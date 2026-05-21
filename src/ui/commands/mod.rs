@@ -6,11 +6,11 @@ mod provider_switch;
 mod quit;
 
 use crate::chat::Context;
+use crate::chat::Message;
 use crate::config::ProvidersConfig;
 use crate::llm::LlmProvider;
-use crate::chat::Message;
-use crate::ui::render::Renderer;
 use crate::ui::render::BoneTerminal;
+use crate::ui::render::Renderer;
 
 /// Result of executing a slash command.
 pub enum CommandResult {
@@ -40,10 +40,7 @@ pub async fn handle(
         "/compact" => compact::run(messages, context),
         "/model" => model::run(provider_label, model_label),
         "/provider" => {
-            provider_switch::run(
-                arg, llm, provider_label, model_label, providers_config,
-            )
-            .await
+            provider_switch::run(arg, llm, provider_label, model_label, providers_config).await
         }
         "/quit" | "/exit" => {
             return Ok(CommandResult::Quit);

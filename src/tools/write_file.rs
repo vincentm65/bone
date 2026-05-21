@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 use tokio::fs;
 
@@ -35,10 +35,15 @@ impl Tool for WriteFileTool {
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
         if let Some(parent) = Path::new(&args.path).parent()
-            && !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
-            }
-        fs::write(&args.path, args.content.as_bytes()).await.map_err(|e| e.to_string())?;
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        fs::write(&args.path, args.content.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(format!("wrote {} bytes", args.content.len()))
     }
 }

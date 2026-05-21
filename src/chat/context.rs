@@ -17,14 +17,20 @@ pub struct Context {
 
 impl Default for Context {
     fn default() -> Self {
-        Self { max_tokens: DEFAULT_MAX_TOKENS, response_reserve: RESPONSE_RESERVE }
+        Self {
+            max_tokens: DEFAULT_MAX_TOKENS,
+            response_reserve: RESPONSE_RESERVE,
+        }
     }
 }
 
 impl Context {
     #[must_use]
     pub fn new(max_tokens: usize) -> Self {
-        Self { max_tokens, response_reserve: RESPONSE_RESERVE }
+        Self {
+            max_tokens,
+            response_reserve: RESPONSE_RESERVE,
+        }
     }
 
     #[must_use]

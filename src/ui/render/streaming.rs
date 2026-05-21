@@ -25,17 +25,13 @@ pub fn redraw(
         renderer.streaming_lines_flushed = complete;
     }
 
-    term.draw(|frame| renderer.draw_bottom_pane(frame, input, status_info))?;
+    term.draw(|frame| renderer.draw_bottom_pane(frame, input, status_info, None))?;
     Ok(())
 }
 
 /// Flush all remaining lines from the streaming message (including the
 /// final partial line that `redraw` skips).
-pub fn finalize(
-    renderer: &mut Renderer,
-    content: &str,
-    term: &mut BoneTerminal,
-) -> io::Result<()> {
+pub fn finalize(renderer: &mut Renderer, content: &str, term: &mut BoneTerminal) -> io::Result<()> {
     let all_lines: Vec<&str> = content.lines().collect();
 
     if all_lines.len() > renderer.streaming_lines_flushed {

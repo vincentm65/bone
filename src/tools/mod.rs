@@ -9,7 +9,7 @@ pub mod write_file;
 use registry::ToolRegistry;
 
 pub use handler::ToolHandler;
-pub use types::{ToolCall, ToolDefinition, ToolResult};
+pub use types::{ApprovalMode, ToolCall, ToolDefinition, ToolResult};
 
 pub fn builtin_tools() -> ToolRegistry {
     ToolRegistry::new()

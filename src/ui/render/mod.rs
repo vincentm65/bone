@@ -3,15 +3,17 @@ mod messages;
 mod streaming;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget};
 use ratatui::{Frame, Terminal, Viewport};
 use std::io::{self, Stdout};
 
 use super::input::InputState;
+use super::prompt::Prompt;
 use super::theme::Theme;
 use crate::chat::Message;
+use crate::tools::types::ApprovalMode;
 
 /// How many rows the bottom pane (input + status) occupies.
 pub(crate) const BOTTOM_ROWS: u16 = 4;
@@ -26,6 +28,7 @@ pub struct StatusInfo {
     pub msg_count: usize,
     pub streaming: bool,
     pub queue_len: usize,
+    pub approval_mode: ApprovalMode,
 }
 
 /// Owns all terminal rendering state and drawing logic.
@@ -65,6 +68,19 @@ impl Renderer {
         crossterm::terminal::disable_raw_mode()
     }
 
+    /// Recreate the inline viewport with a different height (e.g. to
+    /// accommodate a prompt panel).  Raw mode stays enabled.
+    pub fn resize_viewport(term: &mut BoneTerminal, new_height: u16) -> io::Result<()> {
+        term.clear()?;
+        *term = Terminal::with_options(
+            ratatui::backend::CrosstermBackend::new(io::stdout()),
+            ratatui::TerminalOptions {
+                viewport: Viewport::Inline(new_height),
+            },
+        )?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Banner
     // ------------------------------------------------------------------
@@ -95,25 +111,22 @@ impl Renderer {
 
         let start = self.scrollback_cursor;
         let new_msgs = &messages[start..];
-        let rendered: Vec<Line<'static>> = new_msgs
-            .iter()
-            .enumerate()
-            .flat_map(|(i, message)| {
-                let prev_role = if i == 0 && start > 0 {
-                    Some(messages[start - 1].role)
-                } else if i > 0 {
-                    Some(new_msgs[i - 1].role)
-                } else {
-                    None
-                };
-                messages::msg_to_lines(message, &self.theme, prev_role)
-            })
-            .collect();
+        let prev_role = if start > 0 {
+            Some(messages[start - 1].role)
+        } else {
+            None
+        };
+        let rendered: Vec<Line<'static>> = messages::msg_to_lines(new_msgs, &self.theme, prev_role);
         let line_count = rendered.len() as u16;
 
         term.insert_before(line_count, |buf| {
             for (row, line) in rendered.iter().enumerate() {
-                let msg_area = Rect { x: 0, y: row as u16, width: buf.area.width, height: 1 };
+                let msg_area = Rect {
+                    x: 0,
+                    y: row as u16,
+                    width: buf.area.width,
+                    height: 1,
+                };
                 Paragraph::new(line.clone()).render(msg_area, buf);
             }
         })?;
@@ -154,12 +167,12 @@ impl Renderer {
         status_info: &StatusInfo,
     ) -> io::Result<()> {
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
-        term.draw(|frame| self.draw_bottom_pane(frame, input, status_info))?;
+        term.draw(|frame| self.draw_bottom_pane(frame, input, status_info, None))?;
         Ok(())
     }
 
     // ------------------------------------------------------------------
-    // Bottom pane (status bar + input field)
+    // Bottom pane (status bar + input field + optional prompt)
     // ------------------------------------------------------------------
 
     /// Draw the bottom pane: separator + input + separator + status.
@@ -168,8 +181,9 @@ impl Renderer {
         frame: &mut Frame,
         input: &InputState,
         status_info: &StatusInfo,
+        prompt: Option<&Prompt>,
     ) {
-        self.draw_bottom_pane_with_tick(frame, input, status_info, self.spinner_tick);
+        self.draw_bottom_pane_with_tick(frame, input, status_info, self.spinner_tick, prompt);
     }
 
     /// Draw the bottom pane with an explicit spinner tick (used during stream wait).
@@ -179,40 +193,106 @@ impl Renderer {
         input: &InputState,
         status_info: &StatusInfo,
         tick: usize,
+        prompt: Option<&Prompt>,
     ) {
         let area = frame.area();
         frame.render_widget(Clear, area);
         let line = "─".repeat(area.width as usize);
+        let mut y = area.y;
 
-        for y in [area.y, area.y + 2] {
+        // ── Input separator (top border) ──
+        frame.render_widget(
+            Paragraph::new(line.clone()).style(Style::default().fg(self.theme.input_border)),
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
+        );
+        y += 1;
+
+        // ── Optional prompt panel (between separator and input) ──
+        if let Some(prompt) = prompt {
+            // Title
             frame.render_widget(
-                Paragraph::new(line.clone()).style(Style::default().fg(self.theme.input_border)),
-                Rect { y, height: 1, ..area },
+                Paragraph::new(Span::styled(
+                    format!(" {} ", prompt.title),
+                    Style::default()
+                        .fg(self.theme.status_text)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
             );
+            y += 1;
+
+            // Options
+            for (i, option) in prompt.options.iter().enumerate() {
+                let selected = i == prompt.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let prefix = if selected { " > " } else { "   " };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!("{}{}", prefix, option), style)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
+            }
         }
 
-        // Input line with visible cursor at the correct character position.
-        let chars: Vec<char> = input.buffer.chars().collect();
-        let pos = input.cursor_pos.min(chars.len());
-        let before: String = chars[..pos].iter().collect();
-        let at_cursor = chars.get(pos).unwrap_or(&' ');
-        let after: String = chars[pos..].iter().skip(1).collect();
+        // ── Input line (hidden while prompt is active) ──
+        if prompt.is_none() {
+            let chars: Vec<char> = input.buffer.chars().collect();
+            let pos = input.cursor_pos.min(chars.len());
+            let before: String = chars[..pos].iter().collect();
+            let at_cursor = chars.get(pos).unwrap_or(&' ');
+            let after: String = chars[pos..].iter().skip(1).collect();
 
-        let input_line = Line::from(vec![
-            Span::raw("> "),
-            Span::raw(before),
-            Span::styled(
-                at_cursor.to_string(),
-                Style::default().add_modifier(Modifier::REVERSED),
-            ),
-            Span::raw(after),
-        ]);
+            let input_line = Line::from(vec![
+                Span::raw("> "),
+                Span::raw(before),
+                Span::styled(
+                    at_cursor.to_string(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ),
+                Span::raw(after),
+            ]);
 
+            frame.render_widget(
+                Paragraph::new(input_line),
+                Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
+            );
+            y += 1;
+        }
+
+        // ── Status separator ──
         frame.render_widget(
-            Paragraph::new(input_line),
-            Rect { y: area.y + 1, height: 1, ..area },
+            Paragraph::new(line).style(Style::default().fg(self.theme.input_border)),
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
         );
+        y += 1;
 
+        // ── Status bar (always at the very bottom) ──
         let thinking = if status_info.streaming {
             format!(" │ {} thinking", SPINNER[tick % SPINNER.len()])
         } else {
@@ -223,17 +303,31 @@ impl Renderer {
         } else {
             Default::default()
         };
-        let status = format!(
-            " {} │ {} │ msgs: {}{}{}",
-            status_info.provider,
-            status_info.model,
-            status_info.msg_count,
-            thinking,
-            queued
-        );
+        let status = Line::from(vec![
+            Span::styled(
+                format!(" {} │ {}  ", status_info.provider, status_info.model),
+                Style::default().fg(self.theme.status_text),
+            ),
+            Span::styled(
+                format!(" {} ", status_info.approval_mode.label()),
+                Style::default().fg(match status_info.approval_mode {
+                    ApprovalMode::Safe => self.theme.approval_safe,
+                    ApprovalMode::Edits => self.theme.approval_edits,
+                    ApprovalMode::Danger => self.theme.approval_danger,
+                }),
+            ),
+            Span::styled(
+                format!("│ msgs: {}{}{}", status_info.msg_count, thinking, queued),
+                Style::default().fg(self.theme.status_text),
+            ),
+        ]);
         frame.render_widget(
-            Paragraph::new(status).style(Style::default().fg(self.theme.status_text)),
-            Rect { y: area.y + 3, height: 1, ..area },
+            Paragraph::new(status),
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
         );
     }
 }

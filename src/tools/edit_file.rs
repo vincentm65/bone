@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::fs;
 
 use crate::tools::types::{Tool, ToolDefinition};
@@ -39,14 +39,20 @@ impl Tool for EditFileTool {
             return Err("search must not be empty".to_string());
         }
 
-        let content = fs::read_to_string(&args.path).await.map_err(|e| e.to_string())?;
+        let content = fs::read_to_string(&args.path)
+            .await
+            .map_err(|e| e.to_string())?;
         let count = content.matches(&args.search).count();
         if count != 1 {
-            return Err(format!("search text matched {count} times; expected exactly 1"));
+            return Err(format!(
+                "search text matched {count} times; expected exactly 1"
+            ));
         }
 
         let next = content.replacen(&args.search, &args.replace, 1);
-        fs::write(&args.path, next.as_bytes()).await.map_err(|e| e.to_string())?;
+        fs::write(&args.path, next.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
         Ok("edited 1 occurrence".to_string())
     }
 }

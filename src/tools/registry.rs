@@ -9,7 +9,9 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: HashMap::new() }
+        Self {
+            tools: HashMap::new(),
+        }
     }
 
     pub fn register<T: Tool + 'static>(mut self, tool: T) -> Self {
@@ -26,8 +28,18 @@ impl ToolRegistry {
         let name = call.name.clone();
         match self.tools.get(name.as_str()) {
             Some(tool) => match tool.execute(call.arguments).await {
-                Ok(content) => ToolResult { call_id: call.id, name, content, is_error: false },
-                Err(content) => ToolResult { call_id: call.id, name, content, is_error: true },
+                Ok(content) => ToolResult {
+                    call_id: call.id,
+                    name,
+                    content,
+                    is_error: false,
+                },
+                Err(content) => ToolResult {
+                    call_id: call.id,
+                    name,
+                    content,
+                    is_error: true,
+                },
             },
             None => ToolResult {
                 call_id: call.id,

@@ -6,5 +6,6 @@ pub fn run() -> String {
         "/model     — show current model",
         "/provider  — show or switch provider (/provider <name>)",
         "/quit      — exit bone",
-    ].join("\n")
+    ]
+    .join("\n")
 }

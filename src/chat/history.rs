@@ -1,5 +1,5 @@
-use crate::llm::{ChatMessage, ChatRole};
 use crate::llm::prompts;
+use crate::llm::{ChatMessage, ChatRole};
 
 use super::context::Context;
 use super::message::Message;

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::fs;
 
 use crate::tools::types::{Tool, ToolDefinition};
@@ -35,7 +35,9 @@ impl Tool for ReadFileTool {
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
-        let content = fs::read_to_string(&args.path).await.map_err(|e| e.to_string())?;
+        let content = fs::read_to_string(&args.path)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if args.start_line.is_none() && args.max_lines.is_none() {
             return Ok(content);
@@ -43,6 +45,11 @@ impl Tool for ReadFileTool {
 
         let start = args.start_line.unwrap_or(1).saturating_sub(1);
         let max = args.max_lines.unwrap_or(200).min(1000);
-        Ok(content.lines().skip(start).take(max).collect::<Vec<_>>().join("\n"))
+        Ok(content
+            .lines()
+            .skip(start)
+            .take(max)
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }

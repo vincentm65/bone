@@ -18,10 +18,7 @@ async fn main() -> std::io::Result<()> {
 
     let provider = providers::create_provider_with_config(&cfg.provider, &providers_config)
         .map_err(std::io::Error::other)?;
-    provider
-        .validate()
-        .await
-        .map_err(std::io::Error::other)?;
+    provider.validate().await.map_err(std::io::Error::other)?;
 
     let mut app = App::new(
         provider,

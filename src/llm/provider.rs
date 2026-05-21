@@ -43,7 +43,10 @@ impl ChatMessage {
     }
 
     pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { tool_calls, ..Self::new(ChatRole::Assistant, content) }
+        Self {
+            tool_calls,
+            ..Self::new(ChatRole::Assistant, content)
+        }
     }
 
     pub fn tool(result: ToolResult) -> Self {

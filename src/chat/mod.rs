@@ -4,4 +4,4 @@ pub mod message;
 
 pub use context::Context;
 pub use history::build_chat_history;
-pub use message::Message;
+pub use message::{Message, ToolDisplay};

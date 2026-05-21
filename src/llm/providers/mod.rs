@@ -10,7 +10,9 @@ pub fn create_provider_with_config(
 ) -> Result<Box<dyn LlmProvider>, LlmError> {
     if let Some(entry) = config.providers.get(id) {
         if entry.handler == "openai" || entry.handler.is_empty() {
-            return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(id, entry)));
+            return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(
+                id, entry,
+            )));
         }
         return Err(LlmError::new_with_kind(
             LlmErrorKind::Config,

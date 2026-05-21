@@ -7,7 +7,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::config::ProviderEntry;
-use crate::llm::provider::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream};
+use crate::llm::provider::{
+    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
+};
 use crate::tools::{ToolCall, ToolDefinition};
 
 /// Generic OpenAI-compatible provider.
@@ -107,36 +109,47 @@ struct PartialToolCall {
 }
 
 fn openai_tools(tools: Vec<ToolDefinition>) -> Vec<OpenAiTool> {
-    tools.into_iter().map(|tool| OpenAiTool {
-        r#type: "function",
-        function: OpenAiFunction {
-            name: tool.name.to_string(),
-            description: tool.description.to_string(),
-            parameters: tool.input_schema,
-        },
-    }).collect()
+    tools
+        .into_iter()
+        .map(|tool| OpenAiTool {
+            r#type: "function",
+            function: OpenAiFunction {
+                name: tool.name.to_string(),
+                description: tool.description.to_string(),
+                parameters: tool.input_schema,
+            },
+        })
+        .collect()
 }
 
 fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
-    messages.into_iter().map(|message| OpenAiMessage {
-        role: match message.role {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-            ChatRole::Assistant => "assistant",
-            ChatRole::Tool => "tool",
-        }.to_string(),
-        content: message.content,
-        tool_calls: message.tool_calls.into_iter().map(|call| OpenAiToolCall {
-            id: call.id,
-            r#type: "function",
-            function: OpenAiToolCallFunction {
-                name: call.name,
-                arguments: call.arguments.to_string(),
-            },
-        }).collect(),
-        tool_call_id: message.tool_call_id,
-        name: message.name,
-    }).collect()
+    messages
+        .into_iter()
+        .map(|message| OpenAiMessage {
+            role: match message.role {
+                ChatRole::System => "system",
+                ChatRole::User => "user",
+                ChatRole::Assistant => "assistant",
+                ChatRole::Tool => "tool",
+            }
+            .to_string(),
+            content: message.content,
+            tool_calls: message
+                .tool_calls
+                .into_iter()
+                .map(|call| OpenAiToolCall {
+                    id: call.id,
+                    r#type: "function",
+                    function: OpenAiToolCallFunction {
+                        name: call.name,
+                        arguments: call.arguments.to_string(),
+                    },
+                })
+                .collect(),
+            tool_call_id: message.tool_call_id,
+            name: message.name,
+        })
+        .collect()
 }
 
 #[async_trait]
