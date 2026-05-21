@@ -1,0 +1,55 @@
+mod clear;
+mod compact;
+mod help;
+mod model;
+mod provider_switch;
+mod quit;
+
+use crate::chat::Context;
+use crate::config::ProvidersConfig;
+use crate::llm::LlmProvider;
+use crate::chat::Message;
+use crate::ui::render::Renderer;
+use crate::ui::render::BoneTerminal;
+
+/// Result of executing a slash command.
+pub enum CommandResult {
+    /// Continue normally. `reply` is printed as a system message.
+    Continue { reply: String },
+    /// Quit the application.
+    Quit,
+}
+
+/// Dispatch a slash command. Returns a reply string or a quit signal.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle(
+    cmd: &str,
+    arg: &str,
+    messages: &mut Vec<Message>,
+    renderer: &mut Renderer,
+    term: &mut BoneTerminal,
+    context: &Context,
+    llm: &mut Box<dyn LlmProvider>,
+    provider_label: &mut String,
+    model_label: &mut String,
+    providers_config: &ProvidersConfig,
+) -> std::io::Result<CommandResult> {
+    let reply = match cmd {
+        "/help" => help::run(),
+        "/clear" => clear::run(messages, renderer, term, provider_label, model_label)?,
+        "/compact" => compact::run(messages, context),
+        "/model" => model::run(provider_label, model_label),
+        "/provider" => {
+            provider_switch::run(
+                arg, llm, provider_label, model_label, providers_config,
+            )
+            .await
+        }
+        "/quit" | "/exit" => {
+            return Ok(CommandResult::Quit);
+        }
+        _ => format!("Unknown command: {cmd}. Type /help for available commands."),
+    };
+
+    Ok(CommandResult::Continue { reply })
+}

@@ -3,8 +3,10 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, pin::Pin};
 
-/// A boxed async stream of text chunks from an LLM provider.
-pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<String, LlmError>> + Send>>;
+use crate::tools::{ToolCall, ToolDefinition, ToolResult};
+
+/// A boxed async stream of provider events from an LLM provider.
+pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>;
 
 /// Provider-neutral chat roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +15,7 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 /// Provider-neutral chat message.
@@ -20,6 +23,44 @@ pub enum ChatRole {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn new(role: ChatRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self { tool_calls, ..Self::new(ChatRole::Assistant, content) }
+    }
+
+    pub fn tool(result: ToolResult) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content: result.content,
+            tool_calls: Vec::new(),
+            tool_call_id: Some(result.call_id),
+            name: Some(result.name),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ChatEvent {
+    TextDelta(String),
+    ToolCall(ToolCall),
 }
 
 /// Classification of an LLM error.
@@ -120,8 +161,12 @@ pub trait LlmProvider: Send + Sync {
     /// Currently selected model.
     fn model(&self) -> &str;
 
-    /// Send messages and stream response text chunks.
-    async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<ResponseStream, LlmError>;
+    /// Send messages and stream provider-neutral response events.
+    async fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError>;
 
     /// Validate provider setup before first use.
     async fn validate(&self) -> Result<(), LlmError> {

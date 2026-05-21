@@ -1,6 +1,7 @@
 mod chat;
 mod config;
 mod llm;
+mod tools;
 mod ui;
 
 use config::{load_providers, load_user_config, seed_providers_if_missing};

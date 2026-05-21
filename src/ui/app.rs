@@ -1,14 +1,15 @@
-use crate::chat::Context;
+use crate::chat::{Context, Message, build_chat_history};
 use crate::config::ProvidersConfig;
-use crate::llm::LlmProvider;
+use crate::llm::{ChatEvent, ChatMessage, LlmProvider};
+use crate::tools::{ToolHandler, builtin_tools};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{pin_mut, StreamExt};
 use std::io;
 use tokio::time::{self, Duration};
 
 use super::commands;
-use super::input::{InputState, Message};
-use super::renderer::{BoneTerminal, Renderer, StatusInfo};
+use super::input::InputState;
+use super::render::{BoneTerminal, Renderer, StatusInfo};
 
 pub struct App {
     pub messages: Vec<Message>,
@@ -22,6 +23,7 @@ pub struct App {
     pub renderer: Renderer,
     pub providers_config: ProvidersConfig,
     pub queue: Vec<String>,
+    pub tools: ToolHandler,
 }
 
 impl App {
@@ -48,6 +50,7 @@ impl App {
             renderer: Renderer::new(),
             providers_config,
             queue: Vec::new(),
+            tools: ToolHandler::new(builtin_tools()),
         })
     }
 
@@ -190,10 +193,8 @@ impl App {
 
     /// Process queued key events while streaming. Enter queues a message,
     /// Ctrl+D clears the queue. All other input edits work normally.
-    fn process_keys_while_streaming(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    fn process_keys_while_streaming(&mut self) {
         Self::drain_keys(&mut self.input, &mut self.queue);
-        term.draw(|frame| self.draw(frame))?;
-        Ok(())
     }
 
     async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
@@ -212,7 +213,7 @@ impl App {
         self.messages.push(Message::user(&text));
         self.renderer.flush_new_to_scrollback(&self.messages, term)?;
 
-        let history = crate::chat::build_chat_history(&self.messages, &self.context);
+        let mut history = build_chat_history(&self.messages, &self.context);
 
         self.streaming = true;
         self.messages.push(Message::assistant(String::new()));
@@ -221,40 +222,59 @@ impl App {
         let assistant_idx = self.messages.len() - 1;
         term.draw(|frame| self.draw(frame))?;
 
-        let (stream_result, spinner_tick) = self.wait_for_stream(history, term).await;
-        self.renderer.spinner_tick = spinner_tick;
-        match stream_result {
-            Ok(mut stream) => {
-                let mut spinner = time::interval(Duration::from_millis(90));
-                loop {
-                    tokio::select! {
-                        chunk = stream.next() => match chunk {
-                            Some(Ok(text)) => {
-                                self.messages[assistant_idx].content.push_str(&text);
-                                self.renderer.redraw_streaming_message(
-                                    &self.messages[assistant_idx].content,
-                                    term,
-                                    &self.input,
-                                    &self.status_info(),
-                                )?;
+        for _ in 0..8 {
+            let (stream_result, spinner_tick) = self.wait_for_stream(history.clone(), term).await;
+            self.renderer.spinner_tick = spinner_tick;
+            let mut tool_calls = Vec::new();
+            match stream_result {
+                Ok(mut stream) => {
+                    let mut spinner = time::interval(Duration::from_millis(90));
+                    loop {
+                        tokio::select! {
+                            chunk = stream.next() => match chunk {
+                                Some(Ok(ChatEvent::TextDelta(text))) => {
+                                    self.messages[assistant_idx].content.push_str(&text);
+                                    self.renderer.redraw_streaming_message(
+                                        &self.messages[assistant_idx].content,
+                                        term,
+                                        &self.input,
+                                        &self.status_info(),
+                                    )?;
+                                }
+                                Some(Ok(ChatEvent::ToolCall(call))) => tool_calls.push(call),
+                                Some(Err(err)) => {
+                                    self.messages[assistant_idx].content.push_str(&format!("\n[stream error: {err}]"));
+                                    break;
+                                }
+                                None => break,
+                            },
+                            _ = spinner.tick() => {
+                                self.process_keys_while_streaming();
+                                self.renderer.tick_spinner(term, &self.input, &self.status_info())?;
                             }
-                            Some(Err(err)) => {
-                                self.messages[assistant_idx].content.push_str(&format!("\n[stream error: {err}]"));
-                                break;
-                            }
-                            None => break,
-                        },
-                        _ = spinner.tick() => {
-                            self.process_keys_while_streaming(term)?;
-                            self.renderer.tick_spinner(term, &self.input, &self.status_info())?;
                         }
                     }
                 }
+                Err(err) => {
+                    self.messages[assistant_idx].content = format!(
+                        "[provider error: {err}]\n\nIs llama.cpp server running at http://127.0.0.1:8080?"
+                    );
+                    break;
+                }
             }
-            Err(err) => {
-                self.messages[assistant_idx].content = format!(
-                    "[provider error: {err}]\n\nIs llama.cpp server running at http://127.0.0.1:8080?"
-                );
+
+            history.push(ChatMessage::assistant_with_tools(
+                self.messages[assistant_idx].content.clone(),
+                tool_calls.clone(),
+            ));
+
+            if tool_calls.is_empty() {
+                break;
+            }
+
+            let results = self.tools.execute_all(tool_calls).await;
+            for result in results {
+                history.push(ChatMessage::tool(result));
             }
         }
 
@@ -313,9 +333,12 @@ impl App {
         history: Vec<crate::llm::ChatMessage>,
         term: &mut BoneTerminal,
     ) -> (Result<crate::llm::ResponseStream, crate::llm::LlmError>, usize) {
-        let request = self.llm.chat_stream(history);
+        let request = self.llm.chat_stream(history, self.tools.definitions());
         let spinner = time::sleep(Duration::from_millis(90));
-        let mut tick = self.renderer.spinner_tick;
+        let tick = self.renderer.spinner_tick;
+        let provider = self.provider.clone();
+        let model = self.model.clone();
+        let msg_count = self.messages.len();
         let input = &mut self.input;
         let queue = &mut self.queue;
         let renderer = &mut self.renderer;
@@ -325,10 +348,16 @@ impl App {
             tokio::select! {
                 result = &mut request => return (result, tick),
                 _ = &mut spinner => {
-                    tick = tick.wrapping_add(1);
+                    renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
                     Self::drain_keys(input, queue);
                     term.draw(|frame| {
-                        renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo { queue_len: queue.len(), provider: String::new(), model: String::new(), msg_count: 0, streaming: true }, tick);
+                        renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
+                            queue_len: queue.len(),
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            msg_count,
+                            streaming: true,
+                        }, renderer.spinner_tick);
                     }).ok();
                     spinner.as_mut().reset(time::Instant::now() + Duration::from_millis(90));
                 }

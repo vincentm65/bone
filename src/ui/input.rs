@@ -1,34 +1,3 @@
-use crate::llm::{ChatMessage, ChatRole};
-
-/// A single chat message.
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub role: ChatRole,
-    pub content: String,
-}
-
-impl Message {
-    #[must_use]
-    pub fn user(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::User, content: content.into() }
-    }
-
-    #[must_use]
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::Assistant, content: content.into() }
-    }
-
-    #[must_use]
-    pub fn system(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::System, content: content.into() }
-    }
-
-    #[must_use]
-    pub fn to_chat_message(&self) -> ChatMessage {
-        ChatMessage { role: self.role, content: self.content.clone() }
-    }
-}
-
 /// Input field state
 ///
 /// `cursor_pos` tracks a **character** offset (not byte offset) so multi-byte
@@ -68,7 +37,6 @@ impl InputState {
         if self.cursor_pos == 0 {
             return;
         }
-        // Char index of the character we want to remove.
         let prev_char_idx = self.cursor_pos - 1;
         let prev_byte = self
             .buffer
@@ -88,12 +56,10 @@ impl InputState {
         let chars: Vec<char> = self.buffer.chars().collect();
         let start = self.cursor_pos;
 
-        // Skip whitespace immediately left of cursor.
         let mut boundary = start;
         while boundary > 0 && chars[boundary - 1].is_whitespace() {
             boundary -= 1;
         }
-        // Delete the word itself.
         while boundary > 0 && !chars[boundary - 1].is_whitespace() {
             boundary -= 1;
         }
@@ -124,10 +90,6 @@ impl InputState {
         self.buffer.clear();
         self.cursor_pos = 0;
     }
-
-    // ------------------------------------------------------------------
-    // Original methods
-    // ------------------------------------------------------------------
 
     pub fn reset(&mut self) {
         if !self.buffer.is_empty() {

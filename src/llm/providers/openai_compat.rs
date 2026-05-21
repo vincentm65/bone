@@ -4,9 +4,11 @@ use eventsource_stream::Eventsource;
 use futures_util::TryStreamExt;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::config::ProviderEntry;
-use crate::llm::provider::{ChatMessage, LlmError, LlmErrorKind, LlmProvider, ResponseStream};
+use crate::llm::provider::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream};
+use crate::tools::{ToolCall, ToolDefinition};
 
 /// Generic OpenAI-compatible provider.
 ///
@@ -53,8 +55,88 @@ impl OpenAiCompatProvider {
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
-    messages: Vec<ChatMessage>,
+    messages: Vec<OpenAiMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
+}
+
+#[derive(Serialize)]
+struct OpenAiMessage {
+    role: String,
+    content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<OpenAiToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OpenAiTool {
+    r#type: &'static str,
+    function: OpenAiFunction,
+}
+
+#[derive(Serialize)]
+struct OpenAiFunction {
+    name: String,
+    description: String,
+    parameters: Value,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolCall {
+    id: String,
+    r#type: &'static str,
+    function: OpenAiToolCallFunction,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolCallFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Default)]
+struct PartialToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+fn openai_tools(tools: Vec<ToolDefinition>) -> Vec<OpenAiTool> {
+    tools.into_iter().map(|tool| OpenAiTool {
+        r#type: "function",
+        function: OpenAiFunction {
+            name: tool.name.to_string(),
+            description: tool.description.to_string(),
+            parameters: tool.input_schema,
+        },
+    }).collect()
+}
+
+fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
+    messages.into_iter().map(|message| OpenAiMessage {
+        role: match message.role {
+            ChatRole::System => "system",
+            ChatRole::User => "user",
+            ChatRole::Assistant => "assistant",
+            ChatRole::Tool => "tool",
+        }.to_string(),
+        content: message.content,
+        tool_calls: message.tool_calls.into_iter().map(|call| OpenAiToolCall {
+            id: call.id,
+            r#type: "function",
+            function: OpenAiToolCallFunction {
+                name: call.name,
+                arguments: call.arguments.to_string(),
+            },
+        }).collect(),
+        tool_call_id: message.tool_call_id,
+        name: message.name,
+    }).collect()
 }
 
 #[async_trait]
@@ -99,11 +181,16 @@ impl LlmProvider for OpenAiCompatProvider {
         }
     }
 
-    async fn chat_stream(&self, messages: Vec<ChatMessage>) -> Result<ResponseStream, LlmError> {
+    async fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
         let request = ChatRequest {
             model: self.model.clone(),
-            messages,
+            messages: openai_messages(messages),
             stream: true,
+            tools: openai_tools(tools),
         };
 
         let mut req = self.client.post(self.chat_url()).json(&request);
@@ -131,11 +218,23 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let stream = try_stream! {
             futures_util::pin_mut!(events);
+            let mut partial_tool_calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
 
             while let Some(event) = events.try_next().await.map_err(|err| LlmError::new(err.to_string()))? {
                 let data = event.data.trim();
-                if data.is_empty() || data == "[DONE]" {
+                if data.is_empty() {
                     continue;
+                }
+
+                if data == "[DONE]" {
+                    for (_, call) in partial_tool_calls {
+                        if call.id.is_empty() || call.name.is_empty() {
+                            continue;
+                        }
+                        let arguments = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+                        yield ChatEvent::ToolCall(ToolCall { id: call.id, name: call.name, arguments });
+                    }
+                    break;
                 }
 
                 // Skip SSE comments (OpenRouter sends these)
@@ -144,15 +243,59 @@ impl LlmProvider for OpenAiCompatProvider {
                 }
 
                 let value: Value = serde_json::from_str(data)?;
-                if let Some(content) = value
+                let Some(choice) = value
                     .get("choices")
-                    .and_then(|choices| choices.get(0))
-                    .and_then(|choice| choice.get("delta"))
-                    .and_then(|delta| delta.get("content"))
-                    .and_then(|content| content.as_str())
+                    .and_then(|choices| choices.get(0)) else {
+                        continue;
+                    };
+
+                let Some(delta) = choice.get("delta") else {
+                    continue;
+                };
+
+                if let Some(content) = delta.get("content").and_then(|content| content.as_str())
                     && !content.is_empty() {
-                        yield content.to_string();
+                        yield ChatEvent::TextDelta(content.to_string());
                     }
+
+                if let Some(tool_calls) = delta.get("tool_calls").and_then(|calls| calls.as_array()) {
+                    for (fallback_index, call) in tool_calls.iter().enumerate() {
+                        let index = call
+                            .get("index")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(fallback_index);
+                        let partial = partial_tool_calls.entry(index).or_default();
+
+                        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                            partial.id.push_str(id);
+                        }
+
+                        let function = call.get("function").unwrap_or(&Value::Null);
+                        if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                            partial.name.push_str(name);
+                        }
+                        if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str()) {
+                            partial.arguments.push_str(arguments);
+                        }
+                    }
+                }
+
+                let finished_with_tool_calls = choice
+                    .get("finish_reason")
+                    .and_then(|reason| reason.as_str())
+                    .is_some_and(|reason| reason == "tool_calls" || reason == "function_call");
+
+                if finished_with_tool_calls {
+                    let completed = std::mem::take(&mut partial_tool_calls);
+                    for (_, call) in completed {
+                        if call.id.is_empty() || call.name.is_empty() {
+                            continue;
+                        }
+                        let arguments = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+                        yield ChatEvent::ToolCall(ToolCall { id: call.id, name: call.name, arguments });
+                    }
+                }
             }
         };
 
