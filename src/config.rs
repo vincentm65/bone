@@ -11,7 +11,7 @@ fn bone_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/"))
-        .join(".bone")
+        .join(".bone-rust")
 }
 
 pub fn config_path() -> PathBuf {
@@ -23,7 +23,7 @@ pub fn providers_path() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// User config (~/.bone/bone.yaml)
+// User config (~/.bone-rust/bone.yaml)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -62,7 +62,7 @@ impl Default for UserConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Provider config (~/.bone/providers.yaml)
+// Provider config (~/.bone-rust/providers.yaml)
 // ---------------------------------------------------------------------------
 
 /// A single provider entry. All OpenAI-compatible providers share the same
@@ -103,7 +103,7 @@ fn default_handler() -> String {
 
 /// The providers file is a flat map of provider id → config.
 ///
-/// Example `~/.bone/providers.yaml`:
+/// Example `~/.bone-rust/providers.yaml`:
 /// ```yaml
 /// local:
 ///   label: llama.cpp
