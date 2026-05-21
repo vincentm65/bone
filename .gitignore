@@ -1,0 +1,14 @@
+# Build
+/target/
+
+# Temp/scratch
+.temp/
+
+# OS
+.DS_Store
+
+# Secrets — never commit keys
+*.key
+*.pem
+.env
+.env.*
