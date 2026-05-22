@@ -10,7 +10,7 @@ use std::time::Instant;
 use tokio::time::{self, Duration};
 
 use super::commands;
-use super::input::InputState;
+use super::input::{InputAction, InputState};
 use super::prompt::{Decision, Prompt};
 use super::render::{BoneTerminal, Renderer, StatusInfo};
 use super::tool_display::build_tool_row;
@@ -104,6 +104,24 @@ impl App {
             }
         }
 
+        // Finalize any in-progress streaming message before clearing the
+        // viewport, so the user sees "[cancelled]" and the last partial
+        // line in scrollback rather than losing them.
+        if self.streaming {
+            if let Some(msg) = self.messages.last_mut()
+                && (msg.content.is_empty() || !msg.content.ends_with("\n[cancelled]"))
+            {
+                msg.content.push_str("\n[cancelled]");
+            }
+            self.renderer
+                .finalize_streaming_message(
+                    self.messages.last().map(|m| m.content.as_str()).unwrap_or(""),
+                    &mut terminal,
+                )?;
+            self.renderer
+                .flush_new_to_scrollback(&self.messages, &mut terminal)?;
+        }
+
         Renderer::prepare_exit(&mut terminal)?;
         Renderer::shutdown_terminal()?;
         Ok(())
@@ -155,57 +173,15 @@ impl App {
         modifiers: KeyModifiers,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        // ── Ctrl+C: cancel stream or double-tap quit ──
-        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
-            return self.handle_ctrl_c(term);
-        }
-
         // If a blocking prompt is active, only prompt keys are handled.
         if self.active_prompt.is_some() {
             return self.handle_prompt_key(code, term);
         }
 
-        // Ctrl shortcuts take priority.
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            match code {
-                KeyCode::Char('a') => {
-                    self.input.cursor_to_start();
-                    self.redraw(term)?;
-                    return Ok(());
-                }
-                KeyCode::Char('e') => {
-                    self.input.cursor_to_end();
-                    self.redraw(term)?;
-                    return Ok(());
-                }
-                KeyCode::Char('w') => {
-                    self.input.delete_word_backward();
-                    self.redraw(term)?;
-                    return Ok(());
-                }
-                KeyCode::Char('u') => {
-                    self.input.clear_buffer();
-                    self.redraw(term)?;
-                    return Ok(());
-                }
-                KeyCode::Char('d') => {
-                    self.queue.clear();
-                    self.redraw(term)?;
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-
-        match code {
-            KeyCode::BackTab => {
-                self.approval_mode = self.approval_mode.cycle();
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Enter => {
+        match self.input.apply_key(code, modifiers) {
+            InputAction::Cancel => self.handle_ctrl_c(term),
+            InputAction::Submit => {
                 self.send_message(term).await?;
-                // Drain queued messages — send each one without recursion.
                 while let Some(queued) = self.queue.pop_front() {
                     self.input.buffer = queued;
                     self.input.cursor_pos = self.input.buffer.chars().count();
@@ -213,60 +189,16 @@ impl App {
                 }
                 Ok(())
             }
-            KeyCode::Char(c) => {
-                self.input.insert_char(c);
-                self.redraw(term)?;
-                Ok(())
+            InputAction::ClearQueue => {
+                self.queue.clear();
+                self.redraw(term)
             }
-            KeyCode::Backspace => {
-                self.input.delete_backward();
-                self.redraw(term)?;
-                Ok(())
+            InputAction::CycleMode => {
+                self.approval_mode = self.approval_mode.cycle();
+                self.redraw(term)
             }
-            KeyCode::Left if self.input.cursor_pos > 0 => {
-                self.input.cursor_pos -= 1;
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Left => {
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Right if self.input.cursor_pos < self.input.buffer.chars().count() => {
-                self.input.cursor_pos += 1;
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Right => {
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Home => {
-                self.input.cursor_to_start();
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::End => {
-                self.input.cursor_to_end();
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Up => {
-                self.input.history_up();
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Down => {
-                self.input.history_down();
-                self.redraw(term)?;
-                Ok(())
-            }
-            KeyCode::Esc => {
-                self.input.clear_buffer();
-                self.redraw(term)?;
-                Ok(())
-            }
-            _ => Ok(()),
+            InputAction::Redraw | InputAction::Escape => self.redraw(term),
+            InputAction::None => Ok(()),
         }
     }
 
@@ -588,7 +520,8 @@ impl App {
                         Decision::Cancel => was_rejected[i] = true,
                         Decision::Advise => {
                             advised[i] = true;
-                            approved_calls.push(call);
+                            // Advise does NOT execute the tool — it returns
+                            // a result so the LLM can adapt its approach.
                         }
                     }
                 }
@@ -601,7 +534,7 @@ impl App {
                 Vec::new()
             };
 
-            // Merge rejected + executed results in original order.
+            // Merge rejected + advised + executed results in original order.
             let mut exec_iter = exec_results.into_iter();
             let results: Vec<ToolResult> = (0..calls_for_display.len())
                 .map(|i| {
@@ -612,21 +545,22 @@ impl App {
                             content: "rejected by user".into(),
                             is_error: true,
                         }
-                    } else {
-                        let mut result = exec_iter.next().unwrap_or_else(|| {
-                            ToolResult {
-                                call_id: calls_for_display[i].id.clone(),
-                                name: calls_for_display[i].name.clone(),
-                                content: "internal error: tool result missing".into(),
-                                is_error: true,
-                            }
-                        });
-                        if advised[i] {
-                            result.content.push_str(
-                                "\n\nUser selected Advise: proceed carefully, verify assumptions, and explain the outcome.",
-                            );
+                    } else if advised[i] {
+                        // Advise: tool was NOT executed. Return a result so the
+                        // LLM can adapt its approach instead of proceeding blindly.
+                        ToolResult {
+                            call_id: calls_for_display[i].id.clone(),
+                            name: calls_for_display[i].name.clone(),
+                            content: "[exit_code=1] Tool not executed. User advice: proceed carefully, verify assumptions, and explain your approach before taking action.".into(),
+                            is_error: true,
                         }
-                        result
+                    } else {
+                        exec_iter.next().unwrap_or_else(|| ToolResult {
+                            call_id: calls_for_display[i].id.clone(),
+                            name: calls_for_display[i].name.clone(),
+                            content: "internal error: tool result missing".into(),
+                            is_error: true,
+                        })
                     }
                 })
                 .collect();
@@ -748,49 +682,22 @@ impl App {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                let mods = key.modifiers;
-                match key.code {
-                    KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => {
+                match input.apply_key(key.code, key.modifiers) {
+                    InputAction::Cancel => {
                         *cancel = true;
                         queue.clear();
                         return;
                     }
-                    KeyCode::BackTab => {
-                        *mode = mode.cycle();
-                    }
-                    KeyCode::Enter => {
+                    InputAction::Submit => {
                         let text = input.buffer.trim().to_string();
                         if !text.is_empty() {
                             queue.push_back(text);
                             input.reset();
                         }
                     }
-                    KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) => {
-                        input.cursor_to_start()
-                    }
-                    KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => {
-                        input.cursor_to_end()
-                    }
-                    KeyCode::Char('w') if mods.contains(KeyModifiers::CONTROL) => {
-                        input.delete_word_backward()
-                    }
-                    KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
-                        input.clear_buffer()
-                    }
-                    KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => queue.clear(),
-                    KeyCode::Char(c) => input.insert_char(c),
-                    KeyCode::Backspace => input.delete_backward(),
-                    KeyCode::Left if input.cursor_pos > 0 => {
-                        input.cursor_pos -= 1;
-                    }
-                    KeyCode::Left => {}
-                    KeyCode::Right if input.cursor_pos < input.buffer.chars().count() => {
-                        input.cursor_pos += 1;
-                    }
-                    KeyCode::Right => {}
-                    KeyCode::Home => input.cursor_to_start(),
-                    KeyCode::End => input.cursor_to_end(),
-                    _ => {}
+                    InputAction::ClearQueue => queue.clear(),
+                    InputAction::CycleMode => *mode = mode.cycle(),
+                    InputAction::Redraw | InputAction::Escape | InputAction::None => {}
                 }
             }
         }

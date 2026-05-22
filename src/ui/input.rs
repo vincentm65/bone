@@ -1,3 +1,25 @@
+use crossterm::event::{KeyCode, KeyModifiers};
+
+/// Result of applying a key to the input state.
+/// Callers use this to decide side-effects (queue, redraw, etc.).
+#[derive(Debug)]
+pub enum InputAction {
+    /// Buffer changed or cursor moved — needs redraw.
+    Redraw,
+    /// User pressed Enter with non-empty text.
+    Submit,
+    /// User pressed Ctrl+C.
+    Cancel,
+    /// User pressed Ctrl+D — clear the queue.
+    ClearQueue,
+    /// User pressed BackTab — cycle approval mode.
+    CycleMode,
+    /// User pressed Esc — clear the buffer.
+    Escape,
+    /// Key was not handled — no action needed.
+    None,
+}
+
 /// Input field state
 ///
 /// `cursor_pos` tracks a **character** offset (not byte offset) so multi-byte
@@ -48,6 +70,21 @@ impl InputState {
         self.cursor_pos = prev_char_idx;
     }
 
+    /// Delete the character **after** the cursor (Delete key).
+    pub fn delete_forward(&mut self) {
+        if self.cursor_pos >= self.buffer.chars().count() {
+            return;
+        }
+        let byte = self.byte_pos();
+        let next_byte = self
+            .buffer
+            .char_indices()
+            .nth(self.cursor_pos + 1)
+            .map(|(i, _)| i)
+            .unwrap_or(self.buffer.len());
+        self.buffer.replace_range(byte..next_byte, "");
+    }
+
     /// Delete the word before the cursor (Ctrl+W).
     pub fn delete_word_backward(&mut self) {
         if self.cursor_pos == 0 {
@@ -75,6 +112,45 @@ impl InputState {
         self.cursor_pos = boundary;
     }
 
+    /// Delete from cursor to end of line (Ctrl+K).
+    pub fn kill_to_end(&mut self) {
+        let byte_start = self.byte_pos();
+        self.buffer.truncate(byte_start);
+    }
+
+    /// Move cursor one word backward (Alt+Left).
+    pub fn cursor_word_backward(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let mut pos = self.cursor_pos;
+        while pos > 0 && chars[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+        while pos > 0 && !chars[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+        self.cursor_pos = pos;
+    }
+
+    /// Move cursor one word forward (Alt+Right).
+    pub fn cursor_word_forward(&mut self) {
+        let len = self.buffer.chars().count();
+        if self.cursor_pos >= len {
+            return;
+        }
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let mut pos = self.cursor_pos;
+        while pos < len && !chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        while pos < len && chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        self.cursor_pos = pos;
+    }
+
     /// Move cursor to the beginning of the buffer.
     pub fn cursor_to_start(&mut self) {
         self.cursor_pos = 0;
@@ -98,6 +174,117 @@ impl InputState {
         self.buffer.clear();
         self.cursor_pos = 0;
         self.history_index = None;
+    }
+
+    /// Apply a key event to the input state. Returns the action the caller
+    /// should take (redraw, submit, cancel, etc.). This is the single source
+    /// of truth for key handling — used by both the main loop and the
+    /// streaming drain.
+    pub fn apply_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputAction {
+        // Ctrl+C always cancels.
+        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+            return InputAction::Cancel;
+        }
+
+        // Alt (Option) shortcuts.
+        if modifiers.contains(KeyModifiers::ALT) {
+            match code {
+                KeyCode::Left => {
+                    self.cursor_word_backward();
+                    return InputAction::Redraw;
+                }
+                KeyCode::Right => {
+                    self.cursor_word_forward();
+                    return InputAction::Redraw;
+                }
+                _ => return InputAction::None,
+            }
+        }
+
+        // Ctrl shortcuts.
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            return match code {
+                KeyCode::Char('a') => {
+                    self.cursor_to_start();
+                    InputAction::Redraw
+                }
+                KeyCode::Char('e') => {
+                    self.cursor_to_end();
+                    InputAction::Redraw
+                }
+                KeyCode::Char('w') => {
+                    self.delete_word_backward();
+                    InputAction::Redraw
+                }
+                KeyCode::Char('u') => {
+                    self.clear_buffer();
+                    InputAction::Redraw
+                }
+                KeyCode::Char('k') => {
+                    self.kill_to_end();
+                    InputAction::Redraw
+                }
+                KeyCode::Char('d') => InputAction::ClearQueue,
+                _ => InputAction::None,
+            };
+        }
+
+        // No modifiers.
+        match code {
+            KeyCode::BackTab => InputAction::CycleMode,
+            KeyCode::Enter => {
+                if self.buffer.trim().is_empty() {
+                    InputAction::None
+                } else {
+                    InputAction::Submit
+                }
+            }
+            KeyCode::Char(c) => {
+                self.insert_char(c);
+                InputAction::Redraw
+            }
+            KeyCode::Backspace => {
+                self.delete_backward();
+                InputAction::Redraw
+            }
+            KeyCode::Delete => {
+                self.delete_forward();
+                InputAction::Redraw
+            }
+            KeyCode::Left => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                }
+                InputAction::Redraw
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.buffer.chars().count() {
+                    self.cursor_pos += 1;
+                }
+                InputAction::Redraw
+            }
+            KeyCode::Home => {
+                self.cursor_to_start();
+                InputAction::Redraw
+            }
+            KeyCode::End => {
+                self.cursor_to_end();
+                InputAction::Redraw
+            }
+            KeyCode::Up => {
+                self.history_up();
+                InputAction::Redraw
+            }
+            KeyCode::Down => {
+                self.history_down();
+                InputAction::Redraw
+            }
+            KeyCode::Esc => {
+                self.clear_buffer();
+                InputAction::Escape
+            }
+            _ => InputAction::None,
+        }
     }
 
     pub fn history_up(&mut self) {

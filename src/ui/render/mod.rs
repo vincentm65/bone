@@ -19,17 +19,20 @@ use crate::tools::types::ApprovalMode;
 
 /// Fixed viewport height — **never** changes at runtime.
 ///
-/// This is the single most important constant for scrollback stability.
 /// The inline viewport is created once at startup and never resized.
 /// `insert_before` simply pushes lines above it — the viewport itself
 /// can never end up in scrollback.
 ///
-/// Layout (always 4 rows):
-///   row 0 — separator
-///   row 1 — input field (or inline prompt options)
-///   row 2 — separator
-///   row 3 — status bar
-pub(crate) const BOTTOM_ROWS: u16 = 4;
+/// The viewport is taller than the minimum layout to allow the input
+/// field to grow when text wraps. Unused rows at the bottom are blank.
+///
+/// Layout (dynamic within fixed viewport):
+///   row 0         — top separator
+///   row 1..1+N    — input field (N = wrapped lines, max BOTTOM_ROWS-3)
+///   row 1+N       — bottom separator
+///   row 2+N       — status bar
+///   [remaining]   — blank
+pub(crate) const BOTTOM_ROWS: u16 = 8;
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub type BoneTerminal = Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
@@ -93,8 +96,14 @@ impl Renderer {
         crossterm::terminal::disable_raw_mode()
     }
 
-    /// Leave the shell prompt below Bone's inline viewport on exit.
+    /// Clear the inline viewport and leave a clean exit in scrollback.
+    ///
+    /// This is the "Codex handoff trick": wipe the viewport so stale UI
+    /// (input field, status bar, spinner) doesn't linger, then print a
+    /// closing marker so the user sees a clean text seam where the TUI
+    /// ended and normal terminal output resumes.
     pub fn prepare_exit(term: &mut BoneTerminal) -> io::Result<()> {
+        term.clear()?;
         crossterm::execute!(term.backend_mut(), crossterm::style::Print("\r\n"))?;
         io::stdout().flush()
     }
@@ -199,11 +208,8 @@ impl Renderer {
 
     /// Draw the bottom pane into the fixed inline viewport.
     ///
-    /// Layout (always exactly `BOTTOM_ROWS` = 4 rows):
-    ///   row 0 — separator
-    ///   row 1 — input field OR inline prompt selector
-    ///   row 2 — separator
-    ///   row 3 — status bar
+    /// Layout adapts to the input height — the input area grows when
+    /// long text wraps across multiple visual lines.
     pub fn draw_bottom_pane(
         &self,
         frame: &mut Frame,
@@ -227,18 +233,37 @@ impl Renderer {
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
 
+        // ── Pre-compute input split (reused for line count and rendering) ──
+        let input_view = if let Some(_prompt) = prompt {
+            None
+        } else {
+            let chars: Vec<char> = input.buffer.chars().collect();
+            let pos = input.cursor_pos.min(chars.len());
+            let before: String = chars[..pos].iter().collect();
+            let at_cursor = *chars.get(pos).unwrap_or(&' ');
+            let after: String = chars[pos..].iter().skip(1).collect();
+
+            let display_text = format!("> {}{}{}", before, at_cursor, after);
+            let raw = wrap::visual_line_count(&display_text, area.width as usize) as u16;
+            let max_input_rows = BOTTOM_ROWS.saturating_sub(3);
+            let input_rows = raw.clamp(1, max_input_rows);
+
+            Some((before, at_cursor, after, input_rows))
+        };
+
+        let input_rows = input_view.as_ref().map_or(1, |v| v.3);
+
         let mut y = area.y;
 
-        // ── Row 0: top separator ──
+        // ── Top separator ──
         frame.render_widget(
             Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
             Rect { y, height: 1, ..area },
         );
         y += 1;
 
-        // ── Row 1: input field or inline prompt ──
+        // ── Input field or inline prompt ──
         if let Some(prompt) = prompt {
-            // Show all options on one line: "▶ Accept  Advise  Cancel — title"
             let mut spans: Vec<Span> = Vec::new();
             for (i, option) in prompt.options.iter().enumerate() {
                 let selected = i == prompt.selected;
@@ -256,7 +281,6 @@ impl Renderer {
                     ));
                 }
             }
-            // Append title truncated to remaining width
             let title = format!("  {}", prompt.title);
             spans.push(Span::styled(
                 title,
@@ -266,15 +290,7 @@ impl Renderer {
                 Paragraph::new(Line::from(spans)),
                 Rect { y, height: 1, ..area },
             );
-        } else {
-            // Normal input — single line, text wraps visually but we only
-            // render one row.  The user sees the tail end of long input.
-            let chars: Vec<char> = input.buffer.chars().collect();
-            let pos = input.cursor_pos.min(chars.len());
-            let before: String = chars[..pos].iter().collect();
-            let at_cursor = chars.get(pos).unwrap_or(&' ');
-            let after: String = chars[pos..].iter().skip(1).collect();
-
+        } else if let Some((before, at_cursor, after, _rows)) = input_view {
             let input_line = Line::from(vec![
                 Span::raw("> "),
                 Span::raw(before),
@@ -285,22 +301,25 @@ impl Renderer {
                 Span::raw(after),
             ]);
 
-            // Wrap into the single input row.
             frame.render_widget(
                 Paragraph::new(input_line).wrap(Wrap { trim: false }),
-                Rect { y, height: 1, ..area },
+                Rect {
+                    y,
+                    height: input_rows,
+                    ..area
+                },
             );
         }
-        y += 1;
+        y += input_rows;
 
-        // ── Row 2: bottom separator ──
+        // ── Bottom separator ──
         frame.render_widget(
             Paragraph::new(sep).style(Style::default().fg(self.theme.input_border)),
             Rect { y, height: 1, ..area },
         );
         y += 1;
 
-        // ── Row 3: status bar ──
+        // ── Status bar ──
         let mut status_spans: Vec<Span> = vec![
             Span::styled(
                 status_info.model.to_string(),
@@ -328,7 +347,7 @@ impl Renderer {
                 Style::default().fg(self.theme.status_text),
             ));
             status_spans.push(Span::styled(
-                format!("📥 {}", status_info.queue_len),
+                format!("Q: {}", status_info.queue_len),
                 Style::default().fg(self.theme.status_text),
             ));
         }
