@@ -12,10 +12,9 @@ use tokio::time::{self, Duration};
 use super::commands;
 use super::input::{InputAction, InputState};
 use super::prompt::{Decision, Prompt};
-use super::render::{BoneTerminal, Renderer, StatusInfo};
+use super::render::{BoneTerminal, MIN_ROWS, Renderer, StatusInfo};
 use super::tool_display::build_tool_row;
 use crate::tools::edit_file::preview_edit_file;
-use ratatui::widgets::Clear;
 
 pub struct App {
     pub messages: Vec<Message>,
@@ -69,12 +68,12 @@ impl App {
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
-        let mut terminal = Renderer::init_terminal()?;
+        let mut terminal: Option<BoneTerminal> = Some(Renderer::init_terminal(MIN_ROWS)?);
 
         self.renderer
-            .flush_new_to_scrollback(&self.messages, &mut terminal)?;
+            .flush_new_to_scrollback(&self.messages, terminal.as_mut().unwrap())?;
         self.renderer
-            .render_banner(&mut terminal, &self.provider, &self.model)?;
+            .render_banner(terminal.as_mut().unwrap(), &self.provider, &self.model)?;
         self.force_redraw(&mut terminal)?;
 
         // Main event loop
@@ -116,36 +115,45 @@ impl App {
             self.renderer
                 .finalize_streaming_message(
                     self.messages.last().map(|m| m.content.as_str()).unwrap_or(""),
-                    &mut terminal,
+                    terminal.as_mut().unwrap(),
                 )?;
             self.renderer
-                .flush_new_to_scrollback(&self.messages, &mut terminal)?;
+                .flush_new_to_scrollback(&self.messages, terminal.as_mut().unwrap())?;
         }
 
-        Renderer::prepare_exit(&mut terminal)?;
+        Renderer::prepare_exit(terminal.as_mut().unwrap())?;
         Renderer::shutdown_terminal()?;
+        Ok(())
+    }
+
+    /// Ensure the viewport is the right size, then draw.
+    fn ensure_viewport_and_draw(&mut self, terminal: &mut Option<BoneTerminal>) -> io::Result<()> {
+        let width = terminal.as_ref().unwrap().size()?.width;
+        let desired = Renderer::desired_height(
+            &self.input,
+            self.active_prompt.as_ref(),
+            width,
+        );
+
+        if desired != self.renderer.viewport_height {
+            Renderer::resize_viewport(terminal, desired)?;
+            self.renderer.viewport_height = desired;
+        }
+
+        terminal.as_mut().unwrap().draw(|frame| self.draw(frame))?;
         Ok(())
     }
 
     /// Redraw from scratch, updating the tracked terminal size.
     /// Used after resize or stale-size detection.
-    fn force_redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
-        terminal.draw(|frame| {
-            frame.render_widget(Clear, frame.area());
-            self.renderer.draw_bottom_pane(
-                frame,
-                &self.input,
-                &self.status_info(),
-                self.active_prompt.as_ref(),
-            );
-        })?;
+    fn force_redraw(&mut self, terminal: &mut Option<BoneTerminal>) -> io::Result<()> {
+        self.ensure_viewport_and_draw(terminal)?;
         self.renderer.last_size = Some(crossterm::terminal::size()?);
         Ok(())
     }
 
-    fn redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
-        terminal.draw(|frame| self.draw(frame))?;
-        Ok(())
+    fn redraw(&mut self, terminal: &mut Option<BoneTerminal>) -> io::Result<()> {
+        self.ensure_viewport_and_draw(terminal)
     }
 
     fn status_info(&self) -> StatusInfo {
@@ -171,7 +179,7 @@ impl App {
         &mut self,
         code: KeyCode,
         modifiers: KeyModifiers,
-        term: &mut BoneTerminal,
+        term: &mut Option<BoneTerminal>,
     ) -> io::Result<()> {
         // If a blocking prompt is active, only prompt keys are handled.
         if self.active_prompt.is_some() {
@@ -204,7 +212,7 @@ impl App {
 
     /// Handle a keypress while a blocking prompt is displayed.
     /// Up/Down move the cursor, Enter confirms, Esc rejects.
-    fn handle_prompt_key(&mut self, code: KeyCode, term: &mut BoneTerminal) -> io::Result<()> {
+    fn handle_prompt_key(&mut self, code: KeyCode, term: &mut Option<BoneTerminal>) -> io::Result<()> {
         match code {
             KeyCode::Up => {
                 if let Some(ref mut p) = self.active_prompt {
@@ -229,7 +237,7 @@ impl App {
     }
 
     /// Handle Ctrl+C: cancel streaming response, or quit on double-tap.
-    fn handle_ctrl_c(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    fn handle_ctrl_c(&mut self, term: &mut Option<BoneTerminal>) -> io::Result<()> {
         let now = Instant::now();
         let double_tap = self
             .last_ctrl_c
@@ -257,7 +265,7 @@ impl App {
     fn prompt_and_wait(
         &mut self,
         call: &ToolCall,
-        term: &mut BoneTerminal,
+        term: &mut Option<BoneTerminal>,
     ) -> io::Result<Decision> {
         let summary = match call.name.as_str() {
             "read_file" | "write_file" | "edit_file" => {
@@ -331,7 +339,7 @@ impl App {
         );
     }
 
-    async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    async fn send_message(&mut self, term: &mut Option<BoneTerminal>) -> io::Result<()> {
         let text = self.input.buffer.trim().to_string();
         if text.is_empty() {
             return Ok(());
@@ -351,7 +359,7 @@ impl App {
         // Flush the submitted message before resetting the input.
         self.renderer.flush_new_to_scrollback(
             &self.messages,
-            term,
+            term.as_mut().unwrap(),
         )?;
         self.input.reset();
         self.redraw(term)?;
@@ -409,7 +417,7 @@ impl App {
                                     self.messages[assistant_idx].content.push_str(&text);
                                     self.renderer.redraw_streaming_message(
                                         &self.messages[assistant_idx].content,
-                                        term,
+                                        term.as_mut().unwrap(),
                                         &self.input,
                                         &self.status_info(),
                                     )?;
@@ -431,7 +439,7 @@ impl App {
                                     self.messages[assistant_idx].content.push_str("\n[cancelled]");
                                     break;
                                 }
-                                self.renderer.tick_spinner(term, &self.input, &self.status_info())?;
+                                self.renderer.tick_spinner(term.as_mut().unwrap(), &self.input, &self.status_info())?;
                             }
                         }
                     }
@@ -497,7 +505,7 @@ impl App {
                                 serde_json::Value::String(preview.before_hash);
                             self.messages.push(Message::system(preview.diff));
                             self.renderer
-                                .flush_new_to_scrollback(&self.messages, term)?;
+                                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
                         }
                         Err(err) => {
                             self.messages.push(Message::system(format!(
@@ -505,7 +513,7 @@ impl App {
                                 call.arguments["path"].as_str().unwrap_or("?")
                             )));
                             self.renderer
-                                .flush_new_to_scrollback(&self.messages, term)?;
+                                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
                             was_rejected[i] = true;
                             continue;
                         }
@@ -569,7 +577,7 @@ impl App {
                 self.messages.push(build_tool_row(call, result));
             }
             self.renderer
-                .flush_new_to_scrollback(&self.messages, term)?;
+                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
 
             for result in results {
                 let message = ChatMessage::tool(result);
@@ -582,15 +590,15 @@ impl App {
         self.cancel_streaming = false;
         self.last_ctrl_c = None;
         self.renderer
-            .finalize_streaming_message(&self.messages[assistant_idx].content, term)?;
+            .finalize_streaming_message(&self.messages[assistant_idx].content, term.as_mut().unwrap())?;
         self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+            .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
         self.redraw(term)?;
 
         Ok(())
     }
 
-    async fn handle_command(&mut self, input: &str, term: &mut BoneTerminal) -> io::Result<()> {
+    async fn handle_command(&mut self, input: &str, term: &mut Option<BoneTerminal>) -> io::Result<()> {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0].to_string();
         let arg = parts.get(1).copied().unwrap_or("").to_string();
@@ -602,7 +610,7 @@ impl App {
             &mut self.transcript,
             &mut self.token_stats,
             &mut self.renderer,
-            term,
+            term.as_mut().unwrap(),
             &mut self.llm,
             &mut self.provider,
             &mut self.model,
@@ -617,7 +625,7 @@ impl App {
             commands::CommandResult::Continue { reply } => {
                 self.messages.push(Message::system(reply));
                 self.renderer
-                    .flush_new_to_scrollback(&self.messages, term)?;
+                    .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
                 self.redraw(term)?;
             }
         }
@@ -627,7 +635,7 @@ impl App {
     async fn wait_for_stream(
         &mut self,
         history: Vec<crate::llm::ChatMessage>,
-        term: &mut BoneTerminal,
+        term: &mut Option<BoneTerminal>,
     ) -> (
         Result<crate::llm::ResponseStream, crate::llm::LlmError>,
         usize,
@@ -653,7 +661,7 @@ impl App {
                 _ = &mut spinner => {
                     renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
                     Self::drain_keys(input, queue, approval_mode, cancel);
-                    term.draw(|frame| {
+                    term.as_mut().unwrap().draw(|frame| {
                         renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
                             model: model.clone(),
                             token_stats: token_stats.clone(),

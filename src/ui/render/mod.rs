@@ -17,22 +17,8 @@ use crate::chat::Message;
 use crate::llm::TokenStats;
 use crate::tools::types::ApprovalMode;
 
-/// Fixed viewport height — **never** changes at runtime.
-///
-/// The inline viewport is created once at startup and never resized.
-/// `insert_before` simply pushes lines above it — the viewport itself
-/// can never end up in scrollback.
-///
-/// The viewport is taller than the minimum layout to allow the input
-/// field to grow when text wraps. Unused rows at the bottom are blank.
-///
-/// Layout (dynamic within fixed viewport):
-///   row 0         — top separator
-///   row 1..1+N    — input field (N = wrapped lines, max BOTTOM_ROWS-3)
-///   row 1+N       — bottom separator
-///   row 2+N       — status bar
-///   [remaining]   — blank
-pub(crate) const BOTTOM_ROWS: u16 = 8;
+/// Minimum viewport rows: top-sep + input(1) + bottom-sep + status.
+pub(crate) const MIN_ROWS: u16 = 4;
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub type BoneTerminal = Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
@@ -57,6 +43,8 @@ pub struct Renderer {
     pub streaming_lines_flushed: usize,
     /// Terminal size at last successful draw (for stale-size detection).
     pub last_size: Option<(u16, u16)>,
+    /// Current inline viewport height (resized dynamically).
+    pub viewport_height: u16,
 }
 
 impl Default for Renderer {
@@ -73,23 +61,47 @@ impl Renderer {
             spinner_tick: 0,
             streaming_lines_flushed: 0,
             last_size: None,
+            viewport_height: MIN_ROWS,
         }
     }
 
-    /// Create a new terminal in inline-viewport mode with a **fixed** height.
+    /// Create a new terminal in inline-viewport mode.
     ///
-    /// The viewport height is constant (`BOTTOM_ROWS`) and never changes.
-    /// This prevents the viewport from ever being recreated, which is what
-    /// causes its content to leak into scrollback.
-    pub fn init_terminal() -> io::Result<BoneTerminal> {
+    /// Starts at `MIN_ROWS` (4 lines). The viewport is resized dynamically
+    /// via `resize_viewport()` as the input field grows or shrinks.
+    pub fn init_terminal(height: u16) -> io::Result<BoneTerminal> {
         crossterm::terminal::enable_raw_mode()?;
         let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
         Terminal::with_options(
             backend,
             ratatui::TerminalOptions {
-                viewport: Viewport::Inline(BOTTOM_ROWS),
+                viewport: Viewport::Inline(height),
             },
         )
+    }
+
+    /// Recreate the terminal with a new viewport height.
+    ///
+    /// Since ratatui doesn't expose `set_viewport_height()`, we clear the
+    /// old viewport, drop it, and create a fresh one. This is the same
+    /// approach Codex uses — the cost is negligible and invisible.
+    pub fn resize_viewport(
+        term: &mut Option<BoneTerminal>,
+        new_height: u16,
+    ) -> io::Result<()> {
+        if let Some(mut t) = term.take() {
+            t.clear()?;
+            drop(t);
+        }
+        let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
+        let new_term = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: Viewport::Inline(new_height),
+            },
+        )?;
+        *term = Some(new_term);
+        Ok(())
     }
 
     pub fn shutdown_terminal() -> io::Result<()> {
@@ -220,6 +232,26 @@ impl Renderer {
         self.draw_bottom_pane_with_tick(frame, input, status_info, self.spinner_tick, prompt);
     }
 
+    /// Compute the desired viewport height for the current state.
+    pub fn desired_height(
+        input: &InputState,
+        prompt: Option<&Prompt>,
+        terminal_width: u16,
+    ) -> u16 {
+        if let Some(p) = prompt {
+            // top-sep + title + options + bottom-sep + status
+            return MIN_ROWS - 1 + p.options.len() as u16 + 1;
+        }
+        let chars: Vec<char> = input.buffer.chars().collect();
+        let pos = input.cursor_pos.min(chars.len());
+        let before: String = chars[..pos].iter().collect();
+        let at_cursor = chars.get(pos).unwrap_or(&' ');
+        let after: String = chars[pos..].iter().skip(1).collect();
+        let display = format!("> {}{}{}", before, at_cursor, after);
+        let input_rows = wrap::visual_line_count(&display, terminal_width as usize) as u16;
+        MIN_ROWS - 1 + input_rows.max(1) // top-sep + input_rows + bottom-sep + status
+    }
+
     /// Draw the bottom pane with an explicit spinner tick (used during stream wait).
     pub fn draw_bottom_pane_with_tick(
         &self,
@@ -245,10 +277,8 @@ impl Renderer {
 
             let display_text = format!("> {}{}{}", before, at_cursor, after);
             let raw = wrap::visual_line_count(&display_text, area.width as usize) as u16;
-            let max_input_rows = BOTTOM_ROWS.saturating_sub(3);
-            let input_rows = raw.clamp(1, max_input_rows);
 
-            Some((before, at_cursor, after, input_rows))
+            Some((before, at_cursor, after, raw.max(1)))
         };
 
         let mut y = area.y;
@@ -272,13 +302,8 @@ impl Renderer {
             );
             y += 1;
 
-            // Options — one per line, capped to fit within viewport
-            let rows_left = BOTTOM_ROWS.saturating_sub(2) as usize; // reserve bottom sep + status
-            let rows_used = (y - area.y) as usize + 1;              // top sep + title so far
-            let max_options = rows_left.saturating_sub(rows_used);
-            let visible_end = prompt.options.len().min(max_options.max(1));
-
-            for (i, option) in prompt.options[..visible_end].iter().enumerate() {
+            // Options — one per line
+            for (i, option) in prompt.options.iter().enumerate() {
                 let selected = i == prompt.selected;
                 let (marker, style) = if selected {
                     (
