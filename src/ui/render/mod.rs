@@ -272,8 +272,13 @@ impl Renderer {
             );
             y += 1;
 
-            // Options — one per line
-            for (i, option) in prompt.options.iter().enumerate() {
+            // Options — one per line, capped to fit within viewport
+            let rows_left = BOTTOM_ROWS.saturating_sub(2) as usize; // reserve bottom sep + status
+            let rows_used = (y - area.y) as usize + 1;              // top sep + title so far
+            let max_options = rows_left.saturating_sub(rows_used);
+            let visible_end = prompt.options.len().min(max_options.max(1));
+
+            for (i, option) in prompt.options[..visible_end].iter().enumerate() {
                 let selected = i == prompt.selected;
                 let (marker, style) = if selected {
                     (
