@@ -251,8 +251,6 @@ impl Renderer {
             Some((before, at_cursor, after, input_rows))
         };
 
-        let input_rows = input_view.as_ref().map_or(1, |v| v.3);
-
         let mut y = area.y;
 
         // ── Top separator ──
@@ -262,35 +260,44 @@ impl Renderer {
         );
         y += 1;
 
-        // ── Input field or inline prompt ──
+        // ── Input field or vertical prompt ──
         if let Some(prompt) = prompt {
-            let mut spans: Vec<Span> = Vec::new();
-            for (i, option) in prompt.options.iter().enumerate() {
-                let selected = i == prompt.selected;
-                if selected {
-                    spans.push(Span::styled(
-                        format!(" ▶ {} ", option),
-                        Style::default()
-                            .fg(ratatui::style::Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        format!("   {} ", option),
-                        Style::default().fg(ratatui::style::Color::DarkGray),
-                    ));
-                }
-            }
-            let title = format!("  {}", prompt.title);
-            spans.push(Span::styled(
-                title,
-                Style::default().fg(self.theme.system_msg),
-            ));
+            // Title line
             frame.render_widget(
-                Paragraph::new(Line::from(spans)),
+                Paragraph::new(Span::styled(
+                    format!("  {}", prompt.title),
+                    Style::default().fg(self.theme.system_msg),
+                )),
                 Rect { y, height: 1, ..area },
             );
-        } else if let Some((before, at_cursor, after, _rows)) = input_view {
+            y += 1;
+
+            // Options — one per line
+            for (i, option) in prompt.options.iter().enumerate() {
+                let selected = i == prompt.selected;
+                let (marker, style) = if selected {
+                    (
+                        ">",
+                        Style::default()
+                            .fg(self.theme.status_text)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    (
+                        " ",
+                        Style::default().fg(ratatui::style::Color::DarkGray),
+                    )
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!("  {} ", marker), style),
+                        Span::styled(option.clone(), style),
+                    ])),
+                    Rect { y, height: 1, ..area },
+                );
+                y += 1;
+            }
+        } else if let Some((before, at_cursor, after, input_rows)) = input_view {
             let input_line = Line::from(vec![
                 Span::raw("> "),
                 Span::raw(before),
@@ -309,8 +316,8 @@ impl Renderer {
                     ..area
                 },
             );
+            y += input_rows;
         }
-        y += input_rows;
 
         // ── Bottom separator ──
         frame.render_widget(
