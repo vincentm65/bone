@@ -5,11 +5,7 @@ mod seed;
 
 use std::path::Path;
 
-#[allow(unused_imports)]
-pub use app_config::UserConfig;
-pub use app_config::load_user_config;
-#[allow(unused_imports)]
-pub use paths::{config_path, providers_path};
+pub use app_config::{UserConfig, load_user_config};
 pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers};
 pub use seed::seed_providers_if_missing;
 

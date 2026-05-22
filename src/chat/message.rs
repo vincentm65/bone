@@ -1,4 +1,4 @@
-use crate::llm::{ChatMessage, ChatRole};
+use crate::llm::ChatRole;
 
 /// Display metadata for compact tool rows shown in chat.
 #[derive(Debug, Clone)]
@@ -51,10 +51,5 @@ impl Message {
             content: String::new(),
             tool: Some(ToolDisplay { label, is_error }),
         }
-    }
-
-    #[must_use]
-    pub fn to_chat_message(&self) -> ChatMessage {
-        ChatMessage::new(self.role, self.content.clone())
     }
 }

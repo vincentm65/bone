@@ -17,6 +17,8 @@ struct Args {
     timeout_ms: Option<u64>,
 }
 
+/// Receives the LLM's safety classification from the tool call argument.
+/// Validation/override logic lives in `types::CommandSafety::from_tool_call()`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CommandClassification {
@@ -30,17 +32,25 @@ impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash",
-            description: "Run a shell command from the current working directory and return exit code, stdout, and stderr. The caller must classify the command as read_only, edit, or danger using the rules in the input schema.",
+            description: "Run a non-interactive shell command with bash -lc from the current working directory and return its exit code, stdout, and stderr. Use this for builds, tests, formatters, package managers, and other commands that are better expressed in the shell. Do not use it to read or edit files when a dedicated file tool is more appropriate. Always classify the command honestly as read_only, edit, or danger; choose danger when unsure.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string" },
+                    "command": {
+                        "type": "string",
+                        "description": "Command line to execute with bash -lc. It runs without stdin, so avoid interactive prompts and provide flags that make tools non-interactive."
+                    },
                     "classification": {
                         "type": "string",
                         "enum": ["read_only", "edit", "danger"],
-                        "description": "Safety classification for the command. Use read_only only for commands that inspect local state without changing files, services, network state, git state, or external systems (for example pwd, cargo check, cargo test, or reading/listing files). Use edit for commands that mutate normal workspace state, such as formatters, code generation, dependency installation, or creating/removing build artifacts. Use danger for privileged, destructive, external side-effecting, network-modifying, process/service-control, secret-accessing, or git commands, and whenever unsure."
+                        "description": "Safety classification. Use read_only only for local inspection commands that do not modify files, services, network state, git state, or external systems, such as pwd, cargo check, cargo test, or listing files. Use edit for normal workspace mutations such as formatters, code generation, dependency installation, or creating/removing build artifacts. Use danger for privileged, destructive, external side-effecting, network-modifying, process/service-control, secret-accessing, or any git command, and whenever unsure."
                     },
-                    "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 300000 }
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "maximum": 300000,
+                        "description": "Optional timeout in milliseconds. Defaults to 120000 and is clamped between 1000 and 300000."
+                    }
                 },
                 "required": ["command", "classification"],
                 "additionalProperties": false
@@ -59,6 +69,7 @@ impl Tool for BashTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| e.to_string())?;
 

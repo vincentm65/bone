@@ -5,28 +5,58 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ProviderEntry {
     /// Human-readable label shown in the status bar.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_default")]
     pub label: String,
 
     /// API base URL.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_default")]
     pub base_url: String,
 
     /// Model name to send in the request payload.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_default")]
     pub model: String,
 
     /// API key (optional for local providers).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_default")]
     pub api_key: String,
 
     /// Chat endpoint path (default: /chat/completions).
-    #[serde(default = "default_endpoint")]
+    #[serde(
+        default = "default_endpoint",
+        deserialize_with = "string_or_default_endpoint"
+    )]
     pub endpoint: String,
 
     /// Handler style: "openai" (default) or "anthropic".
-    #[serde(default = "default_handler")]
+    #[serde(
+        default = "default_handler",
+        deserialize_with = "string_or_default_handler"
+    )]
     pub handler: String,
+}
+
+fn string_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
+fn string_or_default_endpoint<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_else(default_endpoint))
+}
+
+fn string_or_default_handler<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_else(default_handler))
 }
 
 fn default_endpoint() -> String {
@@ -48,5 +78,8 @@ pub fn load_providers() -> ProvidersConfig {
     if !path.exists() {
         return ProvidersConfig::default();
     }
-    super::load_yaml(&path).unwrap_or_default()
+    super::load_yaml(&path).unwrap_or_else(|| {
+        eprintln!("bone: warning: failed to parse {}", path.display());
+        ProvidersConfig::default()
+    })
 }

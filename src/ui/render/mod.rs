@@ -1,21 +1,34 @@
 mod banner;
 mod messages;
 mod streaming;
+pub mod wrap;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Widget};
+use ratatui::widgets::{Clear, Paragraph, Widget, Wrap};
 use ratatui::{Frame, Terminal, Viewport};
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 
 use super::input::InputState;
 use super::prompt::Prompt;
 use super::theme::Theme;
 use crate::chat::Message;
+use crate::llm::TokenStats;
 use crate::tools::types::ApprovalMode;
 
-/// How many rows the bottom pane (input + status) occupies.
+/// Fixed viewport height — **never** changes at runtime.
+///
+/// This is the single most important constant for scrollback stability.
+/// The inline viewport is created once at startup and never resized.
+/// `insert_before` simply pushes lines above it — the viewport itself
+/// can never end up in scrollback.
+///
+/// Layout (always 4 rows):
+///   row 0 — separator
+///   row 1 — input field (or inline prompt options)
+///   row 2 — separator
+///   row 3 — status bar
 pub(crate) const BOTTOM_ROWS: u16 = 4;
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -23,12 +36,11 @@ pub type BoneTerminal = Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
 
 /// Status bar info passed from App to Renderer for each draw.
 pub struct StatusInfo {
-    pub provider: String,
     pub model: String,
-    pub msg_count: usize,
+    pub token_stats: TokenStats,
     pub streaming: bool,
-    pub queue_len: usize,
     pub approval_mode: ApprovalMode,
+    pub queue_len: usize,
 }
 
 /// Owns all terminal rendering state and drawing logic.
@@ -40,6 +52,14 @@ pub struct Renderer {
     /// Number of lines of the current streaming assistant message already
     /// flushed to native scrollback via insert_before.
     pub streaming_lines_flushed: usize,
+    /// Terminal size at last successful draw (for stale-size detection).
+    pub last_size: Option<(u16, u16)>,
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Renderer {
@@ -49,10 +69,15 @@ impl Renderer {
             scrollback_cursor: 0,
             spinner_tick: 0,
             streaming_lines_flushed: 0,
+            last_size: None,
         }
     }
 
-    /// Create a new terminal in inline-viewport mode.
+    /// Create a new terminal in inline-viewport mode with a **fixed** height.
+    ///
+    /// The viewport height is constant (`BOTTOM_ROWS`) and never changes.
+    /// This prevents the viewport from ever being recreated, which is what
+    /// causes its content to leak into scrollback.
     pub fn init_terminal() -> io::Result<BoneTerminal> {
         crossterm::terminal::enable_raw_mode()?;
         let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
@@ -68,26 +93,18 @@ impl Renderer {
         crossterm::terminal::disable_raw_mode()
     }
 
-    /// Recreate the inline viewport with a different height (e.g. to
-    /// accommodate a prompt panel).  Raw mode stays enabled.
-    pub fn resize_viewport(term: &mut BoneTerminal, new_height: u16) -> io::Result<()> {
-        term.clear()?;
-        *term = Terminal::with_options(
-            ratatui::backend::CrosstermBackend::new(io::stdout()),
-            ratatui::TerminalOptions {
-                viewport: Viewport::Inline(new_height),
-            },
-        )?;
-        Ok(())
+    /// Leave the shell prompt below Bone's inline viewport on exit.
+    pub fn prepare_exit(term: &mut BoneTerminal) -> io::Result<()> {
+        crossterm::execute!(term.backend_mut(), crossterm::style::Print("\r\n"))?;
+        io::stdout().flush()
     }
 
     // ------------------------------------------------------------------
     // Banner
     // ------------------------------------------------------------------
 
-    /// Render the startup banner into native scrollback (called once at launch).
     pub fn render_banner(
-        &mut self,
+        &self,
         term: &mut BoneTerminal,
         provider: &str,
         model: &str,
@@ -100,6 +117,9 @@ impl Renderer {
     // ------------------------------------------------------------------
 
     /// Push messages that haven't been flushed yet into native terminal scrollback.
+    ///
+    /// Uses `insert_before` which inserts lines *above* the fixed inline
+    /// viewport. The viewport itself stays in place and never enters scrollback.
     pub fn flush_new_to_scrollback(
         &mut self,
         messages: &[Message],
@@ -116,7 +136,9 @@ impl Renderer {
         } else {
             None
         };
-        let rendered: Vec<Line<'static>> = messages::msg_to_lines(new_msgs, &self.theme, prev_role);
+        let terminal_width = term.size()?.width;
+        let rendered: Vec<Line<'static>> =
+            messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width);
         let line_count = rendered.len() as u16;
 
         term.insert_before(line_count, |buf| {
@@ -172,10 +194,16 @@ impl Renderer {
     }
 
     // ------------------------------------------------------------------
-    // Bottom pane (status bar + input field + optional prompt)
+    // Bottom pane — fixed 4-row layout
     // ------------------------------------------------------------------
 
-    /// Draw the bottom pane: separator + input + separator + status.
+    /// Draw the bottom pane into the fixed inline viewport.
+    ///
+    /// Layout (always exactly `BOTTOM_ROWS` = 4 rows):
+    ///   row 0 — separator
+    ///   row 1 — input field OR inline prompt selector
+    ///   row 2 — separator
+    ///   row 3 — status bar
     pub fn draw_bottom_pane(
         &self,
         frame: &mut Frame,
@@ -197,63 +225,50 @@ impl Renderer {
     ) {
         let area = frame.area();
         frame.render_widget(Clear, area);
-        let line = "─".repeat(area.width as usize);
+        let sep = "─".repeat(area.width as usize);
+
         let mut y = area.y;
 
-        // ── Input separator (top border) ──
+        // ── Row 0: top separator ──
         frame.render_widget(
-            Paragraph::new(line.clone()).style(Style::default().fg(self.theme.input_border)),
-            Rect {
-                y,
-                height: 1,
-                ..area
-            },
+            Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
+            Rect { y, height: 1, ..area },
         );
         y += 1;
 
-        // ── Optional prompt panel (between separator and input) ──
+        // ── Row 1: input field or inline prompt ──
         if let Some(prompt) = prompt {
-            // Title
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    format!(" {} ", prompt.title),
-                    Style::default()
-                        .fg(self.theme.status_text)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
-            );
-            y += 1;
-
-            // Options
+            // Show all options on one line: "▶ Accept  Advise  Cancel — title"
+            let mut spans: Vec<Span> = Vec::new();
             for (i, option) in prompt.options.iter().enumerate() {
                 let selected = i == prompt.selected;
-                let style = if selected {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                if selected {
+                    spans.push(Span::styled(
+                        format!(" ▶ {} ", option),
+                        Style::default()
+                            .fg(ratatui::style::Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ));
                 } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let prefix = if selected { " > " } else { "   " };
-                frame.render_widget(
-                    Paragraph::new(Span::styled(format!("{}{}", prefix, option), style)),
-                    Rect {
-                        y,
-                        height: 1,
-                        ..area
-                    },
-                );
-                y += 1;
+                    spans.push(Span::styled(
+                        format!("   {} ", option),
+                        Style::default().fg(ratatui::style::Color::DarkGray),
+                    ));
+                }
             }
-        }
-
-        // ── Input line (hidden while prompt is active) ──
-        if prompt.is_none() {
+            // Append title truncated to remaining width
+            let title = format!("  {}", prompt.title);
+            spans.push(Span::styled(
+                title,
+                Style::default().fg(self.theme.system_msg),
+            ));
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect { y, height: 1, ..area },
+            );
+        } else {
+            // Normal input — single line, text wraps visually but we only
+            // render one row.  The user sees the tail end of long input.
             let chars: Vec<char> = input.buffer.chars().collect();
             let pos = input.cursor_pos.min(chars.len());
             let before: String = chars[..pos].iter().collect();
@@ -270,64 +285,68 @@ impl Renderer {
                 Span::raw(after),
             ]);
 
+            // Wrap into the single input row.
             frame.render_widget(
-                Paragraph::new(input_line),
-                Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
+                Paragraph::new(input_line).wrap(Wrap { trim: false }),
+                Rect { y, height: 1, ..area },
             );
-            y += 1;
         }
+        y += 1;
 
-        // ── Status separator ──
+        // ── Row 2: bottom separator ──
         frame.render_widget(
-            Paragraph::new(line).style(Style::default().fg(self.theme.input_border)),
-            Rect {
-                y,
-                height: 1,
-                ..area
-            },
+            Paragraph::new(sep).style(Style::default().fg(self.theme.input_border)),
+            Rect { y, height: 1, ..area },
         );
         y += 1;
 
-        // ── Status bar (always at the very bottom) ──
-        let thinking = if status_info.streaming {
-            format!(" │ {} thinking", SPINNER[tick % SPINNER.len()])
-        } else {
-            Default::default()
-        };
-        let queued = if status_info.queue_len > 0 {
-            format!(" │ queued: {}", status_info.queue_len)
-        } else {
-            Default::default()
-        };
-        let status = Line::from(vec![
+        // ── Row 3: status bar ──
+        let mut status_spans: Vec<Span> = vec![
             Span::styled(
-                format!(" {} │ {}  ", status_info.provider, status_info.model),
+                status_info.model.to_string(),
                 Style::default().fg(self.theme.status_text),
             ),
+            Span::styled(" | ", Style::default().fg(self.theme.status_text)),
             Span::styled(
-                format!(" {} ", status_info.approval_mode.label()),
+                status_info.approval_mode.label().to_string(),
                 Style::default().fg(match status_info.approval_mode {
                     ApprovalMode::Safe => self.theme.approval_safe,
                     ApprovalMode::Edits => self.theme.approval_edits,
                     ApprovalMode::Danger => self.theme.approval_danger,
                 }),
             ),
+            Span::styled(" | ", Style::default().fg(self.theme.status_text)),
             Span::styled(
-                format!("│ msgs: {}{}{}", status_info.msg_count, thinking, queued),
+                status_info.token_stats.display(),
                 Style::default().fg(self.theme.status_text),
             ),
-        ]);
+        ];
+
+        if status_info.queue_len > 0 {
+            status_spans.push(Span::styled(
+                " | ",
+                Style::default().fg(self.theme.status_text),
+            ));
+            status_spans.push(Span::styled(
+                format!("📥 {}", status_info.queue_len),
+                Style::default().fg(self.theme.status_text),
+            ));
+        }
+
+        if status_info.streaming {
+            status_spans.push(Span::styled(
+                " | ",
+                Style::default().fg(self.theme.status_text),
+            ));
+            status_spans.push(Span::styled(
+                format!("{} thinking", SPINNER[tick % SPINNER.len()]),
+                Style::default().fg(self.theme.status_text),
+            ));
+        }
+
         frame.render_widget(
-            Paragraph::new(status),
-            Rect {
-                y,
-                height: 1,
-                ..area
-            },
+            Paragraph::new(Line::from(status_spans)),
+            Rect { y, height: 1, ..area },
         );
     }
 }

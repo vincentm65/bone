@@ -11,6 +11,8 @@ pub struct Theme {
     pub approval_danger: Color,
     pub tool_call: Color,
     pub tool_error: Color,
+    pub diff_removed: Color,
+    pub diff_added: Color,
 }
 
 impl Default for Theme {
@@ -20,11 +22,13 @@ impl Default for Theme {
             status_text: Color::White,
             input_border: Color::DarkGray,
             system_msg: Color::DarkGray,
-            approval_safe: Color::Rgb(92, 214, 140), // muted green
-            approval_edits: Color::LightYellow,
-            approval_danger: Color::Rgb(232, 120, 120), // muted red
+            approval_safe: Color::Rgb(120, 179, 115), // #78B373 — safe green (vmcode)
+            approval_edits: Color::Rgb(184, 160, 64), // #B8A040 — muted gold (vmcode)
+            approval_danger: Color::Rgb(224, 80, 80), // #E05050 — danger red (vmcode)
             tool_call: Color::DarkGray,
             tool_error: Color::Red,
+            diff_removed: Color::Rgb(135, 1, 1),
+            diff_added: Color::Rgb(0, 95, 0),
         }
     }
 }

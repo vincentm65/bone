@@ -1,9 +1,10 @@
-use crate::chat::{Context, Message, build_chat_history};
+use crate::chat::{Message, build_chat_history};
 use crate::config::ProvidersConfig;
-use crate::llm::{ChatEvent, ChatMessage, LlmProvider};
+use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmProvider, TokenStats};
 use crate::tools::{ApprovalMode, ToolCall, ToolHandler, ToolResult, builtin_tools};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, pin_mut};
+use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
 use tokio::time::{self, Duration};
@@ -11,20 +12,23 @@ use tokio::time::{self, Duration};
 use super::commands;
 use super::input::InputState;
 use super::prompt::{Decision, Prompt};
-use super::render::{BOTTOM_ROWS, BoneTerminal, Renderer, StatusInfo};
+use super::render::{BoneTerminal, Renderer, StatusInfo};
+use super::tool_display::build_tool_row;
+use crate::tools::edit_file::preview_edit_file;
+use ratatui::widgets::Clear;
 
 pub struct App {
     pub messages: Vec<Message>,
+    pub transcript: Vec<ChatMessage>,
     pub input: InputState,
     pub streaming: bool,
     pub provider: String,
     pub model: String,
     pub llm: Box<dyn LlmProvider>,
     pub should_quit: bool,
-    pub context: Context,
     pub renderer: Renderer,
     pub providers_config: ProvidersConfig,
-    pub queue: Vec<String>,
+    pub queue: VecDeque<String>,
     pub tools: ToolHandler,
     pub approval_mode: ApprovalMode,
     pub active_prompt: Option<Prompt>,
@@ -32,15 +36,12 @@ pub struct App {
     pub cancel_streaming: bool,
     /// Timestamp of the last Ctrl+C press (for double-tap quit).
     pub last_ctrl_c: Option<Instant>,
+    /// Cumulative token usage stats.
+    pub token_stats: TokenStats,
 }
 
 impl App {
-    pub fn new(
-        llm: Box<dyn LlmProvider>,
-        context_window: usize,
-        response_budget: usize,
-        providers_config: ProvidersConfig,
-    ) -> io::Result<Self> {
+    pub fn new(llm: Box<dyn LlmProvider>, providers_config: ProvidersConfig) -> io::Result<Self> {
         let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
 
@@ -48,64 +49,94 @@ impl App {
             messages: vec![Message::system(
                 "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
             )],
+            transcript: Vec::new(),
             input: InputState::default(),
             streaming: false,
             provider,
             model,
             llm,
             should_quit: false,
-            context: Context::new(context_window).with_response_budget(response_budget),
             renderer: Renderer::new(),
             providers_config,
-            queue: Vec::new(),
+            queue: VecDeque::new(),
             tools: ToolHandler::new(builtin_tools()),
             approval_mode: ApprovalMode::default(),
             active_prompt: None,
             cancel_streaming: false,
             last_ctrl_c: None,
+            token_stats: TokenStats::new(),
         })
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
         let mut terminal = Renderer::init_terminal()?;
 
-        // Startup banner
-        self.renderer
-            .render_banner(&mut terminal, &self.provider, &self.model)?;
-
-        // Push initial system message into scrollback
         self.renderer
             .flush_new_to_scrollback(&self.messages, &mut terminal)?;
-
-        // Initial draw of the bottom pane
-        terminal.draw(|frame| {
-            self.renderer
-                .draw_bottom_pane(frame, &self.input, &self.status_info(), None);
-        })?;
+        self.renderer
+            .render_banner(&mut terminal, &self.provider, &self.model)?;
+        self.force_redraw(&mut terminal)?;
 
         // Main event loop
         while !self.should_quit {
-            if event::poll(std::time::Duration::from_millis(50))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
+            if event::poll(std::time::Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        self.handle_key(key.code, key.modifiers, &mut terminal)
+                            .await?;
+                    }
+                    Event::Resize(_, _) | Event::Key(_) => {
+                        // Resize or non-press key: force a full redraw to
+                        // re-sync the inline viewport position.
+                        self.force_redraw(&mut terminal)?;
+                    }
+                    _ => {}
+                }
+            }
+
+            // P1: Detect stale terminal size (e.g. after tmux detach/reattach
+            // where SIGWINCH may not fire). If the dimensions changed out from
+            // under us, force a redraw.
+            if let Ok(size) = crossterm::terminal::size()
+                && self.renderer.last_size != Some(size)
             {
-                self.handle_key(key.code, key.modifiers, &mut terminal)
-                    .await?;
+                self.force_redraw(&mut terminal)?;
             }
         }
 
+        Renderer::prepare_exit(&mut terminal)?;
         Renderer::shutdown_terminal()?;
+        Ok(())
+    }
+
+    /// Redraw from scratch, updating the tracked terminal size.
+    /// Used after resize or stale-size detection.
+    fn force_redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        terminal.draw(|frame| {
+            frame.render_widget(Clear, frame.area());
+            self.renderer.draw_bottom_pane(
+                frame,
+                &self.input,
+                &self.status_info(),
+                self.active_prompt.as_ref(),
+            );
+        })?;
+        self.renderer.last_size = Some(crossterm::terminal::size()?);
+        Ok(())
+    }
+
+    fn redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        terminal.draw(|frame| self.draw(frame))?;
         Ok(())
     }
 
     fn status_info(&self) -> StatusInfo {
         StatusInfo {
-            provider: self.provider.clone(),
             model: self.model.clone(),
-            msg_count: self.messages.len(),
+            token_stats: self.token_stats.clone(),
             streaming: self.streaming,
-            queue_len: self.queue.len(),
             approval_mode: self.approval_mode,
+            queue_len: self.queue.len(),
         }
     }
 
@@ -139,27 +170,27 @@ impl App {
             match code {
                 KeyCode::Char('a') => {
                     self.input.cursor_to_start();
-                    term.draw(|frame| self.draw(frame))?;
+                    self.redraw(term)?;
                     return Ok(());
                 }
                 KeyCode::Char('e') => {
                     self.input.cursor_to_end();
-                    term.draw(|frame| self.draw(frame))?;
+                    self.redraw(term)?;
                     return Ok(());
                 }
                 KeyCode::Char('w') => {
                     self.input.delete_word_backward();
-                    term.draw(|frame| self.draw(frame))?;
+                    self.redraw(term)?;
                     return Ok(());
                 }
                 KeyCode::Char('u') => {
                     self.input.clear_buffer();
-                    term.draw(|frame| self.draw(frame))?;
+                    self.redraw(term)?;
                     return Ok(());
                 }
                 KeyCode::Char('d') => {
                     self.queue.clear();
-                    term.draw(|frame| self.draw(frame))?;
+                    self.redraw(term)?;
                     return Ok(());
                 }
                 _ => {}
@@ -169,57 +200,70 @@ impl App {
         match code {
             KeyCode::BackTab => {
                 self.approval_mode = self.approval_mode.cycle();
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
-            KeyCode::Enter => self.send_message(term).await,
+            KeyCode::Enter => {
+                self.send_message(term).await?;
+                // Drain queued messages — send each one without recursion.
+                while let Some(queued) = self.queue.pop_front() {
+                    self.input.buffer = queued;
+                    self.input.cursor_pos = self.input.buffer.chars().count();
+                    self.send_message(term).await?;
+                }
+                Ok(())
+            }
             KeyCode::Char(c) => {
                 self.input.insert_char(c);
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::Backspace => {
                 self.input.delete_backward();
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
+                Ok(())
+            }
+            KeyCode::Left if self.input.cursor_pos > 0 => {
+                self.input.cursor_pos -= 1;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::Left => {
-                if self.input.cursor_pos > 0 {
-                    self.input.cursor_pos -= 1;
-                }
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
+                Ok(())
+            }
+            KeyCode::Right if self.input.cursor_pos < self.input.buffer.chars().count() => {
+                self.input.cursor_pos += 1;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::Right => {
-                if self.input.cursor_pos < self.input.buffer.chars().count() {
-                    self.input.cursor_pos += 1;
-                }
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::Home => {
                 self.input.cursor_to_start();
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::End => {
                 self.input.cursor_to_end();
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::Up => {
                 self.input.history_up();
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::Down => {
                 self.input.history_down();
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
             KeyCode::Esc => {
                 self.input.clear_buffer();
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
                 Ok(())
             }
             _ => Ok(()),
@@ -234,13 +278,18 @@ impl App {
                 if let Some(ref mut p) = self.active_prompt {
                     p.up();
                 }
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
             }
             KeyCode::Down => {
                 if let Some(ref mut p) = self.active_prompt {
                     p.down();
                 }
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
+            }
+            KeyCode::Enter | KeyCode::Esc => {
+                // Enter/Esc on a prompt in the main loop should dismiss it.
+                // Currently unreachable — prompts use a blocking mini-event-loop
+                // in prompt_and_wait — but guard against future non-blocking paths.
             }
             _ => {}
         }
@@ -266,12 +315,13 @@ impl App {
         }
         self.queue.clear();
 
-        term.draw(|frame| self.draw(frame))?;
+        self.redraw(term)?;
         Ok(())
     }
 
     /// Show a blocking prompt for a tool call that needs approval.
-    /// Resizes the viewport, waits for the user to pick, then restores.
+    /// Renders the prompt options in the fixed bottom pane, waits for a choice,
+    /// then restores the normal input/status display.
     fn prompt_and_wait(
         &mut self,
         call: &ToolCall,
@@ -293,49 +343,47 @@ impl App {
             vec!["Accept", "Advise", "Cancel"],
         ));
 
-        let height = BOTTOM_ROWS - 1 + self.active_prompt.as_ref().unwrap().height();
-        Renderer::resize_viewport(term, height)?;
-        term.draw(|frame| self.draw(frame))?;
+        self.redraw(term)?;
 
         // ── Mini blocking event loop ──
         let decision = loop {
-            if event::poll(std::time::Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
+            if event::poll(std::time::Duration::from_millis(50))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                match key.code {
+                    KeyCode::Up => {
+                        if let Some(ref mut p) = self.active_prompt {
+                            p.up();
+                        }
+                        self.redraw(term)?;
                     }
-                    match key.code {
-                        KeyCode::Up => {
-                            if let Some(ref mut p) = self.active_prompt {
-                                p.up();
-                            }
-                            term.draw(|frame| self.draw(frame))?;
+                    KeyCode::Down => {
+                        if let Some(ref mut p) = self.active_prompt {
+                            p.down();
                         }
-                        KeyCode::Down => {
-                            if let Some(ref mut p) = self.active_prompt {
-                                p.down();
-                            }
-                            term.draw(|frame| self.draw(frame))?;
-                        }
-                        KeyCode::Enter => {
-                            break self.active_prompt.as_ref().unwrap().decision();
-                        }
-                        KeyCode::Esc => {
-                            break Decision::Cancel;
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            break Decision::Cancel;
-                        }
-                        _ => {}
+                        self.redraw(term)?;
                     }
+                    KeyCode::Enter => {
+                        if let Some(prompt) = self.active_prompt.as_ref() {
+                            break prompt.decision();
+                        }
+                        break Decision::Cancel;
+                    }
+                    KeyCode::Esc => {
+                        break Decision::Cancel;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break Decision::Cancel;
+                    }
+                    _ => {}
                 }
             }
         };
 
         // Dismiss prompt and restore viewport.
         self.active_prompt = None;
-        Renderer::resize_viewport(term, BOTTOM_ROWS)?;
-        term.draw(|frame| self.draw(frame))?;
+        self.redraw(term)?;
 
         Ok(decision)
     }
@@ -357,27 +405,43 @@ impl App {
             return Ok(());
         }
 
-        self.input.reset();
-
         // Slash commands are handled locally, not sent to the LLM.
         if text.starts_with('/') {
+            self.input.reset();
+            self.redraw(term)?;
             return self.handle_command(&text, term).await;
         }
 
         self.messages.push(Message::user(&text));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.transcript
+            .push(ChatMessage::new(ChatRole::User, &text));
 
-        let mut history = build_chat_history(&self.messages, &self.context);
+        // Flush the submitted message before resetting the input.
+        self.renderer.flush_new_to_scrollback(
+            &self.messages,
+            term,
+        )?;
+        self.input.reset();
+        self.redraw(term)?;
+
+        let mut history = build_chat_history(&self.transcript);
 
         self.streaming = true;
         self.messages.push(Message::assistant(String::new()));
         self.renderer.streaming_lines_flushed = 0;
         self.renderer.scrollback_cursor += 1;
         let assistant_idx = self.messages.len() - 1;
-        term.draw(|frame| self.draw(frame))?;
+        self.redraw(term)?;
 
-        for _ in 0..8 {
+        let mut rounds = 0u32;
+        loop {
+            rounds += 1;
+            if rounds > 64 {
+                self.messages[assistant_idx]
+                    .content
+                    .push_str("\n[tool-call round limit reached]");
+                break;
+            }
             if self.cancel_streaming {
                 self.messages[assistant_idx]
                     .content
@@ -399,6 +463,7 @@ impl App {
             match stream_result {
                 Ok(mut stream) => {
                     let mut spinner = time::interval(Duration::from_millis(90));
+                    let mut had_usage = false;
                     loop {
                         if self.cancel_streaming {
                             self.messages[assistant_idx]
@@ -418,6 +483,10 @@ impl App {
                                     )?;
                                 }
                                 Some(Ok(ChatEvent::ToolCall(call))) => tool_calls.push(call),
+                                Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens })) => {
+                                    self.token_stats.record_request(prompt_tokens, completion_tokens);
+                                    had_usage = true;
+                                }
                                 Some(Err(err)) => {
                                     self.messages[assistant_idx].content.push_str(&format!("\n[stream error: {err}]"));
                                     break;
@@ -434,6 +503,16 @@ impl App {
                             }
                         }
                     }
+
+                    // Fallback: if the provider didn't report real token
+                    // usage, estimate from character counts so the status
+                    // bar still shows something useful.
+                    if !had_usage && !self.cancel_streaming {
+                        let prompt_chars: usize = history.iter().map(|m| m.content.len()).sum();
+                        let completion_chars = self.messages[assistant_idx].content.len();
+                        self.token_stats
+                            .record_estimate(prompt_chars, completion_chars);
+                    }
                 }
                 Err(err) => {
                     if self.cancel_streaming {
@@ -449,22 +528,58 @@ impl App {
                 }
             }
 
-            history.push(ChatMessage::assistant_with_tools(
-                self.messages[assistant_idx].content.clone(),
-                tool_calls.clone(),
-            ));
-
             if tool_calls.is_empty() || self.cancel_streaming {
+                self.transcript.push(ChatMessage::new(
+                    ChatRole::Assistant,
+                    self.messages[assistant_idx].content.clone(),
+                ));
                 break;
             }
+
+            let assistant = ChatMessage::assistant_with_tools(
+                self.messages[assistant_idx].content.clone(),
+                tool_calls.clone(),
+            );
+            history.push(assistant.clone());
+            self.transcript.push(assistant);
+
+            // Reset the display slot so the next round starts fresh.
+            // Without this, each round appends to the accumulated content,
+            // causing earlier rounds' text to be duplicated in transcript
+            // and sent back to the LLM on the next request.
+            self.messages[assistant_idx].content.clear();
+            self.renderer.streaming_lines_flushed = 0;
 
             // Per-call approval.  Calls auto-approved by the current mode
             // are collected; the rest block with an interactive prompt.
             let calls_for_display = tool_calls.clone();
             let mut was_rejected = vec![false; tool_calls.len()];
+            let mut advised = vec![false; tool_calls.len()];
             let mut approved_calls = Vec::new();
 
-            for (i, call) in tool_calls.into_iter().enumerate() {
+            for (i, mut call) in tool_calls.into_iter().enumerate() {
+                if call.name == "edit_file" {
+                    match preview_edit_file(call.arguments.clone()).await {
+                        Ok(preview) => {
+                            call.arguments["expected_hash"] =
+                                serde_json::Value::String(preview.before_hash);
+                            self.messages.push(Message::system(preview.diff));
+                            self.renderer
+                                .flush_new_to_scrollback(&self.messages, term)?;
+                        }
+                        Err(err) => {
+                            self.messages.push(Message::system(format!(
+                                "edit_file preview failed for {}: {err}",
+                                call.arguments["path"].as_str().unwrap_or("?")
+                            )));
+                            self.renderer
+                                .flush_new_to_scrollback(&self.messages, term)?;
+                            was_rejected[i] = true;
+                            continue;
+                        }
+                    }
+                }
+
                 if self.approval_mode.allows_call(&call) {
                     approved_calls.push(call);
                 } else {
@@ -472,7 +587,7 @@ impl App {
                         Decision::Accept => approved_calls.push(call),
                         Decision::Cancel => was_rejected[i] = true,
                         Decision::Advise => {
-                            // Treat as accept but flag for advisory feedback.
+                            advised[i] = true;
                             approved_calls.push(call);
                         }
                     }
@@ -498,7 +613,20 @@ impl App {
                             is_error: true,
                         }
                     } else {
-                        exec_iter.next().unwrap()
+                        let mut result = exec_iter.next().unwrap_or_else(|| {
+                            ToolResult {
+                                call_id: calls_for_display[i].id.clone(),
+                                name: calls_for_display[i].name.clone(),
+                                content: "internal error: tool result missing".into(),
+                                is_error: true,
+                            }
+                        });
+                        if advised[i] {
+                            result.content.push_str(
+                                "\n\nUser selected Advise: proceed carefully, verify assumptions, and explain the outcome.",
+                            );
+                        }
+                        result
                     }
                 })
                 .collect();
@@ -510,25 +638,20 @@ impl App {
                 .flush_new_to_scrollback(&self.messages, term)?;
 
             for result in results {
-                history.push(ChatMessage::tool(result));
+                let message = ChatMessage::tool(result);
+                history.push(message.clone());
+                self.transcript.push(message);
             }
         }
 
         self.streaming = false;
         self.cancel_streaming = false;
+        self.last_ctrl_c = None;
         self.renderer
             .finalize_streaming_message(&self.messages[assistant_idx].content, term)?;
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
-        term.draw(|frame| self.draw(frame))?;
-
-        // Drain queued messages — send each one.
-        while let Some(queued) = self.queue.first().cloned() {
-            self.queue.remove(0);
-            self.input.buffer = queued;
-            self.input.cursor_pos = self.input.buffer.chars().count();
-            Box::pin(self.send_message(term)).await?;
-        }
+        self.redraw(term)?;
 
         Ok(())
     }
@@ -542,9 +665,10 @@ impl App {
             &cmd,
             &arg,
             &mut self.messages,
+            &mut self.transcript,
+            &mut self.token_stats,
             &mut self.renderer,
             term,
-            &self.context,
             &mut self.llm,
             &mut self.provider,
             &mut self.model,
@@ -560,7 +684,7 @@ impl App {
                 self.messages.push(Message::system(reply));
                 self.renderer
                     .flush_new_to_scrollback(&self.messages, term)?;
-                term.draw(|frame| self.draw(frame))?;
+                self.redraw(term)?;
             }
         }
         Ok(())
@@ -577,9 +701,8 @@ impl App {
         let request = self.llm.chat_stream(history, self.tools.definitions());
         let spinner = time::sleep(Duration::from_millis(90));
         let tick = self.renderer.spinner_tick;
-        let provider = self.provider.clone();
         let model = self.model.clone();
-        let msg_count = self.messages.len();
+        let token_stats = self.token_stats.clone();
         let input = &mut self.input;
         let queue = &mut self.queue;
         let renderer = &mut self.renderer;
@@ -598,12 +721,11 @@ impl App {
                     Self::drain_keys(input, queue, approval_mode, cancel);
                     term.draw(|frame| {
                         renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
-                            queue_len: queue.len(),
-                            provider: provider.clone(),
                             model: model.clone(),
-                            msg_count,
+                            token_stats: token_stats.clone(),
                             streaming: true,
                             approval_mode: *approval_mode,
+                            queue_len: queue.len(),
                         }, renderer.spinner_tick, None);
                     }).ok();
                     spinner.as_mut().reset(time::Instant::now() + Duration::from_millis(90));
@@ -615,7 +737,7 @@ impl App {
     /// Drain pending key events into input edits or queue. Used during streaming.
     fn drain_keys(
         input: &mut InputState,
-        queue: &mut Vec<String>,
+        queue: &mut VecDeque<String>,
         mode: &mut ApprovalMode,
         cancel: &mut bool,
     ) {
@@ -639,7 +761,7 @@ impl App {
                     KeyCode::Enter => {
                         let text = input.buffer.trim().to_string();
                         if !text.is_empty() {
-                            queue.push(text);
+                            queue.push_back(text);
                             input.reset();
                         }
                     }
@@ -658,42 +780,19 @@ impl App {
                     KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => queue.clear(),
                     KeyCode::Char(c) => input.insert_char(c),
                     KeyCode::Backspace => input.delete_backward(),
-                    KeyCode::Left => {
-                        if input.cursor_pos > 0 {
-                            input.cursor_pos -= 1;
-                        }
+                    KeyCode::Left if input.cursor_pos > 0 => {
+                        input.cursor_pos -= 1;
                     }
-                    KeyCode::Right => {
-                        if input.cursor_pos < input.buffer.chars().count() {
-                            input.cursor_pos += 1;
-                        }
+                    KeyCode::Left => {}
+                    KeyCode::Right if input.cursor_pos < input.buffer.chars().count() => {
+                        input.cursor_pos += 1;
                     }
+                    KeyCode::Right => {}
                     KeyCode::Home => input.cursor_to_start(),
                     KeyCode::End => input.cursor_to_end(),
                     _ => {}
                 }
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tool display helpers.
-// ---------------------------------------------------------------------------
-
-fn build_tool_row(call: &ToolCall, result: &ToolResult) -> Message {
-    Message::tool_row(tool_label(call), result.is_error)
-}
-
-fn tool_label(call: &ToolCall) -> String {
-    let target = match call.name.as_str() {
-        "read_file" | "write_file" | "edit_file" => call.arguments["path"].as_str(),
-        "bash" => call.arguments["command"].as_str(),
-        _ => None,
-    };
-
-    match target {
-        Some(target) if !target.is_empty() => format!("{} {}", call.name, target),
-        _ => call.name.clone(),
     }
 }

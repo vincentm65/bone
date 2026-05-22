@@ -22,11 +22,6 @@ impl Prompt {
         }
     }
 
-    /// Extra rows this prompt adds to the bottom pane (title + options).
-    pub fn height(&self) -> u16 {
-        1 + self.options.len().min(12) as u16
-    }
-
     pub fn up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;

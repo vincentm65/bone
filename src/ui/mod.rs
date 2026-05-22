@@ -4,3 +4,4 @@ pub mod input;
 pub mod prompt;
 pub mod render;
 pub mod theme;
+pub mod tool_display;

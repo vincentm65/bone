@@ -1,12 +1,6 @@
-mod chat;
-mod config;
-mod llm;
-mod tools;
-mod ui;
-
-use config::{load_providers, load_user_config, seed_providers_if_missing};
-use llm::providers;
-use ui::app::App;
+use bone::config::{load_providers, load_user_config, seed_providers_if_missing};
+use bone::llm::providers;
+use bone::ui::app::App;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -20,12 +14,7 @@ async fn main() -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
     provider.validate().await.map_err(std::io::Error::other)?;
 
-    let mut app = App::new(
-        provider,
-        cfg.context_window,
-        cfg.response_budget,
-        providers_config,
-    )?;
+    let mut app = App::new(provider, providers_config)?;
     app.run().await?;
     Ok(())
 }

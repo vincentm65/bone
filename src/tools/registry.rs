@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::tools::types::{Tool, ToolCall, ToolDefinition, ToolResult};
 
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<&'static str, Arc<dyn Tool>>,
 }

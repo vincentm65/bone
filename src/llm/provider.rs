@@ -64,6 +64,11 @@ impl ChatMessage {
 pub enum ChatEvent {
     TextDelta(String),
     ToolCall(ToolCall),
+    /// Token usage from the provider's response (real counts, not estimates).
+    TokenUsage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
 }
 
 /// Classification of an LLM error.
@@ -76,8 +81,8 @@ pub enum LlmErrorKind {
     Auth,
     /// Rate-limited (429).
     RateLimit,
-    /// Server-side error with the HTTP status code.
-    #[allow(dead_code)] // Status code used for construction; will be read in retry logic
+    /// Server-side error with the HTTP status code. Reserved for retry logic.
+    #[allow(dead_code)]
     Server(u16),
     /// Malformed response from the server.
     Parse,
@@ -86,14 +91,23 @@ pub enum LlmErrorKind {
 }
 
 /// Small, owned error type so provider streams can be boxed cleanly.
+///
+/// Fields are public but primarily accessed via [`Display`]/[`Error`];
+/// [`kind`](Self::kind) and [`message`](Self::message) are available for
+/// retry logic and error classification.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields used for construction; will be read in retry/error-display logic
+#[allow(dead_code)]
 pub struct LlmError {
     pub kind: LlmErrorKind,
-    message: String,
+    /// Human-readable error message.
+    pub message: String,
 }
 
 impl LlmError {
+    /// Create an error with [`LlmErrorKind::Config`] kind.
+    ///
+    /// Use [`new_with_kind`](Self::new_with_kind) for specific error
+    /// classification.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             kind: LlmErrorKind::Config,
