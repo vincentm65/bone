@@ -1,4 +1,6 @@
+pub mod approval;
 pub mod bash;
+pub mod command_policy;
 pub mod edit_file;
 pub mod handler;
 pub mod read_file;
