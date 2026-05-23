@@ -38,7 +38,7 @@ fn edit_mode_allows_read_only_and_edit() {
 }
 
 #[test]
-fn danger_mode_only_blocks_dangerous_git_bash_commands() {
+fn danger_mode_allows_all() {
     assert!(ApprovalMode::Danger.allows_call(&call(
         "bash",
         json!({ "command": "rm -rf target", "classification": "danger" })
@@ -51,11 +51,11 @@ fn danger_mode_only_blocks_dangerous_git_bash_commands() {
         "bash",
         json!({ "command": "git diff", "classification": "read_only" })
     )));
-    assert!(!ApprovalMode::Danger.allows_call(&call(
+    assert!(ApprovalMode::Danger.allows_call(&call(
         "bash",
         json!({ "command": "cd repo && git commit -am x", "classification": "danger" })
     )));
-    assert!(!ApprovalMode::Danger.allows_call(&call(
+    assert!(ApprovalMode::Danger.allows_call(&call(
         "bash",
         json!({ "command": "git push", "classification": "danger" })
     )));

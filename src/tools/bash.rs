@@ -18,7 +18,8 @@ struct Args {
 }
 
 /// Receives the LLM's safety classification from the tool call argument.
-/// Validation/override logic lives in `types::CommandSafety::from_tool_call()`.
+/// Kept for tool-prompting compatibility only — approval decisions use the
+/// deterministic classifier in `command_policy::classify_command()`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CommandClassification {

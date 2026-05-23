@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::{CommandSafety, minimum_required_classification};
+use super::{CommandSafety, classify_command};
 use crate::tools::approval::ApprovalMode;
 use crate::tools::types::ToolCall;
 
@@ -13,49 +13,57 @@ fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
 }
 
 #[test]
-fn missing_bash_classification_is_danger() {
+fn missing_bash_command_is_danger() {
     assert_eq!(
-        CommandSafety::from_tool_call(&call("bash", json!({ "command": "pwd" }))),
+        CommandSafety::for_call(&call("bash", json!({}))),
+        CommandSafety::Danger
+    );
+}
+
+#[test]
+fn for_call_ignores_model_classification() {
+    // Model says danger but pwd is ReadOnly — policy wins.
+    assert_eq!(
+        CommandSafety::for_call(&call(
+            "bash",
+            json!({ "command": "pwd", "classification": "danger" })
+        )),
+        CommandSafety::ReadOnly
+    );
+    // Model says read_only but rm is Danger — policy wins.
+    assert_eq!(
+        CommandSafety::for_call(&call(
+            "bash",
+            json!({ "command": "rm -rf /", "classification": "read_only" })
+        )),
         CommandSafety::Danger
     );
 }
 
 // ------------------------------------------------------------------
-// minimum_required_classification policy tests
+// classify_command policy tests
 // ------------------------------------------------------------------
 
 #[test]
 fn policy_danger_rm() {
-    assert_eq!(
-        minimum_required_classification("rm -rf /"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("rm something"),
-        CommandSafety::Danger
-    );
+    assert_eq!(classify_command("rm -rf /"), CommandSafety::Danger);
+    assert_eq!(classify_command("rm something"), CommandSafety::Danger);
 }
 
 #[test]
 fn policy_danger_sudo() {
     assert_eq!(
-        minimum_required_classification("sudo apt install foo"),
+        classify_command("sudo apt install foo"),
         CommandSafety::Danger
     );
-    assert_eq!(
-        minimum_required_classification("sudo rm -rf /"),
-        CommandSafety::Danger
-    );
+    assert_eq!(classify_command("sudo rm -rf /"), CommandSafety::Danger);
 }
 
 #[test]
 fn policy_danger_chmod_chown() {
+    assert_eq!(classify_command("chmod 777 foo"), CommandSafety::Danger);
     assert_eq!(
-        minimum_required_classification("chmod 777 foo"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("chown user:group bar"),
+        classify_command("chown user:group bar"),
         CommandSafety::Danger
     );
 }
@@ -63,20 +71,20 @@ fn policy_danger_chmod_chown() {
 #[test]
 fn policy_danger_systemctl() {
     assert_eq!(
-        minimum_required_classification("systemctl stop nginx"),
+        classify_command("systemctl stop nginx"),
         CommandSafety::Danger
     );
     assert_eq!(
-        minimum_required_classification("systemctl restart nginx"),
+        classify_command("systemctl restart nginx"),
         CommandSafety::Danger
     );
     assert_eq!(
-        minimum_required_classification("systemctl disable nginx"),
+        classify_command("systemctl disable nginx"),
         CommandSafety::Danger
     );
     // Non-destructive systemctl is at least Edit
     assert_eq!(
-        minimum_required_classification("systemctl status nginx"),
+        classify_command("systemctl status nginx"),
         CommandSafety::Edit
     );
 }
@@ -84,16 +92,16 @@ fn policy_danger_systemctl() {
 #[test]
 fn policy_danger_service() {
     assert_eq!(
-        minimum_required_classification("service nginx stop"),
+        classify_command("service nginx stop"),
         CommandSafety::Danger
     );
     assert_eq!(
-        minimum_required_classification("service nginx restart"),
+        classify_command("service nginx restart"),
         CommandSafety::Danger
     );
     // Non-destructive service is at least Edit
     assert_eq!(
-        minimum_required_classification("service nginx status"),
+        classify_command("service nginx status"),
         CommandSafety::Edit
     );
 }
@@ -101,24 +109,24 @@ fn policy_danger_service() {
 #[test]
 fn policy_danger_curl_wget_output() {
     assert_eq!(
-        minimum_required_classification("curl -O http://example.com/file"),
+        classify_command("curl -O http://example.com/file"),
         CommandSafety::Danger
     );
     assert_eq!(
-        minimum_required_classification("wget -O file http://example.com"),
+        classify_command("wget -O file http://example.com"),
         CommandSafety::Danger
     );
     assert_eq!(
-        minimum_required_classification("curl -o /tmp/f http://example.com"),
+        classify_command("curl -o /tmp/f http://example.com"),
         CommandSafety::Danger
     );
     // Plain curl/wget is at least Edit (network access)
     assert_eq!(
-        minimum_required_classification("curl http://example.com"),
+        classify_command("curl http://example.com"),
         CommandSafety::Edit
     );
     assert_eq!(
-        minimum_required_classification("wget http://example.com"),
+        classify_command("wget http://example.com"),
         CommandSafety::Edit
     );
 }
@@ -126,20 +134,20 @@ fn policy_danger_curl_wget_output() {
 #[test]
 fn policy_danger_redirection_to_system_paths() {
     assert_eq!(
-        minimum_required_classification("echo foo > /etc/bar"),
+        classify_command("echo foo > /etc/bar"),
         CommandSafety::Danger
     );
     assert_eq!(
-        minimum_required_classification("cat file >> /etc/config"),
+        classify_command("cat file >> /etc/config"),
         CommandSafety::Danger
     );
     // /dev/ redirections are harmless but may still be edit based on command.
     assert_eq!(
-        minimum_required_classification("echo foo > /dev/null"),
+        classify_command("echo foo > /dev/null"),
         CommandSafety::ReadOnly
     );
     assert_eq!(
-        minimum_required_classification("rg approval 2>/dev/null"),
+        classify_command("rg approval 2>/dev/null"),
         CommandSafety::ReadOnly
     );
 }
@@ -147,99 +155,45 @@ fn policy_danger_redirection_to_system_paths() {
 #[test]
 fn policy_danger_git_destructive() {
     assert_eq!(
-        minimum_required_classification("git push origin main"),
+        classify_command("git push origin main"),
         CommandSafety::Danger
     );
     assert_eq!(
-        minimum_required_classification("git reset --hard HEAD~1"),
+        classify_command("git reset --hard HEAD~1"),
         CommandSafety::Danger
     );
-    assert_eq!(
-        minimum_required_classification("git checkout main"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git rebase main"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git clean -fd"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git commit -am x"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git switch main"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git restore file"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git merge feature"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git pull"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        minimum_required_classification("git tag v1"),
-        CommandSafety::Danger
-    );
+    assert_eq!(classify_command("git checkout main"), CommandSafety::Danger);
+    assert_eq!(classify_command("git rebase main"), CommandSafety::Danger);
+    assert_eq!(classify_command("git clean -fd"), CommandSafety::Danger);
+    assert_eq!(classify_command("git commit -am x"), CommandSafety::Danger);
+    assert_eq!(classify_command("git switch main"), CommandSafety::Danger);
+    assert_eq!(classify_command("git restore file"), CommandSafety::Danger);
+    assert_eq!(classify_command("git merge feature"), CommandSafety::Danger);
+    assert_eq!(classify_command("git pull"), CommandSafety::Danger);
+    assert_eq!(classify_command("git tag v1"), CommandSafety::Danger);
 }
 
 #[test]
 fn policy_edit_mv_cp_mkdir_touch_tee() {
-    assert_eq!(
-        minimum_required_classification("mv a b"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("cp a b"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("mkdir foo"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("touch foo"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("tee file.txt"),
-        CommandSafety::Edit
-    );
+    assert_eq!(classify_command("mv a b"), CommandSafety::Edit);
+    assert_eq!(classify_command("cp a b"), CommandSafety::Edit);
+    assert_eq!(classify_command("mkdir foo"), CommandSafety::Edit);
+    assert_eq!(classify_command("touch foo"), CommandSafety::Edit);
+    assert_eq!(classify_command("tee file.txt"), CommandSafety::Edit);
 }
 
 #[test]
 fn policy_edit_package_managers() {
+    assert_eq!(classify_command("apt install curl"), CommandSafety::Edit);
+    assert_eq!(classify_command("pacman -Syu"), CommandSafety::Edit);
+    assert_eq!(classify_command("brew install rust"), CommandSafety::Edit);
     assert_eq!(
-        minimum_required_classification("apt install curl"),
+        classify_command("pip install requests"),
         CommandSafety::Edit
     );
+    assert_eq!(classify_command("npm install express"), CommandSafety::Edit);
     assert_eq!(
-        minimum_required_classification("pacman -Syu"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("brew install rust"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("pip install requests"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("npm install express"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("cargo install ripgrep"),
+        classify_command("cargo install ripgrep"),
         CommandSafety::Edit
     );
 }
@@ -247,15 +201,12 @@ fn policy_edit_package_managers() {
 #[test]
 fn policy_edit_redirections() {
     assert_eq!(
-        minimum_required_classification("echo hello > file.txt"),
+        classify_command("echo hello > file.txt"),
         CommandSafety::Edit
     );
+    assert_eq!(classify_command("cat a >> b"), CommandSafety::Edit);
     assert_eq!(
-        minimum_required_classification("cat a >> b"),
-        CommandSafety::Edit
-    );
-    assert_eq!(
-        minimum_required_classification("some_cmd | tee log.txt"),
+        classify_command("some_cmd | tee log.txt"),
         CommandSafety::Edit
     );
 }
@@ -263,15 +214,15 @@ fn policy_edit_redirections() {
 #[test]
 fn policy_edit_sed_inplace() {
     assert_eq!(
-        minimum_required_classification("sed -i 's/foo/bar/' file.txt"),
+        classify_command("sed -i 's/foo/bar/' file.txt"),
         CommandSafety::Edit
     );
     assert_eq!(
-        minimum_required_classification("sed -i.bak 's/foo/bar/' file.txt"),
+        classify_command("sed -i.bak 's/foo/bar/' file.txt"),
         CommandSafety::Edit
     );
     assert_eq!(
-        minimum_required_classification("sed --in-place 's/foo/bar/' file.txt"),
+        classify_command("sed --in-place 's/foo/bar/' file.txt"),
         CommandSafety::Edit
     );
 }
@@ -309,7 +260,7 @@ fn policy_readonly_allowlist() {
         "tree -L 2",
     ] {
         assert_eq!(
-            minimum_required_classification(cmd),
+            classify_command(cmd),
             CommandSafety::ReadOnly,
             "expected ReadOnly for: {cmd}"
         );
@@ -318,56 +269,25 @@ fn policy_readonly_allowlist() {
 
 #[test]
 fn policy_readonly_cargo() {
-    assert_eq!(
-        minimum_required_classification("cargo check"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("cargo test"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("cargo build"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("cargo --version"),
-        CommandSafety::ReadOnly
-    );
+    assert_eq!(classify_command("cargo check"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("cargo test"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("cargo build"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("cargo --version"), CommandSafety::ReadOnly);
 }
 
 #[test]
 fn policy_readonly_git() {
-    assert_eq!(
-        minimum_required_classification("git status"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("git log"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("git diff"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("git branch"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("git show HEAD"),
-        CommandSafety::ReadOnly
-    );
-    assert_eq!(
-        minimum_required_classification("git ls-files"),
-        CommandSafety::ReadOnly
-    );
+    assert_eq!(classify_command("git status"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("git log"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("git diff"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("git branch"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("git show HEAD"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("git ls-files"), CommandSafety::ReadOnly);
 }
 
-/// Model misclassifications are caught: even if the model says read_only,
-/// the effective classification must be at least the policy minimum.
+/// Bash approval ignores model classification entirely — deterministic policy wins.
 #[test]
-fn policy_overrides_model_misclassification() {
+fn policy_overrides_model_classification() {
     // Model says read_only but rm is always Danger
     let c1 = call(
         "bash",
@@ -375,7 +295,6 @@ fn policy_overrides_model_misclassification() {
     );
     assert!(!ApprovalMode::Safe.allows_call(&c1));
     assert!(!ApprovalMode::Edits.allows_call(&c1));
-    // Danger mode allows all non-git, but rm is not git → allowed
     assert!(ApprovalMode::Danger.allows_call(&c1));
 
     // Model says read_only but sudo is always Danger
@@ -413,6 +332,23 @@ fn policy_overrides_model_misclassification() {
     assert!(ApprovalMode::Safe.allows_call(&c5));
     assert!(ApprovalMode::Edits.allows_call(&c5));
     assert!(ApprovalMode::Danger.allows_call(&c5));
+
+    // Model says danger but git status is ReadOnly — policy wins.
+    let c6 = call(
+        "bash",
+        json!({ "command": "git status", "classification": "danger" }),
+    );
+    assert!(ApprovalMode::Safe.allows_call(&c6));
+
+    // Bash classification cannot downgrade dangerous commands.
+    // git push is Danger regardless of model claim.
+    let c7 = call(
+        "bash",
+        json!({ "command": "git push", "classification": "read_only" }),
+    );
+    assert!(!ApprovalMode::Safe.allows_call(&c7));
+    assert!(!ApprovalMode::Edits.allows_call(&c7));
+    assert!(ApprovalMode::Danger.allows_call(&c7));
 }
 
 /// Bash approval ignores model over-classification and uses deterministic policy.

@@ -34,32 +34,30 @@ impl CommandSafety {
         }
     }
 
-    pub fn from_tool_call(call: &ToolCall) -> Self {
+    /// Deterministic classification for any tool call.
+    ///
+    /// For bash: inspects the raw command string via [`classify_command`].
+    /// For other tools: classifies by tool name.
+    /// The model-provided `classification` argument on bash calls is **ignored**
+    /// for approval decisions — policy is the sole authority.
+    pub fn for_call(call: &ToolCall) -> Self {
         match call.name.as_str() {
             "read_file" => Self::ReadOnly,
             "write_file" | "edit_file" => Self::Edit,
             "bash" => call
                 .arguments
-                .get("classification")
+                .get("command")
                 .and_then(Value::as_str)
-                .and_then(|value| match value {
-                    "read_only" => Some(Self::ReadOnly),
-                    "edit" => Some(Self::Edit),
-                    "danger" => Some(Self::Danger),
-                    _ => None,
-                })
-                // Missing or malformed classifications are treated as dangerous.
+                .map(classify_command)
                 .unwrap_or(Self::Danger),
             _ => Self::Danger,
         }
     }
 }
 
-/// Deterministic command policy: inspects the raw command string and returns the
-/// minimum safety classification regardless of what the model claims.  This runs
-/// *before* auto-approval so that a misclassified `rm -rf /` can never be treated
-/// as read-only.
-pub fn minimum_required_classification(command: &str) -> CommandSafety {
+/// Deterministic command classification: inspects the raw command string and
+/// returns the safety level based on policy only — never on model claims.
+pub fn classify_command(command: &str) -> CommandSafety {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return CommandSafety::ReadOnly;
@@ -239,21 +237,6 @@ fn has_non_dev_null_redirection(command: &str) -> bool {
         };
         target != "/dev/null"
     })
-}
-
-pub fn is_dangerous_git_bash_call(call: &ToolCall) -> bool {
-    if call.name != "bash" {
-        return false;
-    }
-
-    let Some(command) = call.arguments.get("command").and_then(Value::as_str) else {
-        return false;
-    };
-
-    let tokens: Vec<&str> = command
-        .split(|ch: char| !matches!(ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-' | '.'))
-        .collect();
-    has_dangerous_git_command(&tokens)
 }
 
 fn has_dangerous_git_command(tokens: &[&str]) -> bool {

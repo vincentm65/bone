@@ -1,7 +1,7 @@
 use bone::chat::message::Message;
+use bone::config::UserConfig;
 use bone::llm::ChatRole;
 use bone::ui::render::wrap::{visual_line_count, wrap_text, wrap_text_with_prefix};
-use bone::config::UserConfig;
 
 // ── Message Construction ─────────────────────────────────────────────────────
 
@@ -135,7 +135,9 @@ fn default_provider_is_local() {
 
 #[test]
 fn user_config_serializes_and_deserializes() {
-    let cfg = UserConfig { provider: "openai".into() };
+    let cfg = UserConfig {
+        provider: "openai".into(),
+    };
     let yaml = serde_yaml::to_string(&cfg).unwrap();
     let deserialized: UserConfig = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(deserialized.provider, "openai");
