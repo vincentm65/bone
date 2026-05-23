@@ -232,6 +232,7 @@ impl App {
                 self.redraw(term)
             }
             InputAction::Redraw | InputAction::Escape => self.redraw(term),
+            InputAction::OpenEditor => self.open_editor(term).await,
             InputAction::None => Ok(()),
         }
     }
@@ -387,7 +388,32 @@ impl App {
                     .flush_new_to_scrollback(&self.messages, term)?;
                 self.redraw(term)?;
             }
+            commands::CommandResult::OpenEditor => self.open_editor(term).await?,
         }
         Ok(())
+    }
+
+    async fn open_editor(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        Renderer::prepare_exit(term)?;
+        let tmp = std::env::temp_dir().join("bone-edit.txt");
+        std::fs::write(&tmp, "")?;
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "nano".to_string());
+        let _ = tokio::process::Command::new(&editor)
+            .arg(&tmp)
+            .spawn()?.wait().await;
+        let text = std::fs::read_to_string(&tmp)?;
+        std::fs::remove_file(&tmp).ok();
+        let text = text.trim_end_matches(['\r', '\n']).to_string();
+        if !text.trim().is_empty() {
+            self.input.buffer = text;
+            self.input.cursor_pos = self.input.buffer.chars().count();
+        }
+        *term = Renderer::init_terminal(MIN_ROWS)?;
+        self.renderer.viewport_height = MIN_ROWS;
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.force_redraw(term)
     }
 }

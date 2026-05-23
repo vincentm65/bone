@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use tokio::fs;
 
-use bone::tools::edit_file::{EditFileTool, sha256_hex};
+use bone::tools::edit_file::{EditFileTool, preview_edit_file, sha256_hex};
 use bone::tools::types::Tool;
 
 fn temp_path(name: &str) -> PathBuf {
@@ -270,8 +270,210 @@ async fn zero_match_includes_closest_region_hint() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.contains("matched 0 times"));
-    assert!(err.contains("Closest region"));
+    assert!(err.contains("candidate"));
     assert!(err.contains("println!"));
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn trailing_whitespace_mismatch_recovers() {
+    let path = temp_path("trailing-space.txt");
+    fs::write(&path, "fn main() {\n    let value = 1;   \n}\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "    let value = 1;\n",
+        "replace": "    let value = 2;\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn main() {\n    let value = 2;\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn crlf_mismatch_recovers() {
+    let path = temp_path("crlf.txt");
+    fs::write(&path, "alpha\r\nbeta\r\ngamma\r\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "alpha\nbeta\n",
+        "replace": "one\ntwo\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\ntwo\ngamma\r\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn tabs_and_spaces_mismatch_recovers() {
+    let path = temp_path("tabs-spaces.txt");
+    fs::write(&path, "fn main() {\n\t\tprintln!(\"hi\");\n}\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "  println!(\"hi\");\n",
+        "replace": "  println!(\"bye\");\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn main() {\n  println!(\"bye\");\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn fuzzy_recovery_applies_for_high_confidence_block() {
+    let path = temp_path("fuzzy-high.txt");
+    fs::write(
+        &path,
+        "fn score(input: i32) -> i32 {\n    let adjusted = input + 1;\n    adjusted * 2\n}\n",
+    )
+    .await
+    .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "fn score(input: i32) -> i32 {\n    let adjusted = input + 2;\n    adjusted * 2\n}\n",
+        "replace": "fn score(input: i32) -> i32 {\n    input * 3\n}\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn score(input: i32) -> i32 {\n    input * 3\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn fuzzy_recovery_rejects_low_confidence_block() {
+    let path = temp_path("fuzzy-low.txt");
+    let original = "fn alpha() {\n    println!(\"alpha\");\n    println!(\"done\");\n}\n";
+    fs::write(&path, original).await.expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "path": path,
+            "search": "struct Missing {\n    value: usize,\n    label: String,\n}\n",
+            "replace": "replacement\n"
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not confident enough"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn fuzzy_recovery_rejects_close_candidates() {
+    let path = temp_path("fuzzy-close.txt");
+    let original = "fn first() {\n    let value = compute_total(10);\n    println!(\"{}\", value);\n}\n\nfn second() {\n    let value = compute_total(11);\n    println!(\"{}\", value);\n}\n";
+    fs::write(&path, original).await.expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "path": path,
+            "search": "fn third() {\n    let value = compute_total(12);\n    println!(\"{}\", value);\n}\n",
+            "replace": "replacement\n"
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not confident enough"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn exact_duplicates_do_not_attempt_fuzzy_recovery() {
+    let path = temp_path("exact-dup-no-fuzzy.txt");
+    let original = "target block\ntarget block\n";
+    fs::write(&path, original).await.expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "search": "target block", "replace": "changed" }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("matched 2 times"));
+    assert!(!err.contains("not confident enough"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn multi_edit_failure_is_atomic_after_recovered_edit() {
+    let path = temp_path("multi-recover-atomic.txt");
+    let original = "fn main() {\n    let value = 1;   \n}\n";
+    fs::write(&path, original).await.expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "path": path,
+            "edits": [
+                { "search": "    let value = 1;\n", "replace": "    let value = 2;\n" },
+                { "search": "definitely missing", "replace": "x" }
+            ]
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn preview_uses_same_recovery_logic_as_execute() {
+    let path = temp_path("preview-recover.txt");
+    fs::write(&path, "fn main() {\n    let value = 1;   \n}\n")
+        .await
+        .expect("setup");
+    let args = json!({
+        "path": path,
+        "search": "    let value = 1;\n",
+        "replace": "    let value = 2;\n"
+    });
+
+    let preview = preview_edit_file(args.clone()).await.expect("preview");
+    assert!(preview.diff.contains("let value = 2;"));
+
+    let tool = EditFileTool;
+    tool.execute(args).await.expect("success");
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn main() {\n    let value = 2;\n}\n"
+    );
     let _ = fs::remove_file(&path).await;
 }
 

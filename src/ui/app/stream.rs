@@ -1,7 +1,7 @@
 use crate::chat::{Message, build_chat_history};
-use crate::llm::{ChatEvent, ChatMessage, ChatRole};
+use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, ResponseStream};
 use crate::tools::edit_file::preview_edit_file;
-use crate::tools::{ApprovalMode, ToolResult};
+use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::prompt::Decision;
 use crate::ui::render::{BoneTerminal, StatusInfo};
@@ -14,25 +14,39 @@ use tokio::time::{self, Duration};
 
 use super::App;
 
-impl App {
-    /// Process queued key events while streaming. Enter queues a message,
-    /// Ctrl+D clears the queue. All other input edits work normally.
-    fn process_keys_while_streaming(&mut self) {
-        Self::drain_keys(
-            &mut self.input,
-            &mut self.queue,
-            &mut self.approval_mode,
-            &mut self.cancel_streaming,
-        );
-    }
+enum PendingTool {
+    Approved(ToolCall),
+    Result(ToolResult),
+}
 
+fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
+    ToolResult {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        content: content.into(),
+        is_error: true,
+    }
+}
+
+fn assistant_message(content: String, tool_calls: Vec<ToolCall>, reasoning: String) -> ChatMessage {
+    let mut message = if tool_calls.is_empty() {
+        ChatMessage::new(ChatRole::Assistant, content)
+    } else {
+        ChatMessage::assistant_with_tools(content, tool_calls)
+    };
+    if !reasoning.is_empty() {
+        message.reasoning_content = Some(reasoning);
+    }
+    message
+}
+
+impl App {
     pub(crate) async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let text = self.input.buffer.trim().to_string();
         if text.is_empty() {
             return Ok(());
         }
 
-        // Slash commands are handled locally, not sent to the LLM.
         if text.starts_with('/') {
             self.input.reset();
             self.redraw(term)?;
@@ -43,7 +57,6 @@ impl App {
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &text));
 
-        // Flush the submitted message before resetting the input.
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.input.reset();
@@ -71,9 +84,7 @@ impl App {
                 break;
             }
             if self.cancel_streaming {
-                self.messages[assistant_idx]
-                    .content
-                    .push_str("\n[cancelled]");
+                self.mark_cancelled(assistant_idx);
                 final_assistant_idx = assistant_idx;
                 break;
             }
@@ -82,228 +93,50 @@ impl App {
             self.renderer.spinner_tick = spinner_tick;
 
             if self.cancel_streaming {
-                self.messages[assistant_idx]
-                    .content
-                    .push_str("\n[cancelled]");
+                self.mark_cancelled(assistant_idx);
                 final_assistant_idx = assistant_idx;
                 break;
             }
 
-            let mut tool_calls = Vec::new();
-            // Accumulate reasoning/thinking content (DeepSeek V4) so it
-            // can be passed back in the assistant message history.
-            let mut reasoning_content = String::new();
-            // Live estimate of cumulative output tokens during streaming.
-            // Start from the current total, then replace with real usage when it arrives.
-            let mut stream_estimated_received = self.token_stats.received;
-            match stream_result {
-                Ok(mut stream) => {
-                    let mut spinner = time::interval(Duration::from_millis(90));
-                    let mut had_usage = false;
-                    loop {
-                        if self.cancel_streaming {
-                            self.messages[assistant_idx]
-                                .content
-                                .push_str("\n[cancelled]");
-                            break;
-                        }
-                        tokio::select! {
-                            chunk = stream.next() => match chunk {
-                                Some(Ok(ChatEvent::TextDelta(text))) => {
-                                    self.messages[assistant_idx].content.push_str(&text);
-                                    // Increment estimate: ~4 UTF-8 chars per token, rounded down to avoid overstating live output.
-                                    stream_estimated_received += text.len() as u64 / 4;
-                                    self.renderer.redraw_streaming_message(
-                                        &self.messages[assistant_idx].content,
-                                        term,
-                                        &self.input,
-                                        &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
-                                    )?;
-                                }
-                                Some(Ok(ChatEvent::ReasoningDelta(text))) => {
-                                    reasoning_content.push_str(&text);
-                                }
-                                Some(Ok(ChatEvent::ToolCall(call))) => {
-                                    // Estimate tokens from argument JSON size so the
-                                    // live counter reflects tool activity immediately.
-                                    let arg_tokens = call.arguments.to_string().len() as u64 / 4;
-                                    stream_estimated_received += arg_tokens.max(1);
-                                    tool_calls.push(call);
-                                    self.renderer.redraw_streaming_message(
-                                        &self.messages[assistant_idx].content,
-                                        term,
-                                        &self.input,
-                                        &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
-                                    )?;
-                                }
-                                Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens })) => {
-                                    self.token_stats.record_request(prompt_tokens, completion_tokens);
-                                    stream_estimated_received = self.token_stats.received;
-                                    had_usage = true;
-                                }
-                                Some(Err(err)) => {
-                                    self.messages[assistant_idx].content.push_str(&format!("\n[stream error: {err}]"));
-                                    break;
-                                }
-                                None => break,
-                            },
-                            _ = spinner.tick() => {
-                                self.process_keys_while_streaming();
-                                if self.cancel_streaming {
-                                    self.messages[assistant_idx].content.push_str("\n[cancelled]");
-                                    break;
-                                }
-                                self.renderer.tick_spinner(term, &self.input, &self.stream_status_info_with_tokens(Some(stream_estimated_received)))?;
-                            }
-                        }
-                    }
-
-                    // Fallback: if the provider didn't report real token
-                    // usage, estimate from character counts so the status
-                    // bar still shows something useful.
-                    if !had_usage && !self.cancel_streaming {
-                        let prompt_chars: usize = history.iter().map(|m| m.content.len()).sum();
-                        let completion_chars = self.messages[assistant_idx].content.len();
-                        self.token_stats
-                            .record_estimate(prompt_chars, completion_chars);
-                    }
+            let (tool_calls, reasoning_content) = match stream_result {
+                Ok(stream) => {
+                    self.consume_stream(stream, assistant_idx, &history, term)
+                        .await?
                 }
                 Err(err) => {
                     if self.cancel_streaming {
-                        self.messages[assistant_idx]
-                            .content
-                            .push_str("\n[cancelled]");
+                        self.mark_cancelled(assistant_idx);
                     } else {
                         self.messages[assistant_idx].content = format!("[provider error: {err}]");
                     }
                     final_assistant_idx = assistant_idx;
                     break;
                 }
-            }
+            };
 
             if tool_calls.is_empty() || self.cancel_streaming {
-                let mut msg = ChatMessage::new(
-                    ChatRole::Assistant,
+                let msg = assistant_message(
                     self.messages[assistant_idx].content.clone(),
+                    Vec::new(),
+                    reasoning_content,
                 );
-                if !reasoning_content.is_empty() {
-                    msg.reasoning_content = Some(reasoning_content);
-                }
                 self.transcript.push(msg);
                 final_assistant_idx = assistant_idx;
                 break;
             }
 
-            let mut assistant = ChatMessage::assistant_with_tools(
+            let assistant = assistant_message(
                 self.messages[assistant_idx].content.clone(),
                 tool_calls.clone(),
+                reasoning_content,
             );
-            // DeepSeek V4 thinking mode: reasoning_content MUST be passed
-            // back when the assistant turn involved tool calls.
-            if !reasoning_content.is_empty() {
-                assistant.reasoning_content = Some(reasoning_content);
-            }
             history.push(assistant.clone());
             self.transcript.push(assistant);
 
-            self.renderer.finalize_streaming_message(
-                &self.messages[assistant_idx].content,
-                term,
-            )?;
+            self.renderer
+                .finalize_streaming_message(&self.messages[assistant_idx].content, term)?;
 
-            // Per-call approval.  Calls auto-approved by the current mode
-            // are collected; the rest block with an interactive prompt.
-            let calls_for_display = tool_calls.clone();
-            let mut was_rejected = vec![false; tool_calls.len()];
-            let mut preview_errors = vec![String::new(); tool_calls.len()];
-            let mut advised = vec![false; tool_calls.len()];
-            let mut approved_calls = Vec::new();
-
-            for (i, mut call) in tool_calls.into_iter().enumerate() {
-                if call.name == "edit_file" {
-                    match preview_edit_file(call.arguments.clone()).await {
-                        Ok(preview) => {
-                            call.arguments["expected_hash"] =
-                                serde_json::Value::String(preview.before_hash);
-                            self.messages.push(Message::system(preview.diff));
-                            self.renderer
-                                .flush_new_to_scrollback(&self.messages, term)?;
-                        }
-                        Err(err) => {
-                            let path = call.arguments["path"].as_str().unwrap_or("?");
-                            self.messages.push(Message::system(format!(
-                                "edit_file preview failed for {path}: {err}"
-                            )));
-                            self.renderer
-                                .flush_new_to_scrollback(&self.messages, term)?;
-                            preview_errors[i] = err;
-                            continue;
-                        }
-                    }
-                }
-
-                if self.approval_mode.allows_call(&call) {
-                    approved_calls.push(call);
-                } else {
-                    match self.prompt_and_wait(&calls_for_display[i], term)? {
-                        Decision::Accept => approved_calls.push(call),
-                        Decision::Cancel => was_rejected[i] = true,
-                        Decision::Advise => {
-                            advised[i] = true;
-                            // Advise does NOT execute the tool — it returns
-                            // a result so the LLM can adapt its approach.
-                        }
-                    }
-                }
-            }
-
-            // Execute approved calls.
-            let exec_results = if !approved_calls.is_empty() {
-                self.tools.execute_all(approved_calls).await
-            } else {
-                Vec::new()
-            };
-
-            // Merge rejected + advised + executed results in original order.
-            let mut exec_iter = exec_results.into_iter();
-            let results: Vec<ToolResult> = (0..calls_for_display.len())
-                .map(|i| {
-                    if !preview_errors[i].is_empty() {
-                        ToolResult {
-                            call_id: calls_for_display[i].id.clone(),
-                            name: calls_for_display[i].name.clone(),
-                            content: format!(
-                                "edit_file preview failed: {}",
-                                preview_errors[i]
-                            ),
-                            is_error: true,
-                        }
-                    } else if was_rejected[i] {
-                        ToolResult {
-                            call_id: calls_for_display[i].id.clone(),
-                            name: calls_for_display[i].name.clone(),
-                            content: "rejected by user".into(),
-                            is_error: true,
-                        }
-                    } else if advised[i] {
-                        // Advise: tool was NOT executed. Return a result so the
-                        // LLM can adapt its approach instead of proceeding blindly.
-                        ToolResult {
-                            call_id: calls_for_display[i].id.clone(),
-                            name: calls_for_display[i].name.clone(),
-                            content: "[exit_code=1] Tool not executed. User advice: proceed carefully, verify assumptions, and explain your approach before taking action.".into(),
-                            is_error: true,
-                        }
-                    } else {
-                        exec_iter.next().unwrap_or_else(|| ToolResult {
-                            call_id: calls_for_display[i].id.clone(),
-                            name: calls_for_display[i].name.clone(),
-                            content: "internal error: tool result missing".into(),
-                            is_error: true,
-                        })
-                    }
-                })
-                .collect();
+            let (calls_for_display, results) = self.handle_tool_calls(tool_calls, term).await?;
 
             for (call, result) in calls_for_display.iter().zip(results.iter()) {
                 self.messages.push(build_tool_row(call, result));
@@ -321,10 +154,8 @@ impl App {
         self.streaming = false;
         self.cancel_streaming = false;
         self.last_ctrl_c = None;
-        self.renderer.finalize_streaming_message(
-            &self.messages[final_assistant_idx].content,
-            term,
-        )?;
+        self.renderer
+            .finalize_streaming_message(&self.messages[final_assistant_idx].content, term)?;
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
@@ -332,14 +163,181 @@ impl App {
         Ok(())
     }
 
+    fn mark_cancelled(&mut self, assistant_idx: usize) {
+        if !self.messages[assistant_idx]
+            .content
+            .ends_with("\n[cancelled]")
+        {
+            self.messages[assistant_idx]
+                .content
+                .push_str("\n[cancelled]");
+        }
+    }
+
+    async fn consume_stream(
+        &mut self,
+        mut stream: ResponseStream,
+        assistant_idx: usize,
+        history: &[ChatMessage],
+        term: &mut BoneTerminal,
+    ) -> io::Result<(Vec<ToolCall>, String)> {
+        let mut spinner = time::interval(Duration::from_millis(90));
+        let mut had_usage = false;
+        let mut tool_calls = Vec::new();
+        let mut reasoning_content = String::new();
+        let mut stream_estimated_received = self.token_stats.received;
+
+        loop {
+            if self.cancel_streaming {
+                self.mark_cancelled(assistant_idx);
+                break;
+            }
+            tokio::select! {
+                chunk = stream.next() => match chunk {
+                    Some(Ok(ChatEvent::TextDelta(text))) => {
+                        self.messages[assistant_idx].content.push_str(&text);
+                        stream_estimated_received += text.len() as u64 / 4;
+                        self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
+                    }
+                    Some(Ok(ChatEvent::ReasoningDelta(text))) => reasoning_content.push_str(&text),
+                    Some(Ok(ChatEvent::ToolCall(call))) => {
+                        stream_estimated_received += (call.arguments.to_string().len() as u64 / 4).max(1);
+                        tool_calls.push(call);
+                        self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
+                    }
+                    Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens })) => {
+                        self.token_stats.record_request(prompt_tokens, completion_tokens);
+                        stream_estimated_received = self.token_stats.received;
+                        had_usage = true;
+                    }
+                    Some(Err(err)) => {
+                        self.messages[assistant_idx].content.push_str(&format!("\n[stream error: {err}]"));
+                        break;
+                    }
+                    None => break,
+                },
+                _ = spinner.tick() => {
+                    Self::drain_keys(
+                        &mut self.input,
+                        &mut self.queue,
+                        &mut self.approval_mode,
+                        &mut self.cancel_streaming,
+                    );
+                    if self.cancel_streaming {
+                        self.mark_cancelled(assistant_idx);
+                        break;
+                    }
+                    self.renderer.tick_spinner(term, &self.input, &self.stream_status_info_with_tokens(Some(stream_estimated_received)))?;
+                }
+            }
+        }
+
+        if !had_usage && !self.cancel_streaming {
+            let prompt_chars: usize = history.iter().map(|m| m.content.len()).sum();
+            let completion_chars = self.messages[assistant_idx].content.len();
+            self.token_stats
+                .record_estimate(prompt_chars, completion_chars);
+        }
+
+        Ok((tool_calls, reasoning_content))
+    }
+
+    fn redraw_streaming_tokens(
+        &mut self,
+        assistant_idx: usize,
+        tokens: u64,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        self.renderer.redraw_streaming_message(
+            &self.messages[assistant_idx].content,
+            term,
+            &self.input,
+            &self.stream_status_info_with_tokens(Some(tokens)),
+        )
+    }
+
+    async fn handle_tool_calls(
+        &mut self,
+        tool_calls: Vec<ToolCall>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<(Vec<ToolCall>, Vec<ToolResult>)> {
+        let calls_for_display = tool_calls.clone();
+        let mut pending = Vec::with_capacity(tool_calls.len());
+
+        for (display_call, call) in calls_for_display.iter().zip(tool_calls) {
+            pending.push(self.prepare_tool_call(display_call, call, term).await?);
+        }
+
+        let approved = pending
+            .iter()
+            .filter_map(|pending| match pending {
+                PendingTool::Approved(call) => Some(call.clone()),
+                PendingTool::Result(_) => None,
+            })
+            .collect();
+        let mut exec_results = self.tools.execute_all(approved).await.into_iter();
+        let results = pending
+            .into_iter()
+            .map(|pending| match pending {
+                PendingTool::Result(result) => result,
+                PendingTool::Approved(call) => exec_results
+                    .next()
+                    .unwrap_or_else(|| tool_error(&call, "internal error: tool result missing")),
+            })
+            .collect();
+
+        Ok((calls_for_display, results))
+    }
+
+    async fn prepare_tool_call(
+        &mut self,
+        display_call: &ToolCall,
+        mut call: ToolCall,
+        term: &mut BoneTerminal,
+    ) -> io::Result<PendingTool> {
+        if call.name == "edit_file" {
+            match preview_edit_file(call.arguments.clone()).await {
+                Ok(preview) => {
+                    call.arguments["expected_hash"] =
+                        serde_json::Value::String(preview.before_hash);
+                    self.messages.push(Message::system(preview.diff));
+                }
+                Err(err) => {
+                    let path = call.arguments["path"].as_str().unwrap_or("?");
+                    self.messages.push(Message::system(format!(
+                        "edit_file preview failed for {path}: {err}"
+                    )));
+                    self.renderer
+                        .flush_new_to_scrollback(&self.messages, term)?;
+                    return Ok(PendingTool::Result(tool_error(
+                        &call,
+                        format!("edit_file preview failed: {err}"),
+                    )));
+                }
+            }
+            self.renderer
+                .flush_new_to_scrollback(&self.messages, term)?;
+        }
+
+        Ok(if self.approval_mode.allows_call(&call) {
+            PendingTool::Approved(call)
+        } else {
+            match self.prompt_and_wait(display_call, term)? {
+                Decision::Accept => PendingTool::Approved(call),
+                Decision::Cancel => PendingTool::Result(tool_error(&call, "rejected by user")),
+                Decision::Advise => PendingTool::Result(tool_error(
+                    &call,
+                    "[exit_code=1] Tool not executed. User advice: proceed carefully, verify assumptions, and explain your approach before taking action.",
+                )),
+            }
+        })
+    }
+
     async fn wait_for_stream(
         &mut self,
-        history: Vec<crate::llm::ChatMessage>,
+        history: Vec<ChatMessage>,
         term: &mut BoneTerminal,
-    ) -> (
-        Result<crate::llm::ResponseStream, crate::llm::LlmError>,
-        usize,
-    ) {
+    ) -> (Result<ResponseStream, LlmError>, usize) {
         let request = self.llm.chat_stream(history, self.tools.definitions());
         let spinner = time::sleep(Duration::from_millis(90));
         let tick = self.renderer.spinner_tick;
@@ -354,7 +352,7 @@ impl App {
 
         loop {
             if *cancel {
-                return (Err(crate::llm::LlmError::new("cancelled")), tick);
+                return (Err(LlmError::new("cancelled")), tick);
             }
             tokio::select! {
                 result = &mut request => return (result, tick),
@@ -406,7 +404,7 @@ impl App {
                     }
                     InputAction::ClearQueue => queue.clear(),
                     InputAction::CycleMode => *mode = mode.cycle(),
-                    InputAction::Redraw | InputAction::Escape | InputAction::None => {}
+                    InputAction::Redraw | InputAction::Escape | InputAction::OpenEditor | InputAction::None => {}
                 }
             }
         }

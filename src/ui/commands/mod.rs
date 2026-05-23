@@ -10,6 +10,8 @@ pub enum CommandResult {
     Continue { reply: String },
     /// Quit the application.
     Quit,
+    /// Open the system editor and return the contents to the input buffer.
+    OpenEditor,
 }
 
 /// Dispatch a slash command. Returns a reply string or a quit signal.
@@ -43,6 +45,9 @@ pub async fn handle(
         "/provider" => provider_switch(arg, llm, provider_label, model_label, providers_config).await,
         "/quit" | "/exit" => {
             return Ok(CommandResult::Quit);
+        }
+        "/edit" | "/e" => {
+            return Ok(CommandResult::OpenEditor);
         }
         _ => format!("Unknown command: {cmd}. Type /help for available commands."),
     };
@@ -98,7 +103,7 @@ fn context(messages: &[ChatMessage]) -> String {
 fn help() -> String {
     [
         "/clear     — clear chat history",
-        "/compact   — show context usage",
+        "/edit      — open system editor for input",
         "/help      — show this message",
         "/model     — set or show model (/model <name>)",
         "/provider  — show or switch provider (/provider <name>)",

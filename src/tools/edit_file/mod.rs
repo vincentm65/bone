@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
+use strsim::normalized_levenshtein;
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::tools::types::{Tool, ToolDefinition};
@@ -52,7 +53,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file",
-            description: "Apply precise transactional text edits to an existing UTF-8 file. Supports search/replace, edits, delete, insert_before, insert_after, and rewrite mode. Search must match exactly once — include enough context. Preview shown before applying.",
+            description: "Edit an existing UTF-8 file transactionally. Use exactly one form: top-level search + replace for one replacement; edits[] for multiple operations, deletion, or insertion; or mode=\"rewrite\" + content to replace the whole file. Never send search without replace. Search/delete/insert anchors must identify one location; the matcher may safely recover minor whitespace/newline drift, but duplicate or uncertain matches fail. Preview is shown before applying.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -62,25 +63,25 @@ impl Tool for EditFileTool {
                     },
                     "search": {
                         "type": "string",
-                        "description": "Exact text to replace. Must appear exactly once — include enough surrounding context. Use with replace."
+                        "description": "Top-level single-replacement form only. Text to find and replace; replace is required whenever search is provided. Do not use search by itself. For deletion use edits: [{ delete: ... }]. For insertion use edits with insert_before or insert_after. Include enough context to identify one location."
                     },
                     "replace": {
                         "type": "string",
-                        "description": "Replacement text for search compatibility mode."
+                        "description": "Top-level single-replacement form only. Required when top-level search is provided; this is the exact replacement text, and it may be an empty string only when intentionally replacing with nothing. Do not use with mode=\"rewrite\" or edits[]."
                     },
                     "edits": {
                         "type": "array",
-                        "description": "Transactional edits applied in order. If any edit fails, nothing is written.",
+                        "description": "Multi-operation form. Use this instead of top-level search/replace when making more than one change, deleting text, or inserting text. Each item must specify exactly one operation: search+replace, delete, insert_before+text, or insert_after+text. Edits apply in order to an in-memory candidate; if any edit fails, nothing is written.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "search": { "type": "string", "description": "Exact text to replace. Must appear exactly once. Use with replace." },
-                                "replace": { "type": "string", "description": "Replacement text (also accepts text as fallback)." },
-                                "delete": { "type": "string", "description": "Exact text to remove. Must appear exactly once." },
-                                "insert_before": { "type": "string", "description": "Exact anchor to insert before. Must appear exactly once." },
-                                "insert_after": { "type": "string", "description": "Exact anchor to insert after. Must appear exactly once." },
-                                "text": { "type": "string", "description": "Text to insert for insert_before or insert_after." },
-                                "match": { "type": "string", "enum": ["exact"], "description": "Match mode (only exact supported)." }
+                                "search": { "type": "string", "description": "Replacement operation inside edits[]. Must be paired with replace (preferred) or text (fallback). Do not use by itself. Do not combine with delete, insert_before, or insert_after." },
+                                "replace": { "type": "string", "description": "Replacement text for an edits[] search operation. Required when search is provided, unless text is intentionally used as fallback." },
+                                "delete": { "type": "string", "description": "Deletion operation inside edits[]. Text to remove. Use delete by itself; do not include search, replace, insert_before, insert_after, or text." },
+                                "insert_before": { "type": "string", "description": "Insertion operation inside edits[]. Anchor text to insert before; must be paired with text. Do not combine with search, replace, delete, or insert_after." },
+                                "insert_after": { "type": "string", "description": "Insertion operation inside edits[]. Anchor text to insert after; must be paired with text. Do not combine with search, replace, delete, or insert_before." },
+                                "text": { "type": "string", "description": "Inserted text for insert_before or insert_after. Also accepted as a fallback replacement for search when replace is absent. Do not include text with delete." },
+                                "match": { "type": "string", "enum": ["exact"], "description": "Optional match mode. Only \"exact\" is accepted; omit this unless needed." }
                             },
                             "additionalProperties": false
                         }
@@ -88,15 +89,15 @@ impl Tool for EditFileTool {
                     "mode": {
                         "type": "string",
                         "enum": ["rewrite"],
-                        "description": "Set to rewrite to replace the entire file."
+                        "description": "Whole-file rewrite form. Set to \"rewrite\" only when replacing the entire file; must be paired with content and must not be combined with search, replace, or edits."
                     },
                     "content": {
                         "type": "string",
-                        "description": "New file contents for rewrite mode."
+                        "description": "Complete new file contents for mode=\"rewrite\". Only valid with mode=\"rewrite\"; do not use with search/replace or edits[]."
                     },
                     "expected_hash": {
                         "type": "string",
-                        "description": "Optional SHA-256 hash to detect stale edits."
+                        "description": "Optional SHA-256 hash from preview. When provided, execution fails if the file changed since preview."
                     }
                 },
                 "required": ["path"],
@@ -292,86 +293,120 @@ fn parse_operation(raw: &RawEditOperation) -> Result<EditOperation, String> {
 }
 
 fn apply_one_operation(content: &str, operation: &EditOperation) -> Result<String, String> {
-    match operation {
+    let (needle, replacement, label) = match operation {
         EditOperation::Replace { search, replace } => {
-            replace_unique(content, search, replace, "search text")
+            (search.as_str(), replace.clone(), "search text")
         }
-        EditOperation::Delete { search } => replace_unique(content, search, "", "delete text"),
-        EditOperation::InsertBefore { anchor, text } => replace_unique(
-            content,
-            anchor,
-            &format!("{text}{anchor}"),
+        EditOperation::Delete { search } => (search.as_str(), String::new(), "delete text"),
+        EditOperation::InsertBefore { anchor, text } => (
+            anchor.as_str(),
+            format!("{text}{anchor}"),
             "insert_before anchor",
         ),
-        EditOperation::InsertAfter { anchor, text } => replace_unique(
-            content,
-            anchor,
-            &format!("{anchor}{text}"),
+        EditOperation::InsertAfter { anchor, text } => (
+            anchor.as_str(),
+            format!("{anchor}{text}"),
             "insert_after anchor",
         ),
-    }
+    };
+    replace_matched_span(content, needle, &replacement, label)
 }
 
-fn replace_unique(
+fn replace_matched_span(
     content: &str,
     needle: &str,
     replacement: &str,
     label: &str,
 ) -> Result<String, String> {
+    match find_match_span(content, needle, label)? {
+        MatchSpan::Exact { start, end } | MatchSpan::Recovered { start, end } => {
+            let mut next = String::with_capacity(content.len() - (end - start) + replacement.len());
+            next.push_str(&content[..start]);
+            next.push_str(replacement);
+            next.push_str(&content[end..]);
+            Ok(next)
+        }
+    }
+}
+
+enum MatchSpan {
+    Exact { start: usize, end: usize },
+    Recovered { start: usize, end: usize },
+}
+
+fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan, String> {
     if needle.is_empty() {
         return Err(format!("{label} must not be empty"));
     }
-    let offsets = match_offsets(content, needle);
-    if offsets.len() != 1 {
-        return Err(match_error(content, needle, label, &offsets));
-    }
-    Ok(content.replacen(needle, replacement, 1))
-}
 
-fn match_offsets(content: &str, needle: &str) -> Vec<usize> {
-    content
+    let exact: Vec<_> = content
         .match_indices(needle)
-        .map(|(offset, _)| offset)
-        .collect()
-}
-
-fn match_error(content: &str, needle: &str, label: &str, offsets: &[usize]) -> String {
-    if offsets.is_empty() {
-        let mut msg = format!("{label} matched 0 times; expected exactly 1");
-        if let Some(hint) = find_closest_lines(content, needle) {
-            msg.push_str(&format!(
-                "\n\nClosest region in file (around line {}):\n{}",
-                hint.line, hint.snippet
-            ));
-            // Diagnose common causes: whitespace mismatch, trailing newline, etc.
-            let diag = diagnose_mismatch(&hint.snippet, needle);
-            if !diag.is_empty() {
-                msg.push_str(&format!("\n\nLikely cause: {diag}"));
-            }
-        }
-        msg.push_str(
-            "\n\nTip: read_file the target region first, then copy the exact text verbatim into search.",
-        );
-        return msg;
+        .map(|(start, text)| Candidate {
+            start,
+            end: start + text.len(),
+            score: 1.0,
+        })
+        .collect();
+    if exact.len() == 1 {
+        return Ok(MatchSpan::Exact {
+            start: exact[0].start,
+            end: exact[0].end,
+        });
     }
-
-    let mut msg = format!(
-        "{label} matched {} times; expected exactly 1\n\nMatches:",
-        offsets.len()
-    );
-    for offset in offsets.iter().take(10) {
-        msg.push_str(&format!(
-            "\n- line {}",
-            line_number_for_byte_offset(content, *offset)
+    if exact.len() > 1 {
+        return Err(ambiguous_error(
+            content,
+            label,
+            exact.len(),
+            exact.iter().map(|m| m.start),
         ));
     }
-    if offsets.len() > 10 {
-        msg.push_str(&format!("\n- ... and {} more", offsets.len() - 10));
+
+    let normalized = normalized_candidates(content, needle);
+    if normalized.len() == 1 {
+        return Ok(MatchSpan::Recovered {
+            start: normalized[0].start,
+            end: normalized[0].end,
+        });
     }
-    msg.push_str(
-        "\n\nTip: include enough nearby unique context so the search text matches exactly one location. Do not retry a short repeated fragment; use a larger enclosing block or separate edits with distinct anchors.",
-    );
-    msg
+    if normalized.len() > 1 {
+        return Err(ambiguous_error(
+            content,
+            label,
+            normalized.len(),
+            normalized.iter().map(|m| m.start),
+        ));
+    }
+
+    match fuzzy_candidate(content, needle) {
+        Some(best) if best.score >= 0.92 && needle.trim().len() >= 30 && best.margin >= 0.08 => {
+            Ok(MatchSpan::Recovered {
+                start: best.start,
+                end: best.end,
+            })
+        }
+        Some(best) => Err(no_match_error(
+            content,
+            needle,
+            label,
+            Some((best.start, best.end, best.score)),
+        )),
+        None => Err(no_match_error(content, needle, label, None)),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Candidate {
+    start: usize,
+    end: usize,
+    score: f64,
+}
+
+struct FuzzyCandidate {
+    start: usize,
+    end: usize,
+    score: f64,
+    margin: f64,
 }
 
 struct ClosestHint {
@@ -379,125 +414,170 @@ struct ClosestHint {
     snippet: String,
 }
 
-/// Compare the closest file region with the needle to identify likely causes of mismatch.
-fn diagnose_mismatch(file_region: &str, needle: &str) -> String {
-    let file_trimmed: Vec<&str> = file_region.lines().map(|l| l.trim_end()).collect();
-    let needle_trimmed: Vec<&str> = needle.lines().map(|l| l.trim_end()).collect();
-    let mut causes: Vec<String> = Vec::new();
-
-    // Check trailing whitespace difference
-    if file_trimmed == needle_trimmed {
-        causes
-            .push("trailing whitespace differs (tabs vs spaces, or extra trailing spaces)".into());
-    }
-
-    // Check indentation mismatch
-    let file_prefixes: Vec<&str> = file_region
-        .lines()
-        .map(|l| {
-            l.split_once(|c: char| !c.is_whitespace())
-                .map(|(p, _)| p)
-                .unwrap_or(l)
+fn normalized_candidates(content: &str, needle: &str) -> Vec<Candidate> {
+    let needle_norm = normalize_for_match(needle);
+    line_window_candidates(content, needle)
+        .into_iter()
+        .filter(|candidate| {
+            normalize_for_match(&content[candidate.start..candidate.end]) == needle_norm
         })
-        .collect();
-    let needle_prefixes: Vec<&str> = needle
-        .lines()
-        .map(|l| {
-            l.split_once(|c: char| !c.is_whitespace())
-                .map(|(p, _)| p)
-                .unwrap_or(l)
-        })
-        .collect();
-    if file_prefixes.len() == needle_prefixes.len() && file_prefixes != needle_prefixes {
-        causes.push("indentation differs (tabs vs spaces, or wrong indent level)".into());
-    }
-
-    // Check line count mismatch
-    let fl = file_region.lines().count();
-    let nl = needle.lines().count();
-    if fl != nl {
-        causes.push(format!(
-            "line count differs (file has {fl}, search text has {nl})"
-        ));
-    }
-
-    // Check trailing newline
-    if file_region.ends_with('\n') != needle.ends_with('\n') && fl == nl {
-        causes.push("trailing newline mismatch".into());
-    }
-
-    causes.join("; ")
+        .collect()
 }
 
-/// Find the region in `content` that best matches `needle` using the first
-/// non-empty line of the needle as a probe. Returns the 1-based line number
-/// and a small snippet of the surrounding file content.
-fn find_closest_lines(content: &str, needle: &str) -> Option<ClosestHint> {
-    let probe = needle.lines().find(|l| !l.trim().is_empty())?;
-    let probe_stripped = probe.trim();
-
-    let file_lines: Vec<&str> = content.lines().collect();
-    if file_lines.is_empty() {
-        return None;
-    }
-
-    // Score each line by how much of the probe it shares.
-    let mut best_idx = 0;
-    let mut best_score = 0usize;
-    for (i, line) in file_lines.iter().enumerate() {
-        let line_stripped = line.trim();
-        let score = common_prefix_len(probe_stripped, line_stripped)
-            + common_substring_len(probe_stripped, line_stripped);
-        if score > best_score {
-            best_score = score;
-            best_idx = i;
-        }
-    }
-
-    if best_score == 0 {
-        return None;
-    }
-
-    // Show 3 lines of context around the best match.
-    let start = best_idx.saturating_sub(1);
-    let end = (best_idx + 3).min(file_lines.len());
-    let snippet = file_lines[start..end].join("\n");
-
-    Some(ClosestHint {
-        line: best_idx + 1,
-        snippet,
+fn fuzzy_candidate(content: &str, needle: &str) -> Option<FuzzyCandidate> {
+    let needle_norm = normalize_for_match(needle);
+    let mut ranked: Vec<Candidate> = line_window_candidates(content, needle)
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.score = normalized_levenshtein(
+                &normalize_for_match(&content[candidate.start..candidate.end]),
+                &needle_norm,
+            );
+            candidate
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let best = *ranked.first()?;
+    let second = ranked.get(1).map(|c| c.score).unwrap_or(0.0);
+    Some(FuzzyCandidate {
+        start: best.start,
+        end: best.end,
+        score: best.score,
+        margin: best.score - second,
     })
 }
 
-fn common_prefix_len(a: &str, b: &str) -> usize {
-    a.chars()
-        .zip(b.chars())
-        .take_while(|(ca, cb)| ca == cb)
-        .count()
+fn line_window_candidates(content: &str, needle: &str) -> Vec<Candidate> {
+    let spans = line_spans(content);
+    let needle_lines = needle_line_count(needle);
+    if spans.is_empty() || needle_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    if needle_lines > spans.len() {
+        return Vec::new();
+    }
+    for start_line in 0..=spans.len() - needle_lines {
+        candidates.push(Candidate {
+            start: spans[start_line].0,
+            end: spans[start_line + needle_lines - 1].1,
+            score: 0.0,
+        });
+    }
+    candidates.sort_by_key(|c| (c.start, c.end));
+    candidates.dedup_by_key(|c| (c.start, c.end));
+    candidates
 }
 
-/// Simple shared-char count via a sliding window on the shorter string.
-fn common_substring_len(a: &str, b: &str) -> usize {
-    if a.is_empty() || b.is_empty() {
-        return 0;
+fn line_spans(content: &str) -> Vec<(usize, usize)> {
+    if content.is_empty() {
+        return Vec::new();
     }
-    let (short, long) = if a.len() < b.len() { (a, b) } else { (b, a) };
-    let short_bytes = short.as_bytes();
-    let long_bytes = long.as_bytes();
-    let window = short_bytes.len().min(16);
-    let mut best = 0;
-    for i in 0..=short_bytes.len().saturating_sub(window) {
-        let chunk = &short_bytes[i..i + window];
-        let matches = long_bytes
-            .windows(window)
-            .map(|w| chunk.iter().zip(w.iter()).filter(|(a, b)| a == b).count())
-            .max()
-            .unwrap_or(0);
-        if matches > best {
-            best = matches;
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (idx, ch) in content.char_indices() {
+        if ch == '\n' {
+            spans.push((start, idx + 1));
+            start = idx + 1;
         }
     }
-    best
+    if start < content.len() {
+        spans.push((start, content.len()));
+    }
+    spans
+}
+
+fn needle_line_count(needle: &str) -> usize {
+    if needle.is_empty() {
+        0
+    } else {
+        needle.split_inclusive('\n').count()
+    }
+}
+
+fn normalize_for_match(text: &str) -> String {
+    let text = text.replace("\r\n", "\n");
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map(|body| (body, true))
+            .unwrap_or((line, false));
+        push_normalized_line(&mut out, body);
+        if newline {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn push_normalized_line(out: &mut String, line: &str) {
+    let trimmed = line.trim_end_matches([' ', '\t']);
+    let mut in_space = false;
+    for ch in trimmed.chars() {
+        if ch == ' ' || ch == '\t' {
+            if !in_space {
+                out.push(' ');
+                in_space = true;
+            }
+        } else {
+            out.push(ch);
+            in_space = false;
+        }
+    }
+}
+
+fn ambiguous_error(
+    content: &str,
+    label: &str,
+    count: usize,
+    starts: impl Iterator<Item = usize>,
+) -> String {
+    let mut msg = format!("{label} matched {count} times; expected exactly 1\n\nMatches:");
+    for start in starts.take(10) {
+        msg.push_str(&format!(
+            "\n- line {}",
+            line_number_for_byte_offset(content, start)
+        ));
+    }
+    if count > 10 {
+        msg.push_str(&format!("\n- ... and {} more", count - 10));
+    }
+    msg
+}
+
+fn no_match_error(
+    content: &str,
+    needle: &str,
+    label: &str,
+    best: Option<(usize, usize, f64)>,
+) -> String {
+    let mut msg = format!("{label} matched 0 times; expected exactly 1");
+    if let Some((start, end, score)) = best {
+        msg.push_str(&format!(
+            "\nBest candidate line {} scored {:.2}; edit not applied because the match was not confident enough.\n\nActual candidate:\n{}\n\nSubmitted search:\n{}",
+            line_number_for_byte_offset(content, start),
+            score,
+            &content[start..end],
+            needle
+        ));
+    } else if let Some(hint) = find_closest_lines(content, needle) {
+        msg.push_str(&format!(
+            "\nClosest candidate line {}:\n{}\n\nSubmitted search:\n{}",
+            hint.line, hint.snippet, needle
+        ));
+    } else {
+        msg.push_str(&format!("\n\nSubmitted search:\n{needle}"));
+    }
+    msg
+}
+
+fn find_closest_lines(content: &str, needle: &str) -> Option<ClosestHint> {
+    fuzzy_candidate(content, needle).map(|candidate| ClosestHint {
+        line: line_number_for_byte_offset(content, candidate.start),
+        snippet: content[candidate.start..candidate.end].to_string(),
+    })
 }
 
 fn line_number_for_byte_offset(content: &str, offset: usize) -> usize {
@@ -554,5 +634,3 @@ pub fn sha256_hex(content: &str) -> String {
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
 }
-
-

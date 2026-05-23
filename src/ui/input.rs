@@ -16,6 +16,8 @@ pub enum InputAction {
     CycleMode,
     /// User pressed Esc — clear the buffer.
     Escape,
+    /// Open the system editor.
+    OpenEditor,
     /// Key was not handled — no action needed.
     None,
 }
@@ -225,6 +227,7 @@ impl InputState {
                     InputAction::Redraw
                 }
                 KeyCode::Char('d') => InputAction::ClearQueue,
+                KeyCode::Char('x') => InputAction::OpenEditor,
                 _ => InputAction::None,
             };
         }
