@@ -1,7 +1,7 @@
 use serde_json::json;
 
-use super::ApprovalMode;
-use crate::tools::types::ToolCall;
+use bone::tools::ApprovalMode;
+use bone::tools::ToolCall;
 
 fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     ToolCall {

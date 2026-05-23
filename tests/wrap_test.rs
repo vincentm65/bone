@@ -1,4 +1,4 @@
-use super::*;
+use bone::ui::render::wrap::{visual_line_count, wrap_text, wrap_text_with_prefix};
 
 #[test]
 fn wraps_long_line_at_words() {

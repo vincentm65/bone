@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::tools::types::{Tool, ToolCall, ToolDefinition, ToolResult};
+use futures_util::future::join_all;
 
 #[derive(Clone)]
 pub struct ToolRegistry {
@@ -55,5 +56,23 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct ToolHandler {
+    registry: ToolRegistry,
+}
+
+impl ToolHandler {
+    pub fn new(registry: ToolRegistry) -> Self {
+        Self { registry }
+    }
+
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        self.registry.definitions()
+    }
+
+    pub async fn execute_all(&self, calls: Vec<ToolCall>) -> Vec<ToolResult> {
+        join_all(calls.into_iter().map(|call| self.registry.execute(call))).await
     }
 }

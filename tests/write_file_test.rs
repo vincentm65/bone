@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use tokio::fs;
 
-use super::WriteFileTool;
-use crate::tools::types::Tool;
+use bone::tools::write_file::WriteFileTool;
+use bone::tools::types::Tool;
 
 fn temp_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

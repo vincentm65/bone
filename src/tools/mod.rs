@@ -1,8 +1,6 @@
-pub mod approval;
 pub mod bash;
 pub mod command_policy;
 pub mod edit_file;
-pub mod handler;
 pub mod read_file;
 pub mod registry;
 pub mod types;
@@ -10,8 +8,8 @@ pub mod write_file;
 
 use registry::ToolRegistry;
 
-pub use handler::ToolHandler;
-pub use types::{ApprovalMode, ToolCall, ToolDefinition, ToolResult};
+pub use registry::ToolHandler;
+pub use types::{ToolCall, ToolDefinition, ToolResult};
 
 pub fn builtin_tools() -> ToolRegistry {
     ToolRegistry::new()
@@ -19,4 +17,47 @@ pub fn builtin_tools() -> ToolRegistry {
         .register(write_file::WriteFileTool)
         .register(edit_file::EditFileTool)
         .register(bash::BashTool)
+}
+
+// ── ApprovalMode ────────────────────────────────────────────────────────────
+
+use command_policy::CommandSafety;
+
+/// Which tool calls are automatically approved without prompting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApprovalMode {
+    /// Read-only calls are auto-approved.
+    #[default]
+    Safe,
+    /// Read-only and edit calls are auto-approved.
+    Edits,
+    /// All calls are auto-approved.
+    Danger,
+}
+
+impl ApprovalMode {
+    pub fn allows_call(&self, call: &ToolCall) -> bool {
+        let safety = CommandSafety::for_call(call);
+        match self {
+            Self::Safe => safety == CommandSafety::ReadOnly,
+            Self::Edits => matches!(safety, CommandSafety::ReadOnly | CommandSafety::Edit),
+            Self::Danger => true,
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Safe => Self::Edits,
+            Self::Edits => Self::Danger,
+            Self::Danger => Self::Safe,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Safe => "Safe",
+            Self::Edits => "Edit",
+            Self::Danger => "Danger",
+        }
+    }
 }

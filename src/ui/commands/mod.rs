@@ -1,15 +1,8 @@
-mod clear;
-mod context;
-mod help;
-mod model;
-mod provider_switch;
-mod quit;
-
 use crate::chat::Message;
+use crate::config;
 use crate::config::ProvidersConfig;
-use crate::llm::{ChatMessage, LlmProvider, TokenStats};
-use crate::ui::render::BoneTerminal;
-use crate::ui::render::Renderer;
+use crate::llm::{ChatMessage, ChatRole, LlmProvider, TokenStats, providers};
+use crate::ui::render::{BoneTerminal, Renderer};
 
 /// Result of executing a slash command.
 pub enum CommandResult {
@@ -35,8 +28,8 @@ pub async fn handle(
     providers_config: &mut ProvidersConfig,
 ) -> std::io::Result<CommandResult> {
     let reply = match cmd {
-        "/help" => help::run(),
-        "/clear" | "/new" => clear::run(
+        "/help" => help(),
+        "/clear" | "/new" => clear(
             messages,
             transcript,
             token_stats,
@@ -45,11 +38,9 @@ pub async fn handle(
             provider_label,
             model_label,
         )?,
-        "/context" => context::run(transcript),
-        "/model" => model::run(provider_label, model_label),
-        "/provider" => {
-            provider_switch::run(arg, llm, provider_label, model_label, providers_config).await
-        }
+        "/context" => context(transcript),
+        "/model" => model(provider_label, model_label),
+        "/provider" => provider_switch(arg, llm, provider_label, model_label, providers_config).await,
         "/quit" | "/exit" => {
             return Ok(CommandResult::Quit);
         }
@@ -57,4 +48,112 @@ pub async fn handle(
     };
 
     Ok(CommandResult::Continue { reply })
+}
+
+// ── /clear ──────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn clear(
+    messages: &mut Vec<Message>,
+    transcript: &mut Vec<ChatMessage>,
+    token_stats: &mut TokenStats,
+    renderer: &mut Renderer,
+    term: &mut BoneTerminal,
+    provider_label: &str,
+    model_label: &str,
+) -> std::io::Result<String> {
+    renderer.flush_new_to_scrollback(messages, term)?;
+    crossterm::execute!(
+        term.backend_mut(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge)
+    )?;
+    if let Some(msg) = messages.first().cloned() {
+        if msg.role == ChatRole::System {
+            *messages = vec![msg];
+        } else {
+            messages.clear();
+        }
+    }
+    transcript.clear();
+    *token_stats = TokenStats::new();
+    renderer.scrollback_cursor = messages.len();
+    renderer.render_banner(term, provider_label, model_label)?;
+    Ok("Chat cleared.".to_string())
+}
+
+// ── /context ────────────────────────────────────────────────────────────────
+
+const CHARS_PER_TOKEN: usize = 4;
+
+fn context(messages: &[ChatMessage]) -> String {
+    let used: usize = messages
+        .iter()
+        .map(|m| m.content.len().div_ceil(CHARS_PER_TOKEN))
+        .sum();
+    format!("Context: ~{used} tokens in transcript. No local token cap is applied.")
+}
+
+// ── /help ───────────────────────────────────────────────────────────────────
+
+fn help() -> String {
+    [
+        "/clear     — clear chat history",
+        "/compact   — show context usage",
+        "/help      — show this message",
+        "/model     — show current model",
+        "/provider  — show or switch provider (/provider <name>)",
+        "/quit      — exit bone",
+    ]
+    .join("\n")
+}
+
+// ── /model ──────────────────────────────────────────────────────────────────
+
+fn model(provider_label: &str, model_label: &str) -> String {
+    format!("{} ({})", model_label, provider_label)
+}
+
+// ── /provider ───────────────────────────────────────────────────────────────
+
+async fn provider_switch(
+    arg: &str,
+    llm: &mut Box<dyn LlmProvider>,
+    provider_label: &mut String,
+    model_label: &mut String,
+    providers_config: &mut ProvidersConfig,
+) -> String {
+    if arg.is_empty() {
+        let mut lines = vec![format!("Current: {} ({})", model_label, provider_label)];
+        lines.push(String::new());
+        if providers_config.providers.is_empty() {
+            lines.push("No providers configured. Create ~/.bone-rust/providers.yaml".to_string());
+        } else {
+            lines.push("Available:".to_string());
+            for (id, entry) in &providers_config.providers {
+                let marker = if id == llm.id() { " *" } else { "" };
+                lines.push(format!(
+                    "  {} — {} ({}){}",
+                    id, entry.label, entry.model, marker
+                ));
+            }
+        }
+        lines.join("\n")
+    } else {
+        match providers::create_provider_with_config(arg, providers_config) {
+            Ok(new_provider) => match new_provider.validate().await {
+                Ok(()) => {
+                    let label = format!("{} ({})", new_provider.name(), new_provider.id());
+                    let model = new_provider.model().to_string();
+                    *llm = new_provider;
+                    *provider_label = label.clone();
+                    *model_label = model.clone();
+                    providers_config.last_provider = arg.to_string();
+                    config::providers_config::save_providers(providers_config);
+                    format!("Switched to {} ({})", model, label)
+                }
+                Err(err) => format!("Provider validation failed: {err}"),
+            },
+            Err(err) => err.to_string(),
+        }
+    }
 }

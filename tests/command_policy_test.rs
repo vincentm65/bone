@@ -1,8 +1,8 @@
 use serde_json::json;
 
-use super::{CommandSafety, classify_command};
-use crate::tools::approval::ApprovalMode;
-use crate::tools::types::ToolCall;
+use bone::tools::command_policy::{CommandSafety, classify_command};
+use bone::tools::ApprovalMode;
+use bone::tools::ToolCall;
 
 fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     ToolCall {

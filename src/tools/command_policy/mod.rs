@@ -3,20 +3,20 @@ use serde_json::Value;
 
 use crate::tools::types::ToolCall;
 
-/// Safety classification supplied with shell commands.
+/// Safety classification for shell commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandSafety {
-    /// Read-only inspection commands that do not modify files, services, network state, or git state.
+    /// Read-only: does not modify files, services, network state, or git state.
     ReadOnly,
-    /// Commands that create, update, or delete project files, install dependencies, or otherwise mutate normal workspace state.
+    /// Edit: creates, updates, or deletes project files, installs dependencies, etc.
     Edit,
-    /// Destructive, privileged, external side-effecting, or otherwise high-risk commands.
+    /// Danger: destructive, privileged, external side-effecting, or high-risk.
     Danger,
 }
 
 impl CommandSafety {
-    /// Numeric rank for comparing severity: ReadOnly=0, Edit=1, Danger=2.
+    /// Numeric rank (ReadOnly=0, Edit=1, Danger=2).
     pub fn rank(self) -> u8 {
         match self {
             Self::ReadOnly => 0,
@@ -25,7 +25,7 @@ impl CommandSafety {
         }
     }
 
-    /// Return the more restrictive (higher-ranked) classification.
+    /// More restrictive (higher-ranked) classification.
     pub fn max(self, other: Self) -> Self {
         if self.rank() >= other.rank() {
             self
@@ -34,12 +34,8 @@ impl CommandSafety {
         }
     }
 
-    /// Deterministic classification for any tool call.
-    ///
-    /// For bash: inspects the raw command string via [`classify_command`].
-    /// For other tools: classifies by tool name.
-    /// The model-provided `classification` argument on bash calls is **ignored**
-    /// for approval decisions — policy is the sole authority.
+    /// Classify a tool call for approval. Model-provided `classification` on bash
+    /// calls is ignored — policy is the sole authority.
     pub fn for_call(call: &ToolCall) -> Self {
         match call.name.as_str() {
             "read_file" => Self::ReadOnly,
@@ -55,9 +51,7 @@ impl CommandSafety {
     }
 }
 
-/// Strip a leading shell invoker (`bash`, `sh`, `zsh`, optionally with `-c`)
-/// so that `bash rg -n …` and `sh -c "rg -n …"` are classified by their
-/// inner command, not by the shell binary name.
+/// Strip `bash -c` / `sh -c` wrappers so the inner command is classified.
 fn peel_shell_wrapper(command: &str) -> &str {
     let trimmed = command.trim_start();
     let shells = ["bash", "sh", "zsh", "fish"];
@@ -88,8 +82,7 @@ fn peel_shell_wrapper(command: &str) -> &str {
     command
 }
 
-/// Deterministic command classification: inspects the raw command string and
-/// returns the safety level based on policy only — never on model claims.
+/// Classify a command string based on policy only — never on model claims.
 pub fn classify_command(command: &str) -> CommandSafety {
     // Peel off shell wrappers: `bash cmd args…`, `sh -c "cmd args…"`, etc.
     let command = peel_shell_wrapper(command);
@@ -109,16 +102,13 @@ pub fn classify_command(command: &str) -> CommandSafety {
     max
 }
 
-/// Classify a single command segment (no &&, ||, or ; operators).
 fn classify_segment(command: &str) -> CommandSafety {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return CommandSafety::ReadOnly;
     }
 
-    // ------------------------------------------------------------------
-    // Force Danger — destructive, privileged, or system-modifying commands
-    // ------------------------------------------------------------------
+    // -- Danger --
 
     const DANGER_COMMANDS: &[&str] = &[
         "rm", "rmdir", "chmod", "chown", "sudo", "mkfs", "dd", "shutdown", "reboot", "kill",
@@ -173,9 +163,7 @@ fn classify_segment(command: &str) -> CommandSafety {
         return CommandSafety::Danger;
     }
 
-    // ------------------------------------------------------------------
-    // Force Edit — filesystem / package mutations
-    // ------------------------------------------------------------------
+    // -- Edit --
 
     const EDIT_COMMANDS: &[&str] = &["mv", "cp", "mkdir", "touch", "tee"];
     for token in &tokens {
@@ -233,9 +221,7 @@ fn classify_segment(command: &str) -> CommandSafety {
         }
     }
 
-    // ------------------------------------------------------------------
-    // ReadOnly allowlist — safe inspection commands
-    // ------------------------------------------------------------------
+    // -- ReadOnly --
 
     let first = tokens[0];
 
@@ -277,8 +263,7 @@ fn classify_segment(command: &str) -> CommandSafety {
     CommandSafety::Edit
 }
 
-/// Split on `&&`, `||`, and `;`.  These delimit independent commands that
-/// should each pass the policy independently.
+/// Split on `&&`, `||`, and `;`. Each segment passes policy independently.
 fn split_compound_commands(command: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0;
@@ -337,5 +322,4 @@ fn has_dangerous_git_command(tokens: &[&str]) -> bool {
     })
 }
 
-#[cfg(test)]
-mod tests;
+

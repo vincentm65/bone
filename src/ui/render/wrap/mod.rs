@@ -107,5 +107,4 @@ fn take_width(text: &str, width: usize) -> usize {
     text.len()
 }
 
-#[cfg(test)]
-mod tests;
+

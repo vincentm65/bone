@@ -24,6 +24,18 @@ pub fn render(term: &mut BoneTerminal, provider: &str, model: &str) -> std::io::
     })
 }
 
+fn padded_row(left: &str, right: &str, width: usize, left_style: Style, right_style: Style) -> Line<'static> {
+    let pad = width.saturating_sub(UnicodeWidthStr::width(left) + UnicodeWidthStr::width(right));
+    Line::from(vec![
+        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(left.to_string(), left_style),
+        Span::raw(" ".repeat(pad.saturating_sub(1))),
+        Span::styled(right.to_string(), right_style),
+        Span::raw(" "),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+    ])
+}
+
 fn lines(provider: &str, model: &str, term_width: u16) -> Vec<Line<'static>> {
     let version = env!("CARGO_PKG_VERSION");
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
@@ -36,47 +48,14 @@ fn lines(provider: &str, model: &str, term_width: u16) -> Vec<Line<'static>> {
     let accent = Style::default().fg(Color::DarkGray);
     let muted = Style::default().fg(Color::Gray);
 
-    let term_width = term_width as usize;
-    let inner = term_width.saturating_sub(2);
-
-    // Content rows have "│ " (2) + "│" (1) = 3 chars framing,
-    // while borders have "╭" (1) + "╮" (1) = 2 chars — so content
-    // gets 1 fewer character of usable width.
-    let content_w = inner.saturating_sub(1);
-
-    // Row 1: bone ... v0.1.0
-    let r1_left = "bone";
-    let r1_right = format!("v{version}");
-    let r1_pad = content_w.saturating_sub(
-        UnicodeWidthStr::width(r1_left) + UnicodeWidthStr::width(r1_right.as_str()),
-    );
-
-    // Row 2: provider · model ... dir
-    let r2_left = format!("{provider} · {model}");
-    let r2_right = dir_display;
-    let r2_pad = content_w.saturating_sub(
-        UnicodeWidthStr::width(r2_left.as_str()) + UnicodeWidthStr::width(r2_right.as_str()),
-    );
+    let inner = term_width as usize;
+    let content_w = inner.saturating_sub(3); // "│ " (2) + right pad (1) = 3 chars framing
 
     vec![
-        Line::from(Span::styled(format!("╭{}╮", "─".repeat(inner)), dim)),
-        Line::from(vec![
-            Span::styled("│ ", dim),
-            Span::styled(r1_left.to_string(), bold_white),
-            Span::raw(" ".repeat(r1_pad - 1)),
-            Span::styled(r1_right, muted),
-            Span::raw(" "),
-            Span::styled("│", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("│ ", dim),
-            Span::styled(r2_left, accent),
-            Span::raw(" ".repeat(r2_pad - 1)),
-            Span::styled(r2_right, muted),
-            Span::raw(" "),
-            Span::styled("│", dim),
-        ]),
-        Line::from(Span::styled(format!("╰{}╯", "─".repeat(inner)), dim)),
+        Line::from(Span::styled(format!("╭{}╮", "─".repeat(inner.saturating_sub(2))), dim)),
+        padded_row("bone", &format!("v{version}"), content_w, bold_white, muted),
+        padded_row(&format!("{provider} · {model}"), &dir_display, content_w, accent, muted),
+        Line::from(Span::styled(format!("╰{}╯", "─".repeat(inner.saturating_sub(2))), dim)),
         Line::from(""),
     ]
 }

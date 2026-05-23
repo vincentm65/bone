@@ -1,7 +1,6 @@
 mod banner;
 mod bottom_pane;
 mod messages;
-mod streaming;
 pub mod wrap;
 
 use ratatui::layout::Rect;
@@ -16,7 +15,7 @@ use super::prompt::Prompt;
 use super::theme::Theme;
 use crate::chat::Message;
 use crate::llm::TokenStats;
-use crate::tools::types::ApprovalMode;
+use crate::tools::ApprovalMode;
 
 /// Minimum viewport rows: top-sep + input(1) + bottom-sep + status.
 pub(crate) const MIN_ROWS: u16 = 4;
@@ -189,16 +188,47 @@ impl Renderer {
         input: &InputState,
         status_info: &StatusInfo,
     ) -> io::Result<()> {
-        streaming::redraw(self, content, term, input, status_info)
+        // Flush new complete lines into scrollback.
+        let all_lines: Vec<&str> = content.lines().collect();
+
+        let complete = if content.ends_with('\n') {
+            all_lines.len()
+        } else {
+            all_lines.len().saturating_sub(1)
+        };
+
+        if complete > self.streaming_lines_flushed {
+            let new_lines = &all_lines[self.streaming_lines_flushed..complete];
+            let visual_lines =
+                messages::assistant_raw_lines_to_lines(new_lines, term.size()?.width);
+            messages::insert_lines(term, &visual_lines)?;
+            self.streaming_lines_flushed = complete;
+        }
+
+        // Redraw bottom pane (shows current input so user can type ahead).
+        term.draw(|frame| self.draw_bottom_pane(frame, input, status_info, None))?;
+        Ok(())
     }
 
-    /// Flush all remaining lines from the streaming message.
+    /// Flush all remaining lines from the streaming message (including the
+    /// final partial line that `redraw` skips).
     pub fn finalize_streaming_message(
         &mut self,
         content: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        streaming::finalize(self, content, term)
+        let all_lines: Vec<&str> = content.lines().collect();
+
+        if all_lines.len() > self.streaming_lines_flushed {
+            let remaining = &all_lines[self.streaming_lines_flushed..];
+            let visual_lines =
+                messages::assistant_raw_lines_to_lines(remaining, term.size()?.width);
+            messages::insert_lines(term, &visual_lines)?;
+            self.streaming_lines_flushed = all_lines.len();
+        }
+
+        messages::insert_lines(term, &[ratatui::text::Line::raw("")])?;
+        Ok(())
     }
 
     /// Advance the spinner and redraw bottom pane.

@@ -34,11 +34,8 @@ pub struct InputState {
 }
 
 impl InputState {
-    // ------------------------------------------------------------------
-    // Unicode-safe cursor helpers
-    // ------------------------------------------------------------------
 
-    /// Convert the char-index `cursor_pos` into a byte index for String ops.
+    /// Convert the char-index cursor position to a byte index for String ops.
     fn byte_pos(&self) -> usize {
         self.buffer
             .char_indices()
@@ -47,14 +44,14 @@ impl InputState {
             .unwrap_or(self.buffer.len())
     }
 
-    /// Insert a single character at the cursor and advance the cursor.
+    /// Insert a character at the cursor.
     pub fn insert_char(&mut self, c: char) {
         let bp = self.byte_pos();
         self.buffer.insert(bp, c);
         self.cursor_pos += 1;
     }
 
-    /// Delete the character **before** the cursor (Backspace).
+    /// Delete the character before the cursor (Backspace).
     pub fn delete_backward(&mut self) {
         if self.cursor_pos == 0 {
             return;
@@ -71,7 +68,7 @@ impl InputState {
         self.cursor_pos = prev_char_idx;
     }
 
-    /// Delete the character **after** the cursor (Delete key).
+    /// Delete the character after the cursor (Delete).
     pub fn delete_forward(&mut self) {
         if self.cursor_pos >= self.buffer.chars().count() {
             return;
@@ -113,7 +110,7 @@ impl InputState {
         self.cursor_pos = boundary;
     }
 
-    /// Delete from cursor to end of line (Ctrl+K).
+    /// Delete to end of line (Ctrl+K).
     pub fn kill_to_end(&mut self) {
         let byte_start = self.byte_pos();
         self.buffer.truncate(byte_start);
@@ -181,10 +178,8 @@ impl InputState {
         self.history_index = None;
     }
 
-    /// Apply a key event to the input state. Returns the action the caller
-    /// should take (redraw, submit, cancel, etc.). This is the single source
-    /// of truth for key handling — used by both the main loop and the
-    /// streaming drain.
+    /// Yields the action to take (redraw, submit, etc.). Single source
+    /// of truth for key handling — used by the main loop and streaming drain.
     pub fn apply_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputAction {
         // Ctrl+C always cancels.
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {

@@ -12,14 +12,9 @@ use crate::llm::provider::{
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
-/// Codex provider — adapts the ChatGPT Codex Responses API (`/responses` endpoint)
-/// back into bone's OpenAI-compatible internal shape.
-///
-/// Key differences from OpenAI `/chat/completions`:
-/// - Uses `instructions` + `input` instead of `messages`
-/// - SSE events: `response.output_text.delta`, `response.completed`
-/// - Tools use Codex function schema format
-/// - Response normalization maps Codex output items into OpenAI-style messages
+/// Codex provider — adapts the Codex Responses API to bone's internal shape.
+/// Uses `instructions`+`input` (not messages), Codex-format tools,
+/// and normalizes `response.output_text.delta` SSE events.
 pub struct CodexProvider {
     client: reqwest::Client,
     base_url: String,
@@ -53,7 +48,7 @@ impl CodexProvider {
     }
 }
 
-// ── Request types ──────────────────────────────────────────────────────────
+// ── Request types ──
 
 #[derive(Serialize)]
 struct CodexRequest {
@@ -72,14 +67,11 @@ struct CodexRequest {
     prompt_cache_key: Option<String>,
 }
 
-/// Typed input items for the Codex Responses API.
-///
-/// Uses `#[serde(untagged)]` so each variant serializes as a flat object.
-/// Message variants include `role` + `content`; function variants include
-/// `type` + their specific fields — matching the Codex API shape exactly.
+/// Typed input items for the Codex Responses API. Uses `#[serde(untagged)]`;
+/// message variants have `role`+`content`, function variants have `type`+fields.
 #[derive(Serialize)]
 #[serde(untagged)]
-enum CodexInputItem {
+pub enum CodexInputItem {
     Message {
         role: &'static str,
         content: Vec<CodexContent>,
@@ -101,7 +93,7 @@ enum CodexInputItem {
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
-enum CodexContent {
+pub enum CodexContent {
     #[serde(rename = "input_text")]
     InputText { text: String },
     #[serde(rename = "output_text")]
@@ -146,15 +138,15 @@ impl CodexInputItem {
 }
 
 #[derive(Serialize)]
-struct CodexTool {
-    r#type: &'static str,
-    name: String,
-    description: String,
-    parameters: Value,
-    strict: bool,
+pub struct CodexTool {
+    pub r#type: &'static str,
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub strict: bool,
 }
 
-// ── Response types ─────────────────────────────────────────────────────────
+// ── Response types ──
 
 #[derive(Deserialize)]
 struct CodexSSEEvent {
@@ -196,9 +188,9 @@ struct CodexUsage {
     total_tokens: Option<u64>,
 }
 
-// ── Provider implementation ────────────────────────────────────────────────
+// ── Provider implementation ──
 
-fn codex_tools(tools: Vec<ToolDefinition>) -> Vec<CodexTool> {
+pub fn codex_tools(tools: Vec<ToolDefinition>) -> Vec<CodexTool> {
     tools
         .into_iter()
         .map(|tool| CodexTool {
@@ -211,7 +203,7 @@ fn codex_tools(tools: Vec<ToolDefinition>) -> Vec<CodexTool> {
         .collect()
 }
 
-fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
+pub fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
     let mut items = Vec::new();
     for msg in messages {
         match msg.role {
@@ -241,7 +233,7 @@ fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
     items
 }
 
-fn build_instructions(messages: &[ChatMessage]) -> String {
+pub fn build_instructions(messages: &[ChatMessage]) -> String {
     let system_parts: Vec<&str> = messages
         .iter()
         .filter(|m| m.role == ChatRole::System)
@@ -254,12 +246,9 @@ fn build_instructions(messages: &[ChatMessage]) -> String {
     }
 }
 
-/// Extract tool calls and usage from the completed response.
-///
-/// Text is NOT emitted here — it was already streamed via
-/// `response.output_text.delta` events.  Re-emitting it would duplicate
-/// the assistant's content in the transcript and confuse the LLM on
-/// subsequent rounds.
+// Text is NOT emitted here — it was already streamed via
+// `response.output_text.delta` events, and re-emitting would
+// duplicate content and confuse the LLM on subsequent rounds.
 fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32, u32)>) {
     let tool_calls: Vec<ChatEvent> = resp
         .output
@@ -339,7 +328,7 @@ impl LlmProvider for CodexProvider {
 
         let mut req = self.client.post(self.chat_url()).json(&request);
 
-        let api_key = super::auth::resolve_codex_api_key(&self.api_key);
+        let api_key = resolve_codex_api_key(&self.api_key);
         if !api_key.is_empty() {
             req = req.bearer_auth(&api_key);
         }
@@ -412,6 +401,26 @@ impl LlmProvider for CodexProvider {
         Ok(Box::pin(stream))
     }
 }
+fn read_codex_token() -> String {
+    let path = std::path::Path::new(&dirs::home_dir().unwrap_or_default()).join(".codex/auth.json");
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    let Ok(doc): Result<Value, _> = serde_json::from_str(&data) else {
+        return String::new();
+    };
+    doc["tokens"]["access_token"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
 
-#[cfg(test)]
-mod tests;
+fn resolve_codex_api_key(config_key: &str) -> String {
+    let token = read_codex_token();
+    if !token.is_empty() {
+        return token;
+    }
+    config_key.to_string()
+}
+
+

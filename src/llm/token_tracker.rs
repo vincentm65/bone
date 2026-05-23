@@ -68,9 +68,8 @@ impl TokenStats {
 }
 
 /// Format a token count with comma-separated thousands.
-fn format_tokens(count: u64) -> String {
+pub fn format_tokens(count: u64) -> String {
     count.to_formatted_string(&num_format::Locale::en)
 }
 
-#[cfg(test)]
-mod tests;
+

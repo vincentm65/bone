@@ -165,6 +165,13 @@ pub fn msg_to_lines(
     let mut prev_role = prev_role;
 
     for msg in msgs {
+        // Skip invisible placeholders (e.g., empty assistant messages between
+        // tool rounds) so they don't inject extra blank-line gaps.
+        if msg.tool.is_none() && msg.content.is_empty() {
+            prev_role = Some(msg.role);
+            continue;
+        }
+
         if role_changed(prev_role, msg.role) {
             lines.push(Line::raw(""));
         }

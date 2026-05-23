@@ -78,7 +78,7 @@ pub struct ProvidersConfig {
 }
 
 pub fn load_providers() -> ProvidersConfig {
-    let path = super::paths::providers_path();
+    let path = super::providers_path();
     if !path.exists() {
         return ProvidersConfig::default();
     }
@@ -90,7 +90,7 @@ pub fn load_providers() -> ProvidersConfig {
 
 /// Persist config back to disk (used to save last_provider).
 pub fn save_providers(config: &ProvidersConfig) {
-    let path = super::paths::providers_path();
+    let path = super::providers_path();
     if let Ok(yaml) = serde_yaml::to_string(config) {
         let _ = std::fs::write(&path, yaml);
     }

@@ -6,13 +6,20 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use super::wrap;
 use super::{InputState, MIN_ROWS, Prompt, SPINNER, StatusInfo};
-use crate::tools::types::ApprovalMode;
+use crate::tools::ApprovalMode;
+
+/// Split input buffer at cursor into (before, char-at-cursor, after).
+fn cursor_split(input: &InputState) -> (String, char, String) {
+    let chars: Vec<char> = input.buffer.chars().collect();
+    let pos = input.cursor_pos.min(chars.len());
+    let before: String = chars[..pos].iter().collect();
+    let at_cursor = *chars.get(pos).unwrap_or(&' ');
+    let after: String = chars[pos..].iter().skip(1).collect();
+    (before, at_cursor, after)
+}
 
 impl super::Renderer {
     /// Draw the bottom pane into the fixed inline viewport.
-    ///
-    /// Layout adapts to the input height — the input area grows when
-    /// long text wraps across multiple visual lines.
     pub fn draw_bottom_pane(
         &self,
         frame: &mut Frame,
@@ -26,20 +33,14 @@ impl super::Renderer {
     /// Compute the desired viewport height for the current state.
     pub fn desired_height(input: &InputState, prompt: Option<&Prompt>, terminal_width: u16) -> u16 {
         if let Some(p) = prompt {
-            // top-sep + title + options + bottom-sep + status
             return MIN_ROWS - 1 + p.options.len() as u16 + 1;
         }
-        let chars: Vec<char> = input.buffer.chars().collect();
-        let pos = input.cursor_pos.min(chars.len());
-        let before: String = chars[..pos].iter().collect();
-        let at_cursor = chars.get(pos).unwrap_or(&' ');
-        let after: String = chars[pos..].iter().skip(1).collect();
+        let (before, at_cursor, after) = cursor_split(input);
         let display = format!("> {}{}{}", before, at_cursor, after);
         let input_rows = wrap::visual_line_count(&display, terminal_width as usize) as u16;
-        MIN_ROWS - 1 + input_rows.max(1) // top-sep + input_rows + bottom-sep + status
+        MIN_ROWS - 1 + input_rows.max(1)
     }
 
-    /// Draw the bottom pane with an explicit spinner tick (used during stream wait).
     pub fn draw_bottom_pane_with_tick(
         &self,
         frame: &mut Frame,
@@ -52,25 +53,17 @@ impl super::Renderer {
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
 
-        // ── Pre-compute input split (reused for line count and rendering) ──
-        let input_view = if let Some(_prompt) = prompt {
+        let input_view = if prompt.is_some() {
             None
         } else {
-            let chars: Vec<char> = input.buffer.chars().collect();
-            let pos = input.cursor_pos.min(chars.len());
-            let before: String = chars[..pos].iter().collect();
-            let at_cursor = *chars.get(pos).unwrap_or(&' ');
-            let after: String = chars[pos..].iter().skip(1).collect();
-
+            let (before, at_cursor, after) = cursor_split(input);
             let display_text = format!("> {}{}{}", before, at_cursor, after);
-            let raw = wrap::visual_line_count(&display_text, area.width as usize) as u16;
-
-            Some((before, at_cursor, after, raw.max(1)))
+            let rows = wrap::visual_line_count(&display_text, area.width as usize) as u16;
+            Some((before, at_cursor, after, rows.max(1)))
         };
 
         let mut y = area.y;
 
-        // ── Top separator ──
         frame.render_widget(
             Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
             Rect {
@@ -81,7 +74,6 @@ impl super::Renderer {
         );
         y += 1;
 
-        // ── Input field or vertical prompt ──
         if let Some(prompt) = prompt {
             // Title line
             frame.render_widget(
@@ -146,7 +138,6 @@ impl super::Renderer {
             y += input_rows;
         }
 
-        // ── Bottom separator ──
         frame.render_widget(
             Paragraph::new(sep).style(Style::default().fg(self.theme.input_border)),
             Rect {
@@ -157,7 +148,6 @@ impl super::Renderer {
         );
         y += 1;
 
-        // ── Status bar ──
         let mut status_spans: Vec<Span> = vec![
             Span::styled(
                 status_info.model.to_string(),

@@ -52,35 +52,35 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file",
-            description: "Apply precise transactional text edits to an existing UTF-8 file. Supports single search/replace, multiple edits, delete, insert_before, insert_after, and mode=\"rewrite\". All search text and anchors must match exactly once: do not use a short repeated fragment; include enough nearby unique context to identify the intended location. If the same change is intended in multiple places, use one larger unique block covering all occurrences or separate edits with distinct contextual anchors. A real diff preview is shown before the edit is applied.",
+            description: "Apply precise transactional text edits to an existing UTF-8 file. Supports search/replace, edits, delete, insert_before, insert_after, and rewrite mode. Search must match exactly once — include enough context. Preview shown before applying.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the existing UTF-8 file to edit. Relative paths are resolved from the current working directory."
+                        "description": "Path to the existing UTF-8 file to edit. Relative paths resolved from cwd."
                     },
                     "search": {
                         "type": "string",
-                        "description": "Compatibility mode: exact text to replace. Must appear exactly once. Include enough surrounding lines to make the match unique; do not use a short repeated line or fragment. If the same change is needed in multiple places, use edits with distinct contextual anchors or replace one larger unique block. Use with replace."
+                        "description": "Exact text to replace. Must appear exactly once — include enough surrounding context. Use with replace."
                     },
                     "replace": {
                         "type": "string",
-                        "description": "Compatibility mode: replacement text for search."
+                        "description": "Replacement text for search compatibility mode."
                     },
                     "edits": {
                         "type": "array",
-                        "description": "Transactional edits applied in order to one file. If any edit fails, nothing is written.",
+                        "description": "Transactional edits applied in order. If any edit fails, nothing is written.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "search": { "type": "string", "description": "Exact text to replace. Must appear exactly once; include enough nearby unique context and avoid short repeated fragments. Use with replace." },
-                                "replace": { "type": "string", "description": "Replacement text for search. Prefer this for search/replace edits. For compatibility, text is accepted as a fallback only when replace is absent." },
-                                "delete": { "type": "string", "description": "Exact text to remove. Must appear exactly once; include enough nearby unique context and avoid short repeated fragments." },
-                                "insert_before": { "type": "string", "description": "Exact anchor to insert text before. Must appear exactly once; include enough nearby unique context and avoid short repeated fragments." },
-                                "insert_after": { "type": "string", "description": "Exact anchor to insert text after. Must appear exactly once; include enough nearby unique context and avoid short repeated fragments." },
+                                "search": { "type": "string", "description": "Exact text to replace. Must appear exactly once. Use with replace." },
+                                "replace": { "type": "string", "description": "Replacement text (also accepts text as fallback)." },
+                                "delete": { "type": "string", "description": "Exact text to remove. Must appear exactly once." },
+                                "insert_before": { "type": "string", "description": "Exact anchor to insert before. Must appear exactly once." },
+                                "insert_after": { "type": "string", "description": "Exact anchor to insert after. Must appear exactly once." },
                                 "text": { "type": "string", "description": "Text to insert for insert_before or insert_after." },
-                                "match": { "type": "string", "enum": ["exact"], "description": "Match mode. Currently only exact is supported." }
+                                "match": { "type": "string", "enum": ["exact"], "description": "Match mode (only exact supported)." }
                             },
                             "additionalProperties": false
                         }
@@ -88,15 +88,15 @@ impl Tool for EditFileTool {
                     "mode": {
                         "type": "string",
                         "enum": ["rewrite"],
-                        "description": "Set to rewrite to replace the entire existing file with content."
+                        "description": "Set to rewrite to replace the entire file."
                     },
                     "content": {
                         "type": "string",
-                        "description": "Whole new file contents for mode=rewrite."
+                        "description": "New file contents for rewrite mode."
                     },
                     "expected_hash": {
                         "type": "string",
-                        "description": "Optional SHA-256 hash of current file contents. Bone uses this after preview to prevent stale edits."
+                        "description": "Optional SHA-256 hash to detect stale edits."
                     }
                 },
                 "required": ["path"],
@@ -549,11 +549,10 @@ async fn write_atomic_preserving_permissions(path: &str, content: &str) -> Resul
     Ok(())
 }
 
-fn sha256_hex(content: &str) -> String {
+pub fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-#[cfg(test)]
-mod tests;
+

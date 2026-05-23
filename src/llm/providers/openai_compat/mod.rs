@@ -13,15 +13,9 @@ use crate::llm::provider::{
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
-/// Generic OpenAI-compatible provider.
-///
-/// Works with any server that implements the `/chat/completions` streaming
-/// endpoint (OpenAI format): llama.cpp, OpenRouter, GLM, Gemini, Kimi,
-/// DeepSeek, etc.
-///
-/// The `endpoint` field in `ProviderEntry` controls the path appended to
-/// `base_url`.  Default: `/chat/completions`.  For local llama.cpp you
-/// typically set `endpoint: /v1/chat/completions`.
+/// Generic OpenAI-compatible provider for any server with a `/chat/completions`
+/// streaming endpoint: llama.cpp, OpenRouter, GLM, Gemini, Kimi, DeepSeek, etc.
+/// Set `endpoint` in config to control the path (default: `/chat/completions`).
 pub struct OpenAiCompatProvider {
     client: reqwest::Client,
     base_url: String,
@@ -55,8 +49,6 @@ impl OpenAiCompatProvider {
     }
 }
 
-
-
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
@@ -64,9 +56,7 @@ struct ChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
-    /// Ask OpenAI-compat servers (OpenAI, llama.cpp, ollama, etc.) to include token
-    /// usage in the final streaming chunk.  Ignored by servers that don't
-    /// support it.
+    /// Request token usage in the final streaming chunk (ignored if unsupported).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     stream_options: Option<StreamOptions>,
 }
@@ -87,8 +77,7 @@ struct OpenAiMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    /// DeepSeek V4 thinking mode requires this to be passed back when
-    /// the assistant turn involved tool calls.
+    /// DeepSeek V4: pass back when assistant turn involved tool calls, or 400.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
 }
@@ -120,10 +109,10 @@ struct OpenAiToolCallFunction {
 }
 
 #[derive(Debug, Default)]
-struct PartialToolCall {
-    id: String,
-    name: String,
-    arguments: String,
+pub struct PartialToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 fn openai_tools(tools: Vec<ToolDefinition>) -> Vec<OpenAiTool> {
@@ -177,7 +166,7 @@ fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
 
 /// Flush accumulated partial tool calls, emitting a [`ChatEvent::ToolCall`]
 /// for each complete entry (id and name must be non-empty).
-fn flush_partial_tool_calls(
+pub fn flush_partial_tool_calls(
     partial_tool_calls: &mut BTreeMap<usize, PartialToolCall>,
 ) -> Vec<ChatEvent> {
     let completed = std::mem::take(partial_tool_calls);
@@ -201,7 +190,7 @@ fn flush_partial_tool_calls(
 /// Captures usage, accumulates tool-call partials, and returns any events that
 /// should be emitted for this chunk (text deltas, completed tool calls on
 /// `finish_reason`).  Also updates `last_usage` when a usage block is present.
-fn process_sse_chunk(
+pub fn process_sse_chunk(
     data: &str,
     partial_tool_calls: &mut BTreeMap<usize, PartialToolCall>,
     last_usage: &mut Option<Value>,
@@ -209,7 +198,6 @@ fn process_sse_chunk(
     let value: Value = serde_json::from_str(data)?;
     let mut events = Vec::new();
 
-    // Capture usage data from any chunk
     if let Some(usage) = value.get("usage") {
         *last_usage = Some(usage.clone());
     }
@@ -228,9 +216,8 @@ fn process_sse_chunk(
         events.push(ChatEvent::TextDelta(content.to_string()));
     }
 
-    // DeepSeek V4 thinking mode sends reasoning_content in the delta.
-    // Must be captured and passed back in subsequent requests when tool
-    // calls are involved, or DeepSeek returns 400.
+    // DeepSeek V4 sends reasoning_content in the delta. Must be passed
+    // back in subsequent requests when tool calls are involved.
     if let Some(reasoning) = delta
         .get("reasoning_content")
         .and_then(|r| r.as_str())
@@ -340,16 +327,13 @@ impl LlmProvider for OpenAiCompatProvider {
                 }
 
                 if data == "[DONE]" {
-                    // Flush any accumulated partial tool calls that haven't
-                    // been emitted yet.  Some providers send [DONE] without
-                    // a preceding finish_reason: "tool_calls" chunk, which
-                    // would otherwise silently drop the tool calls and cause
-                    // the agent loop to stop mid-task.
+                    // Flush partial tool calls — some providers send [DONE]
+                    // without finish_reason: "tool_calls", which would
+                    // silently drop tool calls and stall the agent loop.
                     for event in flush_partial_tool_calls(&mut partial_tool_calls) {
                         yield event;
                     }
 
-                    // Emit accumulated token usage if available
                     if let Some(usage) = &last_usage {
                         yield ChatEvent::TokenUsage {
                             prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
@@ -359,7 +343,6 @@ impl LlmProvider for OpenAiCompatProvider {
                     break;
                 }
 
-                // Skip SSE comments (OpenRouter sends these)
                 if data.starts_with(':') {
                     continue;
                 }
@@ -369,9 +352,7 @@ impl LlmProvider for OpenAiCompatProvider {
                 }
             }
 
-            // Safety net: if the stream ended without [DONE] (e.g.
-            // connection drop), flush any remaining partial tool calls so
-            // the agent loop doesn't silently stop.
+            // Flush any remaining partial tool calls on premature stream end.
             for event in flush_partial_tool_calls(&mut partial_tool_calls) {
                 yield event;
             }
@@ -381,5 +362,3 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 }
 
-#[cfg(test)]
-mod tests;
