@@ -312,14 +312,18 @@ impl LlmProvider for OpenAiCompatProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
+        // stream_options is OpenAI-specific; many compat providers (DeepSeek,
+        // GLM, local llama.cpp) reject unknown top-level fields with 400.
+        let stream_options = self.base_url.contains("api.openai.com").then(|| StreamOptions {
+            include_usage: true,
+        });
+
         let request = ChatRequest {
             model: self.model.clone(),
             messages: openai_messages(messages),
             stream: true,
             tools: openai_tools(tools),
-            stream_options: Some(StreamOptions {
-                include_usage: true,
-            }),
+            stream_options,
         };
 
         let mut req = self.client.post(self.chat_url()).json(&request);

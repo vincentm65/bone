@@ -153,9 +153,8 @@ impl App {
                             .content
                             .push_str("\n[cancelled]");
                     } else {
-                        self.messages[assistant_idx].content = format!(
-                            "[provider error: {err}]\n\nIs llama.cpp server running at http://127.0.0.1:8080?"
-                        );
+                        self.messages[assistant_idx].content =
+                            format!("[provider error: {err}]");
                     }
                     break;
                 }
