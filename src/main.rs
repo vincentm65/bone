@@ -10,7 +10,14 @@ async fn main() -> std::io::Result<()> {
     let cfg = load_user_config();
     let providers_config = load_providers();
 
-    let provider = providers::create_provider_with_config(&cfg.provider, &providers_config)
+    let provider_id = cfg.provider.as_str();
+    let provider_id = if providers_config.last_provider.is_empty() {
+        provider_id
+    } else {
+        &providers_config.last_provider
+    };
+
+    let provider = providers::create_provider_with_config(provider_id, &providers_config)
         .map_err(std::io::Error::other)?;
     provider.validate().await.map_err(std::io::Error::other)?;
 

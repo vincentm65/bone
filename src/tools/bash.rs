@@ -92,13 +92,32 @@ impl Tool for BashTool {
             Err(_) => return Err(format!("command timed out after {timeout_ms}ms")),
         };
 
+        let stdout_str = String::from_utf8_lossy(&out);
+        let stderr_str = String::from_utf8_lossy(&err);
+        let stdout_trunc = truncate_output(&stdout_str, 300);
+        let stderr_trunc = truncate_output(&stderr_str, 100);
+
         Ok(format!(
-            "exit code: {}\nstdout:\n{}\nstderr:\n{}",
+            "exit code: {}\nstdout:\n{stdout_trunc}\nstderr:\n{stderr_trunc}",
             status
                 .code()
                 .map_or_else(|| "signal".to_string(), |code| code.to_string()),
-            String::from_utf8_lossy(&out),
-            String::from_utf8_lossy(&err),
         ))
     }
+}
+
+/// Truncate output to `max_lines`, keeping the first half and last half with a
+/// marker showing how many lines were omitted.
+fn truncate_output(output: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.len() <= max_lines {
+        return output.to_string();
+    }
+    let head = max_lines / 2;
+    let tail = max_lines - head;
+    let mut out: Vec<&str> = lines[..head].to_vec();
+    let truncated = format!("... {} lines truncated ...", lines.len() - max_lines);
+    out.push(&truncated);
+    out.extend_from_slice(&lines[lines.len() - tail..]);
+    out.join("\n")
 }

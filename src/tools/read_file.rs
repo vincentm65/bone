@@ -36,7 +36,7 @@ impl Tool for ReadFileTool {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 1000,
-                        "description": "Optional maximum number of lines to return. Use this to avoid dumping large files; defaults to 200 when start_line or max_lines is provided."
+                        "description": "Optional maximum number of lines to return. Defaults to 500; files exceeding this are truncated with a line range header so you know what portion you're seeing."
                     }
                 },
                 "required": ["path"],
@@ -51,17 +51,18 @@ impl Tool for ReadFileTool {
             .await
             .map_err(|e| e.to_string())?;
 
-        if args.start_line.is_none() && args.max_lines.is_none() {
+        let start = args.start_line.unwrap_or(1).saturating_sub(1);
+        let max = args.max_lines.unwrap_or(500).min(1000);
+        let total_lines = content.lines().count();
+
+        if start == 0 && total_lines <= max {
             return Ok(content);
         }
 
-        let start = args.start_line.unwrap_or(1).saturating_sub(1);
-        let max = args.max_lines.unwrap_or(200).min(1000);
-        Ok(content
-            .lines()
-            .skip(start)
-            .take(max)
-            .collect::<Vec<_>>()
-            .join("\n"))
+        let lines: Vec<&str> = content.lines().skip(start).take(max).collect();
+        let end = start + lines.len();
+        let mut out = format!("(lines {}-{} of {total_lines})\n", start + 1, end);
+        out.push_str(&lines.join("\n"));
+        Ok(out)
     }
 }

@@ -1,3 +1,4 @@
+use crate::config;
 use crate::config::ProvidersConfig;
 use crate::llm::LlmProvider;
 use crate::llm::providers;
@@ -7,7 +8,7 @@ pub async fn run(
     llm: &mut Box<dyn LlmProvider>,
     provider_label: &mut String,
     model_label: &mut String,
-    providers_config: &ProvidersConfig,
+    providers_config: &mut ProvidersConfig,
 ) -> String {
     if arg.is_empty() {
         let mut lines = vec![format!("Current: {} ({})", model_label, provider_label)];
@@ -34,9 +35,10 @@ pub async fn run(
                     *llm = new_provider;
                     *provider_label = label.clone();
                     *model_label = model.clone();
+                    config::providers_config::save_providers(providers_config);
                     format!("Switched to {} ({})", model, label)
                 }
-                Err(err) => format!("Provider validation failed: {err}"),
+                Err(err) => format!("Provider validation failed: {err}")
             },
             Err(err) => err.to_string(),
         }

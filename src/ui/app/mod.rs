@@ -343,7 +343,7 @@ impl App {
             &mut self.llm,
             &mut self.provider,
             &mut self.model,
-            &self.providers_config,
+            &mut self.providers_config,
         )
         .await?;
 

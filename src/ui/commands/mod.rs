@@ -32,7 +32,7 @@ pub async fn handle(
     llm: &mut Box<dyn LlmProvider>,
     provider_label: &mut String,
     model_label: &mut String,
-    providers_config: &ProvidersConfig,
+    providers_config: &mut ProvidersConfig,
 ) -> std::io::Result<CommandResult> {
     let reply = match cmd {
         "/help" => help::run(),

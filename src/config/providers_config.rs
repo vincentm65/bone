@@ -69,6 +69,10 @@ fn default_handler() -> String {
 /// The providers file is a flat map of provider id → config.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct ProvidersConfig {
+    /// Last used provider id — loaded on app startup.
+    #[serde(default)]
+    pub last_provider: String,
+
     #[serde(flatten)]
     pub providers: std::collections::HashMap<String, ProviderEntry>,
 }
@@ -82,4 +86,12 @@ pub fn load_providers() -> ProvidersConfig {
         eprintln!("bone: warning: failed to parse {}", path.display());
         ProvidersConfig::default()
     })
+}
+
+/// Persist config back to disk (used to save last_provider).
+pub fn save_providers(config: &ProvidersConfig) {
+    let path = super::paths::providers_path();
+    if let Ok(yaml) = serde_yaml::to_string(config) {
+        let _ = std::fs::write(&path, yaml);
+    }
 }

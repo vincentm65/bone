@@ -10,6 +10,7 @@ pub fn seed_providers_if_missing() {
         return;
     }
     let default = ProvidersConfig {
+        last_provider: String::new(),
         providers: {
             let mut m = std::collections::HashMap::new();
             m.insert(

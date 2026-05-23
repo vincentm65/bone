@@ -134,10 +134,9 @@ pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
     }
 
     write_atomic_preserving_permissions(&args.path, &next).await?;
-    Ok(format!(
-        "edited file ({})",
-        diff::summarize_change(&original, &next)
-    ))
+    let summary = diff::summarize_change(&original, &next);
+    let diff = diff::build_unified_diff(&args.path, &original, &next);
+    Ok(format!("edited file ({summary}){diff}"))
 }
 
 async fn build_candidate_content(args: &Args) -> Result<(String, String), String> {
