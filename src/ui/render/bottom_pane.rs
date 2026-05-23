@@ -1,11 +1,11 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
-use super::{InputState, Prompt, StatusInfo, MIN_ROWS, SPINNER};
 use super::wrap;
+use super::{InputState, MIN_ROWS, Prompt, SPINNER, StatusInfo};
 use crate::tools::types::ApprovalMode;
 
 impl super::Renderer {
@@ -24,11 +24,7 @@ impl super::Renderer {
     }
 
     /// Compute the desired viewport height for the current state.
-    pub fn desired_height(
-        input: &InputState,
-        prompt: Option<&Prompt>,
-        terminal_width: u16,
-    ) -> u16 {
+    pub fn desired_height(input: &InputState, prompt: Option<&Prompt>, terminal_width: u16) -> u16 {
         if let Some(p) = prompt {
             // top-sep + title + options + bottom-sep + status
             return MIN_ROWS - 1 + p.options.len() as u16 + 1;
@@ -77,7 +73,11 @@ impl super::Renderer {
         // ── Top separator ──
         frame.render_widget(
             Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
-            Rect { y, height: 1, ..area },
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
         );
         y += 1;
 
@@ -89,7 +89,11 @@ impl super::Renderer {
                     format!("  {}", prompt.title),
                     Style::default().fg(self.theme.system_msg),
                 )),
-                Rect { y, height: 1, ..area },
+                Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
             );
             y += 1;
 
@@ -104,17 +108,18 @@ impl super::Renderer {
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    (
-                        " ",
-                        Style::default().fg(ratatui::style::Color::DarkGray),
-                    )
+                    (" ", Style::default().fg(ratatui::style::Color::DarkGray))
                 };
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled(format!("  {} ", marker), style),
                         Span::styled(option.clone(), style),
                     ])),
-                    Rect { y, height: 1, ..area },
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
                 );
                 y += 1;
             }
@@ -143,7 +148,11 @@ impl super::Renderer {
         // ── Bottom separator ──
         frame.render_widget(
             Paragraph::new(sep).style(Style::default().fg(self.theme.input_border)),
-            Rect { y, height: 1, ..area },
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
         );
         y += 1;
 
@@ -193,7 +202,11 @@ impl super::Renderer {
 
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)),
-            Rect { y, height: 1, ..area },
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
         );
     }
 }

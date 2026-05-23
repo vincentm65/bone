@@ -133,10 +133,14 @@ fn policy_danger_redirection_to_system_paths() {
         minimum_required_classification("cat file >> /etc/config"),
         CommandSafety::Danger
     );
-    // /dev/ redirections are harmless
+    // /dev/ redirections are harmless but may still be edit based on command.
     assert_eq!(
         minimum_required_classification("echo foo > /dev/null"),
-        CommandSafety::Edit
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        minimum_required_classification("rg approval 2>/dev/null"),
+        CommandSafety::ReadOnly
     );
 }
 
@@ -160,6 +164,30 @@ fn policy_danger_git_destructive() {
     );
     assert_eq!(
         minimum_required_classification("git clean -fd"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        minimum_required_classification("git commit -am x"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        minimum_required_classification("git switch main"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        minimum_required_classification("git restore file"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        minimum_required_classification("git merge feature"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        minimum_required_classification("git pull"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        minimum_required_classification("git tag v1"),
         CommandSafety::Danger
     );
 }
@@ -266,6 +294,19 @@ fn policy_readonly_allowlist() {
         "which rustc",
         "env",
         "printenv",
+        "date",
+        "whoami",
+        "id",
+        "uname -a",
+        "du -sh target",
+        "df -h",
+        "ps aux",
+        "file Cargo.toml",
+        "stat Cargo.toml",
+        "realpath Cargo.toml",
+        "basename src/main.rs",
+        "dirname src/main.rs",
+        "tree -L 2",
     ] {
         assert_eq!(
             minimum_required_classification(cmd),
@@ -313,6 +354,14 @@ fn policy_readonly_git() {
         minimum_required_classification("git branch"),
         CommandSafety::ReadOnly
     );
+    assert_eq!(
+        minimum_required_classification("git show HEAD"),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        minimum_required_classification("git ls-files"),
+        CommandSafety::ReadOnly
+    );
 }
 
 /// Model misclassifications are caught: even if the model says read_only,
@@ -356,40 +405,47 @@ fn policy_overrides_model_misclassification() {
     assert!(ApprovalMode::Edits.allows_call(&c4));
     assert!(ApprovalMode::Danger.allows_call(&c4));
 
-    // Model says danger but ls is ReadOnly — policy doesn't downgrade
+    // Model says danger but ls is ReadOnly — deterministic policy wins.
     let c5 = call(
         "bash",
         json!({ "command": "ls -la", "classification": "danger" }),
     );
-    assert!(!ApprovalMode::Safe.allows_call(&c5)); // still blocked because model said danger
-    assert!(!ApprovalMode::Edits.allows_call(&c5));
+    assert!(ApprovalMode::Safe.allows_call(&c5));
+    assert!(ApprovalMode::Edits.allows_call(&c5));
     assert!(ApprovalMode::Danger.allows_call(&c5));
 }
 
-/// The policy never downgrades; it only upgrades.
+/// Bash approval ignores model over-classification and uses deterministic policy.
 #[test]
-fn policy_never_downgrades() {
-    // git status is ReadOnly by policy, but if model says danger, it stays danger
-    let effective = CommandSafety::from_tool_call(&call(
+fn bash_policy_is_source_of_truth() {
+    let rg_stderr_dev_null = call(
+        "bash",
+        json!({ "command": "rg -t py --no-filename -l approval 2>/dev/null", "classification": "danger" }),
+    );
+    assert!(ApprovalMode::Safe.allows_call(&rg_stderr_dev_null));
+
+    let bash_wrapped_rg = call(
+        "bash",
+        json!({ "command": "bash rg -t py --no-filename -l approval 2>/dev/null", "classification": "read_only" }),
+    );
+    assert!(!ApprovalMode::Safe.allows_call(&bash_wrapped_rg));
+
+    let git_status = call(
         "bash",
         json!({ "command": "git status", "classification": "danger" }),
-    ))
-    .max(minimum_required_classification("git status"));
-    assert_eq!(effective, CommandSafety::Danger);
+    );
+    assert!(ApprovalMode::Safe.allows_call(&git_status));
 
-    // rm is Danger by policy, model says danger → stays danger
-    let effective = CommandSafety::from_tool_call(&call(
+    let rm = call(
         "bash",
-        json!({ "command": "rm foo", "classification": "danger" }),
-    ))
-    .max(minimum_required_classification("rm foo"));
-    assert_eq!(effective, CommandSafety::Danger);
+        json!({ "command": "rm foo", "classification": "read_only" }),
+    );
+    assert!(!ApprovalMode::Safe.allows_call(&rm));
+    assert!(!ApprovalMode::Edits.allows_call(&rm));
 
-    // ls is ReadOnly by policy, model says read_only → stays read_only
-    let effective = CommandSafety::from_tool_call(&call(
+    let ls = call(
         "bash",
-        json!({ "command": "ls", "classification": "read_only" }),
-    ))
-    .max(minimum_required_classification("ls"));
-    assert_eq!(effective, CommandSafety::ReadOnly);
+        json!({ "command": "ls", "classification": "danger" }),
+    );
+    assert!(ApprovalMode::Safe.allows_call(&ls));
 }

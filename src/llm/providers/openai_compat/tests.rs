@@ -196,8 +196,7 @@ fn test_multiple_tool_calls_interleaved_by_index() {
     assert_eq!(partials.len(), 2);
 
     // Finish chunk triggers flush of both
-    let events =
-        process_sse_chunk(&chunk_tool_finish(), &mut partials, &mut last_usage).unwrap();
+    let events = process_sse_chunk(&chunk_tool_finish(), &mut partials, &mut last_usage).unwrap();
     assert_eq!(events.len(), 2, "should emit 2 completed tool calls");
 
     let ids: Vec<&str> = events
@@ -356,8 +355,7 @@ fn test_text_then_usage() {
     let mut partials = BTreeMap::new();
     let mut last_usage = None;
 
-    let e1 =
-        process_sse_chunk(&chunk_with_content("Hi"), &mut partials, &mut last_usage).unwrap();
+    let e1 = process_sse_chunk(&chunk_with_content("Hi"), &mut partials, &mut last_usage).unwrap();
     assert_eq!(e1.len(), 1);
 
     let e2 = process_sse_chunk(
@@ -368,8 +366,7 @@ fn test_text_then_usage() {
     .unwrap();
     assert_eq!(e2.len(), 1);
 
-    let e3 =
-        process_sse_chunk(&chunk_with_usage(10, 2), &mut partials, &mut last_usage).unwrap();
+    let e3 = process_sse_chunk(&chunk_with_usage(10, 2), &mut partials, &mut last_usage).unwrap();
     assert!(e3.is_empty());
 
     assert!(last_usage.is_some());

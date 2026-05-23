@@ -1,63 +1,64 @@
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use serde_json::json;
-    use tokio::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::WriteFileTool;
-    use crate::tools::types::Tool;
+use serde_json::json;
+use tokio::fs;
 
-    fn temp_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("bone-write-file-{name}-{nanos}"))
-    }
+use super::WriteFileTool;
+use crate::tools::types::Tool;
 
-    #[tokio::test]
-    async fn creates_new_file() {
-        let path = temp_path("creates").join("nested/file.txt");
-        let tool = WriteFileTool;
+fn temp_path(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("bone-write-file-{name}-{nanos}"))
+}
 
-        let result = tool
-            .execute(json!({ "path": path, "content": "hello" }))
+#[tokio::test]
+async fn creates_new_file() {
+    let path = temp_path("creates").join("nested/file.txt");
+    let tool = WriteFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "content": "hello" }))
+        .await
+        .expect("write_file should create a new file");
+
+    assert_eq!(result, "wrote 5 bytes");
+    assert_eq!(
+        fs::read_to_string(&path)
             .await
-            .expect("write_file should create a new file");
+            .expect("created file should be readable"),
+        "hello"
+    );
 
-        assert_eq!(result, "wrote 5 bytes");
-        assert_eq!(
-            fs::read_to_string(&path)
-                .await
-                .expect("created file should be readable"),
-            "hello"
-        );
-
-        // Clean up temp dir — best effort
-        if let Some(grandparent) = path.parent().and_then(|p| p.parent()) {
-            let _ = fs::remove_dir_all(grandparent).await;
-        }
+    // Clean up temp dir — best effort
+    if let Some(grandparent) = path.parent().and_then(|p| p.parent()) {
+        let _ = fs::remove_dir_all(grandparent).await;
     }
+}
 
-    #[tokio::test]
-    async fn refuses_to_overwrite_existing_file() {
-        let path = temp_path("exists.txt");
-        fs::write(&path, "original")
+#[tokio::test]
+async fn refuses_to_overwrite_existing_file() {
+    let path = temp_path("exists.txt");
+    fs::write(&path, "original")
+        .await
+        .expect("test setup should create existing file");
+    let tool = WriteFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "content": "replacement" }))
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(
+        fs::read_to_string(&path)
             .await
-            .expect("test setup should create existing file");
-        let tool = WriteFileTool;
+            .expect("existing file should remain readable"),
+        "original"
+    );
 
-        let result = tool
-            .execute(json!({ "path": path, "content": "replacement" }))
-            .await;
-
-        assert!(result.is_err());
-        assert_eq!(
-            fs::read_to_string(&path)
-                .await
-                .expect("existing file should remain readable"),
-            "original"
-        );
-
-        let _ = fs::remove_file(path).await;
-    }
+    let _ = fs::remove_file(path).await;
+}

@@ -26,10 +26,7 @@ impl App {
         );
     }
 
-    pub(crate) async fn send_message(
-        &mut self,
-        term: &mut Option<BoneTerminal>,
-    ) -> io::Result<()> {
+    pub(crate) async fn send_message(&mut self, term: &mut Option<BoneTerminal>) -> io::Result<()> {
         let text = self.input.buffer.trim().to_string();
         if text.is_empty() {
             return Ok(());
@@ -47,10 +44,8 @@ impl App {
             .push(ChatMessage::new(ChatRole::User, &text));
 
         // Flush the submitted message before resetting the input.
-        self.renderer.flush_new_to_scrollback(
-            &self.messages,
-            term.as_mut().unwrap(),
-        )?;
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
         self.input.reset();
         self.redraw(term)?;
 
@@ -79,8 +74,7 @@ impl App {
                 break;
             }
 
-            let (stream_result, spinner_tick) =
-                self.wait_for_stream(history.clone(), term).await;
+            let (stream_result, spinner_tick) = self.wait_for_stream(history.clone(), term).await;
             self.renderer.spinner_tick = spinner_tick;
 
             if self.cancel_streaming {
@@ -139,10 +133,8 @@ impl App {
                     // usage, estimate from character counts so the status
                     // bar still shows something useful.
                     if !had_usage && !self.cancel_streaming {
-                        let prompt_chars: usize =
-                            history.iter().map(|m| m.content.len()).sum();
-                        let completion_chars =
-                            self.messages[assistant_idx].content.len();
+                        let prompt_chars: usize = history.iter().map(|m| m.content.len()).sum();
+                        let completion_chars = self.messages[assistant_idx].content.len();
                         self.token_stats
                             .record_estimate(prompt_chars, completion_chars);
                     }
@@ -153,8 +145,7 @@ impl App {
                             .content
                             .push_str("\n[cancelled]");
                     } else {
-                        self.messages[assistant_idx].content =
-                            format!("[provider error: {err}]");
+                        self.messages[assistant_idx].content = format!("[provider error: {err}]");
                     }
                     break;
                 }
@@ -196,22 +187,16 @@ impl App {
                             call.arguments["expected_hash"] =
                                 serde_json::Value::String(preview.before_hash);
                             self.messages.push(Message::system(preview.diff));
-                            self.renderer.flush_new_to_scrollback(
-                                &self.messages,
-                                term.as_mut().unwrap(),
-                            )?;
+                            self.renderer
+                                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
                         }
                         Err(err) => {
                             self.messages.push(Message::system(format!(
                                 "edit_file preview failed for {}: {err}",
-                                call.arguments["path"]
-                                    .as_str()
-                                    .unwrap_or("?")
+                                call.arguments["path"].as_str().unwrap_or("?")
                             )));
-                            self.renderer.flush_new_to_scrollback(
-                                &self.messages,
-                                term.as_mut().unwrap(),
-                            )?;
+                            self.renderer
+                                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
                             was_rejected[i] = true;
                             continue;
                         }

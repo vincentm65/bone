@@ -1,8 +1,8 @@
 use std::io;
 
-use crate::ui::input::InputState;
 use super::messages;
 use super::{BoneTerminal, Renderer, StatusInfo};
+use crate::ui::input::InputState;
 
 /// During streaming: flush only complete lines of the assistant message.
 ///
@@ -38,11 +38,7 @@ pub fn redraw(
 
 /// Flush all remaining lines from the streaming message (including the
 /// final partial line that `redraw` skips).
-pub fn finalize(
-    renderer: &mut Renderer,
-    content: &str,
-    term: &mut BoneTerminal,
-) -> io::Result<()> {
+pub fn finalize(renderer: &mut Renderer, content: &str, term: &mut BoneTerminal) -> io::Result<()> {
     let all_lines: Vec<&str> = content.lines().collect();
 
     if all_lines.len() > renderer.streaming_lines_flushed {

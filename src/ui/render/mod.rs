@@ -86,10 +86,7 @@ impl Renderer {
     /// Since ratatui doesn't expose `set_viewport_height()`, we clear the
     /// old viewport, drop it, and create a fresh one. This is the same
     /// approach Codex uses — the cost is negligible and invisible.
-    pub fn resize_viewport(
-        term: &mut Option<BoneTerminal>,
-        new_height: u16,
-    ) -> io::Result<()> {
+    pub fn resize_viewport(term: &mut Option<BoneTerminal>, new_height: u16) -> io::Result<()> {
         if let Some(mut t) = term.take() {
             t.clear()?;
             drop(t);
@@ -214,5 +211,4 @@ impl Renderer {
         term.draw(|frame| self.draw_bottom_pane(frame, input, status_info, None))?;
         Ok(())
     }
-
 }

@@ -117,13 +117,9 @@ pub fn minimum_required_classification(command: &str) -> CommandSafety {
         }
     }
 
-    // Destructive git commands — always prompt-worthy
-    for (i, token) in tokens.iter().enumerate() {
-        if *token == "git"
-            && let Some(sub) = tokens.get(i + 1)
-                && matches!(*sub, "push" | "reset" | "checkout" | "rebase" | "clean") {
-                    return CommandSafety::Danger;
-                }
+    // Dangerous git commands — always prompt-worthy.
+    if has_dangerous_git_command(&tokens) {
+        return CommandSafety::Danger;
     }
 
     // ------------------------------------------------------------------
@@ -157,8 +153,8 @@ pub fn minimum_required_classification(command: &str) -> CommandSafety {
         }
     }
 
-    // Shell redirections (>) always imply writing somewhere
-    if command.contains('>') || command.contains(">>") {
+    // Shell redirections imply writing unless they only discard output.
+    if has_non_dev_null_redirection(command) {
         return CommandSafety::Edit;
     }
 
@@ -174,9 +170,9 @@ pub fn minimum_required_classification(command: &str) -> CommandSafety {
                 .iter()
                 .skip(i + 1)
                 .any(|t| t.starts_with("-i") || *t == "--in-place")
-            {
-                return CommandSafety::Edit;
-            }
+        {
+            return CommandSafety::Edit;
+        }
     }
 
     // awk with potential file writes (either redirection or internal >)
@@ -194,7 +190,8 @@ pub fn minimum_required_classification(command: &str) -> CommandSafety {
 
     const READONLY_COMMANDS: &[&str] = &[
         "ls", "pwd", "cat", "head", "tail", "rg", "grep", "find", "wc", "sort", "uniq", "echo",
-        "which", "env", "printenv",
+        "which", "env", "printenv", "date", "whoami", "id", "uname", "du", "df", "ps", "file",
+        "stat", "realpath", "basename", "dirname", "tree",
     ];
     if READONLY_COMMANDS.contains(&first) {
         return CommandSafety::ReadOnly;
@@ -204,16 +201,21 @@ pub fn minimum_required_classification(command: &str) -> CommandSafety {
     // treated as "project workspace" read-only in the original model).
     if first == "cargo"
         && let Some(sub) = tokens.get(1)
-            && matches!(*sub, "check" | "test" | "build") {
-                return CommandSafety::ReadOnly;
-            }
+        && matches!(*sub, "check" | "test" | "build")
+    {
+        return CommandSafety::ReadOnly;
+    }
 
     // Git inspection commands
     if first == "git"
         && let Some(sub) = tokens.get(1)
-            && matches!(*sub, "status" | "log" | "diff" | "branch") {
-                return CommandSafety::ReadOnly;
-            }
+        && matches!(
+            *sub,
+            "status" | "log" | "diff" | "branch" | "show" | "ls-files"
+        )
+    {
+        return CommandSafety::ReadOnly;
+    }
 
     // Version inquiries
     if matches!(first, "node" | "rustc" | "cargo") && tokens.get(1) == Some(&"--version") {
@@ -224,7 +226,22 @@ pub fn minimum_required_classification(command: &str) -> CommandSafety {
     CommandSafety::Edit
 }
 
-pub fn is_git_bash_call(call: &ToolCall) -> bool {
+fn has_non_dev_null_redirection(command: &str) -> bool {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    tokens.iter().enumerate().any(|(i, token)| {
+        let Some((_, target)) = token.split_once('>') else {
+            return false;
+        };
+        let target = if target.is_empty() {
+            tokens.get(i + 1).copied().unwrap_or_default()
+        } else {
+            target
+        };
+        target != "/dev/null"
+    })
+}
+
+pub fn is_dangerous_git_bash_call(call: &ToolCall) -> bool {
     if call.name != "bash" {
         return false;
     }
@@ -233,9 +250,30 @@ pub fn is_git_bash_call(call: &ToolCall) -> bool {
         return false;
     };
 
-    command
+    let tokens: Vec<&str> = command
         .split(|ch: char| !matches!(ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-' | '.'))
-        .any(|token| token == "git")
+        .collect();
+    has_dangerous_git_command(&tokens)
+}
+
+fn has_dangerous_git_command(tokens: &[&str]) -> bool {
+    tokens.windows(2).any(|pair| {
+        pair[0] == "git"
+            && matches!(
+                pair[1],
+                "push"
+                    | "commit"
+                    | "reset"
+                    | "checkout"
+                    | "switch"
+                    | "restore"
+                    | "rebase"
+                    | "clean"
+                    | "merge"
+                    | "pull"
+                    | "tag"
+            )
+    })
 }
 
 #[cfg(test)]

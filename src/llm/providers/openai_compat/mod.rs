@@ -280,7 +280,7 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     async fn validate(&self) -> Result<(), LlmError> {
-        // Only attempt health check for local providers, as others like Gemini 
+        // Only attempt health check for local providers, as others like Gemini
         // might not have a /health endpoint or might require an API key.
         let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
 
@@ -316,9 +316,12 @@ impl LlmProvider for OpenAiCompatProvider {
     ) -> Result<ResponseStream, LlmError> {
         // stream_options is OpenAI-specific; many compat providers (DeepSeek,
         // GLM, local llama.cpp) reject unknown top-level fields with 400.
-        let stream_options = self.base_url.contains("api.openai.com").then(|| StreamOptions {
-            include_usage: true,
-        });
+        let stream_options = self
+            .base_url
+            .contains("api.openai.com")
+            .then(|| StreamOptions {
+                include_usage: true,
+            });
 
         let request = ChatRequest {
             model: self.model.clone(),

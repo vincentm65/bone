@@ -35,10 +35,11 @@ pub async fn run(
                     *llm = new_provider;
                     *provider_label = label.clone();
                     *model_label = model.clone();
+                    providers_config.last_provider = arg.to_string();
                     config::providers_config::save_providers(providers_config);
                     format!("Switched to {} ({})", model, label)
                 }
-                Err(err) => format!("Provider validation failed: {err}")
+                Err(err) => format!("Provider validation failed: {err}"),
             },
             Err(err) => err.to_string(),
         }

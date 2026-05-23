@@ -4,7 +4,9 @@ use serde_json::Value;
 
 // Re-export types moved to dedicated modules so existing imports keep working.
 pub use crate::tools::approval::ApprovalMode;
-pub use crate::tools::command_policy::{CommandSafety, is_git_bash_call, minimum_required_classification};
+pub use crate::tools::command_policy::{
+    CommandSafety, is_dangerous_git_bash_call, minimum_required_classification,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {

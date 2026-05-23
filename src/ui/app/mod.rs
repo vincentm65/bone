@@ -111,11 +111,13 @@ impl App {
             {
                 msg.content.push_str("\n[cancelled]");
             }
-            self.renderer
-                .finalize_streaming_message(
-                    self.messages.last().map(|m| m.content.as_str()).unwrap_or(""),
-                    terminal.as_mut().unwrap(),
-                )?;
+            self.renderer.finalize_streaming_message(
+                self.messages
+                    .last()
+                    .map(|m| m.content.as_str())
+                    .unwrap_or(""),
+                terminal.as_mut().unwrap(),
+            )?;
             self.renderer
                 .flush_new_to_scrollback(&self.messages, terminal.as_mut().unwrap())?;
         }
@@ -128,11 +130,7 @@ impl App {
     /// Ensure the viewport is the right size, then draw.
     fn ensure_viewport_and_draw(&mut self, terminal: &mut Option<BoneTerminal>) -> io::Result<()> {
         let width = terminal.as_ref().unwrap().size()?.width;
-        let desired = Renderer::desired_height(
-            &self.input,
-            self.active_prompt.as_ref(),
-            width,
-        );
+        let desired = Renderer::desired_height(&self.input, self.active_prompt.as_ref(), width);
 
         if desired != self.renderer.viewport_height {
             Renderer::resize_viewport(terminal, desired)?;
@@ -211,7 +209,11 @@ impl App {
 
     /// Handle a keypress while a blocking prompt is displayed.
     /// Up/Down move the cursor, Enter confirms, Esc rejects.
-    fn handle_prompt_key(&mut self, code: KeyCode, term: &mut Option<BoneTerminal>) -> io::Result<()> {
+    fn handle_prompt_key(
+        &mut self,
+        code: KeyCode,
+        term: &mut Option<BoneTerminal>,
+    ) -> io::Result<()> {
         match code {
             KeyCode::Up => {
                 if let Some(ref mut p) = self.active_prompt {
@@ -327,7 +329,11 @@ impl App {
         Ok(decision)
     }
 
-    pub(super) async fn handle_command(&mut self, input: &str, term: &mut Option<BoneTerminal>) -> io::Result<()> {
+    pub(super) async fn handle_command(
+        &mut self,
+        input: &str,
+        term: &mut Option<BoneTerminal>,
+    ) -> io::Result<()> {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0].to_string();
         let arg = parts.get(1).copied().unwrap_or("").to_string();
