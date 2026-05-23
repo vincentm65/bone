@@ -160,6 +160,17 @@ impl From<serde_json::Error> for LlmError {
         }
     }
 }
+/// Map an HTTP status code to an [`LlmErrorKind`].
+///
+/// Shared across all HTTP-based providers.
+pub fn http_status_to_error_kind(status: reqwest::StatusCode) -> LlmErrorKind {
+    match status.as_u16() {
+        401 | 403 => LlmErrorKind::Auth,
+        429 => LlmErrorKind::RateLimit,
+        code if code >= 500 => LlmErrorKind::Server(code),
+        _ => LlmErrorKind::Config,
+    }
+}
 
 /// The only interface providers need to implement.
 ///

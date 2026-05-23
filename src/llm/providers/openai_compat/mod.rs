@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
+    http_status_to_error_kind,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -167,15 +168,6 @@ fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
         .collect()
 }
 
-/// Map an HTTP status code to an [`LlmErrorKind`].
-fn http_status_to_error_kind(status: reqwest::StatusCode) -> LlmErrorKind {
-    match status.as_u16() {
-        401 | 403 => LlmErrorKind::Auth,
-        429 => LlmErrorKind::RateLimit,
-        code if code >= 500 => LlmErrorKind::Server(code),
-        _ => LlmErrorKind::Config,
-    }
-}
 
 /// Flush accumulated partial tool calls, emitting a [`ChatEvent::ToolCall`]
 /// for each complete entry (id and name must be non-empty).

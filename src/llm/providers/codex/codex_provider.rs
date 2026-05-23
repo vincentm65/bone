@@ -4,13 +4,11 @@ use eventsource_stream::Eventsource;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
-
-use std::path::Path;
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
+    http_status_to_error_kind,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -30,31 +28,6 @@ pub struct CodexProvider {
     endpoint: String,
     id: String,
     label: String,
-}
-
-/// Read access token from Codex CLI's cached auth (~/.codex/auth.json).
-/// Returns the access_token if available, empty string otherwise.
-fn read_codex_token() -> String {
-    let path = Path::new(&dirs::home_dir().unwrap_or_default()).join(".codex/auth.json");
-    let Ok(data) = std::fs::read_to_string(&path) else {
-        return String::new();
-    };
-    let Ok(doc): Result<Value, _> = serde_json::from_str(&data) else {
-        return String::new();
-    };
-    doc["tokens"]["access_token"]
-        .as_str()
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Resolve the API key: prefer the dynamic Codex CLI token, fall back to config.
-fn resolve_codex_api_key(config_key: &str) -> String {
-    let token = read_codex_token();
-    if !token.is_empty() {
-        return token;
-    }
-    config_key.to_string()
 }
 
 impl CodexProvider {
@@ -99,42 +72,72 @@ struct CodexRequest {
     prompt_cache_key: Option<String>,
 }
 
+/// Typed input items for the Codex Responses API.
+///
+/// Uses `#[serde(untagged)]` so each variant serializes as a flat object.
+/// Message variants include `role` + `content`; function variants include
+/// `type` + their specific fields — matching the Codex API shape exactly.
 #[derive(Serialize)]
-struct CodexInputItem {
-    #[serde(flatten)]
-    fields: BTreeMap<String, Value>,
+#[serde(untagged)]
+enum CodexInputItem {
+    Message {
+        role: &'static str,
+        content: Vec<CodexContent>,
+    },
+    FunctionCall {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionCallOutput {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        call_id: String,
+        output: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum CodexContent {
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
 }
 
 impl CodexInputItem {
-    fn assistant_text(text: &str) -> Self {
-        let mut fields = BTreeMap::new();
-        fields.insert("role".to_string(), "assistant".into());
-        fields.insert("content".into(), serde_json::json!([{"type": "output_text", "text": text}]));
-        Self { fields }
+    fn user_text(text: &str) -> Self {
+        Self::Message {
+            role: "user",
+            content: vec![CodexContent::InputText { text: text.to_string() }],
+        }
     }
 
-    fn user_text(text: &str) -> Self {
-        let mut fields = BTreeMap::new();
-        fields.insert("role".to_string(), "user".into());
-        fields.insert("content".into(), serde_json::json!([{"type": "input_text", "text": text}]));
-        Self { fields }
+    fn assistant_text(text: &str) -> Self {
+        Self::Message {
+            role: "assistant",
+            content: vec![CodexContent::OutputText { text: text.to_string() }],
+        }
     }
 
     fn tool_call(call_id: &str, name: &str, arguments: &str) -> Self {
-        let mut fields = BTreeMap::new();
-        fields.insert("type".to_string(), "function_call".into());
-        fields.insert("call_id".to_string(), Value::String(call_id.to_string()));
-        fields.insert("name".to_string(), Value::String(name.to_string()));
-        fields.insert("arguments".to_string(), Value::String(arguments.to_string()));
-        Self { fields }
+        Self::FunctionCall {
+            kind: "function_call",
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        }
     }
 
     fn tool_result(call_id: &str, output: &str) -> Self {
-        let mut fields = BTreeMap::new();
-        fields.insert("type".to_string(), "function_call_output".into());
-        fields.insert("call_id".to_string(), Value::String(call_id.to_string()));
-        fields.insert("output".to_string(), Value::String(output.to_string()));
-        Self { fields }
+        Self::FunctionCallOutput {
+            kind: "function_call_output",
+            call_id: call_id.to_string(),
+            output: output.to_string(),
+        }
     }
 }
 
@@ -208,13 +211,8 @@ fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
     let mut items = Vec::new();
     for msg in messages {
         match msg.role {
-            ChatRole::System => {
-                // System messages become the instructions (handled separately)
-                continue;
-            }
-            ChatRole::User => {
-                items.push(CodexInputItem::user_text(&msg.content));
-            }
+            ChatRole::System => continue,
+            ChatRole::User => items.push(CodexInputItem::user_text(&msg.content)),
             ChatRole::Assistant => {
                 if !msg.content.is_empty() {
                     items.push(CodexInputItem::assistant_text(&msg.content));
@@ -240,10 +238,10 @@ fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
 }
 
 fn build_instructions(messages: &[ChatMessage]) -> String {
-    let system_parts: Vec<String> = messages
+    let system_parts: Vec<&str> = messages
         .iter()
         .filter(|m| m.role == ChatRole::System)
-        .map(|m| m.content.clone())
+        .map(|m| m.content.as_str())
         .collect();
     if system_parts.is_empty() {
         "You are a helpful assistant.".to_string()
@@ -258,57 +256,31 @@ fn build_instructions(messages: &[ChatMessage]) -> String {
 /// `response.output_text.delta` events.  Re-emitting it would duplicate
 /// the assistant's content in the transcript and confuse the LLM on
 /// subsequent rounds.
-fn normalize_codex_response(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32, u32)>) {
-    let mut events = Vec::new();
-    let mut tool_calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
-    let mut usage: Option<(u32, u32)> = None;
-
-    // Extract usage
-    if let Some(usage_data) = &resp.usage {
-        usage = usage_data
-            .input_tokens
-            .map(|i| i as u32)
-            .zip(usage_data.output_tokens.map(|o| o as u32))
-            .or_else(|| usage_data.total_tokens.map(|t| (t as u32 / 2, t as u32 - t as u32 / 2)));
-    }
-
-    for item in &resp.output {
-        match item.item_type.as_str() {
-            "function_call" => {
-                let idx = tool_calls.len();
-                tool_calls.insert(
-                    idx,
-                    PartialToolCall {
-                        id: item.call_id.clone().unwrap_or_default(),
-                        name: item.name.clone().unwrap_or_default(),
-                        arguments: item.arguments.clone().unwrap_or_default(),
-                    },
-                );
+fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32, u32)>) {
+    let tool_calls: Vec<ChatEvent> = resp
+        .output
+        .iter()
+        .filter(|item| item.item_type == "function_call")
+        .filter_map(|item| {
+            let id = item.call_id.clone()?;
+            let name = item.name.clone()?;
+            if id.is_empty() || name.is_empty() {
+                return None;
             }
-            _ => {}
-        }
-    }
+            let args = serde_json::from_str(item.arguments.as_deref().unwrap_or("null"))
+                .unwrap_or(Value::Null);
+            Some(ChatEvent::ToolCall(ToolCall { id, name, arguments: args }))
+        })
+        .collect();
 
-    // Emit tool calls
-    for (_, call) in tool_calls {
-        if !call.id.is_empty() && !call.name.is_empty() {
-            let args = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
-            events.push(ChatEvent::ToolCall(ToolCall {
-                id: call.id,
-                name: call.name,
-                arguments: args,
-            }));
-        }
-    }
+    let usage = resp.usage.as_ref().and_then(|u| {
+        u.input_tokens
+            .map(|i| i as u32)
+            .zip(u.output_tokens.map(|o| o as u32))
+            .or_else(|| u.total_tokens.map(|t| (t as u32 / 2, t as u32 - t as u32 / 2)))
+    });
 
-    (events, usage)
-}
-
-#[derive(Debug, Default)]
-struct PartialToolCall {
-    id: String,
-    name: String,
-    arguments: String,
+    (tool_calls, usage)
 }
 
 #[async_trait]
@@ -326,8 +298,6 @@ impl LlmProvider for CodexProvider {
     }
 
     async fn validate(&self) -> Result<(), LlmError> {
-        // Codex requires auth; a quick probe won't work without a real request.
-        // Skip validation — errors will surface on first chat call.
         Ok(())
     }
 
@@ -358,7 +328,7 @@ impl LlmProvider for CodexProvider {
 
         let mut req = self.client.post(self.chat_url()).json(&request);
 
-        let api_key = resolve_codex_api_key(&self.api_key);
+        let api_key = super::auth::resolve_codex_api_key(&self.api_key);
         if !api_key.is_empty() {
             req = req.bearer_auth(&api_key);
         }
@@ -390,7 +360,6 @@ impl LlmProvider for CodexProvider {
                     break;
                 }
 
-                // Skip SSE comments
                 if data.starts_with(':') {
                     continue;
                 }
@@ -408,7 +377,7 @@ impl LlmProvider for CodexProvider {
                     }
                     "response.completed" => {
                         if let Some(resp) = event.response {
-                            let (events, usage) = normalize_codex_response(&resp);
+                            let (events, usage) = extract_response_events(&resp);
                             if let Some(u) = usage {
                                 last_usage = Some(u);
                             }
@@ -417,15 +386,10 @@ impl LlmProvider for CodexProvider {
                             }
                         }
                     }
-                    "response.output_item.done" => {
-                        // We collect output items in the response.completed event,
-                        // but we can also process individual items here if needed.
-                    }
                     _ => {}
                 }
             }
 
-            // Emit accumulated token usage
             if let Some((prompt, completion)) = last_usage {
                 yield ChatEvent::TokenUsage {
                     prompt_tokens: prompt,
@@ -435,16 +399,6 @@ impl LlmProvider for CodexProvider {
         };
 
         Ok(Box::pin(stream))
-    }
-}
-
-/// Map an HTTP status code to an [`LlmErrorKind`].
-fn http_status_to_error_kind(status: reqwest::StatusCode) -> LlmErrorKind {
-    match status.as_u16() {
-        401 | 403 => LlmErrorKind::Auth,
-        429 => LlmErrorKind::RateLimit,
-        code if code >= 500 => LlmErrorKind::Server(code),
-        _ => LlmErrorKind::Config,
     }
 }
 
