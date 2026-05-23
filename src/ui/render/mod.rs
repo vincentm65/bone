@@ -227,7 +227,9 @@ impl Renderer {
             self.streaming_lines_flushed = all_lines.len();
         }
 
-        messages::insert_lines(term, &[ratatui::text::Line::raw("")])?;
+        if !content.is_empty() || self.streaming_lines_flushed > 0 {
+            messages::insert_lines(term, &[ratatui::text::Line::raw("")])?;
+        }
         Ok(())
     }
 

@@ -1,8 +1,8 @@
 use serde_json::json;
 
-use bone::tools::command_policy::{CommandSafety, classify_command};
 use bone::tools::ApprovalMode;
 use bone::tools::ToolCall;
+use bone::tools::command_policy::{CommandSafety, classify_command};
 
 fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     ToolCall {
@@ -238,6 +238,7 @@ fn policy_readonly_allowlist() {
         "rg pattern .",
         "grep pattern file",
         "find . -name '*.rs'",
+        "xargs -0 wc -l 2>/dev/null",
         "wc -l file",
         "sort file",
         "uniq file",
@@ -490,10 +491,7 @@ fn compound_and_edit() {
 
 #[test]
 fn compound_and_readonly() {
-    assert_eq!(
-        classify_command("ls -la && pwd"),
-        CommandSafety::ReadOnly
-    );
+    assert_eq!(classify_command("ls -la && pwd"), CommandSafety::ReadOnly);
     assert_eq!(
         classify_command("cd /tmp && ls -la && rg foo"),
         CommandSafety::ReadOnly
@@ -506,12 +504,31 @@ fn compound_or_and_semicolon() {
         classify_command("ls -la || rm -rf /"),
         CommandSafety::Danger
     );
+    assert_eq!(classify_command("ls -la ; rm -rf /"), CommandSafety::Danger);
+    assert_eq!(classify_command("ls -la ; pwd"), CommandSafety::ReadOnly);
+}
+
+#[test]
+fn compound_newlines_comments_and_pipes_readonly() {
+    let command = r#"
+      # Lines in dedicated test files (tests/ directory + *_test.rs in src/)
+    echo "=== Dedicated test files ==="
+    find /home/vincent/projects/bone -type f \( -path "*/tests/*" -o -name "*_test.rs" \) -not -path "*/target/*" -not -path "*/.git/*" -print0 |
+      xargs -0 wc -l 2>/dev/null |
+      sort -n
+
+      # Lines inside #[cfg(test)] modules within src/ (non-test files)
+    echo "=== Test lines inside src/ (non-test files) ==="
+    rg -n '#\[cfg\(test\)\]' /home/vincent/projects/bone/src/ --no-filename
+"#;
+
+    assert_eq!(classify_command(command), CommandSafety::ReadOnly);
+}
+
+#[test]
+fn compound_splitting_ignores_quoted_pipes_and_hashes() {
     assert_eq!(
-        classify_command("ls -la ; rm -rf /"),
-        CommandSafety::Danger
-    );
-    assert_eq!(
-        classify_command("ls -la ; pwd"),
+        classify_command("echo \"a | b # c\"\nrg '#\\[cfg\\(test\\)\\]' src"),
         CommandSafety::ReadOnly
     );
 }

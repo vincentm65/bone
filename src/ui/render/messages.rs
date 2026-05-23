@@ -6,7 +6,7 @@ use crate::chat::{Message, ToolDisplay};
 use crate::llm::ChatRole;
 use crate::ui::render::{BoneTerminal, wrap};
 use crate::ui::theme::Theme;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -39,28 +39,48 @@ pub fn assistant_raw_lines_to_lines(lines: &[&str], width: u16) -> Vec<Line<'sta
 
 fn render_tool(tool: &ToolDisplay, theme: &Theme, lines: &mut Vec<Line<'static>>, width: usize) {
     let marker = if tool.is_error { "✕ " } else { "  " };
-    let label_style = Style::default().fg(theme.tool_call);
+    let name_style = Style::default().fg(Color::White);
+    let rest_style = Style::default().fg(theme.tool_call);
     let marker_style = Style::default().fg(theme.tool_error);
     let indent = "    ";
     let prefix_width = 4; // "  " + marker (2 chars) = 4 display cols
     let label_width = width.saturating_sub(prefix_width).max(1);
 
-    let wrapped = wrap::wrap_text(&tool.label, label_width);
+    let wrapped = wrap_tool_label(&tool.label, label_width);
 
     for (i, visual_line) in wrapped.into_iter().enumerate() {
         if i == 0 {
+            let p = visual_line.find(' ').unwrap_or(visual_line.len());
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(marker, marker_style),
-                Span::styled(visual_line, label_style),
+                Span::styled(visual_line[..p].to_string(), name_style),
+                Span::styled(visual_line[p..].to_string(), rest_style),
             ]));
         } else {
             lines.push(Line::from(vec![
                 Span::raw(indent),
-                Span::styled(visual_line.trim_start().to_string(), label_style),
+                Span::styled(visual_line, rest_style),
             ]));
         }
     }
+}
+
+fn wrap_tool_label(label: &str, label_width: usize) -> Vec<String> {
+    label
+        .split('\n')
+        .flat_map(|raw_line| wrap_label_line(raw_line, label_width))
+        .collect::<Vec<_>>()
+}
+
+fn wrap_label_line(line: &str, width: usize) -> Vec<String> {
+    let leading = line.len() - line.trim_start().len();
+    if leading == 0 || leading >= line.len() {
+        return wrap::wrap_text(line, width);
+    }
+
+    let first_prefix = &line[..leading];
+    wrap::wrap_text_with_prefix(line.trim_start(), first_prefix, "", width)
 }
 
 fn render_diff_preview(
@@ -153,6 +173,10 @@ fn role_changed(prev_role: Option<ChatRole>, current_role: ChatRole) -> bool {
         )
     )
 }
+
+#[cfg(test)]
+#[path = "messages_test.rs"]
+mod messages_test;
 
 /// Convert messages into terminal lines.
 pub fn msg_to_lines(
