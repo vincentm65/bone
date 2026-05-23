@@ -67,12 +67,12 @@ impl App {
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
-        let mut terminal: Option<BoneTerminal> = Some(Renderer::init_terminal(MIN_ROWS)?);
+        let mut terminal = Renderer::init_terminal(MIN_ROWS)?;
 
         self.renderer
-            .flush_new_to_scrollback(&self.messages, terminal.as_mut().unwrap())?;
+            .flush_new_to_scrollback(&self.messages, &mut terminal)?;
         self.renderer
-            .render_banner(terminal.as_mut().unwrap(), &self.provider, &self.model)?;
+            .render_banner(&mut terminal, &self.provider, &self.model)?;
         self.force_redraw(&mut terminal)?;
 
         // Main event loop
@@ -116,20 +116,20 @@ impl App {
                     .last()
                     .map(|m| m.content.as_str())
                     .unwrap_or(""),
-                terminal.as_mut().unwrap(),
+                &mut terminal,
             )?;
             self.renderer
-                .flush_new_to_scrollback(&self.messages, terminal.as_mut().unwrap())?;
+                .flush_new_to_scrollback(&self.messages, &mut terminal)?;
         }
 
-        Renderer::prepare_exit(terminal.as_mut().unwrap())?;
+        Renderer::prepare_exit(&mut terminal)?;
         Renderer::shutdown_terminal()?;
         Ok(())
     }
 
     /// Ensure the viewport is the right size, then draw.
-    fn ensure_viewport_and_draw(&mut self, terminal: &mut Option<BoneTerminal>) -> io::Result<()> {
-        let width = terminal.as_ref().unwrap().size()?.width;
+    fn ensure_viewport_and_draw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        let width = terminal.size()?.width;
         let desired = Renderer::desired_height(&self.input, self.active_prompt.as_ref(), width);
 
         if desired != self.renderer.viewport_height {
@@ -137,32 +137,61 @@ impl App {
             self.renderer.viewport_height = desired;
         }
 
-        terminal.as_mut().unwrap().draw(|frame| self.draw(frame))?;
+        terminal.draw(|frame| self.draw(frame))?;
         Ok(())
     }
 
     /// Redraw from scratch, updating the tracked terminal size.
     /// Used after resize or stale-size detection.
-    fn force_redraw(&mut self, terminal: &mut Option<BoneTerminal>) -> io::Result<()> {
+    fn force_redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
         self.ensure_viewport_and_draw(terminal)?;
         self.renderer.last_size = Some(crossterm::terminal::size()?);
         Ok(())
     }
 
-    fn redraw(&mut self, terminal: &mut Option<BoneTerminal>) -> io::Result<()> {
+    fn redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
         self.ensure_viewport_and_draw(terminal)
     }
 
     pub(crate) fn status_info(&self) -> StatusInfo {
-        StatusInfo {
-            model: self.model.clone(),
-            token_stats: self.token_stats.clone(),
-            streaming: self.streaming,
-            approval_mode: self.approval_mode,
-            queue_len: self.queue.len(),
-        }
+        self.stream_status_info_with_tokens(None)
     }
 
+    /// Build a [`StatusInfo`] for the streaming spinner wait, with an optional
+    /// live cumulative output-token estimate.
+    fn stream_status_info_with_tokens(&self, estimated_tokens: Option<u64>) -> StatusInfo {
+        stream_status_info_with_token_stats(
+            estimated_tokens,
+            &self.model,
+            &self.token_stats,
+            self.streaming,
+            self.approval_mode,
+            self.queue.len(),
+        )
+    }
+
+}
+
+/// Build a [`StatusInfo`] with a live streaming cumulative output-token estimate.
+pub(crate) fn stream_status_info_with_token_stats(
+    streaming_completion_tokens: Option<u64>,
+    model: &str,
+    token_stats: &crate::llm::TokenStats,
+    streaming: bool,
+    approval_mode: crate::tools::ApprovalMode,
+    queue_len: usize,
+) -> StatusInfo {
+    StatusInfo {
+        model: model.to_string(),
+        token_stats: token_stats.clone(),
+        streaming_completion_tokens,
+        streaming,
+        approval_mode,
+        queue_len,
+    }
+}
+
+impl App {
     fn draw(&self, frame: &mut ratatui::Frame) {
         self.renderer.draw_bottom_pane(
             frame,
@@ -176,7 +205,7 @@ impl App {
         &mut self,
         code: KeyCode,
         modifiers: KeyModifiers,
-        term: &mut Option<BoneTerminal>,
+        term: &mut BoneTerminal,
     ) -> io::Result<()> {
         // If a blocking prompt is active, only prompt keys are handled.
         if self.active_prompt.is_some() {
@@ -212,7 +241,7 @@ impl App {
     fn handle_prompt_key(
         &mut self,
         code: KeyCode,
-        term: &mut Option<BoneTerminal>,
+        term: &mut BoneTerminal,
     ) -> io::Result<()> {
         match code {
             KeyCode::Up => {
@@ -227,18 +256,13 @@ impl App {
                 }
                 self.redraw(term)?;
             }
-            KeyCode::Enter | KeyCode::Esc => {
-                // Enter/Esc on a prompt in the main loop should dismiss it.
-                // Currently unreachable — prompts use a blocking mini-event-loop
-                // in prompt_and_wait — but guard against future non-blocking paths.
-            }
             _ => {}
         }
         Ok(())
     }
 
     /// Handle Ctrl+C: cancel streaming response, or quit on double-tap.
-    fn handle_ctrl_c(&mut self, term: &mut Option<BoneTerminal>) -> io::Result<()> {
+    fn handle_ctrl_c(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let now = Instant::now();
         let double_tap = self
             .last_ctrl_c
@@ -266,7 +290,7 @@ impl App {
     pub(crate) fn prompt_and_wait(
         &mut self,
         call: &ToolCall,
-        term: &mut Option<BoneTerminal>,
+        term: &mut BoneTerminal,
     ) -> io::Result<Decision> {
         let summary = match call.name.as_str() {
             "read_file" | "write_file" | "edit_file" => {
@@ -332,7 +356,7 @@ impl App {
     pub(super) async fn handle_command(
         &mut self,
         input: &str,
-        term: &mut Option<BoneTerminal>,
+        term: &mut BoneTerminal,
     ) -> io::Result<()> {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0].to_string();
@@ -345,7 +369,7 @@ impl App {
             &mut self.transcript,
             &mut self.token_stats,
             &mut self.renderer,
-            term.as_mut().unwrap(),
+            term,
             &mut self.llm,
             &mut self.provider,
             &mut self.model,
@@ -360,7 +384,7 @@ impl App {
             commands::CommandResult::Continue { reply } => {
                 self.messages.push(Message::system(reply));
                 self.renderer
-                    .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
+                    .flush_new_to_scrollback(&self.messages, term)?;
                 self.redraw(term)?;
             }
         }

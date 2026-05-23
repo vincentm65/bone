@@ -24,4 +24,10 @@ Tool rules:
 - Do not guess paths or file contents; inspect them with tools when needed.
 - Keep responses concise and ask only when required to avoid doing the wrong thing.
 
+edit_file rules:
+- Always read_file the target region before editing. Copy search text verbatim from the read output — character for character, including indentation, blank lines, trailing commas, and closing braces.
+- In the edits array, each edit must use exactly one operation: search+replace, delete, insert_before+text, or insert_after+text. Never combine operations in one edit object.
+- Include 3-5 lines of surrounding context in search text so it is unique in the file. A single line like `}` or `pub fn foo()` will match many locations and fail.
+- When multiple edits target the same file, list them in top-to-bottom order. Each edit applies to the result of the previous one, so later search text must account for earlier changes.
+
 ";

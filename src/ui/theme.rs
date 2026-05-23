@@ -13,15 +13,16 @@ pub struct Theme {
     pub tool_error: Color,
     pub diff_removed: Color,
     pub diff_added: Color,
+    pub thinking: Color,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
             user_msg: Color::Gray,
-            status_text: Color::White,
+            status_text: Color::DarkGray,
             input_border: Color::DarkGray,
-            system_msg: Color::DarkGray,
+            system_msg: Color::White,
             approval_safe: Color::Rgb(120, 179, 115), // #78B373 — safe green (vmcode)
             approval_edits: Color::Rgb(184, 160, 64), // #B8A040 — muted gold (vmcode)
             approval_danger: Color::Rgb(224, 80, 80), // #E05050 — danger red (vmcode)
@@ -29,6 +30,7 @@ impl Default for Theme {
             tool_error: Color::Red,
             diff_removed: Color::Rgb(135, 1, 1),
             diff_added: Color::Rgb(0, 95, 0),
+            thinking: Color::Rgb(140, 220, 220), // pastel cyan
         }
     }
 }

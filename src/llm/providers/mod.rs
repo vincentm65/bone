@@ -11,19 +11,25 @@ pub fn create_provider_with_config(
 ) -> Result<Box<dyn LlmProvider>, LlmError> {
     if let Some(entry) = config.providers.get(id) {
         match entry.handler.as_str() {
-            "codex" => return Ok(Box::new(codex::codex_provider::CodexProvider::from_entry(
-                id, entry,
-            ))),
-            "openai" | "" => return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(
-                id, entry,
-            ))),
-            _ => return Err(LlmError::new_with_kind(
-                LlmErrorKind::Config,
-                format!(
-                    "unsupported handler `{}` for provider `{id}`; supported: openai, codex",
-                    entry.handler
-                ),
-            )),
+            "codex" => {
+                return Ok(Box::new(codex::codex_provider::CodexProvider::from_entry(
+                    id, entry,
+                )));
+            }
+            "openai" | "" => {
+                return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(
+                    id, entry,
+                )));
+            }
+            _ => {
+                return Err(LlmError::new_with_kind(
+                    LlmErrorKind::Config,
+                    format!(
+                        "unsupported handler `{}` for provider `{id}`; supported: openai, codex",
+                        entry.handler
+                    ),
+                ));
+            }
         }
     }
 

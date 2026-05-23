@@ -29,6 +29,10 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reasoning/thinking content from DeepSeek V4 thinking mode.
+    /// Must be passed back when the assistant turn involved tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -39,6 +43,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         }
     }
 
@@ -56,6 +61,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: Some(result.call_id),
             name: Some(result.name),
+            reasoning_content: None,
         }
     }
 }
@@ -63,6 +69,8 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
     TextDelta(String),
+    /// Reasoning/thinking token from DeepSeek V4 thinking mode.
+    ReasoningDelta(String),
     ToolCall(ToolCall),
     /// Token usage from the provider's response (real counts, not estimates).
     TokenUsage {

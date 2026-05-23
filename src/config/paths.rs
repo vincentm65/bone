@@ -9,7 +9,9 @@ fn bone_dir() -> PathBuf {
         .ok()
         .map(|home| PathBuf::from(home).join(".bone-rust"))
         .unwrap_or_else(|| {
-            eprintln!("bone: warning: neither $HOME nor $XDG_CONFIG_HOME is set; using /tmp/.bone-rust");
+            eprintln!(
+                "bone: warning: neither $HOME nor $XDG_CONFIG_HOME is set; using /tmp/.bone-rust"
+            );
             PathBuf::from("/tmp/.bone-rust")
         })
 }

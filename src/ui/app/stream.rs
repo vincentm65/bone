@@ -26,7 +26,7 @@ impl App {
         );
     }
 
-    pub(crate) async fn send_message(&mut self, term: &mut Option<BoneTerminal>) -> io::Result<()> {
+    pub(crate) async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let text = self.input.buffer.trim().to_string();
         if text.is_empty() {
             return Ok(());
@@ -45,32 +45,36 @@ impl App {
 
         // Flush the submitted message before resetting the input.
         self.renderer
-            .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
+            .flush_new_to_scrollback(&self.messages, term)?;
         self.input.reset();
         self.redraw(term)?;
 
         let mut history = build_chat_history(&self.transcript);
 
         self.streaming = true;
-        self.messages.push(Message::assistant(String::new()));
-        self.renderer.streaming_lines_flushed = 0;
-        self.renderer.scrollback_cursor += 1;
-        let assistant_idx = self.messages.len() - 1;
         self.redraw(term)?;
 
         let mut rounds = 0u32;
+        let final_assistant_idx;
         loop {
             rounds += 1;
+            self.messages.push(Message::assistant(String::new()));
+            self.renderer.streaming_lines_flushed = 0;
+            self.renderer.scrollback_cursor += 1;
+            let assistant_idx = self.messages.len() - 1;
+
             if rounds > 64 {
                 self.messages[assistant_idx]
                     .content
                     .push_str("\n[tool-call round limit reached]");
+                final_assistant_idx = assistant_idx;
                 break;
             }
             if self.cancel_streaming {
                 self.messages[assistant_idx]
                     .content
                     .push_str("\n[cancelled]");
+                final_assistant_idx = assistant_idx;
                 break;
             }
 
@@ -81,10 +85,17 @@ impl App {
                 self.messages[assistant_idx]
                     .content
                     .push_str("\n[cancelled]");
+                final_assistant_idx = assistant_idx;
                 break;
             }
 
             let mut tool_calls = Vec::new();
+            // Accumulate reasoning/thinking content (DeepSeek V4) so it
+            // can be passed back in the assistant message history.
+            let mut reasoning_content = String::new();
+            // Live estimate of cumulative output tokens during streaming.
+            // Start from the current total, then replace with real usage when it arrives.
+            let mut stream_estimated_received = self.token_stats.received;
             match stream_result {
                 Ok(mut stream) => {
                     let mut spinner = time::interval(Duration::from_millis(90));
@@ -100,16 +111,22 @@ impl App {
                             chunk = stream.next() => match chunk {
                                 Some(Ok(ChatEvent::TextDelta(text))) => {
                                     self.messages[assistant_idx].content.push_str(&text);
+                                    // Increment estimate: ~6 UTF-8 chars per token, rounded down to avoid overstating live output.
+                                    stream_estimated_received += text.len() as u64 / 6;
                                     self.renderer.redraw_streaming_message(
                                         &self.messages[assistant_idx].content,
-                                        term.as_mut().unwrap(),
+                                        term,
                                         &self.input,
-                                        &self.status_info(),
+                                        &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
                                     )?;
+                                }
+                                Some(Ok(ChatEvent::ReasoningDelta(text))) => {
+                                    reasoning_content.push_str(&text);
                                 }
                                 Some(Ok(ChatEvent::ToolCall(call))) => tool_calls.push(call),
                                 Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens })) => {
                                     self.token_stats.record_request(prompt_tokens, completion_tokens);
+                                    stream_estimated_received = self.token_stats.received;
                                     had_usage = true;
                                 }
                                 Some(Err(err)) => {
@@ -124,7 +141,7 @@ impl App {
                                     self.messages[assistant_idx].content.push_str("\n[cancelled]");
                                     break;
                                 }
-                                self.renderer.tick_spinner(term.as_mut().unwrap(), &self.input, &self.status_info())?;
+                                self.renderer.tick_spinner(term, &self.input, &self.stream_status_info_with_tokens(Some(stream_estimated_received)))?;
                             }
                         }
                     }
@@ -147,31 +164,40 @@ impl App {
                     } else {
                         self.messages[assistant_idx].content = format!("[provider error: {err}]");
                     }
+                    final_assistant_idx = assistant_idx;
                     break;
                 }
             }
 
             if tool_calls.is_empty() || self.cancel_streaming {
-                self.transcript.push(ChatMessage::new(
+                let mut msg = ChatMessage::new(
                     ChatRole::Assistant,
                     self.messages[assistant_idx].content.clone(),
-                ));
+                );
+                if !reasoning_content.is_empty() {
+                    msg.reasoning_content = Some(reasoning_content);
+                }
+                self.transcript.push(msg);
+                final_assistant_idx = assistant_idx;
                 break;
             }
 
-            let assistant = ChatMessage::assistant_with_tools(
+            let mut assistant = ChatMessage::assistant_with_tools(
                 self.messages[assistant_idx].content.clone(),
                 tool_calls.clone(),
             );
+            // DeepSeek V4 thinking mode: reasoning_content MUST be passed
+            // back when the assistant turn involved tool calls.
+            if !reasoning_content.is_empty() {
+                assistant.reasoning_content = Some(reasoning_content);
+            }
             history.push(assistant.clone());
             self.transcript.push(assistant);
 
-            // Reset the display slot so the next round starts fresh.
-            // Without this, each round appends to the accumulated content,
-            // causing earlier rounds' text to be duplicated in transcript
-            // and sent back to the LLM on the next request.
-            self.messages[assistant_idx].content.clear();
-            self.renderer.streaming_lines_flushed = 0;
+            self.renderer.finalize_streaming_message(
+                &self.messages[assistant_idx].content,
+                term,
+            )?;
 
             // Per-call approval.  Calls auto-approved by the current mode
             // are collected; the rest block with an interactive prompt.
@@ -189,7 +215,7 @@ impl App {
                                 serde_json::Value::String(preview.before_hash);
                             self.messages.push(Message::system(preview.diff));
                             self.renderer
-                                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
+                                .flush_new_to_scrollback(&self.messages, term)?;
                         }
                         Err(err) => {
                             let path = call.arguments["path"].as_str().unwrap_or("?");
@@ -197,7 +223,7 @@ impl App {
                                 "edit_file preview failed for {path}: {err}"
                             )));
                             self.renderer
-                                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
+                                .flush_new_to_scrollback(&self.messages, term)?;
                             preview_errors[i] = err;
                             continue;
                         }
@@ -267,17 +293,11 @@ impl App {
                 })
                 .collect();
 
-            // If every tool call failed, discard the assistant's preamble so the
-            // retry doesn't duplicate its explanation.
-            if results.iter().all(|r| r.is_error) {
-                self.messages[assistant_idx].content.clear();
-            }
-
             for (call, result) in calls_for_display.iter().zip(results.iter()) {
                 self.messages.push(build_tool_row(call, result));
             }
             self.renderer
-                .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
+                .flush_new_to_scrollback(&self.messages, term)?;
 
             for result in results {
                 let message = ChatMessage::tool(result);
@@ -290,11 +310,11 @@ impl App {
         self.cancel_streaming = false;
         self.last_ctrl_c = None;
         self.renderer.finalize_streaming_message(
-            &self.messages[assistant_idx].content,
-            term.as_mut().unwrap(),
+            &self.messages[final_assistant_idx].content,
+            term,
         )?;
         self.renderer
-            .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
+            .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
 
         Ok(())
@@ -303,7 +323,7 @@ impl App {
     async fn wait_for_stream(
         &mut self,
         history: Vec<crate::llm::ChatMessage>,
-        term: &mut Option<BoneTerminal>,
+        term: &mut BoneTerminal,
     ) -> (
         Result<crate::llm::ResponseStream, crate::llm::LlmError>,
         usize,
@@ -329,10 +349,11 @@ impl App {
                 _ = &mut spinner => {
                     renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
                     Self::drain_keys(input, queue, approval_mode, cancel);
-                    term.as_mut().unwrap().draw(|frame| {
+                    term.draw(|frame| {
                         renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
                             model: model.clone(),
                             token_stats: token_stats.clone(),
+                            streaming_completion_tokens: None,
                             streaming: true,
                             approval_mode: *approval_mode,
                             queue_len: queue.len(),

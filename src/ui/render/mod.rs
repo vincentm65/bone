@@ -28,6 +28,8 @@ pub type BoneTerminal = Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
 pub struct StatusInfo {
     pub model: String,
     pub token_stats: TokenStats,
+    /// Live cumulative output-token estimate during streaming.
+    pub streaming_completion_tokens: Option<u64>,
     pub streaming: bool,
     pub approval_mode: ApprovalMode,
     pub queue_len: usize,
@@ -86,11 +88,10 @@ impl Renderer {
     /// Since ratatui doesn't expose `set_viewport_height()`, we clear the
     /// old viewport, drop it, and create a fresh one. This is the same
     /// approach Codex uses — the cost is negligible and invisible.
-    pub fn resize_viewport(term: &mut Option<BoneTerminal>, new_height: u16) -> io::Result<()> {
-        if let Some(mut t) = term.take() {
-            t.clear()?;
-            drop(t);
-        }
+    pub fn resize_viewport(term: &mut BoneTerminal, new_height: u16) -> io::Result<()> {
+        // Clear the current viewport before swapping.
+        term.clear()?;
+        // Replace with a fresh terminal at the new height.
         let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
         let new_term = Terminal::with_options(
             backend,
@@ -98,7 +99,7 @@ impl Renderer {
                 viewport: Viewport::Inline(new_height),
             },
         )?;
-        *term = Some(new_term);
+        *term = new_term;
         Ok(())
     }
 

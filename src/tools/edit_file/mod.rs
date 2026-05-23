@@ -337,17 +337,20 @@ fn match_offsets(content: &str, needle: &str) -> Vec<usize> {
 
 fn match_error(content: &str, needle: &str, label: &str, offsets: &[usize]) -> String {
     if offsets.is_empty() {
-        let mut msg = format!(
-            "{label} matched 0 times; expected exactly 1"
-        );
+        let mut msg = format!("{label} matched 0 times; expected exactly 1");
         if let Some(hint) = find_closest_lines(content, needle) {
             msg.push_str(&format!(
                 "\n\nClosest region in file (around line {}):\n{}",
                 hint.line, hint.snippet
             ));
+            // Diagnose common causes: whitespace mismatch, trailing newline, etc.
+            let diag = diagnose_mismatch(&hint.snippet, needle);
+            if !diag.is_empty() {
+                msg.push_str(&format!("\n\nLikely cause: {diag}"));
+            }
         }
         msg.push_str(
-            "\n\nTip: include exact indentation, blank lines, and enough surrounding context.",
+            "\n\nTip: read_file the target region first, then copy the exact text verbatim into search.",
         );
         return msg;
     }
@@ -374,6 +377,56 @@ fn match_error(content: &str, needle: &str, label: &str, offsets: &[usize]) -> S
 struct ClosestHint {
     line: usize,
     snippet: String,
+}
+
+/// Compare the closest file region with the needle to identify likely causes of mismatch.
+fn diagnose_mismatch(file_region: &str, needle: &str) -> String {
+    let file_trimmed: Vec<&str> = file_region.lines().map(|l| l.trim_end()).collect();
+    let needle_trimmed: Vec<&str> = needle.lines().map(|l| l.trim_end()).collect();
+    let mut causes: Vec<String> = Vec::new();
+
+    // Check trailing whitespace difference
+    if file_trimmed == needle_trimmed {
+        causes
+            .push("trailing whitespace differs (tabs vs spaces, or extra trailing spaces)".into());
+    }
+
+    // Check indentation mismatch
+    let file_prefixes: Vec<&str> = file_region
+        .lines()
+        .map(|l| {
+            l.split_once(|c: char| !c.is_whitespace())
+                .map(|(p, _)| p)
+                .unwrap_or(l)
+        })
+        .collect();
+    let needle_prefixes: Vec<&str> = needle
+        .lines()
+        .map(|l| {
+            l.split_once(|c: char| !c.is_whitespace())
+                .map(|(p, _)| p)
+                .unwrap_or(l)
+        })
+        .collect();
+    if file_prefixes.len() == needle_prefixes.len() && file_prefixes != needle_prefixes {
+        causes.push("indentation differs (tabs vs spaces, or wrong indent level)".into());
+    }
+
+    // Check line count mismatch
+    let fl = file_region.lines().count();
+    let nl = needle.lines().count();
+    if fl != nl {
+        causes.push(format!(
+            "line count differs (file has {fl}, search text has {nl})"
+        ));
+    }
+
+    // Check trailing newline
+    if file_region.ends_with('\n') != needle.ends_with('\n') && fl == nl {
+        causes.push("trailing newline mismatch".into());
+    }
+
+    causes.join("; ")
 }
 
 /// Find the region in `content` that best matches `needle` using the first
@@ -437,13 +490,7 @@ fn common_substring_len(a: &str, b: &str) -> usize {
         let chunk = &short_bytes[i..i + window];
         let matches = long_bytes
             .windows(window)
-            .map(|w| {
-                chunk
-                    .iter()
-                    .zip(w.iter())
-                    .filter(|(a, b)| a == b)
-                    .count()
-            })
+            .map(|w| chunk.iter().zip(w.iter()).filter(|(a, b)| a == b).count())
             .max()
             .unwrap_or(0);
         if matches > best {

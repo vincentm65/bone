@@ -112,14 +112,18 @@ impl CodexInputItem {
     fn user_text(text: &str) -> Self {
         Self::Message {
             role: "user",
-            content: vec![CodexContent::InputText { text: text.to_string() }],
+            content: vec![CodexContent::InputText {
+                text: text.to_string(),
+            }],
         }
     }
 
     fn assistant_text(text: &str) -> Self {
         Self::Message {
             role: "assistant",
-            content: vec![CodexContent::OutputText { text: text.to_string() }],
+            content: vec![CodexContent::OutputText {
+                text: text.to_string(),
+            }],
         }
     }
 
@@ -269,7 +273,11 @@ fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32
             }
             let args = serde_json::from_str(item.arguments.as_deref().unwrap_or("null"))
                 .unwrap_or(Value::Null);
-            Some(ChatEvent::ToolCall(ToolCall { id, name, arguments: args }))
+            Some(ChatEvent::ToolCall(ToolCall {
+                id,
+                name,
+                arguments: args,
+            }))
         })
         .collect();
 
@@ -277,7 +285,10 @@ fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32
         u.input_tokens
             .map(|i| i as u32)
             .zip(u.output_tokens.map(|o| o as u32))
-            .or_else(|| u.total_tokens.map(|t| (t as u32 / 2, t as u32 - t as u32 / 2)))
+            .or_else(|| {
+                u.total_tokens
+                    .map(|t| (t as u32 / 2, t as u32 - t as u32 / 2))
+            })
     });
 
     (tool_calls, usage)

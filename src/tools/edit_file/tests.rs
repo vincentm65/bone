@@ -254,12 +254,9 @@ async fn expected_hash_mismatch_preserves_file() {
 #[tokio::test]
 async fn zero_match_includes_closest_region_hint() {
     let path = temp_path("hint.txt");
-    fs::write(
-        &path,
-        "fn main() {\n    println!(\"hello\");\n}\n",
-    )
-    .await
-    .expect("setup");
+    fs::write(&path, "fn main() {\n    println!(\"hello\");\n}\n")
+        .await
+        .expect("setup");
     let tool = EditFileTool;
 
     let result = tool

@@ -53,6 +53,10 @@ impl OpenAiCompatProvider {
     fn chat_url(&self) -> String {
         format!("{}{}", self.base_url, self.endpoint)
     }
+
+    fn is_local(&self) -> bool {
+        self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost")
+    }
 }
 
 #[derive(Serialize)]
@@ -85,6 +89,10 @@ struct OpenAiMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// DeepSeek V4 thinking mode requires this to be passed back when
+    /// the assistant turn involved tool calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -164,10 +172,10 @@ fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 .collect(),
             tool_call_id: message.tool_call_id,
             name: message.name,
+            reasoning_content: message.reasoning_content,
         })
         .collect()
 }
-
 
 /// Flush accumulated partial tool calls, emitting a [`ChatEvent::ToolCall`]
 /// for each complete entry (id and name must be non-empty).
@@ -222,6 +230,16 @@ fn process_sse_chunk(
         events.push(ChatEvent::TextDelta(content.to_string()));
     }
 
+    // DeepSeek V4 thinking mode sends reasoning_content in the delta.
+    // Must be captured and passed back in subsequent requests when tool
+    // calls are involved, or DeepSeek returns 400.
+    if let Some(reasoning) = delta
+        .get("reasoning_content")
+        .and_then(|r| r.as_str())
+    {
+        events.push(ChatEvent::ReasoningDelta(reasoning.to_string()));
+    }
+
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|calls| calls.as_array()) {
         for (fallback_index, call) in tool_calls.iter().enumerate() {
             let index = call
@@ -274,9 +292,7 @@ impl LlmProvider for OpenAiCompatProvider {
     async fn validate(&self) -> Result<(), LlmError> {
         // Only attempt health check for local providers, as others like Gemini
         // might not have a /health endpoint or might require an API key.
-        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
-
-        if is_local && self.api_key.is_empty() {
+        if self.is_local() && self.api_key.is_empty() {
             let health_url = format!("{}/health", self.base_url);
             let resp = self.client.get(&health_url).send().await;
             match resp {
@@ -306,12 +322,8 @@ impl LlmProvider for OpenAiCompatProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
-        // stream_options is OpenAI-specific; many compat providers (DeepSeek,
-        // GLM, local llama.cpp) reject unknown top-level fields with 400.
-        let stream_options = self
-            .base_url
-            .contains("api.openai.com")
-            .then(|| StreamOptions {
+        let stream_options =
+            (self.base_url.contains("api.openai.com") || self.is_local()).then(|| StreamOptions {
                 include_usage: true,
             });
 

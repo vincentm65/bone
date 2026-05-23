@@ -2,9 +2,7 @@ use super::*;
 
 #[test]
 fn test_build_instructions_empty() {
-    let messages = vec![
-        ChatMessage::new(ChatRole::User, "Hello"),
-    ];
+    let messages = vec![ChatMessage::new(ChatRole::User, "Hello")];
     let instructions = build_instructions(&messages);
     assert_eq!(instructions, "You are a helpful assistant.");
 }
@@ -21,9 +19,7 @@ fn test_build_instructions_with_system() {
 
 #[test]
 fn test_build_codex_messages_user() {
-    let messages = vec![
-        ChatMessage::new(ChatRole::User, "Hello world"),
-    ];
+    let messages = vec![ChatMessage::new(ChatRole::User, "Hello world")];
     let items = build_codex_messages(messages);
     assert_eq!(items.len(), 1);
 }

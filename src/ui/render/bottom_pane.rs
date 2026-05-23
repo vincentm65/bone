@@ -100,7 +100,7 @@ impl super::Renderer {
             // Options — one per line
             for (i, option) in prompt.options.iter().enumerate() {
                 let selected = i == prompt.selected;
-                let (marker, style) = if selected {
+                let (marker, marker_style) = if selected {
                     (
                         ">",
                         Style::default()
@@ -110,10 +110,11 @@ impl super::Renderer {
                 } else {
                     (" ", Style::default().fg(ratatui::style::Color::DarkGray))
                 };
+                let option_style = Style::default().fg(ratatui::style::Color::White);
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
-                        Span::styled(format!("  {} ", marker), style),
-                        Span::styled(option.clone(), style),
+                        Span::styled(format!("  {} ", marker), marker_style),
+                        Span::styled(option.clone(), option_style),
                     ])),
                     Rect {
                         y,
@@ -173,7 +174,9 @@ impl super::Renderer {
             ),
             Span::styled(" | ", Style::default().fg(self.theme.status_text)),
             Span::styled(
-                status_info.token_stats.display(),
+                status_info
+                    .token_stats
+                    .display_with_received_override(status_info.streaming_completion_tokens),
                 Style::default().fg(self.theme.status_text),
             ),
         ];
@@ -195,7 +198,11 @@ impl super::Renderer {
                 Style::default().fg(self.theme.status_text),
             ));
             status_spans.push(Span::styled(
-                format!("{} thinking", SPINNER[tick % SPINNER.len()]),
+                SPINNER[tick % SPINNER.len()],
+                Style::default().fg(self.theme.thinking),
+            ));
+            status_spans.push(Span::styled(
+                " thinking",
                 Style::default().fg(self.theme.status_text),
             ));
         }

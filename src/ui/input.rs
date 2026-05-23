@@ -60,13 +60,14 @@ impl InputState {
             return;
         }
         let prev_char_idx = self.cursor_pos - 1;
-        let prev_byte = self
+        // Find the byte range of the character to remove.
+        let (start_byte, ch) = self
             .buffer
             .char_indices()
             .nth(prev_char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        self.buffer.remove(prev_byte);
+            .map(|(i, c)| (i, c))
+            .unwrap_or((0, '\0'));
+        self.buffer.replace_range(start_byte..start_byte + ch.len_utf8(), "");
         self.cursor_pos = prev_char_idx;
     }
 
@@ -169,6 +170,10 @@ impl InputState {
 
     pub fn reset(&mut self) {
         if !self.buffer.is_empty() {
+            // Deduplicate: remove previous occurrence if it exists
+            if let Some(pos) = self.history.iter().rposition(|s| s == &self.buffer) {
+                self.history.remove(pos);
+            }
             self.history.push(self.buffer.clone());
         }
         self.buffer.clear();

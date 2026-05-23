@@ -15,10 +15,10 @@ fn record_real_usage() {
 fn record_estimate() {
     let mut stats = TokenStats::new();
     stats.record_estimate(400, 200);
-    // 400/4 = 100, 200/4 = 50
-    assert_eq!(stats.sent, 100);
-    assert_eq!(stats.received, 50);
-    assert_eq!(stats.context_length, 100);
+    // 400/3.5 = 114.3 → ceil = 115, 200/3.5 = 57.1 → ceil = 58
+    assert_eq!(stats.sent, 115);
+    assert_eq!(stats.received, 58);
+    assert_eq!(stats.context_length, 115);
 }
 
 #[test]
@@ -28,26 +28,38 @@ fn format_tokens_small() {
 
 #[test]
 fn format_tokens_thousands() {
-    assert_eq!(format_tokens(1234), "1234");
-    assert_eq!(format_tokens(9999), "9999");
-    assert_eq!(format_tokens(10_000), "10.0k");
-    assert_eq!(format_tokens(12_345), "12.3k");
+    assert_eq!(format_tokens(1_234), "1,234");
+    assert_eq!(format_tokens(9_999), "9,999");
+    assert_eq!(format_tokens(10_000), "10,000");
+    assert_eq!(format_tokens(12_345), "12,345");
 }
 
 #[test]
 fn format_tokens_millions() {
-    assert_eq!(format_tokens(12_345_678), "12.3M");
+    assert_eq!(format_tokens(1_000_000), "1,000,000");
+    assert_eq!(format_tokens(1_234_567), "1,234,567");
+    assert_eq!(format_tokens(12_345_678), "12,345,678");
 }
 
 #[test]
 fn display_format() {
     let mut stats = TokenStats::new();
     stats.record_request(1234, 56);
-    assert_eq!(stats.display(), "curr: 1234 in: 1234 out: 56");
+    assert_eq!(stats.display(), "curr 1,234 | in 1,234 | out 56");
 }
 
 #[test]
 fn display_format_no_context() {
     let stats = TokenStats::new();
-    assert_eq!(stats.display(), "curr: 0 in: 0 out: 0");
+    assert_eq!(stats.display(), "curr 0 | in 0 | out 0");
+}
+
+#[test]
+fn display_received_override_is_cumulative() {
+    let mut stats = TokenStats::new();
+    stats.record_request(100, 25);
+    assert_eq!(
+        stats.display_with_received_override(Some(stats.received + 10)),
+        "curr 100 | in 100 | out 35"
+    );
 }

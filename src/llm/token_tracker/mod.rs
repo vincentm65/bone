@@ -1,3 +1,4 @@
+use num_format::ToFormattedString;
 /// Lightweight token usage tracker.
 ///
 /// Tracks cumulative tokens sent to and received from the LLM provider.
@@ -33,8 +34,8 @@ impl TokenStats {
 
     /// Record a request using a fallback character-based estimate.
     pub fn record_estimate(&mut self, prompt_chars: usize, completion_chars: usize) {
-        // Rough heuristic: ~4 UTF-8 chars per token for typical text.
-        let chars_per_token = 4.0;
+        // Rough heuristic: ~3.5 UTF-8 chars per token for typical text.
+        let chars_per_token = 3.5;
         let estimated_prompt = (prompt_chars as f64 / chars_per_token).ceil() as u64;
         self.context_length = estimated_prompt;
         self.sent += estimated_prompt;
@@ -48,26 +49,27 @@ impl TokenStats {
         self.sent + self.received
     }
 
-    /// Format for display: "curr: 1.2k in: 1.2k out: 340".
+    /// Format for display: "curr 1,234 | in 1,234 | out 340".
     pub fn display(&self) -> String {
+        self.display_with_received_override(None)
+    }
+
+    /// Format for display, optionally overriding the cumulative received count.
+    /// Used during streaming to show a live estimate until provider usage arrives.
+    pub fn display_with_received_override(&self, received_override: Option<u64>) -> String {
+        let received = received_override.unwrap_or(self.received);
         format!(
-            "curr: {} in: {} out: {}",
+            "curr {} | in {} | out {}",
             format_tokens(self.context_length),
             format_tokens(self.sent),
-            format_tokens(self.received)
+            format_tokens(received)
         )
     }
 }
 
-/// Format a token count for display.
+/// Format a token count with comma-separated thousands.
 fn format_tokens(count: u64) -> String {
-    if count >= 10_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    } else if count >= 10_000 {
-        format!("{:.1}k", count as f64 / 1_000.0)
-    } else {
-        count.to_string()
-    }
+    count.to_formatted_string(&num_format::Locale::en)
 }
 
 #[cfg(test)]
