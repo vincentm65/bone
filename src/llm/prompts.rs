@@ -1,6 +1,9 @@
 /// Default system prompt injected at the start of every conversation.
-pub fn system_prompt() -> &'static str {
-    SYSTEM_PROMPT
+pub fn system_prompt() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("{SYSTEM_PROMPT}\nCurrent working directory: {cwd}\n")
 }
 
 static SYSTEM_PROMPT: &str = "\
