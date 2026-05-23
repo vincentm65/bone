@@ -360,11 +360,12 @@ fn bash_policy_is_source_of_truth() {
     );
     assert!(ApprovalMode::Safe.allows_call(&rg_stderr_dev_null));
 
+    // Shell-wrapper peeling: `bash rg …` should classify as ReadOnly (inner command is rg).
     let bash_wrapped_rg = call(
         "bash",
         json!({ "command": "bash rg -t py --no-filename -l approval 2>/dev/null", "classification": "read_only" }),
     );
-    assert!(!ApprovalMode::Safe.allows_call(&bash_wrapped_rg));
+    assert!(ApprovalMode::Safe.allows_call(&bash_wrapped_rg));
 
     let git_status = call(
         "bash",
@@ -384,4 +385,149 @@ fn bash_policy_is_source_of_truth() {
         json!({ "command": "ls", "classification": "danger" }),
     );
     assert!(ApprovalMode::Safe.allows_call(&ls));
+}
+
+// ------------------------------------------------------------------
+// Shell-wrapper peeling tests
+// ------------------------------------------------------------------
+
+#[test]
+fn peel_bash_prefix() {
+    // `bash rg …` → classifies inner `rg` as ReadOnly
+    assert_eq!(
+        classify_command("bash rg -n struct ToolCall --type rust"),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        classify_command("bash cd /home && rg -n foo"),
+        CommandSafety::ReadOnly // `cd` is now in readonly allowlist
+    );
+}
+
+#[test]
+fn peel_sh_c_quoted() {
+    assert_eq!(
+        classify_command("sh -c \"rg -n foo\""),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        classify_command("sh -c 'rg -n foo'"),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        classify_command("sh -c \"rm -rf /\""),
+        CommandSafety::Danger
+    );
+}
+
+#[test]
+fn peel_bash_c_unquoted() {
+    assert_eq!(
+        classify_command("bash -c rg -n foo"),
+        CommandSafety::ReadOnly
+    );
+}
+
+#[test]
+fn peel_preserves_danger_classification() {
+    // `bash rm …` must still be Danger
+    assert_eq!(classify_command("bash rm -rf /"), CommandSafety::Danger);
+    assert_eq!(
+        classify_command("bash sudo apt install foo"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        classify_command("sh -c \"git push\""),
+        CommandSafety::Danger
+    );
+}
+
+#[test]
+fn peel_preserves_edit_classification() {
+    assert_eq!(classify_command("bash mv a b"), CommandSafety::Edit);
+    assert_eq!(classify_command("bash mkdir foo"), CommandSafety::Edit);
+    assert_eq!(
+        classify_command("zsh -c \"echo hello > file.txt\""),
+        CommandSafety::Edit
+    );
+}
+
+#[test]
+fn no_peel_for_direct_commands() {
+    // Commands not starting with a shell name are unaffected
+    assert_eq!(classify_command("rg -n foo"), CommandSafety::ReadOnly);
+    assert_eq!(classify_command("rm foo"), CommandSafety::Danger);
+    assert_eq!(classify_command("mv a b"), CommandSafety::Edit);
+}
+
+// ------------------------------------------------------------------
+// Compound command splitting tests
+// ------------------------------------------------------------------
+
+#[test]
+fn compound_and_danger() {
+    assert_eq!(
+        classify_command("cd /tmp && rm -rf /"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        classify_command("ls -la && rm -rf /"),
+        CommandSafety::Danger
+    );
+}
+
+#[test]
+fn compound_and_edit() {
+    assert_eq!(
+        classify_command("echo hello && mv a b"),
+        CommandSafety::Edit
+    );
+    assert_eq!(
+        classify_command("cd /tmp && mkdir foo"),
+        CommandSafety::Edit
+    );
+}
+
+#[test]
+fn compound_and_readonly() {
+    assert_eq!(
+        classify_command("ls -la && pwd"),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        classify_command("cd /tmp && ls -la && rg foo"),
+        CommandSafety::ReadOnly
+    );
+}
+
+#[test]
+fn compound_or_and_semicolon() {
+    assert_eq!(
+        classify_command("ls -la || rm -rf /"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        classify_command("ls -la ; rm -rf /"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        classify_command("ls -la ; pwd"),
+        CommandSafety::ReadOnly
+    );
+}
+
+#[test]
+fn compound_with_shell_wrapper() {
+    assert_eq!(
+        classify_command("bash ls -la && rm -rf /"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        classify_command("sh -c 'ls -la ; rm -rf /'"),
+        CommandSafety::Danger
+    );
+    assert_eq!(
+        classify_command("bash cd /tmp && ls -la"),
+        CommandSafety::ReadOnly
+    );
 }

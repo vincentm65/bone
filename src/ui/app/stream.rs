@@ -111,8 +111,8 @@ impl App {
                             chunk = stream.next() => match chunk {
                                 Some(Ok(ChatEvent::TextDelta(text))) => {
                                     self.messages[assistant_idx].content.push_str(&text);
-                                    // Increment estimate: ~6 UTF-8 chars per token, rounded down to avoid overstating live output.
-                                    stream_estimated_received += text.len() as u64 / 6;
+                                    // Increment estimate: ~4 UTF-8 chars per token, rounded down to avoid overstating live output.
+                                    stream_estimated_received += text.len() as u64 / 4;
                                     self.renderer.redraw_streaming_message(
                                         &self.messages[assistant_idx].content,
                                         term,
@@ -123,7 +123,19 @@ impl App {
                                 Some(Ok(ChatEvent::ReasoningDelta(text))) => {
                                     reasoning_content.push_str(&text);
                                 }
-                                Some(Ok(ChatEvent::ToolCall(call))) => tool_calls.push(call),
+                                Some(Ok(ChatEvent::ToolCall(call))) => {
+                                    // Estimate tokens from argument JSON size so the
+                                    // live counter reflects tool activity immediately.
+                                    let arg_tokens = call.arguments.to_string().len() as u64 / 4;
+                                    stream_estimated_received += arg_tokens.max(1);
+                                    tool_calls.push(call);
+                                    self.renderer.redraw_streaming_message(
+                                        &self.messages[assistant_idx].content,
+                                        term,
+                                        &self.input,
+                                        &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
+                                    )?;
+                                }
                                 Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens })) => {
                                     self.token_stats.record_request(prompt_tokens, completion_tokens);
                                     stream_estimated_received = self.token_stats.received;

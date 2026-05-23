@@ -55,9 +55,62 @@ impl CommandSafety {
     }
 }
 
+/// Strip a leading shell invoker (`bash`, `sh`, `zsh`, optionally with `-c`)
+/// so that `bash rg -n …` and `sh -c "rg -n …"` are classified by their
+/// inner command, not by the shell binary name.
+fn peel_shell_wrapper(command: &str) -> &str {
+    let trimmed = command.trim_start();
+    let shells = ["bash", "sh", "zsh", "fish"];
+    for shell in shells {
+        if let Some(rest) = trimmed.strip_prefix(shell) {
+            let rest = rest.trim_start();
+            // Strip `-c` flag (with optional value that may follow)
+            if let Some(after_c) = rest.strip_prefix("-c") {
+                let after_c = after_c.trim_start();
+                // `-c "cmd"` — strip one layer of quotes
+                if let Some(inner) = after_c
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                {
+                    return inner;
+                }
+                if let Some(inner) = after_c
+                    .strip_prefix('\'')
+                    .and_then(|s| s.strip_suffix('\''))
+                {
+                    return inner;
+                }
+                return after_c;
+            }
+            return rest;
+        }
+    }
+    command
+}
+
 /// Deterministic command classification: inspects the raw command string and
 /// returns the safety level based on policy only — never on model claims.
 pub fn classify_command(command: &str) -> CommandSafety {
+    // Peel off shell wrappers: `bash cmd args…`, `sh -c "cmd args…"`, etc.
+    let command = peel_shell_wrapper(command);
+
+    // Split on compound command operators (&&, ||, ;) and classify each
+    // segment independently, taking the most restrictive result.
+    let mut max = CommandSafety::ReadOnly;
+    for segment in split_compound_commands(command) {
+        let s = classify_segment(segment);
+        if s.rank() > max.rank() {
+            max = s;
+            if max == CommandSafety::Danger {
+                return max; // cannot get worse
+            }
+        }
+    }
+    max
+}
+
+/// Classify a single command segment (no &&, ||, or ; operators).
+fn classify_segment(command: &str) -> CommandSafety {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return CommandSafety::ReadOnly;
@@ -187,9 +240,9 @@ pub fn classify_command(command: &str) -> CommandSafety {
     let first = tokens[0];
 
     const READONLY_COMMANDS: &[&str] = &[
-        "ls", "pwd", "cat", "head", "tail", "rg", "grep", "find", "wc", "sort", "uniq", "echo",
-        "which", "env", "printenv", "date", "whoami", "id", "uname", "du", "df", "ps", "file",
-        "stat", "realpath", "basename", "dirname", "tree",
+        "cd", "ls", "pwd", "cat", "head", "tail", "rg", "grep", "find", "wc", "sort", "uniq",
+        "echo", "which", "env", "printenv", "date", "whoami", "id", "uname", "du", "df", "ps",
+        "file", "stat", "realpath", "basename", "dirname", "tree",
     ];
     if READONLY_COMMANDS.contains(&first) {
         return CommandSafety::ReadOnly;
@@ -222,6 +275,31 @@ pub fn classify_command(command: &str) -> CommandSafety {
 
     // Anything not explicitly allowed nor forbidden is at least Edit.
     CommandSafety::Edit
+}
+
+/// Split on `&&`, `||`, and `;`.  These delimit independent commands that
+/// should each pass the policy independently.
+fn split_compound_commands(command: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let bytes = command.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b';' {
+            segments.push(command[start..i].trim());
+            start = i + 1;
+        } else if b == b'&' && bytes.get(i + 1) == Some(&b'&') {
+            segments.push(command[start..i].trim());
+            start = i + 2;
+        } else if b == b'|' && bytes.get(i + 1) == Some(&b'|') {
+            segments.push(command[start..i].trim());
+            start = i + 2;
+        }
+    }
+    let tail = command[start..].trim();
+    if !tail.is_empty() {
+        segments.push(tail);
+    }
+    segments
 }
 
 fn has_non_dev_null_redirection(command: &str) -> bool {

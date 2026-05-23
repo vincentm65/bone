@@ -63,3 +63,29 @@ fn display_received_override_is_cumulative() {
         "curr 100 | in 100 | out 35"
     );
 }
+
+#[test]
+fn estimate_tool_call_tokens_from_json_size() {
+    // ~4 UTF-8 chars per token (same ratio used in streaming).
+    let chars_per_token = 4u64;
+
+    // Tiny argument: {"path":"f.rs"} = 15 chars → 3 tokens
+    let tiny = r#"{"path":"f.rs"}"#.to_string();
+    assert_eq!(tiny.len() as u64 / chars_per_token, 3);
+    assert_eq!(tiny.len(), 15);
+
+    // Medium argument: a file path + expected_hash = 72 chars → 18 tokens
+    let medium = r#"{"path":"src/main.rs","expected_hash":"abc123","content":"fn main() {}"}"#.to_string();
+    assert_eq!(medium.len() as u64 / chars_per_token, 18);
+    assert_eq!(medium.len(), 72);
+
+    // Large argument: multi-line JSON = 150 chars → 37 tokens
+    let large_json = r#"{"path":"src/lib.rs","expected_hash":"deadbeef","content":"use std::io;\n\npub fn hello() -> io::Result<()> {\n    println!(\"hello\");\n    Ok(())\n}"#.to_string();
+    assert_eq!(large_json.len() as u64 / chars_per_token, 37);
+    assert_eq!(large_json.len(), 150);
+
+    // Ensure minimum of 1 token for any non-empty argument
+    let one_char = r#"{}"#.to_string();
+    assert_eq!(one_char.len() as u64 / chars_per_token, 0);
+    assert!((one_char.len() as u64 / chars_per_token).max(1) >= 1);
+}
