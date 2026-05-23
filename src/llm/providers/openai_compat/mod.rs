@@ -274,6 +274,10 @@ impl LlmProvider for OpenAiCompatProvider {
         &self.model
     }
 
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+
     async fn validate(&self) -> Result<(), LlmError> {
         Ok(())
     }

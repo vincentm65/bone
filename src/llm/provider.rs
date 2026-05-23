@@ -197,6 +197,9 @@ pub trait LlmProvider: Send + Sync {
     /// Currently selected model.
     fn model(&self) -> &str;
 
+    /// Change the model to use for subsequent requests.
+    fn set_model(&mut self, model: String);
+
     /// Send messages and stream provider-neutral response events.
     async fn chat_stream(
         &self,

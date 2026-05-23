@@ -39,7 +39,7 @@ pub async fn handle(
             model_label,
         )?,
         "/context" => context(transcript),
-        "/model" => model(provider_label, model_label),
+          "/model" => model_switch(arg, llm, provider_label, model_label, providers_config),
         "/provider" => provider_switch(arg, llm, provider_label, model_label, providers_config).await,
         "/quit" | "/exit" => {
             return Ok(CommandResult::Quit);
@@ -100,7 +100,7 @@ fn help() -> String {
         "/clear     — clear chat history",
         "/compact   — show context usage",
         "/help      — show this message",
-        "/model     — show current model",
+        "/model     — set or show model (/model <name>)",
         "/provider  — show or switch provider (/provider <name>)",
         "/quit      — exit bone",
     ]
@@ -109,8 +109,23 @@ fn help() -> String {
 
 // ── /model ──────────────────────────────────────────────────────────────────
 
-fn model(provider_label: &str, model_label: &str) -> String {
-    format!("{} ({})", model_label, provider_label)
+fn model_switch(
+    arg: &str,
+    llm: &mut Box<dyn LlmProvider>,
+    provider_label: &mut String,
+    model_label: &mut String,
+    providers_config: &mut ProvidersConfig,
+) -> String {
+    if arg.is_empty() {
+        return format!("{} ({})", model_label, provider_label);
+    }
+
+    let entry = providers_config.providers.get_mut(llm.id()).unwrap();
+    entry.model = arg.to_string();
+    config::providers_config::save_providers(providers_config);
+    llm.set_model(arg.to_string());
+    *model_label = arg.to_string();
+    format!("Switched to {} ({})", arg, provider_label)
 }
 
 // ── /provider ───────────────────────────────────────────────────────────────
