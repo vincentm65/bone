@@ -280,9 +280,11 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     async fn validate(&self) -> Result<(), LlmError> {
-        // For local providers (no API key), hit /health.
-        // For remote providers, skip validation — errors will surface on first chat.
-        if self.api_key.is_empty() {
+        // Only attempt health check for local providers, as others like Gemini 
+        // might not have a /health endpoint or might require an API key.
+        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
+
+        if is_local && self.api_key.is_empty() {
             let health_url = format!("{}/health", self.base_url);
             let resp = self.client.get(&health_url).send().await;
             match resp {
