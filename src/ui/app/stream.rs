@@ -177,6 +177,7 @@ impl App {
             // are collected; the rest block with an interactive prompt.
             let calls_for_display = tool_calls.clone();
             let mut was_rejected = vec![false; tool_calls.len()];
+            let mut preview_errors = vec![String::new(); tool_calls.len()];
             let mut advised = vec![false; tool_calls.len()];
             let mut approved_calls = Vec::new();
 
@@ -191,13 +192,13 @@ impl App {
                                 .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
                         }
                         Err(err) => {
+                            let path = call.arguments["path"].as_str().unwrap_or("?");
                             self.messages.push(Message::system(format!(
-                                "edit_file preview failed for {}: {err}",
-                                call.arguments["path"].as_str().unwrap_or("?")
+                                "edit_file preview failed for {path}: {err}"
                             )));
                             self.renderer
                                 .flush_new_to_scrollback(&self.messages, term.as_mut().unwrap())?;
-                            was_rejected[i] = true;
+                            preview_errors[i] = err;
                             continue;
                         }
                     }
@@ -229,7 +230,17 @@ impl App {
             let mut exec_iter = exec_results.into_iter();
             let results: Vec<ToolResult> = (0..calls_for_display.len())
                 .map(|i| {
-                    if was_rejected[i] {
+                    if !preview_errors[i].is_empty() {
+                        ToolResult {
+                            call_id: calls_for_display[i].id.clone(),
+                            name: calls_for_display[i].name.clone(),
+                            content: format!(
+                                "edit_file preview failed: {}",
+                                preview_errors[i]
+                            ),
+                            is_error: true,
+                        }
+                    } else if was_rejected[i] {
                         ToolResult {
                             call_id: calls_for_display[i].id.clone(),
                             name: calls_for_display[i].name.clone(),
@@ -255,6 +266,12 @@ impl App {
                     }
                 })
                 .collect();
+
+            // If every tool call failed, discard the assistant's preamble so the
+            // retry doesn't duplicate its explanation.
+            if results.iter().all(|r| r.is_error) {
+                self.messages[assistant_idx].content.clear();
+            }
 
             for (call, result) in calls_for_display.iter().zip(results.iter()) {
                 self.messages.push(build_tool_row(call, result));

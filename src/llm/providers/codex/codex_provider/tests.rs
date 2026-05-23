@@ -1,0 +1,57 @@
+use super::*;
+
+#[test]
+fn test_build_instructions_empty() {
+    let messages = vec![
+        ChatMessage::new(ChatRole::User, "Hello"),
+    ];
+    let instructions = build_instructions(&messages);
+    assert_eq!(instructions, "You are a helpful assistant.");
+}
+
+#[test]
+fn test_build_instructions_with_system() {
+    let messages = vec![
+        ChatMessage::new(ChatRole::System, "You are a coding assistant."),
+        ChatMessage::new(ChatRole::User, "Hello"),
+    ];
+    let instructions = build_instructions(&messages);
+    assert_eq!(instructions, "You are a coding assistant.");
+}
+
+#[test]
+fn test_build_codex_messages_user() {
+    let messages = vec![
+        ChatMessage::new(ChatRole::User, "Hello world"),
+    ];
+    let items = build_codex_messages(messages);
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_build_codex_messages_system_skipped() {
+    let messages = vec![
+        ChatMessage::new(ChatRole::System, "System prompt"),
+        ChatMessage::new(ChatRole::User, "Hello"),
+    ];
+    let items = build_codex_messages(messages);
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_codex_tools_conversion() {
+    let tools = vec![ToolDefinition {
+        name: "test_tool",
+        description: "A test tool",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"}
+            }
+        }),
+    }];
+    let codex_tools = codex_tools(tools);
+    assert_eq!(codex_tools.len(), 1);
+    assert_eq!(codex_tools[0].name, "test_tool");
+    assert_eq!(codex_tools[0].description, "A test tool");
+}

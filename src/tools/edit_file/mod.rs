@@ -335,11 +335,21 @@ fn match_offsets(content: &str, needle: &str) -> Vec<usize> {
         .collect()
 }
 
-fn match_error(content: &str, _needle: &str, label: &str, offsets: &[usize]) -> String {
+fn match_error(content: &str, needle: &str, label: &str, offsets: &[usize]) -> String {
     if offsets.is_empty() {
-        return format!(
-            "{label} matched 0 times; expected exactly 1\n\nTip: include exact indentation, blank lines, and enough surrounding context."
+        let mut msg = format!(
+            "{label} matched 0 times; expected exactly 1"
         );
+        if let Some(hint) = find_closest_lines(content, needle) {
+            msg.push_str(&format!(
+                "\n\nClosest region in file (around line {}):\n{}",
+                hint.line, hint.snippet
+            ));
+        }
+        msg.push_str(
+            "\n\nTip: include exact indentation, blank lines, and enough surrounding context.",
+        );
+        return msg;
     }
 
     let mut msg = format!(
@@ -359,6 +369,88 @@ fn match_error(content: &str, _needle: &str, label: &str, offsets: &[usize]) -> 
         "\n\nTip: include enough nearby unique context so the search text matches exactly one location. Do not retry a short repeated fragment; use a larger enclosing block or separate edits with distinct anchors.",
     );
     msg
+}
+
+struct ClosestHint {
+    line: usize,
+    snippet: String,
+}
+
+/// Find the region in `content` that best matches `needle` using the first
+/// non-empty line of the needle as a probe. Returns the 1-based line number
+/// and a small snippet of the surrounding file content.
+fn find_closest_lines(content: &str, needle: &str) -> Option<ClosestHint> {
+    let probe = needle.lines().find(|l| !l.trim().is_empty())?;
+    let probe_stripped = probe.trim();
+
+    let file_lines: Vec<&str> = content.lines().collect();
+    if file_lines.is_empty() {
+        return None;
+    }
+
+    // Score each line by how much of the probe it shares.
+    let mut best_idx = 0;
+    let mut best_score = 0usize;
+    for (i, line) in file_lines.iter().enumerate() {
+        let line_stripped = line.trim();
+        let score = common_prefix_len(probe_stripped, line_stripped)
+            + common_substring_len(probe_stripped, line_stripped);
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+
+    if best_score == 0 {
+        return None;
+    }
+
+    // Show 3 lines of context around the best match.
+    let start = best_idx.saturating_sub(1);
+    let end = (best_idx + 3).min(file_lines.len());
+    let snippet = file_lines[start..end].join("\n");
+
+    Some(ClosestHint {
+        line: best_idx + 1,
+        snippet,
+    })
+}
+
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(ca, cb)| ca == cb)
+        .count()
+}
+
+/// Simple shared-char count via a sliding window on the shorter string.
+fn common_substring_len(a: &str, b: &str) -> usize {
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+    let (short, long) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    let short_bytes = short.as_bytes();
+    let long_bytes = long.as_bytes();
+    let window = short_bytes.len().min(16);
+    let mut best = 0;
+    for i in 0..=short_bytes.len().saturating_sub(window) {
+        let chunk = &short_bytes[i..i + window];
+        let matches = long_bytes
+            .windows(window)
+            .map(|w| {
+                chunk
+                    .iter()
+                    .zip(w.iter())
+                    .filter(|(a, b)| a == b)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        if matches > best {
+            best = matches;
+        }
+    }
+    best
 }
 
 fn line_number_for_byte_offset(content: &str, offset: usize) -> usize {

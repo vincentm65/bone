@@ -1,6 +1,7 @@
 use super::provider::{LlmError, LlmErrorKind, LlmProvider};
 use crate::config::ProvidersConfig;
 
+pub mod codex;
 pub mod openai_compat;
 
 /// Construct a provider by stable id, using a pre-loaded config.
@@ -9,18 +10,21 @@ pub fn create_provider_with_config(
     config: &ProvidersConfig,
 ) -> Result<Box<dyn LlmProvider>, LlmError> {
     if let Some(entry) = config.providers.get(id) {
-        if entry.handler == "openai" || entry.handler.is_empty() {
-            return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(
+        match entry.handler.as_str() {
+            "codex" => return Ok(Box::new(codex::codex_provider::CodexProvider::from_entry(
                 id, entry,
-            )));
+            ))),
+            "openai" | "" => return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(
+                id, entry,
+            ))),
+            _ => return Err(LlmError::new_with_kind(
+                LlmErrorKind::Config,
+                format!(
+                    "unsupported handler `{}` for provider `{id}`; supported: openai, codex",
+                    entry.handler
+                ),
+            )),
         }
-        return Err(LlmError::new_with_kind(
-            LlmErrorKind::Config,
-            format!(
-                "unsupported handler `{}` for provider `{id}`; supported: openai",
-                entry.handler
-            ),
-        ));
     }
 
     // Helpful error listing what's available.

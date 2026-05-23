@@ -251,6 +251,33 @@ async fn expected_hash_mismatch_preserves_file() {
     let _ = fs::remove_file(&path).await;
 }
 
+#[tokio::test]
+async fn zero_match_includes_closest_region_hint() {
+    let path = temp_path("hint.txt");
+    fs::write(
+        &path,
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    )
+    .await
+    .expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "path": path,
+            "search": "    println!(\"world\");",
+            "replace": "    println!(\"universe\");"
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("matched 0 times"));
+    assert!(err.contains("Closest region"));
+    assert!(err.contains("println!"));
+    let _ = fs::remove_file(&path).await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn preserves_permissions() {
