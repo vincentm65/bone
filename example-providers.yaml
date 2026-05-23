@@ -1,0 +1,99 @@
+# Example providers configuration for bone-rust.
+# Copy this to ~/.bone-rust/providers.yaml and fill in your API keys.
+#
+# On first run, bone-rust will copy this file automatically if no
+# providers.yaml exists.  Edit the copy — this file is never overwritten.
+
+last_provider: local
+
+openai:
+  label: OpenAI
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+anthropic:
+  label: Anthropic
+  base_url: https://api.anthropic.com/v1
+  model: claude-3-5-sonnet-20241022
+  api_key: ''
+  endpoint: /chat/completions
+  handler: anthropic
+gemini:
+  label: Gemini
+  base_url: https://generativelanguage.googleapis.com/v1beta
+  model: gemini-1.5-flash
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+deepseek:
+  label: DeepSeek
+  base_url: https://api.deepseek.com/v1
+  model: deepseek-v4-pro
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+openrouter:
+  label: OpenRouter
+  base_url: https://openrouter.ai/api/v1
+  model: google/gemini-3.1-flash-lite
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+glm:
+  label: GLM
+  base_url: https://open.bigmodel.cn/api/paas/v4
+  model: GLM-5
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+glm_plan:
+  label: GLM Plan
+  base_url: https://api.z.ai/api/coding/paas/v4
+  model: GLM-5.1
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+kimi:
+  label: Kimi
+  base_url: https://api.moonshot.cn/v1
+  model: moonshot-v1-8k
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+minimax:
+  label: MiniMax
+  base_url: https://api.minimax.io/anthropic/v1
+  model: MiniMax-M2.7
+  api_key: ''
+  endpoint: /chat/completions
+  handler: anthropic
+minimax_plan:
+  label: MiniMax Plan
+  base_url: https://api.minimax.io/anthropic/v1
+  model: MiniMax-M2.7
+  api_key: ''
+  endpoint: /chat/completions
+  handler: anthropic
+bone_proxy:
+  label: Bone Proxy
+  base_url: ''
+  model: z-ai/glm-4.5-air:free
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
+codex:
+  label: Codex
+  base_url: https://chatgpt.com/backend-api/codex
+  model: gpt-5.5
+  api_key: ''
+  endpoint: /responses
+  handler: codex
+local:
+  label: llama.cpp
+  base_url: http://127.0.0.1:8080
+  model: local
+  api_key: ''
+  endpoint: /v1/chat/completions
+  handler: openai
