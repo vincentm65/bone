@@ -228,6 +228,31 @@ fn policy_edit_sed_inplace() {
 }
 
 #[test]
+fn policy_powershell_mutations_prompt() {
+    for cmd in &[
+        "Remove-Item file.txt",
+        "del file.txt",
+        "Copy-Item a b",
+        "Move-Item a b",
+        "Rename-Item a b",
+        "New-Item file.txt",
+        "Set-Content file.txt value",
+        "Add-Content file.txt value",
+        "Out-File file.txt",
+        "Tee-Object file.txt",
+        "Set-ItemProperty . Name value",
+        "Stop-Process -Id 123",
+        "Stop-Service Spooler",
+    ] {
+        assert_ne!(
+            classify_command(cmd),
+            CommandSafety::ReadOnly,
+            "expected prompt-worthy classification for: {cmd}"
+        );
+    }
+}
+
+#[test]
 fn policy_readonly_allowlist() {
     for cmd in &[
         "ls -la",
@@ -259,6 +284,47 @@ fn policy_readonly_allowlist() {
         "basename src/main.rs",
         "dirname src/main.rs",
         "tree -L 2",
+        "awk '{ print $1 }' file",
+        "sed -n '1,10p' file",
+        "cut -d: -f1 /etc/passwd",
+        "printf hello",
+        "sha256sum Cargo.toml",
+    ] {
+        assert_eq!(
+            classify_command(cmd),
+            CommandSafety::ReadOnly,
+            "expected ReadOnly for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn policy_readonly_powershell_allowlist() {
+    for cmd in &[
+        "Get-ChildItem src",
+        "gci src",
+        "dir src",
+        "Get-Content Cargo.toml",
+        "gc Cargo.toml",
+        "Select-String -Path src/*.rs -Pattern ToolCall",
+        "sls ToolCall src/*.rs",
+        "Measure-Object -Line",
+        "Sort-Object Name",
+        "Where-Object { $_.Name -like '*.rs' }",
+        "ForEach-Object { $_.Name }",
+        "Write-Output hello",
+        "Get-Location",
+        "Set-Location src",
+        "Get-Item Cargo.toml",
+        "Get-ItemProperty .",
+        "Get-Command cargo",
+        "Get-Process",
+        "Get-Service",
+        "Resolve-Path Cargo.toml",
+        "Test-Path Cargo.toml",
+        "Select-Object Name",
+        "Format-Table Name",
+        "Out-String",
     ] {
         assert_eq!(
             classify_command(cmd),
@@ -526,11 +592,49 @@ fn compound_newlines_comments_and_pipes_readonly() {
 }
 
 #[test]
+fn compound_readonly_while_loop_pipeline() {
+    let command = r#"
+    find /home/vincent/projects/bone/src -name "*.rs" |
+      sort |
+      while read f;
+      do echo "$(wc -l < "$f") $f";
+      done |
+      sort -rn
+"#;
+
+    assert_eq!(classify_command(command), CommandSafety::ReadOnly);
+}
+
+#[test]
 fn compound_splitting_ignores_quoted_pipes_and_hashes() {
     assert_eq!(
         classify_command("echo \"a | b # c\"\nrg '#\\[cfg\\(test\\)\\]' src"),
         CommandSafety::ReadOnly
     );
+}
+
+#[test]
+fn policy_powershell_wrappers_peel_to_inner_command() {
+    assert_eq!(
+        classify_command("pwsh -NoProfile -Command \"Get-ChildItem src | Sort-Object Name\""),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        classify_command("powershell.exe -NonInteractive -Command \"Remove-Item file.txt\""),
+        CommandSafety::Danger
+    );
+}
+
+#[test]
+fn policy_powershell_pipeline_readonly() {
+    let command = r#"
+    Get-ChildItem src -Recurse -Filter *.rs |
+      Where-Object { $_.Length -gt 0 } |
+      ForEach-Object { $_.FullName } |
+      Sort-Object
+"#;
+
+    assert_eq!(classify_command(command), CommandSafety::ReadOnly);
 }
 
 #[test]

@@ -1,4 +1,6 @@
-use bone::config::{load_providers, load_user_config, seed_providers_if_missing};
+use bone::config::{
+    load_providers, load_user_config, seed_command_policy_if_missing, seed_providers_if_missing,
+};
 use bone::llm::providers;
 use bone::ui::app::App;
 
@@ -6,6 +8,7 @@ use bone::ui::app::App;
 async fn main() -> std::io::Result<()> {
     // Seed a default providers.yaml if this is a fresh install.
     seed_providers_if_missing();
+    seed_command_policy_if_missing();
 
     let cfg = load_user_config();
     let providers_config = load_providers();

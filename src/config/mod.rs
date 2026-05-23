@@ -40,6 +40,10 @@ pub fn providers_path() -> PathBuf {
     bone_dir().join("providers.yaml")
 }
 
+pub fn command_policy_path() -> PathBuf {
+    bone_dir().join("command-policy.yaml")
+}
+
 // ── UserConfig ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -74,9 +78,19 @@ pub fn load_user_config() -> UserConfig {
 // ── seed providers ──────────────────────────────────────────────────────────
 
 const EXAMPLE_PROVIDERS: &str = include_str!("../../example-providers.yaml");
+const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
 
 pub fn seed_providers_if_missing() {
     let path = providers_path();
+    seed_file_if_missing(&path, EXAMPLE_PROVIDERS);
+}
+
+pub fn seed_command_policy_if_missing() {
+    let path = command_policy_path();
+    seed_file_if_missing(&path, DEFAULT_COMMAND_POLICY);
+}
+
+fn seed_file_if_missing(path: &Path, content: &str) {
     if path.exists() {
         return;
     }
@@ -86,7 +100,7 @@ pub fn seed_providers_if_missing() {
             return;
         }
     }
-    if let Err(e) = fs::write(&path, EXAMPLE_PROVIDERS) {
+    if let Err(e) = fs::write(path, content) {
         eprintln!("bone: warning: could not write {}: {e}", path.display());
     }
 }
