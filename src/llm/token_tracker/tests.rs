@@ -15,10 +15,10 @@ fn record_real_usage() {
 fn record_estimate() {
     let mut stats = TokenStats::new();
     stats.record_estimate(400, 200);
-    // 400/3.5 = 114.3 → ceil = 115, 200/3.5 = 57.1 → ceil = 58
-    assert_eq!(stats.sent, 115);
-    assert_eq!(stats.received, 58);
-    assert_eq!(stats.context_length, 115);
+    // 400/3.8 = 105.3 → ceil = 106, 200/3.8 = 52.6 → ceil = 53
+    assert_eq!(stats.sent, 106);
+    assert_eq!(stats.received, 53);
+    assert_eq!(stats.context_length, 106);
 }
 
 #[test]

@@ -53,11 +53,9 @@ impl OpenAiCompatProvider {
     fn chat_url(&self) -> String {
         format!("{}{}", self.base_url, self.endpoint)
     }
-
-    fn is_local(&self) -> bool {
-        self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost")
-    }
 }
+
+
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -290,31 +288,7 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     async fn validate(&self) -> Result<(), LlmError> {
-        // Only attempt health check for local providers, as others like Gemini
-        // might not have a /health endpoint or might require an API key.
-        if self.is_local() && self.api_key.is_empty() {
-            let health_url = format!("{}/health", self.base_url);
-            let resp = self.client.get(&health_url).send().await;
-            match resp {
-                Ok(r) if r.status().is_success() => Ok(()),
-                Ok(r) => Err(LlmError::new_with_kind(
-                    http_status_to_error_kind(r.status()),
-                    format!(
-                        "local server returned {} from /health — is llama.cpp running?",
-                        r.status()
-                    ),
-                )),
-                Err(e) => Err(LlmError::new_with_kind(
-                    LlmErrorKind::Connection,
-                    format!(
-                        "can't reach {}/health: {e} — is llama.cpp running?",
-                        self.base_url
-                    ),
-                )),
-            }
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     async fn chat_stream(
@@ -323,7 +297,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
         let stream_options =
-            (self.base_url.contains("api.openai.com") || self.is_local()).then(|| StreamOptions {
+            (self.base_url.contains("api.openai.com") || self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost")).then(|| StreamOptions {
                 include_usage: true,
             });
 

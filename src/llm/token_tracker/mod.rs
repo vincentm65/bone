@@ -34,8 +34,8 @@ impl TokenStats {
 
     /// Record a request using a fallback character-based estimate.
     pub fn record_estimate(&mut self, prompt_chars: usize, completion_chars: usize) {
-        // Rough heuristic: ~3.5 UTF-8 chars per token for typical text.
-        let chars_per_token = 3.5;
+        // Rough heuristic: ~3.8 UTF-8 chars per token for typical text.
+        let chars_per_token = 3.8;
         let estimated_prompt = (prompt_chars as f64 / chars_per_token).ceil() as u64;
         self.context_length = estimated_prompt;
         self.sent += estimated_prompt;
