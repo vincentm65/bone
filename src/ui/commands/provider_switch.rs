@@ -14,7 +14,7 @@ pub async fn run(
         let mut lines = vec![format!("Current: {} ({})", model_label, provider_label)];
         lines.push(String::new());
         if providers_config.providers.is_empty() {
-            lines.push("No providers configured. Create ~/.bone/providers.yaml".to_string());
+            lines.push("No providers configured. Create ~/.bone-rust/providers.yaml".to_string());
         } else {
             lines.push("Available:".to_string());
             for (id, entry) in &providers_config.providers {

@@ -2,15 +2,15 @@ use std::path::PathBuf;
 
 fn bone_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("bone");
+        return PathBuf::from(xdg).join("bone-rust");
     }
 
     std::env::var("HOME")
         .ok()
-        .map(|home| PathBuf::from(home).join(".bone"))
+        .map(|home| PathBuf::from(home).join(".bone-rust"))
         .unwrap_or_else(|| {
-            eprintln!("bone: warning: neither $HOME nor $XDG_CONFIG_HOME is set; using /tmp/.bone");
-            PathBuf::from("/tmp/.bone")
+            eprintln!("bone: warning: neither $HOME nor $XDG_CONFIG_HOME is set; using /tmp/.bone-rust");
+            PathBuf::from("/tmp/.bone-rust")
         })
 }
 
