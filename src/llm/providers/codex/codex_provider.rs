@@ -426,5 +426,3 @@ fn resolve_codex_api_key(config_key: &str) -> String {
     }
     config_key.to_string()
 }
-
-

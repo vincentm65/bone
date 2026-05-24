@@ -218,10 +218,7 @@ pub fn process_sse_chunk(
 
     // DeepSeek V4 sends reasoning_content in the delta. Must be passed
     // back in subsequent requests when tool calls are involved.
-    if let Some(reasoning) = delta
-        .get("reasoning_content")
-        .and_then(|r| r.as_str())
-    {
+    if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
         events.push(ChatEvent::ReasoningDelta(reasoning.to_string()));
     }
 
@@ -287,10 +284,12 @@ impl LlmProvider for OpenAiCompatProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
-        let stream_options =
-            (self.base_url.contains("api.openai.com") || self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost")).then(|| StreamOptions {
-                include_usage: true,
-            });
+        let stream_options = (self.base_url.contains("api.openai.com")
+            || self.base_url.contains("127.0.0.1")
+            || self.base_url.contains("localhost"))
+        .then(|| StreamOptions {
+            include_usage: true,
+        });
 
         let request = ChatRequest {
             model: self.model.clone(),
@@ -365,4 +364,3 @@ impl LlmProvider for OpenAiCompatProvider {
         Ok(Box::pin(stream))
     }
 }
-

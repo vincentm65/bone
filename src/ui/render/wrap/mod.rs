@@ -81,8 +81,7 @@ fn take_breakable_width(text: &str, width: usize) -> usize {
     if let Some((idx, _)) = candidate
         .char_indices()
         .rev()
-        .find(|(_, ch)| ch.is_whitespace())
-        && idx > 0
+        .find(|(idx, ch)| *idx > 0 && ch.is_whitespace())
     {
         return idx;
     }
@@ -106,5 +105,3 @@ fn take_width(text: &str, width: usize) -> usize {
 
     text.len()
 }
-
-

@@ -169,7 +169,6 @@ impl App {
             self.queue.len(),
         )
     }
-
 }
 
 /// Build a [`StatusInfo`] with a live streaming cumulative output-token estimate.
@@ -239,11 +238,7 @@ impl App {
 
     /// Handle a keypress while a blocking prompt is displayed.
     /// Up/Down move the cursor, Enter confirms, Esc rejects.
-    fn handle_prompt_key(
-        &mut self,
-        code: KeyCode,
-        term: &mut BoneTerminal,
-    ) -> io::Result<()> {
+    fn handle_prompt_key(&mut self, code: KeyCode, term: &mut BoneTerminal) -> io::Result<()> {
         match code {
             KeyCode::Up => {
                 if let Some(ref mut p) = self.active_prompt {
@@ -256,6 +251,12 @@ impl App {
                     p.down();
                 }
                 self.redraw(term)?;
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                if let Some(ref mut p) = self.active_prompt {
+                    p.toggle_peek();
+                    self.redraw(term)?;
+                }
             }
             _ => {}
         }
@@ -304,10 +305,36 @@ impl App {
             _ => call.name.clone(),
         };
 
-        self.active_prompt = Some(Prompt::new(
-            format!("{} — {}", call.name, summary),
-            vec!["Accept", "Advise", "Cancel"],
-        ));
+        let prompt = if call.name == "bash" {
+            let full_command = call.arguments["command"].as_str().map(String::from);
+            // Truncate title to first line + brief preview
+            let title = call.arguments["command"]
+                .as_str()
+                .unwrap_or("?")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            Prompt {
+                title: format!("{} — {}", call.name, title),
+                options: vec![
+                    "Accept".to_string(),
+                    "Advise".to_string(),
+                    "Cancel".to_string(),
+                ],
+                selected: 0,
+                full_command,
+                peek_mode: false,
+            }
+        } else {
+            Prompt::new(
+                format!("{} — {}", call.name, summary),
+                vec!["Accept", "Advise", "Cancel"],
+            )
+        };
+        self.active_prompt = Some(prompt);
 
         self.redraw(term)?;
 
@@ -329,6 +356,12 @@ impl App {
                             p.down();
                         }
                         self.redraw(term)?;
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        if let Some(ref mut p) = self.active_prompt {
+                            p.toggle_peek();
+                            self.redraw(term)?;
+                        }
                     }
                     KeyCode::Enter => {
                         if let Some(prompt) = self.active_prompt.as_ref() {
@@ -402,7 +435,9 @@ impl App {
             .unwrap_or_else(|_| "nano".to_string());
         let _ = tokio::process::Command::new(&editor)
             .arg(&tmp)
-            .spawn()?.wait().await;
+            .spawn()?
+            .wait()
+            .await;
         let text = std::fs::read_to_string(&tmp)?;
         std::fs::remove_file(&tmp).ok();
         let text = text.trim_end_matches(['\r', '\n']).to_string();

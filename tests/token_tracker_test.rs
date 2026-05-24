@@ -75,7 +75,8 @@ fn estimate_tool_call_tokens_from_json_size() {
     assert_eq!(tiny.len(), 15);
 
     // Medium argument: a file path + expected_hash = 72 chars → 18 tokens
-    let medium = r#"{"path":"src/main.rs","expected_hash":"abc123","content":"fn main() {}"}"#.to_string();
+    let medium =
+        r#"{"path":"src/main.rs","expected_hash":"abc123","content":"fn main() {}"}"#.to_string();
     assert_eq!(medium.len() as u64 / chars_per_token, 18);
     assert_eq!(medium.len(), 72);
 

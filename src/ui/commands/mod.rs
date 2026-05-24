@@ -41,8 +41,10 @@ pub async fn handle(
             model_label,
         )?,
         "/context" => context(transcript),
-          "/model" => model_switch(arg, llm, provider_label, model_label, providers_config),
-        "/provider" => provider_switch(arg, llm, provider_label, model_label, providers_config).await,
+        "/model" => model_switch(arg, llm, provider_label, model_label, providers_config),
+        "/provider" => {
+            provider_switch(arg, llm, provider_label, model_label, providers_config).await
+        }
         "/quit" | "/exit" => {
             return Ok(CommandResult::Quit);
         }

@@ -71,5 +71,3 @@ impl TokenStats {
 pub fn format_tokens(count: u64) -> String {
     count.to_formatted_string(&num_format::Locale::en)
 }
-
-

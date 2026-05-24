@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use serde_json::Value;
-use bone::llm::providers::openai_compat::{flush_partial_tool_calls, process_sse_chunk, PartialToolCall};
 use bone::llm::ChatEvent;
+use bone::llm::providers::openai_compat::{
+    PartialToolCall, flush_partial_tool_calls, process_sse_chunk,
+};
+use serde_json::Value;
 
 /// Helper: build a minimal SSE chunk JSON string with a text content delta.
 fn chunk_with_content(content: &str) -> String {

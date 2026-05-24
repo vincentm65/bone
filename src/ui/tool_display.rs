@@ -48,14 +48,18 @@ pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {
 }
 
 pub fn format_bash_label(command: &str) -> String {
-    let mut lines = vec!["bash".to_string()];
-    for line in format_bash_command(command) {
+    let mut command_lines = format_bash_command(command).into_iter();
+    let mut lines = vec![match command_lines.next() {
+        Some(line) => format!("bash {line}"),
+        None => "bash".to_string(),
+    }];
+    for line in command_lines {
         lines.push(format!("  {line}"));
     }
     lines.join("\n")
 }
 
-fn format_bash_command(command: &str) -> Vec<String> {
+pub(crate) fn format_bash_command(command: &str) -> Vec<String> {
     if find_heredoc_marker(command).is_some() {
         return expand_collapsed_heredoc_line(command);
     }

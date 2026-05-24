@@ -95,7 +95,7 @@ impl Tool for BashTool {
 
         let stdout_str = String::from_utf8_lossy(&out);
         let stderr_str = String::from_utf8_lossy(&err);
-        let stdout_trunc = truncate_output(&stdout_str, 300);
+        let stdout_trunc = truncate_output(&stdout_str, 500);
         let stderr_trunc = truncate_output(&stderr_str, 100);
 
         Ok(format!(

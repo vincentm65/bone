@@ -404,7 +404,10 @@ impl App {
                     }
                     InputAction::ClearQueue => queue.clear(),
                     InputAction::CycleMode => *mode = mode.cycle(),
-                    InputAction::Redraw | InputAction::Escape | InputAction::OpenEditor | InputAction::None => {}
+                    InputAction::Redraw
+                    | InputAction::Escape
+                    | InputAction::OpenEditor
+                    | InputAction::None => {}
                 }
             }
         }

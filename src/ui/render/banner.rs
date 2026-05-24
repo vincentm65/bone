@@ -24,7 +24,13 @@ pub fn render(term: &mut BoneTerminal, provider: &str, model: &str) -> std::io::
     })
 }
 
-fn padded_row(left: &str, right: &str, width: usize, left_style: Style, right_style: Style) -> Line<'static> {
+fn padded_row(
+    left: &str,
+    right: &str,
+    width: usize,
+    left_style: Style,
+    right_style: Style,
+) -> Line<'static> {
     let pad = width.saturating_sub(UnicodeWidthStr::width(left) + UnicodeWidthStr::width(right));
     Line::from(vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
@@ -52,10 +58,22 @@ fn lines(provider: &str, model: &str, term_width: u16) -> Vec<Line<'static>> {
     let content_w = inner.saturating_sub(3); // "│ " (2) + right pad (1) = 3 chars framing
 
     vec![
-        Line::from(Span::styled(format!("╭{}╮", "─".repeat(inner.saturating_sub(2))), dim)),
+        Line::from(Span::styled(
+            format!("╭{}╮", "─".repeat(inner.saturating_sub(2))),
+            dim,
+        )),
         padded_row("bone", &format!("v{version}"), content_w, bold_white, muted),
-        padded_row(&format!("{provider} · {model}"), &dir_display, content_w, accent, muted),
-        Line::from(Span::styled(format!("╰{}╯", "─".repeat(inner.saturating_sub(2))), dim)),
+        padded_row(
+            &format!("{provider} · {model}"),
+            &dir_display,
+            content_w,
+            accent,
+            muted,
+        ),
+        Line::from(Span::styled(
+            format!("╰{}╯", "─".repeat(inner.saturating_sub(2))),
+            dim,
+        )),
         Line::from(""),
     ]
 }

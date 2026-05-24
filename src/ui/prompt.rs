@@ -11,6 +11,10 @@ pub struct Prompt {
     pub title: String,
     pub options: Vec<String>,
     pub selected: usize,
+    /// Raw command text for bash approval prompts (enables preview/peek).
+    pub full_command: Option<String>,
+    /// When true, show all command lines instead of the truncated preview.
+    pub peek_mode: bool,
 }
 
 impl Prompt {
@@ -19,6 +23,8 @@ impl Prompt {
             title: title.into(),
             options: options.into_iter().map(Into::into).collect(),
             selected: 0,
+            full_command: None,
+            peek_mode: false,
         }
     }
 
@@ -43,6 +49,13 @@ impl Prompt {
     pub fn right(&mut self) {
         if self.selected + 1 < self.options.len() {
             self.selected += 1;
+        }
+    }
+
+    /// Toggle peek mode for command preview.
+    pub fn toggle_peek(&mut self) {
+        if self.full_command.is_some() {
+            self.peek_mode = !self.peek_mode;
         }
     }
 

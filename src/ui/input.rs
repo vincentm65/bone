@@ -36,7 +36,6 @@ pub struct InputState {
 }
 
 impl InputState {
-
     /// Convert the char-index cursor position to a byte index for String ops.
     fn byte_pos(&self) -> usize {
         self.buffer
@@ -66,7 +65,8 @@ impl InputState {
             .nth(prev_char_idx)
             .map(|(i, c)| (i, c))
             .unwrap_or((0, '\0'));
-        self.buffer.replace_range(start_byte..start_byte + ch.len_utf8(), "");
+        self.buffer
+            .replace_range(start_byte..start_byte + ch.len_utf8(), "");
         self.cursor_pos = prev_char_idx;
     }
 

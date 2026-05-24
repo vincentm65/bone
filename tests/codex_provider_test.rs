@@ -1,5 +1,7 @@
 use bone::llm::provider::{ChatMessage, ChatRole};
-use bone::llm::providers::codex::codex_provider::{build_codex_messages, build_instructions, codex_tools};
+use bone::llm::providers::codex::codex_provider::{
+    build_codex_messages, build_instructions, codex_tools,
+};
 use bone::tools::ToolDefinition;
 
 #[test]

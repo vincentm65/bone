@@ -5,8 +5,25 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use super::wrap;
-use super::{InputState, MIN_ROWS, Prompt, SPINNER, StatusInfo};
+use super::{InputState, Prompt, SPINNER, StatusInfo};
 use crate::tools::ApprovalMode;
+use crate::ui::tool_display;
+
+const COMMAND_PREVIEW_LINES: usize = 6;
+
+fn bash_prompt_title(prompt: &Prompt) -> String {
+    format!(
+        "  {}",
+        prompt.title.split(" — ").next().unwrap_or(&prompt.title)
+    )
+}
+
+fn bash_command_preview_lines(command: &str, width: usize) -> Vec<String> {
+    tool_display::format_bash_command(command)
+        .into_iter()
+        .flat_map(|line| wrap::wrap_text_with_prefix(&line, "  ", "  ", width))
+        .collect()
+}
 
 /// Split input buffer at cursor into (before, char-at-cursor, after).
 fn cursor_split(input: &InputState) -> (String, char, String) {
@@ -33,12 +50,28 @@ impl super::Renderer {
     /// Compute the desired viewport height for the current state.
     pub fn desired_height(input: &InputState, prompt: Option<&Prompt>, terminal_width: u16) -> u16 {
         if let Some(p) = prompt {
-            return MIN_ROWS - 1 + p.options.len() as u16 + 1;
+            if let Some(ref cmd) = p.full_command {
+                let title = bash_prompt_title(p);
+                let title_lines = wrap::wrap_text(&title, terminal_width as usize).len() as u16;
+                let cmd_visual_lines =
+                    bash_command_preview_lines(cmd, terminal_width as usize).len() as u16;
+                let options = p.options.len() as u16;
+                if p.peek_mode {
+                    // sep + title + cmd_lines + hint + options + sep + status
+                    return 1 + title_lines + cmd_visual_lines + 1 + options + 1 + 1;
+                }
+                // sep + title + preview + combined hint + options + sep + status
+                let preview = cmd_visual_lines.min(COMMAND_PREVIEW_LINES as u16);
+                return 1 + title_lines + preview + 1 + options + 1 + 1;
+            }
+            // sep + title + options + sep + status
+            return 1 + 1 + p.options.len() as u16 + 1 + 1;
         }
         let (before, at_cursor, after) = cursor_split(input);
         let display = format!("> {}{}{}", before, at_cursor, after);
         let input_rows = wrap::visual_line_count(&display, terminal_width as usize) as u16;
-        MIN_ROWS - 1 + input_rows.max(1)
+        // sep + input_rows + sep + status
+        return 1 + input_rows.max(1) + 1 + 1;
     }
 
     pub fn draw_bottom_pane_with_tick(
@@ -75,39 +108,65 @@ impl super::Renderer {
         y += 1;
 
         if let Some(prompt) = prompt {
-            // Title line
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    format!("  {}", prompt.title),
-                    Style::default().fg(self.theme.system_msg),
-                )),
-                Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
-            );
-            y += 1;
+            if let Some(ref cmd) = prompt.full_command {
+                // ── Bash command preview ──
 
-            // Options — one per line
-            for (i, option) in prompt.options.iter().enumerate() {
-                let selected = i == prompt.selected;
-                let (marker, marker_style) = if selected {
-                    (
-                        ">",
-                        Style::default()
-                            .fg(self.theme.status_text)
-                            .add_modifier(Modifier::BOLD),
+                let title = bash_prompt_title(prompt);
+                let title_lines = wrap::wrap_text(&title, area.width as usize);
+                for title_line in title_lines {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            title_line,
+                            Style::default().fg(self.theme.system_msg),
+                        )),
+                        Rect {
+                            y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    y += 1;
+                }
+
+                let cmd_visual_lines = bash_command_preview_lines(cmd, area.width as usize);
+                let max_preview = if prompt.peek_mode {
+                    cmd_visual_lines.len()
+                } else {
+                    cmd_visual_lines.len().min(COMMAND_PREVIEW_LINES)
+                };
+
+                for visual_line in cmd_visual_lines.iter().take(max_preview) {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            visual_line.clone(),
+                            Style::default().fg(self.theme.tool_call),
+                        )),
+                        Rect {
+                            y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    y += 1;
+                }
+
+                // Combined hint/truncation line
+                let hint = if prompt.peek_mode {
+                    "    Press P to hide full command".to_string()
+                } else if cmd_visual_lines.len() > COMMAND_PREVIEW_LINES {
+                    let remaining = cmd_visual_lines.len() - COMMAND_PREVIEW_LINES;
+                    format!(
+                        "    … [+{} more lines]  Press P to show full command",
+                        remaining
                     )
                 } else {
-                    (" ", Style::default().fg(ratatui::style::Color::DarkGray))
+                    "    Press P to show full command".to_string()
                 };
-                let option_style = Style::default().fg(ratatui::style::Color::White);
                 frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(format!("  {} ", marker), marker_style),
-                        Span::styled(option.clone(), option_style),
-                    ])),
+                    Paragraph::new(Span::styled(
+                        hint,
+                        Style::default().fg(self.theme.system_msg),
+                    )),
                     Rect {
                         y,
                         height: 1,
@@ -115,6 +174,78 @@ impl super::Renderer {
                     },
                 );
                 y += 1;
+
+                // Options
+                for (i, option) in prompt.options.iter().enumerate() {
+                    let selected = i == prompt.selected;
+                    let (marker, marker_style) = if selected {
+                        (
+                            ">",
+                            Style::default()
+                                .fg(self.theme.status_text)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (" ", Style::default().fg(ratatui::style::Color::DarkGray))
+                    };
+                    let option_style = Style::default().fg(ratatui::style::Color::White);
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(format!("  {} ", marker), marker_style),
+                            Span::styled(option.clone(), option_style),
+                        ])),
+                        Rect {
+                            y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    y += 1;
+                }
+            } else {
+                // ── Original non-command prompt ──
+
+                // Title line
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("  {}", prompt.title),
+                        Style::default().fg(self.theme.system_msg),
+                    )),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
+
+                // Options — one per line
+                for (i, option) in prompt.options.iter().enumerate() {
+                    let selected = i == prompt.selected;
+                    let (marker, marker_style) = if selected {
+                        (
+                            ">",
+                            Style::default()
+                                .fg(self.theme.status_text)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (" ", Style::default().fg(ratatui::style::Color::DarkGray))
+                    };
+                    let option_style = Style::default().fg(ratatui::style::Color::White);
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(format!("  {} ", marker), marker_style),
+                            Span::styled(option.clone(), option_style),
+                        ])),
+                        Rect {
+                            y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    y += 1;
+                }
             }
         } else if let Some((before, at_cursor, after, input_rows)) = input_view {
             let input_line = Line::from(vec![

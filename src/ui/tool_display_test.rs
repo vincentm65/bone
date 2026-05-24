@@ -4,7 +4,7 @@ use super::format_bash_label;
 fn bash_label_splits_top_level_shell_chains() {
     assert_eq!(
         format_bash_label("cd repo && cargo test"),
-        "bash\n  cd repo &&\n  cargo test"
+        "bash cd repo &&\n  cargo test"
     );
 }
 
@@ -12,7 +12,7 @@ fn bash_label_splits_top_level_shell_chains() {
 fn bash_label_keeps_quoted_operators_intact() {
     assert_eq!(
         format_bash_label("printf \"a && b\" && echo done"),
-        "bash\n  printf \"a && b\" &&\n  echo done"
+        "bash printf \"a && b\" &&\n  echo done"
     );
 }
 
@@ -20,7 +20,7 @@ fn bash_label_keeps_quoted_operators_intact() {
 fn bash_label_expands_unquoted_heredoc_delimiter() {
     assert_eq!(
         format_bash_label("cat > /tmp/file << EOFfn main() {}EOF"),
-        "bash\n  cat > /tmp/file << EOF\n    fn main()\n    {\n    }\n  EOF"
+        "bash cat > /tmp/file << EOF\n    fn main()\n    {\n    }\n  EOF"
     );
 }
 
@@ -28,7 +28,7 @@ fn bash_label_expands_unquoted_heredoc_delimiter() {
 fn bash_label_expands_quoted_heredoc_delimiter() {
     assert_eq!(
         format_bash_label("cat > /tmp/file << 'EOF'let x = 1;EOF"),
-        "bash\n  cat > /tmp/file << 'EOF'\n    let x = 1;\n  EOF"
+        "bash cat > /tmp/file << 'EOF'\n    let x = 1;\n  EOF"
     );
 }
 
@@ -36,7 +36,7 @@ fn bash_label_expands_quoted_heredoc_delimiter() {
 fn bash_label_handles_collapsed_heredoc_followed_by_command() {
     assert_eq!(
         format_bash_label("cat << 'EOF'let x = 1;EOFBONE_TEST_DIR=/tmp cargo test"),
-        "bash\n  cat << 'EOF'\n    let x = 1;\n  EOF\n  BONE_TEST_DIR=/tmp cargo test"
+        "bash cat << 'EOF'\n    let x = 1;\n  EOF\n  BONE_TEST_DIR=/tmp cargo test"
     );
 }
 
@@ -44,6 +44,6 @@ fn bash_label_handles_collapsed_heredoc_followed_by_command() {
 fn bash_label_reflows_basic_code_payload() {
     assert_eq!(
         format_bash_label("cat << EOF// hello fn main(){let x = 1;}EOF"),
-        "bash\n  cat << EOF\n    // hello fn main()\n    {\n      let x = 1;\n    }\n  EOF"
+        "bash cat << EOF\n    // hello fn main()\n    {\n      let x = 1;\n    }\n  EOF"
     );
 }

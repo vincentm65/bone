@@ -84,5 +84,3 @@ impl Tool for WriteFileTool {
         Ok(format!("wrote {} bytes", args.content.len()))
     }
 }
-
-
