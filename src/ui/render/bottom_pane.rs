@@ -150,30 +150,30 @@ impl super::Renderer {
                     y += 1;
                 }
 
-                // Combined hint/truncation line
-                let hint = if prompt.peek_mode {
-                    "    Press P to hide full command".to_string()
-                } else if cmd_visual_lines.len() > COMMAND_PREVIEW_LINES {
-                    let remaining = cmd_visual_lines.len() - COMMAND_PREVIEW_LINES;
-                    format!(
-                        "    … [+{} more lines]  Press P to show full command",
-                        remaining
-                    )
-                } else {
-                    "    Press P to show full command".to_string()
-                };
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        hint,
-                        Style::default().fg(self.theme.system_msg),
-                    )),
-                    Rect {
-                        y,
-                        height: 1,
-                        ..area
-                    },
-                );
-                y += 1;
+                // Combined hint/truncation line (only shown when truncated or in peek mode)
+                if prompt.peek_mode || cmd_visual_lines.len() > COMMAND_PREVIEW_LINES {
+                    let hint = if prompt.peek_mode {
+                        "    Press P to hide full command".to_string()
+                    } else {
+                        let remaining = cmd_visual_lines.len() - COMMAND_PREVIEW_LINES;
+                        format!(
+                            "    … [+{} more lines]  Press P to show full command",
+                            remaining
+                        )
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            hint,
+                            Style::default().fg(self.theme.system_msg),
+                        )),
+                        Rect {
+                            y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    y += 1;
+                }
 
                 // Options
                 for (i, option) in prompt.options.iter().enumerate() {

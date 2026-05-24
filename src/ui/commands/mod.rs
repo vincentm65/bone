@@ -110,6 +110,7 @@ fn help() -> String {
         "/model     — set or show model (/model <name>)",
         "/provider  — show or switch provider (/provider <name>)",
         "/quit      — exit bone",
+        ":        — run a command inline (: <command>)",
     ]
     .join("\n")
 }

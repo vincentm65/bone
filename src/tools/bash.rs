@@ -109,7 +109,7 @@ impl Tool for BashTool {
 
 /// Truncate output to `max_lines`, keeping the first half and last half with a
 /// marker showing how many lines were omitted.
-fn truncate_output(output: &str, max_lines: usize) -> String {
+pub fn truncate_output(output: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     if lines.len() <= max_lines {
         return output.to_string();

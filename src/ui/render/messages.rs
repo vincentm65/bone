@@ -37,13 +37,13 @@ pub fn assistant_raw_lines_to_lines(lines: &[&str], width: u16) -> Vec<Line<'sta
         .collect()
 }
 
-fn render_tool(tool: &ToolDisplay, theme: &Theme, lines: &mut Vec<Line<'static>>, width: usize) {
+fn render_tool(tool: &ToolDisplay, content: &str, theme: &Theme, lines: &mut Vec<Line<'static>>, width: usize) {
     let marker = if tool.is_error { "✕ " } else { "  " };
     let name_style = Style::default().fg(Color::White);
     let rest_style = Style::default().fg(theme.tool_call);
     let marker_style = Style::default().fg(theme.tool_error);
     let indent = "    ";
-    let prefix_width = 4; // "  " + marker (2 chars) = 4 display cols
+    let prefix_width = 4;
     let label_width = width.saturating_sub(prefix_width).max(1);
 
     let wrapped = wrap_tool_label(&tool.label, label_width);
@@ -62,6 +62,18 @@ fn render_tool(tool: &ToolDisplay, theme: &Theme, lines: &mut Vec<Line<'static>>
                 Span::raw(indent),
                 Span::styled(visual_line, rest_style),
             ]));
+        }
+    }
+
+    if !content.is_empty() {
+        lines.push(Line::raw(""));
+        for raw_line in content.lines() {
+            for visual_line in wrap::wrap_text(raw_line, width) {
+                lines.push(Line::from(Span::styled(
+                    visual_line,
+                    Style::default().fg(theme.system_msg),
+                )));
+            }
         }
     }
 }
@@ -134,9 +146,10 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
                 for visual_line in
                     wrap::wrap_text_with_prefix(raw_line, first_prefix, "  ", width as usize)
                 {
+                    let styled_line = pad_to_terminal_width(&visual_line, width as usize);
                     lines.push(Line::from(Span::styled(
-                        visual_line,
-                        Style::default().fg(theme.user_msg),
+                        styled_line,
+                        Style::default().fg(theme.user_msg).bg(theme.user_msg_bg),
                     )));
                 }
             }
@@ -201,7 +214,7 @@ pub fn msg_to_lines(
         }
 
         if let Some(tool) = &msg.tool {
-            render_tool(tool, theme, &mut lines, width as usize);
+            render_tool(tool, &msg.content, theme, &mut lines, width as usize);
         } else {
             render_content(msg, theme, &mut lines, width);
         }

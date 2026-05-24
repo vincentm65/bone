@@ -1,8 +1,8 @@
 /// User's response to a blocking prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Accept,
-    Advise,
+    Advise(String),
     Cancel,
 }
 
@@ -62,7 +62,7 @@ impl Prompt {
     pub fn decision(&self) -> Decision {
         match self.selected {
             0 => Decision::Accept,
-            1 => Decision::Advise,
+            1 => Decision::Advise(String::new()),
             _ => Decision::Cancel,
         }
     }

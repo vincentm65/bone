@@ -338,12 +338,33 @@ impl App {
 
         self.redraw(term)?;
 
-        // ── Mini blocking event loop ──
+        let mut advising = false;
+
         let decision = loop {
             if event::poll(std::time::Duration::from_millis(50))?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {
+                if advising {
+                    match self.input.apply_key(key.code, key.modifiers) {
+                        InputAction::Submit => {
+                            let advice = self.input.buffer.trim().to_string();
+                            self.input.reset();
+                            break Decision::Advise(advice);
+                        }
+                        InputAction::Cancel | InputAction::Escape => {
+                            self.input.clear_buffer();
+                            break Decision::Cancel;
+                        }
+                        InputAction::Redraw => self.redraw(term)?,
+                        InputAction::None if key.code == KeyCode::Enter => {
+                            break Decision::Advise(String::new());
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Up => {
                         if let Some(ref mut p) = self.active_prompt {
@@ -365,7 +386,14 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if let Some(prompt) = self.active_prompt.as_ref() {
-                            break prompt.decision();
+                            let decision = prompt.decision();
+                            if matches!(decision, Decision::Advise(_)) {
+                                self.active_prompt = None;
+                                advising = true;
+                                self.redraw(term)?;
+                                continue;
+                            }
+                            break decision;
                         }
                         break Decision::Cancel;
                     }
@@ -374,6 +402,18 @@ impl App {
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break Decision::Cancel;
+                    }
+                    KeyCode::Char(c)
+                        if key.modifiers.is_empty()
+                            && self
+                                .active_prompt
+                                .as_ref()
+                                .is_some_and(|prompt| prompt.selected == 1) =>
+                    {
+                        self.input.insert_char(c);
+                        self.active_prompt = None;
+                        advising = true;
+                        self.redraw(term)?;
                     }
                     _ => {}
                 }

@@ -1,6 +1,8 @@
 use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, ResponseStream};
+use crate::tools::bash::BashTool;
 use crate::tools::edit_file::preview_edit_file;
+use crate::tools::types::Tool;
 use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::prompt::Decision;
@@ -45,6 +47,10 @@ impl App {
         let text = self.input.buffer.trim().to_string();
         if text.is_empty() {
             return Ok(());
+        }
+
+        if text.starts_with(':') {
+            return self.run_inline_command(&text[1..], term).await;
         }
 
         if text.starts_with('/') {
@@ -137,6 +143,11 @@ impl App {
                 .finalize_streaming_message(&self.messages[assistant_idx].content, term)?;
 
             let (calls_for_display, results) = self.handle_tool_calls(tool_calls, term).await?;
+            if self.cancel_streaming {
+                self.queue.clear();
+                final_assistant_idx = assistant_idx;
+                break;
+            }
 
             for (call, result) in calls_for_display.iter().zip(results.iter()) {
                 self.messages.push(build_tool_row(call, result));
@@ -160,6 +171,42 @@ impl App {
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
 
+        Ok(())
+    }
+
+    async fn run_inline_command(&mut self, cmd: &str, term: &mut BoneTerminal) -> io::Result<()> {
+        use crate::tools::command_policy::classify_command;
+
+        let safety = classify_command(cmd);
+        let classification = match safety {
+            crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
+            crate::tools::command_policy::CommandSafety::Edit => "edit",
+            crate::tools::command_policy::CommandSafety::Danger => "danger",
+        };
+
+        let result = BashTool
+            .execute(serde_json::json!({
+                "command": cmd,
+                "classification": classification,
+                "timeout_ms": 60_000,
+            }))
+            .await
+            .unwrap_or_else(|e| format!("[error: {e}]"));
+
+        let is_error = result.contains("exit code: 1") || result.contains("timed out");
+        let display = format!("{cmd}\n{result}");
+        self.input.reset();
+        self.messages.push(Message::terminal_output(
+            cmd.to_string(),
+            display,
+            is_error,
+        ));
+        let transcript_text = crate::tools::bash::truncate_output(&format!("$ {cmd}\n{result}"), 500);
+        self.transcript
+            .push(ChatMessage::new(ChatRole::User, &transcript_text));
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.redraw(term)?;
         Ok(())
     }
 
@@ -265,6 +312,9 @@ impl App {
         let mut pending = Vec::with_capacity(tool_calls.len());
 
         for (display_call, call) in calls_for_display.iter().zip(tool_calls) {
+            if self.cancel_streaming {
+                break;
+            }
             pending.push(self.prepare_tool_call(display_call, call, term).await?);
         }
 
@@ -324,11 +374,22 @@ impl App {
         } else {
             match self.prompt_and_wait(display_call, term)? {
                 Decision::Accept => PendingTool::Approved(call),
-                Decision::Cancel => PendingTool::Result(tool_error(&call, "rejected by user")),
-                Decision::Advise => PendingTool::Result(tool_error(
-                    &call,
-                    "[exit_code=1] Tool not executed. User advice: proceed carefully, verify assumptions, and explain your approach before taking action.",
-                )),
+                Decision::Cancel => {
+                    self.cancel_streaming = true;
+                    self.queue.clear();
+                    PendingTool::Result(tool_error(&call, "cancelled by user"))
+                }
+                Decision::Advise(advice) => {
+                    let advice = if advice.trim().is_empty() {
+                        "proceed carefully, verify assumptions, and explain your approach before taking action"
+                    } else {
+                        advice.trim()
+                    };
+                    PendingTool::Result(tool_error(
+                        &call,
+                        format!("[exit_code=1] Tool not executed. User advice: {advice}"),
+                    ))
+                }
             }
         })
     }

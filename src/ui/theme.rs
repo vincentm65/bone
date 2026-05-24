@@ -3,6 +3,7 @@ use ratatui::style::Color;
 /// App-wide color theme.
 pub struct Theme {
     pub user_msg: Color,
+    pub user_msg_bg: Color,
     pub status_text: Color,
     pub input_border: Color,
     pub system_msg: Color,
@@ -19,7 +20,8 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            user_msg: Color::Gray,
+            user_msg: Color::White,
+            user_msg_bg: Color::Rgb(48, 48, 48),
             status_text: Color::DarkGray,
             input_border: Color::DarkGray,
             system_msg: Color::White,

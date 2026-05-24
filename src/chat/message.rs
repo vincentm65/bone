@@ -52,4 +52,17 @@ impl Message {
             tool: Some(ToolDisplay { label, is_error }),
         }
     }
+
+    /// Terminal output: shows a label (e.g. "bash: ls") plus visible content.
+    #[must_use]
+    pub fn terminal_output(command: String, content: String, is_error: bool) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content,
+            tool: Some(ToolDisplay {
+                label: format!("bash: {command}"),
+                is_error,
+            }),
+        }
+    }
 }
