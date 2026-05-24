@@ -54,7 +54,7 @@ pub fn format_bash_label(command: &str) -> String {
         None => "bash".to_string(),
     }];
     for line in command_lines {
-        lines.push(format!("  {line}"));
+        lines.push(format!(" {line}"));
     }
     lines.join("\n")
 }
@@ -148,7 +148,7 @@ fn expand_collapsed_heredoc_line(line: &str) -> Vec<String> {
 
     let mut out = vec![line[..marker.after_start].trim_end().to_string()];
     for payload_line in reflow_code_payload(body) {
-        out.push(format!("  {payload_line}"));
+        out.push(format!(" {payload_line}"));
     }
     out.push(marker.delimiter);
     if !rest.is_empty() {
