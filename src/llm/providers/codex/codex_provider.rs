@@ -33,7 +33,11 @@ impl CodexProvider {
             entry.label.clone()
         };
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
             id: id.to_string(),
             label,
             base_url: entry.base_url.trim_end_matches('/').to_string(),
@@ -47,8 +51,6 @@ impl CodexProvider {
         format!("{}{}", self.base_url, self.endpoint)
     }
 }
-
-// ── Request types ──
 
 #[derive(Serialize)]
 struct CodexRequest {
@@ -146,8 +148,6 @@ pub struct CodexTool {
     pub strict: bool,
 }
 
-// ── Response types ──
-
 #[derive(Deserialize)]
 struct CodexSSEEvent {
     #[serde(rename = "type")]
@@ -187,8 +187,6 @@ struct CodexUsage {
     #[serde(rename = "total_tokens")]
     total_tokens: Option<u64>,
 }
-
-// ── Provider implementation ──
 
 pub fn codex_tools(tools: Vec<ToolDefinition>) -> Vec<CodexTool> {
     tools

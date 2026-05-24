@@ -1,5 +1,5 @@
 use crate::chat::{Message, build_chat_history};
-use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, ResponseStream};
+use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
 use crate::tools::bash::BashTool;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::types::Tool;
@@ -15,6 +15,10 @@ use std::io;
 use tokio::time::{self, Duration};
 
 use super::App;
+
+const INITIAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PROVIDER_ATTEMPTS: usize = 2;
 
 enum PendingTool {
     Approved(ToolCall),
@@ -42,6 +46,45 @@ fn assistant_message(content: String, tool_calls: Vec<ToolCall>, reasoning: Stri
     message
 }
 
+pub enum StreamFailure {
+    Provider(LlmError),
+    InitialTimeout,
+    IdleTimeout,
+}
+
+impl StreamFailure {
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Provider(err) => {
+                matches!(err.kind, LlmErrorKind::Timeout | LlmErrorKind::Connection)
+            }
+            Self::InitialTimeout | Self::IdleTimeout => true,
+        }
+    }
+
+    fn display_message(&self, retried: bool) -> String {
+        match self {
+            Self::InitialTimeout => timeout_message("provider timeout", "no response", retried),
+            Self::IdleTimeout => timeout_message("stream timeout", "no events", retried),
+            Self::Provider(err) if matches!(err.kind, LlmErrorKind::Timeout) => {
+                timeout_message("provider timeout", "request timed out", retried)
+            }
+            Self::Provider(err) if matches!(err.kind, LlmErrorKind::Connection) => {
+                timeout_message("provider error", "connection refused", retried)
+            }
+            Self::Provider(err) => format!("[provider error: {err}]"),
+        }
+    }
+}
+
+pub fn timeout_message(prefix: &str, detail: &str, retried: bool) -> String {
+    if retried {
+        format!("[{prefix}: {detail} within 30s; retried once]")
+    } else {
+        format!("[{prefix}: {detail} within 30s]")
+    }
+}
+
 impl App {
     pub(crate) async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let text = self.input.buffer.trim().to_string();
@@ -49,14 +92,14 @@ impl App {
             return Ok(());
         }
 
-        if text.starts_with(':') {
-            return self.run_inline_command(&text[1..], term).await;
+        if let Some(cmd) = text.strip_prefix(':') {
+            return self.run_inline_command(cmd, term).await;
         }
 
-        if text.starts_with('/') {
+        if let Some(cmd) = text.strip_prefix('/') {
             self.input.reset();
             self.redraw(term)?;
-            return self.handle_command(&text, term).await;
+            return self.handle_command(cmd, term).await;
         }
 
         self.messages.push(Message::user(&text));
@@ -78,6 +121,7 @@ impl App {
         loop {
             rounds += 1;
             self.messages.push(Message::assistant(String::new()));
+            self.renderer.streaming_source_flushed = 0;
             self.renderer.streaming_lines_flushed = 0;
             self.renderer.scrollback_cursor += 1;
             let assistant_idx = self.messages.len() - 1;
@@ -95,8 +139,58 @@ impl App {
                 break;
             }
 
-            let (stream_result, spinner_tick) = self.wait_for_stream(history.clone(), term).await;
-            self.renderer.spinner_tick = spinner_tick;
+            let mut last_failure = None;
+            let mut stream_output = None;
+            for attempt in 1..=MAX_PROVIDER_ATTEMPTS {
+                self.messages[assistant_idx].content.clear();
+                self.renderer.streaming_source_flushed = 0;
+                self.renderer.streaming_lines_flushed = 0;
+
+                let (stream_result, spinner_tick) =
+                    self.wait_for_stream(history.clone(), term).await;
+                self.renderer.spinner_tick = spinner_tick;
+
+                if self.cancel_streaming {
+                    self.mark_cancelled(assistant_idx);
+                    break;
+                }
+
+                let stream = match stream_result {
+                    Ok(stream) => stream,
+                    Err(failure) => {
+                        let retryable = failure.retryable();
+                        last_failure = Some(failure);
+                        if retryable && attempt < MAX_PROVIDER_ATTEMPTS {
+                            time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        break;
+                    }
+                };
+
+                match self
+                    .consume_stream(stream, assistant_idx, &history, term)
+                    .await?
+                {
+                    Ok(output) => {
+                        stream_output = Some(output);
+                        break;
+                    }
+                    Err(failure) => {
+                        if self.cancel_streaming {
+                            self.mark_cancelled(assistant_idx);
+                            break;
+                        }
+                        let retryable = failure.retryable();
+                        last_failure = Some(failure);
+                        if retryable && attempt < MAX_PROVIDER_ATTEMPTS {
+                            time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
 
             if self.cancel_streaming {
                 self.mark_cancelled(assistant_idx);
@@ -104,20 +198,13 @@ impl App {
                 break;
             }
 
-            let (tool_calls, reasoning_content) = match stream_result {
-                Ok(stream) => {
-                    self.consume_stream(stream, assistant_idx, &history, term)
-                        .await?
+            let Some((tool_calls, reasoning_content)) = stream_output else {
+                if let Some(failure) = last_failure {
+                    self.messages[assistant_idx].content =
+                        failure.display_message(MAX_PROVIDER_ATTEMPTS > 1);
                 }
-                Err(err) => {
-                    if self.cancel_streaming {
-                        self.mark_cancelled(assistant_idx);
-                    } else {
-                        self.messages[assistant_idx].content = format!("[provider error: {err}]");
-                    }
-                    final_assistant_idx = assistant_idx;
-                    break;
-                }
+                final_assistant_idx = assistant_idx;
+                break;
             };
 
             if tool_calls.is_empty() || self.cancel_streaming {
@@ -196,12 +283,10 @@ impl App {
         let is_error = result.contains("exit code: 1") || result.contains("timed out");
         let display = format!("{cmd}\n{result}");
         self.input.reset();
-        self.messages.push(Message::terminal_output(
-            cmd.to_string(),
-            display,
-            is_error,
-        ));
-        let transcript_text = crate::tools::bash::truncate_output(&format!("$ {cmd}\n{result}"), 500);
+        self.messages
+            .push(Message::terminal_output(cmd.to_string(), display, is_error));
+        let transcript_text =
+            crate::tools::bash::truncate_output(&format!("$ {cmd}\n{result}"), 500);
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &transcript_text));
         self.renderer
@@ -227,12 +312,14 @@ impl App {
         assistant_idx: usize,
         history: &[ChatMessage],
         term: &mut BoneTerminal,
-    ) -> io::Result<(Vec<ToolCall>, String)> {
+    ) -> io::Result<Result<(Vec<ToolCall>, String), StreamFailure>> {
         let mut spinner = time::interval(Duration::from_millis(90));
+        let idle = time::sleep(STREAM_IDLE_TIMEOUT);
         let mut had_usage = false;
         let mut tool_calls = Vec::new();
         let mut reasoning_content = String::new();
         let mut stream_estimated_received = self.token_stats.received;
+        pin_mut!(idle);
 
         loop {
             if self.cancel_streaming {
@@ -242,27 +329,33 @@ impl App {
             tokio::select! {
                 chunk = stream.next() => match chunk {
                     Some(Ok(ChatEvent::TextDelta(text))) => {
+                        idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
                         self.messages[assistant_idx].content.push_str(&text);
                         stream_estimated_received += text.len() as u64 / 4;
                         self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
                     }
-                    Some(Ok(ChatEvent::ReasoningDelta(text))) => reasoning_content.push_str(&text),
+                    Some(Ok(ChatEvent::ReasoningDelta(text))) => {
+                        idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
+                        reasoning_content.push_str(&text);
+                    }
                     Some(Ok(ChatEvent::ToolCall(call))) => {
+                        idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
                         stream_estimated_received += (call.arguments.to_string().len() as u64 / 4).max(1);
                         tool_calls.push(call);
                         self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
                     }
                     Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens })) => {
+                        idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
                         self.token_stats.record_request(prompt_tokens, completion_tokens);
                         stream_estimated_received = self.token_stats.received;
                         had_usage = true;
                     }
                     Some(Err(err)) => {
-                        self.messages[assistant_idx].content.push_str(&format!("\n[stream error: {err}]"));
-                        break;
+                        return Ok(Err(StreamFailure::Provider(err)));
                     }
                     None => break,
                 },
+                _ = &mut idle => return Ok(Err(StreamFailure::IdleTimeout)),
                 _ = spinner.tick() => {
                     Self::drain_keys(
                         &mut self.input,
@@ -286,7 +379,7 @@ impl App {
                 .record_estimate(prompt_chars, completion_chars);
         }
 
-        Ok((tool_calls, reasoning_content))
+        Ok(Ok((tool_calls, reasoning_content)))
     }
 
     fn redraw_streaming_tokens(
@@ -398,9 +491,10 @@ impl App {
         &mut self,
         history: Vec<ChatMessage>,
         term: &mut BoneTerminal,
-    ) -> (Result<ResponseStream, LlmError>, usize) {
+    ) -> (Result<ResponseStream, StreamFailure>, usize) {
         let request = self.llm.chat_stream(history, self.tools.definitions());
         let spinner = time::sleep(Duration::from_millis(90));
+        let timeout = time::sleep(INITIAL_RESPONSE_TIMEOUT);
         let tick = self.renderer.spinner_tick;
         let model = self.model.clone();
         let token_stats = self.token_stats.clone();
@@ -409,14 +503,18 @@ impl App {
         let renderer = &mut self.renderer;
         let approval_mode = &mut self.approval_mode;
         let cancel = &mut self.cancel_streaming;
-        pin_mut!(request, spinner);
+        pin_mut!(request, spinner, timeout);
 
         loop {
             if *cancel {
-                return (Err(LlmError::new("cancelled")), tick);
+                return (
+                    Err(StreamFailure::Provider(LlmError::new("cancelled"))),
+                    tick,
+                );
             }
             tokio::select! {
-                result = &mut request => return (result, tick),
+                result = &mut request => return (result.map_err(StreamFailure::Provider), tick),
+                _ = &mut timeout => return (Err(StreamFailure::InitialTimeout), tick),
                 _ = &mut spinner => {
                     renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
                     Self::drain_keys(input, queue, approval_mode, cancel);

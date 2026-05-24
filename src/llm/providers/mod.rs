@@ -32,8 +32,6 @@ pub fn create_provider_with_config(
             }
         }
     }
-
-    // Helpful error listing what's available.
     let available: Vec<&str> = config.providers.keys().map(|s| s.as_str()).collect();
     let mut msg = format!("unknown provider `{id}`.");
     if available.is_empty() {

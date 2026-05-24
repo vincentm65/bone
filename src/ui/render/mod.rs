@@ -1,12 +1,13 @@
 mod banner;
 mod bottom_pane;
-mod messages;
+pub mod markdown;
+pub mod messages;
 pub mod wrap;
 
 use ratatui::layout::Rect;
 
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, Viewport};
 use std::io::{self, Stdout, Write};
 
@@ -40,8 +41,10 @@ pub struct Renderer {
     /// Index of the first message NOT yet pushed to native scrollback.
     pub scrollback_cursor: usize,
     pub spinner_tick: usize,
-    /// Number of lines of the current streaming assistant message already
-    /// flushed to native scrollback via insert_before.
+    /// Byte offset of the current streaming assistant message already flushed
+    /// to native scrollback via insert_before.
+    pub streaming_source_flushed: usize,
+    /// Number of stable rendered lines already inserted for the current response.
     pub streaming_lines_flushed: usize,
     /// Terminal size at last successful draw (for stale-size detection).
     pub last_size: Option<(u16, u16)>,
@@ -61,6 +64,7 @@ impl Renderer {
             theme: Theme::default(),
             scrollback_cursor: 0,
             spinner_tick: 0,
+            streaming_source_flushed: 0,
             streaming_lines_flushed: 0,
             last_size: None,
             viewport_height: MIN_ROWS,
@@ -118,10 +122,6 @@ impl Renderer {
         io::stdout().flush()
     }
 
-    // ------------------------------------------------------------------
-    // Banner
-    // ------------------------------------------------------------------
-
     pub fn render_banner(
         &self,
         term: &mut BoneTerminal,
@@ -130,10 +130,6 @@ impl Renderer {
     ) -> io::Result<()> {
         banner::render(term, provider, model)
     }
-
-    // ------------------------------------------------------------------
-    // Scrollback / messages
-    // ------------------------------------------------------------------
 
     /// Push messages that haven't been flushed yet into native terminal scrollback.
     ///
@@ -158,17 +154,22 @@ impl Renderer {
         let terminal_width = term.size()?.width;
         let rendered: Vec<Line<'static>> =
             messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width);
-        let line_count = rendered.len() as u16;
+        let line_count = logical_lines_row_count(&rendered, terminal_width);
 
         term.insert_before(line_count, |buf| {
-            for (row, line) in rendered.iter().enumerate() {
+            let mut row = 0u16;
+            for line in &rendered {
+                let height = logical_line_row_count(line, buf.area.width.max(1));
                 let msg_area = Rect {
                     x: 0,
-                    y: row as u16,
+                    y: row,
                     width: buf.area.width,
-                    height: 1,
+                    height,
                 };
-                Paragraph::new(line.clone()).render(msg_area, buf);
+                Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .render(msg_area, buf);
+                row = row.saturating_add(height);
             }
         })?;
 
@@ -176,11 +177,9 @@ impl Renderer {
         Ok(())
     }
 
-    // ------------------------------------------------------------------
-    // Streaming
-    // ------------------------------------------------------------------
-
-    /// During streaming: flush only complete lines of the assistant message.
+    /// During streaming: flush complete source lines as soon as they are safe
+    /// to render. Fenced code blocks and pipe tables are buffered until their
+    /// final rendering is known.
     pub fn redraw_streaming_message(
         &mut self,
         content: &str,
@@ -188,46 +187,40 @@ impl Renderer {
         input: &InputState,
         status_info: &StatusInfo,
     ) -> io::Result<()> {
-        // Flush new complete lines into scrollback.
-        let all_lines: Vec<&str> = content.lines().collect();
-
-        let complete = if content.ends_with('\n') {
-            all_lines.len()
-        } else {
-            all_lines.len().saturating_sub(1)
-        };
-
-        if complete > self.streaming_lines_flushed {
-            let new_lines = &all_lines[self.streaming_lines_flushed..complete];
-            let visual_lines =
-                messages::assistant_raw_lines_to_lines(new_lines, term.size()?.width);
-            messages::insert_lines(term, &visual_lines)?;
-            self.streaming_lines_flushed = complete;
+        let safe_end = safe_markdown_prefix_end(content);
+        if safe_end > self.streaming_source_flushed {
+            let width = term.size()?.width.max(1);
+            let rendered = messages::assistant_markdown_to_lines(&content[..safe_end], width);
+            if self.streaming_lines_flushed < rendered.len() {
+                messages::insert_lines(term, &rendered[self.streaming_lines_flushed..])?;
+                self.streaming_lines_flushed = rendered.len();
+            }
+            self.streaming_source_flushed = safe_end;
         }
 
-        // Redraw bottom pane (shows current input so user can type ahead).
+        // Redraw only composer/status UI. Incomplete assistant output is never
+        // shown in the input viewport; it is inserted once markdown is stable.
         term.draw(|frame| self.draw_bottom_pane(frame, input, status_info, None))?;
         Ok(())
     }
 
-    /// Flush all remaining lines from the streaming message (including the
-    /// final partial line that `redraw` skips).
+    /// Flush all remaining lines from the streaming message, including
+    /// the incomplete trailing paragraph that `redraw_streaming_message`
+    /// holds back during streaming.
     pub fn finalize_streaming_message(
         &mut self,
         content: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        let all_lines: Vec<&str> = content.lines().collect();
-
-        if all_lines.len() > self.streaming_lines_flushed {
-            let remaining = &all_lines[self.streaming_lines_flushed..];
-            let visual_lines =
-                messages::assistant_raw_lines_to_lines(remaining, term.size()?.width);
-            messages::insert_lines(term, &visual_lines)?;
-            self.streaming_lines_flushed = all_lines.len();
+        let width = term.size()?.width.max(1);
+        let rendered = messages::assistant_markdown_to_lines(content, width);
+        if self.streaming_lines_flushed < rendered.len() {
+            messages::insert_lines(term, &rendered[self.streaming_lines_flushed..])?;
         }
+        self.streaming_source_flushed = content.len();
+        self.streaming_lines_flushed = rendered.len();
 
-        if !content.is_empty() || self.streaming_lines_flushed > 0 {
+        if !content.is_empty() || self.streaming_source_flushed > 0 {
             messages::insert_lines(term, &[ratatui::text::Line::raw("")])?;
         }
         Ok(())
@@ -244,4 +237,138 @@ impl Renderer {
         term.draw(|frame| self.draw_bottom_pane(frame, input, status_info, None))?;
         Ok(())
     }
+}
+
+fn logical_lines_row_count(lines: &[Line<'static>], width: u16) -> u16 {
+    lines
+        .iter()
+        .map(|line| logical_line_row_count(line, width))
+        .sum()
+}
+
+fn logical_line_row_count(line: &Line<'static>, width: u16) -> u16 {
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
+        .max(1) as u16
+}
+
+pub fn safe_markdown_prefix_end(content: &str) -> usize {
+    let mut safe_end = 0;
+    let mut in_fence: Option<(char, usize)> = None;
+    let mut pending_pipe: Option<usize> = None;
+    let mut in_table = false;
+
+    for (start, line_with_newline) in complete_lines(content) {
+        let line = line_with_newline
+            .trim_end_matches('\n')
+            .trim_end_matches('\r');
+        let trimmed = line.trim();
+        let end = start + line_with_newline.len();
+
+        if let Some((fc, fl)) = in_fence {
+            if is_closing_fence(trimmed, fc, fl) {
+                in_fence = None;
+                safe_end = end;
+            }
+            continue;
+        }
+
+        if let Some(fence) = opening_fence(trimmed) {
+            in_fence = Some(fence);
+            continue;
+        }
+
+        if in_table {
+            if trimmed.is_empty() {
+                in_table = false;
+                safe_end = end;
+            } else if !is_pipe_line(trimmed) {
+                in_table = false;
+                safe_end = start;
+            }
+            continue;
+        }
+
+        if let Some(pipe_start) = pending_pipe.take() {
+            if is_table_delimiter(trimmed) {
+                in_table = true;
+                safe_end = safe_end.min(pipe_start);
+                continue;
+            }
+        }
+
+        if is_pipe_line(trimmed) {
+            pending_pipe = Some(start);
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            safe_end = end;
+        }
+    }
+
+    safe_end
+}
+
+fn complete_lines(content: &str) -> impl Iterator<Item = (usize, &str)> {
+    content
+        .split_inclusive('\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some((start, line))
+        })
+        .filter(|(_, line)| line.ends_with('\n'))
+}
+
+fn opening_fence(trimmed: &str) -> Option<(char, usize)> {
+    let bytes = trimmed.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let c = bytes[0];
+    if c != b'`' && c != b'~' {
+        return None;
+    }
+    let len = bytes.iter().take_while(|&&b| b == c).count();
+    if len >= 3 {
+        Some((c as char, len))
+    } else {
+        None
+    }
+}
+
+fn is_closing_fence(trimmed: &str, fence_char: char, fence_len: usize) -> bool {
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < fence_len {
+        return false;
+    }
+    let matching = bytes.iter().take(fence_len).all(|&b| b == fence_char as u8);
+    matching
+        && (bytes.len() == fence_len || trimmed[fence_len..].chars().all(|ch| ch.is_whitespace()))
+}
+
+fn is_pipe_line(trimmed: &str) -> bool {
+    trimmed.contains('|')
+}
+
+fn is_table_delimiter(trimmed: &str) -> bool {
+    if !is_pipe_line(trimmed) {
+        return false;
+    }
+    let trimmed = trimmed.trim_matches('|').trim();
+    let mut saw_cell = false;
+    for cell in trimmed.split('|') {
+        let cell = cell.trim();
+        if cell.is_empty() {
+            return false;
+        }
+        let cell = cell.trim_matches(':');
+        if cell.len() < 3 || !cell.chars().all(|ch| ch == '-') {
+            return false;
+        }
+        saw_cell = true;
+    }
+    saw_cell
 }

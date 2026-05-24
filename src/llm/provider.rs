@@ -85,6 +85,8 @@ pub enum ChatEvent {
 pub enum LlmErrorKind {
     /// Server unreachable (DNS, connect timeout, etc.).
     Connection,
+    /// Provider request or stream timed out.
+    Timeout,
     /// Authentication/authorization error (401/403).
     Auth,
     /// Rate-limited (429).
@@ -146,7 +148,9 @@ impl From<reqwest::Error> for LlmError {
             Some(code) if code.as_u16() == 429 => LlmErrorKind::RateLimit,
             Some(code) if code.is_server_error() => LlmErrorKind::Server(code.as_u16()),
             _ => {
-                if err.is_connect() || err.is_timeout() {
+                if err.is_timeout() {
+                    LlmErrorKind::Timeout
+                } else if err.is_connect() {
                     LlmErrorKind::Connection
                 } else {
                     LlmErrorKind::Config

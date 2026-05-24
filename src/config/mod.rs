@@ -7,15 +7,11 @@ use serde::{Deserialize, Serialize};
 
 pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers, save_providers};
 
-// ── shared YAML loader ──────────────────────────────────────────────────────
-
 pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let raw = std::fs::read_to_string(path).ok()?;
     let raw = raw.trim_start_matches('\u{feff}');
     serde_yaml::from_str(raw).ok()
 }
-
-// ── paths ───────────────────────────────────────────────────────────────────
 
 fn bone_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -43,8 +39,6 @@ pub fn providers_path() -> PathBuf {
 pub fn command_policy_path() -> PathBuf {
     bone_dir().join("command-policy.yaml")
 }
-
-// ── UserConfig ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct UserConfig {
@@ -75,8 +69,6 @@ pub fn load_user_config() -> UserConfig {
     })
 }
 
-// ── seed providers ──────────────────────────────────────────────────────────
-
 const EXAMPLE_PROVIDERS: &str = include_str!("../../example-providers.yaml");
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
 
@@ -94,11 +86,11 @@ fn seed_file_if_missing(path: &Path, content: &str) {
     if path.exists() {
         return;
     }
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            eprintln!("bone: warning: could not create {}: {e}", parent.display());
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        eprintln!("bone: warning: could not create {}: {e}", parent.display());
+        return;
     }
     if let Err(e) = fs::write(path, content) {
         eprintln!("bone: warning: could not write {}: {e}", path.display());

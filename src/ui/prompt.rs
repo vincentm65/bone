@@ -40,18 +40,6 @@ impl Prompt {
         }
     }
 
-    pub fn left(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
-    }
-
-    pub fn right(&mut self) {
-        if self.selected + 1 < self.options.len() {
-            self.selected += 1;
-        }
-    }
-
     /// Toggle peek mode for command preview.
     pub fn toggle_peek(&mut self) {
         if self.full_command.is_some() {

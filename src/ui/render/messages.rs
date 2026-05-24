@@ -4,40 +4,59 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::chat::{Message, ToolDisplay};
 use crate::llm::ChatRole;
-use crate::ui::render::{BoneTerminal, wrap};
+use crate::ui::render::{BoneTerminal, markdown, wrap};
 use crate::ui::theme::Theme;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 
-/// Insert already-rendered visual lines into native scrollback.
 pub fn insert_lines(term: &mut BoneTerminal, lines: &[Line<'static>]) -> io::Result<()> {
     if lines.is_empty() {
         return Ok(());
     }
 
-    term.insert_before(lines.len() as u16, |buf| {
-        for (row, line) in lines.iter().enumerate() {
+    let width = term.size()?.width.max(1);
+    let row_count: u16 = lines
+        .iter()
+        .map(|line| wrapped_line_count(line, width))
+        .sum();
+
+    term.insert_before(row_count, |buf| {
+        let mut row = 0u16;
+        for line in lines {
+            let height = wrapped_line_count(line, buf.area.width.max(1));
             let area = ratatui::layout::Rect {
                 x: 0,
-                y: row as u16,
+                y: row,
                 width: buf.area.width,
-                height: 1,
+                height,
             };
-            Paragraph::new(line.clone()).render(area, buf);
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .render(area, buf);
+            row = row.saturating_add(height);
         }
     })
 }
 
-pub fn assistant_raw_lines_to_lines(lines: &[&str], width: u16) -> Vec<Line<'static>> {
-    lines
-        .iter()
-        .flat_map(|raw_line| wrap::wrap_text(raw_line, width as usize))
-        .map(Line::raw)
-        .collect()
+fn wrapped_line_count(line: &Line<'static>, width: u16) -> u16 {
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1) as u16
 }
 
-fn render_tool(tool: &ToolDisplay, content: &str, theme: &Theme, lines: &mut Vec<Line<'static>>, width: usize) {
+pub fn assistant_markdown_to_lines(content: &str, width: u16) -> Vec<Line<'static>> {
+    markdown::render_markdown(content, width)
+}
+
+pub fn render_tool(
+    tool: &ToolDisplay,
+    content: &str,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+) {
     let marker = if tool.is_error { "✕ " } else { "  " };
     let name_style = Style::default().fg(Color::White);
     let rest_style = Style::default().fg(theme.tool_call);
@@ -155,11 +174,8 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
             }
         }
         ChatRole::Assistant => {
-            for raw_line in msg.content.lines() {
-                for visual_line in wrap::wrap_text(raw_line, width as usize) {
-                    lines.push(Line::raw(visual_line));
-                }
-            }
+            let rendered = markdown::render_markdown(&msg.content, width);
+            lines.extend(rendered);
         }
         ChatRole::System | ChatRole::Tool => {
             for raw_line in msg.content.lines() {
@@ -187,11 +203,6 @@ fn role_changed(prev_role: Option<ChatRole>, current_role: ChatRole) -> bool {
     )
 }
 
-#[cfg(test)]
-#[path = "messages_test.rs"]
-mod messages_test;
-
-/// Convert messages into terminal lines.
 pub fn msg_to_lines(
     msgs: &[Message],
     theme: &Theme,

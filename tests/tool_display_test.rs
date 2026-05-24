@@ -1,4 +1,4 @@
-use super::format_bash_label;
+use bone::ui::tool_display::format_bash_label;
 
 #[test]
 fn bash_label_splits_top_level_shell_chains() {

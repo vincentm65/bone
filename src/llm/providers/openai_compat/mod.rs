@@ -34,7 +34,11 @@ impl OpenAiCompatProvider {
             entry.label.clone()
         };
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
             id: id.to_string(),
             label,
             base_url: entry.base_url.trim_end_matches('/').to_string(),
@@ -56,7 +60,6 @@ struct ChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
-    /// Request token usage in the final streaming chunk (ignored if unsupported).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     stream_options: Option<StreamOptions>,
 }

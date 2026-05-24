@@ -59,6 +59,14 @@ fn wrap_plain_line_splits_at_spaces() {
 }
 
 #[test]
+fn wrap_plain_line_keeps_leading_indent_on_continuations() {
+    assert_eq!(
+        wrap_text("  hello world foo bar", 10),
+        vec!["  hello", "  world", "  foo bar"]
+    );
+}
+
+#[test]
 fn wrap_plain_line_hard_breaks_long_words() {
     assert_eq!(wrap_text("abcdefghij", 5), vec!["abcde", "fghij"]);
 }

@@ -70,8 +70,8 @@ impl super::Renderer {
         let (before, at_cursor, after) = cursor_split(input);
         let display = format!("> {}{}{}", before, at_cursor, after);
         let input_rows = wrap::visual_line_count(&display, terminal_width as usize) as u16;
-        // sep + input_rows + sep + status
-        return 1 + input_rows.max(1) + 1 + 1;
+        // top sep + input_rows + bottom sep + status
+        1 + input_rows.max(1) + 1 + 1
     }
 
     pub fn draw_bottom_pane_with_tick(
@@ -96,7 +96,6 @@ impl super::Renderer {
         };
 
         let mut y = area.y;
-
         frame.render_widget(
             Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
             Rect {
@@ -109,8 +108,6 @@ impl super::Renderer {
 
         if let Some(prompt) = prompt {
             if let Some(ref cmd) = prompt.full_command {
-                // ── Bash command preview ──
-
                 let title = bash_prompt_title(prompt);
                 let title_lines = wrap::wrap_text(&title, area.width as usize);
                 for title_line in title_lines {
@@ -203,8 +200,6 @@ impl super::Renderer {
                     y += 1;
                 }
             } else {
-                // ── Original non-command prompt ──
-
                 // Title line
                 frame.render_widget(
                     Paragraph::new(Span::styled(

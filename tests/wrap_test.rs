@@ -9,6 +9,14 @@ fn wraps_long_line_at_words() {
 }
 
 #[test]
+fn wrapped_indented_line_keeps_indent_on_continuations() {
+    assert_eq!(
+        wrap_text("  alpha beta gamma", 10),
+        vec!["  alpha", "  beta", "  gamma"]
+    );
+}
+
+#[test]
 fn hard_wraps_long_words() {
     assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
 }

@@ -58,12 +58,10 @@ impl InputState {
             return;
         }
         let prev_char_idx = self.cursor_pos - 1;
-        // Find the byte range of the character to remove.
         let (start_byte, ch) = self
             .buffer
             .char_indices()
             .nth(prev_char_idx)
-            .map(|(i, c)| (i, c))
             .unwrap_or((0, '\0'));
         self.buffer
             .replace_range(start_byte..start_byte + ch.len_utf8(), "");
@@ -183,12 +181,10 @@ impl InputState {
     /// Yields the action to take (redraw, submit, etc.). Single source
     /// of truth for key handling — used by the main loop and streaming drain.
     pub fn apply_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputAction {
-        // Ctrl+C always cancels.
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
             return InputAction::Cancel;
         }
 
-        // Alt (Option) shortcuts.
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
                 KeyCode::Left => {
@@ -203,7 +199,6 @@ impl InputState {
             }
         }
 
-        // Ctrl shortcuts.
         if modifiers.contains(KeyModifiers::CONTROL) {
             return match code {
                 KeyCode::Char('a') => {
@@ -232,7 +227,6 @@ impl InputState {
             };
         }
 
-        // No modifiers.
         match code {
             KeyCode::BackTab => InputAction::CycleMode,
             KeyCode::Enter => {

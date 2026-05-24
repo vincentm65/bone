@@ -41,6 +41,13 @@ fn wrap_plain_line(text: &str, width: usize) -> Vec<String> {
         return vec![String::new()];
     }
 
+    let leading = text.len() - text.trim_start().len();
+    if leading > 0 && leading < text.len() {
+        let indent = &text[..leading];
+        let content = &text[leading..];
+        return wrap_text_with_prefix(content, indent, indent, width);
+    }
+
     let mut lines = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {

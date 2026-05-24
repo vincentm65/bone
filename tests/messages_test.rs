@@ -1,6 +1,6 @@
-use super::render_tool;
-use crate::chat::ToolDisplay;
-use crate::ui::theme::Theme;
+use bone::chat::ToolDisplay;
+use bone::ui::render::messages::render_tool;
+use bone::ui::theme::Theme;
 use ratatui::text::Line;
 
 fn line_text(line: &Line<'static>) -> String {

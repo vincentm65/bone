@@ -30,8 +30,8 @@ pub async fn handle(
     providers_config: &mut ProvidersConfig,
 ) -> std::io::Result<CommandResult> {
     let reply = match cmd {
-        "/help" => help(),
-        "/clear" | "/new" => clear(
+        "help" => help(),
+        "clear" | "new" => clear(
             messages,
             transcript,
             token_stats,
@@ -40,24 +40,22 @@ pub async fn handle(
             provider_label,
             model_label,
         )?,
-        "/context" => context(transcript),
-        "/model" => model_switch(arg, llm, provider_label, model_label, providers_config),
-        "/provider" => {
+        "context" => context(transcript),
+        "model" => model_switch(arg, llm, provider_label, model_label, providers_config),
+        "provider" => {
             provider_switch(arg, llm, provider_label, model_label, providers_config).await
         }
-        "/quit" | "/exit" => {
+        "quit" | "exit" => {
             return Ok(CommandResult::Quit);
         }
-        "/edit" | "/e" => {
+        "edit" | "e" => {
             return Ok(CommandResult::OpenEditor);
         }
-        _ => format!("Unknown command: {cmd}. Type /help for available commands."),
+        _ => format!("Unknown command: /{cmd}. Type /help for available commands."),
     };
 
     Ok(CommandResult::Continue { reply })
 }
-
-// ── /clear ──────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn clear(
@@ -87,9 +85,6 @@ fn clear(
     renderer.render_banner(term, provider_label, model_label)?;
     Ok("Chat cleared.".to_string())
 }
-
-// ── /context ────────────────────────────────────────────────────────────────
-
 const CHARS_PER_TOKEN: usize = 4;
 
 fn context(messages: &[ChatMessage]) -> String {
@@ -99,9 +94,6 @@ fn context(messages: &[ChatMessage]) -> String {
         .sum();
     format!("Context: ~{used} tokens in transcript. No local token cap is applied.")
 }
-
-// ── /help ───────────────────────────────────────────────────────────────────
-
 fn help() -> String {
     [
         "/clear     — clear chat history",
@@ -114,9 +106,6 @@ fn help() -> String {
     ]
     .join("\n")
 }
-
-// ── /model ──────────────────────────────────────────────────────────────────
-
 fn model_switch(
     arg: &str,
     llm: &mut Box<dyn LlmProvider>,
@@ -135,9 +124,6 @@ fn model_switch(
     *model_label = arg.to_string();
     format!("Switched to {} ({})", arg, provider_label)
 }
-
-// ── /provider ───────────────────────────────────────────────────────────────
-
 async fn provider_switch(
     arg: &str,
     llm: &mut Box<dyn LlmProvider>,

@@ -1,4 +1,4 @@
-mod stream;
+pub mod stream;
 
 use crate::chat::Message;
 use crate::config::ProvidersConfig;
@@ -75,7 +75,6 @@ impl App {
             .render_banner(&mut terminal, &self.provider, &self.model)?;
         self.force_redraw(&mut terminal)?;
 
-        // Main event loop
         while !self.should_quit {
             if event::poll(std::time::Duration::from_millis(50))? {
                 match event::read()? {
@@ -206,7 +205,6 @@ impl App {
         modifiers: KeyModifiers,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        // If a blocking prompt is active, only prompt keys are handled.
         if self.active_prompt.is_some() {
             return self.handle_prompt_key(code, term);
         }
@@ -307,7 +305,6 @@ impl App {
 
         let prompt = if call.name == "bash" {
             let full_command = call.arguments["command"].as_str().map(String::from);
-            // Truncate title to first line + brief preview
             let title = call.arguments["command"]
                 .as_str()
                 .unwrap_or("?")
@@ -420,7 +417,6 @@ impl App {
             }
         };
 
-        // Dismiss prompt and restore viewport.
         self.active_prompt = None;
         self.redraw(term)?;
 

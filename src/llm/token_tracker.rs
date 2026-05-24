@@ -1,10 +1,9 @@
 use num_format::ToFormattedString;
+
 /// Lightweight token usage tracker.
 ///
 /// Tracks cumulative tokens sent to and received from the LLM provider.
 /// Provides a fallback estimator for providers that don't return usage data.
-///
-/// Cumulative token usage stats.
 #[derive(Debug, Clone, Default)]
 pub struct TokenStats {
     /// Tokens sent to the provider (prompt + tool definitions).

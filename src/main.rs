@@ -6,7 +6,6 @@ use bone::ui::app::App;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    // Seed a default providers.yaml if this is a fresh install.
     seed_providers_if_missing();
     seed_command_policy_if_missing();
 

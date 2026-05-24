@@ -1,7 +1,3 @@
-// ---------------------------------------------------------------------------
-// Tool display helpers — build Message structs from tool calls/results.
-// ---------------------------------------------------------------------------
-
 use crate::chat::Message;
 use crate::tools::types::{ToolCall, ToolResult};
 
@@ -294,7 +290,3 @@ fn flush_code_line(lines: &mut Vec<String>, current: &mut String, indent: usize)
     }
     current.clear();
 }
-
-#[cfg(test)]
-#[path = "tool_display_test.rs"]
-mod tool_display_test;
