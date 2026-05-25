@@ -19,19 +19,40 @@ struct Args {
     timeout_ms: Option<u64>,
 }
 
+/// Returns the shell program, its argument flag, and a label for descriptions.
+fn shell_command() -> (&'static str, &'static str, &'static str) {
+    if cfg!(windows) {
+        ("cmd", "/c", "cmd /c")
+    } else {
+        ("bash", "-lc", "bash -lc")
+    }
+}
 
 #[async_trait]
 impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
+        let (_, _, shell_label) = shell_command();
+        let desc: &'static str = Box::leak(
+            format!(
+                "Run a non-interactive shell command with {shell_label} from the current working directory and return its exit code, stdout, and stderr. Use this for builds, tests, formatters, package managers, and other commands that are better expressed in the shell. Do not use it to read or edit files when a dedicated file tool is more appropriate. Always classify the command honestly as read_only, edit, or danger; choose danger when unsure.",
+            )
+            .into_boxed_str(),
+        );
+        let cmd_desc: &'static str = Box::leak(
+            format!(
+                "Command line to execute with {shell_label}. It runs without stdin, so avoid interactive prompts and provide flags that make tools non-interactive.",
+            )
+            .into_boxed_str(),
+        );
         ToolDefinition {
             name: "bash",
-            description: "Run a non-interactive shell command with bash -lc from the current working directory and return its exit code, stdout, and stderr. Use this for builds, tests, formatters, package managers, and other commands that are better expressed in the shell. Do not use it to read or edit files when a dedicated file tool is more appropriate. Always classify the command honestly as read_only, edit, or danger; choose danger when unsure.",
+            description: desc,
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Command line to execute with bash -lc. It runs without stdin, so avoid interactive prompts and provide flags that make tools non-interactive."
+                        "description": cmd_desc,
                     },
                     "classification": {
                         "type": "string",
@@ -56,9 +77,10 @@ impl Tool for BashTool {
         let _ = args.classification;
         let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 300_000);
 
-        let mut child = Command::new("bash")
-            .arg("-lc")
-            .arg(args.command)
+        let (shell, shell_arg, _) = shell_command();
+        let mut child = Command::new(shell)
+            .arg(shell_arg)
+            .arg(&args.command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

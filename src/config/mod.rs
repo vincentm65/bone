@@ -17,15 +17,13 @@ fn bone_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("bone-rust");
     }
-    std::env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join(".bone-rust"))
-        .unwrap_or_else(|| {
-            eprintln!(
-                "bone: warning: neither $HOME nor $XDG_CONFIG_HOME is set; using /tmp/.bone-rust"
-            );
-            PathBuf::from("/tmp/.bone-rust")
-        })
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        return PathBuf::from(home).join(".bone-rust");
+    }
+    eprintln!(
+        "bone: warning: neither $HOME, $USERPROFILE nor $XDG_CONFIG_HOME is set; using /tmp/.bone-rust"
+    );
+    PathBuf::from("/tmp/.bone-rust")
 }
 
 pub fn config_path() -> PathBuf {
