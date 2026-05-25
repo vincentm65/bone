@@ -112,12 +112,16 @@ impl Tool for BashTool {
         let stdout_trunc = truncate_output(&stdout_str, 500);
         let stderr_trunc = truncate_output(&stderr_str, 100);
 
-        Ok(format!(
-            "exit code: {}\nstdout:\n{stdout_trunc}\nstderr:\n{stderr_trunc}",
+        let mut result = format!(
+            "exit code: {}\nstdout:\n{stdout_trunc}",
             status
                 .code()
                 .map_or_else(|| "signal".to_string(), |code| code.to_string()),
-        ))
+        );
+        if !stderr_trunc.is_empty() {
+            result.push_str(&format!("\nstderr:\n{stderr_trunc}"));
+        }
+        Ok(result)
     }
 }
 
