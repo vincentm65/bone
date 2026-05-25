@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::fs;
 
 use crate::tools::types::{Tool, ToolDefinition};
+use crate::tools::write_atomic::write_atomic;
 
 pub struct WriteFileTool;
 
@@ -57,30 +57,7 @@ impl Tool for WriteFileTool {
                 "file already exists; use edit_file for targeted modifications".to_string(),
             );
         }
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_else(|_| std::process::id() as u128);
-        let pid = std::process::id();
-        let temp_path = path.with_extension(format!("bone-tmp-{pid}-{nanos}"));
-        // Atomically create a new temp file; create_new(true) ensures we
-        // never clobber an existing file from a crashed prior invocation.
-        {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path)
-                .await
-                .map_err(|e| e.to_string())?;
-            f.write_all(args.content.as_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
-            f.flush().await.map_err(|e| e.to_string())?;
-        }
-        fs::rename(&temp_path, path).await.map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            e.to_string()
-        })?;
+        write_atomic(path, &args.content, None).await?;
         Ok(format!("wrote {} bytes", args.content.len()))
     }
 }

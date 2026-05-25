@@ -508,7 +508,7 @@ impl App {
         loop {
             if *cancel {
                 return (
-                    Err(StreamFailure::Provider(LlmError::new("cancelled"))),
+                    Err(StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Config, "cancelled"))),
                     tick,
                 );
             }

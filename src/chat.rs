@@ -1,4 +1,17 @@
-use crate::llm::ChatRole;
+use crate::llm::prompts;
+use crate::llm::{ChatMessage, ChatRole};
+
+// ── History ─────────────────────────────────────────────────────────────────
+
+/// Build provider history without truncating conversation or tool chains.
+pub fn build_chat_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    out.push(ChatMessage::new(ChatRole::System, prompts::system_prompt()));
+    out.extend(messages.iter().cloned());
+    out
+}
+
+// ── Message ─────────────────────────────────────────────────────────────────
 
 /// Display metadata for compact tool rows shown in chat.
 #[derive(Debug, Clone)]

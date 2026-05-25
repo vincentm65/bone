@@ -13,20 +13,12 @@ pub struct BashTool;
 #[derive(Deserialize)]
 struct Args {
     command: String,
-    classification: CommandClassification,
+    /// Classification from the model — accepted for schema compatibility but ignored.
+    /// The deterministic classifier in command_policy is the sole authority.
+    classification: Value,
     timeout_ms: Option<u64>,
 }
 
-/// Receives the LLM's safety classification from the tool call argument.
-/// Kept for tool-prompting compatibility only — approval decisions use the
-/// deterministic classifier in `command_policy::classify_command()`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CommandClassification {
-    ReadOnly,
-    Edit,
-    Danger,
-}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -61,7 +53,7 @@ impl Tool for BashTool {
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
-        let _classification = args.classification;
+        let _ = args.classification;
         let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 300_000);
 
         let mut child = Command::new("bash")

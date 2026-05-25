@@ -12,7 +12,7 @@ pub fn create_provider_with_config(
     if let Some(entry) = config.providers.get(id) {
         match entry.handler.as_str() {
             "codex" => {
-                return Ok(Box::new(codex::codex_provider::CodexProvider::from_entry(
+                return Ok(Box::new(codex::CodexProvider::from_entry(
                     id, entry,
                 )));
             }

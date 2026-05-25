@@ -121,34 +121,66 @@ fn render_diff_preview(
     terminal_width: usize,
 ) {
     let content = content.strip_prefix('\n').unwrap_or(content);
-    for (idx, raw_line) in content.lines().enumerate() {
-        let (line, style) = if idx == 0 {
-            (raw_line.to_string(), Style::default().fg(theme.system_msg))
-        } else if raw_line.len() >= 7 {
-            match raw_line.as_bytes()[6] as char {
-                '-' => (
-                    pad_to_terminal_width(raw_line, terminal_width),
-                    Style::default().bg(theme.diff_removed),
-                ),
-                '+' => (
-                    pad_to_terminal_width(raw_line, terminal_width),
-                    Style::default().bg(theme.diff_added),
-                ),
-                _ => (raw_line.to_string(), Style::default().fg(theme.system_msg)),
-            }
-        } else {
-            (raw_line.to_string(), Style::default().fg(theme.system_msg))
-        };
-        lines.push(Line::from(Span::styled(line, style)));
+    for raw_line in content.lines() {
+        let (visual_lines, style, fill_background) =
+            if let Some((gutter, body, marker)) = numbered_diff_parts(raw_line) {
+                let style = match marker {
+                    '-' => Style::default().bg(theme.diff_removed),
+                    '+' => Style::default().bg(theme.diff_added),
+                    _ => Style::default().fg(theme.system_msg),
+                };
+                (
+                    wrap_numbered_diff_line(gutter, body, terminal_width),
+                    style,
+                    matches!(marker, '-' | '+'),
+                )
+            } else {
+                (
+                    wrap::wrap_text(raw_line, terminal_width),
+                    Style::default().fg(theme.system_msg),
+                    false,
+                )
+            };
+
+        for visual_line in visual_lines {
+            let line = if fill_background {
+                pad_to_terminal_width(&visual_line, terminal_width)
+            } else {
+                visual_line
+            };
+            lines.push(Line::from(Span::styled(line, style)));
+        }
     }
+}
+
+fn numbered_diff_parts(line: &str) -> Option<(&str, &str, char)> {
+    let gutter = line.get(..8)?;
+    let body = line.get(8..)?;
+    let marker = *gutter.as_bytes().get(6)? as char;
+    let has_number = gutter.get(..5)?.trim().parse::<usize>().is_ok();
+
+    (has_number && matches!(marker, ' ' | '+' | '-')).then_some((gutter, body, marker))
+}
+
+fn wrap_numbered_diff_line(gutter: &str, body: &str, terminal_width: usize) -> Vec<String> {
+    let indent_end = body.len() - body.trim_start().len();
+    let indent = &body[..indent_end];
+    let first_prefix = format!("{gutter}{indent}");
+    let continuation_prefix = format!("        {indent}");
+
+    wrap::wrap_text_with_prefix(
+        body.trim_start(),
+        &first_prefix,
+        &continuation_prefix,
+        terminal_width,
+    )
 }
 
 fn pad_to_terminal_width(line: &str, terminal_width: usize) -> String {
     let terminal_width = terminal_width.max(1);
     let width = UnicodeWidthStr::width(line);
-    let padded_width = width.div_ceil(terminal_width) * terminal_width;
     // Pad with spaces to fill terminal width for full-width background coloring
-    let pad = padded_width.saturating_sub(width);
+    let pad = terminal_width.saturating_sub(width);
     format!("{line}{}", " ".repeat(pad))
 }
 

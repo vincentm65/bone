@@ -24,21 +24,16 @@ pub fn render(term: &mut BoneTerminal, provider: &str, model: &str) -> std::io::
     })
 }
 
-fn padded_row(
-    left: &str,
-    right: &str,
-    width: usize,
-    left_style: Style,
-    right_style: Style,
-) -> Line<'static> {
+fn padded_row(left: &str, right: &str, width: usize, ls: Style, rs: Style) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
     let pad = width.saturating_sub(UnicodeWidthStr::width(left) + UnicodeWidthStr::width(right));
     Line::from(vec![
-        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(left.to_string(), left_style),
+        Span::styled("│ ", dim),
+        Span::styled(left.to_string(), ls),
         Span::raw(" ".repeat(pad.saturating_sub(1))),
-        Span::styled(right.to_string(), right_style),
+        Span::styled(right.to_string(), rs),
         Span::raw(" "),
-        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled("│", dim),
     ])
 }
 
@@ -48,32 +43,30 @@ fn lines(provider: &str, model: &str, term_width: u16) -> Vec<Line<'static>> {
     let dir_display = format_short_dir(&cwd);
 
     let dim = Style::default().fg(Color::DarkGray);
-    let bold_white = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
-    let accent = Style::default().fg(Color::DarkGray);
+    let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(Color::Gray);
 
     let inner = term_width as usize;
-    let content_w = inner.saturating_sub(3); // "│ " (2) + right pad (1) = 3 chars framing
+    let content_w = inner.saturating_sub(3);
+
+    let border = |open: &str, close: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!("{open}{}{close}", "─".repeat(inner.saturating_sub(2))),
+            dim,
+        ))
+    };
 
     vec![
-        Line::from(Span::styled(
-            format!("╭{}╮", "─".repeat(inner.saturating_sub(2))),
-            dim,
-        )),
-        padded_row("bone", &format!("v{version}"), content_w, bold_white, muted),
+        border("╭", "╮"),
+        padded_row("bone", &format!("v{version}"), content_w, bold, muted),
         padded_row(
             &format!("{provider} · {model}"),
             &dir_display,
             content_w,
-            accent,
+            dim,
             muted,
         ),
-        Line::from(Span::styled(
-            format!("╰{}╯", "─".repeat(inner.saturating_sub(2))),
-            dim,
-        )),
+        border("╰", "╯"),
         Line::from(""),
     ]
 }
@@ -83,10 +76,7 @@ fn format_short_dir(path: &Path) -> String {
     let components: Vec<&std::ffi::OsStr> = path.iter().collect();
     if components.len() > 2 {
         let first = components[0].to_string_lossy();
-        let last = components
-            .last()
-            .expect("Path::components is non-empty for absolute or relative paths")
-            .to_string_lossy();
+        let last = components.last().unwrap().to_string_lossy();
         let sep = if first.ends_with('/') || first.ends_with('\\') {
             ""
         } else {

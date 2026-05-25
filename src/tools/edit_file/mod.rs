@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 use strsim::normalized_levenshtein;
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::fs;
 
 use crate::tools::types::{Tool, ToolDefinition};
+use crate::tools::write_atomic::write_atomic;
 
 mod diff;
 
@@ -134,7 +134,12 @@ pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
         return Ok("no changes".to_string());
     }
 
-    write_atomic_preserving_permissions(&args.path, &next).await?;
+    {
+        let path = std::path::Path::new(&args.path);
+        let metadata = fs::metadata(path).await.map_err(|e| e.to_string())?;
+        let permissions = Some(metadata.permissions());
+        write_atomic(path, &next, permissions).await?;
+    }
     let summary = diff::summarize_change(&original, &next);
     let diff = diff::build_unified_diff(&args.path, &original, &next);
     Ok(format!("edited file ({summary}){diff}"))
@@ -586,47 +591,6 @@ fn line_number_for_byte_offset(content: &str, offset: usize) -> usize {
         .filter(|b| *b == b'\n')
         .count()
         + 1
-}
-
-async fn write_atomic_preserving_permissions(path: &str, content: &str) -> Result<(), String> {
-    let path = std::path::Path::new(path);
-    let metadata = fs::metadata(path).await.map_err(|e| e.to_string())?;
-    let permissions = metadata.permissions();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_else(|_| std::process::id() as u128);
-    let pid = std::process::id();
-    let temp_path = path.with_extension(format!("bone-tmp-{pid}-{nanos}"));
-
-    {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .await
-            .map_err(|e| e.to_string())?;
-        f.write_all(content.as_bytes()).await.map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            e.to_string()
-        })?;
-        f.flush().await.map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            e.to_string()
-        })?;
-    }
-
-    fs::set_permissions(&temp_path, permissions)
-        .await
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            e.to_string()
-        })?;
-    fs::rename(&temp_path, path).await.map_err(|e| {
-        let _ = std::fs::remove_file(&temp_path);
-        e.to_string()
-    })?;
-    Ok(())
 }
 
 pub fn sha256_hex(content: &str) -> String {
