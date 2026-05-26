@@ -1,3 +1,4 @@
+mod backend;
 mod banner;
 mod bottom_pane;
 pub mod markdown;
@@ -17,12 +18,13 @@ use super::theme::Theme;
 use crate::chat::Message;
 use crate::llm::TokenStats;
 use crate::tools::ApprovalMode;
+use backend::BoneBackend;
 
 /// Minimum viewport rows: top-sep + input(1) + bottom-sep + status.
 pub(crate) const MIN_ROWS: u16 = 4;
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-pub type BoneTerminal = Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
+pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
 
 /// Status bar info passed from App to Renderer for each draw.
 pub struct StatusInfo {
@@ -77,13 +79,22 @@ impl Renderer {
     /// via `resize_viewport()` as the input field grows or shrinks.
     pub fn init_terminal(height: u16) -> io::Result<BoneTerminal> {
         crossterm::terminal::enable_raw_mode()?;
-        let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
-        Terminal::with_options(
+        if let Err(err) = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste)
+        {
+            crossterm::terminal::disable_raw_mode().ok();
+            return Err(err);
+        }
+        let backend = BoneBackend::new(io::stdout());
+        let terminal = Terminal::with_options(
             backend,
             ratatui::TerminalOptions {
                 viewport: Viewport::Inline(height),
             },
-        )
+        );
+        if terminal.is_err() {
+            Self::shutdown_terminal().ok();
+        }
+        terminal
     }
 
     /// Recreate the terminal with a new viewport height.
@@ -95,7 +106,7 @@ impl Renderer {
         // Clear the current viewport before swapping.
         term.clear()?;
         // Replace with a fresh terminal at the new height.
-        let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
+        let backend = BoneBackend::new(io::stdout());
         let new_term = Terminal::with_options(
             backend,
             ratatui::TerminalOptions {
@@ -107,7 +118,10 @@ impl Renderer {
     }
 
     pub fn shutdown_terminal() -> io::Result<()> {
-        crossterm::terminal::disable_raw_mode()
+        let paste_result =
+            crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
+        let raw_result = crossterm::terminal::disable_raw_mode();
+        paste_result.and(raw_result)
     }
 
     /// Clear the inline viewport and leave a clean exit in scrollback.
@@ -155,6 +169,7 @@ impl Renderer {
         let rendered: Vec<Line<'static>> =
             messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width);
         let line_count = logical_lines_row_count(&rendered, terminal_width);
+        let user_background = self.theme.user_msg_bg;
 
         term.insert_before(line_count, |buf| {
             let mut row = 0u16;
@@ -166,6 +181,16 @@ impl Renderer {
                     width: buf.area.width,
                     height,
                 };
+                if line
+                    .spans
+                    .iter()
+                    .any(|span| span.style.bg == Some(user_background))
+                {
+                    buf.set_style(
+                        msg_area,
+                        ratatui::style::Style::default().bg(user_background),
+                    );
+                }
                 Paragraph::new(line.clone())
                     .wrap(Wrap { trim: false })
                     .render(msg_area, buf);

@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use super::wrap;
@@ -10,6 +10,11 @@ use crate::tools::ApprovalMode;
 use crate::ui::tool_display;
 
 const COMMAND_PREVIEW_LINES: usize = 6;
+const BLANK_CURSOR_CELL: &str = "\u{00a0}";
+
+fn input_width(terminal_width: u16) -> usize {
+    terminal_width.saturating_sub(1).max(1) as usize
+}
 
 fn shell_prompt_title(prompt: &Prompt) -> String {
     format!(
@@ -33,6 +38,54 @@ fn cursor_split(input: &InputState) -> (String, char, String) {
     let at_cursor = *chars.get(pos).unwrap_or(&' ');
     let after: String = chars[pos..].iter().skip(1).collect();
     (before, at_cursor, after)
+}
+
+fn push_input_text(text: &str, spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
+    for (index, part) in text.split('\n').enumerate() {
+        if index > 0 {
+            lines.push(Line::from(std::mem::take(spans)));
+        }
+        if !part.is_empty() {
+            spans.push(Span::raw(part.to_string()));
+        }
+    }
+}
+
+/// Build actual logical lines so hard newlines in pasted input render as rows.
+fn input_text(input: &InputState) -> Text<'static> {
+    let (before, at_cursor, after) = cursor_split(input);
+    let mut spans = vec![Span::raw("> ")];
+    let mut lines = Vec::new();
+
+    push_input_text(&before, &mut spans, &mut lines);
+    if at_cursor == '\n' {
+        spans.push(Span::styled(
+            BLANK_CURSOR_CELL,
+            Style::default().add_modifier(Modifier::REVERSED),
+        ));
+        lines.push(Line::from(std::mem::take(&mut spans)));
+    } else {
+        let cursor_cell = if at_cursor == ' ' {
+            BLANK_CURSOR_CELL.to_string()
+        } else {
+            at_cursor.to_string()
+        };
+        spans.push(Span::styled(
+            cursor_cell,
+            Style::default().add_modifier(Modifier::REVERSED),
+        ));
+    }
+    push_input_text(&after, &mut spans, &mut lines);
+    lines.push(Line::from(spans));
+
+    Text::from(lines)
+}
+
+fn rendered_input_rows(input: &InputState, terminal_width: u16) -> u16 {
+    Paragraph::new(input_text(input))
+        .wrap(Wrap { trim: false })
+        .line_count(input_width(terminal_width) as u16)
+        .max(1) as u16
 }
 
 impl super::Renderer {
@@ -67,9 +120,7 @@ impl super::Renderer {
             // sep + title + options + sep + status
             return 1 + 1 + p.options.len() as u16 + 1 + 1;
         }
-        let (before, at_cursor, after) = cursor_split(input);
-        let display = format!("> {}{}{}", before, at_cursor, after);
-        let input_rows = wrap::visual_line_count(&display, terminal_width as usize) as u16;
+        let input_rows = rendered_input_rows(input, terminal_width);
         // top sep + input_rows + bottom sep + status
         1 + input_rows.max(1) + 1 + 1
     }
@@ -90,10 +141,7 @@ impl super::Renderer {
         let input_view = if prompt.is_some() {
             None
         } else {
-            let (before, at_cursor, after) = cursor_split(input);
-            let display_text = format!("> {}{}{}", before, at_cursor, after);
-            let rows = wrap::visual_line_count(&display_text, area.width as usize) as u16;
-            Some((before, at_cursor, after, rows.max(1)))
+            Some(rendered_input_rows(input, area.width))
         };
 
         let mut y = area.y;
@@ -264,24 +312,15 @@ impl super::Renderer {
                     y += 1;
                 }
             }
-        } else if let Some((before, at_cursor, after, input_rows)) = input_view {
-            let input_line = Line::from(vec![
-                Span::raw("> "),
-                Span::raw(before),
-                Span::styled(
-                    at_cursor.to_string(),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                ),
-                Span::raw(after),
-            ]);
-
+        } else if let Some(input_rows) = input_view {
             let visible_input_rows = input_rows.min(content_bottom.saturating_sub(y));
             if visible_input_rows > 0 {
                 frame.render_widget(
-                    Paragraph::new(input_line).wrap(Wrap { trim: false }),
+                    Paragraph::new(input_text(input)).wrap(Wrap { trim: false }),
                     Rect {
                         y,
                         height: visible_input_rows,
+                        width: area.width.saturating_sub(1).max(1),
                         ..area
                     },
                 );

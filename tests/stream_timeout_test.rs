@@ -40,10 +40,10 @@ fn non_retryable_provider_failures() {
 fn final_timeout_messages_include_retry_status() {
     assert_eq!(
         timeout_message("provider timeout", "no response", true),
-        "[provider timeout: no response within 30s; retried once]",
+        "[provider timeout: no response within 90s; retried once]",
     );
     assert_eq!(
         timeout_message("stream timeout", "no events", true),
-        "[stream timeout: no events within 30s; retried once]",
+        "[stream timeout: no events within 90s; retried once]",
     );
 }

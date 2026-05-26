@@ -59,3 +59,47 @@ fn multiline_input_is_clipped_to_a_short_frame() {
         .draw(|frame| renderer.draw_bottom_pane(frame, &input, &status_info(), None))
         .unwrap();
 }
+
+#[test]
+fn multiline_input_renders_hard_newlines_on_separate_rows() {
+    let renderer = Renderer::new();
+    let mut input = InputState::default();
+    input.buffer = "alpha\nbeta".to_string();
+    input.cursor_pos = input.buffer.chars().count();
+    let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+
+    terminal
+        .draw(|frame| renderer.draw_bottom_pane(frame, &input, &status_info(), None))
+        .unwrap();
+
+    assert!(row_text(&terminal, 1, 20).starts_with("> alpha"));
+    assert!(row_text(&terminal, 2, 20).starts_with("beta"));
+    assert!(!row_text(&terminal, 1, 20).contains("beta"));
+}
+
+#[test]
+fn newline_cursor_marker_is_included_in_input_height() {
+    let mut input = InputState::default();
+    input.buffer = format!("{}\nnext", "a".repeat(18));
+    input.cursor_pos = 18;
+
+    assert_eq!(Renderer::desired_height(&input, None, 20), 6);
+}
+
+#[test]
+fn composer_reserves_terminal_final_column_like_submitted_user_text() {
+    let mut input = InputState::default();
+    input.buffer = "a".repeat(17);
+    input.cursor_pos = input.buffer.chars().count();
+
+    assert_eq!(Renderer::desired_height(&input, None, 20), 5);
+}
+
+#[test]
+fn composer_height_uses_the_same_word_wrapping_as_rendering() {
+    let mut input = InputState::default();
+    input.buffer = "alpha beta gamma".to_string();
+    input.cursor_pos = 0;
+
+    assert_eq!(Renderer::desired_height(&input, None, 10), 6);
+}

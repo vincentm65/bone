@@ -1,4 +1,4 @@
-use bone::chat::message::Message;
+use bone::chat::Message;
 use bone::config::UserConfig;
 use bone::llm::ChatRole;
 use bone::ui::render::wrap::{visual_line_count, wrap_text, wrap_text_with_prefix};

@@ -542,32 +542,37 @@ impl App {
         cancel: &mut bool,
     ) {
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
-            if let Event::Key(key) = event::read().unwrap_or(Event::Key(
-                crossterm::event::KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
-            )) {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match input.apply_key(key.code, key.modifiers) {
-                    InputAction::Cancel => {
-                        *cancel = true;
-                        queue.clear();
-                        return;
+            match event::read().unwrap_or(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Null,
+                KeyModifiers::NONE,
+            ))) {
+                Event::Paste(text) => input.insert_paste(&text),
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
                     }
-                    InputAction::Submit => {
-                        let text = input.buffer.trim().to_string();
-                        if !text.is_empty() {
-                            queue.push_back(text);
-                            input.reset();
+                    match input.apply_key(key.code, key.modifiers) {
+                        InputAction::Cancel => {
+                            *cancel = true;
+                            queue.clear();
+                            return;
                         }
+                        InputAction::Submit => {
+                            let text = input.buffer.trim().to_string();
+                            if !text.is_empty() {
+                                queue.push_back(text);
+                                input.reset();
+                            }
+                        }
+                        InputAction::ClearQueue => queue.clear(),
+                        InputAction::CycleMode => *mode = mode.cycle(),
+                        InputAction::Redraw
+                        | InputAction::Escape
+                        | InputAction::OpenEditor
+                        | InputAction::None => {}
                     }
-                    InputAction::ClearQueue => queue.clear(),
-                    InputAction::CycleMode => *mode = mode.cycle(),
-                    InputAction::Redraw
-                    | InputAction::Escape
-                    | InputAction::OpenEditor
-                    | InputAction::None => {}
                 }
+                _ => {}
             }
         }
     }

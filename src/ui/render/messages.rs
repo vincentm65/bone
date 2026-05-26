@@ -1,6 +1,6 @@
 use std::io;
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::chat::{Message, ToolDisplay};
 use crate::llm::ChatRole;
@@ -184,6 +184,38 @@ fn pad_to_terminal_width(line: &str, terminal_width: usize) -> String {
     format!("{line}{}", " ".repeat(pad))
 }
 
+fn truncate_to_display_width(text: &str, max_width: usize) -> String {
+    let mut fitted = String::new();
+    let mut used = 0;
+
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > max_width {
+            break;
+        }
+        fitted.push(ch);
+        used += width;
+    }
+
+    fitted
+}
+
+fn wrap_user_line(raw_line: &str, first_line: bool, width: usize) -> Vec<String> {
+    // Avoid writing styled user rows through the terminal's final column when
+    // inserting into native scrollback; terminals may auto-wrap that cell.
+    let width = width.saturating_sub(1).max(1);
+    let leading = raw_line.len() - raw_line.trim_start().len();
+    let indent = &raw_line[..leading];
+    let content = &raw_line[leading..];
+    let marker = if first_line { "> " } else { "" };
+    let required_content_width = usize::from(!content.is_empty());
+    let prefix_limit = width.saturating_sub(required_content_width);
+    let first_prefix = truncate_to_display_width(&format!("{marker}{indent}"), prefix_limit);
+    let rest_prefix = truncate_to_display_width(indent, prefix_limit);
+
+    wrap::wrap_text_with_prefix(content, &first_prefix, &rest_prefix, width)
+}
+
 fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, width: u16) {
     if matches!(msg.role, ChatRole::System) && msg.content.starts_with("\n") {
         render_diff_preview(&msg.content, theme, lines, width as usize);
@@ -193,13 +225,9 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
     match msg.role {
         ChatRole::User => {
             for (idx, raw_line) in msg.content.lines().enumerate() {
-                let first_prefix = if idx == 0 { "> " } else { "  " };
-                for visual_line in
-                    wrap::wrap_text_with_prefix(raw_line, first_prefix, "  ", width as usize)
-                {
-                    let styled_line = pad_to_terminal_width(&visual_line, width as usize);
+                for visual_line in wrap_user_line(raw_line, idx == 0, width as usize) {
                     lines.push(Line::from(Span::styled(
-                        styled_line,
+                        visual_line,
                         Style::default().fg(theme.user_msg).bg(theme.user_msg_bg),
                     )));
                 }

@@ -82,6 +82,10 @@ impl App {
                         self.handle_key(key.code, key.modifiers, &mut terminal)
                             .await?;
                     }
+                    Event::Paste(text) => {
+                        self.input.insert_paste(&text);
+                        self.redraw(&mut terminal)?;
+                    }
                     Event::Resize(_, _) | Event::Key(_) => {
                         // Resize or non-press key: force a full redraw to
                         // re-sync the inline viewport position.
@@ -338,10 +342,21 @@ impl App {
         let mut advising = false;
 
         let decision = loop {
-            if event::poll(std::time::Duration::from_millis(50))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
+            if event::poll(std::time::Duration::from_millis(50))? {
+                let event = event::read()?;
+                if let Event::Paste(text) = event {
+                    if advising {
+                        self.input.insert_paste(&text);
+                        self.redraw(term)?;
+                    }
+                    continue;
+                }
+                let Event::Key(key) = event else {
+                    continue;
+                };
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 if advising {
                     match self.input.apply_key(key.code, key.modifiers) {
                         InputAction::Submit => {
@@ -464,6 +479,7 @@ impl App {
 
     async fn open_editor(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         Renderer::prepare_exit(term)?;
+        Renderer::shutdown_terminal()?;
         let tmp = std::env::temp_dir().join("bone-edit.txt");
         std::fs::write(&tmp, "")?;
         let editor = std::env::var("VISUAL")

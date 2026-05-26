@@ -52,6 +52,19 @@ impl InputState {
         self.cursor_pos += 1;
     }
 
+    /// Insert text at the cursor without interpreting embedded newlines.
+    pub fn insert_text(&mut self, text: &str) {
+        let bp = self.byte_pos();
+        self.buffer.insert_str(bp, text);
+        self.cursor_pos += text.chars().count();
+    }
+
+    /// Insert terminal paste contents, normalizing terminal line endings.
+    pub fn insert_paste(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.insert_text(&normalized);
+    }
+
     /// Delete the character before the cursor (Backspace).
     pub fn delete_backward(&mut self) {
         if self.cursor_pos == 0 {
