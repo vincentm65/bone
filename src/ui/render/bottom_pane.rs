@@ -85,6 +85,7 @@ impl super::Renderer {
         let area = frame.area();
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
+        let content_bottom = area.bottom().saturating_sub(2).max(area.y);
 
         let input_view = if prompt.is_some() {
             None
@@ -96,21 +97,27 @@ impl super::Renderer {
         };
 
         let mut y = area.y;
-        frame.render_widget(
-            Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
-            Rect {
-                y,
-                height: 1,
-                ..area
-            },
-        );
-        y += 1;
+        if area.height > 0 {
+            frame.render_widget(
+                Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
+                Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
+            );
+            y += 1;
+        }
 
         if let Some(prompt) = prompt {
+            let options_top = content_bottom.saturating_sub(prompt.options.len() as u16);
             if let Some(ref cmd) = prompt.full_command {
                 let title = shell_prompt_title(prompt);
                 let title_lines = wrap::wrap_text(&title, area.width as usize);
                 for title_line in title_lines {
+                    if y >= options_top {
+                        break;
+                    }
                     frame.render_widget(
                         Paragraph::new(Span::styled(
                             title_line,
@@ -133,6 +140,9 @@ impl super::Renderer {
                 };
 
                 for visual_line in cmd_visual_lines.iter().take(max_preview) {
+                    if y >= options_top {
+                        break;
+                    }
                     frame.render_widget(
                         Paragraph::new(Span::styled(
                             visual_line.clone(),
@@ -148,7 +158,9 @@ impl super::Renderer {
                 }
 
                 // Combined hint/truncation line (only shown when truncated or in peek mode)
-                if prompt.peek_mode || cmd_visual_lines.len() > COMMAND_PREVIEW_LINES {
+                if y < options_top
+                    && (prompt.peek_mode || cmd_visual_lines.len() > COMMAND_PREVIEW_LINES)
+                {
                     let hint = if prompt.peek_mode {
                         "    Press P to hide full command".to_string()
                     } else {
@@ -173,7 +185,11 @@ impl super::Renderer {
                 }
 
                 // Options
+                y = y.max(options_top);
                 for (i, option) in prompt.options.iter().enumerate() {
+                    if y >= content_bottom {
+                        break;
+                    }
                     let selected = i == prompt.selected;
                     let (marker, marker_style) = if selected {
                         (
@@ -201,21 +217,27 @@ impl super::Renderer {
                 }
             } else {
                 // Title line
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        format!("  {}", prompt.title),
-                        Style::default().fg(self.theme.system_msg),
-                    )),
-                    Rect {
-                        y,
-                        height: 1,
-                        ..area
-                    },
-                );
-                y += 1;
+                if y < options_top {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            format!("  {}", prompt.title),
+                            Style::default().fg(self.theme.system_msg),
+                        )),
+                        Rect {
+                            y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    y += 1;
+                }
 
                 // Options — one per line
+                y = y.max(options_top);
                 for (i, option) in prompt.options.iter().enumerate() {
+                    if y >= content_bottom {
+                        break;
+                    }
                     let selected = i == prompt.selected;
                     let (marker, marker_style) = if selected {
                         (
@@ -253,26 +275,29 @@ impl super::Renderer {
                 Span::raw(after),
             ]);
 
+            let visible_input_rows = input_rows.min(content_bottom.saturating_sub(y));
+            if visible_input_rows > 0 {
+                frame.render_widget(
+                    Paragraph::new(input_line).wrap(Wrap { trim: false }),
+                    Rect {
+                        y,
+                        height: visible_input_rows,
+                        ..area
+                    },
+                );
+            }
+        }
+
+        if area.height >= 2 {
             frame.render_widget(
-                Paragraph::new(input_line).wrap(Wrap { trim: false }),
+                Paragraph::new(sep).style(Style::default().fg(self.theme.input_border)),
                 Rect {
-                    y,
-                    height: input_rows,
+                    y: area.bottom() - 2,
+                    height: 1,
                     ..area
                 },
             );
-            y += input_rows;
         }
-
-        frame.render_widget(
-            Paragraph::new(sep).style(Style::default().fg(self.theme.input_border)),
-            Rect {
-                y,
-                height: 1,
-                ..area
-            },
-        );
-        y += 1;
 
         let mut status_spans: Vec<Span> = vec![
             Span::styled(
@@ -323,13 +348,15 @@ impl super::Renderer {
             ));
         }
 
-        frame.render_widget(
-            Paragraph::new(Line::from(status_spans)),
-            Rect {
-                y,
-                height: 1,
-                ..area
-            },
-        );
+        if area.height > 0 {
+            frame.render_widget(
+                Paragraph::new(Line::from(status_spans)),
+                Rect {
+                    y: area.bottom() - 1,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
     }
 }
