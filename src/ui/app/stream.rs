@@ -16,8 +16,8 @@ use tokio::time::{self, Duration};
 
 use super::App;
 
-const INITIAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const INITIAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(90);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_PROVIDER_ATTEMPTS: usize = 2;
 
 enum PendingTool {
@@ -79,9 +79,9 @@ impl StreamFailure {
 
 pub fn timeout_message(prefix: &str, detail: &str, retried: bool) -> String {
     if retried {
-        format!("[{prefix}: {detail} within 30s; retried once]")
+        format!("[{prefix}: {detail} within 90s; retried once]")
     } else {
-        format!("[{prefix}: {detail} within 30s]")
+        format!("[{prefix}: {detail} within 90s]")
     }
 }
 
