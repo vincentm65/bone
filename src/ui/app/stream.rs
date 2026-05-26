@@ -1,6 +1,6 @@
 use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
-use crate::tools::bash::BashTool;
+use crate::tools::shell::ShellTool;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::types::Tool;
 use crate::tools::{ApprovalMode, ToolCall, ToolResult};
@@ -271,7 +271,7 @@ impl App {
             crate::tools::command_policy::CommandSafety::Danger => "danger",
         };
 
-        let result = BashTool
+        let result = ShellTool
             .execute(serde_json::json!({
                 "command": cmd,
                 "classification": classification,
@@ -286,7 +286,7 @@ impl App {
         self.messages
             .push(Message::terminal_output(cmd.to_string(), display, is_error));
         let transcript_text =
-            crate::tools::bash::truncate_output(&format!("$ {cmd}\n{result}"), 500);
+            crate::tools::shell::truncate_output(&format!("$ {cmd}\n{result}"), 500);
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &transcript_text));
         self.renderer

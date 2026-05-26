@@ -13,7 +13,7 @@ fn line_text(line: &Line<'static>) -> String {
 #[test]
 fn tool_label_preserves_explicit_newlines_and_indentation() {
     let tool = ToolDisplay {
-        label: "bash cd repo &&\n  cargo test".to_string(),
+        label: "shell cd repo &&\n  cargo test".to_string(),
         is_error: false,
     };
     let mut lines = Vec::new();
@@ -21,13 +21,13 @@ fn tool_label_preserves_explicit_newlines_and_indentation() {
     render_tool(&tool, "", &Theme::default(), &mut lines, 80);
 
     let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
-    assert_eq!(rendered, vec!["    bash cd repo &&", "      cargo test"]);
+    assert_eq!(rendered, vec!["    shell cd repo &&", "      cargo test"]);
 }
 
 #[test]
 fn tool_label_wraps_multiline_labels_at_narrow_width() {
     let tool = ToolDisplay {
-        label: "bash verylongcommand --with-long-argument".to_string(),
+        label: "shell verylongcommand --with-long-argument".to_string(),
         is_error: false,
     };
     let mut lines = Vec::new();
@@ -38,7 +38,7 @@ fn tool_label_wraps_multiline_labels_at_narrow_width() {
     assert_eq!(
         rendered,
         vec![
-            "    bash",
+            "    shell",
             "     verylongcom",
             "    mand",
             "     --with-long",

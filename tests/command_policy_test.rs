@@ -13,9 +13,9 @@ fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
 }
 
 #[test]
-fn missing_bash_command_is_danger() {
+fn missing_shell_command_is_danger() {
     assert_eq!(
-        CommandSafety::for_call(&call("bash", json!({}))),
+        CommandSafety::for_call(&call("shell", json!({}))),
         CommandSafety::Danger
     );
 }
@@ -25,7 +25,7 @@ fn for_call_ignores_model_classification() {
     // Model says danger but pwd is ReadOnly — policy wins.
     assert_eq!(
         CommandSafety::for_call(&call(
-            "bash",
+            "shell",
             json!({ "command": "pwd", "classification": "danger" })
         )),
         CommandSafety::ReadOnly
@@ -33,7 +33,7 @@ fn for_call_ignores_model_classification() {
     // Model says read_only but rm is Danger — policy wins.
     assert_eq!(
         CommandSafety::for_call(&call(
-            "bash",
+            "shell",
             json!({ "command": "rm -rf /", "classification": "read_only" })
         )),
         CommandSafety::Danger
@@ -352,12 +352,12 @@ fn policy_readonly_git() {
     assert_eq!(classify_command("git ls-files"), CommandSafety::ReadOnly);
 }
 
-/// Bash approval ignores model classification entirely — deterministic policy wins.
+/// Shell approval ignores model classification entirely — deterministic policy wins.
 #[test]
 fn policy_overrides_model_classification() {
     // Model says read_only but rm is always Danger
     let c1 = call(
-        "bash",
+        "shell",
         json!({ "command": "rm -rf /", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c1));
@@ -366,7 +366,7 @@ fn policy_overrides_model_classification() {
 
     // Model says read_only but sudo is always Danger
     let c2 = call(
-        "bash",
+        "shell",
         json!({ "command": "sudo apt install foo", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c2));
@@ -375,7 +375,7 @@ fn policy_overrides_model_classification() {
 
     // Model says read_only but mv is at least Edit
     let c3 = call(
-        "bash",
+        "shell",
         json!({ "command": "mv a b", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c3));
@@ -384,7 +384,7 @@ fn policy_overrides_model_classification() {
 
     // Model says read_only but echo > file is at least Edit
     let c4 = call(
-        "bash",
+        "shell",
         json!({ "command": "echo hello > file.txt", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c4));
@@ -393,7 +393,7 @@ fn policy_overrides_model_classification() {
 
     // Model says danger but ls is ReadOnly — deterministic policy wins.
     let c5 = call(
-        "bash",
+        "shell",
         json!({ "command": "ls -la", "classification": "danger" }),
     );
     assert!(ApprovalMode::Safe.allows_call(&c5));
@@ -402,15 +402,15 @@ fn policy_overrides_model_classification() {
 
     // Model says danger but git status is ReadOnly — policy wins.
     let c6 = call(
-        "bash",
+        "shell",
         json!({ "command": "git status", "classification": "danger" }),
     );
     assert!(ApprovalMode::Safe.allows_call(&c6));
 
-    // Bash classification cannot downgrade dangerous commands.
+    // Shell classification cannot downgrade dangerous commands.
     // git push is Danger regardless of model claim.
     let c7 = call(
-        "bash",
+        "shell",
         json!({ "command": "git push", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c7));
@@ -418,37 +418,37 @@ fn policy_overrides_model_classification() {
     assert!(ApprovalMode::Danger.allows_call(&c7));
 }
 
-/// Bash approval ignores model over-classification and uses deterministic policy.
+/// Shell approval ignores model over-classification and uses deterministic policy.
 #[test]
-fn bash_policy_is_source_of_truth() {
+fn shell_policy_is_source_of_truth() {
     let rg_stderr_dev_null = call(
-        "bash",
+        "shell",
         json!({ "command": "rg -t py --no-filename -l approval 2>/dev/null", "classification": "danger" }),
     );
     assert!(ApprovalMode::Safe.allows_call(&rg_stderr_dev_null));
 
     // Shell-wrapper peeling: `bash rg …` should classify as ReadOnly (inner command is rg).
-    let bash_wrapped_rg = call(
-        "bash",
+    let shell_wrapped_rg = call(
+        "shell",
         json!({ "command": "bash rg -t py --no-filename -l approval 2>/dev/null", "classification": "read_only" }),
     );
-    assert!(ApprovalMode::Safe.allows_call(&bash_wrapped_rg));
+    assert!(ApprovalMode::Safe.allows_call(&shell_wrapped_rg));
 
     let git_status = call(
-        "bash",
+        "shell",
         json!({ "command": "git status", "classification": "danger" }),
     );
     assert!(ApprovalMode::Safe.allows_call(&git_status));
 
     let rm = call(
-        "bash",
+        "shell",
         json!({ "command": "rm foo", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&rm));
     assert!(!ApprovalMode::Edits.allows_call(&rm));
 
     let ls = call(
-        "bash",
+        "shell",
         json!({ "command": "ls", "classification": "danger" }),
     );
     assert!(ApprovalMode::Safe.allows_call(&ls));

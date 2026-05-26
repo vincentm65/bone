@@ -8,7 +8,7 @@ use tokio::time::{Duration, timeout};
 
 use crate::tools::types::{Tool, ToolDefinition};
 
-pub struct BashTool;
+pub struct ShellTool;
 
 #[derive(Deserialize)]
 struct Args {
@@ -29,7 +29,7 @@ fn shell_command() -> (&'static str, &'static str, &'static str) {
 }
 
 #[async_trait]
-impl Tool for BashTool {
+impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         let (_, _, shell_label) = shell_command();
         let desc: &'static str = Box::leak(
@@ -45,7 +45,7 @@ impl Tool for BashTool {
             .into_boxed_str(),
         );
         ToolDefinition {
-            name: "bash",
+            name: "shell",
             description: desc,
             input_schema: json!({
                 "type": "object",

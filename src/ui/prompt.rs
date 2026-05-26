@@ -11,7 +11,7 @@ pub struct Prompt {
     pub title: String,
     pub options: Vec<String>,
     pub selected: usize,
-    /// Raw command text for bash approval prompts (enables preview/peek).
+    /// Raw command text for shell approval prompts (enables preview/peek).
     pub full_command: Option<String>,
     /// When true, show all command lines instead of the truncated preview.
     pub peek_mode: bool,

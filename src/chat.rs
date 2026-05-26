@@ -66,14 +66,14 @@ impl Message {
         }
     }
 
-    /// Terminal output: shows a label (e.g. "bash: ls") plus visible content.
+    /// Terminal output: shows a label (e.g. "shell: ls") plus visible content.
     #[must_use]
     pub fn terminal_output(command: String, content: String, is_error: bool) -> Self {
         Self {
             role: ChatRole::Tool,
             content,
             tool: Some(ToolDisplay {
-                label: format!("bash: {command}"),
+                label: format!("shell: {command}"),
                 is_error,
             }),
         }

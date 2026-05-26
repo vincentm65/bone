@@ -31,7 +31,7 @@ fn system_message_has_correct_role() {
 
 #[test]
 fn tool_message_is_marked_as_tool_role() {
-    let msg = Message::tool_row("bash: ls -la".to_string(), false);
+    let msg = Message::tool_row("shell: ls -la".to_string(), false);
     assert_eq!(msg.role, ChatRole::Tool);
     assert!(msg.content.is_empty());
     assert!(msg.tool.is_some());
@@ -39,10 +39,10 @@ fn tool_message_is_marked_as_tool_role() {
 
 #[test]
 fn tool_message_error_flag_is_preserved() {
-    let msg = Message::tool_row("bash: failed command".to_string(), true);
+    let msg = Message::tool_row("shell: failed command".to_string(), true);
     assert!(msg.tool.unwrap().is_error);
 
-    let ok_msg = Message::tool_row("bash: ok command".to_string(), false);
+    let ok_msg = Message::tool_row("shell: ok command".to_string(), false);
     assert!(!ok_msg.tool.unwrap().is_error);
 }
 

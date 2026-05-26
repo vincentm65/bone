@@ -149,7 +149,7 @@ fn test_multiple_tool_calls_interleaved_by_index() {
     let mut last_usage = None;
 
     process_sse_chunk(
-        &chunk_with_tool(0, "id0", "bash", "{\"cmd\": \"ls\"}"),
+        &chunk_with_tool(0, "id0", "shell", "{\"cmd\": \"ls\"}"),
         &mut partials,
         &mut last_usage,
     )

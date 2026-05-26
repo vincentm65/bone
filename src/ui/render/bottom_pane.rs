@@ -11,15 +11,15 @@ use crate::ui::tool_display;
 
 const COMMAND_PREVIEW_LINES: usize = 6;
 
-fn bash_prompt_title(prompt: &Prompt) -> String {
+fn shell_prompt_title(prompt: &Prompt) -> String {
     format!(
         "  {}",
         prompt.title.split(" — ").next().unwrap_or(&prompt.title)
     )
 }
 
-fn bash_command_preview_lines(command: &str, width: usize) -> Vec<String> {
-    tool_display::format_bash_command(command)
+fn shell_command_preview_lines(command: &str, width: usize) -> Vec<String> {
+    tool_display::format_shell_command(command)
         .into_iter()
         .flat_map(|line| wrap::wrap_text_with_prefix(&line, "  ", "  ", width))
         .collect()
@@ -51,10 +51,10 @@ impl super::Renderer {
     pub fn desired_height(input: &InputState, prompt: Option<&Prompt>, terminal_width: u16) -> u16 {
         if let Some(p) = prompt {
             if let Some(ref cmd) = p.full_command {
-                let title = bash_prompt_title(p);
+                let title = shell_prompt_title(p);
                 let title_lines = wrap::wrap_text(&title, terminal_width as usize).len() as u16;
                 let cmd_visual_lines =
-                    bash_command_preview_lines(cmd, terminal_width as usize).len() as u16;
+                    shell_command_preview_lines(cmd, terminal_width as usize).len() as u16;
                 let options = p.options.len() as u16;
                 if p.peek_mode {
                     // sep + title + cmd_lines + hint + options + sep + status
@@ -108,7 +108,7 @@ impl super::Renderer {
 
         if let Some(prompt) = prompt {
             if let Some(ref cmd) = prompt.full_command {
-                let title = bash_prompt_title(prompt);
+                let title = shell_prompt_title(prompt);
                 let title_lines = wrap::wrap_text(&title, area.width as usize);
                 for title_line in title_lines {
                     frame.render_widget(
@@ -125,7 +125,7 @@ impl super::Renderer {
                     y += 1;
                 }
 
-                let cmd_visual_lines = bash_command_preview_lines(cmd, area.width as usize);
+                let cmd_visual_lines = shell_command_preview_lines(cmd, area.width as usize);
                 let max_preview = if prompt.peek_mode {
                     cmd_visual_lines.len()
                 } else {

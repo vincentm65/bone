@@ -39,13 +39,13 @@ impl CommandSafety {
         }
     }
 
-    /// Classify a tool call for approval. Model-provided `classification` on bash
+    /// Classify a tool call for approval. Model-provided `classification` on shell
     /// calls is ignored — policy is the sole authority.
     pub fn for_call(call: &ToolCall) -> Self {
         match call.name.as_str() {
             "read_file" => Self::ReadOnly,
             "write_file" | "edit_file" => Self::Edit,
-            "bash" => call
+            "shell" => call
                 .arguments
                 .get("command")
                 .and_then(Value::as_str)
@@ -441,6 +441,10 @@ fn has_non_dev_null_redirection(command: &str) -> bool {
         } else {
             target
         };
+        // Ignore fd-duplication redirects like 2>&1, 1>&2, etc.
+        if target.starts_with('&') {
+            return false;
+        }
         target != "/dev/null"
     })
 }

@@ -6,12 +6,12 @@ pub fn build_tool_row(call: &ToolCall, result: &ToolResult) -> Message {
 }
 
 pub fn tool_label(call: &ToolCall, result: &ToolResult) -> String {
-    if call.name == "bash" {
+    if call.name == "shell" {
         return call
             .arguments
             .get("command")
             .and_then(|value| value.as_str())
-            .map(format_bash_label)
+            .map(format_shell_label)
             .unwrap_or_else(|| call.name.clone());
     }
 
@@ -43,11 +43,11 @@ pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {
     format!(" (lines {start_line}-{end_line}, {lines_read} read)")
 }
 
-pub fn format_bash_label(command: &str) -> String {
-    let mut command_lines = format_bash_command(command).into_iter();
+pub fn format_shell_label(command: &str) -> String {
+    let mut command_lines = format_shell_command(command).into_iter();
     let mut lines = vec![match command_lines.next() {
-        Some(line) => format!("bash {line}"),
-        None => "bash".to_string(),
+        Some(line) => format!("shell {line}"),
+        None => "shell".to_string(),
     }];
     for line in command_lines {
         lines.push(format!(" {line}"));
@@ -55,7 +55,7 @@ pub fn format_bash_label(command: &str) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn format_bash_command(command: &str) -> Vec<String> {
+pub(crate) fn format_shell_command(command: &str) -> Vec<String> {
     if find_heredoc_marker(command).is_some() {
         return expand_collapsed_heredoc_line(command);
     }
@@ -148,7 +148,7 @@ fn expand_collapsed_heredoc_line(line: &str) -> Vec<String> {
     }
     out.push(marker.delimiter);
     if !rest.is_empty() {
-        out.extend(format_bash_command(rest));
+        out.extend(format_shell_command(rest));
     }
     out
 }

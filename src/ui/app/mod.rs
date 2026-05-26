@@ -296,14 +296,14 @@ impl App {
             "read_file" | "write_file" | "edit_file" => {
                 call.arguments["path"].as_str().unwrap_or("?").to_string()
             }
-            "bash" => call.arguments["command"]
+            "shell" => call.arguments["command"]
                 .as_str()
                 .unwrap_or("?")
                 .to_string(),
             _ => call.name.clone(),
         };
 
-        let prompt = if call.name == "bash" {
+        let prompt = if call.name == "shell" {
             let full_command = call.arguments["command"].as_str().map(String::from);
             let title = call.arguments["command"]
                 .as_str()

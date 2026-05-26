@@ -1,4 +1,4 @@
-pub mod bash;
+pub mod shell;
 pub mod command_policy;
 pub mod edit_file;
 pub mod read_file;
@@ -17,7 +17,7 @@ pub fn builtin_tools() -> ToolRegistry {
         .register(read_file::ReadFileTool)
         .register(write_file::WriteFileTool)
         .register(edit_file::EditFileTool)
-        .register(bash::BashTool)
+        .register(shell::ShellTool)
 }
 
 // ── ApprovalMode ────────────────────────────────────────────────────────────
