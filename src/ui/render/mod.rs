@@ -1,4 +1,4 @@
-mod backend;
+pub mod backend;
 mod banner;
 mod bottom_pane;
 pub mod markdown;
