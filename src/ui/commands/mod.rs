@@ -100,7 +100,9 @@ fn help() -> String {
         "/edit      — open system editor for input",
         "/help      — show this message",
         "/model     — set or show model (/model <name>)",
-        "/provider  — show or switch provider (/provider <name>)",
+        "/provider  — pick or switch provider (/provider <name>)",
+        "/tools     — enable or disable tools",
+        "/config    — change application settings",
         "/quit      — exit bone",
         ":        — run a command inline (: <command>)",
     ]

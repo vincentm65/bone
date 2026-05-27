@@ -103,3 +103,33 @@ fn composer_height_uses_the_same_word_wrapping_as_rendering() {
 
     assert_eq!(Renderer::desired_height(&input, None, 10), 6);
 }
+
+#[test]
+fn prompt_navigation_scrolls_selected_rows_into_view() {
+    let mut prompt = Prompt::new(
+        "Tools",
+        (0..20).map(|i| format!("tool {i}")).collect::<Vec<_>>(),
+    );
+    prompt.visible_rows = 4;
+
+    for _ in 0..6 {
+        prompt.down();
+    }
+
+    assert_eq!(prompt.selected, 6);
+    assert_eq!(prompt.visible_options(), 3..7);
+    prompt.page_up();
+    assert_eq!(prompt.selected, 2);
+    assert_eq!(prompt.visible_options(), 2..6);
+}
+
+#[test]
+fn long_prompt_uses_a_bounded_viewport_height() {
+    let input = InputState::default();
+    let prompt = Prompt::new(
+        "Providers",
+        (0..50).map(|i| format!("provider {i}")).collect::<Vec<_>>(),
+    );
+
+    assert_eq!(Renderer::desired_height(&input, Some(&prompt), 80), 14);
+}

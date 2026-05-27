@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::tools::ApprovalMode;
 pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers, save_providers};
 
 pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -38,20 +39,33 @@ pub fn command_policy_path() -> PathBuf {
     bone_dir().join("command-policy.yaml")
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserConfig {
     #[serde(default = "default_provider")]
     pub provider: String,
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
+    #[serde(default = "default_enabled_tools")]
+    pub enabled_tools: Vec<String>,
 }
 
 fn default_provider() -> String {
     "local".to_string()
 }
 
+pub fn default_enabled_tools() -> Vec<String> {
+    ["read_file", "write_file", "edit_file", "shell"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
             provider: default_provider(),
+            approval_mode: ApprovalMode::default(),
+            enabled_tools: default_enabled_tools(),
         }
     }
 }
@@ -65,6 +79,16 @@ pub fn load_user_config() -> UserConfig {
         eprintln!("bone: warning: failed to parse {}", path.display());
         UserConfig::default()
     })
+}
+
+pub fn save_user_config(config: &UserConfig) {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(yaml) = serde_yaml::to_string(config) {
+        let _ = fs::write(path, yaml);
+    }
 }
 
 const EXAMPLE_PROVIDERS: &str = include_str!("../../example-providers.yaml");

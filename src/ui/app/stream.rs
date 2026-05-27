@@ -1,7 +1,7 @@
 use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
-use crate::tools::shell::ShellTool;
 use crate::tools::edit_file::preview_edit_file;
+use crate::tools::shell::ShellTool;
 use crate::tools::types::Tool;
 use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
@@ -357,12 +357,15 @@ impl App {
                 },
                 _ = &mut idle => return Ok(Err(StreamFailure::IdleTimeout)),
                 _ = spinner.tick() => {
-                    Self::drain_keys(
+                    if Self::drain_keys(
                         &mut self.input,
                         &mut self.queue,
                         &mut self.approval_mode,
                         &mut self.cancel_streaming,
-                    );
+                    ) {
+                        self.user_config.approval_mode = self.approval_mode;
+                        crate::config::save_user_config(&self.user_config);
+                    }
                     if self.cancel_streaming {
                         self.mark_cancelled(assistant_idx);
                         break;
@@ -502,13 +505,17 @@ impl App {
         let queue = &mut self.queue;
         let renderer = &mut self.renderer;
         let approval_mode = &mut self.approval_mode;
+        let user_config = &mut self.user_config;
         let cancel = &mut self.cancel_streaming;
         pin_mut!(request, spinner, timeout);
 
         loop {
             if *cancel {
                 return (
-                    Err(StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Config, "cancelled"))),
+                    Err(StreamFailure::Provider(LlmError::new_with_kind(
+                        LlmErrorKind::Config,
+                        "cancelled",
+                    ))),
                     tick,
                 );
             }
@@ -517,7 +524,10 @@ impl App {
                 _ = &mut timeout => return (Err(StreamFailure::InitialTimeout), tick),
                 _ = &mut spinner => {
                     renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
-                    Self::drain_keys(input, queue, approval_mode, cancel);
+                    if Self::drain_keys(input, queue, approval_mode, cancel) {
+                        user_config.approval_mode = *approval_mode;
+                        crate::config::save_user_config(user_config);
+                    }
                     term.draw(|frame| {
                         renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
                             model: model.clone(),
@@ -540,7 +550,8 @@ impl App {
         queue: &mut VecDeque<String>,
         mode: &mut ApprovalMode,
         cancel: &mut bool,
-    ) {
+    ) -> bool {
+        let mut mode_changed = false;
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
             match event::read().unwrap_or(Event::Key(crossterm::event::KeyEvent::new(
                 KeyCode::Null,
@@ -555,7 +566,7 @@ impl App {
                         InputAction::Cancel => {
                             *cancel = true;
                             queue.clear();
-                            return;
+                            return mode_changed;
                         }
                         InputAction::Submit => {
                             let text = input.buffer.trim().to_string();
@@ -565,7 +576,10 @@ impl App {
                             }
                         }
                         InputAction::ClearQueue => queue.clear(),
-                        InputAction::CycleMode => *mode = mode.cycle(),
+                        InputAction::CycleMode => {
+                            *mode = mode.cycle();
+                            mode_changed = true;
+                        }
                         InputAction::Redraw
                         | InputAction::Escape
                         | InputAction::OpenEditor
@@ -575,5 +589,6 @@ impl App {
                 _ => {}
             }
         }
+        mode_changed
     }
 }

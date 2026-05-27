@@ -103,22 +103,23 @@ impl super::Renderer {
     /// Compute the desired viewport height for the current state.
     pub fn desired_height(input: &InputState, prompt: Option<&Prompt>, terminal_width: u16) -> u16 {
         if let Some(p) = prompt {
+            let options = p.options.len().min(p.visible_rows) as u16;
+            let hint = u16::from(p.hint.is_some());
             if let Some(ref cmd) = p.full_command {
                 let title = shell_prompt_title(p);
                 let title_lines = wrap::wrap_text(&title, terminal_width as usize).len() as u16;
                 let cmd_visual_lines =
                     shell_command_preview_lines(cmd, terminal_width as usize).len() as u16;
-                let options = p.options.len() as u16;
                 if p.peek_mode {
                     // sep + title + cmd_lines + hint + options + sep + status
-                    return 1 + title_lines + cmd_visual_lines + 1 + options + 1 + 1;
+                    return 1 + title_lines + cmd_visual_lines + 1 + options + hint + 1 + 1;
                 }
                 // sep + title + preview + combined hint + options + sep + status
                 let preview = cmd_visual_lines.min(COMMAND_PREVIEW_LINES as u16);
-                return 1 + title_lines + preview + 1 + options + 1 + 1;
+                return 1 + title_lines + preview + 1 + options + hint + 1 + 1;
             }
             // sep + title + options + sep + status
-            return 1 + 1 + p.options.len() as u16 + 1 + 1;
+            return 1 + 1 + options + hint + 1 + 1;
         }
         let input_rows = rendered_input_rows(input, terminal_width);
         // top sep + input_rows + bottom sep + status
@@ -158,7 +159,10 @@ impl super::Renderer {
         }
 
         if let Some(prompt) = prompt {
-            let options_top = content_bottom.saturating_sub(prompt.options.len() as u16);
+            let shown_options = prompt.visible_options();
+            let shown_len = shown_options.len() as u16;
+            let hint_rows = u16::from(prompt.hint.is_some());
+            let options_top = content_bottom.saturating_sub(shown_len + hint_rows);
             if let Some(ref cmd) = prompt.full_command {
                 let title = shell_prompt_title(prompt);
                 let title_lines = wrap::wrap_text(&title, area.width as usize);
@@ -234,10 +238,11 @@ impl super::Renderer {
 
                 // Options
                 y = y.max(options_top);
-                for (i, option) in prompt.options.iter().enumerate() {
+                for i in shown_options.clone() {
                     if y >= content_bottom {
                         break;
                     }
+                    let option = &prompt.options[i];
                     let selected = i == prompt.selected;
                     let (marker, marker_style) = if selected {
                         (
@@ -282,10 +287,11 @@ impl super::Renderer {
 
                 // Options — one per line
                 y = y.max(options_top);
-                for (i, option) in prompt.options.iter().enumerate() {
+                for i in shown_options {
                     if y >= content_bottom {
                         break;
                     }
+                    let option = &prompt.options[i];
                     let selected = i == prompt.selected;
                     let (marker, marker_style) = if selected {
                         (
@@ -311,6 +317,21 @@ impl super::Renderer {
                     );
                     y += 1;
                 }
+            }
+            if let Some(hint) = &prompt.hint
+                && y < content_bottom
+            {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("  {hint}"),
+                        Style::default().fg(self.theme.system_msg),
+                    )),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
             }
         } else if let Some(input_rows) = input_view {
             let visible_input_rows = input_rows.min(content_bottom.saturating_sub(y));

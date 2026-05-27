@@ -145,10 +145,13 @@ fn default_provider_is_local() {
 fn user_config_serializes_and_deserializes() {
     let cfg = UserConfig {
         provider: "openai".into(),
+        ..UserConfig::default()
     };
     let yaml = serde_yaml::to_string(&cfg).unwrap();
     let deserialized: UserConfig = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(deserialized.provider, "openai");
+    assert_eq!(deserialized.approval_mode, bone::tools::ApprovalMode::Safe);
+    assert_eq!(deserialized.enabled_tools.len(), 4);
 }
 
 #[test]
@@ -156,6 +159,20 @@ fn config_missing_provider_field_defaults_to_local() {
     let yaml = "";
     let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap_or_default();
     assert_eq!(cfg.provider, "local");
+    assert_eq!(cfg.approval_mode, bone::tools::ApprovalMode::Safe);
+    assert_eq!(cfg.enabled_tools.len(), 4);
+}
+
+#[test]
+fn legacy_config_with_only_provider_defaults_new_settings() {
+    let cfg: UserConfig = serde_yaml::from_str("provider: codex\n").unwrap();
+
+    assert_eq!(cfg.provider, "codex");
+    assert_eq!(cfg.approval_mode, bone::tools::ApprovalMode::Safe);
+    assert_eq!(
+        cfg.enabled_tools,
+        vec!["read_file", "write_file", "edit_file", "shell"]
+    );
 }
 // ── Tool Handler (concurrency ordering) ─────────────────────────────────────
 
@@ -215,4 +232,27 @@ async fn execute_all_returns_results_in_request_order_after_concurrent_execution
     assert_eq!(*order.lock().unwrap(), vec!["second", "first"]);
     assert_eq!(results[0].call_id, "slow");
     assert_eq!(results[1].call_id, "fast");
+}
+
+#[tokio::test]
+async fn disabled_tools_are_not_advertised_or_executed() {
+    use bone::tools::{ToolCall, ToolHandler, builtin_tools};
+    use serde_json::json;
+
+    let enabled = vec!["read_file".to_string()];
+    let handler = ToolHandler::with_enabled(builtin_tools(), &enabled);
+
+    let definitions = handler.definitions();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].name, "read_file");
+
+    let results = handler
+        .execute_all(vec![ToolCall {
+            id: "disabled".into(),
+            name: "shell".into(),
+            arguments: json!({ "command": "pwd" }),
+        }])
+        .await;
+    assert!(results[0].is_error);
+    assert!(results[0].content.contains("disabled"));
 }

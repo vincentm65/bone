@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::tools::types::{Tool, ToolCall, ToolDefinition, ToolResult};
@@ -61,18 +61,65 @@ impl Default for ToolRegistry {
 
 pub struct ToolHandler {
     registry: ToolRegistry,
+    enabled: HashSet<String>,
 }
 
 impl ToolHandler {
     pub fn new(registry: ToolRegistry) -> Self {
-        Self { registry }
+        let enabled = registry
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        Self { registry, enabled }
+    }
+
+    pub fn with_enabled(registry: ToolRegistry, enabled: &[String]) -> Self {
+        Self {
+            registry,
+            enabled: enabled.iter().cloned().collect(),
+        }
+    }
+
+    pub fn is_enabled(&self, name: &str) -> bool {
+        self.enabled.contains(name)
+    }
+
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) {
+        if enabled {
+            self.enabled.insert(name.to_string());
+        } else {
+            self.enabled.remove(name);
+        }
+    }
+
+    pub fn enabled_names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.enabled.iter().cloned().collect();
+        names.sort();
+        names
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.registry.definitions()
+        self.registry
+            .definitions()
+            .into_iter()
+            .filter(|tool| self.is_enabled(tool.name))
+            .collect()
     }
 
     pub async fn execute_all(&self, calls: Vec<ToolCall>) -> Vec<ToolResult> {
-        join_all(calls.into_iter().map(|call| self.registry.execute(call))).await
+        join_all(calls.into_iter().map(|call| async move {
+            if self.is_enabled(&call.name) {
+                self.registry.execute(call).await
+            } else {
+                ToolResult {
+                    call_id: call.id,
+                    name: call.name,
+                    content: "Tool disabled in /tools settings".to_string(),
+                    is_error: true,
+                }
+            }
+        }))
+        .await
     }
 }

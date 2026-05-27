@@ -1,8 +1,8 @@
-pub mod shell;
 pub mod command_policy;
 pub mod edit_file;
 pub mod read_file;
 pub mod registry;
+pub mod shell;
 pub mod types;
 pub mod write_atomic;
 pub mod write_file;
@@ -23,9 +23,11 @@ pub fn builtin_tools() -> ToolRegistry {
 // ── ApprovalMode ────────────────────────────────────────────────────────────
 
 use command_policy::CommandSafety;
+use serde::{Deserialize, Serialize};
 
 /// Which tool calls are automatically approved without prompting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ApprovalMode {
     /// Read-only calls are auto-approved.
     #[default]

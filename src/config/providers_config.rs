@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// A single provider entry. All OpenAI-compatible providers share the same
 /// shape; Anthropic-style providers are differentiated by `handler`.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProviderEntry {
     /// Human-readable label shown in the status bar.
     #[serde(default, deserialize_with = "string_or_default")]
@@ -67,7 +67,7 @@ fn default_handler() -> String {
 }
 
 /// The providers file is a flat map of provider id → config.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProvidersConfig {
     /// Last used provider id — loaded on app startup.
     #[serde(default)]

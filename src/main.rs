@@ -23,7 +23,7 @@ async fn main() -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
     provider.validate().await.map_err(std::io::Error::other)?;
 
-    let mut app = App::new(provider, providers_config)?;
+    let mut app = App::new(provider, providers_config, cfg)?;
     app.run().await?;
     Ok(())
 }

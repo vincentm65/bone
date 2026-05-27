@@ -1,8 +1,8 @@
 pub mod stream;
 
 use crate::chat::Message;
-use crate::config::ProvidersConfig;
-use crate::llm::{ChatMessage, LlmProvider, TokenStats};
+use crate::config::{self, ProvidersConfig, UserConfig};
+use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
 use crate::tools::{ApprovalMode, ToolCall, ToolHandler, builtin_tools};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
@@ -26,6 +26,7 @@ pub struct App {
     pub should_quit: bool,
     pub renderer: Renderer,
     pub providers_config: ProvidersConfig,
+    pub user_config: UserConfig,
     pub queue: VecDeque<String>,
     pub tools: ToolHandler,
     pub approval_mode: ApprovalMode,
@@ -39,9 +40,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(llm: Box<dyn LlmProvider>, providers_config: ProvidersConfig) -> io::Result<Self> {
+    pub fn new(
+        llm: Box<dyn LlmProvider>,
+        providers_config: ProvidersConfig,
+        user_config: UserConfig,
+    ) -> io::Result<Self> {
         let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
+        let approval_mode = user_config.approval_mode;
+        let tools = ToolHandler::with_enabled(builtin_tools(), &user_config.enabled_tools);
 
         Ok(Self {
             messages: vec![Message::system(
@@ -56,9 +63,10 @@ impl App {
             should_quit: false,
             renderer: Renderer::new(),
             providers_config,
+            user_config,
             queue: VecDeque::new(),
-            tools: ToolHandler::new(builtin_tools()),
-            approval_mode: ApprovalMode::default(),
+            tools,
+            approval_mode,
             active_prompt: None,
             cancel_streaming: false,
             last_ctrl_c: None,
@@ -230,6 +238,8 @@ impl App {
             }
             InputAction::CycleMode => {
                 self.approval_mode = self.approval_mode.cycle();
+                self.user_config.approval_mode = self.approval_mode;
+                config::save_user_config(&self.user_config);
                 self.redraw(term)
             }
             InputAction::Redraw | InputAction::Escape => self.redraw(term),
@@ -251,6 +261,18 @@ impl App {
             KeyCode::Down => {
                 if let Some(ref mut p) = self.active_prompt {
                     p.down();
+                }
+                self.redraw(term)?;
+            }
+            KeyCode::PageUp => {
+                if let Some(ref mut p) = self.active_prompt {
+                    p.page_up();
+                }
+                self.redraw(term)?;
+            }
+            KeyCode::PageDown => {
+                if let Some(ref mut p) = self.active_prompt {
+                    p.page_down();
                 }
                 self.redraw(term)?;
             }
@@ -326,6 +348,9 @@ impl App {
                     "Cancel".to_string(),
                 ],
                 selected: 0,
+                scroll: 0,
+                visible_rows: 10,
+                hint: None,
                 full_command,
                 peek_mode: false,
             }
@@ -390,6 +415,18 @@ impl App {
                         }
                         self.redraw(term)?;
                     }
+                    KeyCode::PageUp => {
+                        if let Some(ref mut p) = self.active_prompt {
+                            p.page_up();
+                        }
+                        self.redraw(term)?;
+                    }
+                    KeyCode::PageDown => {
+                        if let Some(ref mut p) = self.active_prompt {
+                            p.page_down();
+                        }
+                        self.redraw(term)?;
+                    }
                     KeyCode::Char('p') | KeyCode::Char('P') => {
                         if let Some(ref mut p) = self.active_prompt {
                             p.toggle_peek();
@@ -447,6 +484,16 @@ impl App {
         let cmd = parts[0].to_string();
         let arg = parts.get(1).copied().unwrap_or("").to_string();
 
+        if cmd == "provider" && arg.is_empty() {
+            return self.provider_picker(term).await;
+        }
+        if cmd == "tools" {
+            return self.tools_picker(term);
+        }
+        if cmd == "config" {
+            return self.config_picker(term);
+        }
+
         let result = commands::handle(
             &cmd,
             &arg,
@@ -475,6 +522,340 @@ impl App {
             commands::CommandResult::OpenEditor => self.open_editor(term).await?,
         }
         Ok(())
+    }
+
+    fn panel_key(&mut self, term: &mut BoneTerminal) -> io::Result<(KeyCode, KeyModifiers)> {
+        loop {
+            if event::poll(std::time::Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        return Ok((key.code, key.modifiers));
+                    }
+                    Event::Resize(_, _) => self.force_redraw(term)?,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn close_panel(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.active_prompt = None;
+        self.redraw(term)
+    }
+
+    fn show_reply(&mut self, reply: impl Into<String>, term: &mut BoneTerminal) -> io::Result<()> {
+        self.messages.push(Message::system(reply.into()));
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.redraw(term)
+    }
+
+    fn navigate_panel(&mut self, code: KeyCode, term: &mut BoneTerminal) -> io::Result<bool> {
+        match code {
+            KeyCode::Up => self.active_prompt.as_mut().unwrap().up(),
+            KeyCode::Down => self.active_prompt.as_mut().unwrap().down(),
+            KeyCode::PageUp => self.active_prompt.as_mut().unwrap().page_up(),
+            KeyCode::PageDown => self.active_prompt.as_mut().unwrap().page_down(),
+            _ => return Ok(false),
+        }
+        self.redraw(term)?;
+        Ok(true)
+    }
+
+    async fn provider_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let mut selected = 0usize;
+        loop {
+            let mut ids: Vec<String> = self.providers_config.providers.keys().cloned().collect();
+            ids.sort();
+            let options = ids
+                .iter()
+                .map(|id| {
+                    let entry = &self.providers_config.providers[id];
+                    let active = if id == self.llm.id() { "*" } else { " " };
+                    format!("[{active}] {id}  {} ({})", entry.label, entry.model)
+                })
+                .collect::<Vec<_>>();
+            let mut prompt = Prompt::new("Providers", options);
+            prompt.selected = selected.min(ids.len().saturating_sub(1));
+            prompt.scroll = prompt.selected.saturating_sub(prompt.visible_rows - 1);
+            prompt.hint = Some("Enter select  e edit  Esc close".to_string());
+            self.active_prompt = Some(prompt);
+            self.redraw(term)?;
+
+            let (code, modifiers) = self.panel_key(term)?;
+            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                return self.close_panel(term);
+            }
+            match code {
+                code if self.navigate_panel(code, term)? => {
+                    selected = self.active_prompt.as_ref().unwrap().selected;
+                    continue;
+                }
+                KeyCode::Esc => return self.close_panel(term),
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    if let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) {
+                        self.provider_editor(id.clone(), term)?;
+                    }
+                }
+                KeyCode::Enter => {
+                    let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) else {
+                        return self.close_panel(term);
+                    };
+                    let reply =
+                        match providers::create_provider_with_config(id, &self.providers_config) {
+                            Ok(new_provider) => match new_provider.validate().await {
+                                Ok(()) => {
+                                    self.provider =
+                                        format!("{} ({})", new_provider.name(), new_provider.id());
+                                    self.model = new_provider.model().to_string();
+                                    self.llm = new_provider;
+                                    self.providers_config.last_provider = id.clone();
+                                    config::save_providers(&self.providers_config);
+                                    format!("Switched to {} ({})", self.model, self.provider)
+                                }
+                                Err(err) => format!("Provider validation failed: {err}"),
+                            },
+                            Err(err) => err.to_string(),
+                        };
+                    self.close_panel(term)?;
+                    return self.show_reply(reply, term);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn mask_secret(value: &str) -> String {
+        if value.is_empty() {
+            "(empty)".to_string()
+        } else {
+            "*".repeat(value.chars().count().min(12).max(4))
+        }
+    }
+
+    fn edit_value(
+        &mut self,
+        label: &str,
+        initial: &str,
+        secret: bool,
+        term: &mut BoneTerminal,
+    ) -> io::Result<Option<String>> {
+        self.input.buffer = if secret {
+            String::new()
+        } else {
+            initial.to_string()
+        };
+        self.input.cursor_pos = self.input.buffer.chars().count();
+        loop {
+            let value = if secret {
+                Self::mask_secret(&self.input.buffer)
+            } else {
+                self.input.buffer.clone()
+            };
+            let mut prompt =
+                Prompt::new(format!("Edit {label}"), vec![format!("{label}: {value}")]);
+            prompt.hint = Some("Enter save value  Esc cancel".to_string());
+            self.active_prompt = Some(prompt);
+            self.redraw(term)?;
+            match event::read()? {
+                Event::Paste(text) => self.input.insert_paste(&text),
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if key.code == KeyCode::Enter {
+                        let value = self.input.buffer.clone();
+                        self.input.clear_buffer();
+                        return Ok(Some(value));
+                    }
+                    if key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                    {
+                        self.input.clear_buffer();
+                        return Ok(None);
+                    }
+                    let _ = self.input.apply_key(key.code, key.modifiers);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn provider_editor(&mut self, id: String, term: &mut BoneTerminal) -> io::Result<()> {
+        let mut entry = self.providers_config.providers[&id].clone();
+        let mut selected = 0usize;
+        loop {
+            let options = vec![
+                format!("label: {}", entry.label),
+                format!("model: {}", entry.model),
+                format!("base_url: {}", entry.base_url),
+                format!("endpoint: {}", entry.endpoint),
+                format!("handler: {}", entry.handler),
+                format!("api_key: {}", Self::mask_secret(&entry.api_key)),
+                "Save".to_string(),
+            ];
+            let mut prompt = Prompt::new(format!("Edit provider: {id}"), options);
+            prompt.selected = selected;
+            prompt.hint = Some("Enter edit/select  Esc back".to_string());
+            self.active_prompt = Some(prompt);
+            self.redraw(term)?;
+            let (code, modifiers) = self.panel_key(term)?;
+            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(());
+            }
+            if self.navigate_panel(code, term)? {
+                selected = self.active_prompt.as_ref().unwrap().selected;
+                continue;
+            }
+            match code {
+                KeyCode::Esc => return Ok(()),
+                KeyCode::Enter => {
+                    let selected = self.active_prompt.as_ref().unwrap().selected;
+                    let edited = match selected {
+                        0 => self.edit_value("label", &entry.label, false, term)?,
+                        1 => self.edit_value("model", &entry.model, false, term)?,
+                        2 => self.edit_value("base_url", &entry.base_url, false, term)?,
+                        3 => self.edit_value("endpoint", &entry.endpoint, false, term)?,
+                        4 => {
+                            entry.handler = if entry.handler == "codex" {
+                                "openai".to_string()
+                            } else {
+                                "codex".to_string()
+                            };
+                            None
+                        }
+                        5 => self.edit_value("api_key", "", true, term)?,
+                        6 => {
+                            self.providers_config
+                                .providers
+                                .insert(id.clone(), entry.clone());
+                            config::save_providers(&self.providers_config);
+                            let reply = if self.llm.id() == id {
+                                match providers::create_provider_with_config(
+                                    &id,
+                                    &self.providers_config,
+                                ) {
+                                    Ok(provider) => {
+                                        self.provider =
+                                            format!("{} ({})", provider.name(), provider.id());
+                                        self.model = provider.model().to_string();
+                                        self.llm = provider;
+                                        format!("Saved and reloaded provider {id}.")
+                                    }
+                                    Err(err) => format!(
+                                        "Saved provider {id}, but active reload failed: {err}"
+                                    ),
+                                }
+                            } else {
+                                format!("Saved provider {id}.")
+                            };
+                            self.show_reply(reply, term)?;
+                            return Ok(());
+                        }
+                        _ => None,
+                    };
+                    if let Some(value) = edited {
+                        match selected {
+                            0 => entry.label = value,
+                            1 => entry.model = value,
+                            2 => entry.base_url = value,
+                            3 => entry.endpoint = value,
+                            5 => entry.api_key = value,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn tools_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let names = config::default_enabled_tools();
+        let mut selected = 0usize;
+        loop {
+            let options = names
+                .iter()
+                .map(|name| {
+                    let mark = if self.tools.is_enabled(name) {
+                        "x"
+                    } else {
+                        " "
+                    };
+                    format!("[{mark}] {name}")
+                })
+                .collect();
+            let mut prompt = Prompt::new("Tools", options);
+            prompt.selected = selected;
+            prompt.hint = Some("Space/Enter toggle  Esc close".to_string());
+            self.active_prompt = Some(prompt);
+            self.redraw(term)?;
+            let (code, modifiers) = self.panel_key(term)?;
+            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                return self.close_panel(term);
+            }
+            if self.navigate_panel(code, term)? {
+                selected = self.active_prompt.as_ref().unwrap().selected;
+                continue;
+            }
+            match code {
+                KeyCode::Esc => return self.close_panel(term),
+                KeyCode::Char(' ') | KeyCode::Enter => {
+                    let selected = self.active_prompt.as_ref().unwrap().selected;
+                    if let Some(name) = names.get(selected) {
+                        self.tools.set_enabled(name, !self.tools.is_enabled(name));
+                        self.user_config.enabled_tools = self.tools.enabled_names();
+                        config::save_user_config(&self.user_config);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn config_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let modes = [
+            ApprovalMode::Safe,
+            ApprovalMode::Edits,
+            ApprovalMode::Danger,
+        ];
+        let mut selected = 0usize;
+        loop {
+            let options = modes
+                .iter()
+                .map(|mode| {
+                    let active = if *mode == self.approval_mode {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    format!("[{active}] Approval mode: {}", mode.label())
+                })
+                .collect();
+            let mut prompt = Prompt::new("Config", options);
+            prompt.selected = selected;
+            prompt.hint = Some("Enter choose  Esc close".to_string());
+            self.active_prompt = Some(prompt);
+            self.redraw(term)?;
+            let (code, modifiers) = self.panel_key(term)?;
+            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                return self.close_panel(term);
+            }
+            if self.navigate_panel(code, term)? {
+                selected = self.active_prompt.as_ref().unwrap().selected;
+                continue;
+            }
+            match code {
+                KeyCode::Esc => return self.close_panel(term),
+                KeyCode::Enter => {
+                    let selected = self.active_prompt.as_ref().unwrap().selected;
+                    if let Some(mode) = modes.get(selected) {
+                        self.approval_mode = *mode;
+                        self.user_config.approval_mode = *mode;
+                        config::save_user_config(&self.user_config);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     async fn open_editor(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
