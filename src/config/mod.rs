@@ -58,7 +58,7 @@ fn default_provider() -> String {
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
-    ["read_file", "write_file", "edit_file", "shell"]
+    ["read_file", "write_file", "edit_file", "shell", "web_search"]
         .into_iter()
         .map(String::from)
         .collect()

@@ -151,7 +151,7 @@ fn user_config_serializes_and_deserializes() {
     let deserialized: UserConfig = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(deserialized.provider, "openai");
     assert_eq!(deserialized.approval_mode, bone::tools::ApprovalMode::Safe);
-    assert_eq!(deserialized.enabled_tools.len(), 4);
+    assert_eq!(deserialized.enabled_tools.len(), 5);
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn config_missing_provider_field_defaults_to_local() {
     let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap_or_default();
     assert_eq!(cfg.provider, "local");
     assert_eq!(cfg.approval_mode, bone::tools::ApprovalMode::Safe);
-    assert_eq!(cfg.enabled_tools.len(), 4);
+    assert_eq!(cfg.enabled_tools.len(), 5);
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn legacy_config_with_only_provider_defaults_new_settings() {
     assert_eq!(cfg.approval_mode, bone::tools::ApprovalMode::Safe);
     assert_eq!(
         cfg.enabled_tools,
-        vec!["read_file", "write_file", "edit_file", "shell"]
+        vec!["read_file", "write_file", "edit_file", "shell", "web_search"]
     );
 }
 // ── Tool Handler (concurrency ordering) ─────────────────────────────────────

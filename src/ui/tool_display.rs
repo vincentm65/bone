@@ -15,15 +15,19 @@ pub fn tool_label(call: &ToolCall, result: &ToolResult) -> String {
             .unwrap_or_else(|| call.name.clone());
     }
 
-    let target = match call.name.as_str() {
-        "read_file" | "write_file" | "edit_file" => call.arguments["path"].as_str(),
-        _ => None,
-    };
+    let target = call
+        .arguments
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| call.arguments.get("query").and_then(|v| v.as_str()));
 
     let mut label = match target {
-        Some(target) if !target.is_empty() => format!("{} {}", call.name, target),
-        _ => call.name.clone(),
+        Some(target) => format!("{} {}", call.name, target),
+        None => call.name.clone(),
     };
+
+
 
     if call.name == "read_file" && !result.is_error {
         label.push_str(&read_file_line_summary(call, result));

@@ -1,0 +1,20 @@
+name: web_search
+description: "Search the web for information using DuckDuckGo. Returns titles, URLs and summaries. Useful for looking up documentation, current events, technical topics, and general knowledge."
+args:
+  - name: query
+    type: string
+    description: "The search query"
+    required: true
+  - name: num_results
+    type: integer
+    description: "Number of results to return (default 5, max 10)"
+    required: false
+script: |
+  set -euo pipefail
+  QUERY="$TOOL_QUERY"
+  NUM="${TOOL_NUM_RESULTS:-5}"
+  # Clamp to 1-10
+  if [ "$NUM" -lt 1 ] 2>/dev/null; then NUM=1; fi
+  if [ "$NUM" -gt 10 ] 2>/dev/null; then NUM=10; fi
+
+  exec uvx ddgs text -q "$QUERY" -m "$NUM"

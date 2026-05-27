@@ -20,7 +20,7 @@ Custom Tools:
 - A custom tool YAML has `name`, `description`, `args` (list of typed parameters), and a `script` (bash script) or `interaction: select` (shows options to the user).
 - Args are passed as env vars: `TOOL_<UPPERCASE_ARG_NAME>`. Non-alphanumeric chars become `_`.
 - To create a new tool, use `write_file` to write a YAML file to `~/.bone-rust/tools/<name>.yaml`, then tell the user to run `/tools reload`.
-- Default tools (grep, gh, ask_user) are seeded on first launch. Users can edit or delete them.
+- Default tools (ask_user, web_search) are seeded on first launch. Users can edit or delete them.
 
 Rules:
 - If the user asks you to create, edit, delete, move, rename, format, run, test, install, or otherwise affect real files or system state, you must use a tool.

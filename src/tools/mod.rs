@@ -36,10 +36,8 @@ pub fn load_tools() -> LoadedTools {
     // Load dynamic tools from disk (single parse)
     let dir = tools_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let is_empty = std::fs::read_dir(&dir).map_or(true, |mut d| d.next().is_none());
-    if is_empty {
-        seed_default_tools(&dir);
-    }
+    seed_default_tools(&dir);
+
     let dynamic = dynamic::load_from_dir(&dir);
 
     let mut interaction_tools = std::collections::HashSet::new();
@@ -87,6 +85,10 @@ fn seed_default_tools(dir: &std::path::Path) {
             "ask_user.yaml",
             include_str!("../../defaults/tools/ask_user.yaml"),
         ),
+        (
+            "web_search.yaml",
+            include_str!("../../defaults/tools/web_search.yaml"),
+        ),
     ];
     for (name, content) in DEFAULTS {
         let path = dir.join(name);
@@ -97,8 +99,6 @@ fn seed_default_tools(dir: &std::path::Path) {
         }
     }
 }
-
-
 
 // ── ApprovalMode ────────────────────────────────────────────────────────────
 
