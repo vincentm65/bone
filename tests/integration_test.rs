@@ -194,8 +194,8 @@ async fn execute_all_returns_results_in_request_order_after_concurrent_execution
     impl Tool for RecordingTool {
         fn definition(&self) -> ToolDefinition {
             ToolDefinition {
-                name: "record",
-                description: "record execution order",
+                name: "record".to_string(),
+                description: "record execution order".to_string(),
                 input_schema: json!({ "type": "object" }),
             }
         }
@@ -242,6 +242,7 @@ async fn disabled_tools_are_not_advertised_or_executed() {
     let enabled = vec!["read_file".to_string()];
     let handler = ToolHandler::with_enabled(builtin_tools(), &enabled);
 
+    assert_eq!(handler.available_definitions().len(), 4);
     let definitions = handler.definitions();
     assert_eq!(definitions.len(), 1);
     assert_eq!(definitions[0].name, "read_file");

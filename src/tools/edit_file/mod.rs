@@ -52,8 +52,8 @@ pub struct EditPreview {
 impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "edit_file",
-            description: "Edit an existing UTF-8 file transactionally. Use exactly one form: top-level search + replace for one replacement; edits[] for multiple operations, deletion, or insertion; or mode=\"rewrite\" + content to replace the whole file. Never send search without replace. Search/delete/insert anchors must identify one location; the matcher may safely recover minor whitespace/newline drift, but duplicate or uncertain matches fail. Preview is shown before applying.",
+            name: "edit_file".to_string(),
+            description: "Edit an existing UTF-8 file transactionally. Use exactly one form: top-level search + replace for one replacement; edits[] for multiple operations, deletion, or insertion; or mode=\"rewrite\" + content to replace the whole file. Never send search without replace. Search/delete/insert anchors must identify one location; the matcher may safely recover minor whitespace/newline drift, but duplicate or uncertain matches fail. Preview is shown before applying.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

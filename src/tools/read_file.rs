@@ -18,8 +18,8 @@ struct Args {
 impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "read_file",
-            description: "Read a UTF-8 text file. Use this to inspect source, config, or notes before editing. Optionally pass start_line and max_lines to read only a range.",
+            name: "read_file".to_string(),
+            description: "Read a UTF-8 text file. Use this to inspect source, config, or notes before editing. Optionally pass start_line and max_lines to read only a range.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

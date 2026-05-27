@@ -6,7 +6,7 @@ use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
 use crate::skills::SkillStore;
 use crate::skills::types::Skill;
 use crate::tools::script_runner::{ScriptRequest, run_script};
-use crate::tools::{ApprovalMode, ToolCall, ToolHandler, builtin_tools};
+use crate::tools::{ApprovalMode, ToolCall, ToolHandler};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
 use std::io;
@@ -41,6 +41,10 @@ pub struct App {
     pub last_ctrl_c: Option<Instant>,
     /// Cumulative token usage stats.
     pub token_stats: TokenStats,
+    /// Cached set of dynamic tool names that use interaction: select.
+    interaction_tools: std::collections::HashSet<String>,
+    /// Map from dynamic tool name to its script (shown in approval prompt).
+    dynamic_scripts: std::collections::HashMap<String, String>,
 }
 
 impl App {
@@ -52,7 +56,15 @@ impl App {
         let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
-        let tools = ToolHandler::with_enabled(builtin_tools(), &user_config.enabled_tools);
+        let loaded = crate::tools::load_tools();
+        // Auto-enable any new tools not yet in the user's enabled list
+        let mut enabled = user_config.enabled_tools.clone();
+        for def in loaded.registry.definitions() {
+            if !enabled.contains(&def.name) {
+                enabled.push(def.name);
+            }
+        }
+        let tools = ToolHandler::with_enabled(loaded.registry, &enabled);
         let skills = SkillStore::load()?;
         let mut messages = vec![Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
@@ -81,6 +93,8 @@ impl App {
             cancel_streaming: false,
             last_ctrl_c: None,
             token_stats: TokenStats::new(),
+            interaction_tools: loaded.interaction_tools,
+            dynamic_scripts: loaded.dynamic_scripts,
         })
     }
 
@@ -369,6 +383,22 @@ impl App {
                 full_command,
                 peek_mode: false,
             }
+        } else if let Some(script) = self.dynamic_scripts.get(&call.name) {
+            // Dynamic tool — show the script so the user can see what runs
+            Prompt {
+                title: format!("{} — {}", call.name, summary),
+                options: vec![
+                    "Accept".to_string(),
+                    "Advise".to_string(),
+                    "Cancel".to_string(),
+                ],
+                selected: 0,
+                scroll: 0,
+                visible_rows: 10,
+                hint: None,
+                full_command: Some(script.clone()),
+                peek_mode: false,
+            }
         } else {
             Prompt::new(
                 format!("{} — {}", call.name, summary),
@@ -503,7 +533,7 @@ impl App {
             return self.provider_picker(term).await;
         }
         if cmd == "tools" {
-            return self.tools_picker(term);
+            return self.handle_tools_command(&arg, term);
         }
         if cmd == "config" {
             return self.config_picker(term);
@@ -943,11 +973,45 @@ impl App {
         }
     }
 
+    fn handle_tools_command(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
+        let mut parts = arg.split_whitespace();
+        let action = parts.next().unwrap_or("");
+        match action {
+            "reload" => {
+                let loaded = crate::tools::load_tools();
+                let mut enabled = self.tools.enabled_names();
+                for def in loaded.registry.definitions() {
+                    if !enabled.contains(&def.name) {
+                        enabled.push(def.name);
+                    }
+                }
+                self.tools = crate::tools::ToolHandler::with_enabled(loaded.registry, &enabled);
+                self.interaction_tools = loaded.interaction_tools;
+                self.dynamic_scripts = loaded.dynamic_scripts;
+                self.user_config.enabled_tools = self.tools.enabled_names();
+                config::save_user_config(&self.user_config);
+                let count = self.tools.definitions().len();
+                self.show_reply(format!("Tools reloaded. {count} tools enabled."), term)
+            }
+            _ => self.tools_picker(term),
+        }
+    }
+
     fn tools_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let names = config::default_enabled_tools();
+        let all_names = self
+            .tools
+            .available_definitions()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>();
+        let builtin_names: Vec<String> = crate::tools::builtin_tools()
+            .definitions()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
         let mut selected = 0usize;
         loop {
-            let options = names
+            let options = all_names
                 .iter()
                 .map(|name| {
                     let mark = if self.tools.is_enabled(name) {
@@ -955,7 +1019,8 @@ impl App {
                     } else {
                         " "
                     };
-                    format!("[{mark}] {name}")
+                    let tag = if builtin_names.contains(name) { "" } else { " (custom)" };
+                    format!("[{mark}] {name}{tag}")
                 })
                 .collect();
             let mut prompt = Prompt::new("Tools", options);
@@ -975,7 +1040,7 @@ impl App {
                 KeyCode::Esc => return self.close_panel(term),
                 KeyCode::Char(' ') | KeyCode::Enter => {
                     let selected = self.active_prompt.as_ref().unwrap().selected;
-                    if let Some(name) = names.get(selected) {
+                    if let Some(name) = all_names.get(selected) {
                         self.tools.set_enabled(name, !self.tools.is_enabled(name));
                         self.user_config.enabled_tools = self.tools.enabled_names();
                         config::save_user_config(&self.user_config);

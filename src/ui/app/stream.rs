@@ -451,6 +451,70 @@ impl App {
         mut call: ToolCall,
         term: &mut BoneTerminal,
     ) -> io::Result<PendingTool> {
+        // Check if this is a dynamic tool with interaction
+        if self.interaction_tools.contains(&call.name) {
+            let question = call.arguments["question"].as_str().unwrap_or("");
+            let options: Vec<String> = call.arguments["options"]
+                    .as_array()
+                    .and_then(|a| {
+                        a.iter()
+                            .map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if options.is_empty() {
+                    return Ok(PendingTool::Result(tool_error(
+                        &call,
+                        "interaction tool: options must be a non-empty array of strings",
+                    )));
+                }
+                let prompt = crate::ui::prompt::Prompt::new(
+                    question,
+                    options.clone(),
+                );
+                self.active_prompt = Some(prompt);
+                self.redraw(term)?;
+
+                let selection = loop {
+                    if event::poll(std::time::Duration::from_millis(50))? {
+                        match event::read()? {
+                            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                                KeyCode::Up => {
+                                    if let Some(ref mut p) = self.active_prompt { p.up(); }
+                                    self.redraw(term)?;
+                                }
+                                KeyCode::Down => {
+                                    if let Some(ref mut p) = self.active_prompt { p.down(); }
+                                    self.redraw(term)?;
+                                }
+                                KeyCode::Enter => {
+                                    break self.active_prompt.as_ref().and_then(|p| {
+                                        options.get(p.selected).cloned()
+                                    });
+                                }
+                                KeyCode::Esc => break None,
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
+                                _ => {}
+                            },
+                            _ => {}
+                        }
+                    }
+                };
+
+                self.active_prompt = None;
+                self.redraw(term)?;
+
+                return Ok(match selection {
+                    Some(choice) => PendingTool::Result(ToolResult {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        content: choice,
+                        is_error: false,
+                    }),
+                    None => PendingTool::Result(tool_error(&call, "cancelled by user")),
+                });
+        }
+
         if call.name == "edit_file" {
             match preview_edit_file(call.arguments.clone()).await {
                 Ok(preview) => {

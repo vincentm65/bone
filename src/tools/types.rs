@@ -7,8 +7,8 @@ pub use crate::tools::command_policy::{CommandSafety, classify_command};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub input_schema: Value,
 }
 

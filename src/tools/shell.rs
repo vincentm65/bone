@@ -22,20 +22,14 @@ struct Args {
 impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         let (_, _, shell_label) = shell_command();
-        let desc: &'static str = Box::leak(
-            format!(
-                "Run a non-interactive shell command with {shell_label} from the current working directory and return its exit code, stdout, and stderr. Use this for builds, tests, formatters, package managers, and other commands that are better expressed in the shell. Do not use it to read or edit files when a dedicated file tool is more appropriate. Always classify the command honestly as read_only, edit, or danger; choose danger when unsure.",
-            )
-            .into_boxed_str(),
+        let desc = format!(
+            "Run a non-interactive shell command with {shell_label} from the current working directory and return its exit code, stdout, and stderr. Use this for builds, tests, formatters, package managers, and other commands that are better expressed in the shell. Do not use it to read or edit files when a dedicated file tool is more appropriate. Always classify the command honestly as read_only, edit, or danger; choose danger when unsure."
         );
-        let cmd_desc: &'static str = Box::leak(
-            format!(
-                "Command line to execute with {shell_label}. It runs without stdin, so avoid interactive prompts and provide flags that make tools non-interactive.",
-            )
-            .into_boxed_str(),
+        let cmd_desc = format!(
+            "Command line to execute with {shell_label}. It runs without stdin, so avoid interactive prompts and provide flags that make tools non-interactive."
         );
         ToolDefinition {
-            name: "shell",
+            name: "shell".to_string(),
             description: desc,
             input_schema: json!({
                 "type": "object",

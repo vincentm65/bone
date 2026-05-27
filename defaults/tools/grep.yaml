@@ -1,0 +1,14 @@
+name: grep
+version: 1
+description: "Search for a pattern in files using ripgrep"
+args:
+  - name: pattern
+    type: string
+    description: "Regex pattern to search for"
+    required: true
+  - name: path
+    type: string
+    description: "Directory or file to search in"
+    required: false
+script: |
+  rg "${TOOL_PATTERN}" "${TOOL_PATH:-.}"

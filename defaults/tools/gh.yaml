@@ -1,0 +1,10 @@
+name: gh
+version: 1
+description: "GitHub CLI wrapper — run any gh command"
+args:
+  - name: command
+    type: string
+    description: "The gh subcommand and arguments to run"
+    required: true
+script: |
+  gh "${TOOL_COMMAND}"

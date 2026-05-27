@@ -19,8 +19,8 @@ struct Args {
 impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "write_file",
-            description: "Create a new UTF-8 text file. Parent directories are created automatically, but the call fails if the destination file already exists. Use edit_file for targeted modifications to existing files.",
+            name: "write_file".to_string(),
+            description: "Create a new UTF-8 text file. Parent directories are created automatically, but the call fails if the destination file already exists. Use edit_file for targeted modifications to existing files.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

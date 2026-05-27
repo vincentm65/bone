@@ -6,7 +6,7 @@ use futures_util::future::join_all;
 
 #[derive(Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<&'static str, Arc<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -28,7 +28,7 @@ impl ToolRegistry {
 
     pub async fn execute(&self, call: ToolCall) -> ToolResult {
         let name = call.name.clone();
-        match self.tools.get(name.as_str()) {
+        match self.tools.get(&name) {
             Some(tool) => match tool.execute(call.arguments).await {
                 Ok(content) => ToolResult {
                     call_id: call.id,
@@ -69,7 +69,7 @@ impl ToolHandler {
         let enabled = registry
             .definitions()
             .into_iter()
-            .map(|tool| tool.name.to_string())
+            .map(|tool| tool.name)
             .collect();
         Self { registry, enabled }
     }
@@ -103,8 +103,12 @@ impl ToolHandler {
         self.registry
             .definitions()
             .into_iter()
-            .filter(|tool| self.is_enabled(tool.name))
+            .filter(|tool| self.is_enabled(&tool.name))
             .collect()
+    }
+
+    pub fn available_definitions(&self) -> Vec<ToolDefinition> {
+        self.registry.definitions()
     }
 
     pub async fn execute_all(&self, calls: Vec<ToolCall>) -> Vec<ToolResult> {

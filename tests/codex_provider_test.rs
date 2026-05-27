@@ -41,8 +41,8 @@ fn test_build_codex_messages_system_skipped() {
 #[test]
 fn test_codex_tools_conversion() {
     let tools = vec![ToolDefinition {
-        name: "test_tool",
-        description: "A test tool",
+        name: "test_tool".to_string(),
+        description: "A test tool".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

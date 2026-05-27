@@ -1,0 +1,13 @@
+name: ask_user
+version: 1
+description: "Ask the user a question with selectable options"
+interaction: select
+args:
+  - name: question
+    type: string
+    description: "The question to ask"
+    required: true
+  - name: options
+    type: array
+    description: "List of options for the user to choose from"
+    required: true
