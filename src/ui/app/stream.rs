@@ -102,7 +102,17 @@ impl App {
             return self.handle_command(cmd, term).await;
         }
 
-        self.messages.push(Message::user(&text));
+        self.submit_user_turn(text, None, term).await
+    }
+
+    pub(super) async fn submit_user_turn(
+        &mut self,
+        text: String,
+        display_text: Option<String>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        self.messages
+            .push(Message::user(display_text.as_deref().unwrap_or(&text)));
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &text));
 

@@ -2,6 +2,7 @@ pub mod command_policy;
 pub mod edit_file;
 pub mod read_file;
 pub mod registry;
+pub mod script_runner;
 pub mod shell;
 pub mod types;
 pub mod write_atomic;

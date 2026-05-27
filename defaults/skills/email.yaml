@@ -1,0 +1,6 @@
+name: email
+description: "Draft a professional email from supplied points"
+enabled: true
+prompt: |
+  Draft a professional email using these points:
+  {{args}}

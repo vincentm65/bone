@@ -39,6 +39,10 @@ pub fn command_policy_path() -> PathBuf {
     bone_dir().join("command-policy.yaml")
 }
 
+pub fn skills_dir() -> PathBuf {
+    bone_dir().join("skills")
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserConfig {
     #[serde(default = "default_provider")]

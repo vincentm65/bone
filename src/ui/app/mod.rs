@@ -3,6 +3,9 @@ pub mod stream;
 use crate::chat::Message;
 use crate::config::{self, ProvidersConfig, UserConfig};
 use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
+use crate::skills::SkillStore;
+use crate::skills::types::Skill;
+use crate::tools::script_runner::{ScriptRequest, run_script};
 use crate::tools::{ApprovalMode, ToolCall, ToolHandler, builtin_tools};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
@@ -29,6 +32,7 @@ pub struct App {
     pub user_config: UserConfig,
     pub queue: VecDeque<String>,
     pub tools: ToolHandler,
+    pub skills: SkillStore,
     pub approval_mode: ApprovalMode,
     pub active_prompt: Option<Prompt>,
     /// Set to `true` to abort the current streaming response.
@@ -49,11 +53,16 @@ impl App {
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
         let tools = ToolHandler::with_enabled(builtin_tools(), &user_config.enabled_tools);
+        let skills = SkillStore::load()?;
+        let mut messages = vec![Message::system(
+            "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
+        )];
+        for warning in skills.warnings() {
+            messages.push(Message::system(format!("skill warning: {warning}")));
+        }
 
         Ok(Self {
-            messages: vec![Message::system(
-                "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
-            )],
+            messages,
             transcript: Vec::new(),
             input: InputState::default(),
             streaming: false,
@@ -66,6 +75,7 @@ impl App {
             user_config,
             queue: VecDeque::new(),
             tools,
+            skills,
             approval_mode,
             active_prompt: None,
             cancel_streaming: false,
@@ -331,15 +341,20 @@ impl App {
 
         let prompt = if call.name == "shell" {
             let full_command = call.arguments["command"].as_str().map(String::from);
-            let title = call.arguments["command"]
+            let title = call.arguments["display_label"]
                 .as_str()
-                .unwrap_or("?")
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(80)
-                .collect::<String>();
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    call.arguments["command"]
+                        .as_str()
+                        .unwrap_or("?")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect::<String>()
+                });
             Prompt {
                 title: format!("{} — {}", call.name, title),
                 options: vec![
@@ -493,6 +508,29 @@ impl App {
         if cmd == "config" {
             return self.config_picker(term);
         }
+        if cmd == "skills" {
+            return self.handle_skills_command(&arg, term);
+        }
+        if !matches!(
+            cmd.as_str(),
+            "help"
+                | "clear"
+                | "new"
+                | "context"
+                | "model"
+                | "provider"
+                | "quit"
+                | "exit"
+                | "edit"
+                | "e"
+        ) {
+            if let Err(err) = self.skills.reload() {
+                return self.show_reply(format!("Failed to refresh skills: {err}"), term);
+            }
+            if let Some(skill) = self.skills.get_enabled(&cmd).cloned() {
+                return self.invoke_skill(skill, &arg, term).await;
+            }
+        }
 
         let result = commands::handle(
             &cmd,
@@ -522,6 +560,143 @@ impl App {
             commands::CommandResult::OpenEditor => self.open_editor(term).await?,
         }
         Ok(())
+    }
+
+    fn handle_skills_command(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
+        let mut parts = arg.split_whitespace();
+        let action = parts.next().unwrap_or("list");
+        if action != "reload"
+            && let Err(err) = self.skills.reload()
+        {
+            return self.show_reply(format!("Failed to refresh skills: {err}"), term);
+        }
+        let reply = match action {
+            "list" => {
+                let mut lines = vec!["Skills:".to_string()];
+                lines.extend(self.skills.list().map(|skill| {
+                    let status = if skill.enabled { "enabled" } else { "disabled" };
+                    format!("  /{} [{status}] — {}", skill.name, skill.description)
+                }));
+                if lines.len() == 1 {
+                    lines.push("  (none)".to_string());
+                }
+                lines.join("\n")
+            }
+            "enable" | "disable" => match parts.next() {
+                Some(name) => {
+                    let enabled = action == "enable";
+                    match self.skills.set_enabled(name, enabled) {
+                        Ok(()) => format!(
+                            "Skill /{name} {}.",
+                            if enabled { "enabled" } else { "disabled" }
+                        ),
+                        Err(err) => err,
+                    }
+                }
+                None => format!("Usage: /skills {action} <name>"),
+            },
+            "reload" => match self.skills.reload() {
+                Ok(()) => {
+                    let mut lines = vec!["Skills reloaded.".to_string()];
+                    lines.extend(
+                        self.skills
+                            .warnings()
+                            .iter()
+                            .map(|warning| format!("warning: {warning}")),
+                    );
+                    lines.join("\n")
+                }
+                Err(err) => format!("Failed to reload skills: {err}"),
+            },
+            _ => "Usage: /skills [list|enable <name>|disable <name>|reload]".to_string(),
+        };
+        self.show_reply(reply, term)
+    }
+
+    async fn invoke_skill(
+        &mut self,
+        skill: Skill,
+        args: &str,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        let script_output = if let Some(script) = skill.script.as_ref() {
+            let approval_call = ToolCall {
+                id: format!("skill:{}", skill.name),
+                name: "shell".to_string(),
+                arguments: serde_json::json!({
+                    "command": script,
+                    "classification": "danger",
+                    "display_label": format!("skill: /{}", skill.name),
+                }),
+            };
+            if !self.approval_mode.allows_call(&approval_call) {
+                match self.prompt_and_wait(&approval_call, term)? {
+                    Decision::Accept => {}
+                    Decision::Cancel => {
+                        return self.show_reply(
+                            format!("Skill /{} cancelled; script was not executed.", skill.name),
+                            term,
+                        );
+                    }
+                    Decision::Advise(advice) => {
+                        let suffix = if advice.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" Advice: {}", advice.trim())
+                        };
+                        return self.show_reply(
+                            format!("Skill /{} not executed.{suffix}", skill.name),
+                            term,
+                        );
+                    }
+                }
+            }
+            let output = match run_script(ScriptRequest {
+                command: script.clone(),
+                env: vec![("BONE_ARGS".to_string(), args.to_string())],
+                timeout_ms: 120_000,
+            })
+            .await
+            {
+                Ok(output) => output,
+                Err(err) => {
+                    return self.show_reply(format!("Skill /{} failed: {err}", skill.name), term);
+                }
+            };
+            if output.exit_code != Some(0) {
+                let detail = if output.stderr.is_empty() {
+                    output.stdout
+                } else {
+                    output.stderr
+                };
+                return self.show_reply(
+                    format!(
+                        "Skill /{} failed (exit code {}).\n{}",
+                        skill.name,
+                        output
+                            .exit_code
+                            .map_or_else(|| "signal".to_string(), |code| code.to_string()),
+                        detail
+                    ),
+                    term,
+                );
+            }
+            Some(output.stdout)
+        } else {
+            None
+        };
+
+        match crate::skills::render_skill(&skill, args, script_output.as_deref()) {
+            Ok(rendered) => {
+                let display = if args.trim().is_empty() {
+                    format!("/{}\n[skill input submitted]", skill.name)
+                } else {
+                    format!("/{} {}\n[skill input submitted]", skill.name, args)
+                };
+                self.submit_user_turn(rendered, Some(display), term).await
+            }
+            Err(err) => self.show_reply(err, term),
+        }
     }
 
     fn panel_key(&mut self, term: &mut BoneTerminal) -> io::Result<(KeyCode, KeyModifiers)> {

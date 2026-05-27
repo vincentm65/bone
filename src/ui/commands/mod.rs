@@ -102,6 +102,7 @@ fn help() -> String {
         "/model     — set or show model (/model <name>)",
         "/provider  — pick or switch provider (/provider <name>)",
         "/tools     — enable or disable tools",
+        "/skills    — list, enable, disable, or reload skills",
         "/config    — change application settings",
         "/quit      — exit bone",
         ":        — run a command inline (: <command>)",

@@ -1,0 +1,10 @@
+name: hn
+description: "Search recent Hacker News stories through the Algolia API"
+enabled: true
+script: |
+  curl -fsS --get --data-urlencode "query=$BONE_ARGS" "https://hn.algolia.com/api/v1/search"
+prompt: |
+  Summarize relevant Hacker News results for: {{args}}
+
+  Search data:
+  {{script_output}}
