@@ -9,9 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use types::Skill;
 
-const HN_SKILL: &str = include_str!("../../defaults/skills/hn.yaml");
 const COMMIT_SKILL: &str = include_str!("../../defaults/skills/commit.yaml");
-const EMAIL_SKILL: &str = include_str!("../../defaults/skills/email.yaml");
 
 #[derive(Debug, Clone)]
 pub struct LoadedSkill {
@@ -176,9 +174,7 @@ fn seed_example_skills(dir: &Path) -> io::Result<()> {
     });
     if !has_yaml {
         for (name, contents) in [
-            ("hn.yaml", HN_SKILL),
             ("commit.yaml", COMMIT_SKILL),
-            ("email.yaml", EMAIL_SKILL),
         ] {
             fs::write(dir.join(name), contents)?;
         }

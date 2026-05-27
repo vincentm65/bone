@@ -88,7 +88,7 @@ fn template_interpolation_is_single_pass() {
 fn examples_are_seeded_once_and_deleted_files_stay_deleted() {
     let dir = temp_dir("seed");
     let first = SkillStore::load_from_dir(&dir, true).unwrap();
-    assert!(first.get_enabled("hn").is_some());
+    assert!(first.get_enabled("commit").is_some());
     assert!(dir.join("commit.yaml").exists());
 
     fs::remove_file(dir.join("commit.yaml")).unwrap();

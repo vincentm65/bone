@@ -83,7 +83,6 @@ pub fn tools_dir() -> std::path::PathBuf {
 
 fn seed_default_tools(dir: &std::path::Path) {
     const DEFAULTS: &[(&str, &str)] = &[
-        ("grep.yaml", include_str!("../../defaults/tools/grep.yaml")),
         ("gh.yaml", include_str!("../../defaults/tools/gh.yaml")),
         (
             "ask_user.yaml",
