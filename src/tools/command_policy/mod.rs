@@ -9,10 +9,11 @@ use crate::tools::types::ToolCall;
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../../default-command-policy.yaml");
 
 /// Safety classification for shell commands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandSafety {
     /// Read-only: does not modify files, services, network state, or git state.
+    #[serde(alias = "safe")]
     ReadOnly,
     /// Edit: creates, updates, or deletes project files, installs dependencies, etc.
     Edit,

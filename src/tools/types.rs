@@ -1,3 +1,4 @@
+use crate::ui::pane_page::PanePage;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,10 +26,44 @@ pub struct ToolResult {
     pub name: String,
     pub content: String,
     pub is_error: bool,
+    /// Optional pane page to display in the bottom pane.
+    /// Not serialized — this is a UI-only field.
+    #[serde(skip)]
+    pub pane_page: Option<PanePage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDisplayConfig {
+    /// Argument names to show in the compact tool-call row.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional simple template. Placeholders like `{query}` are replaced
+    /// with argument values when present.
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    pub content: String,
+    pub pane_page: Option<PanePage>,
+}
+
+impl ToolOutput {
+    pub fn text(content: String) -> Self {
+        Self {
+            content,
+            pane_page: None,
+        }
+    }
 }
 
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
     async fn execute(&self, arguments: Value) -> Result<String, String>;
+
+    async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
+        self.execute(arguments).await.map(ToolOutput::text)
+    }
 }

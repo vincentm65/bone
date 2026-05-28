@@ -13,8 +13,8 @@ use registry::ToolRegistry;
 
 pub use dynamic::DynamicTool as DynamicToolType;
 pub use registry::ToolHandler;
-pub use types::{ToolCall, ToolDefinition, ToolResult};
 use std::collections::HashMap;
+pub use types::{ToolCall, ToolDefinition, ToolResult};
 
 /// Result of loading all tools (builtins + dynamic) in a single pass.
 pub struct LoadedTools {
@@ -23,6 +23,10 @@ pub struct LoadedTools {
     pub interaction_tools: std::collections::HashSet<String>,
     /// Map from dynamic tool name to its script content (for display in approval).
     pub dynamic_scripts: HashMap<String, String>,
+    /// Map from dynamic tool name to its declared safety level.
+    pub dynamic_safety: HashMap<String, CommandSafety>,
+    /// Map from dynamic tool name to UI-only display metadata.
+    pub dynamic_display: HashMap<String, types::ToolDisplayConfig>,
 }
 
 pub fn load_tools() -> LoadedTools {
@@ -42,6 +46,8 @@ pub fn load_tools() -> LoadedTools {
 
     let mut interaction_tools = std::collections::HashSet::new();
     let mut dynamic_scripts = HashMap::new();
+    let mut dynamic_safety = HashMap::new();
+    let mut dynamic_display = HashMap::new();
 
     for tool in dynamic {
         if builtin_names.contains(&tool.name) {
@@ -57,6 +63,15 @@ pub fn load_tools() -> LoadedTools {
         if let Some(ref script) = tool.script {
             dynamic_scripts.insert(tool.name.clone(), script.clone());
         }
+        let default_safety = if tool.name == "task_list" {
+            CommandSafety::ReadOnly
+        } else {
+            CommandSafety::Danger
+        };
+        dynamic_safety.insert(tool.name.clone(), tool.safety.unwrap_or(default_safety));
+        if let Some(display) = tool.display.clone() {
+            dynamic_display.insert(tool.name.clone(), display);
+        }
         registry = registry.register(tool);
     }
 
@@ -64,6 +79,8 @@ pub fn load_tools() -> LoadedTools {
         registry,
         interaction_tools,
         dynamic_scripts,
+        dynamic_safety,
+        dynamic_display,
     }
 }
 
@@ -88,6 +105,10 @@ fn seed_default_tools(dir: &std::path::Path) {
         (
             "web_search.yaml",
             include_str!("../../defaults/tools/web_search.yaml"),
+        ),
+        (
+            "task_list.yaml",
+            include_str!("../../defaults/tools/task_list.yaml"),
         ),
     ];
     for (name, content) in DEFAULTS {
@@ -119,13 +140,17 @@ pub enum ApprovalMode {
 }
 
 impl ApprovalMode {
-    pub fn allows_call(&self, call: &ToolCall) -> bool {
-        let safety = CommandSafety::for_call(call);
+    pub fn allows_safety(&self, safety: CommandSafety) -> bool {
         match self {
             Self::Safe => safety == CommandSafety::ReadOnly,
             Self::Edits => matches!(safety, CommandSafety::ReadOnly | CommandSafety::Edit),
             Self::Danger => true,
         }
+    }
+
+    pub fn allows_call(&self, call: &ToolCall) -> bool {
+        let safety = CommandSafety::for_call(call);
+        self.allows_safety(safety)
     }
 
     pub fn cycle(self) -> Self {

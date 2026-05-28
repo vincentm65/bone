@@ -15,8 +15,9 @@ use tokio::time::Duration;
 
 use super::commands;
 use super::input::{InputAction, InputState};
+use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
-use super::render::{BoneTerminal, MIN_ROWS, Renderer, StatusInfo};
+use super::render::{BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, Renderer, StatusInfo};
 
 pub struct App {
     pub messages: Vec<Message>,
@@ -43,6 +44,12 @@ pub struct App {
     pub token_stats: TokenStats,
     /// Cached set of dynamic tool names that use interaction: select.
     interaction_tools: std::collections::HashSet<String>,
+    /// Active pane pages displayed between input and status bar.
+    pub pages: Vec<PanePage>,
+    /// Index of the currently visible pane page.
+    pub active_page: usize,
+    /// Whether pane pages are shown in the bottom pane.
+    pub panes_visible: bool,
     /// Map from dynamic tool name to its script (shown in approval prompt).
     dynamic_scripts: std::collections::HashMap<String, String>,
 }
@@ -64,7 +71,12 @@ impl App {
                 enabled.push(def.name);
             }
         }
-        let tools = ToolHandler::with_enabled(loaded.registry, &enabled);
+        let tools = ToolHandler::with_enabled_safety_and_display(
+            loaded.registry,
+            &enabled,
+            loaded.dynamic_safety,
+            loaded.dynamic_display,
+        );
         let skills = SkillStore::load()?;
         let mut messages = vec![Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
@@ -93,6 +105,9 @@ impl App {
             cancel_streaming: false,
             last_ctrl_c: None,
             token_stats: TokenStats::new(),
+            pages: Vec::new(),
+            active_page: 0,
+            panes_visible: true,
             interaction_tools: loaded.interaction_tools,
             dynamic_scripts: loaded.dynamic_scripts,
         })
@@ -165,7 +180,13 @@ impl App {
     /// Ensure the viewport is the right size, then draw.
     fn ensure_viewport_and_draw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
         let width = terminal.size()?.width;
-        let desired = Renderer::desired_height(&self.input, self.active_prompt.as_ref(), width);
+        let desired = Renderer::desired_height(
+            &self.input,
+            self.active_prompt.as_ref(),
+            width,
+            self.visible_pages(),
+            self.active_page,
+        );
 
         if desired != self.renderer.viewport_height {
             Renderer::resize_viewport(terminal, desired)?;
@@ -232,7 +253,24 @@ impl App {
             &self.input,
             &self.status_info(),
             self.active_prompt.as_ref(),
+            self.visible_pages(),
+            self.active_page,
+            self.pane_toggle_hint(),
         );
+    }
+
+    fn visible_pages(&self) -> &[PanePage] {
+        if self.panes_visible { &self.pages } else { &[] }
+    }
+
+    fn pane_toggle_hint(&self) -> Option<&'static str> {
+        if self.pages.is_empty() {
+            None
+        } else if self.panes_visible {
+            Some("Ctrl+T hide tasks")
+        } else {
+            Some("Ctrl+T show tasks")
+        }
     }
 
     async fn handle_key(
@@ -241,6 +279,41 @@ impl App {
         modifiers: KeyModifiers,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
+        // Handle page keybindings before input processing
+        if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
+            self.panes_visible = !self.panes_visible;
+            return self.redraw(term);
+        }
+
+        if self.panes_visible && !self.pages.is_empty() && modifiers.is_empty() {
+            match code {
+                KeyCode::Tab => {
+                    self.active_page = (self.active_page + 1) % self.pages.len();
+                    return self.redraw(term);
+                }
+                KeyCode::BackTab => {
+                    self.active_page = if self.active_page == 0 {
+                        self.pages.len() - 1
+                    } else {
+                        self.active_page - 1
+                    };
+                    return self.redraw(term);
+                }
+                KeyCode::PageUp => {
+                    let page = &mut self.pages[self.active_page];
+                    page.scroll = page.scroll.saturating_sub(MAX_PANE_ROWS);
+                    return self.redraw(term);
+                }
+                KeyCode::PageDown => {
+                    let page = &mut self.pages[self.active_page];
+                    let max_scroll = page.content.len().saturating_sub(MAX_PANE_ROWS);
+                    page.scroll = (page.scroll + MAX_PANE_ROWS).min(max_scroll);
+                    return self.redraw(term);
+                }
+                _ => {}
+            }
+        }
+
         if self.active_prompt.is_some() {
             return self.handle_prompt_key(code, term);
         }
@@ -560,6 +633,11 @@ impl App {
             if let Some(skill) = self.skills.get_enabled(&cmd).cloned() {
                 return self.invoke_skill(skill, &arg, term).await;
             }
+        }
+
+        if matches!(cmd.as_str(), "clear" | "new") {
+            self.pages.clear();
+            self.active_page = 0;
         }
 
         let result = commands::handle(
@@ -985,7 +1063,12 @@ impl App {
                         enabled.push(def.name);
                     }
                 }
-                self.tools = crate::tools::ToolHandler::with_enabled(loaded.registry, &enabled);
+                self.tools = crate::tools::ToolHandler::with_enabled_safety_and_display(
+                    loaded.registry,
+                    &enabled,
+                    loaded.dynamic_safety,
+                    loaded.dynamic_display,
+                );
                 self.interaction_tools = loaded.interaction_tools;
                 self.dynamic_scripts = loaded.dynamic_scripts;
                 self.user_config.enabled_tools = self.tools.enabled_names();
@@ -1019,7 +1102,11 @@ impl App {
                     } else {
                         " "
                     };
-                    let tag = if builtin_names.contains(name) { "" } else { " (custom)" };
+                    let tag = if builtin_names.contains(name) {
+                        ""
+                    } else {
+                        " (custom)"
+                    };
                     format!("[{mark}] {name}{tag}")
                 })
                 .collect();

@@ -1,9 +1,12 @@
 use async_trait::async_trait;
+use ratatui::text::Line;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::tools::command_policy::CommandSafety;
 use crate::tools::script_runner::{ScriptRequest, run_script};
-use crate::tools::types::{Tool, ToolDefinition};
+use crate::tools::types::{Tool, ToolDefinition, ToolDisplayConfig, ToolOutput};
+use crate::ui::pane_page::PanePage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicTool {
@@ -16,12 +19,46 @@ pub struct DynamicTool {
     pub script: Option<String>,
     #[serde(default)]
     pub interaction: Option<InteractionType>,
+    #[serde(default)]
+    pub output: Option<OutputConfig>,
+    #[serde(default)]
+    pub safety: Option<CommandSafety>,
+    #[serde(default)]
+    pub display: Option<ToolDisplayConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionType {
     Select,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputConfig {
+    pub kind: OutputKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputKind {
+    JsonEnvelope,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonEnvelope {
+    content: String,
+    #[serde(default)]
+    pane: Option<PaneEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneEnvelope {
+    source: String,
+    title: String,
+    #[serde(default)]
+    lines: Vec<String>,
+    #[serde(default)]
+    scroll: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +132,11 @@ impl DynamicTool {
     }
 
     fn arg_to_env_name(name: &str) -> String {
-        format!("TOOL_{}", name.to_uppercase().replace(|c: char| !c.is_alphanumeric(), "_"))
+        format!(
+            "TOOL_{}",
+            name.to_uppercase()
+                .replace(|c: char| !c.is_alphanumeric(), "_")
+        )
     }
 }
 
@@ -114,6 +155,23 @@ impl Tool for DynamicTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
+        self.run(arguments).await.map(|output| output.stdout)
+    }
+
+    async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
+        let output = self.run(arguments).await?;
+        match self.output.as_ref().map(|output| &output.kind) {
+            Some(OutputKind::JsonEnvelope) => parse_json_envelope(&output.stdout),
+            None => Ok(ToolOutput::text(output.stdout)),
+        }
+    }
+}
+
+impl DynamicTool {
+    async fn run(
+        &self,
+        arguments: Value,
+    ) -> Result<crate::tools::script_runner::ScriptOutput, String> {
         if self.interaction.is_some() {
             return Err("interaction tools should not reach execute(); they are intercepted in prepare_tool_call".to_string());
         }
@@ -147,6 +205,10 @@ impl Tool for DynamicTool {
                     _ => value.to_string(),
                 };
                 env.push((env_name, env_value));
+                env.push((
+                    format!("{}_JSON", Self::arg_to_env_name(key)),
+                    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+                ));
             }
         }
 
@@ -159,7 +221,7 @@ impl Tool for DynamicTool {
         .map_err(|e| e.to_string())?;
 
         if output.exit_code == Some(0) {
-            Ok(output.stdout)
+            Ok(output)
         } else {
             let code = output
                 .exit_code
@@ -174,6 +236,21 @@ impl Tool for DynamicTool {
             Err(msg)
         }
     }
+}
+
+fn parse_json_envelope(stdout: &str) -> Result<ToolOutput, String> {
+    let envelope: JsonEnvelope = serde_json::from_str(stdout.trim())
+        .map_err(|err| format!("invalid json_envelope output: {err}"))?;
+    let pane_page = envelope.pane.map(|pane| PanePage {
+        source: pane.source,
+        title: pane.title,
+        content: pane.lines.into_iter().map(Line::from).collect(),
+        scroll: pane.scroll,
+    });
+    Ok(ToolOutput {
+        content: envelope.content,
+        pane_page,
+    })
 }
 
 /// Parse all `*.yaml` files in a directory into DynamicTool instances.

@@ -1,6 +1,6 @@
 name: ask_user
 version: 1
-description: "Ask the user a question with selectable options"
+description: "Ask the user a question with selectable options or a custom answer"
 interaction: select
 args:
   - name: question
@@ -11,3 +11,7 @@ args:
     type: array
     description: "List of options for the user to choose from"
     required: true
+  - name: allow_custom
+    type: boolean
+    description: "Whether the user can type their own answer"
+    required: false

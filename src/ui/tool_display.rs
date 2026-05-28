@@ -1,11 +1,20 @@
 use crate::chat::Message;
-use crate::tools::types::{ToolCall, ToolResult};
+use crate::tools::types::{ToolCall, ToolDisplayConfig, ToolResult};
+use serde_json::Value;
 
-pub fn build_tool_row(call: &ToolCall, result: &ToolResult) -> Message {
-    Message::tool_row(tool_label(call, result), result.is_error)
+pub fn build_tool_row(
+    call: &ToolCall,
+    result: &ToolResult,
+    display: Option<&ToolDisplayConfig>,
+) -> Message {
+    Message::tool_row(tool_label(call, result, display), result.is_error)
 }
 
-pub fn tool_label(call: &ToolCall, result: &ToolResult) -> String {
+pub fn tool_label(
+    call: &ToolCall,
+    result: &ToolResult,
+    display: Option<&ToolDisplayConfig>,
+) -> String {
     if call.name == "shell" {
         return call
             .arguments
@@ -13,6 +22,10 @@ pub fn tool_label(call: &ToolCall, result: &ToolResult) -> String {
             .and_then(|value| value.as_str())
             .map(format_shell_label)
             .unwrap_or_else(|| call.name.clone());
+    }
+
+    if let Some(display_label) = display.and_then(|display| format_display_label(call, display)) {
+        return display_label;
     }
 
     let target = call
@@ -27,13 +40,72 @@ pub fn tool_label(call: &ToolCall, result: &ToolResult) -> String {
         None => call.name.clone(),
     };
 
-
-
     if call.name == "read_file" && !result.is_error {
         label.push_str(&read_file_line_summary(call, result));
     }
 
     label
+}
+
+fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<String> {
+    if let Some(template) = display.template.as_deref() {
+        let rendered = render_display_template(template, &call.arguments);
+        if !rendered.trim().is_empty() {
+            return Some(format!("{} {}", call.name, rendered.trim()));
+        }
+    }
+
+    let parts = display
+        .args
+        .iter()
+        .filter_map(|arg| {
+            call.arguments
+                .get(arg)
+                .filter(|value| !value.is_null())
+                .map(|value| format!("{arg}={}", format_display_value(value)))
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("{} {}", call.name, parts.join(" ")))
+    }
+}
+
+fn render_display_template(template: &str, arguments: &Value) -> String {
+    let mut rendered = template.to_string();
+    let Some(map) = arguments.as_object() else {
+        return rendered;
+    };
+
+    for (key, value) in map {
+        rendered = rendered.replace(&format!("{{{key}}}"), &format_display_value(value));
+    }
+    rendered
+}
+
+fn format_display_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => {
+            if value.chars().any(char::is_whitespace) {
+                format!("\"{value}\"")
+            } else {
+                value.clone()
+            }
+        }
+        Value::Array(values) => {
+            let rendered = values
+                .iter()
+                .map(format_display_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{rendered}]")
+        }
+        Value::Object(_) => value.to_string(),
+        Value::Null => String::new(),
+        Value::Bool(_) | Value::Number(_) => value.to_string(),
+    }
 }
 
 pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {

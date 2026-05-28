@@ -67,7 +67,7 @@ script: |
 ```yaml
 name: ask_user
 version: 1
-description: "Ask the user a question with selectable options"
+description: "Ask the user a question with selectable options or a custom answer"
 interaction: select
 args:
   - name: question
@@ -79,6 +79,10 @@ args:
     items: string
     description: "Choices the user can select"
     required: true
+  - name: allow_custom
+    type: boolean
+    description: "Whether the user can type their own answer"
+    required: false
 ```
 
 The `execution.kind` wrapper makes executable intent explicit and leaves room for future non-shell handlers. For backward compatibility with the initial proposed YAML shape, a definition with `script` and no `execution` is valid: load it as `kind: script` with conservative `safety: danger`. This preserves existing definitions while letting reviewed definitions opt into a less restrictive declared safety.

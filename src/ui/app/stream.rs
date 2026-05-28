@@ -5,6 +5,7 @@ use crate::tools::shell::ShellTool;
 use crate::tools::types::Tool;
 use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
+use crate::ui::pane_page::PanePage;
 use crate::ui::prompt::Decision;
 use crate::ui::render::{BoneTerminal, StatusInfo};
 use crate::ui::tool_display::build_tool_row;
@@ -31,6 +32,7 @@ fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
         name: call.name.clone(),
         content: content.into(),
         is_error: true,
+        pane_page: None,
     }
 }
 
@@ -82,6 +84,16 @@ pub fn timeout_message(prefix: &str, detail: &str, retried: bool) -> String {
         format!("[{prefix}: {detail} within 90s; retried once]")
     } else {
         format!("[{prefix}: {detail} within 90s]")
+    }
+}
+
+fn pane_toggle_hint(panes_visible: bool, has_pages: bool) -> Option<&'static str> {
+    if !has_pages {
+        None
+    } else if panes_visible {
+        Some("Ctrl+T hide tasks")
+    } else {
+        Some("Ctrl+T show tasks")
     }
 }
 
@@ -247,7 +259,11 @@ impl App {
             }
 
             for (call, result) in calls_for_display.iter().zip(results.iter()) {
-                self.messages.push(build_tool_row(call, result));
+                self.messages.push(build_tool_row(
+                    call,
+                    result,
+                    self.tools.display_for_call(call),
+                ));
             }
             self.renderer
                 .flush_new_to_scrollback(&self.messages, term)?;
@@ -372,6 +388,7 @@ impl App {
                         &mut self.queue,
                         &mut self.approval_mode,
                         &mut self.cancel_streaming,
+                        &mut self.panes_visible,
                     ) {
                         self.user_config.approval_mode = self.approval_mode;
                         crate::config::save_user_config(&self.user_config);
@@ -380,7 +397,13 @@ impl App {
                         self.mark_cancelled(assistant_idx);
                         break;
                     }
-                    self.renderer.tick_spinner(term, &self.input, &self.stream_status_info_with_tokens(Some(stream_estimated_received)))?;
+                    let pages = if self.panes_visible {
+                        self.pages.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
+                    self.renderer.tick_spinner(term, &self.input, &self.stream_status_info_with_tokens(Some(stream_estimated_received)), pages, self.active_page, hint)?;
                 }
             }
         }
@@ -406,6 +429,9 @@ impl App {
             term,
             &self.input,
             &self.stream_status_info_with_tokens(Some(tokens)),
+            if self.panes_visible { &self.pages } else { &[] },
+            self.active_page,
+            pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
         )
     }
 
@@ -432,7 +458,7 @@ impl App {
             })
             .collect();
         let mut exec_results = self.tools.execute_all(approved).await.into_iter();
-        let results = pending
+        let results: Vec<ToolResult> = pending
             .into_iter()
             .map(|pending| match pending {
                 PendingTool::Result(result) => result,
@@ -441,6 +467,20 @@ impl App {
                     .unwrap_or_else(|| tool_error(&call, "internal error: tool result missing")),
             })
             .collect();
+
+        // Process pane pages from tool results
+        for result in &results {
+            if let Some(page) = &result.pane_page {
+                if page.content.is_empty() {
+                    self.active_page =
+                        PanePage::remove(&mut self.pages, &page.source, self.active_page);
+                } else {
+                    let (_, new_active) =
+                        PanePage::upsert(&mut self.pages, self.active_page, page.clone());
+                    self.active_page = new_active;
+                }
+            }
+        }
 
         Ok((calls_for_display, results))
     }
@@ -454,65 +494,130 @@ impl App {
         // Check if this is a dynamic tool with interaction
         if self.interaction_tools.contains(&call.name) {
             let question = call.arguments["question"].as_str().unwrap_or("");
-            let options: Vec<String> = call.arguments["options"]
-                    .as_array()
-                    .and_then(|a| {
-                        a.iter()
-                            .map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if options.is_empty() {
-                    return Ok(PendingTool::Result(tool_error(
-                        &call,
-                        "interaction tool: options must be a non-empty array of strings",
-                    )));
-                }
-                let prompt = crate::ui::prompt::Prompt::new(
-                    question,
-                    options.clone(),
-                );
-                self.active_prompt = Some(prompt);
-                self.redraw(term)?;
+            let mut options: Vec<String> = call.arguments["options"]
+                .as_array()
+                .and_then(|a| a.iter().map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            if options.is_empty() {
+                return Ok(PendingTool::Result(tool_error(
+                    &call,
+                    "interaction tool: options must be a non-empty array of strings",
+                )));
+            }
+            let allow_custom = call.arguments["allow_custom"].as_bool().unwrap_or(true);
+            let custom_option_index = if allow_custom {
+                options.push("Other (type answer)".to_string());
+                Some(options.len() - 1)
+            } else {
+                None
+            };
+            let prompt = crate::ui::prompt::Prompt::new(question, options.clone());
+            self.active_prompt = Some(prompt);
+            self.redraw(term)?;
 
-                let selection = loop {
-                    if event::poll(std::time::Duration::from_millis(50))? {
-                        match event::read()? {
-                            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                                KeyCode::Up => {
-                                    if let Some(ref mut p) = self.active_prompt { p.up(); }
-                                    self.redraw(term)?;
-                                }
-                                KeyCode::Down => {
-                                    if let Some(ref mut p) = self.active_prompt { p.down(); }
-                                    self.redraw(term)?;
-                                }
-                                KeyCode::Enter => {
-                                    break self.active_prompt.as_ref().and_then(|p| {
-                                        options.get(p.selected).cloned()
-                                    });
-                                }
-                                KeyCode::Esc => break None,
-                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
-                                _ => {}
-                            },
-                            _ => {}
+            let selection = loop {
+                if event::poll(std::time::Duration::from_millis(50))? {
+                    let event = event::read()?;
+                    if let Event::Paste(text) = event {
+                        if self.active_prompt.is_none() {
+                            self.input.insert_paste(&text);
+                            self.redraw(term)?;
                         }
+                        continue;
                     }
-                };
+                    match event {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                            code if self.active_prompt.is_none() => {
+                                match self.input.apply_key(code, key.modifiers) {
+                                    InputAction::Submit => {
+                                        let answer = self.input.buffer.trim().to_string();
+                                        self.input.reset();
+                                        break Some(answer);
+                                    }
+                                    InputAction::Cancel | InputAction::Escape => {
+                                        self.input.clear_buffer();
+                                        break None;
+                                    }
+                                    InputAction::Redraw => self.redraw(term)?,
+                                    InputAction::None if code == KeyCode::Enter => {
+                                        break Some(String::new());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            KeyCode::Up => {
+                                if let Some(ref mut p) = self.active_prompt {
+                                    p.up();
+                                }
+                                self.redraw(term)?;
+                            }
+                            KeyCode::Down => {
+                                if let Some(ref mut p) = self.active_prompt {
+                                    p.down();
+                                }
+                                self.redraw(term)?;
+                            }
+                            KeyCode::PageUp => {
+                                if let Some(ref mut p) = self.active_prompt {
+                                    p.page_up();
+                                }
+                                self.redraw(term)?;
+                            }
+                            KeyCode::PageDown => {
+                                if let Some(ref mut p) = self.active_prompt {
+                                    p.page_down();
+                                }
+                                self.redraw(term)?;
+                            }
+                            KeyCode::Enter => {
+                                if let Some(prompt) = self.active_prompt.as_ref()
+                                    && Some(prompt.selected) == custom_option_index
+                                {
+                                    self.input.clear_buffer();
+                                    self.active_prompt = None;
+                                    self.redraw(term)?;
+                                    continue;
+                                }
+                                break self
+                                    .active_prompt
+                                    .as_ref()
+                                    .and_then(|p| options.get(p.selected).cloned());
+                            }
+                            KeyCode::Esc => break None,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break None;
+                            }
+                            KeyCode::Char(c)
+                                if key.modifiers.is_empty()
+                                    && self.active_prompt.as_ref().is_some_and(|prompt| {
+                                        Some(prompt.selected) == custom_option_index
+                                    }) =>
+                            {
+                                self.input.clear_buffer();
+                                self.input.insert_char(c);
+                                self.active_prompt = None;
+                                self.redraw(term)?;
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+            };
 
-                self.active_prompt = None;
-                self.redraw(term)?;
+            self.active_prompt = None;
+            self.redraw(term)?;
 
-                return Ok(match selection {
-                    Some(choice) => PendingTool::Result(ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: choice,
-                        is_error: false,
-                    }),
-                    None => PendingTool::Result(tool_error(&call, "cancelled by user")),
-                });
+            return Ok(match selection {
+                Some(choice) => PendingTool::Result(ToolResult {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    content: choice,
+                    is_error: false,
+                    pane_page: None,
+                }),
+                None => PendingTool::Result(tool_error(&call, "cancelled by user")),
+            });
         }
 
         if call.name == "edit_file" {
@@ -539,7 +644,7 @@ impl App {
                 .flush_new_to_scrollback(&self.messages, term)?;
         }
 
-        Ok(if self.approval_mode.allows_call(&call) {
+        Ok(if self.tools.allows_call(self.approval_mode, &call) {
             PendingTool::Approved(call)
         } else {
             match self.prompt_and_wait(display_call, term)? {
@@ -581,7 +686,10 @@ impl App {
         let approval_mode = &mut self.approval_mode;
         let user_config = &mut self.user_config;
         let cancel = &mut self.cancel_streaming;
+        let panes_visible = &mut self.panes_visible;
         pin_mut!(request, spinner, timeout);
+        let pages = self.pages.clone();
+        let active_page = self.active_page;
 
         loop {
             if *cancel {
@@ -598,10 +706,12 @@ impl App {
                 _ = &mut timeout => return (Err(StreamFailure::InitialTimeout), tick),
                 _ = &mut spinner => {
                     renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
-                    if Self::drain_keys(input, queue, approval_mode, cancel) {
+                    if Self::drain_keys(input, queue, approval_mode, cancel, panes_visible) {
                         user_config.approval_mode = *approval_mode;
                         crate::config::save_user_config(user_config);
                     }
+                    let visible_pages = if *panes_visible { pages.as_slice() } else { &[] };
+                    let hint = pane_toggle_hint(*panes_visible, !pages.is_empty());
                     term.draw(|frame| {
                         renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
                             model: model.clone(),
@@ -610,7 +720,7 @@ impl App {
                             streaming: true,
                             approval_mode: *approval_mode,
                             queue_len: queue.len(),
-                        }, renderer.spinner_tick, None);
+                        }, renderer.spinner_tick, None, visible_pages, active_page, hint);
                     }).ok();
                     spinner.as_mut().reset(time::Instant::now() + Duration::from_millis(90));
                 }
@@ -624,6 +734,7 @@ impl App {
         queue: &mut VecDeque<String>,
         mode: &mut ApprovalMode,
         cancel: &mut bool,
+        panes_visible: &mut bool,
     ) -> bool {
         let mut mode_changed = false;
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
@@ -634,6 +745,12 @@ impl App {
                 Event::Paste(text) => input.insert_paste(&text),
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if key.code == KeyCode::Char('t')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        *panes_visible = !*panes_visible;
                         continue;
                     }
                     match input.apply_key(key.code, key.modifiers) {

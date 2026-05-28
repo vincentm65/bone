@@ -173,9 +173,7 @@ fn seed_example_skills(dir: &Path) -> io::Result<()> {
             .is_some_and(|extension| extension == "yaml")
     });
     if !has_yaml {
-        for (name, contents) in [
-            ("commit.yaml", COMMIT_SKILL),
-        ] {
+        for (name, contents) in [("commit.yaml", COMMIT_SKILL)] {
             fs::write(dir.join(name), contents)?;
         }
     }

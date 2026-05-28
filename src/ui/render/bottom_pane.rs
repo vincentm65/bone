@@ -7,10 +7,14 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 use super::wrap;
 use super::{InputState, Prompt, SPINNER, StatusInfo};
 use crate::tools::ApprovalMode;
+use crate::ui::pane_page::PanePage;
 use crate::ui::tool_display;
 
 const COMMAND_PREVIEW_LINES: usize = 6;
 const BLANK_CURSOR_CELL: &str = "\u{00a0}";
+
+/// Maximum rows of pane page content visible at once.
+pub const MAX_PANE_ROWS: usize = 8;
 
 fn input_width(terminal_width: u16) -> usize {
     terminal_width.saturating_sub(1).max(1) as usize
@@ -28,6 +32,20 @@ fn shell_command_preview_lines(command: &str, width: usize) -> Vec<String> {
         .into_iter()
         .flat_map(|line| wrap::wrap_text_with_prefix(&line, "  ", "  ", width))
         .collect()
+}
+
+fn separator_with_hint(width: u16, hint: Option<&str>) -> String {
+    let width = width as usize;
+    let Some(hint) = hint else {
+        return "─".repeat(width);
+    };
+    let label = format!(" {hint} ");
+    if label.len() >= width {
+        return "─".repeat(width);
+    }
+    let remaining = width - label.len();
+    let left = remaining.saturating_sub(2);
+    format!("{}{label}──", "─".repeat(left.max(0)))
 }
 
 /// Split input buffer at cursor into (before, char-at-cursor, after).
@@ -88,6 +106,28 @@ fn rendered_input_rows(input: &InputState, terminal_width: u16) -> u16 {
         .max(1) as u16
 }
 
+/// Compute how many rows a page's visible content occupies.
+fn page_visible_rows(page: &PanePage) -> usize {
+    page.content
+        .len()
+        .saturating_sub(page.scroll)
+        .min(MAX_PANE_ROWS)
+}
+
+/// Compute extra height needed for the page region (separators + content + tab indicator).
+fn page_extra_height(pages: &[PanePage], active_page: usize) -> u16 {
+    if pages.is_empty() {
+        return 0;
+    }
+    let page = &pages[active_page.min(pages.len() - 1)];
+    let content_rows = page_visible_rows(page) as u16;
+    // page top sep + content + optional page bottom sep/tab indicator.
+    // Single-page panes use the fixed bottom separator as the closing rule.
+    let tab_indicator = if pages.len() > 1 { 1u16 } else { 0u16 };
+    let page_bottom_sep = if pages.len() > 1 { 1u16 } else { 0u16 };
+    1 + content_rows + page_bottom_sep + tab_indicator
+}
+
 impl super::Renderer {
     /// Draw the bottom pane into the fixed inline viewport.
     pub fn draw_bottom_pane(
@@ -96,12 +136,30 @@ impl super::Renderer {
         input: &InputState,
         status_info: &StatusInfo,
         prompt: Option<&Prompt>,
+        pages: &[PanePage],
+        active_page: usize,
+        pane_toggle_hint: Option<&str>,
     ) {
-        self.draw_bottom_pane_with_tick(frame, input, status_info, self.spinner_tick, prompt);
+        self.draw_bottom_pane_with_tick(
+            frame,
+            input,
+            status_info,
+            self.spinner_tick,
+            prompt,
+            pages,
+            active_page,
+            pane_toggle_hint,
+        );
     }
 
     /// Compute the desired viewport height for the current state.
-    pub fn desired_height(input: &InputState, prompt: Option<&Prompt>, terminal_width: u16) -> u16 {
+    pub fn desired_height(
+        input: &InputState,
+        prompt: Option<&Prompt>,
+        terminal_width: u16,
+        pages: &[PanePage],
+        active_page: usize,
+    ) -> u16 {
         if let Some(p) = prompt {
             let options = p.options.len().min(p.visible_rows) as u16;
             let hint = u16::from(p.hint.is_some());
@@ -122,8 +180,8 @@ impl super::Renderer {
             return 1 + 1 + options + hint + 1 + 1;
         }
         let input_rows = rendered_input_rows(input, terminal_width);
-        // top sep + input_rows + bottom sep + status
-        1 + input_rows.max(1) + 1 + 1
+        // top sep + input_rows + bottom sep + status + page region
+        1 + input_rows.max(1) + 1 + 1 + page_extra_height(pages, active_page)
     }
 
     pub fn draw_bottom_pane_with_tick(
@@ -133,11 +191,18 @@ impl super::Renderer {
         status_info: &StatusInfo,
         tick: usize,
         prompt: Option<&Prompt>,
+        pages: &[PanePage],
+        active_page: usize,
+        pane_toggle_hint: Option<&str>,
     ) {
         let area = frame.area();
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
-        let content_bottom = area.bottom().saturating_sub(2).max(area.y);
+        let bottom_sep = separator_with_hint(area.width, pane_toggle_hint);
+
+        // Reserve rows from the bottom: status bar (1) + bottom sep (1) + page region
+        let page_height = page_extra_height(pages, active_page);
+        let content_bottom = area.bottom().saturating_sub(2 + page_height).max(area.y);
 
         let input_view = if prompt.is_some() {
             None
@@ -348,9 +413,161 @@ impl super::Renderer {
             }
         }
 
+        // ── Page region ──────────────────────────────────────────────────
+        if !pages.is_empty() {
+            // Bottom separator is at area.bottom()-2, status at area.bottom()-1.
+            // Page region sits between the input/prompt area and those two rows.
+            // We need at least 1 row for the page separator.
+            let status_row = area.bottom().saturating_sub(1);
+            let bottom_sep_row = area.bottom().saturating_sub(2);
+
+            // Earliest row we can use for the page region
+            let page_start = content_bottom.max(area.y);
+            // How many rows are actually available between content_bottom and bottom_sep_row
+            let available = bottom_sep_row.saturating_sub(page_start);
+
+            if available == 0 {
+                // No room for pages at all — skip
+            } else if pages.len() > 1 {
+                // Multi-page: [sep] [content...] [sep] [tab indicator]
+                // Reserve: 1 (top sep) + content + 1 (bottom sep) + 1 (tab) = content + 3
+                let tab_rows: u16 = 1;
+                let sep_rows: u16 = 2; // top + bottom
+                let content_available = available.saturating_sub(sep_rows + tab_rows);
+                let content_rows = (page_visible_rows(&pages[active_page.min(pages.len() - 1)])
+                    as u16)
+                    .min(content_available);
+                let mut py = page_start;
+
+                // Page top separator
+                frame.render_widget(
+                    Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
+                    Rect {
+                        y: py,
+                        height: 1,
+                        ..area
+                    },
+                );
+                py += 1;
+
+                // Page content
+                let page_idx = active_page.min(pages.len() - 1);
+                let page = &pages[page_idx];
+                let scroll = page.scroll.min(page.content.len());
+                for line in page.content.iter().skip(scroll).take(content_rows as usize) {
+                    if py >= bottom_sep_row {
+                        break;
+                    }
+                    frame.render_widget(
+                        Paragraph::new(line.clone()),
+                        Rect {
+                            y: py,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    py += 1;
+                }
+                // Fill remaining content rows if scroll skipped some
+                while py < page_start + 1 + content_rows && py < bottom_sep_row {
+                    py += 1;
+                }
+
+                // Page bottom separator
+                let bot_sep_y = page_start + 1 + content_rows;
+                if bot_sep_y < bottom_sep_row {
+                    frame.render_widget(
+                        Paragraph::new(sep.clone())
+                            .style(Style::default().fg(self.theme.input_border)),
+                        Rect {
+                            y: bot_sep_y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                }
+
+                // Tab indicator
+                let tab_y = bot_sep_y + 1;
+                if tab_y < status_row {
+                    let mut tab_spans = Vec::new();
+                    for (i, p) in pages.iter().enumerate() {
+                        if i > 0 {
+                            tab_spans.push(Span::styled(
+                                " | ",
+                                Style::default().fg(self.theme.system_msg),
+                            ));
+                        }
+                        if i == page_idx {
+                            tab_spans.push(Span::styled(
+                                p.title.clone(),
+                                Style::default()
+                                    .fg(self.theme.status_text)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        } else {
+                            tab_spans.push(Span::styled(
+                                p.title.clone(),
+                                Style::default().fg(self.theme.system_msg),
+                            ));
+                        }
+                    }
+                    tab_spans.push(Span::styled(
+                        "  Tab to switch",
+                        Style::default().fg(ratatui::style::Color::DarkGray),
+                    ));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(tab_spans)),
+                        Rect {
+                            y: tab_y,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                }
+            } else {
+                // Single page: [sep] [content...]. The fixed bottom separator
+                // below the page region closes the pane.
+                let sep_rows: u16 = 1;
+                let content_available = available.saturating_sub(sep_rows);
+                let content_rows = (page_visible_rows(&pages[0]) as u16).min(content_available);
+                let mut py = page_start;
+
+                // Page top separator
+                frame.render_widget(
+                    Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
+                    Rect {
+                        y: py,
+                        height: 1,
+                        ..area
+                    },
+                );
+                py += 1;
+
+                // Page content
+                let page = &pages[0];
+                let scroll = page.scroll.min(page.content.len());
+                for line in page.content.iter().skip(scroll).take(content_rows as usize) {
+                    if py >= bottom_sep_row {
+                        break;
+                    }
+                    frame.render_widget(
+                        Paragraph::new(line.clone()),
+                        Rect {
+                            y: py,
+                            height: 1,
+                            ..area
+                        },
+                    );
+                    py += 1;
+                }
+            }
+        }
+
+        // ── Bottom separator ─────────────────────────────────────────────
         if area.height >= 2 {
             frame.render_widget(
-                Paragraph::new(sep).style(Style::default().fg(self.theme.input_border)),
+                Paragraph::new(bottom_sep).style(Style::default().fg(self.theme.input_border)),
                 Rect {
                     y: area.bottom() - 2,
                     height: 1,
@@ -359,6 +576,7 @@ impl super::Renderer {
             );
         }
 
+        // ── Status bar ───────────────────────────────────────────────────
         let mut status_spans: Vec<Span> = vec![
             Span::styled(
                 status_info.model.to_string(),

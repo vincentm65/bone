@@ -18,10 +18,12 @@ use super::theme::Theme;
 use crate::chat::Message;
 use crate::llm::TokenStats;
 use crate::tools::ApprovalMode;
+use crate::ui::pane_page::PanePage;
 use backend::BoneBackend;
 
 /// Minimum viewport rows: top-sep + input(1) + bottom-sep + status.
 pub(crate) const MIN_ROWS: u16 = 4;
+pub use bottom_pane::MAX_PANE_ROWS;
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
@@ -211,6 +213,9 @@ impl Renderer {
         term: &mut BoneTerminal,
         input: &InputState,
         status_info: &StatusInfo,
+        pages: &[PanePage],
+        active_page: usize,
+        pane_toggle_hint: Option<&str>,
     ) -> io::Result<()> {
         let safe_end = safe_markdown_prefix_end(content);
         if safe_end > self.streaming_source_flushed {
@@ -225,7 +230,17 @@ impl Renderer {
 
         // Redraw only composer/status UI. Incomplete assistant output is never
         // shown in the input viewport; it is inserted once markdown is stable.
-        term.draw(|frame| self.draw_bottom_pane(frame, input, status_info, None))?;
+        term.draw(|frame| {
+            self.draw_bottom_pane(
+                frame,
+                input,
+                status_info,
+                None,
+                pages,
+                active_page,
+                pane_toggle_hint,
+            )
+        })?;
         Ok(())
     }
 
@@ -257,9 +272,22 @@ impl Renderer {
         term: &mut BoneTerminal,
         input: &InputState,
         status_info: &StatusInfo,
+        pages: &[PanePage],
+        active_page: usize,
+        pane_toggle_hint: Option<&str>,
     ) -> io::Result<()> {
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
-        term.draw(|frame| self.draw_bottom_pane(frame, input, status_info, None))?;
+        term.draw(|frame| {
+            self.draw_bottom_pane(
+                frame,
+                input,
+                status_info,
+                None,
+                pages,
+                active_page,
+                pane_toggle_hint,
+            )
+        })?;
         Ok(())
     }
 }

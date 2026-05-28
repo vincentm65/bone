@@ -43,7 +43,9 @@ fn lines(provider: &str, model: &str, term_width: u16) -> Vec<Line<'static>> {
     let dir_display = format_short_dir(&cwd);
 
     let dim = Style::default().fg(Color::DarkGray);
-    let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let bold = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(Color::Gray);
 
     let inner = term_width as usize;

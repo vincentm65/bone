@@ -12,9 +12,7 @@ pub fn create_provider_with_config(
     if let Some(entry) = config.providers.get(id) {
         match entry.handler.as_str() {
             "codex" => {
-                return Ok(Box::new(codex::CodexProvider::from_entry(
-                    id, entry,
-                )));
+                return Ok(Box::new(codex::CodexProvider::from_entry(id, entry)));
             }
             "openai" | "" => {
                 return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(

@@ -186,5 +186,3 @@ fn to_crossterm_color(color: Color) -> CrosstermColor {
         Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
     }
 }
-
-
