@@ -164,6 +164,15 @@ script: |
               texts = get_texts()
               if not texts:
                   raise ValueError("Provide text or texts for 'create'.")
+              # Reject if the single text looks like a JSON array (caller should use 'texts' instead)
+              if len(texts) == 1:
+                  import re
+                  s = texts[0].strip()
+                  if re.match(r'^\[.*\]$', s):
+                      raise ValueError(
+                          "'text' looks like a JSON array. Use 'texts' argument for multiple tasks, "
+                          "or pass a plain string for a single task."
+                      )
               tasks = [{"text": t, "done": False} for t in texts]
               save(tasks)
               msg = f"Created {len(tasks)} task(s)." if len(tasks) > 1 else f"Created task: {tasks[0]['text']}"

@@ -163,21 +163,25 @@ impl super::Renderer {
         if let Some(p) = prompt {
             let options = p.options.len().min(p.visible_rows) as u16;
             let hint = u16::from(p.hint.is_some());
-            if let Some(ref cmd) = p.full_command {
+            let prompt_rows = if let Some(ref cmd) = p.full_command {
                 let title = shell_prompt_title(p);
                 let title_lines = wrap::wrap_text(&title, terminal_width as usize).len() as u16;
                 let cmd_visual_lines =
                     shell_command_preview_lines(cmd, terminal_width as usize).len() as u16;
                 if p.peek_mode {
-                    // sep + title + cmd_lines + hint + options + sep + status
-                    return 1 + title_lines + cmd_visual_lines + 1 + options + hint + 1 + 1;
+                    // title + cmd_lines + hint + options
+                    title_lines + cmd_visual_lines + hint + options
+                } else {
+                    // title + preview + hint + options
+                    let preview = cmd_visual_lines.min(COMMAND_PREVIEW_LINES as u16);
+                    title_lines + preview + hint + options
                 }
-                // sep + title + preview + combined hint + options + sep + status
-                let preview = cmd_visual_lines.min(COMMAND_PREVIEW_LINES as u16);
-                return 1 + title_lines + preview + 1 + options + hint + 1 + 1;
-            }
-            // sep + title + options + sep + status
-            return 1 + 1 + options + hint + 1 + 1;
+            } else {
+                // title + hint + options
+                1 + hint + options
+            };
+            // top sep + prompt region + bottom sep + status + page region
+            return 1 + prompt_rows + 1 + 1 + page_extra_height(pages, active_page);
         }
         let input_rows = rendered_input_rows(input, terminal_width);
         // top sep + input_rows + bottom sep + status + page region
