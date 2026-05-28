@@ -151,6 +151,7 @@ fn pane_page_adds_height_to_viewport() {
             ratatui::text::Line::raw("line 2"),
             ratatui::text::Line::raw("line 3"),
         ],
+        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
     }];
 
@@ -162,6 +163,23 @@ fn pane_page_adds_height_to_viewport() {
 }
 
 #[test]
+fn pane_page_honors_visible_rows() {
+    let input = InputState::default();
+    let pages = vec![PanePage {
+        source: "test".to_string(),
+        title: "test page".to_string(),
+        content: (0..20)
+            .map(|i| ratatui::text::Line::raw(format!("line {i}")))
+            .collect(),
+        visible_rows: 12,
+        scroll: 0,
+    }];
+
+    // base(4) + page_sep(1) + tool-requested content rows(12)
+    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0), 17);
+}
+
+#[test]
 fn pane_page_with_two_pages_adds_tab_indicator() {
     let input = InputState::default();
     let pages = vec![
@@ -169,12 +187,14 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
             source: "tasks".to_string(),
             title: "tasks (2)".to_string(),
             content: vec![ratatui::text::Line::raw("task 1")],
+            visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
             scroll: 0,
         },
         PanePage {
             source: "notes".to_string(),
             title: "notes".to_string(),
             content: vec![ratatui::text::Line::raw("note 1")],
+            visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
             scroll: 0,
         },
     ];
@@ -194,6 +214,7 @@ fn pane_page_does_not_panic_with_tiny_viewport() {
         content: (0..10)
             .map(|i| ratatui::text::Line::raw(format!("line {i}")))
             .collect(),
+        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
@@ -217,6 +238,7 @@ fn pane_page_renders_content_between_input_and_status() {
         source: "test".to_string(),
         title: "test".to_string(),
         content: vec![ratatui::text::Line::raw("hello pane")],
+        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
@@ -246,6 +268,7 @@ fn single_pane_page_has_only_the_fixed_bottom_separator() {
         source: "test".to_string(),
         title: "test".to_string(),
         content: vec![ratatui::text::Line::raw("hello pane")],
+        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
@@ -270,6 +293,7 @@ fn bottom_separator_can_show_pane_toggle_hint() {
         source: "test".to_string(),
         title: "test".to_string(),
         content: vec![ratatui::text::Line::raw("hello pane")],
+        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
@@ -292,5 +316,39 @@ fn bottom_separator_can_show_pane_toggle_hint() {
     assert_eq!(
         separator,
         format!("{} Ctrl+T hide tasks ──", "─".repeat(19))
+    );
+}
+
+#[test]
+fn bottom_separator_hint_uses_display_width_for_unicode_shortcuts() {
+    let renderer = Renderer::new();
+    let input = InputState::default();
+    let pages = vec![PanePage {
+        source: "test".to_string(),
+        title: "test".to_string(),
+        content: vec![ratatui::text::Line::raw("hello pane")],
+        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
+        scroll: 0,
+    }];
+    let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(
+                frame,
+                &input,
+                &status_info(),
+                None,
+                &pages,
+                0,
+                Some("Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓"),
+            )
+        })
+        .unwrap();
+
+    let separator = row_text(&terminal, 4, 40);
+    assert_eq!(
+        separator,
+        format!("{} Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓ ──", "─".repeat(3))
     );
 }

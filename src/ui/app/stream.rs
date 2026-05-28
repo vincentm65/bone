@@ -7,7 +7,7 @@ use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::prompt::Decision;
-use crate::ui::render::{BoneTerminal, Renderer, StatusInfo};
+use crate::ui::render::{BoneTerminal, StatusInfo};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, pin_mut};
@@ -91,9 +91,9 @@ fn pane_toggle_hint(panes_visible: bool, has_pages: bool) -> Option<&'static str
     if !has_pages {
         None
     } else if panes_visible {
-        Some("Ctrl+T hide tasks")
+        Some("Ctrl+T hide panel")
     } else {
-        Some("Ctrl+T show tasks")
+        Some("Ctrl+T show panel")
     }
 }
 
@@ -396,6 +396,8 @@ impl App {
                         &mut self.approval_mode,
                         &mut self.cancel_streaming,
                         &mut self.panes_visible,
+                        &mut self.pages,
+                        &mut self.active_page,
                     ) {
                         self.user_config.approval_mode = self.approval_mode;
                         crate::config::save_user_config(&self.user_config);
@@ -490,18 +492,13 @@ impl App {
         }
 
         // Resize viewport if pages changed during tool execution.
-        let width = term.size().map(|s| s.width).unwrap_or(80);
-        let desired = Renderer::desired_height(
+        self.renderer.ensure_viewport_height(
+            term,
             &self.input,
             self.active_prompt.as_ref(),
-            width,
             if self.panes_visible { &self.pages } else { &[] },
             self.active_page,
-        );
-        if desired != self.renderer.viewport_height {
-            Renderer::resize_viewport(term, desired)?;
-            self.renderer.viewport_height = desired;
-        }
+        )?;
 
         Ok((calls_for_display, results))
     }
@@ -708,9 +705,9 @@ impl App {
         let user_config = &mut self.user_config;
         let cancel = &mut self.cancel_streaming;
         let panes_visible = &mut self.panes_visible;
+        let pages = &mut self.pages;
+        let active_page = &mut self.active_page;
         pin_mut!(request, spinner, timeout);
-        let pages = self.pages.clone();
-        let active_page = self.active_page;
 
         loop {
             if *cancel {
@@ -727,12 +724,15 @@ impl App {
                 _ = &mut timeout => return (Err(StreamFailure::InitialTimeout), tick),
                 _ = &mut spinner => {
                     renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
-                    if Self::drain_keys(input, queue, approval_mode, cancel, panes_visible) {
+                    if Self::drain_keys(input, queue, approval_mode, cancel, panes_visible, pages, active_page) {
                         user_config.approval_mode = *approval_mode;
                         crate::config::save_user_config(user_config);
                     }
                     let visible_pages = if *panes_visible { pages.as_slice() } else { &[] };
                     let hint = pane_toggle_hint(*panes_visible, !pages.is_empty());
+                    renderer
+                        .ensure_viewport_height(term, input, None, visible_pages, *active_page)
+                        .ok();
                     term.draw(|frame| {
                         renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
                             model: model.clone(),
@@ -741,7 +741,7 @@ impl App {
                             streaming: true,
                             approval_mode: *approval_mode,
                             queue_len: queue.len(),
-                        }, renderer.spinner_tick, None, visible_pages, active_page, hint);
+                        }, renderer.spinner_tick, None, visible_pages, *active_page, hint);
                     }).ok();
                     spinner.as_mut().reset(time::Instant::now() + Duration::from_millis(90));
                 }
@@ -756,6 +756,8 @@ impl App {
         mode: &mut ApprovalMode,
         cancel: &mut bool,
         panes_visible: &mut bool,
+        pages: &mut [PanePage],
+        active_page: &mut usize,
     ) -> bool {
         let mut mode_changed = false;
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
@@ -773,6 +775,52 @@ impl App {
                     {
                         *panes_visible = !*panes_visible;
                         continue;
+                    }
+                    if *panes_visible && !pages.is_empty() {
+                        *active_page = (*active_page).min(pages.len() - 1);
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Tab, m) if m.is_empty() => {
+                                *active_page = (*active_page + 1) % pages.len();
+                                continue;
+                            }
+                            (KeyCode::BackTab, m) if m.is_empty() => {
+                                *active_page = if *active_page == 0 {
+                                    pages.len() - 1
+                                } else {
+                                    *active_page - 1
+                                };
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        let page = &mut pages[*active_page];
+                        match (key.code, key.modifiers) {
+                            (KeyCode::PageUp, m) if m.is_empty() => {
+                                page.scroll =
+                                    page.scroll.saturating_sub(crate::ui::render::MAX_PANE_ROWS);
+                                continue;
+                            }
+                            (KeyCode::PageDown, m) if m.is_empty() => {
+                                let max_scroll = page.content.len().saturating_sub(
+                                    crate::ui::render::clamped_pane_visible_rows(page.visible_rows),
+                                );
+                                page.scroll = (page.scroll + crate::ui::render::MAX_PANE_ROWS)
+                                    .min(max_scroll);
+                                continue;
+                            }
+                            (KeyCode::Up, m) if m.contains(KeyModifiers::CONTROL) => {
+                                page.scroll = page.scroll.saturating_sub(1);
+                                continue;
+                            }
+                            (KeyCode::Down, m) if m.contains(KeyModifiers::CONTROL) => {
+                                let max_scroll = page.content.len().saturating_sub(
+                                    crate::ui::render::clamped_pane_visible_rows(page.visible_rows),
+                                );
+                                page.scroll = (page.scroll + 1).min(max_scroll);
+                                continue;
+                            }
+                            _ => {}
+                        }
                     }
                     match input.apply_key(key.code, key.modifiers) {
                         InputAction::Cancel => {

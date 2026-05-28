@@ -145,7 +145,7 @@ script: |
       else:
           lines.append("  No tasks")
       title = f"Task List ({done}/{len(tasks)})" if tasks else "Task List"
-      return {"source": "task_list", "title": title, "lines": lines, "scroll": scroll}
+      return {"source": "task_list", "title": title, "lines": lines, "visible_rows": 8, "scroll": scroll}
 
   def emit(content, tasks, scroll=0):
       print(json.dumps({"content": content, "pane": pane(tasks, scroll)}, ensure_ascii=False))
@@ -176,7 +176,7 @@ script: |
               tasks = [{"text": t, "done": False} for t in texts]
               save(tasks)
               msg = f"Created {len(tasks)} task(s)." if len(tasks) > 1 else f"Created task: {tasks[0]['text']}"
-              scroll = max(0, len(tasks) + 1 - MAX_PANE)
+              scroll = 0
               emit(msg, tasks, scroll)
               sys.exit(0)
 

@@ -7,6 +7,7 @@ use crate::tools::command_policy::CommandSafety;
 use crate::tools::script_runner::{ScriptRequest, run_script};
 use crate::tools::types::{Tool, ToolDefinition, ToolDisplayConfig, ToolOutput};
 use crate::ui::pane_page::PanePage;
+use crate::ui::render::DEFAULT_PANE_ROWS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicTool {
@@ -57,8 +58,14 @@ struct PaneEnvelope {
     title: String,
     #[serde(default)]
     lines: Vec<String>,
+    #[serde(default = "default_pane_rows")]
+    visible_rows: usize,
     #[serde(default)]
     scroll: usize,
+}
+
+fn default_pane_rows() -> usize {
+    DEFAULT_PANE_ROWS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +252,7 @@ fn parse_json_envelope(stdout: &str) -> Result<ToolOutput, String> {
         source: pane.source,
         title: pane.title,
         content: pane.lines.into_iter().map(Line::from).collect(),
+        visible_rows: pane.visible_rows,
         scroll: pane.scroll,
     });
     Ok(ToolOutput {

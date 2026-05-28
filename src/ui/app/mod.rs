@@ -17,7 +17,9 @@ use super::commands;
 use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
-use super::render::{BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, Renderer, StatusInfo};
+use super::render::{
+    BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, Renderer, StatusInfo, clamped_pane_visible_rows,
+};
 
 pub struct App {
     pub messages: Vec<Message>,
@@ -267,9 +269,9 @@ impl App {
         if self.pages.is_empty() {
             None
         } else if self.panes_visible {
-            Some("Ctrl+T hide tasks")
+            Some("Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓")
         } else {
-            Some("Ctrl+T show tasks")
+            Some("Ctrl+T show panel  ──  Ctrl+↑↓/↑↓")
         }
     }
 
@@ -306,11 +308,32 @@ impl App {
                 }
                 KeyCode::PageDown => {
                     let page = &mut self.pages[self.active_page];
-                    let max_scroll = page.content.len().saturating_sub(MAX_PANE_ROWS);
+                    let max_scroll = page
+                        .content
+                        .len()
+                        .saturating_sub(clamped_pane_visible_rows(page.visible_rows));
                     page.scroll = (page.scroll + MAX_PANE_ROWS).min(max_scroll);
                     return self.redraw(term);
                 }
                 _ => {}
+            }
+        }
+
+        // Ctrl+Up / Ctrl+Down: scroll pane pages
+        if self.panes_visible && !self.pages.is_empty() {
+            if matches!(code, KeyCode::Up) && modifiers.contains(KeyModifiers::CONTROL) {
+                let page = &mut self.pages[self.active_page];
+                page.scroll = page.scroll.saturating_sub(1);
+                return self.redraw(term);
+            }
+            if matches!(code, KeyCode::Down) && modifiers.contains(KeyModifiers::CONTROL) {
+                let page = &mut self.pages[self.active_page];
+                let max_scroll = page
+                    .content
+                    .len()
+                    .saturating_sub(clamped_pane_visible_rows(page.visible_rows));
+                page.scroll = (page.scroll + 1).min(max_scroll);
+                return self.redraw(term);
             }
         }
 

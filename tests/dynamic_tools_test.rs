@@ -135,6 +135,33 @@ script: |
 }
 
 #[tokio::test]
+async fn json_envelope_pane_visible_rows_is_preserved() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: pane_sizer
+description: write pane content with height
+output:
+  kind: json_envelope
+script: |
+  printf '%s\n' '{"content":"Added tasks","pane":{"source":"task_list","title":"tasks (0/10)","lines":["one","two","three"],"visible_rows":12}}'
+"#,
+    )
+    .unwrap();
+    let handler = ToolHandler::new(ToolRegistry::new().register(tool));
+
+    let results = handler
+        .execute_all(vec![ToolCall {
+            id: "call-1".into(),
+            name: "pane_sizer".into(),
+            arguments: json!({}),
+        }])
+        .await;
+
+    assert!(!results[0].is_error);
+    assert_eq!(results[0].pane_page.as_ref().unwrap().visible_rows, 12);
+}
+
+#[tokio::test]
 async fn json_envelope_pane_scroll_is_preserved() {
     let tool: DynamicTool = serde_yaml::from_str(
         r#"

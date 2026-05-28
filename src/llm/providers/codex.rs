@@ -4,6 +4,7 @@ use eventsource_stream::Eventsource;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
@@ -14,7 +15,7 @@ use crate::tools::{ToolCall, ToolDefinition};
 
 /// Codex provider — adapts the Codex Responses API to bone's internal shape.
 /// Uses `instructions`+`input` (not messages), Codex-format tools,
-/// and normalizes `response.output_text.delta` SSE events.
+/// and normalizes streaming SSE events including function_call deltas.
 pub struct CodexProvider {
     client: reqwest::Client,
     base_url: String,
@@ -65,8 +66,6 @@ struct CodexRequest {
     top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<CodexTool>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_key: Option<String>,
 }
 
 /// Typed input items for the Codex Responses API. Uses `#[serde(untagged)]`;
@@ -148,14 +147,36 @@ pub struct CodexTool {
     pub strict: bool,
 }
 
-#[derive(Deserialize)]
-struct CodexSSEEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(default)]
-    delta: Option<String>,
-    #[serde(default)]
-    response: Option<CodexResponse>,
+/// Partial tool call accumulated from streaming Responses API deltas.
+#[derive(Debug, Default)]
+struct PartialCodexToolCall {
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+impl PartialCodexToolCall {
+    fn is_ready(&self) -> bool {
+        !self.call_id.is_empty() && !self.name.is_empty()
+    }
+}
+
+/// Flush completed partial tool calls, emitting a [`ChatEvent::ToolCall`]
+/// for each one that has both id and name set.
+fn flush_partial_tool_calls(partial: &mut BTreeMap<usize, PartialCodexToolCall>) -> Vec<ChatEvent> {
+    let completed = std::mem::take(partial);
+    let mut events = Vec::new();
+    for (_, call) in completed {
+        if call.is_ready() {
+            let arguments = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+            events.push(ChatEvent::ToolCall(ToolCall {
+                id: call.call_id,
+                name: call.name,
+                arguments,
+            }));
+        }
+    }
+    events
 }
 
 #[derive(Deserialize)]
@@ -244,9 +265,10 @@ pub fn build_instructions(messages: &[ChatMessage]) -> String {
     }
 }
 
-// Text is NOT emitted here — it was already streamed via
-// `response.output_text.delta` events, and re-emitting would
-// duplicate content and confuse the LLM on subsequent rounds.
+/// Extract tool calls and usage from a completed response object.
+/// Text is NOT emitted here — it was already streamed via
+/// `response.output_text.delta` events, and re-emitting would
+/// duplicate content and confuse the LLM on subsequent rounds.
 fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32, u32)>) {
     let tool_calls: Vec<ChatEvent> = resp
         .output
@@ -279,6 +301,16 @@ fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32
     });
 
     (tool_calls, usage)
+}
+
+/// Resolve the event type. First checks the JSON `type` field (Responses API
+/// convention), then falls back to the SSE `event:` line. Some backends only
+/// set the event type in the SSE event line, not inside the JSON body.
+fn resolve_event_type<'a>(raw: &'a Value, sse_event: &'a str) -> &'a str {
+    if let Some(t) = raw.get("type").and_then(|t| t.as_str()) {
+        return t;
+    }
+    sse_event
 }
 
 #[async_trait]
@@ -325,7 +357,6 @@ impl LlmProvider for CodexProvider {
             } else {
                 Some(codex_tools)
             },
-            prompt_cache_key: None,
         };
 
         let mut req = self.client.post(self.chat_url()).json(&request);
@@ -348,6 +379,8 @@ impl LlmProvider for CodexProvider {
 
         let stream = try_stream! {
             futures_util::pin_mut!(events);
+            let mut partial_tool_calls: BTreeMap<usize, PartialCodexToolCall> = BTreeMap::new();
+            let mut emitted_tool_call_ids: BTreeSet<String> = BTreeSet::new();
             let mut last_usage: Option<(u32, u32)> = None;
 
             while let Some(event) = events.try_next().await.map_err(|err| {
@@ -359,6 +392,10 @@ impl LlmProvider for CodexProvider {
                 }
 
                 if data == "[DONE]" {
+                    // Flush any partial tool calls that haven't been completed yet.
+                    for ev in flush_partial_tool_calls(&mut partial_tool_calls) {
+                        yield ev;
+                    }
                     break;
                 }
 
@@ -366,30 +403,132 @@ impl LlmProvider for CodexProvider {
                     continue;
                 }
 
-                let event: CodexSSEEvent = match serde_json::from_str(data) {
-                    Ok(e) => e,
+                let raw: Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
                     Err(_) => continue,
                 };
 
-                match event.event_type.as_str() {
+                let event_type = resolve_event_type(&raw, &event.event);
+
+                match event_type {
+                    // ── Text streaming ──────────────────────────────────
                     "response.output_text.delta" => {
-                        if let Some(delta) = event.delta {
-                            yield ChatEvent::TextDelta(delta);
+                        if let Some(delta) = raw.get("delta").and_then(|d| d.as_str()) {
+                            yield ChatEvent::TextDelta(delta.to_string());
                         }
                     }
+
+                    // ── Tool call streaming (output item lifecycle) ────
+                    "response.output_item.added" => {
+                        let output_index = raw
+                            .get("output_index")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(0);
+                        if let Some(item) = raw.get("item") {
+                            if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                                let mut partial = PartialCodexToolCall::default();
+                                if let Some(id) = item.get("call_id").and_then(|v| v.as_str()) {
+                                    partial.call_id = id.to_string();
+                                }
+                                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                                    partial.name = name.to_string();
+                                }
+                                partial_tool_calls.insert(output_index, partial);
+                            }
+                        }
+                    }
+
+                    "response.function_call_arguments.delta" => {
+                        let output_index = raw
+                            .get("output_index")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(0);
+                        if let Some(delta) = raw.get("delta").and_then(|d| d.as_str()) {
+                            partial_tool_calls
+                                .entry(output_index)
+                                .or_default()
+                                .arguments
+                                .push_str(delta);
+                        }
+                    }
+
+                    "response.function_call_arguments.done" => {
+                        let output_index = raw
+                            .get("output_index")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(0);
+                        // Some backends send the full arguments string in this event.
+                        if let Some(args) = raw.get("arguments").and_then(|a| a.as_str()) {
+                            let partial = partial_tool_calls
+                                .entry(output_index)
+                                .or_default();
+                            // Prefer the full string if provided; otherwise keep deltas.
+                            if !args.is_empty() {
+                                partial.arguments = args.to_string();
+                            }
+                        }
+                    }
+
+                    "response.output_item.done" => {
+                        let output_index = raw
+                            .get("output_index")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(0);
+                        if let Some(partial) = partial_tool_calls.remove(&output_index) {
+                            if partial.is_ready() {
+                                let arguments =
+                                    serde_json::from_str(&partial.arguments)
+                                        .unwrap_or(Value::Null);
+                                emitted_tool_call_ids.insert(partial.call_id.clone());
+                                yield ChatEvent::ToolCall(ToolCall {
+                                    id: partial.call_id,
+                                    name: partial.name,
+                                    arguments,
+                                });
+                            }
+                        }
+                    }
+
+                    // ── Final response (fallback for non-streaming tool calls) ─
                     "response.completed" => {
-                        if let Some(resp) = event.response {
-                            let (events, usage) = extract_response_events(&resp);
-                            if let Some(u) = usage {
-                                last_usage = Some(u);
+                        // Flush any remaining partial calls first.
+                        for ev in flush_partial_tool_calls(&mut partial_tool_calls) {
+                            if let ChatEvent::ToolCall(call) = &ev {
+                                emitted_tool_call_ids.insert(call.id.clone());
                             }
-                            for event in events {
-                                yield event;
+                            yield ev;
+                        }
+                        if let Some(resp_val) = raw.get("response") {
+                            if let Ok(resp) = serde_json::from_value(resp_val.clone()) {
+                                let (events, usage) = extract_response_events(&resp);
+                                if let Some(u) = usage {
+                                    last_usage = Some(u);
+                                }
+                                for ev in events {
+                                    match &ev {
+                                        ChatEvent::ToolCall(call) if emitted_tool_call_ids.contains(&call.id) => {}
+                                        ChatEvent::ToolCall(call) => {
+                                            emitted_tool_call_ids.insert(call.id.clone());
+                                            yield ev;
+                                        }
+                                        _ => yield ev,
+                                    }
+                                }
                             }
                         }
                     }
+
                     _ => {}
                 }
+            }
+
+            // Flush any remaining partial tool calls on premature stream end.
+            for ev in flush_partial_tool_calls(&mut partial_tool_calls) {
+                yield ev;
             }
 
             if let Some((prompt, completion)) = last_usage {
@@ -403,6 +542,7 @@ impl LlmProvider for CodexProvider {
         Ok(Box::pin(stream))
     }
 }
+
 fn read_codex_token() -> String {
     let path = std::path::Path::new(&dirs::home_dir().unwrap_or_default()).join(".codex/auth.json");
     let Ok(data) = std::fs::read_to_string(&path) else {

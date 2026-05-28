@@ -10,6 +10,8 @@ pub struct PanePage {
     pub title: String,
     /// The content lines to render.
     pub content: Vec<Line<'static>>,
+    /// Maximum content rows this page wants visible at once.
+    pub visible_rows: usize,
     /// Scroll offset for this page (rows into content).
     pub scroll: usize,
 }

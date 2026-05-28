@@ -23,7 +23,8 @@ use backend::BoneBackend;
 
 /// Minimum viewport rows: top-sep + input(1) + bottom-sep + status.
 pub(crate) const MIN_ROWS: u16 = 4;
-pub use bottom_pane::MAX_PANE_ROWS;
+pub(crate) use bottom_pane::clamped_pane_visible_rows;
+pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
@@ -116,6 +117,26 @@ impl Renderer {
             },
         )?;
         *term = new_term;
+        Ok(())
+    }
+
+    /// Ensure the inline viewport height matches the content currently drawn
+    /// in it. Streaming paths call this directly because they repaint without
+    /// going through `App::redraw`.
+    pub fn ensure_viewport_height(
+        &mut self,
+        term: &mut BoneTerminal,
+        input: &InputState,
+        prompt: Option<&Prompt>,
+        pages: &[PanePage],
+        active_page: usize,
+    ) -> io::Result<()> {
+        let width = term.size()?.width;
+        let desired = Self::desired_height(input, prompt, width, pages, active_page);
+        if desired != self.viewport_height {
+            Self::resize_viewport(term, desired)?;
+            self.viewport_height = desired;
+        }
         Ok(())
     }
 
@@ -217,6 +238,8 @@ impl Renderer {
         active_page: usize,
         pane_toggle_hint: Option<&str>,
     ) -> io::Result<()> {
+        self.ensure_viewport_height(term, input, None, pages, active_page)?;
+
         let safe_end = safe_markdown_prefix_end(content);
         if safe_end > self.streaming_source_flushed {
             let width = term.size()?.width.max(1);
@@ -277,6 +300,7 @@ impl Renderer {
         pane_toggle_hint: Option<&str>,
     ) -> io::Result<()> {
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
+        self.ensure_viewport_height(term, input, None, pages, active_page)?;
         term.draw(|frame| {
             self.draw_bottom_pane(
                 frame,

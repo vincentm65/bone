@@ -226,7 +226,7 @@ impl InputState {
                     self.delete_word_backward();
                     InputAction::Redraw
                 }
-                KeyCode::Char('u') => {
+                KeyCode::Char('u') | KeyCode::Char('U') => {
                     self.clear_buffer();
                     InputAction::Redraw
                 }
@@ -234,7 +234,7 @@ impl InputState {
                     self.kill_to_end();
                     InputAction::Redraw
                 }
-                KeyCode::Char('d') => InputAction::ClearQueue,
+                KeyCode::Char('d') | KeyCode::Char('D') => InputAction::ClearQueue,
                 KeyCode::Char('x') => InputAction::OpenEditor,
                 _ => InputAction::None,
             };
