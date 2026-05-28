@@ -315,3 +315,112 @@ script: |
     assert_eq!(page.source, "task_list");
     assert!(page.content.is_empty());
 }
+#[tokio::test]
+async fn line_envelope_output_sets_tool_content_and_pane_page() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: line_pane_writer
+description: write pane content
+output:
+  kind: line_envelope
+script: |
+  printf '@@content@@\n'
+  printf 'Added task: fix auth\n'
+  printf '@@pane@@\n'
+  printf 'source: task_list\n'
+  printf 'title: tasks (0/1)\n'
+  printf 'visible_rows: 8\n'
+  printf 'scroll: 0\n'
+  printf '@@lines@@\n'
+  printf '  \u25cb fix auth\n'
+  printf '@@end@@\n'
+"#,
+    )
+    .unwrap();
+    let handler = ToolHandler::new(ToolRegistry::new().register(tool));
+
+    let results = handler
+        .execute_all(vec![ToolCall {
+            id: "call-1".into(),
+            name: "line_pane_writer".into(),
+            arguments: json!({}),
+        }])
+        .await;
+
+    assert!(!results[0].is_error);
+    assert_eq!(results[0].content, "Added task: fix auth");
+    let page = results[0].pane_page.as_ref().unwrap();
+    assert_eq!(page.source, "task_list");
+    assert_eq!(page.title, "tasks (0/1)");
+    assert_eq!(page.content[0].to_string(), "  \u{25cb} fix auth");
+    assert_eq!(page.visible_rows, 8);
+    assert_eq!(page.scroll, 0);
+}
+
+#[tokio::test]
+async fn line_envelope_empty_pane_lines_returns_empty_page() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: line_pane_remover
+description: remove pane content
+output:
+  kind: line_envelope
+script: |
+  printf '@@content@@\n'
+  printf 'Task list killed.\n'
+  printf '@@pane@@\n'
+  printf 'source: task_list\n'
+  printf 'title: Task List\n'
+  printf 'visible_rows: 8\n'
+  printf 'scroll: 0\n'
+  printf '@@lines@@\n'
+  printf '@@end@@\n'
+"#,
+    )
+    .unwrap();
+    let handler = ToolHandler::new(ToolRegistry::new().register(tool));
+
+    let results = handler
+        .execute_all(vec![ToolCall {
+            id: "call-1".into(),
+            name: "line_pane_remover".into(),
+            arguments: json!({}),
+        }])
+        .await;
+
+    assert!(!results[0].is_error);
+    assert_eq!(results[0].content, "Task list killed.");
+    let page = results[0].pane_page.as_ref().unwrap();
+    assert_eq!(page.source, "task_list");
+    assert!(page.content.is_empty());
+}
+
+#[tokio::test]
+async fn line_envelope_without_pane_returns_no_page() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: line_no_pane
+description: no pane
+output:
+  kind: line_envelope
+script: |
+  printf '@@content@@\n'
+  printf 'Just content\n'
+  printf '@@end@@\n'
+"#,
+    )
+    .unwrap();
+    let handler = ToolHandler::new(ToolRegistry::new().register(tool));
+
+    let results = handler
+        .execute_all(vec![ToolCall {
+            id: "call-1".into(),
+            name: "line_no_pane".into(),
+            arguments: json!({}),
+        }])
+        .await;
+
+    assert!(!results[0].is_error);
+    assert_eq!(results[0].content, "Just content");
+    assert!(results[0].pane_page.is_none());
+}

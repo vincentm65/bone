@@ -1,0 +1,212 @@
+name: task_list
+version: 2
+description: "Manage a persistent task list displayed in the bottom pane. Actions: create (bulk-add tasks), complete (mark done by index/name), kill (destroy the list). Agent calls kill after all tasks are done."
+safety: safe
+output:
+  kind: line_envelope
+display:
+  show: false
+args:
+  - name: action
+    type: string
+    description: "create, complete, or kill"
+    required: true
+  - name: text
+    type: string
+    description: "Single task name. Used with complete to match by name."
+    required: false
+  - name: texts
+    type: array
+    description: "Multiple task strings for create, or multiple task names for complete."
+    required: false
+  - name: index
+    type: integer
+    description: "Single 1-based task index for complete."
+    required: false
+  - name: indices
+    type: array
+    description: "Multiple 1-based task indices for complete."
+    required: false
+script: |
+  $ErrorActionPreference = 'Stop'
+
+  # ── config directory ────────────────────────────────────────────────
+  function Get-BoneDir {
+    if ($env:XDG_CONFIG_HOME) { return Join-Path $env:XDG_CONFIG_HOME 'bone-rust' }
+    if ($env:HOME)            { return Join-Path $env:HOME '.bone-rust' }
+    if ($env:USERPROFILE)     { return Join-Path $env:USERPROFILE '.bone-rust' }
+    return Join-Path $env:TEMP '.bone-rust'
+  }
+
+  $Dir        = Join-Path (Get-BoneDir) "tasks/$(${env:BONE_PID} ?? $PID)"
+  $TasksFile  = Join-Path $Dir 'tasks.txt'
+  $DoneFile   = Join-Path $Dir 'tasks_done.txt'
+  New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+
+  # ── helpers ─────────────────────────────────────────────────────────
+  function Get-TotalCount {
+    if (Test-Path $TasksFile) { (Get-Content $TasksFile).Count } else { 0 }
+  }
+  function Get-DoneCount {
+    if (Test-Path $DoneFile) { (Get-Content $DoneFile).Count } else { 0 }
+  }
+
+  function Emit-Pane($Msg, $Scroll = 0) {
+    $total = Get-TotalCount
+    $done  = Get-DoneCount
+    $title = if ($total -gt 0) { "Task List ($done/$total)" } else { "Task List" }
+    Write-Output '@@content@@'
+    Write-Output $Msg
+    Write-Output '@@pane@@'
+    Write-Output "source: task_list"
+    Write-Output "title: $title"
+    Write-Output 'visible_rows: 8'
+    Write-Output "scroll: $Scroll"
+    Write-Output '@@lines@@'
+    if ($total -gt 0) {
+      $tasks = Get-Content $TasksFile
+      $doneItems = @()
+      if (Test-Path $DoneFile) { $doneItems = Get-Content $DoneFile }
+      foreach ($task in $tasks) {
+        if ($doneItems -contains $task) {
+          Write-Output "  ✓ $task"
+        } else {
+          Write-Output "  ○ $task"
+        }
+      }
+    } else {
+      Write-Output '  No tasks'
+    }
+    Write-Output '@@end@@'
+  }
+
+  function Emit-EmptyPane($Msg) {
+    Write-Output '@@content@@'
+    Write-Output $Msg
+    Write-Output '@@pane@@'
+    Write-Output 'source: task_list'
+    Write-Output 'title: Task List'
+    Write-Output 'visible_rows: 8'
+    Write-Output 'scroll: 0'
+    Write-Output '@@lines@@'
+    Write-Output '@@end@@'
+  }
+
+  # ── read indexed array env vars ─────────────────────────────────────
+  function Get-Texts {
+    $count = 0
+    if ($env:TOOL_TEXTS_COUNT) { $count = [int]$env:TOOL_TEXTS_COUNT }
+    if ($count -gt 0) {
+      for ($i = 0; $i -lt $count; $i++) {
+        $val = [System.Environment]::GetEnvironmentVariable("TOOL_TEXTS_$i")
+        if ($val) { Write-Output $val }
+      }
+      return
+    }
+    if ($env:TOOL_TEXT) { Write-Output $env:TOOL_TEXT }
+  }
+
+  function Get-Indices {
+    $count = 0
+    if ($env:TOOL_INDICES_COUNT) { $count = [int]$env:TOOL_INDICES_COUNT }
+    if ($count -gt 0) {
+      for ($i = 0; $i -lt $count; $i++) {
+        $val = [System.Environment]::GetEnvironmentVariable("TOOL_INDICES_$i")
+        if ($val) { Write-Output $val }
+      }
+      return
+    }
+    if ($env:TOOL_INDEX) { Write-Output $env:TOOL_INDEX }
+  }
+
+  # ── resolve task name to line number (1-based) ──────────────────────
+  function Resolve-Name($Name) {
+    if (-not (Test-Path $TasksFile)) { return }
+    $tasks = Get-Content $TasksFile
+    # Exact match
+    for ($i = 0; $i -lt $tasks.Count; $i++) {
+      if ($tasks[$i] -eq $Name) { return $i + 1 }
+    }
+    # Case-insensitive fallback
+    $nameLower = $Name.ToLowerInvariant()
+    for ($i = 0; $i -lt $tasks.Count; $i++) {
+      if ($tasks[$i].ToLowerInvariant() -eq $nameLower) { return $i + 1 }
+    }
+  }
+
+  # ── get target indices from index/name args ─────────────────────────
+  function Get-Targets {
+    $indices = if ($env:TOOL_INDICES_COUNT -or $env:TOOL_INDEX) { Get-Indices } else { @() }
+    $names   = if ($env:TOOL_TEXTS_COUNT -or $env:TOOL_TEXT)    { Get-Texts }   else { @() }
+
+    if ($indices -and $names) {
+      Write-Error 'Use either indices or names, not both.'; exit 1
+    }
+    if ($indices) { return $indices }
+    if ($names) {
+      foreach ($name in $names) {
+        $idx = Resolve-Name $name
+        if (-not $idx) { Write-Error "No task found: $name"; exit 1 }
+        Write-Output $idx
+      }
+      return
+    }
+    Write-Error 'Provide index, indices, text, or texts.'; exit 1
+  }
+
+  # ── main ────────────────────────────────────────────────────────────
+  $action = $env:TOOL_ACTION
+
+  switch ($action) {
+    'kill' {
+      if (Test-Path $TasksFile) { Remove-Item $TasksFile -Force }
+      if (Test-Path $DoneFile)  { Remove-Item $DoneFile -Force }
+      Emit-EmptyPane 'Task list killed.'
+    }
+
+    'create' {
+      $texts = @(Get-Texts)
+      if ($texts.Count -eq 0) { Write-Error "Provide text or texts for 'create'."; exit 1 }
+      $texts | Set-Content $TasksFile -Encoding UTF8
+      if (Test-Path $DoneFile) { Clear-Content $DoneFile } else { '' | Set-Content $DoneFile -Encoding UTF8 }
+      if ($texts.Count -gt 1) {
+        $msg = "Created $($texts.Count) task(s)."
+      } else {
+        $msg = "Created task: $($texts[0])"
+      }
+      Emit-Pane $msg 0
+    }
+
+    'complete' {
+      if (-not (Test-Path $TasksFile)) {
+        Write-Error 'No task list exists. Use create first.'; exit 1
+      }
+      $targets = @(Get-Targets)
+      if ($targets.Count -eq 0) { exit 1 }
+      $tasks = Get-Content $TasksFile
+      if (-not (Test-Path $DoneFile)) { '' | Set-Content $DoneFile -Encoding UTF8 }
+      $doneItems = @(Get-Content $DoneFile)
+      foreach ($idx in $targets) {
+        $task = $tasks[[int]$idx - 1]
+        if ($doneItems -notcontains $task) {
+          Add-Content $DoneFile $task -Encoding UTF8
+        }
+      }
+      $total = Get-TotalCount
+      $done  = Get-DoneCount
+      $firstIdx = [int]($targets[0])
+      $firstTask = $tasks[$firstIdx - 1]
+      if ($targets.Count -eq 1) {
+        $msg = "Completed: $firstTask"
+      } else {
+        $msg = "Completed $($targets.Count) tasks."
+      }
+      if ($done -eq $total) { $msg += ' All done -- you can kill the list.' }
+      $scroll = [Math]::Max(0, $firstIdx - 1)
+      Emit-Pane $msg $scroll
+    }
+
+    default {
+      Write-Error 'Action must be create, complete, or kill.'; exit 1
+    }
+  }

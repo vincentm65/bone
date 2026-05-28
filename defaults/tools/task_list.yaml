@@ -1,9 +1,9 @@
 name: task_list
-version: 1
+version: 2
 description: "Manage a persistent task list displayed in the bottom pane. Actions: create (bulk-add tasks), complete (mark done by index/name), kill (destroy the list). Agent calls kill after all tasks are done."
 safety: safe
 output:
-  kind: json_envelope
+  kind: line_envelope
 display:
   show: false
 args:
@@ -28,181 +28,226 @@ args:
     description: "Multiple 1-based task indices for complete."
     required: false
 script: |
-  python3 - <<'PY'
-  import json, os, sys
-  from pathlib import Path
+  set -euo pipefail
 
-  def bone_dir():
-      xdg = os.environ.get("XDG_CONFIG_HOME")
-      if xdg:
-          return Path(xdg) / "bone-rust"
-      home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
-      if home:
-          return Path(home) / ".bone-rust"
-      return Path("/tmp/.bone-rust")
+  # ── config directory ────────────────────────────────────────────────
+  bone_dir() {
+    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+      echo "$XDG_CONFIG_HOME/bone-rust"
+    elif [ -n "${HOME:-}" ]; then
+      echo "$HOME/.bone-rust"
+    elif [ -n "${USERPROFILE:-}" ]; then
+      echo "$USERPROFILE/.bone-rust"
+    else
+      echo "/tmp/.bone-rust"
+    fi
+  }
 
-  TASKS_PATH = bone_dir() / "tasks.json"
-  LOCK_PATH  = bone_dir() / "tasks.lock"
-  MAX_PANE   = 8
+  DIR="$(bone_dir)/tasks/${BONE_PID:-$$}"
+  TASKS_FILE="$DIR/tasks.txt"
+  DONE_FILE="$DIR/tasks_done.txt"
+  mkdir -p "$DIR"
 
-  # ── locking ──────────────────────────────────────────────────────────
-  class FileLock:
-      def __enter__(self):
-          LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-          self.f = LOCK_PATH.open("a+")
-          try:
-              import fcntl
-              fcntl.flock(self.f.fileno(), fcntl.LOCK_EX)
-              self._unlock = lambda: fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
-          except Exception:
-              self._unlock = lambda: None
-          return self
-      def __exit__(self, *exc):
-          try: self._unlock()
-          finally: self.f.close()
+  # ── helpers ─────────────────────────────────────────────────────────
+  total_tasks()    { [ -f "$TASKS_FILE" ] && wc -l < "$TASKS_FILE" || echo 0; }
+  done_count()     { [ -f "$DONE_FILE" ] && wc -l < "$DONE_FILE" || echo 0; }
 
-  # ── persistence ──────────────────────────────────────────────────────
-  def load():
-      try:
-          data = json.loads(TASKS_PATH.read_text())
-          if isinstance(data, list):
-              return [t for t in data if isinstance(t, dict) and t.get("text")]
-      except Exception:
-          pass
-      return []
+  emit_pane() {
+    local msg="$1" scroll="${2:-0}"
+    local total done title
+    total=$(total_tasks)
+    done=$(done_count)
+    if [ "$total" -gt 0 ]; then
+      title="Task List ($done/$total)"
+    else
+      title="Task List"
+    fi
+    printf '@@content@@\n'
+    printf '%s\n' "$msg"
+    printf '@@pane@@\n'
+    printf 'source: task_list\n'
+    printf 'title: %s\n' "$title"
+    printf 'visible_rows: 8\n'
+    printf 'scroll: %s\n' "$scroll"
+    printf '@@lines@@\n'
+    if [ "$total" -gt 0 ]; then
+      i=0
+      while IFS= read -r task; do
+        if [ -f "$DONE_FILE" ] && grep -qxF "$task" "$DONE_FILE" 2>/dev/null; then
+          printf '  \u2713 %s\n' "$task"
+        else
+          printf '  \u25cb %s\n' "$task"
+        fi
+        i=$((i + 1))
+      done < "$TASKS_FILE"
+    else
+      printf '  No tasks\n'
+    fi
+    printf '@@end@@\n'
+  }
 
-  def save(tasks):
-      TASKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-      TASKS_PATH.write_text(json.dumps(tasks, indent=2) + "\n")
+  emit_empty_pane() {
+    local msg="$1"
+    printf '@@content@@\n'
+    printf '%s\n' "$msg"
+    printf '@@pane@@\n'
+    printf 'source: task_list\n'
+    printf 'title: Task List\n'
+    printf 'visible_rows: 8\n'
+    printf 'scroll: 0\n'
+    printf '@@lines@@\n'
+    printf '@@end@@\n'
+  }
 
-  def destroy():
-      try: TASKS_PATH.unlink()
-      except FileNotFoundError: pass
+  # ── read indexed array env vars ─────────────────────────────────────
+  get_texts() {
+    local count="${TOOL_TEXTS_COUNT:-0}"
+    if [ "$count" -gt 0 ]; then
+      for i in $(seq 0 $((count - 1))); do
+        eval "printf '%s\n' \"\${TOOL_TEXTS_$i:-}\""
+      done
+      return
+    fi
+    if [ -n "${TOOL_TEXT:-}" ]; then
+      printf '%s\n' "$TOOL_TEXT"
+    fi
+  }
 
-  # ── arg helpers ──────────────────────────────────────────────────────
-  def arg_json(name, default):
-      raw = os.environ.get(f"TOOL_{name}_JSON")
-      if raw is None:
-          return default
-      try: return json.loads(raw)
-      except Exception: return default
+  get_indices() {
+    local count="${TOOL_INDICES_COUNT:-0}"
+    if [ "$count" -gt 0 ]; then
+      for i in $(seq 0 $((count - 1))); do
+        eval "printf '%s\n' \"\${TOOL_INDICES_$i:-}\""
+      done
+      return
+    fi
+    if [ -n "${TOOL_INDEX:-}" ]; then
+      printf '%s\n' "$TOOL_INDEX"
+    fi
+  }
 
-  def get_texts():
-      vals = arg_json("TEXTS", None)
-      if isinstance(vals, list):
-          return [str(v).strip() for v in vals if str(v).strip()]
-      t = os.environ.get("TOOL_TEXT", "").strip()
-      return [t] if t else []
+  # ── resolve task name(s) to line number(s) ──────────────────────────
+  resolve_name() {
+    local name="$1" total
+    total=$(total_tasks)
+    # Exact match first
+    local line=0
+    while IFS= read -r task; do
+      line=$((line + 1))
+      if [ "$task" = "$name" ]; then
+        printf '%s\n' "$line"
+        return
+      fi
+    done < "$TASKS_FILE"
+    # Case-insensitive fallback
+    line=0
+    local name_lower
+    name_lower=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
+    while IFS= read -r task; do
+      line=$((line + 1))
+      task_lower=$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')
+      if [ "$task_lower" = "$name_lower" ]; then
+        printf '%s\n' "$line"
+        return
+      fi
+    done < "$TASKS_FILE"
+    printf ''  # not found
+  }
 
-  def get_indices():
-      vals = arg_json("INDICES", None)
-      if isinstance(vals, list):
-          out = []
-          for v in vals:
-              try: out.append(int(v))
-              except Exception: pass
-          return out
-      raw = os.environ.get("TOOL_INDEX", "").strip()
-      if not raw: return []
-      try: return [int(raw)]
-      except Exception: return []
+  # ── get target indices from index/name args ─────────────────────────
+  get_targets() {
+    local indices names
+    indices=$(get_indices)
+    names=$(get_texts)
+    if [ -n "$indices" ] && [ -n "$names" ]; then
+      echo "ERROR: Use either indices or names, not both." >&2
+      exit 1
+    fi
+    if [ -n "$indices" ]; then
+      printf '%s\n' "$indices"
+      return
+    fi
+    if [ -n "$names" ]; then
+      for name in $names; do
+        local idx
+        idx=$(resolve_name "$name")
+        if [ -z "$idx" ]; then
+          echo "ERROR: No task found: $name" >&2
+          exit 1
+        fi
+        printf '%s\n' "$idx"
+      done
+      return
+    fi
+    echo "ERROR: Provide index, indices, text, or texts." >&2
+    exit 1
+  }
 
-  def resolve_names(tasks, names):
-      idxs = []
-      for name in names:
-          hits = [i for i, t in enumerate(tasks) if t["text"] == name]
-          if not hits:
-              hits = [i for i, t in enumerate(tasks) if t["text"].casefold() == name.casefold()]
-          if not hits:
-              raise ValueError(f"No task found: {name}")
-          if len(hits) > 1:
-              raise ValueError(f"Multiple tasks match '{name}'. Use index instead.")
-          idxs.append(hits[0] + 1)
-      return idxs
+  # ── main ────────────────────────────────────────────────────────────
+  action="${TOOL_ACTION:-}"
 
-  def targets(tasks):
-      idxs = get_indices()
-      names = get_texts()
-      if idxs and names:
-          raise ValueError("Use either indices or names, not both.")
-      if idxs:
-          for i in idxs:
-              if i < 1 or i > len(tasks):
-                  raise ValueError(f"Index {i} out of range (1-{len(tasks)}).")
-          return idxs
-      if names:
-          return resolve_names(tasks, names)
-      raise ValueError("Provide index, indices, text, or texts.")
+  case "$action" in
+    kill)
+      rm -f "$TASKS_FILE" "$DONE_FILE"
+      emit_empty_pane "Task list killed."
+      ;;
 
-  # ── pane rendering ───────────────────────────────────────────────────
-  def pane(tasks, scroll=0):
-      done = sum(1 for t in tasks if t.get("done"))
-      lines = ["Task List"]
-      if tasks:
-          for t in tasks:
-              mark = "✓" if t.get("done") else "○"
-              lines.append(f"  {mark} {t['text']}")
-      else:
-          lines.append("  No tasks")
-      title = f"Task List ({done}/{len(tasks)})" if tasks else "Task List"
-      return {"source": "task_list", "title": title, "lines": lines, "visible_rows": 8, "scroll": scroll}
+    create)
+      texts=$(get_texts)
+      if [ -z "$texts" ]; then
+        echo "ERROR: Provide text or texts for 'create'." >&2
+        exit 1
+      fi
+      # Overwrite task files with new list
+      printf '%s\n' "$texts" > "$TASKS_FILE"
+      : > "$DONE_FILE"
+      count=$(total_tasks)
+      if [ "$count" -gt 1 ]; then
+        msg="Created $count task(s)."
+      else
+        msg="Created task: $(head -1 "$TASKS_FILE")"
+      fi
+      emit_pane "$msg" 0
+      ;;
 
-  def emit(content, tasks, scroll=0):
-      print(json.dumps({"content": content, "pane": pane(tasks, scroll)}, ensure_ascii=False))
+    complete)
+      if [ ! -f "$TASKS_FILE" ]; then
+        echo "ERROR: No task list exists. Use 'create' first." >&2
+        exit 1
+      fi
+      targets=$(get_targets)
+      if [ -z "$targets" ]; then
+        exit 1
+      fi
+      # Mark each target task as done
+      for idx in $targets; do
+        task=$(sed -n "${idx}p" "$TASKS_FILE")
+        # Add to done file if not already there
+        if ! grep -qxF "$task" "$DONE_FILE" 2>/dev/null; then
+          printf '%s\n' "$task" >> "$DONE_FILE"
+        fi
+      done
+      total=$(total_tasks)
+      done=$(done_count)
+      # Build completion message
+      first=$(printf '%s\n' "$targets" | head -1)
+      first_task=$(sed -n "${first}p" "$TASKS_FILE")
+      target_count=$(printf '%s\n' "$targets" | wc -l)
+      if [ "$target_count" -eq 1 ]; then
+        msg="Completed: $first_task"
+      else
+        msg="Completed $target_count tasks."
+      fi
+      if [ "$done" -eq "$total" ]; then
+        msg="$msg All done -- you can kill the list."
+      fi
+      scroll=$((first - 1))
+      [ "$scroll" -lt 0 ] && scroll=0
+      emit_pane "$msg" "$scroll"
+      ;;
 
-  # ── main ─────────────────────────────────────────────────────────────
-  action = os.environ.get("TOOL_ACTION", "").strip().lower()
-
-  try:
-      with FileLock():
-          if action == "kill":
-              destroy()
-              print(json.dumps({"content": "Task list killed.", "pane": {"source": "task_list", "title": "Task List", "lines": []}}))
-              sys.exit(0)
-
-          if action == "create":
-              texts = get_texts()
-              if not texts:
-                  raise ValueError("Provide text or texts for 'create'.")
-              # Reject if the single text looks like a JSON array (caller should use 'texts' instead)
-              if len(texts) == 1:
-                  import re
-                  s = texts[0].strip()
-                  if re.match(r'^\[.*\]$', s):
-                      raise ValueError(
-                          "'text' looks like a JSON array. Use 'texts' argument for multiple tasks, "
-                          "or pass a plain string for a single task."
-                      )
-              tasks = [{"text": t, "done": False} for t in texts]
-              save(tasks)
-              msg = f"Created {len(tasks)} task(s)." if len(tasks) > 1 else f"Created task: {tasks[0]['text']}"
-              scroll = 0
-              emit(msg, tasks, scroll)
-              sys.exit(0)
-
-          if action == "complete":
-              tasks = load()
-              if not tasks:
-                  raise ValueError("No task list exists. Use 'create' first.")
-              idxs = targets(tasks)
-              for i in idxs:
-                  tasks[i - 1]["done"] = True
-              save(tasks)
-              done_count = sum(1 for t in tasks if t.get("done"))
-              total = len(tasks)
-              if len(idxs) == 1:
-                  msg = f"Completed: {tasks[idxs[0]-1]['text']}"
-              else:
-                  msg = f"Completed {len(idxs)} tasks."
-              if done_count == total:
-                  msg += " All done — you can kill the list."
-              scroll = max(0, min(idxs) - 1)
-              emit(msg, tasks, scroll)
-              sys.exit(0)
-
-          raise ValueError("Action must be create, complete, or kill.")
-
-  except ValueError as e:
-      print(str(e), file=sys.stderr)
-      sys.exit(1)
-  PY
+    *)
+      echo "ERROR: Action must be create, complete, or kill." >&2
+      exit 1
+      ;;
+  esac

@@ -43,6 +43,7 @@ pub struct OutputConfig {
 #[serde(rename_all = "snake_case")]
 pub enum OutputKind {
     JsonEnvelope,
+    LineEnvelope,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +170,7 @@ impl Tool for DynamicTool {
         let output = self.run(arguments).await?;
         match self.output.as_ref().map(|output| &output.kind) {
             Some(OutputKind::JsonEnvelope) => parse_json_envelope(&output.stdout),
+            Some(OutputKind::LineEnvelope) => parse_line_envelope(&output.stdout),
             None => Ok(ToolOutput::text(output.stdout)),
         }
     }
@@ -196,7 +198,7 @@ impl DynamicTool {
         }
 
         // Build env vars from arguments
-        let mut env = Vec::new();
+        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
         if let Value::Object(map) = &arguments {
             for (key, value) in map {
                 let env_name = Self::arg_to_env_name(key);
@@ -216,6 +218,19 @@ impl DynamicTool {
                     format!("{}_JSON", Self::arg_to_env_name(key)),
                     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
                 ));
+                // For array args, also export indexed env vars: TOOL_KEY_0, TOOL_KEY_1, ...
+                // and TOOL_KEY_COUNT with the total count.
+                if let Value::Array(arr) = value {
+                    let base = Self::arg_to_env_name(key);
+                    env.push((format!("{base}_COUNT"), arr.len().to_string()));
+                    for (i, item) in arr.iter().enumerate() {
+                        let val = match item {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        env.push((format!("{base}_{i}"), val));
+                    }
+                }
             }
         }
 
@@ -243,6 +258,74 @@ impl DynamicTool {
             Err(msg)
         }
     }
+}
+
+fn parse_line_envelope(stdout: &str) -> Result<ToolOutput, String> {
+    let mut content = String::new();
+    let mut pane_source = String::new();
+    let mut pane_title = String::new();
+    let mut pane_lines: Vec<String> = Vec::new();
+    let mut pane_visible_rows = DEFAULT_PANE_ROWS;
+    let mut pane_scroll: usize = 0;
+    let mut has_pane = false;
+
+    enum Section {
+        Content,
+        PaneMeta,
+        PaneLines,
+    }
+    let mut section = Section::Content;
+
+    for line in stdout.lines() {
+        match line {
+            "@@content@@" => section = Section::Content,
+            "@@pane@@" => {
+                has_pane = true;
+                section = Section::PaneMeta;
+            }
+            "@@lines@@" => section = Section::PaneLines,
+            "@@end@@" => section = Section::Content,
+            _ => match section {
+                Section::Content => {
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(line);
+                }
+                Section::PaneMeta => {
+                    if let Some(value) = line.strip_prefix("source: ") {
+                        pane_source = value.to_string();
+                    } else if let Some(value) = line.strip_prefix("title: ") {
+                        pane_title = value.to_string();
+                    } else if let Some(value) = line.strip_prefix("visible_rows: ") {
+                        pane_visible_rows = value.parse().unwrap_or(DEFAULT_PANE_ROWS);
+                    } else if let Some(value) = line.strip_prefix("scroll: ") {
+                        pane_scroll = value.parse().unwrap_or(0);
+                    }
+                }
+                Section::PaneLines => {
+                    pane_lines.push(line.to_string());
+                }
+            },
+        }
+    }
+
+    let pane_page = if has_pane {
+        Some(PanePage {
+            source: pane_source,
+            title: pane_title,
+            content: pane_lines.into_iter().map(Line::from).collect(),
+            visible_rows: pane_visible_rows,
+            scroll: pane_scroll,
+        })
+    } else {
+        None
+    };
+
+    Ok(ToolOutput {
+        content,
+        pane_page,
+    })
 }
 
 fn parse_json_envelope(stdout: &str) -> Result<ToolOutput, String> {

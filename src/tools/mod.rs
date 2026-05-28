@@ -102,10 +102,6 @@ pub fn seed_default_tools(dir: &std::path::Path) {
             "web_search.yaml",
             include_str!("../../defaults/tools/web_search.yaml"),
         ),
-        (
-            "task_list.yaml",
-            include_str!("../../defaults/tools/task_list.yaml"),
-        ),
     ];
     for (name, content) in DEFAULTS {
         let path = dir.join(name);
@@ -113,25 +109,99 @@ pub fn seed_default_tools(dir: &std::path::Path) {
             if let Err(e) = std::fs::write(&path, content) {
                 eprintln!("bone: warning: could not write {}: {e}", path.display());
             }
-        } else if *name == "task_list.yaml" {
-            migrate_task_list_pane_clear(&path);
+        }
+    }
+
+    // Seed task_list.yaml with the OS-appropriate variant.
+    let task_list_content: &str = if cfg!(windows) {
+        include_str!("../../defaults/tools/task_list.ps1.yaml")
+    } else {
+        include_str!("../../defaults/tools/task_list.yaml")
+    };
+    let task_list_path = dir.join("task_list.yaml");
+    if !task_list_path.exists() {
+        if let Err(e) = std::fs::write(&task_list_path, task_list_content) {
+            eprintln!("bone: warning: could not write {}: {e}", task_list_path.display());
+        }
+    } else {
+        migrate_task_list(&task_list_path, task_list_content);
+    }
+
+    clean_stale_task_dirs();
+}
+
+/// Migrate old task_list.yaml to the current OS-appropriate version.
+/// Overwrites if the file contains v1 markers (python3, json_envelope) or
+/// if it has the wrong OS variant (bash on Windows, PowerShell on Unix).
+fn migrate_task_list(path: &std::path::Path, new_content: &str) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let is_v1 = raw.contains("python3") || raw.contains("json_envelope");
+    let wrong_os = if cfg!(windows) {
+        // Windows should have PowerShell, not bash
+        raw.contains("set -euo pipefail")
+    } else {
+        // Unix should have bash, not PowerShell
+        raw.contains("$ErrorActionPreference")
+    };
+    if !is_v1 && !wrong_os {
+        return; // current version, correct OS, or user-customized
+    }
+    if let Err(e) = std::fs::write(path, new_content) {
+        eprintln!("bone: warning: could not update {}: {e}", path.display());
+    }
+}
+
+/// Remove stale per-PID task directories left by previous bone instances.
+fn clean_stale_task_dirs() {
+    let tasks_dir = crate::config::bone_dir().join("tasks");
+    let Ok(entries) = std::fs::read_dir(&tasks_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        // Only consider numeric directory names (PIDs)
+        let Ok(pid) = name_str.parse::<u32>() else {
+            continue;
+        };
+        // Skip our own PID
+        if pid == std::process::id() {
+            continue;
+        }
+        if !is_pid_alive(pid) {
+            let _ = std::fs::remove_dir_all(entry.path());
         }
     }
 }
 
-fn migrate_task_list_pane_clear(path: &std::path::Path) {
-    const OLD: &str = r#"print(json.dumps({"content": "Task list killed.", "pane": None}))"#;
-    const NEW: &str = r#"print(json.dumps({"content": "Task list killed.", "pane": {"source": "task_list", "title": "Task List", "lines": []}}))"#;
-
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return;
-    };
-    if !raw.contains(OLD) {
-        return;
-    }
-    let updated = raw.replace(OLD, NEW);
-    if let Err(e) = std::fs::write(path, updated) {
-        eprintln!("bone: warning: could not update {}: {e}", path.display());
+/// Check whether a process is still running.
+fn is_pid_alive(pid: u32) -> bool {
+    use std::process::Stdio;
+    // On Unix, `kill -0 <pid>` checks existence without sending a signal.
+    // On Windows, `tasklist /FI "PID eq <pid>"` does the same.
+    if cfg!(unix) {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        // Windows: check via tasklist
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .stdout(Stdio::piped())
+            .output();
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()),
+            Err(_) => false,
+        }
     }
 }
 

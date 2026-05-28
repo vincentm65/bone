@@ -17,12 +17,27 @@ pub struct ScriptOutput {
 }
 
 /// Returns the shell program, its argument flag, and a label for descriptions.
+/// On Windows, prefers `pwsh` (PowerShell Core) and falls back to `powershell`
+/// (Windows PowerShell 5.x built into Windows).
 pub fn shell_command() -> (&'static str, &'static str, &'static str) {
     if cfg!(windows) {
-        ("cmd", "/c", "cmd /c")
+        if which("pwsh") {
+            ("pwsh", "-Command", "pwsh -Command")
+        } else {
+            ("powershell", "-Command", "powershell -Command")
+        }
     } else {
         ("bash", "-lc", "bash -lc")
     }
+}
+
+fn which(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("-Version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
