@@ -63,11 +63,7 @@ pub fn load_tools() -> LoadedTools {
         if let Some(ref script) = tool.script {
             dynamic_scripts.insert(tool.name.clone(), script.clone());
         }
-        let default_safety = if tool.name == "task_list" {
-            CommandSafety::ReadOnly
-        } else {
-            CommandSafety::Danger
-        };
+        let default_safety = CommandSafety::Danger;
         dynamic_safety.insert(tool.name.clone(), tool.safety.unwrap_or(default_safety));
         if let Some(display) = tool.display.clone() {
             dynamic_display.insert(tool.name.clone(), display);
@@ -96,7 +92,7 @@ pub fn tools_dir() -> std::path::PathBuf {
     crate::config::bone_dir().join("tools")
 }
 
-fn seed_default_tools(dir: &std::path::Path) {
+pub fn seed_default_tools(dir: &std::path::Path) {
     const DEFAULTS: &[(&str, &str)] = &[
         (
             "ask_user.yaml",
@@ -117,7 +113,25 @@ fn seed_default_tools(dir: &std::path::Path) {
             if let Err(e) = std::fs::write(&path, content) {
                 eprintln!("bone: warning: could not write {}: {e}", path.display());
             }
+        } else if *name == "task_list.yaml" {
+            migrate_task_list_pane_clear(&path);
         }
+    }
+}
+
+fn migrate_task_list_pane_clear(path: &std::path::Path) {
+    const OLD: &str = r#"print(json.dumps({"content": "Task list killed.", "pane": None}))"#;
+    const NEW: &str = r#"print(json.dumps({"content": "Task list killed.", "pane": {"source": "task_list", "title": "Task List", "lines": []}}))"#;
+
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    if !raw.contains(OLD) {
+        return;
+    }
+    let updated = raw.replace(OLD, NEW);
+    if let Err(e) = std::fs::write(path, updated) {
+        eprintln!("bone: warning: could not update {}: {e}", path.display());
     }
 }
 
@@ -169,3 +183,4 @@ impl ApprovalMode {
         }
     }
 }
+

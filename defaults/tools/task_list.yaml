@@ -1,0 +1,199 @@
+name: task_list
+version: 1
+description: "Manage a persistent task list displayed in the bottom pane. Actions: create (bulk-add tasks), complete (mark done by index/name), kill (destroy the list). Agent calls kill after all tasks are done."
+safety: safe
+output:
+  kind: json_envelope
+display:
+  show: false
+args:
+  - name: action
+    type: string
+    description: "create, complete, or kill"
+    required: true
+  - name: text
+    type: string
+    description: "Single task name. Used with complete to match by name."
+    required: false
+  - name: texts
+    type: array
+    description: "Multiple task strings for create, or multiple task names for complete."
+    required: false
+  - name: index
+    type: integer
+    description: "Single 1-based task index for complete."
+    required: false
+  - name: indices
+    type: array
+    description: "Multiple 1-based task indices for complete."
+    required: false
+script: |
+  python3 - <<'PY'
+  import json, os, sys
+  from pathlib import Path
+
+  def bone_dir():
+      xdg = os.environ.get("XDG_CONFIG_HOME")
+      if xdg:
+          return Path(xdg) / "bone-rust"
+      home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+      if home:
+          return Path(home) / ".bone-rust"
+      return Path("/tmp/.bone-rust")
+
+  TASKS_PATH = bone_dir() / "tasks.json"
+  LOCK_PATH  = bone_dir() / "tasks.lock"
+  MAX_PANE   = 8
+
+  # ── locking ──────────────────────────────────────────────────────────
+  class FileLock:
+      def __enter__(self):
+          LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+          self.f = LOCK_PATH.open("a+")
+          try:
+              import fcntl
+              fcntl.flock(self.f.fileno(), fcntl.LOCK_EX)
+              self._unlock = lambda: fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
+          except Exception:
+              self._unlock = lambda: None
+          return self
+      def __exit__(self, *exc):
+          try: self._unlock()
+          finally: self.f.close()
+
+  # ── persistence ──────────────────────────────────────────────────────
+  def load():
+      try:
+          data = json.loads(TASKS_PATH.read_text())
+          if isinstance(data, list):
+              return [t for t in data if isinstance(t, dict) and t.get("text")]
+      except Exception:
+          pass
+      return []
+
+  def save(tasks):
+      TASKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+      TASKS_PATH.write_text(json.dumps(tasks, indent=2) + "\n")
+
+  def destroy():
+      try: TASKS_PATH.unlink()
+      except FileNotFoundError: pass
+
+  # ── arg helpers ──────────────────────────────────────────────────────
+  def arg_json(name, default):
+      raw = os.environ.get(f"TOOL_{name}_JSON")
+      if raw is None:
+          return default
+      try: return json.loads(raw)
+      except Exception: return default
+
+  def get_texts():
+      vals = arg_json("TEXTS", None)
+      if isinstance(vals, list):
+          return [str(v).strip() for v in vals if str(v).strip()]
+      t = os.environ.get("TOOL_TEXT", "").strip()
+      return [t] if t else []
+
+  def get_indices():
+      vals = arg_json("INDICES", None)
+      if isinstance(vals, list):
+          out = []
+          for v in vals:
+              try: out.append(int(v))
+              except Exception: pass
+          return out
+      raw = os.environ.get("TOOL_INDEX", "").strip()
+      if not raw: return []
+      try: return [int(raw)]
+      except Exception: return []
+
+  def resolve_names(tasks, names):
+      idxs = []
+      for name in names:
+          hits = [i for i, t in enumerate(tasks) if t["text"] == name]
+          if not hits:
+              hits = [i for i, t in enumerate(tasks) if t["text"].casefold() == name.casefold()]
+          if not hits:
+              raise ValueError(f"No task found: {name}")
+          if len(hits) > 1:
+              raise ValueError(f"Multiple tasks match '{name}'. Use index instead.")
+          idxs.append(hits[0] + 1)
+      return idxs
+
+  def targets(tasks):
+      idxs = get_indices()
+      names = get_texts()
+      if idxs and names:
+          raise ValueError("Use either indices or names, not both.")
+      if idxs:
+          for i in idxs:
+              if i < 1 or i > len(tasks):
+                  raise ValueError(f"Index {i} out of range (1-{len(tasks)}).")
+          return idxs
+      if names:
+          return resolve_names(tasks, names)
+      raise ValueError("Provide index, indices, text, or texts.")
+
+  # ── pane rendering ───────────────────────────────────────────────────
+  def pane(tasks, scroll=0):
+      done = sum(1 for t in tasks if t.get("done"))
+      lines = ["Task List"]
+      if tasks:
+          for t in tasks:
+              mark = "✓" if t.get("done") else "○"
+              lines.append(f"  {mark} {t['text']}")
+      else:
+          lines.append("  No tasks")
+      title = f"Task List ({done}/{len(tasks)})" if tasks else "Task List"
+      return {"source": "task_list", "title": title, "lines": lines, "scroll": scroll}
+
+  def emit(content, tasks, scroll=0):
+      print(json.dumps({"content": content, "pane": pane(tasks, scroll)}, ensure_ascii=False))
+
+  # ── main ─────────────────────────────────────────────────────────────
+  action = os.environ.get("TOOL_ACTION", "").strip().lower()
+
+  try:
+      with FileLock():
+          if action == "kill":
+              destroy()
+              print(json.dumps({"content": "Task list killed.", "pane": {"source": "task_list", "title": "Task List", "lines": []}}))
+              sys.exit(0)
+
+          if action == "create":
+              texts = get_texts()
+              if not texts:
+                  raise ValueError("Provide text or texts for 'create'.")
+              tasks = [{"text": t, "done": False} for t in texts]
+              save(tasks)
+              msg = f"Created {len(tasks)} task(s)." if len(tasks) > 1 else f"Created task: {tasks[0]['text']}"
+              scroll = max(0, len(tasks) + 1 - MAX_PANE)
+              emit(msg, tasks, scroll)
+              sys.exit(0)
+
+          if action == "complete":
+              tasks = load()
+              if not tasks:
+                  raise ValueError("No task list exists. Use 'create' first.")
+              idxs = targets(tasks)
+              for i in idxs:
+                  tasks[i - 1]["done"] = True
+              save(tasks)
+              done_count = sum(1 for t in tasks if t.get("done"))
+              total = len(tasks)
+              if len(idxs) == 1:
+                  msg = f"Completed: {tasks[idxs[0]-1]['text']}"
+              else:
+                  msg = f"Completed {len(idxs)} tasks."
+              if done_count == total:
+                  msg += " All done — you can kill the list."
+              scroll = max(0, min(idxs) - 1)
+              emit(msg, tasks, scroll)
+              sys.exit(0)
+
+          raise ValueError("Action must be create, complete, or kill.")
+
+  except ValueError as e:
+      print(str(e), file=sys.stderr)
+      sys.exit(1)
+  PY

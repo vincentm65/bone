@@ -76,6 +76,7 @@ fn dynamic_display_args_render_in_tool_label() {
             "indices".to_string(),
         ],
         template: None,
+        show: None,
     };
 
     assert_eq!(
@@ -103,6 +104,7 @@ fn dynamic_display_template_renders_in_tool_label() {
     let display = ToolDisplayConfig {
         args: Vec::new(),
         template: Some("search {query}".to_string()),
+        show: None,
     };
 
     assert_eq!(

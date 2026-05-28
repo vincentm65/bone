@@ -41,6 +41,9 @@ pub struct ToolDisplayConfig {
     /// with argument values when present.
     #[serde(default)]
     pub template: Option<String>,
+    /// Whether to show the tool call row in chat. Defaults to true.
+    #[serde(default)]
+    pub show: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

@@ -7,7 +7,7 @@ use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::prompt::Decision;
-use crate::ui::render::{BoneTerminal, StatusInfo};
+use crate::ui::render::{BoneTerminal, Renderer, StatusInfo};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, pin_mut};
@@ -259,11 +259,18 @@ impl App {
             }
 
             for (call, result) in calls_for_display.iter().zip(results.iter()) {
-                self.messages.push(build_tool_row(
-                    call,
-                    result,
-                    self.tools.display_for_call(call),
-                ));
+                let visible = self
+                    .tools
+                    .display_for_call(call)
+                    .and_then(|d| d.show)
+                    .unwrap_or(true);
+                if visible {
+                    self.messages.push(build_tool_row(
+                        call,
+                        result,
+                        self.tools.display_for_call(call),
+                    ));
+                }
             }
             self.renderer
                 .flush_new_to_scrollback(&self.messages, term)?;
@@ -480,6 +487,20 @@ impl App {
                     self.active_page = new_active;
                 }
             }
+        }
+
+        // Resize viewport if pages changed during tool execution.
+        let width = term.size().map(|s| s.width).unwrap_or(80);
+        let desired = Renderer::desired_height(
+            &self.input,
+            self.active_prompt.as_ref(),
+            width,
+            if self.panes_visible { &self.pages } else { &[] },
+            self.active_page,
+        );
+        if desired != self.renderer.viewport_height {
+            Renderer::resize_viewport(term, desired)?;
+            self.renderer.viewport_height = desired;
         }
 
         Ok((calls_for_display, results))

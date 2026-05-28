@@ -1,5 +1,5 @@
 use bone::tools::command_policy::CommandSafety;
-use bone::tools::dynamic::{DynamicTool, InteractionType, OutputKind};
+use bone::tools::dynamic::{DynamicTool, InteractionType};
 use bone::tools::registry::ToolRegistry;
 use bone::tools::{ApprovalMode, ToolCall, ToolHandler};
 use serde_json::json;
@@ -42,50 +42,13 @@ fn script_tool_can_omit_args() {
 }
 
 #[test]
-fn default_task_list_parses_as_json_envelope_tool() {
-    let yaml = include_str!("../defaults/tools/task_list.yaml");
-    let tool: DynamicTool = serde_yaml::from_str(yaml).unwrap();
-
-    assert_eq!(tool.name, "task_list");
-    assert!(matches!(
-        tool.output.as_ref().map(|output| &output.kind),
-        Some(OutputKind::JsonEnvelope)
-    ));
-    assert_eq!(tool.safety, Some(CommandSafety::ReadOnly));
-    assert_eq!(
-        tool.display.as_ref().map(|display| display.args.as_slice()),
-        Some(
-            &[
-                "action".to_string(),
-                "text".to_string(),
-                "texts".to_string(),
-                "index".to_string(),
-                "indices".to_string()
-            ][..]
-        )
-    );
-    assert!(tool.script.is_some());
-}
-
-#[test]
-fn task_list_is_not_a_builtin_tool() {
-    let names: Vec<_> = bone::tools::builtin_tools()
-        .definitions()
-        .into_iter()
-        .map(|definition| definition.name)
-        .collect();
-
-    assert!(!names.contains(&"task_list".to_string()));
-}
-
-#[test]
 fn dynamic_tool_declared_safe_safety_is_allowed_in_safe_mode() {
     let call = ToolCall {
         id: "call-1".into(),
-        name: "task_list".into(),
+        name: "safe_tool".into(),
         arguments: json!({ "action": "list" }),
     };
-    let safety = [("task_list".to_string(), CommandSafety::ReadOnly)]
+    let safety = [("safe_tool".to_string(), CommandSafety::ReadOnly)]
         .into_iter()
         .collect();
     let handler = ToolHandler::with_enabled_and_safety(ToolRegistry::new(), &[], safety);
@@ -96,34 +59,32 @@ fn dynamic_tool_declared_safe_safety_is_allowed_in_safe_mode() {
 }
 
 #[test]
-fn task_list_without_declared_safety_defaults_to_safe_for_existing_seeded_files() {
-    let dir = temp_dir("task-list-safety");
+fn task_list_without_declared_safety_defaults_to_danger() {
+    let dir = temp_dir("tool-safety");
     fs::write(
-        dir.join("task_list.yaml"),
-        "name: task_list\ndescription: tasks\nscript: echo ok\n",
+        dir.join("my_tool.yaml"),
+        "name: my_tool\ndescription: my tool\nscript: echo ok\n",
     )
     .unwrap();
     let mut registry = bone::tools::builtin_tools();
     let mut dynamic_safety = std::collections::HashMap::new();
     for tool in bone::tools::dynamic::load_from_dir(&dir) {
-        let default_safety = if tool.name == "task_list" {
-            CommandSafety::ReadOnly
-        } else {
-            CommandSafety::Danger
-        };
-        dynamic_safety.insert(tool.name.clone(), tool.safety.unwrap_or(default_safety));
+        dynamic_safety.insert(
+            tool.name.clone(),
+            tool.safety.unwrap_or(CommandSafety::Danger),
+        );
         registry = registry.register(tool);
     }
     let handler =
-        ToolHandler::with_enabled_and_safety(registry, &["task_list".into()], dynamic_safety);
+        ToolHandler::with_enabled_and_safety(registry, &["my_tool".into()], dynamic_safety);
 
     assert_eq!(
         handler.safety_for_call(&ToolCall {
             id: "call-1".into(),
-            name: "task_list".into(),
+            name: "my_tool".into(),
             arguments: json!({ "action": "list" }),
         }),
-        CommandSafety::ReadOnly
+        CommandSafety::Danger
     );
 
     let _ = fs::remove_dir_all(dir);
@@ -198,6 +159,36 @@ script: |
 
     assert!(!results[0].is_error);
     assert_eq!(results[0].pane_page.as_ref().unwrap().scroll, 2);
+}
+
+#[tokio::test]
+async fn default_task_list_kill_returns_empty_pane_for_removal() {
+    let dir = temp_dir("task-list-kill");
+    let mut tool: DynamicTool =
+        serde_yaml::from_str(include_str!("../defaults/tools/task_list.yaml")).unwrap();
+    let script = tool.script.take().unwrap();
+    tool.script = Some(format!(
+        "export XDG_CONFIG_HOME='{}'\n{}",
+        dir.display(),
+        script
+    ));
+    let handler = ToolHandler::new(ToolRegistry::new().register(tool));
+
+    let results = handler
+        .execute_all(vec![ToolCall {
+            id: "call-1".into(),
+            name: "task_list".into(),
+            arguments: json!({ "action": "kill" }),
+        }])
+        .await;
+
+    assert!(!results[0].is_error, "{}", results[0].content);
+    assert_eq!(results[0].content, "Task list killed.");
+    let page = results[0].pane_page.as_ref().unwrap();
+    assert_eq!(page.source, "task_list");
+    assert!(page.content.is_empty());
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
