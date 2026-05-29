@@ -52,6 +52,16 @@ pub struct ToolOutput {
     pub pane_page: Option<PanePage>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ToolExecutionContext {
+    pub call_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ToolLiveEvent {
+    Pane(PanePage),
+}
+
 impl ToolOutput {
     pub fn text(content: String) -> Self {
         Self {
@@ -68,5 +78,14 @@ pub trait Tool: Send + Sync {
 
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
         self.execute(arguments).await.map(ToolOutput::text)
+    }
+
+    async fn execute_output_live(
+        &self,
+        arguments: Value,
+        _events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        _context: ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        self.execute_output(arguments).await
     }
 }

@@ -1,5 +1,5 @@
 use bone::tools::command_policy::CommandSafety;
-use bone::tools::dynamic::{DynamicTool, InteractionType};
+use bone::tools::dynamic::{DynamicTool, InteractionType, OutputKind};
 use bone::tools::registry::ToolRegistry;
 use bone::tools::{ApprovalMode, ToolCall, ToolHandler};
 use serde_json::json;
@@ -15,6 +15,21 @@ fn temp_dir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("bone-tools-{label}-{suffix}"));
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+#[test]
+fn default_subagent_wraps_agent_events_and_uses_python_panel_script() {
+    let yaml = include_str!("../defaults/tools/subagent.yaml");
+    let tool: DynamicTool = serde_yaml::from_str(yaml).unwrap();
+
+    assert_eq!(tool.name, "subagent");
+    assert_eq!(tool.output.as_ref().unwrap().kind, OutputKind::JsonlEvents);
+    let script = tool.script.as_ref().unwrap();
+    assert!(script.contains("python3 -"));
+    assert!(script.contains("TOOL_CALL_ID"));
+    assert!(script.contains("type\": \"pane"));
+    assert!(script.contains("print(line, flush=True)"));
+    assert!(script.contains("emit_pane(remove=True)"));
 }
 
 #[test]

@@ -1,0 +1,169 @@
+name: subagent
+version: 1
+description: "Run a Bone sub-agent with a chosen approval mode. Optionally override provider and model; omitted values use the last/default provider and that provider's configured model."
+safety: read_only
+args:
+  - name: approval
+    type: string
+    required: true
+    description: "Approval mode - read_only, edit, or danger."
+  - name: task
+    type: string
+    required: true
+    description: "Task for the sub-agent."
+  - name: provider
+    type: string
+    description: "Optional provider id. If omitted, uses the last/default provider from config."
+  - name: model
+    type: string
+    description: "Optional model name. If omitted, uses the selected provider's configured model."
+script: |
+  set -euo pipefail
+
+  approval="${TOOL_APPROVAL:-read_only}"
+  task="${TOOL_TASK:-}"
+
+  args=(agent --events --approval "$approval" --prompt "$task")
+  if [ -n "${TOOL_PROVIDER:-}" ]; then
+    args+=(--provider "$TOOL_PROVIDER")
+  fi
+  if [ -n "${TOOL_MODEL:-}" ]; then
+    args+=(--model "$TOOL_MODEL")
+  fi
+
+  uv run -- python3 - "$approval" "$task" "${TOOL_CALL_ID:-}" "${args[@]}" <<'PY'
+  import json
+  import subprocess
+  import sys
+  import threading
+
+  approval = sys.argv[1]
+  task = sys.argv[2]
+  call_id = sys.argv[3]
+  args = sys.argv[4:]
+
+  def short_mode(value):
+      return {"read_only": "ro", "edit": "edit", "danger": "danger"}.get(value, (value or "?")[:6])
+
+  def short_title(value):
+      first = (value or "").splitlines()[0].strip()
+      if len(first) > 28:
+          first = first[:25] + "..."
+      return first or "subagent"
+
+  def fmt_tokens(sent, received):
+      total = int(sent or 0) + int(received or 0)
+      if total >= 1_000_000:
+          return f"{total / 1_000_000:.1f}M"
+      if total >= 1000:
+          return f"{total / 1000:.1f}k"
+      return str(total)
+
+  def clip(value, width):
+      value = " ".join(str(value or "").split())
+      return value if len(value) <= width else value[:max(0, width - 3)] + "..."
+
+  def compact_status(message):
+      message = " ".join(str(message or "").split())
+      if message.startswith("running shell: "):
+          return message[len("running shell: "):]
+      if message.startswith("running "):
+          return message[len("running "):]
+      return message or "running"
+
+  state = {
+      "approval": approval,
+      "mode": short_mode(approval),
+      "task": task,
+      "title": short_title(task),
+      "model": "current",
+      "now": "starting",
+      "sent": 0,
+      "received": 0,
+  }
+
+  source = f"subagent-{call_id}" if call_id else f"subagent-{state['mode']}"
+
+  def emit_pane(remove=False):
+      if remove:
+          pane = {"source": source, "title": "subagent", "lines": []}
+      else:
+          tokens = fmt_tokens(state["sent"], state["received"])
+          title = f"subagent {state['mode']} {tokens} tok"
+          row = f"{state['mode']:<4} {clip(state['model'], 12):<12} {tokens:<6} {clip(state['title'], 28):<28} {clip(state['now'], 32)}"
+          pane = {
+              "source": source,
+              "title": title,
+              "visible_rows": 2,
+              "lines": [
+                  "MODE MODEL        TOKENS TITLE                        NOW",
+                  row,
+              ],
+          }
+      print(json.dumps({"type": "pane", "pane": pane}), flush=True)
+
+  emit_pane()
+
+  proc = subprocess.Popen(
+      ["bone"] + args,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      text=True,
+      bufsize=1,
+  )
+  stderr_lines = []
+
+  def drain_stderr():
+      if proc.stderr is None:
+          return
+      for err_line in proc.stderr:
+          stderr_lines.append(err_line)
+
+  stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+  stderr_thread.start()
+
+  for line in proc.stdout:
+      line = line.rstrip("\n")
+      print(line, flush=True)
+      try:
+          event = json.loads(line)
+      except Exception:
+          continue
+
+      event_type = event.get("type")
+      if event_type == "started":
+          state["approval"] = event.get("approval") or state["approval"]
+          state["mode"] = short_mode(state["approval"])
+          state["model"] = event.get("model") or state["model"]
+          state["task"] = event.get("task") or state["task"]
+          state["title"] = short_title(state["task"])
+          state["now"] = "thinking"
+      elif event_type == "status":
+          state["now"] = compact_status(event.get("message"))
+      elif event_type == "tool_call":
+          name = event.get("name") or "tool"
+          summary = event.get("summary") or ""
+          state["now"] = f"{name} {summary}".strip()
+      elif event_type == "token_usage":
+          state["sent"] = event.get("sent") or 0
+          state["received"] = event.get("received") or 0
+      elif event_type == "finished":
+          state["now"] = "done"
+      elif event_type == "failed":
+          state["now"] = "failed: " + str(event.get("message") or "error")
+
+      emit_pane()
+
+  code = proc.wait()
+  stderr_thread.join(timeout=1)
+  stderr = "".join(stderr_lines)
+  if stderr:
+      print(stderr, file=sys.stderr, end="")
+
+  emit_pane(remove=True)
+  sys.exit(code)
+  PY
+output:
+  kind: jsonl_events
+display:
+  args: [approval, task, provider, model]

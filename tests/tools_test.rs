@@ -14,10 +14,9 @@ fn temp_dir(label: &str) -> PathBuf {
 }
 
 #[test]
-fn seed_default_tools_migrates_v1_python_task_list_to_v2_bash() {
+fn seed_default_tools_migrates_versionless_task_list() {
     let dir = temp_dir("task-list-migration");
     let path = dir.join("task_list.yaml");
-    // Simulate a v1 (Python-based) task_list.yaml
     fs::write(
         &path,
         r#"name: task_list
@@ -35,26 +34,22 @@ script: |
     seed_default_tools(&dir);
 
     let updated = fs::read_to_string(&path).unwrap();
-    // v2 uses bash, not python
-    assert!(!updated.contains("python3"));
-    // v2 uses line_envelope, not json_envelope
+    assert!(updated.contains("uv run"));
+    assert!(updated.contains("python3"));
     assert!(updated.contains("line_envelope"));
     assert!(!updated.contains("json_envelope"));
-    // v2 uses bash set -euo pipefail
-    assert!(updated.contains("set -euo pipefail"));
 
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn seed_default_tools_does_not_overwrite_v2_task_list() {
+fn seed_default_tools_does_not_overwrite_v4_task_list() {
     let dir = temp_dir("task-list-no-migrate");
     let path = dir.join("task_list.yaml");
-    // Simulate a v2 (bash-based) task_list.yaml
     fs::write(
         &path,
         r#"name: task_list
-version: 2
+version: 4
 description: my custom task list
 script: |
   echo "custom"
@@ -65,26 +60,25 @@ script: |
     seed_default_tools(&dir);
 
     let content = fs::read_to_string(&path).unwrap();
-    // Should not be overwritten since it's already v2 (no python3, no json_envelope)
     assert!(content.contains("my custom task list"));
 
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn seed_default_tools_detects_wrong_os_variant() {
-    let dir = temp_dir("task-list-wrong-os");
+fn seed_default_tools_migrates_v3_heredoc_to_v4() {
+    let dir = temp_dir("task-list-v3-migration");
     let path = dir.join("task_list.yaml");
-    // Simulate a PowerShell variant on a Unix system (wrong OS)
     fs::write(
         &path,
         r#"name: task_list
-version: 2
+version: 3
 output:
   kind: line_envelope
 script: |
-  $ErrorActionPreference = 'Stop'
-  Write-Output 'hello'
+  uv run -- python3 <<'PYEOF'
+  print("hello")
+  PYEOF
 "#,
     )
     .unwrap();
@@ -92,12 +86,40 @@ script: |
     seed_default_tools(&dir);
 
     let updated = fs::read_to_string(&path).unwrap();
-    // On Unix, should have been migrated to the bash variant
     assert!(
-        updated.contains("set -euo pipefail"),
-        "expected bash variant after wrong-OS migration, got: {updated}"
+        updated.contains("version: 4"),
+        "expected v4 after v3 migration, got: {updated}"
     );
-    assert!(!updated.contains("$ErrorActionPreference"));
+    assert!(
+        updated.contains("python3 -c"),
+        "expected python3 -c syntax, got: {updated}"
+    );
+    assert!(!updated.contains("<<'PYEOF'"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn seed_default_tools_seeds_task_list_when_absent() {
+    let dir = temp_dir("task-list-seed");
+
+    seed_default_tools(&dir);
+
+    let content = fs::read_to_string(dir.join("task_list.yaml")).unwrap();
+    assert!(content.contains("version: 4"));
+    assert!(content.contains("python3 -c"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn seed_default_tools_seeds_web_search_when_absent() {
+    let dir = temp_dir("web-search-seed");
+
+    seed_default_tools(&dir);
+
+    let content = fs::read_to_string(dir.join("web_search.yaml")).unwrap();
+    assert!(content.contains("ddgs"));
 
     let _ = fs::remove_dir_all(dir);
 }

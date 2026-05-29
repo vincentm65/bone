@@ -1,3 +1,4 @@
+version: 3
 name: web_search
 description: "Search the web for information using DuckDuckGo. Returns titles, URLs and summaries. Useful for looking up documentation, current events, technical topics, and general knowledge."
 args:
@@ -10,11 +11,17 @@ args:
     description: "Number of results to return (default 5, max 10)"
     required: false
 script: |
-  set -euo pipefail
-  QUERY="$TOOL_QUERY"
-  NUM="${TOOL_NUM_RESULTS:-5}"
-  # Clamp to 1-10
-  if [ "$NUM" -lt 1 ] 2>/dev/null; then NUM=1; fi
-  if [ "$NUM" -gt 10 ] 2>/dev/null; then NUM=10; fi
+  uv run --with ddgs -- python3 -c "
+  import json, os, sys
+  from ddgs import DDGS
 
-  exec uvx ddgs text -q "$QUERY" -m "$NUM"
+  query = os.environ['TOOL_QUERY']
+  num = int(os.environ.get('TOOL_NUM_RESULTS', '5'))
+  num = max(1, min(10, num))
+
+  with DDGS() as ddgs:
+      results = list(ddgs.text(query, max_results=num))
+
+  for r in results:
+      print(json.dumps(r))
+  "

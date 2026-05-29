@@ -42,7 +42,6 @@ impl TokenStats {
         self.request_count += 1;
     }
 
-    #[allow(dead_code)]
     /// Total tokens across all requests.
     pub fn total(&self) -> u64 {
         self.sent + self.received

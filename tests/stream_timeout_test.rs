@@ -26,7 +26,6 @@ fn non_retryable_provider_failures() {
     for kind in [
         LlmErrorKind::Auth,
         LlmErrorKind::RateLimit,
-        LlmErrorKind::Server(500),
         LlmErrorKind::Parse,
         LlmErrorKind::Config,
     ] {

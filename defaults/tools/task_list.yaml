@@ -1,5 +1,5 @@
 name: task_list
-version: 2
+version: 4
 description: "Manage a persistent task list displayed in the bottom pane. Actions: create (bulk-add tasks), complete (mark done by index/name), kill (destroy the list). Agent calls kill after all tasks are done."
 safety: safe
 output:
@@ -28,226 +28,158 @@ args:
     description: "Multiple 1-based task indices for complete."
     required: false
 script: |
-  set -euo pipefail
+  uv run -- python3 -c "
+  import json, os, pathlib, sys
 
-  # ── config directory ────────────────────────────────────────────────
-  bone_dir() {
-    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
-      echo "$XDG_CONFIG_HOME/bone-rust"
-    elif [ -n "${HOME:-}" ]; then
-      echo "$HOME/.bone-rust"
-    elif [ -n "${USERPROFILE:-}" ]; then
-      echo "$USERPROFILE/.bone-rust"
-    else
-      echo "/tmp/.bone-rust"
-    fi
-  }
+  def bone_dir():
+      xdg = os.environ.get('XDG_CONFIG_HOME')
+      if xdg:
+          return pathlib.Path(xdg) / 'bone-rust'
+      home = os.environ.get('HOME') or os.environ.get('USERPROFILE')
+      if home:
+          return pathlib.Path(home) / '.bone-rust'
+      return pathlib.Path('/tmp/.bone-rust')
 
-  DIR="$(bone_dir)/tasks/${BONE_PID:-$$}"
-  TASKS_FILE="$DIR/tasks.txt"
-  DONE_FILE="$DIR/tasks_done.txt"
-  mkdir -p "$DIR"
+  dir_path = bone_dir() / 'tasks' / os.environ.get('BONE_PID', str(os.getpid()))
+  dir_path.mkdir(parents=True, exist_ok=True)
+  tasks_file = dir_path / 'tasks.txt'
+  done_file = dir_path / 'tasks_done.txt'
 
-  # ── helpers ─────────────────────────────────────────────────────────
-  total_tasks()    { [ -f "$TASKS_FILE" ] && wc -l < "$TASKS_FILE" || echo 0; }
-  done_count()     { [ -f "$DONE_FILE" ] && wc -l < "$DONE_FILE" || echo 0; }
+  def read_lines(p):
+      return p.read_text().splitlines() if p.exists() else []
 
-  emit_pane() {
-    local msg="$1" scroll="${2:-0}"
-    local total done title
-    total=$(total_tasks)
-    done=$(done_count)
-    if [ "$total" -gt 0 ]; then
-      title="Task List ($done/$total)"
-    else
-      title="Task List"
-    fi
-    printf '@@content@@\n'
-    printf '%s\n' "$msg"
-    printf '@@pane@@\n'
-    printf 'source: task_list\n'
-    printf 'title: %s\n' "$title"
-    printf 'visible_rows: 8\n'
-    printf 'scroll: %s\n' "$scroll"
-    printf '@@lines@@\n'
-    if [ "$total" -gt 0 ]; then
-      i=0
-      while IFS= read -r task; do
-        if [ -f "$DONE_FILE" ] && grep -qxF "$task" "$DONE_FILE" 2>/dev/null; then
-          printf '  \u2713 %s\n' "$task"
-        else
-          printf '  \u25cb %s\n' "$task"
-        fi
-        i=$((i + 1))
-      done < "$TASKS_FILE"
-    else
-      printf '  No tasks\n'
-    fi
-    printf '@@end@@\n'
-  }
+  def write_lines(p, lines):
+      p.write_text('\n'.join(lines) + ('\n' if lines else ''))
 
-  emit_empty_pane() {
-    local msg="$1"
-    printf '@@content@@\n'
-    printf '%s\n' "$msg"
-    printf '@@pane@@\n'
-    printf 'source: task_list\n'
-    printf 'title: Task List\n'
-    printf 'visible_rows: 8\n'
-    printf 'scroll: 0\n'
-    printf '@@lines@@\n'
-    printf '@@end@@\n'
-  }
+  def append_line(p, line):
+      with open(p, 'a') as f:
+          f.write(line + '\n')
 
-  # ── read indexed array env vars ─────────────────────────────────────
-  get_texts() {
-    local count="${TOOL_TEXTS_COUNT:-0}"
-    if [ "$count" -gt 0 ]; then
-      for i in $(seq 0 $((count - 1))); do
-        eval "printf '%s\n' \"\${TOOL_TEXTS_$i:-}\""
-      done
-      return
-    fi
-    if [ -n "${TOOL_TEXT:-}" ]; then
-      printf '%s\n' "$TOOL_TEXT"
-    fi
-  }
+  def total_tasks():
+      return len(read_lines(tasks_file))
 
-  get_indices() {
-    local count="${TOOL_INDICES_COUNT:-0}"
-    if [ "$count" -gt 0 ]; then
-      for i in $(seq 0 $((count - 1))); do
-        eval "printf '%s\n' \"\${TOOL_INDICES_$i:-}\""
-      done
-      return
-    fi
-    if [ -n "${TOOL_INDEX:-}" ]; then
-      printf '%s\n' "$TOOL_INDEX"
-    fi
-  }
+  def done_count():
+      return len(read_lines(done_file))
 
-  # ── resolve task name(s) to line number(s) ──────────────────────────
-  resolve_name() {
-    local name="$1" total
-    total=$(total_tasks)
-    # Exact match first
-    local line=0
-    while IFS= read -r task; do
-      line=$((line + 1))
-      if [ "$task" = "$name" ]; then
-        printf '%s\n' "$line"
-        return
-      fi
-    done < "$TASKS_FILE"
-    # Case-insensitive fallback
-    line=0
-    local name_lower
-    name_lower=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
-    while IFS= read -r task; do
-      line=$((line + 1))
-      task_lower=$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')
-      if [ "$task_lower" = "$name_lower" ]; then
-        printf '%s\n' "$line"
-        return
-      fi
-    done < "$TASKS_FILE"
-    printf ''  # not found
-  }
+  def get_texts():
+      count = int(os.environ.get('TOOL_TEXTS_COUNT', '0'))
+      if count > 0:
+          return [os.environ.get(f'TOOL_TEXTS_{i}', '') for i in range(count)]
+      t = os.environ.get('TOOL_TEXT', '')
+      return [t] if t else []
 
-  # ── get target indices from index/name args ─────────────────────────
-  get_targets() {
-    local indices names
-    indices=$(get_indices)
-    names=$(get_texts)
-    if [ -n "$indices" ] && [ -n "$names" ]; then
-      echo "ERROR: Use either indices or names, not both." >&2
-      exit 1
-    fi
-    if [ -n "$indices" ]; then
-      printf '%s\n' "$indices"
-      return
-    fi
-    if [ -n "$names" ]; then
-      for name in $names; do
-        local idx
-        idx=$(resolve_name "$name")
-        if [ -z "$idx" ]; then
-          echo "ERROR: No task found: $name" >&2
-          exit 1
-        fi
-        printf '%s\n' "$idx"
-      done
-      return
-    fi
-    echo "ERROR: Provide index, indices, text, or texts." >&2
-    exit 1
-  }
+  def get_indices():
+      count = int(os.environ.get('TOOL_INDICES_COUNT', '0'))
+      if count > 0:
+          return [int(os.environ.get(f'TOOL_INDICES_{i}', '0')) for i in range(count)]
+      idx = os.environ.get('TOOL_INDEX', '')
+      return [int(idx)] if idx else []
 
-  # ── main ────────────────────────────────────────────────────────────
-  action="${TOOL_ACTION:-}"
+  def resolve_name(name):
+      tasks = read_lines(tasks_file)
+      for i, t in enumerate(tasks):
+          if t == name:
+              return i + 1
+      name_low = name.lower()
+      for i, t in enumerate(tasks):
+          if t.lower() == name_low:
+              return i + 1
+      return None
 
-  case "$action" in
-    kill)
-      rm -f "$TASKS_FILE" "$DONE_FILE"
-      emit_empty_pane "Task list killed."
-      ;;
+  def get_targets():
+      indices = get_indices()
+      texts = get_texts()
+      if indices and texts:
+          print('ERROR: Use either indices or names, not both.', file=sys.stderr)
+          sys.exit(1)
+      if indices:
+          return indices
+      if texts:
+          result = []
+          for name in texts:
+              idx = resolve_name(name)
+              if idx is None:
+                  print(f'ERROR: No task found: {name}', file=sys.stderr)
+                  sys.exit(1)
+              result.append(idx)
+          return result
+      print('ERROR: Provide index, indices, text, or texts.', file=sys.stderr)
+      sys.exit(1)
 
-    create)
-      texts=$(get_texts)
-      if [ -z "$texts" ]; then
-        echo "ERROR: Provide text or texts for 'create'." >&2
-        exit 1
-      fi
-      # Overwrite task files with new list
-      printf '%s\n' "$texts" > "$TASKS_FILE"
-      : > "$DONE_FILE"
-      count=$(total_tasks)
-      if [ "$count" -gt 1 ]; then
-        msg="Created $count task(s)."
-      else
-        msg="Created task: $(head -1 "$TASKS_FILE")"
-      fi
-      emit_pane "$msg" 0
-      ;;
+  def emit_pane(msg, scroll=0):
+      total = total_tasks()
+      done = done_count()
+      title = f'Task List ({done}/{total})' if total > 0 else 'Task List'
+      print('@@content@@')
+      print(msg)
+      print('@@pane@@')
+      print('source: task_list')
+      print(f'title: {title}')
+      print('visible_rows: 8')
+      print(f'scroll: {scroll}')
+      print('@@lines@@')
+      if total > 0:
+          tasks = read_lines(tasks_file)
+          done_items = set(read_lines(done_file))
+          for t in tasks:
+              mark = '\u2713' if t in done_items else '\u25cb'
+              print(f'  {mark} {t}')
+      else:
+          print('  No tasks')
+      print('@@end@@')
 
-    complete)
-      if [ ! -f "$TASKS_FILE" ]; then
-        echo "ERROR: No task list exists. Use 'create' first." >&2
-        exit 1
-      fi
-      targets=$(get_targets)
-      if [ -z "$targets" ]; then
-        exit 1
-      fi
-      # Mark each target task as done
-      for idx in $targets; do
-        task=$(sed -n "${idx}p" "$TASKS_FILE")
-        # Add to done file if not already there
-        if ! grep -qxF "$task" "$DONE_FILE" 2>/dev/null; then
-          printf '%s\n' "$task" >> "$DONE_FILE"
-        fi
-      done
-      total=$(total_tasks)
-      done=$(done_count)
-      # Build completion message
-      first=$(printf '%s\n' "$targets" | head -1)
-      first_task=$(sed -n "${first}p" "$TASKS_FILE")
-      target_count=$(printf '%s\n' "$targets" | wc -l)
-      if [ "$target_count" -eq 1 ]; then
-        msg="Completed: $first_task"
-      else
-        msg="Completed $target_count tasks."
-      fi
-      if [ "$done" -eq "$total" ]; then
-        msg="$msg All done -- you can kill the list."
-      fi
-      scroll=$((first - 1))
-      [ "$scroll" -lt 0 ] && scroll=0
-      emit_pane "$msg" "$scroll"
-      ;;
+  def emit_empty_pane(msg):
+      print('@@content@@')
+      print(msg)
+      print('@@pane@@')
+      print('source: task_list')
+      print('title: Task List')
+      print('visible_rows: 8')
+      print('scroll: 0')
+      print('@@lines@@')
+      print('@@end@@')
 
-    *)
-      echo "ERROR: Action must be create, complete, or kill." >&2
-      exit 1
-      ;;
-  esac
+  action = os.environ.get('TOOL_ACTION', '')
+
+  if action == 'kill':
+      tasks_file.unlink(missing_ok=True)
+      done_file.unlink(missing_ok=True)
+      emit_empty_pane('Task list killed.')
+  elif action == 'create':
+      texts = get_texts()
+      if not texts:
+          print(\"ERROR: Provide text or texts for 'create'.\", file=sys.stderr)
+          sys.exit(1)
+      write_lines(tasks_file, texts)
+      write_lines(done_file, [])
+      count = len(texts)
+      msg = f'Created {count} task(s).' if count > 1 else f'Created task: {texts[0]}'
+      emit_pane(msg, 0)
+  elif action == 'complete':
+      if not tasks_file.exists():
+          print(\"ERROR: No task list exists. Use 'create' first.\", file=sys.stderr)
+          sys.exit(1)
+      targets = get_targets()
+      tasks = read_lines(tasks_file)
+      done_items = set(read_lines(done_file))
+      for idx in targets:
+          task = tasks[idx - 1]
+          if task not in done_items:
+              append_line(done_file, task)
+              done_items.add(task)
+      total = total_tasks()
+      done = done_count()
+      first = targets[0]
+      first_task = tasks[first - 1]
+      if len(targets) == 1:
+          msg = f'Completed: {first_task}'
+      else:
+          msg = f'Completed {len(targets)} tasks.'
+      if done == total:
+          msg += ' All done -- you can kill the list.'
+      scroll = max(0, first - 1)
+      emit_pane(msg, scroll)
+  else:
+      print('ERROR: Action must be create, complete, or kill.', file=sys.stderr)
+      sys.exit(1)
+  "

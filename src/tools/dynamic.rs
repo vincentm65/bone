@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::tools::command_policy::CommandSafety;
-use crate::tools::script_runner::{ScriptRequest, run_script};
-use crate::tools::types::{Tool, ToolDefinition, ToolDisplayConfig, ToolOutput};
+use crate::tools::script_runner::{ScriptRequest, run_script, run_script_jsonl};
+use crate::tools::types::{
+    Tool, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolLiveEvent, ToolOutput,
+};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::DEFAULT_PANE_ROWS;
 
@@ -44,6 +46,7 @@ pub struct OutputConfig {
 pub enum OutputKind {
     JsonEnvelope,
     LineEnvelope,
+    JsonlEvents,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,16 +170,165 @@ impl Tool for DynamicTool {
     }
 
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
+        // For JsonlEvents, use streaming execution to read stdout line-by-line.
+        if self.output.as_ref().map(|o| &o.kind) == Some(&OutputKind::JsonlEvents) {
+            return self.run_jsonl_events(arguments).await;
+        }
         let output = self.run(arguments).await?;
         match self.output.as_ref().map(|output| &output.kind) {
             Some(OutputKind::JsonEnvelope) => parse_json_envelope(&output.stdout),
             Some(OutputKind::LineEnvelope) => parse_line_envelope(&output.stdout),
-            None => Ok(ToolOutput::text(output.stdout)),
+            Some(OutputKind::JsonlEvents) | None => Ok(ToolOutput::text(output.stdout)),
         }
+    }
+
+    async fn execute_output_live(
+        &self,
+        arguments: Value,
+        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        if self.output.as_ref().map(|o| &o.kind) == Some(&OutputKind::JsonlEvents) {
+            return self.run_jsonl_events_live(arguments, events, context).await;
+        }
+        self.execute_output(arguments).await
     }
 }
 
 impl DynamicTool {
+    /// Run the tool script and parse JSONL events from stdout.
+    /// Accumulates events into a pane page with sub-agent progress.
+    async fn run_jsonl_events(&self, arguments: Value) -> Result<ToolOutput, String> {
+        // Build env vars (same as run())
+        let script = self
+            .script
+            .as_ref()
+            .ok_or_else(|| "dynamic tool has no script".to_string())?;
+
+        for arg in &self.args {
+            if arg.required && arguments.get(&arg.name).is_none() {
+                return Err(format!("missing required argument: {}", arg.name));
+            }
+        }
+
+        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
+        if let Value::Object(map) = &arguments {
+            for (key, value) in map {
+                let env_name = Self::arg_to_env_name(key);
+                let env_value = match value {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => value.to_string(),
+                };
+                env.push((env_name, env_value));
+            }
+        }
+
+        let output = run_script(ScriptRequest {
+            command: script.clone(),
+            env,
+            timeout_ms: 300_000,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if output.exit_code != Some(0) {
+            let code = output
+                .exit_code
+                .map_or_else(|| "signal".to_string(), |c| c.to_string());
+            return Err(format!("exit code: {code}\n{}", output.stdout));
+        }
+
+        parse_jsonl_events(&output.stdout)
+    }
+
+    async fn run_jsonl_events_live(
+        &self,
+        arguments: Value,
+        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        let script = self
+            .script
+            .as_ref()
+            .ok_or_else(|| "dynamic tool has no script".to_string())?;
+
+        for arg in &self.args {
+            if arg.required && arguments.get(&arg.name).is_none() {
+                return Err(format!("missing required argument: {}", arg.name));
+            }
+        }
+
+        let mut env = self.build_env(&arguments);
+        env.push(("TOOL_CALL_ID".to_string(), context.call_id));
+        let sender = events.clone();
+        let output = run_script_jsonl(
+            ScriptRequest {
+                command: script.clone(),
+                env,
+                timeout_ms: 300_000,
+            },
+            move |line| {
+                if let (Some(sender), Some(page)) = (sender.as_ref(), pane_event_from_line(&line)) {
+                    let _ = sender.send(ToolLiveEvent::Pane(page));
+                }
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if output.exit_code != Some(0) {
+            let code = output
+                .exit_code
+                .map_or_else(|| "signal".to_string(), |c| c.to_string());
+            return Err(format!("exit code: {code}\n{}", output.stdout));
+        }
+
+        parse_jsonl_events(&output.stdout)
+    }
+
+    fn build_env(&self, arguments: &Value) -> Vec<(String, String)> {
+        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
+        if let Value::Object(map) = arguments {
+            for (key, value) in map {
+                let env_name = Self::arg_to_env_name(key);
+                let env_value = match value {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => value.to_string(),
+                };
+                env.push((env_name.clone(), env_value));
+                env.push((
+                    format!("{env_name}_JSON"),
+                    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+                ));
+                if let Value::Array(arr) = value {
+                    env.push((format!("{env_name}_COUNT"), arr.len().to_string()));
+                    for (i, item) in arr.iter().enumerate() {
+                        let val = match item {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        env.push((format!("{env_name}_{i}"), val));
+                    }
+                }
+            }
+        }
+        env
+    }
+
     async fn run(
         &self,
         arguments: Value,
@@ -260,6 +412,25 @@ impl DynamicTool {
     }
 }
 
+fn pane_event_from_line(line: &str) -> Option<PanePage> {
+    let event: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if event["type"].as_str()? != "pane" {
+        return None;
+    }
+    pane_page_from_value(&event)
+}
+
+fn pane_page_from_value(event: &serde_json::Value) -> Option<PanePage> {
+    let pane: PaneEnvelope = serde_json::from_value(event.get("pane")?.clone()).ok()?;
+    Some(PanePage {
+        source: pane.source,
+        title: pane.title,
+        content: pane.lines.into_iter().map(Line::from).collect(),
+        visible_rows: pane.visible_rows,
+        scroll: pane.scroll,
+    })
+}
+
 fn parse_line_envelope(stdout: &str) -> Result<ToolOutput, String> {
     let mut content = String::new();
     let mut pane_source = String::new();
@@ -322,10 +493,7 @@ fn parse_line_envelope(stdout: &str) -> Result<ToolOutput, String> {
         None
     };
 
-    Ok(ToolOutput {
-        content,
-        pane_page,
-    })
+    Ok(ToolOutput { content, pane_page })
 }
 
 fn parse_json_envelope(stdout: &str) -> Result<ToolOutput, String> {
@@ -342,6 +510,129 @@ fn parse_json_envelope(stdout: &str) -> Result<ToolOutput, String> {
         content: envelope.content,
         pane_page,
     })
+}
+fn parse_jsonl_events(stdout: &str) -> Result<ToolOutput, String> {
+    let mut content = String::new();
+    let mut pane_title = String::from("Sub-agent");
+    let mut pane_source = String::from("subagent");
+    let mut pane_lines: Vec<String> = Vec::new();
+    let mut explicit_pane_page: Option<PanePage> = None;
+    let mut _status_message = String::new();
+    let mut tokens_sent: u64 = 0;
+    let mut tokens_received: u64 = 0;
+    #[allow(unused_assignments)]
+    let mut task_preview = String::new();
+    #[allow(unused_assignments)]
+    let mut approval = String::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("bone: warning: skipping non-JSON line in tool output: {e}");
+                continue;
+            }
+        };
+        let event_type = event["type"].as_str().unwrap_or("");
+        if event_type == "pane" {
+            explicit_pane_page = pane_page_from_value(&event);
+            continue;
+        }
+
+        match event_type {
+            "started" => {
+                approval = event["approval"].as_str().unwrap_or("").to_string();
+                task_preview = event["task"]
+                    .as_str()
+                    .unwrap_or("")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let task_display = if task_preview.len() > 80 {
+                    format!("{}...", &task_preview[..77])
+                } else {
+                    task_preview.clone()
+                };
+                pane_title = format!("Sub-agent: {approval}");
+                pane_source = format!("subagent-{}", approval);
+                pane_lines.push(format!("Task: {task_display}"));
+                pane_lines.push(String::new());
+            }
+            "status" => {
+                _status_message = event["message"].as_str().unwrap_or("").to_string();
+            }
+            "tool_call" => {
+                let name = event["name"].as_str().unwrap_or("");
+                let summary = event["summary"].as_str().unwrap_or("");
+                let summary_preview = if summary.len() > 100 {
+                    format!("{}...", &summary[..97])
+                } else {
+                    summary.to_string()
+                };
+                pane_lines.push(format!("  > {name}: {summary_preview}"));
+            }
+            "tool_result" => {
+                let is_error = event["is_error"].as_bool().unwrap_or(false);
+                if is_error {
+                    pane_lines.push("    (denied by approval mode)".to_string());
+                }
+            }
+            "token_usage" => {
+                tokens_sent = event["sent"].as_u64().unwrap_or(0);
+                tokens_received = event["received"].as_u64().unwrap_or(0);
+            }
+            "text_delta" => {
+                // accumulate partial text
+                if let Some(text) = event["text"].as_str() {
+                    content.push_str(text);
+                }
+            }
+            "finished" => {
+                // Use the finished content if we didn't accumulate deltas
+                if content.is_empty() {
+                    content = event["content"].as_str().unwrap_or("").to_string();
+                }
+                pane_lines.push(String::new());
+                pane_lines.push(format!(
+                    "Status: finished | Tokens: {tokens_sent} sent / {tokens_received} received"
+                ));
+            }
+            "failed" => {
+                let msg = event["message"].as_str().unwrap_or("unknown error");
+                pane_lines.push(format!("FAILED: {msg}"));
+                if content.is_empty() {
+                    content = format!("Sub-agent failed: {msg}");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // If no content was collected from events, use stdout as fallback
+    if content.is_empty() && !stdout.is_empty() {
+        content = stdout.to_string();
+    }
+
+    let pane_page = explicit_pane_page.or_else(|| {
+        if pane_lines.is_empty() {
+            None
+        } else {
+            Some(PanePage {
+                source: pane_source,
+                title: pane_title,
+                content: pane_lines.into_iter().map(Line::from).collect(),
+                visible_rows: DEFAULT_PANE_ROWS,
+                scroll: 0,
+            })
+        }
+    });
+
+    Ok(ToolOutput { content, pane_page })
 }
 
 /// Parse all `*.yaml` files in a directory into DynamicTool instances.

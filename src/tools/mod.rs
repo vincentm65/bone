@@ -102,6 +102,10 @@ pub fn seed_default_tools(dir: &std::path::Path) {
             "web_search.yaml",
             include_str!("../../defaults/tools/web_search.yaml"),
         ),
+        (
+            "subagent.yaml",
+            include_str!("../../defaults/tools/subagent.yaml"),
+        ),
     ];
     for (name, content) in DEFAULTS {
         let path = dir.join(name);
@@ -112,16 +116,15 @@ pub fn seed_default_tools(dir: &std::path::Path) {
         }
     }
 
-    // Seed task_list.yaml with the OS-appropriate variant.
-    let task_list_content: &str = if cfg!(windows) {
-        include_str!("../../defaults/tools/task_list.ps1.yaml")
-    } else {
-        include_str!("../../defaults/tools/task_list.yaml")
-    };
+    // Seed task_list.yaml (cross-platform, uses python3 -c via uv run).
+    let task_list_content: &str = include_str!("../../defaults/tools/task_list.yaml");
     let task_list_path = dir.join("task_list.yaml");
     if !task_list_path.exists() {
         if let Err(e) = std::fs::write(&task_list_path, task_list_content) {
-            eprintln!("bone: warning: could not write {}: {e}", task_list_path.display());
+            eprintln!(
+                "bone: warning: could not write {}: {e}",
+                task_list_path.display()
+            );
         }
     } else {
         migrate_task_list(&task_list_path, task_list_content);
@@ -130,23 +133,18 @@ pub fn seed_default_tools(dir: &std::path::Path) {
     clean_stale_task_dirs();
 }
 
-/// Migrate old task_list.yaml to the current OS-appropriate version.
-/// Overwrites if the file contains v1 markers (python3, json_envelope) or
-/// if it has the wrong OS variant (bash on Windows, PowerShell on Unix).
+/// Migrate old task_list.yaml to the current version.
+/// Overwrites if the version field is < 4.
 fn migrate_task_list(path: &std::path::Path, new_content: &str) {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return;
     };
-    let is_v1 = raw.contains("python3") || raw.contains("json_envelope");
-    let wrong_os = if cfg!(windows) {
-        // Windows should have PowerShell, not bash
-        raw.contains("set -euo pipefail")
-    } else {
-        // Unix should have bash, not PowerShell
-        raw.contains("$ErrorActionPreference")
-    };
-    if !is_v1 && !wrong_os {
-        return; // current version, correct OS, or user-customized
+    let existing_version: u64 = serde_yaml::from_str::<serde_yaml::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    if existing_version >= 4 {
+        return; // current version or user-customized
     }
     if let Err(e) = std::fs::write(path, new_content) {
         eprintln!("bone: warning: could not update {}: {e}", path.display());

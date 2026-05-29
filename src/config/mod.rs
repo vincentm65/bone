@@ -51,10 +51,16 @@ pub struct UserConfig {
     pub approval_mode: ApprovalMode,
     #[serde(default = "default_enabled_tools")]
     pub enabled_tools: Vec<String>,
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u32,
 }
 
 fn default_provider() -> String {
     "local".to_string()
+}
+
+fn default_max_rounds() -> u32 {
+    150
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
@@ -77,6 +83,7 @@ impl Default for UserConfig {
             provider: default_provider(),
             approval_mode: ApprovalMode::default(),
             enabled_tools: default_enabled_tools(),
+            max_rounds: default_max_rounds(),
         }
     }
 }

@@ -92,7 +92,6 @@ pub enum LlmErrorKind {
     /// Rate-limited (429).
     RateLimit,
     /// Server-side error with the HTTP status code. Reserved for retry logic.
-    #[allow(dead_code)]
     Server(u16),
     /// Malformed response from the server.
     Parse,
@@ -106,7 +105,6 @@ pub enum LlmErrorKind {
 /// [`kind`](Self::kind) and [`message`](Self::message) are available for
 /// retry logic and error classification.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LlmError {
     pub kind: LlmErrorKind,
     /// Human-readable error message.

@@ -46,6 +46,7 @@ impl CommandSafety {
         match call.name.as_str() {
             "read_file" => Self::ReadOnly,
             "write_file" | "edit_file" => Self::Edit,
+            "subagent" => Self::ReadOnly,
             "shell" => call
                 .arguments
                 .get("command")

@@ -1,6 +1,6 @@
 use std::process::Stdio;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
@@ -58,13 +58,24 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
     let mut stderr = child.stderr.take().ok_or("failed to capture stderr")?;
 
     let wait = async {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let status_fut = child.wait();
-        let out_fut = stdout.read_to_end(&mut out);
-        let err_fut = stderr.read_to_end(&mut err);
-        let (status, _, _) =
-            tokio::try_join!(status_fut, out_fut, err_fut).map_err(|e| e.to_string())?;
+        let status_fut = async { child.wait().await.map_err(|e| e.to_string()) };
+        let out_fut = async {
+            let mut out = Vec::new();
+            stdout
+                .read_to_end(&mut out)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(out)
+        };
+        let err_fut = async {
+            let mut err = Vec::new();
+            stderr
+                .read_to_end(&mut err)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(err)
+        };
+        let (status, out, err) = tokio::try_join!(status_fut, out_fut, err_fut)?;
         Ok::<_, String>((status, out, err))
     };
 
@@ -76,6 +87,71 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
     Ok(ScriptOutput {
         exit_code: status.code(),
         stdout: truncate_output(&String::from_utf8_lossy(&out), 500),
+        stderr: truncate_output(&String::from_utf8_lossy(&err), 100),
+    })
+}
+
+pub async fn run_script_jsonl<F>(
+    request: ScriptRequest,
+    mut on_line: F,
+) -> Result<ScriptOutput, String>
+where
+    F: FnMut(String) + Send,
+{
+    let timeout_ms = request.timeout_ms.clamp(1_000, 300_000);
+    let (shell, shell_arg, _) = shell_command();
+    let mut child = Command::new(shell)
+        .arg(shell_arg)
+        .arg(&request.command)
+        .envs(request.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let stdout = child.stdout.take().ok_or("failed to capture stdout")?;
+    let mut stderr = child.stderr.take().ok_or("failed to capture stderr")?;
+
+    let wait = async {
+        let status_fut = async { child.wait().await.map_err(|e| e.to_string()) };
+        let out_fut = async {
+            let mut out = String::new();
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        on_line(line.clone());
+                        out.push_str(&line);
+                        out.push('\n');
+                    }
+                    Ok(None) => break,
+                    Err(err) => return Err(err.to_string()),
+                }
+            }
+            Ok::<_, String>(out)
+        };
+        let err_fut = async {
+            let mut err = Vec::new();
+            stderr
+                .read_to_end(&mut err)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(err)
+        };
+        let (status, out, err) = tokio::try_join!(status_fut, out_fut, err_fut)?;
+        Ok::<_, String>((status, out, err))
+    };
+
+    let (status, out, err) = match timeout(Duration::from_millis(timeout_ms), wait).await {
+        Ok(result) => result?,
+        Err(_) => return Err(format!("command timed out after {timeout_ms}ms")),
+    };
+
+    Ok(ScriptOutput {
+        exit_code: status.code(),
+        stdout: out,
         stderr: truncate_output(&String::from_utf8_lossy(&err), 100),
     })
 }
@@ -94,4 +170,33 @@ pub fn truncate_output(output: &str, max_lines: usize) -> String {
     out.push(&truncated);
     out.extend_from_slice(&lines[lines.len() - tail..]);
     out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn jsonl_runner_drains_stderr_while_reading_stdout() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&lines);
+        let output = run_script_jsonl(
+            ScriptRequest {
+                command: r#"i=0; while [ "$i" -lt 20000 ]; do echo stderr-line >&2; i=$((i+1)); done; echo '{"type":"finished","content":"ok"}'"#.to_string(),
+                env: Vec::new(),
+                timeout_ms: 2_000,
+            },
+            move |line| {
+                seen.lock().unwrap().push(line);
+            },
+        )
+        .await
+        .expect("jsonl runner should not deadlock on large stderr output");
+
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.contains(r#""content":"ok""#));
+        assert!(!output.stderr.is_empty());
+        assert_eq!(lines.lock().unwrap().len(), 1);
+    }
 }

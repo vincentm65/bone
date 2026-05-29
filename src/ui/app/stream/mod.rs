@@ -1,8 +1,9 @@
+use crate::agent::check_depth;
 use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
-use crate::tools::types::Tool;
+use crate::tools::types::{Tool, ToolLiveEvent};
 use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
@@ -10,9 +11,14 @@ use crate::ui::prompt::Decision;
 use crate::ui::render::{BoneTerminal, StatusInfo};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use futures_util::{StreamExt, pin_mut};
+use futures_util::{StreamExt, future::join_all, pin_mut};
+use ratatui::text::Line;
 use std::collections::VecDeque;
 use std::io;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
 use super::App;
@@ -36,6 +42,9 @@ fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
     }
 }
 
+#[cfg(test)]
+mod stream_test;
+
 fn assistant_message(content: String, tool_calls: Vec<ToolCall>, reasoning: String) -> ChatMessage {
     let mut message = if tool_calls.is_empty() {
         ChatMessage::new(ChatRole::Assistant, content)
@@ -48,6 +57,145 @@ fn assistant_message(content: String, tool_calls: Vec<ToolCall>, reasoning: Stri
     message
 }
 
+#[derive(Clone)]
+enum SubagentStatus {
+    Starting,
+    Thinking,
+    Running,
+    Finished,
+    Failed,
+}
+
+
+#[derive(Clone)]
+struct ActiveSubagent {
+    call: ToolCall,
+    model: String,
+    resolved_model: bool,
+    sent: u64,
+    received: u64,
+    status: SubagentStatus,
+}
+
+fn call_is_immediate(call: &ToolCall) -> bool {
+    call.name == "subagent"
+}
+
+fn call_row_shown_during_prepare(call: &ToolCall) -> bool {
+    call.name == "edit_file"
+}
+
+fn short_subagent_mode(call: &ToolCall) -> String {
+    let approval = call
+        .arguments
+        .get("approval")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    match approval {
+        "read_only" => "ro".to_string(),
+        "edit" => "edit".to_string(),
+        "danger" => "danger".to_string(),
+        other => clip_text(other, 6),
+    }
+}
+
+fn clip_text(value: &str, width: usize) -> String {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if value.chars().count() <= width {
+        return value;
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    format!("{}...", value.chars().take(width - 3).collect::<String>())
+}
+
+fn subagent_task_preview(call: &ToolCall, width: usize) -> String {
+    let task = call
+        .arguments
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim();
+    clip_text(task, width)
+}
+
+fn subagent_token_text(agent: &ActiveSubagent) -> String {
+    let total = agent.sent + agent.received;
+    if total >= 1000 {
+        format!("{:.1}k", total as f64 / 1000.0)
+    } else {
+        total.to_string()
+    }
+}
+
+fn subagent_configured_model(
+    call: &ToolCall,
+    providers_config: &crate::config::ProvidersConfig,
+    fallback: &str,
+) -> (String, bool) {
+    if let Some(model) = call
+        .arguments
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        return (model.to_string(), true);
+    }
+    if let Some(provider) = call
+        .arguments
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        && let Some(entry) = providers_config.providers.get(provider)
+        && !entry.model.trim().is_empty()
+    {
+        return (entry.model.clone(), true);
+    }
+    (fallback.to_string(), false)
+}
+
+fn subagent_status_line(agent: &ActiveSubagent) -> Line<'static> {
+    let model = if agent.model.trim().is_empty() {
+        "current".to_string()
+    } else {
+        clip_text(&agent.model, 12)
+    };
+    let mode = short_subagent_mode(&agent.call);
+    let tokens = subagent_token_text(agent);
+    let title = subagent_task_preview(&agent.call, 28);
+    Line::from(format!(
+        "{mode:<4} {model:<12} {tokens:<6} {title:<28}"
+    ))
+}
+
+fn subagent_status_page(active: &[ActiveSubagent]) -> PanePage {
+    let mut content = Vec::with_capacity(active.len() + 1);
+    content.push(Line::from("MODE MODEL        TOKENS TITLE"));
+    content.extend(active.iter().map(subagent_status_line));
+    PanePage {
+        source: "subagents-active".to_string(),
+        title: format!("subagents ({})", active.len()),
+        content,
+        visible_rows: (active.len() + 1).max(2).min(9),
+        scroll: 0,
+    }
+}
+
+fn parse_subagent_event(line: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(line.trim()).ok()
+}
+
+fn token_usage_from_event(event: &serde_json::Value) -> Option<(u64, u64)> {
+    (event["type"].as_str()? == "token_usage").then_some((
+        event["sent"].as_u64().unwrap_or(0),
+        event["received"].as_u64().unwrap_or(0),
+    ))
+}
+
 pub enum StreamFailure {
     Provider(LlmError),
     InitialTimeout,
@@ -57,9 +205,10 @@ pub enum StreamFailure {
 impl StreamFailure {
     pub fn retryable(&self) -> bool {
         match self {
-            Self::Provider(err) => {
-                matches!(err.kind, LlmErrorKind::Timeout | LlmErrorKind::Connection)
-            }
+            Self::Provider(err) => matches!(
+                err.kind,
+                LlmErrorKind::Timeout | LlmErrorKind::Connection | LlmErrorKind::Server(_)
+            ),
             Self::InitialTimeout | Self::IdleTimeout => true,
         }
     }
@@ -94,6 +243,267 @@ fn pane_toggle_hint(panes_visible: bool, has_pages: bool) -> Option<&'static str
         Some("Ctrl+T hide panel")
     } else {
         Some("Ctrl+T show panel")
+    }
+}
+
+enum SubagentProgress {
+    Started {
+        call_id: String,
+        model: String,
+    },
+    Status {
+        call_id: String,
+        status: SubagentStatus,
+    },
+    Tokens {
+        call_id: String,
+        sent: u64,
+        received: u64,
+    },
+}
+
+async fn execute_subagent_live(
+    call: ToolCall,
+    progress: mpsc::UnboundedSender<SubagentProgress>,
+) -> ToolResult {
+    let call_id = call.id.clone();
+    let progress_id = call.id.clone();
+    let approval = call
+        .arguments
+        .get("approval")
+        .and_then(|v| v.as_str())
+        .unwrap_or("read_only")
+        .to_string();
+    let task = call
+        .arguments
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let provider = call
+        .arguments
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
+    let model = call
+        .arguments
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
+
+    // Recursion depth guard
+    let new_depth = match check_depth() {
+        Ok(d) => d,
+        Err(e) => {
+            return ToolResult {
+                call_id,
+                name: call.name,
+                content: e,
+                is_error: true,
+                pane_page: None,
+            };
+        }
+    };
+
+    let mut command = Command::new("bone");
+    command
+        .arg("agent")
+        .arg("--events")
+        .arg("--approval")
+        .arg(&approval)
+        .arg("--prompt")
+        .arg(&task);
+    if let Some(provider) = provider.as_ref() {
+        command.arg("--provider").arg(provider);
+    }
+    if let Some(model) = model.as_ref() {
+        command.arg("--model").arg(model);
+    }
+
+    let mut child = match command
+        .env("BONE_PID", std::process::id().to_string())
+        .env("BONE_AGENT_DEPTH", new_depth.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return ToolResult {
+                call_id,
+                name: call.name,
+                content: err.to_string(),
+                is_error: true,
+                pane_page: None,
+            };
+        }
+    };
+
+    let Some(stdout) = child.stdout.take() else {
+        return ToolResult {
+            call_id,
+            name: call.name,
+            content: "failed to capture stdout".to_string(),
+            is_error: true,
+            pane_page: None,
+        };
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        return ToolResult {
+            call_id,
+            name: call.name,
+            content: "failed to capture stderr".to_string(),
+            is_error: true,
+            pane_page: None,
+        };
+    };
+    let mut lines = BufReader::new(stdout).lines();
+    let stdout_fut = async {
+        let mut raw = String::new();
+        let mut final_content = String::new();
+        let mut read_error = None;
+
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    raw.push_str(&line);
+                    raw.push('\n');
+                    if let Some(event) = parse_subagent_event(&line) {
+                        match event["type"].as_str() {
+                            Some("started") => {
+                                let model = event["model"].as_str().unwrap_or("").to_string();
+                                let _ = progress.send(SubagentProgress::Started {
+                                    call_id: progress_id.clone(),
+                                    model,
+                                });
+                            }
+                            Some("status") => {
+                                let message = event["message"].as_str().unwrap_or("");
+                                let status = if message == "thinking" {
+                                    SubagentStatus::Thinking
+                                } else if message.starts_with("running") {
+                                    SubagentStatus::Running
+                                } else {
+                                    SubagentStatus::Running
+                                };
+                                let _ = progress.send(SubagentProgress::Status {
+                                    call_id: progress_id.clone(),
+                                    status,
+                                });
+                            }
+                            Some("token_usage") => {
+                                if let Some((sent, received)) = token_usage_from_event(&event) {
+                                    let _ = progress.send(SubagentProgress::Tokens {
+                                        call_id: progress_id.clone(),
+                                        sent,
+                                        received,
+                                    });
+                                }
+                            }
+                            Some("finished") => {
+                                final_content = event["content"].as_str().unwrap_or("").to_string();
+                                let _ = progress.send(SubagentProgress::Status {
+                                    call_id: progress_id.clone(),
+                                    status: SubagentStatus::Finished,
+                                });
+                            }
+                            Some("failed") => {
+                                let _ = progress.send(SubagentProgress::Status {
+                                    call_id: progress_id.clone(),
+                                    status: SubagentStatus::Failed,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    read_error = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+
+        (raw, final_content, read_error)
+    };
+    let mut stderr_text = String::new();
+    let stderr_fut = stderr.read_to_string(&mut stderr_text);
+    let wait_fut = child.wait();
+
+    const SUBAGENT_TIMEOUT_SECS: u64 = 300;
+    let result = time::timeout(
+        Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+        async { tokio::join!(stdout_fut, stderr_fut, wait_fut) },
+    )
+    .await;
+    let ((raw, final_content, read_error), stderr_read, status) = match result {
+        Ok(triple) => triple,
+        Err(_) => {
+            let _ = child.kill().await;
+            return ToolResult {
+                call_id,
+                name: call.name,
+                content: format!("subagent timed out after {SUBAGENT_TIMEOUT_SECS}s"),
+                is_error: true,
+                pane_page: None,
+            };
+        }
+    };
+
+    let status = match status {
+        Ok(status) => status,
+        Err(err) => {
+            return ToolResult {
+                call_id,
+                name: call.name,
+                content: err.to_string(),
+                is_error: true,
+                pane_page: None,
+            };
+        }
+    };
+    if let Err(err) = stderr_read {
+        stderr_text = format!("failed to read stderr: {err}");
+    }
+
+    if status.success() && read_error.is_none() {
+        ToolResult {
+            call_id,
+            name: call.name,
+            content: if final_content.is_empty() {
+                raw
+            } else {
+                final_content
+            },
+            is_error: false,
+            pane_page: None,
+        }
+    } else {
+        let code = status
+            .code()
+            .map_or_else(|| "signal".to_string(), |code| code.to_string());
+        let mut content = format!("exit code: {code}");
+        if let Some(err) = read_error {
+            content.push_str(&format!("\nstdout read error: {err}"));
+        }
+        if !stderr_text.is_empty() {
+            content.push_str(&format!("\nstderr:\n{stderr_text}"));
+        }
+        if !raw.is_empty() {
+            content.push_str(&format!("\nstdout:\n{raw}"));
+        }
+        ToolResult {
+            call_id,
+            name: call.name,
+            content,
+            is_error: true,
+            pane_page: None,
+        }
     }
 }
 
@@ -148,7 +558,7 @@ impl App {
             self.renderer.scrollback_cursor += 1;
             let assistant_idx = self.messages.len() - 1;
 
-            if rounds > 64 {
+            if rounds > self.user_config.max_rounds {
                 self.messages[assistant_idx]
                     .content
                     .push_str("\n[tool-call round limit reached]");
@@ -264,7 +674,7 @@ impl App {
                     .display_for_call(call)
                     .and_then(|d| d.show)
                     .unwrap_or(true);
-                if visible {
+                if visible && !call_is_immediate(call) && !call_row_shown_during_prepare(call) {
                     self.messages.push(build_tool_row(
                         call,
                         result,
@@ -459,14 +869,19 @@ impl App {
             pending.push(self.prepare_tool_call(display_call, call, term).await?);
         }
 
-        let approved = pending
+        let approved: Vec<ToolCall> = pending
             .iter()
             .filter_map(|pending| match pending {
                 PendingTool::Approved(call) => Some(call.clone()),
                 PendingTool::Result(_) => None,
             })
             .collect();
-        let mut exec_results = self.tools.execute_all(approved).await.into_iter();
+
+        self.show_immediate_tool_rows(&approved, term)?;
+        let mut exec_results = self
+            .execute_tools_responsive(approved, term)
+            .await?
+            .into_iter();
         let results: Vec<ToolResult> = pending
             .into_iter()
             .map(|pending| match pending {
@@ -501,6 +916,261 @@ impl App {
         )?;
 
         Ok((calls_for_display, results))
+    }
+
+    fn show_immediate_tool_rows(
+        &mut self,
+        _approved: &[ToolCall],
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        // Subagent calls stream their output in real-time via child process,
+        // so they don't need placeholder rows in chat history.
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.redraw(term)
+    }
+
+    async fn execute_tools_responsive(
+        &mut self,
+        approved: Vec<ToolCall>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<Vec<ToolResult>> {
+        if approved.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let result_order: Vec<bool> = approved.iter().map(call_is_immediate).collect();
+        let approved_for_cancel = approved.clone();
+        let (subagents, normal): (Vec<_>, Vec<_>) = approved
+            .into_iter()
+            .partition(|call| call_is_immediate(call));
+
+        if subagents.is_empty() {
+            let tools = self.tools.clone();
+            return self
+                .wait_for_tool_future_live(
+                    |events| async move { tools.execute_all_live(normal, Some(events)).await },
+                    &approved_for_cancel,
+                    term,
+                )
+                .await;
+        }
+
+        let mut active_subagents: Vec<ActiveSubagent> = subagents
+            .iter()
+            .cloned()
+            .map(|call| {
+                let (model, resolved_model) =
+                    subagent_configured_model(&call, &self.providers_config, &self.model);
+                ActiveSubagent {
+                    call,
+                    model,
+                    resolved_model,
+                    sent: 0,
+                    received: 0,
+                    status: SubagentStatus::Starting,
+                }
+            })
+            .collect();
+        let page = subagent_status_page(&active_subagents);
+        let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+        self.active_page = active;
+
+        let tools = self.tools.clone();
+        let subagent_count = subagents.len();
+        let (tx, mut rx) = mpsc::unbounded_channel::<SubagentProgress>();
+        let execute = async move {
+            let normal_fut = async move { tools.execute_all(normal).await };
+            let subagent_futs = subagents
+                .into_iter()
+                .map(|call| execute_subagent_live(call, tx.clone()));
+            let (normal_results, subagent_results) =
+                tokio::join!(normal_fut, async move { join_all(subagent_futs).await });
+            let mut results = Vec::with_capacity(normal_results.len() + subagent_results.len());
+            let mut normal_iter = normal_results.into_iter();
+            let mut subagent_iter = subagent_results.into_iter();
+            for is_subagent in result_order {
+                if is_subagent {
+                    if let Some(result) = subagent_iter.next() {
+                        results.push(result);
+                    }
+                } else if let Some(result) = normal_iter.next() {
+                    results.push(result);
+                }
+            }
+            (subagent_count, results)
+        };
+        let mut spinner = time::interval(Duration::from_millis(90));
+        pin_mut!(execute);
+
+        loop {
+            tokio::select! {
+                (subagent_count, results) = &mut execute => {
+                    if subagent_count > 0 {
+                        self.active_page = PanePage::remove(
+                            &mut self.pages,
+                            "subagents-active",
+                            self.active_page,
+                        );
+                    }
+                    return Ok(results);
+                }
+                Some(progress) = rx.recv() => {
+                    match progress {
+                        SubagentProgress::Started { call_id, model } => {
+                            if let Some(agent) = active_subagents
+                                .iter_mut()
+                                .find(|agent| agent.call.id == call_id)
+                            {
+                                if !model.trim().is_empty()
+                                    && !(agent.resolved_model && model == "current")
+                                {
+                                    agent.model = model;
+                                    agent.resolved_model = true;
+                                }
+                                agent.status = SubagentStatus::Thinking;
+                            }
+                        }
+                        SubagentProgress::Status { call_id, status } => {
+                            if let Some(agent) = active_subagents
+                                .iter_mut()
+                                .find(|agent| agent.call.id == call_id)
+                            {
+                                agent.status = status;
+                            }
+                        }
+                        SubagentProgress::Tokens { call_id, sent, received } => {
+                            if let Some(agent) = active_subagents
+                                .iter_mut()
+                                .find(|agent| agent.call.id == call_id)
+                            {
+                                agent.sent = sent;
+                                agent.received = received;
+                            }
+                        }
+                    }
+                    let page = subagent_status_page(&active_subagents);
+                    let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+                    self.active_page = active;
+                }
+                _ = spinner.tick() => {
+                    if Self::drain_keys(
+                        &mut self.input,
+                        &mut self.queue,
+                        &mut self.approval_mode,
+                        &mut self.cancel_streaming,
+                        &mut self.panes_visible,
+                        &mut self.pages,
+                        &mut self.active_page,
+                    ) {
+                        self.user_config.approval_mode = self.approval_mode;
+                        crate::config::save_user_config(&self.user_config);
+                    }
+                    if self.cancel_streaming {
+                        self.active_page = PanePage::remove(
+                            &mut self.pages,
+                            "subagents-active",
+                            self.active_page,
+                        );
+                        let results = approved_for_cancel
+                            .iter()
+                            .map(|call| tool_error(call, "cancelled by user"))
+                            .collect();
+                        return Ok(results);
+                    }
+
+                    let visible_pages = if self.panes_visible {
+                        self.pages.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
+                    self.renderer.tick_spinner(
+                        term,
+                        &self.input,
+                        &self.status_info(),
+                        visible_pages,
+                        self.active_page,
+                        hint,
+                    )?;
+                }
+            }
+        }
+    }
+
+    fn apply_tool_live_event(&mut self, event: ToolLiveEvent) {
+        match event {
+            ToolLiveEvent::Pane(page) => {
+                if page.content.is_empty() {
+                    self.active_page =
+                        PanePage::remove(&mut self.pages, &page.source, self.active_page);
+                } else {
+                    let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+                    self.active_page = active;
+                }
+            }
+        }
+    }
+
+    async fn wait_for_tool_future_live<F, Fut>(
+        &mut self,
+        make_future: F,
+        cancel_calls: &[ToolCall],
+        term: &mut BoneTerminal,
+    ) -> io::Result<Vec<ToolResult>>
+    where
+        F: FnOnce(mpsc::UnboundedSender<ToolLiveEvent>) -> Fut,
+        Fut: std::future::Future<Output = Vec<ToolResult>>,
+    {
+        let mut spinner = time::interval(Duration::from_millis(90));
+        let (tx, mut rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
+        let future = make_future(tx);
+        pin_mut!(future);
+
+        loop {
+            tokio::select! {
+                results = &mut future => return Ok(results),
+                Some(event) = rx.recv() => {
+                    self.apply_tool_live_event(event);
+                }
+                _ = spinner.tick() => {
+                    if Self::drain_keys(
+                        &mut self.input,
+                        &mut self.queue,
+                        &mut self.approval_mode,
+                        &mut self.cancel_streaming,
+                        &mut self.panes_visible,
+                        &mut self.pages,
+                        &mut self.active_page,
+                    ) {
+                        self.user_config.approval_mode = self.approval_mode;
+                        crate::config::save_user_config(&self.user_config);
+                    }
+                    if self.cancel_streaming {
+                        let results = cancel_calls
+                            .iter()
+                            .map(|call| tool_error(call, "cancelled by user"))
+                            .collect();
+                        return Ok(results);
+                    }
+
+                    let visible_pages = if self.panes_visible {
+                        self.pages.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
+                    self.renderer.tick_spinner(
+                        term,
+                        &self.input,
+                        &self.status_info(),
+                        visible_pages,
+                        self.active_page,
+                        hint,
+                    )?;
+                }
+            }
+        }
     }
 
     async fn prepare_tool_call(
@@ -639,6 +1309,24 @@ impl App {
         }
 
         if call.name == "edit_file" {
+            if self
+                .tools
+                .display_for_call(&call)
+                .and_then(|display| display.show)
+                .unwrap_or(true)
+            {
+                self.messages.push(build_tool_row(
+                    &call,
+                    &ToolResult {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        content: String::new(),
+                        is_error: false,
+                        pane_page: None,
+                    },
+                    self.tools.display_for_call(&call),
+                ));
+            }
             match preview_edit_file(call.arguments.clone()).await {
                 Ok(preview) => {
                     call.arguments["expected_hash"] =

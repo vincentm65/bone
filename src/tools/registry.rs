@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use crate::tools::ApprovalMode;
 use crate::tools::command_policy::CommandSafety;
-use crate::tools::types::{Tool, ToolCall, ToolDefinition, ToolDisplayConfig, ToolResult};
+use crate::tools::types::{
+    Tool, ToolCall, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolLiveEvent,
+    ToolResult,
+};
 use futures_util::future::join_all;
 
 #[derive(Clone)]
@@ -57,6 +60,49 @@ impl ToolRegistry {
             },
         }
     }
+
+    pub async fn execute_live(
+        &self,
+        call: ToolCall,
+        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+    ) -> ToolResult {
+        let name = call.name.clone();
+        let call_id = call.id.clone();
+        match self.tools.get(&name) {
+            Some(tool) => match tool
+                .execute_output_live(
+                    call.arguments,
+                    events,
+                    ToolExecutionContext {
+                        call_id: call_id.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(output) => ToolResult {
+                    call_id,
+                    name,
+                    content: output.content,
+                    is_error: false,
+                    pane_page: output.pane_page,
+                },
+                Err(content) => ToolResult {
+                    call_id,
+                    name,
+                    content,
+                    is_error: true,
+                    pane_page: None,
+                },
+            },
+            None => ToolResult {
+                call_id,
+                name,
+                content: "Unknown tool".to_string(),
+                is_error: true,
+                pane_page: None,
+            },
+        }
+    }
 }
 
 impl Default for ToolRegistry {
@@ -65,6 +111,7 @@ impl Default for ToolRegistry {
     }
 }
 
+#[derive(Clone)]
 pub struct ToolHandler {
     registry: ToolRegistry,
     enabled: HashSet<String>,
@@ -169,11 +216,19 @@ impl ToolHandler {
     }
 
     pub async fn execute_all(&self, calls: Vec<ToolCall>) -> Vec<ToolResult> {
+        self.execute_all_live(calls, None).await
+    }
+
+    pub async fn execute_all_live(
+        &self,
+        calls: Vec<ToolCall>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+    ) -> Vec<ToolResult> {
         if calls.iter().filter(|call| call.name == "task_list").count() > 1 {
             let mut results = Vec::with_capacity(calls.len());
             for call in calls {
                 if self.is_enabled(&call.name) {
-                    results.push(self.registry.execute(call).await);
+                    results.push(self.registry.execute_live(call, events.clone()).await);
                 } else {
                     results.push(ToolResult {
                         call_id: call.id,
@@ -187,16 +242,19 @@ impl ToolHandler {
             return results;
         }
 
-        join_all(calls.into_iter().map(|call| async move {
-            if self.is_enabled(&call.name) {
-                self.registry.execute(call).await
-            } else {
-                ToolResult {
-                    call_id: call.id,
-                    name: call.name,
-                    content: "Tool disabled in /tools settings".to_string(),
-                    is_error: true,
-                    pane_page: None,
+        join_all(calls.into_iter().map(|call| {
+            let events = events.clone();
+            async move {
+                if self.is_enabled(&call.name) {
+                    self.registry.execute_live(call, events).await
+                } else {
+                    ToolResult {
+                        call_id: call.id,
+                        name: call.name,
+                        content: "Tool disabled in /tools settings".to_string(),
+                        is_error: true,
+                        pane_page: None,
+                    }
                 }
             }
         }))
