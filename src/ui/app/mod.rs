@@ -1217,20 +1217,29 @@ impl App {
         ];
         let mut selected = 0usize;
         loop {
-            let options = modes
-                .iter()
-                .map(|mode| {
-                    let active = if *mode == self.approval_mode {
-                        "*"
-                    } else {
-                        " "
-                    };
-                    format!("[{active}] Approval mode: {}", mode.label())
-                })
-                .collect();
+            let compact_label = match self.user_config.auto_compact_tokens {
+                Some(t) => format!("auto_compact_tokens: {t}"),
+                None => "auto_compact_tokens: disabled".to_string(),
+            };
+            let keep_label = match self.user_config.auto_compact_keep_messages {
+                Some(n) => format!("auto_compact_keep_messages: {n}"),
+                None => "auto_compact_keep_messages: 12 (default)".to_string(),
+            };
+            let mode_label = format!(
+                "approval_mode: {} {}",
+                self.approval_mode.label(),
+                if self.approval_mode == ApprovalMode::Safe {
+                    "(all approved)"
+                } else if self.approval_mode == ApprovalMode::Edits {
+                    "(edit/danger prompt)"
+                } else {
+                    "(all prompt)"
+                }
+            );
+            let options = vec![mode_label, compact_label, keep_label];
             let mut prompt = Prompt::new("Config", options);
             prompt.selected = selected;
-            prompt.hint = Some("Enter choose  Esc close".to_string());
+            prompt.hint = Some("Enter edit  Esc close".to_string());
             self.active_prompt = Some(prompt);
             self.redraw(term)?;
             let (code, modifiers) = self.panel_key(term)?;
@@ -1244,11 +1253,40 @@ impl App {
             match code {
                 KeyCode::Esc => return self.close_panel(term),
                 KeyCode::Enter => {
-                    let selected = self.active_prompt.as_ref().unwrap().selected;
-                    if let Some(mode) = modes.get(selected) {
-                        self.approval_mode = *mode;
-                        self.user_config.approval_mode = *mode;
-                        config::save_user_config(&self.user_config);
+                    let idx = self.active_prompt.as_ref().unwrap().selected;
+                    match idx {
+                        // approval mode: cycle through modes
+                        0 => {
+                            let next = (modes.iter().position(|m| *m == self.approval_mode).unwrap_or(0) + 1) % modes.len();
+                            self.approval_mode = modes[next];
+                            self.user_config.approval_mode = self.approval_mode;
+                            config::save_user_config(&self.user_config);
+                        }
+                        // auto_compact_tokens
+                        1 => {
+                            let current = self.user_config.auto_compact_tokens.map(|t| t.to_string()).unwrap_or_default();
+                            if let Some(val) = self.edit_value("auto_compact_tokens (empty = disabled)", &current, false, term)? {
+                                self.user_config.auto_compact_tokens = if val.trim().is_empty() {
+                                    None
+                                } else {
+                                    val.trim().parse::<u64>().ok()
+                                };
+                                config::save_user_config(&self.user_config);
+                            }
+                        }
+                        // auto_compact_keep_messages
+                        2 => {
+                            let current = self.user_config.auto_compact_keep_messages.map(|n| n.to_string()).unwrap_or_default();
+                            if let Some(val) = self.edit_value("auto_compact_keep_messages (empty = default 12)", &current, false, term)? {
+                                self.user_config.auto_compact_keep_messages = if val.trim().is_empty() {
+                                    None
+                                } else {
+                                    val.trim().parse::<usize>().ok()
+                                };
+                                config::save_user_config(&self.user_config);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
