@@ -2,13 +2,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use strsim::normalized_levenshtein;
 use tokio::fs;
 
 use crate::tools::types::{Tool, ToolDefinition};
 use crate::tools::write_atomic::write_atomic;
 
-use super::edit_file::diff;
+use super::edit_diff;
 
 pub struct EditFileUnifiedTool;
 
@@ -26,16 +25,17 @@ pub struct EditPreview {
 }
 
 #[derive(Debug)]
-struct Hunk {
-    old_start: usize,
-    lines: Vec<HunkLine>,
+struct Patch {
+    update_path: Option<String>,
+    chunks: Vec<Chunk>,
 }
 
 #[derive(Debug)]
-enum HunkLine {
-    Context(String),
-    Remove(String),
-    Add(String),
+struct Chunk {
+    change_context: Option<String>,
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+    is_end_of_file: bool,
 }
 
 #[async_trait]
@@ -43,7 +43,7 @@ impl Tool for EditFileUnifiedTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit an existing UTF-8 file transactionally by applying a unified diff patch. Provide path and patch (or diff). Preview/display output uses the same numbered diff format. Hunks use context-aware matching with exact, whitespace-normalized, and fuzzy fallback.".to_string(),
+            description: "Edit an existing UTF-8 file transactionally using Codex-style apply_patch chunks. Provide path and patch (or diff). Patch may be a full *** Begin Patch / *** Update File envelope or just one or more @@ chunks. Use - old lines, + new lines, and optional space-prefixed context lines; keep anchors small and unique. Unified hunk range headers like @@ -10,4 +10,6 @@ are accepted but ignored for matching.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -53,7 +53,7 @@ impl Tool for EditFileUnifiedTool {
                     },
                     "patch": {
                         "type": "string",
-                        "description": "Unified diff patch for this file. May include ---/+++ file headers and one or more @@ hunks. Use space-prefixed context lines, - removed lines, and + added lines."
+                        "description": "Codex-style patch for this file. May be a full *** Begin Patch / *** Update File patch or just @@ chunks. Each changed line starts with -, +, or space for context. Unified hunk range headers are accepted."
                     },
                     "diff": {
                         "type": "string",
@@ -84,7 +84,7 @@ pub async fn preview_edit_file_unified(arguments: Value) -> Result<EditPreview, 
     let (original, next) = build_candidate_content(&args).await?;
     Ok(EditPreview {
         before_hash: sha256_hex(&original),
-        diff: diff::build_unified_diff(&args.path, &original, &next),
+        diff: edit_diff::build_unified_diff(&args.path, &original, &next),
     })
 }
 
@@ -108,8 +108,8 @@ pub async fn execute_edit_file_unified(arguments: Value) -> Result<String, Strin
     let permissions = Some(metadata.permissions());
     write_atomic(path, &next, permissions).await?;
 
-    let summary = diff::summarize_change(&original, &next);
-    let shown_diff = diff::build_unified_diff(&args.path, &original, &next);
+    let summary = edit_diff::summarize_change(&original, &next);
+    let shown_diff = edit_diff::build_unified_diff(&args.path, &original, &next);
     Ok(format!("edited file ({summary}){shown_diff}"))
 }
 
@@ -121,315 +121,293 @@ async fn build_candidate_content(args: &Args) -> Result<(String, String), String
     let original = fs::read_to_string(&args.path)
         .await
         .map_err(|e| e.to_string())?;
-    let hunks = parse_unified_diff(&args.patch)?;
-    let mut next = original.clone();
-    for (index, hunk) in hunks.iter().enumerate() {
-        next = apply_hunk(&next, hunk).map_err(|e| format!("hunk {} failed: {e}", index + 1))?;
-    }
+    let patch = parse_codex_patch(&args.patch)?;
+    validate_patch_path(&args.path, patch.update_path.as_deref())?;
+    let next = apply_chunks(&original, &args.path, &patch.chunks)?;
     Ok((original, next))
 }
 
-fn parse_unified_diff(patch: &str) -> Result<Vec<Hunk>, String> {
-    let mut hunks = Vec::new();
-    let mut current: Option<Hunk> = None;
+fn validate_patch_path(path: &str, update_path: Option<&str>) -> Result<(), String> {
+    let Some(update_path) = update_path else {
+        return Ok(());
+    };
+    let requested = std::path::Path::new(path);
+    let update = std::path::Path::new(update_path);
+    if requested == update || requested.ends_with(update) || update.ends_with(requested) {
+        Ok(())
+    } else {
+        Err(format!(
+            "patch updates {update_path}, but edit_file path is {path}"
+        ))
+    }
+}
 
-    for raw in patch.split_inclusive('\n') {
-        let line = raw;
-        if line.starts_with("--- ")
-            || line.starts_with("+++ ")
-            || line.starts_with("diff --git ")
-            || line.starts_with("index ")
-        {
+fn parse_codex_patch(patch: &str) -> Result<Patch, String> {
+    let mut update_path = None;
+    let mut chunks = Vec::new();
+    let mut current: Option<Chunk> = None;
+    let mut saw_update_header = false;
+    let mut saw_begin = false;
+
+    for raw in patch.lines() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line == "*** Begin Patch" {
+            saw_begin = true;
             continue;
         }
-        if line.starts_with("@@ ") {
-            if let Some(hunk) = current.take() {
-                hunks.push(hunk);
+        if line == "*** End Patch" {
+            break;
+        }
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            if update_path.is_some() {
+                return Err("patch must update exactly one file".to_string());
             }
-            current = Some(Hunk {
-                old_start: parse_old_start(line)
-                    .ok_or_else(|| format!("invalid hunk header: {}", line.trim_end()))?,
-                lines: Vec::new(),
+            saw_update_header = true;
+            update_path = Some(path.trim().to_string());
+            continue;
+        }
+        if line.starts_with("*** Add File: ") || line.starts_with("*** Delete File: ") {
+            return Err("edit_file only supports Update File patches".to_string());
+        }
+        if line.starts_with("*** Move to: ") {
+            return Err("edit_file does not support file moves".to_string());
+        }
+        if line == "*** End of File" {
+            let Some(chunk) = current.as_mut() else {
+                return Err("*** End of File must appear inside a hunk".to_string());
+            };
+            chunk.is_end_of_file = true;
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("@@") {
+            if let Some(chunk) = current.take() {
+                push_chunk(&mut chunks, chunk)?;
+            }
+            let header = header.trim();
+            current = Some(Chunk {
+                change_context: if header.is_empty() || is_unified_hunk_range(header) {
+                    None
+                } else {
+                    Some(header.to_string())
+                },
+                old_lines: Vec::new(),
+                new_lines: Vec::new(),
+                is_end_of_file: false,
             });
             continue;
         }
 
-        let Some(hunk) = current.as_mut() else {
+        let Some(chunk) = current.as_mut() else {
             if line.trim().is_empty() {
                 continue;
             }
-            return Err("patch must contain at least one @@ hunk".to_string());
+            if !saw_begin && !saw_update_header {
+                return Err("patch must contain at least one @@ hunk".to_string());
+            }
+            return Err(format!("invalid patch line before hunk: {line}"));
         };
 
         if let Some(text) = line.strip_prefix(' ') {
-            hunk.lines.push(HunkLine::Context(text.to_string()));
+            chunk.old_lines.push(text.to_string());
+            chunk.new_lines.push(text.to_string());
         } else if let Some(text) = line.strip_prefix('-') {
-            hunk.lines.push(HunkLine::Remove(text.to_string()));
+            chunk.old_lines.push(text.to_string());
         } else if let Some(text) = line.strip_prefix('+') {
-            hunk.lines.push(HunkLine::Add(text.to_string()));
-        } else if line.starts_with("\\ No newline at end of file") {
-            // Keep parser permissive. The previous line already carries the text.
+            chunk.new_lines.push(text.to_string());
         } else if line.trim().is_empty() {
-            // A truly empty diff line is invalid in strict unified diff, but models
-            // sometimes emit it. Treat it as an empty context line.
-            hunk.lines.push(HunkLine::Context(line.to_string()));
+            chunk.old_lines.push(String::new());
+            chunk.new_lines.push(String::new());
         } else {
-            return Err(format!("invalid hunk line: {}", line.trim_end()));
+            return Err(format!("invalid hunk line: {line}"));
         }
     }
-    if let Some(hunk) = current.take() {
-        hunks.push(hunk);
+
+    if let Some(chunk) = current.take() {
+        push_chunk(&mut chunks, chunk)?;
     }
-    if hunks.is_empty() {
+    if chunks.is_empty() {
         return Err("patch must contain at least one @@ hunk".to_string());
     }
-    Ok(hunks)
+    Ok(Patch {
+        update_path,
+        chunks,
+    })
 }
 
-fn parse_old_start(header: &str) -> Option<usize> {
+fn is_unified_hunk_range(header: &str) -> bool {
+    let header = header.strip_suffix("@@").unwrap_or(header).trim();
     let mut parts = header.split_whitespace();
-    parts.next()?; // @@
-    let old = parts.next()?;
-    let range = old.strip_prefix('-')?;
-    range.split(',').next()?.parse().ok()
-}
-
-fn apply_hunk(content: &str, hunk: &Hunk) -> Result<String, String> {
-    let old_lines: Vec<String> = hunk
-        .lines
-        .iter()
-        .filter_map(|line| match line {
-            HunkLine::Context(s) | HunkLine::Remove(s) => Some(s.clone()),
-            HunkLine::Add(_) => None,
-        })
-        .collect();
-    let new_text: String = hunk
-        .lines
-        .iter()
-        .filter_map(|line| match line {
-            HunkLine::Context(s) | HunkLine::Add(s) => Some(s.as_str()),
-            HunkLine::Remove(_) => None,
-        })
-        .collect();
-
-    if old_lines.is_empty() {
-        return insert_at_line(content, hunk.old_start, &new_text);
-    }
-
-    let old_text: String = old_lines.iter().map(String::as_str).collect();
-    let span = find_hunk_span(content, &old_text, old_lines.len(), hunk.old_start)?;
-    let mut next = String::with_capacity(content.len() - (span.end - span.start) + new_text.len());
-    next.push_str(&content[..span.start]);
-    next.push_str(&new_text);
-    next.push_str(&content[span.end..]);
-    Ok(next)
-}
-
-struct Span {
-    start: usize,
-    end: usize,
-}
-
-#[derive(Clone, Copy)]
-struct Candidate {
-    start: usize,
-    end: usize,
-    line: usize,
-    score: f64,
-}
-
-fn find_hunk_span(
-    content: &str,
-    old_text: &str,
-    old_line_count: usize,
-    expected_line: usize,
-) -> Result<Span, String> {
-    let exact: Vec<_> = line_window_candidates(content, old_line_count)
-        .into_iter()
-        .filter(|candidate| content[candidate.start..candidate.end] == *old_text)
-        .collect();
-    if let Some(candidate) = choose_exact_or_normalized(&exact, expected_line) {
-        return Ok(Span {
-            start: candidate.start,
-            end: candidate.end,
-        });
-    }
-    if exact.len() > 1 {
-        return Err(ambiguous_error(
-            "hunk context",
-            exact.len(),
-            exact.iter().map(|c| c.line),
-        ));
-    }
-
-    let old_norm = normalize_for_match(old_text);
-    let normalized: Vec<_> = line_window_candidates(content, old_line_count)
-        .into_iter()
-        .filter(|candidate| {
-            normalize_for_match(&content[candidate.start..candidate.end]) == old_norm
-        })
-        .collect();
-    if let Some(candidate) = choose_exact_or_normalized(&normalized, expected_line) {
-        return Ok(Span {
-            start: candidate.start,
-            end: candidate.end,
-        });
-    }
-    if normalized.len() > 1 {
-        return Err(ambiguous_error(
-            "hunk context",
-            normalized.len(),
-            normalized.iter().map(|c| c.line),
-        ));
-    }
-
-    let mut ranked: Vec<Candidate> = line_window_candidates(content, old_line_count)
-        .into_iter()
-        .map(|mut candidate| {
-            candidate.score = normalized_levenshtein(
-                &normalize_for_match(&content[candidate.start..candidate.end]),
-                &old_norm,
-            );
-            candidate
-        })
-        .collect();
-    ranked.sort_by(|a, b| {
-        b.score.total_cmp(&a.score).then_with(|| {
-            line_distance(a.line, expected_line).cmp(&line_distance(b.line, expected_line))
-        })
-    });
-
-    let Some(best) = ranked.first().copied() else {
-        return Err("hunk context matched 0 times; expected exactly 1".to_string());
+    let Some(old_part) = parts.next() else {
+        return false;
     };
-    let second_score = ranked.get(1).map(|c| c.score).unwrap_or(0.0);
-    let margin = best.score - second_score;
-    if best.score >= 0.85 && (margin >= 0.04 || best.line == expected_line) {
-        return Ok(Span {
-            start: best.start,
-            end: best.end,
-        });
+    if !old_part.starts_with('-') || !is_hunk_range(&old_part[1..]) {
+        return false;
     }
-
-    Err(format!(
-        "hunk context matched 0 times; expected exactly 1\nBest candidate line {} scored {:.2}; patch not applied because the match was not confident enough.\n\nActual candidate:\n{}\n\nSubmitted hunk context:\n{}",
-        best.line,
-        best.score,
-        &content[best.start..best.end],
-        old_text
-    ))
-}
-
-fn choose_exact_or_normalized(candidates: &[Candidate], expected_line: usize) -> Option<Candidate> {
-    if candidates.len() == 1 {
-        return Some(candidates[0]);
-    }
-    let at_expected: Vec<_> = candidates
-        .iter()
-        .copied()
-        .filter(|candidate| candidate.line == expected_line)
-        .collect();
-    if at_expected.len() == 1 {
-        Some(at_expected[0])
-    } else {
-        None
+    match parts.next() {
+        Some(new_part) if new_part.starts_with('+') && is_hunk_range(&new_part[1..]) => true,
+        None => true,
+        _ => false,
     }
 }
 
-fn ambiguous_error(label: &str, count: usize, lines: impl Iterator<Item = usize>) -> String {
-    let mut msg = format!("{label} matched {count} times; expected exactly 1\n\nMatches:");
-    for line in lines.take(10) {
-        msg.push_str(&format!("\n- line {line}"));
-    }
-    if count > 10 {
-        msg.push_str(&format!("\n- ... and {} more", count - 10));
-    }
-    msg
-}
-
-fn insert_at_line(content: &str, line: usize, text: &str) -> Result<String, String> {
-    let spans = line_spans(content);
-    let start = if line == 0 {
-        0
-    } else if line > spans.len() {
-        content.len()
-    } else {
-        spans[line - 1].1
+fn is_hunk_range(range: &str) -> bool {
+    let mut parts = range.split(',');
+    let Some(start) = parts.next() else {
+        return false;
     };
-    let mut next = String::with_capacity(content.len() + text.len());
-    next.push_str(&content[..start]);
-    next.push_str(text);
-    next.push_str(&content[start..]);
-    Ok(next)
+    if start.is_empty() || !start.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        Some(len) if !len.is_empty() && len.chars().all(|ch| ch.is_ascii_digit()) => {
+            parts.next().is_none()
+        }
+        None => true,
+        _ => false,
+    }
 }
 
-fn line_window_candidates(content: &str, line_count: usize) -> Vec<Candidate> {
-    let spans = line_spans(content);
-    if spans.is_empty() || line_count == 0 || line_count > spans.len() {
-        return Vec::new();
+fn push_chunk(chunks: &mut Vec<Chunk>, chunk: Chunk) -> Result<(), String> {
+    if chunk.old_lines.is_empty() && chunk.new_lines.is_empty() {
+        return Err("empty hunk".to_string());
     }
-    (0..=spans.len() - line_count)
-        .map(|idx| Candidate {
-            start: spans[idx].0,
-            end: spans[idx + line_count - 1].1,
-            line: idx + 1,
-            score: 0.0,
+    chunks.push(chunk);
+    Ok(())
+}
+
+fn apply_chunks(content: &str, path: &str, chunks: &[Chunk]) -> Result<String, String> {
+    let mut lines: Vec<String> = content.split('\n').map(String::from).collect();
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+
+    let mut replacements = Vec::new();
+    let mut line_index = 0;
+    for (index, chunk) in chunks.iter().enumerate() {
+        if let Some(context) = &chunk.change_context {
+            let pattern = vec![context.clone()];
+            let Some(found) = seek_sequence(&lines, &pattern, line_index, false) else {
+                return Err(format!(
+                    "hunk {} failed: failed to find context '{}' in {path}",
+                    index + 1,
+                    context
+                ));
+            };
+            line_index = found + 1;
+        }
+
+        if chunk.old_lines.is_empty() {
+            let insertion_idx = if lines.last().is_some_and(String::is_empty) {
+                lines.len() - 1
+            } else {
+                lines.len()
+            };
+            replacements.push((insertion_idx, 0, chunk.new_lines.clone()));
+            continue;
+        }
+
+        let mut pattern = chunk.old_lines.as_slice();
+        let mut new_slice = chunk.new_lines.as_slice();
+        let mut found = seek_sequence(&lines, pattern, line_index, chunk.is_end_of_file);
+        if found.is_none() && pattern.last().is_some_and(String::is_empty) {
+            pattern = &pattern[..pattern.len() - 1];
+            if new_slice.last().is_some_and(String::is_empty) {
+                new_slice = &new_slice[..new_slice.len() - 1];
+            }
+            found = seek_sequence(&lines, pattern, line_index, chunk.is_end_of_file);
+        }
+
+        let Some(start_idx) = found else {
+            return Err(format!(
+                "hunk {} failed: failed to find expected lines in {path}:\n{}",
+                index + 1,
+                chunk.old_lines.join("\n")
+            ));
+        };
+        replacements.push((start_idx, pattern.len(), new_slice.to_vec()));
+        line_index = start_idx + pattern.len();
+    }
+
+    replacements.sort_by_key(|(index, _, _)| *index);
+    for (start_idx, old_len, new_segment) in replacements.into_iter().rev() {
+        for _ in 0..old_len {
+            if start_idx < lines.len() {
+                lines.remove(start_idx);
+            }
+        }
+        for (offset, new_line) in new_segment.into_iter().enumerate() {
+            lines.insert(start_idx + offset, new_line);
+        }
+    }
+
+    if !lines.last().is_some_and(String::is_empty) {
+        lines.push(String::new());
+    }
+    Ok(lines.join("\n"))
+}
+
+fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(start);
+    }
+    if pattern.len() > lines.len() {
+        return None;
+    }
+    let search_start = if eof && lines.len() >= pattern.len() {
+        lines.len() - pattern.len()
+    } else {
+        start
+    };
+
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        if lines[i..i + pattern.len()] == *pattern {
+            return Some(i);
+        }
+    }
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        if pattern
+            .iter()
+            .enumerate()
+            .all(|(offset, pat)| lines[i + offset].trim_end() == pat.trim_end())
+        {
+            return Some(i);
+        }
+    }
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        if pattern
+            .iter()
+            .enumerate()
+            .all(|(offset, pat)| lines[i + offset].trim() == pat.trim())
+        {
+            return Some(i);
+        }
+    }
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        if pattern
+            .iter()
+            .enumerate()
+            .all(|(offset, pat)| normalize_line(&lines[i + offset]) == normalize_line(pat))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn normalize_line(line: &str) -> String {
+    line.trim()
+        .chars()
+        .map(|ch| match ch {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
         })
         .collect()
-}
-
-fn line_spans(content: &str) -> Vec<(usize, usize)> {
-    if content.is_empty() {
-        return Vec::new();
-    }
-    let mut spans = Vec::new();
-    let mut start = 0;
-    for (idx, ch) in content.char_indices() {
-        if ch == '\n' {
-            spans.push((start, idx + 1));
-            start = idx + 1;
-        }
-    }
-    if start < content.len() {
-        spans.push((start, content.len()));
-    }
-    spans
-}
-
-fn normalize_for_match(text: &str) -> String {
-    let text = text.replace("\r\n", "\n");
-    let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let (body, newline) = line
-            .strip_suffix('\n')
-            .map(|body| (body, true))
-            .unwrap_or((line, false));
-        push_normalized_line(&mut out, body);
-        if newline {
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn push_normalized_line(out: &mut String, line: &str) {
-    let trimmed = line.trim_end_matches([' ', '\t']);
-    let mut in_space = false;
-    for ch in trimmed.chars() {
-        if ch == ' ' || ch == '\t' {
-            if !in_space {
-                out.push(' ');
-                in_space = true;
-            }
-        } else {
-            out.push(ch);
-            in_space = false;
-        }
-    }
-}
-
-fn line_distance(a: usize, b: usize) -> usize {
-    a.abs_diff(b)
 }
 
 pub fn sha256_hex(content: &str) -> String {

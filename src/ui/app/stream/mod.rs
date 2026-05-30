@@ -11,7 +11,7 @@ use crate::ui::render::{BoneTerminal, StatusInfo};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, pin_mut};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
@@ -150,6 +150,7 @@ impl App {
 
         let mut rounds = 0u32;
         let final_assistant_idx;
+        let mut hidden_edit_preview_failures: HashMap<String, usize> = HashMap::new();
         loop {
             rounds += 1;
             self.messages.push(Message::assistant(String::new()));
@@ -261,7 +262,9 @@ impl App {
             self.renderer
                 .finalize_streaming_message(&self.messages[assistant_idx].content, term)?;
 
-            let (calls_for_display, results) = self.handle_tool_calls(tool_calls, term).await?;
+            let (calls_for_display, results) = self
+                .handle_tool_calls(tool_calls, term, &mut hidden_edit_preview_failures)
+                .await?;
             if self.cancel_streaming {
                 self.queue.clear();
                 final_assistant_idx = assistant_idx;
@@ -458,6 +461,7 @@ impl App {
         &mut self,
         tool_calls: Vec<ToolCall>,
         term: &mut BoneTerminal,
+        hidden_edit_preview_failures: &mut HashMap<String, usize>,
     ) -> io::Result<(Vec<ToolCall>, Vec<ToolResult>)> {
         let calls_for_display = tool_calls.clone();
         let mut pending = Vec::with_capacity(tool_calls.len());
@@ -466,7 +470,10 @@ impl App {
             if self.cancel_streaming {
                 break;
             }
-            pending.push(self.prepare_tool_call(display_call, call, term).await?);
+            pending.push(
+                self.prepare_tool_call(display_call, call, term, hidden_edit_preview_failures)
+                    .await?,
+            );
         }
 
         let approved: Vec<ToolCall> = pending
@@ -634,6 +641,7 @@ impl App {
         display_call: &ToolCall,
         mut call: ToolCall,
         term: &mut BoneTerminal,
+        hidden_edit_preview_failures: &mut HashMap<String, usize>,
     ) -> io::Result<PendingTool> {
         // Check if this is a dynamic tool with interaction
         if self.interaction_tools.contains(&call.name) {
@@ -765,37 +773,61 @@ impl App {
         }
 
         if call.name == "edit_file" {
-            if self
-                .tools
-                .display_for_call(&call)
-                .and_then(|display| display.show)
-                .unwrap_or(true)
-            {
-                self.messages.push(build_tool_row(
-                    &call,
-                    &ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: String::new(),
-                        is_error: false,
-                        pane_page: None,
-                    },
-                    self.tools.display_for_call(&call),
-                ));
-            }
             match preview_edit_file_unified(call.arguments.clone()).await {
                 Ok(preview) => {
+                    if self
+                        .tools
+                        .display_for_call(&call)
+                        .and_then(|display| display.show)
+                        .unwrap_or(true)
+                    {
+                        self.messages.push(build_tool_row(
+                            &call,
+                            &ToolResult {
+                                call_id: call.id.clone(),
+                                name: call.name.clone(),
+                                content: String::new(),
+                                is_error: false,
+                                pane_page: None,
+                            },
+                            self.tools.display_for_call(&call),
+                        ));
+                    }
                     call.arguments["expected_hash"] =
                         serde_json::Value::String(preview.before_hash);
                     self.messages.push(Message::system(preview.diff));
                 }
                 Err(err) => {
                     let path = call.arguments["path"].as_str().unwrap_or("?");
-                    self.messages.push(Message::system(format!(
-                        "edit_file preview failed for {path}: {err}"
-                    )));
-                    self.renderer
-                        .flush_new_to_scrollback(&self.messages, term)?;
+                    let failure_count = hidden_edit_preview_failures
+                        .entry(path.to_string())
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+                    if *failure_count > 1 {
+                        if self
+                            .tools
+                            .display_for_call(&call)
+                            .and_then(|display| display.show)
+                            .unwrap_or(true)
+                        {
+                            self.messages.push(build_tool_row(
+                                &call,
+                                &ToolResult {
+                                    call_id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    content: String::new(),
+                                    is_error: true,
+                                    pane_page: None,
+                                },
+                                self.tools.display_for_call(&call),
+                            ));
+                        }
+                        self.messages.push(Message::system(format!(
+                            "edit_file preview failed for {path}: {err}"
+                        )));
+                        self.renderer
+                            .flush_new_to_scrollback(&self.messages, term)?;
+                    }
                     return Ok(PendingTool::Result(tool_error(
                         &call,
                         format!("edit_file preview failed: {err}"),

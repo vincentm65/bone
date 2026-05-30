@@ -1,6 +1,6 @@
 pub mod command_policy;
 pub mod dynamic;
-pub mod edit_file;
+pub mod edit_diff;
 pub mod edit_file_unified;
 pub mod read_file;
 pub mod registry;
