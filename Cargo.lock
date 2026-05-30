@@ -114,6 +114,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "similar",
+ "strsim",
  "syntect",
  "tokio",
  "unicode-width 0.2.0",

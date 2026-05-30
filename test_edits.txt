@@ -1,0 +1,29 @@
+# Refactored Document
+This is a sample file for testing edits.
+Note: Sections have been reorganized.
+## Section 1
+The quick brown fox jumps over the lazy cat.
+Hello, world!
+
+## Section 2
+Python is great for scripting.
+JavaScript is used for web development.
+Rust is fast and safe.
+Go is known for concurrency.
+Swift powers iOS apps.
+
+Numbers: One, two, three, four, five.
+
+## Section 3
+
+## Section 4
+Line A
+Line B
+Line C
+Line A again
+
+## Section 5
+
+## Section 6
+Numbers:
+One, two, three, four, five.

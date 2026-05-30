@@ -1,7 +1,6 @@
 pub mod command_policy;
 pub mod dynamic;
-pub mod edit_diff;
-pub mod edit_file_unified;
+pub mod edit_file;
 pub mod read_file;
 pub mod registry;
 pub mod script_runner;
@@ -85,7 +84,7 @@ pub fn builtin_tools() -> ToolRegistry {
     ToolRegistry::new()
         .register(read_file::ReadFileTool)
         .register(write_file::WriteFileTool)
-        .register(edit_file_unified::EditFileUnifiedTool)
+        .register(edit_file::EditFileTool)
         .register(shell::ShellTool)
 }
 
