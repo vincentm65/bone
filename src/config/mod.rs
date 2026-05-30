@@ -88,8 +88,8 @@ impl Default for UserConfig {
             approval_mode: ApprovalMode::default(),
             enabled_tools: default_enabled_tools(),
             max_rounds: default_max_rounds(),
-            auto_compact_tokens: Some(65_000),
-            auto_compact_keep_messages: Some(50),
+            auto_compact_tokens: None,
+            auto_compact_keep_messages: None,
         }
     }
 }
