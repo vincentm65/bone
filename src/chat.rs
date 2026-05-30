@@ -48,18 +48,22 @@ pub fn compact_transcript<'a>(
 fn compact_boundary(messages: &[ChatMessage], requested: usize) -> usize {
     let mut boundary = requested;
 
-    // Do not start with tool results unless the assistant tool-call message
-    // that produced them is also retained.
-    while boundary > 0 && messages[boundary].role == ChatRole::Tool {
-        boundary -= 1;
+    // Walk backward until we find a safe cut point:
+    //   - boundary must not point at a tool result (needs its assistant call)
+    //   - message before boundary must not be a tool result (would orphan it)
+    while boundary > 0 {
+        if boundary < messages.len() && messages[boundary].role == ChatRole::Tool {
+            boundary -= 1;
+            continue;
+        }
+        if messages[boundary - 1].role == ChatRole::Tool {
+            boundary -= 1;
+            continue;
+        }
+        break;
     }
 
-    // If the requested boundary falls immediately after an assistant/tool chain,
-    // include the chain instead of orphaning retained tool results.
-    while boundary > 0 && messages[boundary - 1].role == ChatRole::Tool {
-        boundary -= 1;
-    }
-
+    // Include the assistant call that initiated a retained tool chain
     if boundary > 0
         && messages[boundary - 1].role == ChatRole::Assistant
         && !messages[boundary - 1].tool_calls.is_empty()

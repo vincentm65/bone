@@ -1,4 +1,4 @@
-use crate::chat::{COMPACT_NOTICE, Message, build_chat_history};
+use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
@@ -143,18 +143,7 @@ impl App {
         self.input.reset();
         self.redraw(term)?;
 
-        if self
-            .user_config
-            .auto_compact_tokens
-            .filter(|limit| *limit > 0)
-            .is_some_and(|limit| self.token_stats.context_length >= limit)
-            && self.compact_transcript_state()
-        {
-            self.messages.push(Message::system(COMPACT_NOTICE));
-            self.renderer
-                .flush_new_to_scrollback(&self.messages, term)?;
-            self.redraw(term)?;
-        }
+        self.auto_compact_if_needed(term)?;
 
         let mut history = build_chat_history(&self.transcript);
 
@@ -314,18 +303,7 @@ impl App {
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
 
-        if self
-            .user_config
-            .auto_compact_tokens
-            .filter(|limit| *limit > 0)
-            .is_some_and(|limit| self.token_stats.context_length >= limit)
-            && self.compact_transcript_state()
-        {
-            self.messages.push(Message::system(COMPACT_NOTICE));
-            self.renderer
-                .flush_new_to_scrollback(&self.messages, term)?;
-            self.redraw(term)?;
-        }
+        self.auto_compact_if_needed(term)?;
 
         Ok(())
     }

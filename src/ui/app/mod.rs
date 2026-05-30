@@ -889,6 +889,21 @@ impl App {
         self.redraw(term)
     }
 
+    /// Auto-compact transcript if the token threshold is exceeded.
+    pub(crate) fn auto_compact_if_needed(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let should_compact = self
+            .user_config
+            .auto_compact_tokens
+            .is_some_and(|limit| limit > 0 && self.token_stats.context_length >= limit);
+
+        if should_compact && self.compact_transcript_state() {
+            self.messages.push(Message::system(COMPACT_NOTICE));
+            self.renderer.flush_new_to_scrollback(&self.messages, term)?;
+            self.redraw(term)?;
+        }
+        Ok(())
+    }
+
     fn navigate_panel(&mut self, code: KeyCode, term: &mut BoneTerminal) -> io::Result<bool> {
         match code {
             KeyCode::Up => self.active_prompt.as_mut().unwrap().up(),
