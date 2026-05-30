@@ -171,5 +171,3 @@ pub fn truncate_output(output: &str, max_lines: usize) -> String {
     out.extend_from_slice(&lines[lines.len() - tail..]);
     out.join("\n")
 }
-
-

@@ -25,7 +25,10 @@ async fn web_search_returns_json_results_for_real_query() {
     let output = run_script(ScriptRequest {
         command: script,
         env: vec![
-            ("TOOL_QUERY".to_string(), "rust programming language".to_string()),
+            (
+                "TOOL_QUERY".to_string(),
+                "rust programming language".to_string(),
+            ),
             ("TOOL_NUM_RESULTS".to_string(), "3".to_string()),
         ],
         timeout_ms: 30_000,
@@ -45,8 +48,8 @@ async fn web_search_returns_json_results_for_real_query() {
     );
 
     for line in &lines {
-        let parsed: serde_json::Value =
-            serde_json::from_str(line).unwrap_or_else(|e| panic!("line is not valid JSON: {line}\n{e}"));
+        let parsed: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("line is not valid JSON: {line}\n{e}"));
         assert!(
             parsed["title"].is_string() || parsed["href"].is_string(),
             "result should have title or href: {line}"
@@ -89,7 +92,10 @@ async fn web_search_handles_empty_results_gracefully() {
         command: script,
         env: vec![
             // Nonsensical query unlikely to return results
-            ("TOOL_QUERY".to_string(), "zzzzzxxxxxqqqqqNoSuchThing12345".to_string()),
+            (
+                "TOOL_QUERY".to_string(),
+                "zzzzzxxxxxqqqqqNoSuchThing12345".to_string(),
+            ),
             ("TOOL_NUM_RESULTS".to_string(), "1".to_string()),
         ],
         timeout_ms: 30_000,
@@ -124,5 +130,8 @@ fn web_search_script_references_ddgs() {
     let script = tool.script.unwrap();
     assert!(script.contains("ddgs"), "script should import ddgs library");
     assert!(script.contains("uv run"), "script should use uv run");
-    assert!(script.contains("python3 -c"), "script should invoke python3 -c");
+    assert!(
+        script.contains("python3 -c"),
+        "script should invoke python3 -c"
+    );
 }

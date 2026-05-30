@@ -28,6 +28,12 @@ fn default_subagent_wraps_agent_events_and_uses_python_panel_script() {
     assert!(script.contains("python3 -"));
     assert!(script.contains("TOOL_CALL_ID"));
     assert!(script.contains("type\": \"pane"));
+    assert!(script.contains("pane_source = \"subagents\""));
+    assert!(script.contains("\"read_only\": \"read\""));
+    assert!(script.contains("mode_width = max"));
+    assert!(script.contains("model_width = max"));
+    assert!(script.contains("token_width = max"));
+    assert!(script.contains("def list_line(entry, mode_width, model_width, token_width):"));
     assert!(script.contains("print(line, flush=True)"));
     assert!(script.contains("emit_pane(remove=True)"));
 }

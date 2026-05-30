@@ -197,42 +197,13 @@ impl Tool for DynamicTool {
 
 impl DynamicTool {
     /// Run the tool script and parse JSONL events from stdout.
-    /// Accumulates events into a pane page with sub-agent progress.
     async fn run_jsonl_events(&self, arguments: Value) -> Result<ToolOutput, String> {
-        // Build env vars (same as run())
-        let script = self
-            .script
-            .as_ref()
-            .ok_or_else(|| "dynamic tool has no script".to_string())?;
-
-        for arg in &self.args {
-            if arg.required && arguments.get(&arg.name).is_none() {
-                return Err(format!("missing required argument: {}", arg.name));
-            }
-        }
-
-        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
-        if let Value::Object(map) = &arguments {
-            for (key, value) in map {
-                let env_name = Self::arg_to_env_name(key);
-                let env_value = match value {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Array(arr) => arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => value.to_string(),
-                };
-                env.push((env_name, env_value));
-            }
-        }
+        let script = self.script()?;
+        self.validate_required_args(&arguments)?;
 
         let output = run_script(ScriptRequest {
             command: script.clone(),
-            env,
+            env: self.build_env(&arguments),
             timeout_ms: 300_000,
         })
         .await
@@ -254,16 +225,8 @@ impl DynamicTool {
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
         context: ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
-        let script = self
-            .script
-            .as_ref()
-            .ok_or_else(|| "dynamic tool has no script".to_string())?;
-
-        for arg in &self.args {
-            if arg.required && arguments.get(&arg.name).is_none() {
-                return Err(format!("missing required argument: {}", arg.name));
-            }
-        }
+        let script = self.script()?;
+        self.validate_required_args(&arguments)?;
 
         let mut env = self.build_env(&arguments);
         env.push(("TOOL_CALL_ID".to_string(), context.call_id));
@@ -293,40 +256,61 @@ impl DynamicTool {
         parse_jsonl_events(&output.stdout)
     }
 
-    fn build_env(&self, arguments: &Value) -> Vec<(String, String)> {
-        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
-        if let Value::Object(map) = arguments {
-            for (key, value) in map {
-                let env_name = Self::arg_to_env_name(key);
-                let env_value = match value {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Array(arr) => arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => value.to_string(),
-                };
-                env.push((env_name.clone(), env_value));
-                env.push((
-                    format!("{env_name}_JSON"),
-                    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
-                ));
-                if let Value::Array(arr) = value {
-                    env.push((format!("{env_name}_COUNT"), arr.len().to_string()));
-                    for (i, item) in arr.iter().enumerate() {
-                        let val = match item {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        env.push((format!("{env_name}_{i}"), val));
-                    }
-                }
+    fn script(&self) -> Result<&String, String> {
+        self.script
+            .as_ref()
+            .ok_or_else(|| "dynamic tool has no script".to_string())
+    }
+
+    fn validate_required_args(&self, arguments: &Value) -> Result<(), String> {
+        for arg in &self.args {
+            if arg.required && arguments.get(&arg.name).is_none() {
+                return Err(format!("missing required argument: {}", arg.name));
             }
         }
+        Ok(())
+    }
+
+    fn build_env(&self, arguments: &Value) -> Vec<(String, String)> {
+        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
+        let Value::Object(map) = arguments else {
+            return env;
+        };
+
+        for (key, value) in map {
+            let env_name = Self::arg_to_env_name(key);
+            env.push((env_name.clone(), Self::env_value(value)));
+            env.push((
+                format!("{env_name}_JSON"),
+                serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+            ));
+            Self::push_array_env(&mut env, &env_name, value);
+        }
         env
+    }
+
+    fn env_value(value: &Value) -> String {
+        match value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => value.to_string(),
+        }
+    }
+
+    fn push_array_env(env: &mut Vec<(String, String)>, env_name: &str, value: &Value) {
+        let Value::Array(arr) = value else {
+            return;
+        };
+        env.push((format!("{env_name}_COUNT"), arr.len().to_string()));
+        for (i, item) in arr.iter().enumerate() {
+            env.push((format!("{env_name}_{i}"), Self::env_value(item)));
+        }
     }
 
     async fn run(
@@ -337,58 +321,12 @@ impl DynamicTool {
             return Err("interaction tools should not reach execute(); they are intercepted in prepare_tool_call".to_string());
         }
 
-        let script = self
-            .script
-            .as_ref()
-            .ok_or_else(|| "dynamic tool has no script".to_string())?;
-
-        // Validate required args
-        for arg in &self.args {
-            if arg.required && arguments.get(&arg.name).is_none() {
-                return Err(format!("missing required argument: {}", arg.name));
-            }
-        }
-
-        // Build env vars from arguments
-        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
-        if let Value::Object(map) = &arguments {
-            for (key, value) in map {
-                let env_name = Self::arg_to_env_name(key);
-                let env_value = match value {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Array(arr) => arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => value.to_string(),
-                };
-                env.push((env_name, env_value));
-                env.push((
-                    format!("{}_JSON", Self::arg_to_env_name(key)),
-                    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
-                ));
-                // For array args, also export indexed env vars: TOOL_KEY_0, TOOL_KEY_1, ...
-                // and TOOL_KEY_COUNT with the total count.
-                if let Value::Array(arr) = value {
-                    let base = Self::arg_to_env_name(key);
-                    env.push((format!("{base}_COUNT"), arr.len().to_string()));
-                    for (i, item) in arr.iter().enumerate() {
-                        let val = match item {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        env.push((format!("{base}_{i}"), val));
-                    }
-                }
-            }
-        }
+        let script = self.script()?;
+        self.validate_required_args(&arguments)?;
 
         let output = run_script(ScriptRequest {
             command: script.clone(),
-            env,
+            env: self.build_env(&arguments),
             timeout_ms: 120_000,
         })
         .await

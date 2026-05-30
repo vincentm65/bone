@@ -8,7 +8,7 @@ use tokio::fs;
 use crate::tools::types::{Tool, ToolDefinition};
 use crate::tools::write_atomic::write_atomic;
 
-mod diff;
+pub(crate) mod diff;
 
 pub struct EditFileTool;
 

@@ -1,11 +1,9 @@
-use bone::tools::types::{
-    Tool, ToolCall, ToolDefinition, ToolLiveEvent, ToolOutput,
-};
-use bone::tools::registry::{ToolHandler, ToolRegistry};
-use bone::tools::ApprovalMode;
-use bone::ui::app::stream::{StreamFailure, timeout_message};
-use bone::llm::{LlmError, LlmErrorKind};
 use async_trait::async_trait;
+use bone::llm::{LlmError, LlmErrorKind};
+use bone::tools::ApprovalMode;
+use bone::tools::registry::{ToolHandler, ToolRegistry};
+use bone::tools::types::{Tool, ToolCall, ToolDefinition, ToolLiveEvent, ToolOutput};
+use bone::ui::app::stream::{StreamFailure, timeout_message};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -102,8 +100,14 @@ fn make_call(name: &str, id: &str) -> ToolCall {
 #[tokio::test]
 async fn tool_handler_execute_all_returns_results_in_order() {
     let registry = ToolRegistry::new()
-        .register(MockTool { name: "tool_a".to_string(), result: Ok("result_a".to_string()) })
-        .register(MockTool { name: "tool_b".to_string(), result: Ok("result_b".to_string()) });
+        .register(MockTool {
+            name: "tool_a".to_string(),
+            result: Ok("result_a".to_string()),
+        })
+        .register(MockTool {
+            name: "tool_b".to_string(),
+            result: Ok("result_b".to_string()),
+        });
 
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("tool_a", "c1"), make_call("tool_b", "c2")];
@@ -118,8 +122,10 @@ async fn tool_handler_execute_all_returns_results_in_order() {
 
 #[tokio::test]
 async fn tool_handler_execute_all_reports_errors() {
-    let registry = ToolRegistry::new()
-        .register(MockTool { name: "failing".to_string(), result: Err("something broke".to_string()) });
+    let registry = ToolRegistry::new().register(MockTool {
+        name: "failing".to_string(),
+        result: Err("something broke".to_string()),
+    });
 
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("failing", "c1")];
@@ -142,8 +148,10 @@ async fn tool_handler_execute_all_unknown_tool() {
 
 #[tokio::test]
 async fn tool_handler_execute_all_disabled_tool() {
-    let registry = ToolRegistry::new()
-        .register(MockTool { name: "disabled_tool".to_string(), result: Ok("ok".to_string()) });
+    let registry = ToolRegistry::new().register(MockTool {
+        name: "disabled_tool".to_string(),
+        result: Ok("ok".to_string()),
+    });
 
     let handler = ToolHandler::with_enabled(registry, &[]);
     let calls = vec![make_call("disabled_tool", "c1")];
@@ -156,8 +164,16 @@ async fn tool_handler_execute_all_disabled_tool() {
 #[tokio::test]
 async fn tool_handler_execute_all_runs_in_parallel() {
     let registry = ToolRegistry::new()
-        .register(SlowTool { name: "slow_a".to_string(), delay_ms: 100, content: "a".to_string() })
-        .register(SlowTool { name: "slow_b".to_string(), delay_ms: 100, content: "b".to_string() });
+        .register(SlowTool {
+            name: "slow_a".to_string(),
+            delay_ms: 100,
+            content: "a".to_string(),
+        })
+        .register(SlowTool {
+            name: "slow_b".to_string(),
+            delay_ms: 100,
+            content: "b".to_string(),
+        });
 
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("slow_a", "c1"), make_call("slow_b", "c2")];
@@ -177,8 +193,7 @@ async fn tool_handler_execute_all_runs_in_parallel() {
 
 #[tokio::test]
 async fn tool_handler_execute_live_receives_pane_events() {
-    let registry = ToolRegistry::new()
-        .register(PaneTool);
+    let registry = ToolRegistry::new().register(PaneTool);
 
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("pane_tool", "c1")];
@@ -195,8 +210,10 @@ async fn tool_handler_execute_live_receives_pane_events() {
 
 #[tokio::test]
 async fn tool_handler_execute_live_no_events_channel() {
-    let registry = ToolRegistry::new()
-        .register(MockTool { name: "simple".to_string(), result: Ok("ok".to_string()) });
+    let registry = ToolRegistry::new().register(MockTool {
+        name: "simple".to_string(),
+        result: Ok("ok".to_string()),
+    });
 
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("simple", "c1")];
@@ -208,8 +225,10 @@ async fn tool_handler_execute_live_no_events_channel() {
 
 #[tokio::test]
 async fn tool_handler_allows_call_based_on_approval_mode() {
-    let registry = ToolRegistry::new()
-        .register(MockTool { name: "read_file".to_string(), result: Ok("ok".to_string()) });
+    let registry = ToolRegistry::new().register(MockTool {
+        name: "read_file".to_string(),
+        result: Ok("ok".to_string()),
+    });
 
     let handler = ToolHandler::new(registry);
     let call = make_call("read_file", "c1");
@@ -225,17 +244,35 @@ async fn tool_handler_allows_call_based_on_approval_mode() {
 fn stream_failure_retryable_cases() {
     assert!(StreamFailure::InitialTimeout.retryable());
     assert!(StreamFailure::IdleTimeout.retryable());
-    assert!(StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Timeout, "timed out")).retryable());
-    assert!(StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Connection, "refused")).retryable());
+    assert!(
+        StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Timeout, "timed out"))
+            .retryable()
+    );
+    assert!(
+        StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Connection, "refused"))
+            .retryable()
+    );
 }
 
 #[test]
 fn stream_failure_non_retryable_cases() {
-    assert!(!StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Auth, "bad key")).retryable());
-    assert!(!StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::RateLimit, "429")).retryable());
-    assert!(!StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Parse, "bad json")).retryable());
+    assert!(
+        !StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Auth, "bad key"))
+            .retryable()
+    );
+    assert!(
+        !StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::RateLimit, "429"))
+            .retryable()
+    );
+    assert!(
+        !StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Parse, "bad json"))
+            .retryable()
+    );
     // Server errors ARE retryable
-    assert!(StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Server(500), "500")).retryable());
+    assert!(
+        StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Server(500), "500"))
+            .retryable()
+    );
 }
 
 #[test]

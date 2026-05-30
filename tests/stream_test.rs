@@ -1,5 +1,7 @@
 use bone::tools::types::ToolCall;
-use bone::ui::app::stream::{assistant_message, call_row_shown_during_prepare, pane_toggle_hint, tool_error};
+use bone::ui::app::stream::{
+    assistant_message, call_row_shown_during_prepare, pane_toggle_hint, tool_error,
+};
 use serde_json::json;
 
 #[test]
@@ -52,7 +54,11 @@ fn assistant_message_with_tool_calls() {
         name: "shell".to_string(),
         arguments: json!({}),
     };
-    let msg = assistant_message("I will run a command".to_string(), vec![call], "reasoning".to_string());
+    let msg = assistant_message(
+        "I will run a command".to_string(),
+        vec![call],
+        "reasoning".to_string(),
+    );
     assert_eq!(msg.role, bone::llm::ChatRole::Assistant);
     assert_eq!(msg.content, "I will run a command");
     assert_eq!(msg.reasoning_content, Some("reasoning".to_string()));

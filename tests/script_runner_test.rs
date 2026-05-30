@@ -1,5 +1,5 @@
+use bone::tools::script_runner::{ScriptRequest, run_script_jsonl};
 use std::sync::{Arc, Mutex};
-use bone::tools::script_runner::{run_script_jsonl, ScriptRequest};
 
 #[tokio::test]
 async fn jsonl_runner_drains_stderr_while_reading_stdout() {

@@ -1,6 +1,6 @@
 use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
-use crate::tools::edit_file::preview_edit_file;
+use crate::tools::edit_file_unified::preview_edit_file_unified;
 use crate::tools::shell::ShellTool;
 use crate::tools::types::{Tool, ToolLiveEvent};
 use crate::tools::{ApprovalMode, ToolCall, ToolResult};
@@ -37,7 +37,11 @@ pub fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
     }
 }
 
-pub fn assistant_message(content: String, tool_calls: Vec<ToolCall>, reasoning: String) -> ChatMessage {
+pub fn assistant_message(
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    reasoning: String,
+) -> ChatMessage {
     let mut message = if tool_calls.is_empty() {
         ChatMessage::new(ChatRole::Assistant, content)
     } else {
@@ -52,7 +56,6 @@ pub fn assistant_message(content: String, tool_calls: Vec<ToolCall>, reasoning: 
 pub fn call_row_shown_during_prepare(call: &ToolCall) -> bool {
     call.name == "edit_file"
 }
-
 
 pub enum StreamFailure {
     Provider(LlmError),
@@ -546,7 +549,6 @@ impl App {
         .await
     }
 
-
     fn apply_tool_live_event(&mut self, event: ToolLiveEvent) {
         match event {
             ToolLiveEvent::Pane(page) => {
@@ -578,7 +580,12 @@ impl App {
 
         loop {
             tokio::select! {
-                results = &mut future => return Ok(results),
+                results = &mut future => {
+                    while let Ok(event) = rx.try_recv() {
+                        self.apply_tool_live_event(event);
+                    }
+                    return Ok(results);
+                }
                 Some(event) = rx.recv() => {
                     self.apply_tool_live_event(event);
                 }
@@ -776,7 +783,7 @@ impl App {
                     self.tools.display_for_call(&call),
                 ));
             }
-            match preview_edit_file(call.arguments.clone()).await {
+            match preview_edit_file_unified(call.arguments.clone()).await {
                 Ok(preview) => {
                     call.arguments["expected_hash"] =
                         serde_json::Value::String(preview.before_hash);

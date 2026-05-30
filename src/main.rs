@@ -53,7 +53,9 @@ fn ensure_uv() {
         eprintln!("Install uv:");
         eprintln!("  macOS/Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh");
         eprintln!("  macOS (brew): brew install uv");
-        eprintln!("  Windows:      powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"");
+        eprintln!(
+            "  Windows:      powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\""
+        );
         eprintln!("  pip:          pip install uv");
         eprintln!("  See: https://docs.astral.sh/uv/getting-started/installation/");
         eprintln!();
