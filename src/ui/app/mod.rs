@@ -1,6 +1,6 @@
 pub mod stream;
 
-use crate::chat::Message;
+use crate::chat::{COMPACT_NOTICE, DEFAULT_KEEP_MESSAGES, Message, compact_transcript};
 use crate::config::{self, ProvidersConfig, UserConfig};
 use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
 use crate::skills::SkillStore;
@@ -637,6 +637,9 @@ impl App {
         if cmd == "skills" {
             return self.handle_skills_command(&arg, term);
         }
+        if cmd == "compact" {
+            return self.compact_chat(term);
+        }
         if !matches!(
             cmd.as_str(),
             "help"
@@ -851,6 +854,36 @@ impl App {
 
     fn show_reply(&mut self, reply: impl Into<String>, term: &mut BoneTerminal) -> io::Result<()> {
         self.messages.push(Message::system(reply.into()));
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.redraw(term)
+    }
+
+    pub(crate) fn compact_transcript_state(&mut self) -> bool {
+        let keep = self
+            .user_config
+            .auto_compact_keep_messages
+            .unwrap_or(DEFAULT_KEEP_MESSAGES);
+        match compact_transcript(&self.transcript, keep) {
+            std::borrow::Cow::Owned(owned) => {
+                self.transcript = owned;
+                let history = crate::chat::build_chat_history(&self.transcript);
+                let tools = self.tools.definitions();
+                let prompt_chars = Self::estimate_context_chars(&history, &tools);
+                self.token_stats.set_context_estimate(prompt_chars);
+                true
+            }
+            std::borrow::Cow::Borrowed(_) => false,
+        }
+    }
+
+    pub(crate) fn compact_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if self.compact_transcript_state() {
+            self.messages.push(Message::system(COMPACT_NOTICE));
+        } else {
+            self.messages
+                .push(Message::system("Chat history is already compact."));
+        }
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)

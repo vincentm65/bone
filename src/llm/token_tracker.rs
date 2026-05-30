@@ -42,6 +42,16 @@ impl TokenStats {
         self.request_count += 1;
     }
 
+    /// Set the current context length using the same fallback character-based estimate.
+    ///
+    /// This is for local transcript changes such as compaction, where no provider
+    /// request has occurred yet, so cumulative sent/received totals must not change.
+    pub fn set_context_estimate(&mut self, prompt_chars: usize) {
+        // Rough heuristic: ~3.8 UTF-8 chars per token for typical text.
+        let chars_per_token = 3.8;
+        self.context_length = (prompt_chars as f64 / chars_per_token).ceil() as u64;
+    }
+
     /// Total tokens across all requests.
     pub fn total(&self) -> u64 {
         self.sent + self.received

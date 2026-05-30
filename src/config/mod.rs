@@ -53,6 +53,10 @@ pub struct UserConfig {
     pub enabled_tools: Vec<String>,
     #[serde(default = "default_max_rounds")]
     pub max_rounds: u32,
+    #[serde(default)]
+    pub auto_compact_tokens: Option<u64>,
+    #[serde(default)]
+    pub auto_compact_keep_messages: Option<usize>,
 }
 
 fn default_provider() -> String {
@@ -84,6 +88,8 @@ impl Default for UserConfig {
             approval_mode: ApprovalMode::default(),
             enabled_tools: default_enabled_tools(),
             max_rounds: default_max_rounds(),
+            auto_compact_tokens: None,
+            auto_compact_keep_messages: None,
         }
     }
 }

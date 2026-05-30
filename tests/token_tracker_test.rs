@@ -22,6 +22,19 @@ fn record_estimate() {
 }
 
 #[test]
+fn set_context_estimate_updates_current_only() {
+    let mut stats = TokenStats::new();
+    stats.record_request(1000, 50);
+
+    stats.set_context_estimate(380);
+
+    assert_eq!(stats.context_length, 100);
+    assert_eq!(stats.sent, 1000);
+    assert_eq!(stats.received, 50);
+    assert_eq!(stats.request_count, 1);
+}
+
+#[test]
 fn format_tokens_small() {
     assert_eq!(format_tokens(42), "42");
 }

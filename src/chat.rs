@@ -11,6 +11,65 @@ pub fn build_chat_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     out
 }
 
+/// Notice inserted when older messages are compacted.
+pub const COMPACT_NOTICE: &str = "Compacted older messages.";
+
+/// Default number of recent messages to keep during compaction.
+pub const DEFAULT_KEEP_MESSAGES: usize = 12;
+
+/// Compact chat transcript by replacing older turns with a short notice.
+///
+/// This does not summarize removed content; it only keeps the most recent
+/// messages, expanding the retained range when needed to avoid splitting
+/// assistant/tool-call chains.
+///
+/// Returns a `Cow` to avoid allocation when the transcript is already short
+/// enough to keep as-is.
+pub fn compact_transcript<'a>(
+    messages: &'a [ChatMessage],
+    keep: usize,
+) -> std::borrow::Cow<'a, [ChatMessage]> {
+    let keep = keep.max(1);
+    if messages.len() <= keep {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+
+    let keep_from = compact_boundary(messages, messages.len() - keep);
+    if keep_from == 0 {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+
+    let mut out = Vec::with_capacity(messages.len() - keep_from + 1);
+    out.push(ChatMessage::new(ChatRole::System, COMPACT_NOTICE));
+    out.extend(messages[keep_from..].iter().cloned());
+    std::borrow::Cow::Owned(out)
+}
+
+fn compact_boundary(messages: &[ChatMessage], requested: usize) -> usize {
+    let mut boundary = requested;
+
+    // Do not start with tool results unless the assistant tool-call message
+    // that produced them is also retained.
+    while boundary > 0 && messages[boundary].role == ChatRole::Tool {
+        boundary -= 1;
+    }
+
+    // If the requested boundary falls immediately after an assistant/tool chain,
+    // include the chain instead of orphaning retained tool results.
+    while boundary > 0 && messages[boundary - 1].role == ChatRole::Tool {
+        boundary -= 1;
+    }
+
+    if boundary > 0
+        && messages[boundary - 1].role == ChatRole::Assistant
+        && !messages[boundary - 1].tool_calls.is_empty()
+    {
+        boundary -= 1;
+    }
+
+    boundary
+}
+
 // ── Message ─────────────────────────────────────────────────────────────────
 
 /// Display metadata for compact tool rows shown in chat.

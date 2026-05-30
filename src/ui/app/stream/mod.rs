@@ -1,4 +1,4 @@
-use crate::chat::{Message, build_chat_history};
+use crate::chat::{COMPACT_NOTICE, Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
@@ -143,6 +143,19 @@ impl App {
         self.input.reset();
         self.redraw(term)?;
 
+        if self
+            .user_config
+            .auto_compact_tokens
+            .filter(|limit| *limit > 0)
+            .is_some_and(|limit| self.token_stats.context_length >= limit)
+            && self.compact_transcript_state()
+        {
+            self.messages.push(Message::system(COMPACT_NOTICE));
+            self.renderer
+                .flush_new_to_scrollback(&self.messages, term)?;
+            self.redraw(term)?;
+        }
+
         let mut history = build_chat_history(&self.transcript);
 
         self.streaming = true;
@@ -261,9 +274,7 @@ impl App {
             self.renderer
                 .finalize_streaming_message(&self.messages[assistant_idx].content, term)?;
 
-            let (calls_for_display, results) = self
-                .handle_tool_calls(tool_calls, term)
-                .await?;
+            let (calls_for_display, results) = self.handle_tool_calls(tool_calls, term).await?;
             if self.cancel_streaming {
                 self.queue.clear();
                 final_assistant_idx = assistant_idx;
@@ -302,6 +313,19 @@ impl App {
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
+
+        if self
+            .user_config
+            .auto_compact_tokens
+            .filter(|limit| *limit > 0)
+            .is_some_and(|limit| self.token_stats.context_length >= limit)
+            && self.compact_transcript_state()
+        {
+            self.messages.push(Message::system(COMPACT_NOTICE));
+            self.renderer
+                .flush_new_to_scrollback(&self.messages, term)?;
+            self.redraw(term)?;
+        }
 
         Ok(())
     }
@@ -430,8 +454,8 @@ impl App {
         }
 
         if !had_usage && !self.cancel_streaming {
-            let prompt_chars: usize = history.iter().map(|m| m.content.len()).sum();
-            let completion_chars = self.messages[assistant_idx].content.len();
+            let prompt_chars = Self::estimate_context_chars(&history, &self.tools.definitions());
+            let completion_chars = self.messages[assistant_idx].content.chars().count();
             self.token_stats
                 .record_estimate(prompt_chars, completion_chars);
         }
@@ -468,9 +492,7 @@ impl App {
             if self.cancel_streaming {
                 break;
             }
-            pending.push(
-                self.prepare_tool_call(display_call, call, term).await?,
-            );
+            pending.push(self.prepare_tool_call(display_call, call, term).await?);
         }
 
         let approved: Vec<ToolCall> = pending
@@ -827,6 +849,43 @@ impl App {
                 }
             }
         })
+    }
+
+    pub(crate) fn estimate_context_chars(
+        history: &[ChatMessage],
+        tools: &[crate::tools::ToolDefinition],
+    ) -> usize {
+        let message_chars: usize = history
+            .iter()
+            .map(|message| {
+                message.content.chars().count()
+                    + message
+                        .reasoning_content
+                        .as_deref()
+                        .map(str::chars)
+                        .map(Iterator::count)
+                        .unwrap_or(0)
+                    + serde_json::to_string(&message.tool_calls)
+                        .map(|json| json.chars().count())
+                        .unwrap_or(0)
+                    + message
+                        .tool_call_id
+                        .as_deref()
+                        .map(str::chars)
+                        .map(Iterator::count)
+                        .unwrap_or(0)
+                    + message
+                        .name
+                        .as_deref()
+                        .map(str::chars)
+                        .map(Iterator::count)
+                        .unwrap_or(0)
+            })
+            .sum();
+        let tool_chars = serde_json::to_string(tools)
+            .map(|json| json.chars().count())
+            .unwrap_or(0);
+        message_chars + tool_chars
     }
 
     async fn wait_for_stream(

@@ -97,6 +97,7 @@ fn context(messages: &[ChatMessage]) -> String {
 fn help() -> String {
     [
         "/clear     — clear chat history",
+        "/compact   — compact chat history",
         "/edit      — open system editor for input",
         "/help      — show this message",
         "/model     — set or show model (/model <name>)",
