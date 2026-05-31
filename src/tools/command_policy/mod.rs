@@ -172,6 +172,13 @@ fn classify_segment(command: &str) -> CommandSafety {
 
     if names
         .iter()
+        .any(|token| matches!(token.as_str(), "systemctl" | "service"))
+    {
+        return CommandSafety::Edit;
+    }
+
+    if names
+        .iter()
         .any(|token| matches!(token.as_str(), "curl" | "wget"))
         && (command.contains(" -O") || command.contains(" -o ") || command.contains('>'))
     {

@@ -1,5 +1,8 @@
 pub mod types;
 
+use crate::tools::ApprovalMode;
+use crate::tools::script_runner::{ScriptRequest, run_script};
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -131,6 +134,75 @@ pub fn render_skill(
         (None, Some(output)) => Ok(output.to_string()),
         (None, None) => Err(format!("skill {} produced no input", skill.name)),
     }
+}
+
+pub async fn expand_skill_command(
+    store: &SkillStore,
+    input: &str,
+    allow_scripts: bool,
+    approval_mode: ApprovalMode,
+) -> Result<String, String> {
+    let trimmed = input.trim();
+    let Some(command) = trimmed.strip_prefix('/') else {
+        return Err("not a skill invocation".to_string());
+    };
+    let mut parts = command.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or_default();
+    if name.is_empty() {
+        return Err("not a skill invocation".to_string());
+    }
+    let args = parts.next().unwrap_or("").trim_start();
+    let skill = store
+        .get_enabled(name)
+        .ok_or_else(|| format!("unknown skill: /{name}"))?;
+
+    if skill.script.is_some() {
+        let safety = skill.effective_safety();
+        if !approval_mode.allows_safety(safety) {
+            return Err(format!(
+                "skill /{} requires {:?} approval, but current mode is {}",
+                skill.name,
+                safety,
+                approval_mode.mode_str()
+            ));
+        }
+    }
+
+    let script_output = if let Some(script) = skill.script.as_ref() {
+        if !allow_scripts {
+            return Err(format!(
+                "skill /{} has a script; rerun with --allow-skill-scripts to execute headlessly",
+                skill.name
+            ));
+        }
+        let output = run_script(ScriptRequest {
+            command: script.clone(),
+            env: vec![("BONE_ARGS".to_string(), args.to_string())],
+            timeout_ms: 120_000,
+        })
+        .await
+        .map_err(|err| format!("Skill /{} failed: {err}", skill.name))?;
+        if output.exit_code != Some(0) {
+            let detail = if output.stderr.is_empty() {
+                output.stdout
+            } else {
+                output.stderr
+            };
+            return Err(format!(
+                "Skill /{} failed (exit code {}).\n{}",
+                skill.name,
+                output
+                    .exit_code
+                    .map_or_else(|| "signal".to_string(), |code| code.to_string()),
+                detail
+            ));
+        }
+        Some(output.stdout)
+    } else {
+        None
+    };
+
+    render_skill(skill, args, script_output.as_deref())
 }
 
 fn render_template(template: &str, args: &str, script_output: &str) -> String {

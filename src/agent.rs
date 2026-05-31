@@ -28,12 +28,27 @@ enum AgentEvent<'a> {
         task: &'a str,
         model: &'a str,
     },
-    Status { message: &'a str },
-    ToolCall { name: &'a str, summary: &'a str },
-    ToolResult { name: &'a str, is_error: bool },
-    TokenUsage { sent: u64, received: u64 },
-    Finished { content: &'a str },
-    Failed { message: &'a str },
+    Status {
+        message: &'a str,
+    },
+    ToolCall {
+        name: &'a str,
+        summary: &'a str,
+    },
+    ToolResult {
+        name: &'a str,
+        is_error: bool,
+    },
+    TokenUsage {
+        sent: u64,
+        received: u64,
+    },
+    Finished {
+        content: &'a str,
+    },
+    Failed {
+        message: &'a str,
+    },
 }
 
 fn emit_event(events: bool, event: &AgentEvent) {
@@ -190,7 +205,12 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             model: llm.model(),
         },
     );
-    emit_event(request.events, &AgentEvent::Status { message: "thinking" });
+    emit_event(
+        request.events,
+        &AgentEvent::Status {
+            message: "thinking",
+        },
+    );
 
     let max_rounds = user_config.max_rounds;
 
@@ -207,7 +227,12 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                emit_event(request.events, &AgentEvent::Failed { message: &e.to_string() });
+                emit_event(
+                    request.events,
+                    &AgentEvent::Failed {
+                        message: &e.to_string(),
+                    },
+                );
                 return Err(format!("provider error: {e}"));
             }
         };
@@ -247,7 +272,12 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                     );
                 }
                 Err(e) => {
-                    emit_event(request.events, &AgentEvent::Failed { message: &e.to_string() });
+                    emit_event(
+                        request.events,
+                        &AgentEvent::Failed {
+                            message: &e.to_string(),
+                        },
+                    );
                     return Err(format!("stream error: {e}"));
                 }
             }

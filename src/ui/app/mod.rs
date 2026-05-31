@@ -2,7 +2,7 @@ pub mod stream;
 
 use crate::chat::{COMPACT_NOTICE, DEFAULT_KEEP_MESSAGES, Message, compact_transcript};
 use crate::config::{self, ProvidersConfig, UserConfig};
-use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
+use crate::llm::{ChatMessage, LlmProvider, TokenStats, format_tokens, providers};
 use crate::skills::SkillStore;
 use crate::skills::types::Skill;
 use crate::tools::script_runner::{ScriptRequest, run_script};
@@ -859,11 +859,12 @@ impl App {
         self.redraw(term)
     }
 
-    pub(crate) fn compact_transcript_state(&mut self) -> bool {
+    pub(crate) fn compact_transcript_state(&mut self) -> (bool, u64) {
         let keep = self
             .user_config
             .auto_compact_keep_messages
             .unwrap_or(DEFAULT_KEEP_MESSAGES);
+        let before = self.token_stats.context_length;
         match compact_transcript(&self.transcript, keep) {
             std::borrow::Cow::Owned(owned) => {
                 self.transcript = owned;
@@ -871,15 +872,27 @@ impl App {
                 let tools = self.tools.definitions();
                 let prompt_chars = Self::estimate_context_chars(&history, &tools);
                 self.token_stats.set_context_estimate(prompt_chars);
-                true
+                let after = self.token_stats.context_length;
+                (true, before.saturating_sub(after))
             }
-            std::borrow::Cow::Borrowed(_) => false,
+            std::borrow::Cow::Borrowed(_) => (false, 0),
         }
     }
 
     pub(crate) fn compact_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        if self.compact_transcript_state() {
-            self.messages.push(Message::system(COMPACT_NOTICE));
+        let (compacted, saved) = self.compact_transcript_state();
+        if compacted {
+            let msg = if saved > 0 {
+                format!(
+                    "Compacted older messages. Saved ~{} tokens (was ~{}, now {}).",
+                    format_tokens(saved),
+                    format_tokens(saved + self.token_stats.context_length),
+                    format_tokens(self.token_stats.context_length)
+                )
+            } else {
+                COMPACT_NOTICE.to_string()
+            };
+            self.messages.push(Message::system(msg));
         } else {
             self.messages
                 .push(Message::system("Chat history is already compact."));
@@ -896,9 +909,23 @@ impl App {
             .auto_compact_tokens
             .is_some_and(|limit| limit > 0 && self.token_stats.context_length >= limit);
 
-        if should_compact && self.compact_transcript_state() {
-            self.messages.push(Message::system(COMPACT_NOTICE));
-            self.renderer.flush_new_to_scrollback(&self.messages, term)?;
+        if should_compact {
+            let (compacted, saved) = self.compact_transcript_state();
+            if compacted {
+                let msg = if saved > 0 {
+                    format!(
+                        "Auto-compacted. Saved ~{} tokens (was ~{}, now {}).",
+                        format_tokens(saved),
+                        format_tokens(saved + self.token_stats.context_length),
+                        format_tokens(self.token_stats.context_length)
+                    )
+                } else {
+                    COMPACT_NOTICE.to_string()
+                };
+                self.messages.push(Message::system(msg));
+            }
+            self.renderer
+                .flush_new_to_scrollback(&self.messages, term)?;
             self.redraw(term)?;
         }
         Ok(())
@@ -1257,15 +1284,29 @@ impl App {
                     match idx {
                         // approval mode: cycle through modes
                         0 => {
-                            let next = (modes.iter().position(|m| *m == self.approval_mode).unwrap_or(0) + 1) % modes.len();
+                            let next = (modes
+                                .iter()
+                                .position(|m| *m == self.approval_mode)
+                                .unwrap_or(0)
+                                + 1)
+                                % modes.len();
                             self.approval_mode = modes[next];
                             self.user_config.approval_mode = self.approval_mode;
                             config::save_user_config(&self.user_config);
                         }
                         // auto_compact_tokens
                         1 => {
-                            let current = self.user_config.auto_compact_tokens.map(|t| t.to_string()).unwrap_or_default();
-                            if let Some(val) = self.edit_value("auto_compact_tokens (empty = disabled)", &current, false, term)? {
+                            let current = self
+                                .user_config
+                                .auto_compact_tokens
+                                .map(|t| t.to_string())
+                                .unwrap_or_default();
+                            if let Some(val) = self.edit_value(
+                                "auto_compact_tokens (empty = disabled)",
+                                &current,
+                                false,
+                                term,
+                            )? {
                                 self.user_config.auto_compact_tokens = if val.trim().is_empty() {
                                     None
                                 } else {
@@ -1276,13 +1317,23 @@ impl App {
                         }
                         // auto_compact_keep_messages
                         2 => {
-                            let current = self.user_config.auto_compact_keep_messages.map(|n| n.to_string()).unwrap_or_default();
-                            if let Some(val) = self.edit_value("auto_compact_keep_messages (empty = default 12)", &current, false, term)? {
-                                self.user_config.auto_compact_keep_messages = if val.trim().is_empty() {
-                                    None
-                                } else {
-                                    val.trim().parse::<usize>().ok()
-                                };
+                            let current = self
+                                .user_config
+                                .auto_compact_keep_messages
+                                .map(|n| n.to_string())
+                                .unwrap_or_default();
+                            if let Some(val) = self.edit_value(
+                                "auto_compact_keep_messages (empty = default 12)",
+                                &current,
+                                false,
+                                term,
+                            )? {
+                                self.user_config.auto_compact_keep_messages =
+                                    if val.trim().is_empty() {
+                                        None
+                                    } else {
+                                        val.trim().parse::<usize>().ok()
+                                    };
                                 config::save_user_config(&self.user_config);
                             }
                         }

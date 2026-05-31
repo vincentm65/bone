@@ -106,6 +106,7 @@ pub fn seed_default_tools(dir: &std::path::Path) {
             "subagent.yaml",
             include_str!("../../defaults/tools/subagent.yaml"),
         ),
+        ("cron.yaml", include_str!("../../defaults/tools/cron.yaml")),
     ];
     for (name, content) in DEFAULTS {
         let path = dir.join(name);

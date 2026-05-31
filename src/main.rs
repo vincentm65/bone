@@ -3,7 +3,9 @@ use bone::config::{
     load_providers, load_user_config, save_providers, seed_command_policy_if_missing,
     seed_providers_if_missing,
 };
+use bone::cron;
 use bone::llm::providers;
+use bone::run;
 use bone::ui::app::App;
 struct CliOptions {
     provider: Option<String>,
@@ -71,6 +73,21 @@ fn usage() -> String {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.first().map(String::as_str) == Some("run") {
+        ensure_uv();
+        let request = run::parse_run_args(&args[1..]).map_err(std::io::Error::other)?;
+        let response = run::run_headless(request)
+            .await
+            .map_err(std::io::Error::other)?;
+        println!("{}", response.content);
+        return Ok(());
+    }
+
+    if args.first().map(String::as_str) == Some("cron") {
+        cron::handle_cron_args(&args[1..]).map_err(std::io::Error::other)?;
+        return Ok(());
+    }
 
     // Dispatch headless sub-agent mode
     if args.first().map(String::as_str) == Some("agent") {

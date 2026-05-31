@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::tools::command_policy::CommandSafety;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     pub name: String,
@@ -8,6 +10,8 @@ pub struct Skill {
     pub enabled: bool,
     pub prompt: Option<String>,
     pub script: Option<String>,
+    #[serde(default)]
+    pub safety: Option<CommandSafety>,
 }
 
 fn enabled_by_default() -> bool {
@@ -31,12 +35,25 @@ impl Skill {
                 self.name
             ));
         }
-        if self.prompt.as_ref().is_some_and(|prompt| prompt.is_empty())
-            && self.script.as_ref().is_none_or(|script| script.is_empty())
+        if self.prompt.as_ref().is_some_and(|prompt| prompt.is_empty()) {
+            return Err(format!("skill {} has an empty prompt", self.name));
+        }
+        if self
+            .script
+            .as_ref()
+            .is_some_and(|script| script.trim().is_empty())
         {
-            return Err(format!("skill {} has no executable content", self.name));
+            return Err(format!("skill {} has an empty script", self.name));
         }
         Ok(())
+    }
+
+    pub fn effective_safety(&self) -> CommandSafety {
+        if self.script.is_some() {
+            CommandSafety::Danger
+        } else {
+            self.safety.unwrap_or(CommandSafety::ReadOnly)
+        }
     }
 }
 

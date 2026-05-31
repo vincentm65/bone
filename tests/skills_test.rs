@@ -77,6 +77,7 @@ fn template_interpolation_is_single_pass() {
         enabled: true,
         prompt: Some("Args: {{args}}\nOutput: {{script_output}}".to_string()),
         script: Some("true".to_string()),
+        safety: None,
     };
 
     let rendered = render_skill(&skill, "{{script_output}}", Some("{{args}}")).unwrap();

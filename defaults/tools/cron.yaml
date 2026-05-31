@@ -1,0 +1,118 @@
+name: cron
+version: 1
+description: "Manage Bone scheduled jobs for the user. Use this when the user asks to schedule, list, remove, or inspect recurring Bone tasks. Supports daily HH:MM schedules through bone cron."
+safety: edit
+args:
+  - name: action
+    type: string
+    required: true
+    description: "Action: add, list, remove, logs, or help."
+  - name: name
+    type: string
+    required: false
+    description: "Job name for add/remove/logs. Use letters, numbers, '-' or '_'."
+  - name: time
+    type: string
+    required: false
+    description: "Daily run time in HH:MM 24-hour local time, required for add."
+  - name: approval
+    type: string
+    required: false
+    description: "Approval mode for add: read_only, edit, or danger. Defaults to read_only."
+  - name: prompt
+    type: string
+    required: false
+    description: "Prompt or skill invocation for add, e.g. '/clean src/main.rs'."
+  - name: cwd
+    type: string
+    required: false
+    description: "Working directory for add. Defaults to current directory."
+  - name: tail
+    type: integer
+    required: false
+    description: "Number of log lines for logs."
+  - name: allow_skill_scripts
+    type: boolean
+    required: false
+    description: "For add: pass --allow-skill-scripts to scheduled bone run. Defaults to false."
+script: |
+  set -euo pipefail
+
+  action="${TOOL_ACTION:-}"
+  name="${TOOL_NAME:-}"
+  time="${TOOL_TIME:-}"
+  approval="${TOOL_APPROVAL:-read_only}"
+  prompt="${TOOL_PROMPT:-}"
+  cwd="${TOOL_CWD:-}"
+  tail="${TOOL_TAIL:-}"
+  allow_skill_scripts="${TOOL_ALLOW_SKILL_SCRIPTS:-false}"
+
+  find_bone() {
+    if [ -n "${BONE_BIN:-}" ] && [ -x "${BONE_BIN:-}" ]; then
+      printf '%s\n' "$BONE_BIN"
+      return 0
+    fi
+    if command -v bone >/dev/null 2>&1; then
+      command -v bone
+      return 0
+    fi
+    printf 'bone binary not found. Set BONE_BIN=/path/to/bone or make sure "bone" is on your PATH.\n' >&2
+    return 127
+  }
+
+  bone_bin="$(find_bone)"
+
+  case "$action" in
+    list)
+      exec "$bone_bin" cron list
+      ;;
+    add)
+      if [ -z "$name" ] || [ -z "$time" ] || [ -z "$prompt" ]; then
+        printf 'Usage: cron add requires name, time, and prompt.\n' >&2
+        exit 2
+      fi
+      args=(cron add --name "$name" --time "$time" --approval "$approval" --prompt "$prompt")
+      if [ -n "$cwd" ]; then
+        args+=(--cwd "$cwd")
+      fi
+      case "$allow_skill_scripts" in
+        true|1|yes|on)
+          args+=(--allow-skill-scripts)
+          ;;
+      esac
+      exec "$bone_bin" "${args[@]}"
+      ;;
+    remove|rm)
+      if [ -z "$name" ]; then
+        printf 'Usage: cron remove requires name.\n' >&2
+        exit 2
+      fi
+      exec "$bone_bin" cron remove "$name"
+      ;;
+    logs)
+      if [ -z "$name" ]; then
+        printf 'Usage: cron logs requires name.\n' >&2
+        exit 2
+      fi
+      args=(cron logs "$name")
+      if [ -n "$tail" ]; then
+        args+=(--tail "$tail")
+      fi
+      exec "$bone_bin" "${args[@]}"
+      ;;
+    help|--help|-h|"")
+      cat <<'EOF'
+  Manage Bone scheduled jobs.
+
+  Examples:
+    cron(action=list)
+    cron(action=add, name=daily-clean, time=09:00, approval=edit, prompt=/clean src/main.rs)
+    cron(action=remove, name=daily-clean)
+    cron(action=logs, name=daily-clean, tail=100)
+  EOF
+      ;;
+    *)
+      printf 'Unknown cron action: %s\n' "$action" >&2
+      exit 2
+      ;;
+  esac
