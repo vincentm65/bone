@@ -250,4 +250,13 @@ impl ApprovalMode {
             Self::Danger => "Danger",
         }
     }
+
+    /// Lowercase short labels used in sub-agent JSONL events.
+    pub fn mode_str(&self) -> &'static str {
+        match self {
+            Self::Safe => "read_only",
+            Self::Edits => "edit",
+            Self::Danger => "danger",
+        }
+    }
 }

@@ -455,7 +455,6 @@ fn parse_jsonl_events(stdout: &str) -> Result<ToolOutput, String> {
     let mut pane_source = String::from("subagent");
     let mut pane_lines: Vec<String> = Vec::new();
     let mut explicit_pane_page: Option<PanePage> = None;
-    let mut _status_message = String::new();
     let mut tokens_sent: u64 = 0;
     let mut tokens_received: u64 = 0;
     #[allow(unused_assignments)]
@@ -501,9 +500,7 @@ fn parse_jsonl_events(stdout: &str) -> Result<ToolOutput, String> {
                 pane_lines.push(format!("Task: {task_display}"));
                 pane_lines.push(String::new());
             }
-            "status" => {
-                _status_message = event["message"].as_str().unwrap_or("").to_string();
-            }
+            "status" => {}
             "tool_call" => {
                 let name = event["name"].as_str().unwrap_or("");
                 let summary = event["summary"].as_str().unwrap_or("");

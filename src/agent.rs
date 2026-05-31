@@ -14,7 +14,6 @@ pub struct AgentRequest {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub events: bool,
-    pub timeout_ms: u64,
 }
 
 pub struct AgentResponse {
@@ -23,105 +22,86 @@ pub struct AgentResponse {
 
 // ── JSONL event helpers ─────────────────────────────────────────────────────
 
-fn emit_event(events: bool, json: &str) {
-    if events {
-        println!("{json}");
+enum AgentEvent<'a> {
+    Started {
+        approval: &'a str,
+        task: &'a str,
+        model: &'a str,
+    },
+    Status { message: &'a str },
+    ToolCall { name: &'a str, summary: &'a str },
+    ToolResult { name: &'a str, is_error: bool },
+    TokenUsage { sent: u64, received: u64 },
+    Finished { content: &'a str },
+    Failed { message: &'a str },
+}
+
+fn emit_event(events: bool, event: &AgentEvent) {
+    if !events {
+        return;
     }
-}
-
-fn event_started(events: bool, approval: &str, task: &str, model: &str) {
-    let task_preview = if task.len() > 200 { &task[..200] } else { task };
-    emit_event(
-        events,
-        &serde_json::json!({
-            "type": "started",
-            "approval": approval,
-            "task": task_preview,
-            "model": model
-        })
-        .to_string(),
-    );
-}
-
-fn event_status(events: bool, message: &str) {
-    emit_event(
-        events,
-        &serde_json::json!({
-            "type": "status",
-            "message": message
-        })
-        .to_string(),
-    );
-}
-
-fn event_tool_call(events: bool, name: &str, summary: &str) {
-    let summary = if summary.len() > 200 {
-        &summary[..200]
-    } else {
-        summary
+    let json = match event {
+        AgentEvent::Started {
+            approval,
+            task,
+            model,
+        } => {
+            let task_preview = if task.len() > 200 {
+                &task[..200]
+            } else {
+                *task
+            };
+            serde_json::json!({
+                "type": "started",
+                "approval": approval,
+                "task": task_preview,
+                "model": model
+            })
+        }
+        AgentEvent::Status { message } => {
+            serde_json::json!({ "type": "status", "message": message })
+        }
+        AgentEvent::ToolCall { name, summary } => {
+            let summary = if summary.len() > 200 {
+                &summary[..200]
+            } else {
+                *summary
+            };
+            serde_json::json!({
+                "type": "tool_call",
+                "name": name,
+                "summary": summary
+            })
+        }
+        AgentEvent::ToolResult { name, is_error } => {
+            serde_json::json!({
+                "type": "tool_result",
+                "name": name,
+                "is_error": is_error
+            })
+        }
+        AgentEvent::TokenUsage { sent, received } => {
+            serde_json::json!({
+                "type": "token_usage",
+                "sent": sent,
+                "received": received
+            })
+        }
+        AgentEvent::Finished { content } => {
+            serde_json::json!({ "type": "finished", "content": content })
+        }
+        AgentEvent::Failed { message } => {
+            serde_json::json!({ "type": "failed", "message": message })
+        }
     };
-    emit_event(
-        events,
-        &serde_json::json!({
-            "type": "tool_call",
-            "name": name,
-            "summary": summary
-        })
-        .to_string(),
-    );
-}
-
-fn event_tool_result(events: bool, name: &str, is_error: bool) {
-    emit_event(
-        events,
-        &serde_json::json!({
-            "type": "tool_result",
-            "name": name,
-            "is_error": is_error
-        })
-        .to_string(),
-    );
-}
-
-fn event_token_usage(events: bool, sent: u64, received: u64) {
-    emit_event(
-        events,
-        &serde_json::json!({
-            "type": "token_usage",
-            "sent": sent,
-            "received": received
-        })
-        .to_string(),
-    );
-}
-
-fn event_finished(events: bool, content: &str) {
-    emit_event(
-        events,
-        &serde_json::json!({
-            "type": "finished",
-            "content": content
-        })
-        .to_string(),
-    );
-}
-
-fn event_failed(events: bool, message: &str) {
-    emit_event(
-        events,
-        &serde_json::json!({
-            "type": "failed",
-            "message": message
-        })
-        .to_string(),
-    );
+    println!("{json}");
 }
 
 // ── Recursion guard ─────────────────────────────────────────────────────────
 
-pub(crate) const MAX_AGENT_DEPTH: u32 = 3;
+const MAX_AGENT_DEPTH: u32 = 3;
 
-pub(crate) fn check_depth() -> Result<u32, String> {
+fn check_depth() -> Result<u32, String> {
     let depth: u32 = std::env::var("BONE_AGENT_DEPTH")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -143,6 +123,10 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let user_config = load_user_config();
     let mut providers_config = load_providers();
 
+    // NOTE: provider fallback order differs from main.rs intentionally.
+    // agent.rs prefers the config file (user_config.provider) before last_provider,
+    // so sub-agents follow the configured default. main.rs inverts this to remember
+    // the last provider selected interactively in the TUI.
     let provider_id = request
         .provider
         .clone()
@@ -183,11 +167,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         loaded.dynamic_display,
     );
 
-    let approval_label = match request.approval_mode {
-        ApprovalMode::Safe => "read_only",
-        ApprovalMode::Edits => "edit",
-        ApprovalMode::Danger => "danger",
-    };
+    let approval_label = request.approval_mode.mode_str();
 
     // Set recursion depth for child processes (safe: single-threaded before any spawns)
     // SAFETY: set_var is safe in single-threaded code before any async tasks spawn.
@@ -202,8 +182,15 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let mut history = build_chat_history(&transcript);
     let mut token_stats = TokenStats::new();
 
-    event_started(request.events, approval_label, &request.prompt, llm.model());
-    event_status(request.events, "thinking");
+    emit_event(
+        request.events,
+        &AgentEvent::Started {
+            approval: approval_label,
+            task: &request.prompt,
+            model: llm.model(),
+        },
+    );
+    emit_event(request.events, &AgentEvent::Status { message: "thinking" });
 
     let max_rounds = user_config.max_rounds;
 
@@ -220,7 +207,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                event_failed(request.events, &e.to_string());
+                emit_event(request.events, &AgentEvent::Failed { message: &e.to_string() });
                 return Err(format!("provider error: {e}"));
             }
         };
@@ -237,7 +224,13 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Ok(ChatEvent::ReasoningDelta(_)) => {}
                 Ok(ChatEvent::ToolCall(call)) => {
                     let summary = format!("{}: {}", call.name, summarize_call_args(&call));
-                    event_tool_call(request.events, &call.name, &summary);
+                    emit_event(
+                        request.events,
+                        &AgentEvent::ToolCall {
+                            name: &call.name,
+                            summary: &summary,
+                        },
+                    );
                     tool_calls.push(call);
                 }
                 Ok(ChatEvent::TokenUsage {
@@ -245,10 +238,16 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                     completion_tokens,
                 }) => {
                     token_stats.record_request(prompt_tokens, completion_tokens);
-                    event_token_usage(request.events, token_stats.sent, token_stats.received);
+                    emit_event(
+                        request.events,
+                        &AgentEvent::TokenUsage {
+                            sent: token_stats.sent,
+                            received: token_stats.received,
+                        },
+                    );
                 }
                 Err(e) => {
-                    event_failed(request.events, &e.to_string());
+                    emit_event(request.events, &AgentEvent::Failed { message: &e.to_string() });
                     return Err(format!("stream error: {e}"));
                 }
             }
@@ -266,23 +265,36 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         // Execute tool calls
         for call in &tool_calls {
-            event_status(
+            emit_event(
                 request.events,
-                &format!("running {}: {}", call.name, summarize_call_args(call)),
+                &AgentEvent::Status {
+                    message: &format!("running {}: {}", call.name, summarize_call_args(call)),
+                },
             );
         }
 
         let results = execute_tool_calls(&tools, request.approval_mode, tool_calls).await;
 
         for result in &results {
-            event_tool_result(request.events, &result.name, result.is_error);
+            emit_event(
+                request.events,
+                &AgentEvent::ToolResult {
+                    name: &result.name,
+                    is_error: result.is_error,
+                },
+            );
             let message = ChatMessage::tool(result.clone());
             history.push(message.clone());
             transcript.push(message);
         }
     };
 
-    event_finished(request.events, &final_content);
+    emit_event(
+        request.events,
+        &AgentEvent::Finished {
+            content: &final_content,
+        },
+    );
 
     Ok(AgentResponse {
         content: final_content,
@@ -296,6 +308,7 @@ async fn execute_tool_calls(
     mode: ApprovalMode,
     calls: Vec<crate::tools::ToolCall>,
 ) -> Vec<crate::tools::ToolResult> {
+    let mode_label = mode.mode_str();
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
         if tools.allows_call(mode, &call) {
@@ -305,11 +318,6 @@ async fn execute_tool_calls(
                 .expect("execute_all returns one result per call");
             out.push(result);
         } else {
-            let mode_label = match mode {
-                ApprovalMode::Safe => "read_only",
-                ApprovalMode::Edits => "edit",
-                ApprovalMode::Danger => "danger",
-            };
             let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
             out.push(crate::tools::ToolResult {
                 call_id: call.id.clone(),
@@ -356,7 +364,6 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
     let mut events = false;
-    let mut timeout_ms: u64 = 300_000;
 
     let mut i = 0;
     while i < args.len() {
@@ -380,14 +387,6 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
             }
             "--events" => {
                 events = true;
-            }
-            "--timeout-ms" => {
-                i += 1;
-                timeout_ms = args
-                    .get(i)
-                    .ok_or("--timeout-ms requires a value")?
-                    .parse::<u64>()
-                    .map_err(|e| format!("invalid --timeout-ms: {e}"))?;
             }
             other => {
                 return Err(format!("unknown argument: {other}"));
@@ -422,6 +421,5 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
         provider,
         model,
         events,
-        timeout_ms,
     })
 }
