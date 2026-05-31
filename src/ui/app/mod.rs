@@ -952,8 +952,13 @@ impl App {
                 .iter()
                 .map(|id| {
                     let entry = &self.providers_config.providers[id];
-                    let active = if id == self.llm.id() { "*" } else { " " };
-                    format!("[{active}] {id}  {} ({})", entry.label, entry.model)
+                    let active = if id == self.llm.id() { "●" } else { "○" };
+                    let kind = if entry.handler.is_empty() {
+                        "openai"
+                    } else {
+                        entry.handler.as_str()
+                    };
+                    format!("{active} {id} · {} · {} · {kind}", entry.model, entry.label)
                 })
                 .collect::<Vec<_>>();
             let mut prompt = Prompt::new("Providers", options);
@@ -1065,13 +1070,13 @@ impl App {
         let mut selected = 0usize;
         loop {
             let options = vec![
-                format!("label: {}", entry.label),
-                format!("model: {}", entry.model),
-                format!("base_url: {}", entry.base_url),
-                format!("endpoint: {}", entry.endpoint),
-                format!("handler: {}", entry.handler),
-                format!("api_key: {}", Self::mask_secret(&entry.api_key)),
-                "Save".to_string(),
+                format!("label · {}", entry.label),
+                format!("model · {}", entry.model),
+                format!("base_url · {}", entry.base_url),
+                format!("endpoint · {}", entry.endpoint),
+                format!("handler · {}", entry.handler),
+                format!("api_key · {}", Self::mask_secret(&entry.api_key)),
+                "Save changes".to_string(),
             ];
             let mut prompt = Prompt::new(format!("Edit provider: {id}"), options);
             prompt.selected = selected;
@@ -1196,16 +1201,16 @@ impl App {
                 .iter()
                 .map(|name| {
                     let mark = if self.tools.is_enabled(name) {
-                        "x"
+                        "●"
                     } else {
-                        " "
+                        "○"
                     };
-                    let tag = if builtin_names.contains(name) {
-                        ""
+                    let source = if builtin_names.contains(name) {
+                        "built-in"
                     } else {
-                        " (custom)"
+                        "custom"
                     };
-                    format!("[{mark}] {name}{tag}")
+                    format!("{mark} {name} · {source}")
                 })
                 .collect();
             let mut prompt = Prompt::new("Tools", options);

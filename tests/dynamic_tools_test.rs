@@ -4,6 +4,8 @@ use bone::tools::registry::ToolRegistry;
 use bone::tools::{ApprovalMode, ToolCall, ToolHandler};
 use serde_json::json;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,6 +38,109 @@ fn default_subagent_wraps_agent_events_and_uses_python_panel_script() {
     assert!(script.contains("def list_line(entry, mode_width, model_width, token_width):"));
     assert!(script.contains("print(line, flush=True)"));
     assert!(script.contains("emit_pane(remove=True)"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn default_cron_tool_adds_lists_and_removes_job_with_fake_crontab() {
+    let dir = temp_dir("cron-tool");
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let crontab_path = dir.join("crontab.txt");
+    let fake_crontab = bin_dir.join("crontab");
+    fs::write(
+        &fake_crontab,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+store={store:?}
+if [ "${{1:-}}" = "-l" ]; then
+  if [ -f "$store" ]; then
+    cat "$store"
+  else
+    printf 'no crontab for test\n' >&2
+    exit 1
+  fi
+elif [ "${{1:-}}" = "-" ]; then
+  cat > "$store"
+else
+  exit 2
+fi
+"#,
+            store = crontab_path.display().to_string()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_crontab, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let fake_bone = bin_dir.join("bone");
+    fs::write(&fake_bone, "#!/usr/bin/env bash\nexit 0\n").unwrap();
+    fs::set_permissions(&fake_bone, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut tool: DynamicTool = serde_yaml::from_str(include_str!("../defaults/tools/cron.yaml")).unwrap();
+    let script = tool.script.take().unwrap();
+    tool.script = Some(format!(
+        "export XDG_CONFIG_HOME={}\nexport PATH={}:$PATH\nexport BONE_BIN={}\n{}",
+        sh_quote(&dir.display().to_string()),
+        sh_quote(&bin_dir.display().to_string()),
+        sh_quote(&fake_bone.display().to_string()),
+        script
+    ));
+    let handler = ToolHandler::new(ToolRegistry::new().register(tool));
+
+    let add = handler
+        .execute_all(vec![ToolCall {
+            id: "call-add".into(),
+            name: "cron".into(),
+            arguments: json!({
+                "action": "add",
+                "name": "daily-clean",
+                "time": "09:05",
+                "approval": "edit",
+                "prompt": "/clean src/main.rs",
+                "cwd": dir.display().to_string(),
+                "allow_skill_scripts": true
+            }),
+        }])
+        .await;
+    assert!(!add[0].is_error, "{}", add[0].content);
+    assert_eq!(add[0].content.trim(), "Added cron job daily-clean.");
+
+    let crontab = fs::read_to_string(&crontab_path).unwrap();
+    assert!(crontab.contains("5 9 * * *"), "{crontab}");
+    assert!(crontab.contains("run --approval edit"), "{crontab}");
+    assert!(crontab.contains("--allow-skill-scripts"), "{crontab}");
+    assert!(crontab.contains("# BONE:"), "{crontab}");
+    assert!(crontab.contains("runs/daily-clean.log"), "{crontab}");
+
+    let list = handler
+        .execute_all(vec![ToolCall {
+            id: "call-list".into(),
+            name: "cron".into(),
+            arguments: json!({ "action": "list" }),
+        }])
+        .await;
+    assert!(!list[0].is_error, "{}", list[0].content);
+    assert!(list[0].content.contains("daily-clean\t09:05\tedit"));
+    assert!(list[0].content.contains("/clean src/main.rs"));
+
+    let remove = handler
+        .execute_all(vec![ToolCall {
+            id: "call-remove".into(),
+            name: "cron".into(),
+            arguments: json!({ "action": "remove", "name": "daily-clean" }),
+        }])
+        .await;
+    assert!(!remove[0].is_error, "{}", remove[0].content);
+    assert_eq!(remove[0].content.trim(), "Removed cron job daily-clean.");
+    assert_eq!(fs::read_to_string(&crontab_path).unwrap_or_default(), "");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[test]

@@ -3,7 +3,6 @@ use bone::config::{
     load_providers, load_user_config, save_providers, seed_command_policy_if_missing,
     seed_providers_if_missing,
 };
-use bone::cron;
 use bone::llm::providers;
 use bone::run;
 use bone::ui::app::App;
@@ -81,11 +80,6 @@ async fn main() -> std::io::Result<()> {
             .await
             .map_err(std::io::Error::other)?;
         println!("{}", response.content);
-        return Ok(());
-    }
-
-    if args.first().map(String::as_str) == Some("cron") {
-        cron::handle_cron_args(&args[1..]).map_err(std::io::Error::other)?;
         return Ok(());
     }
 

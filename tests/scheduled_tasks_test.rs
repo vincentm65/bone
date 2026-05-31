@@ -2,7 +2,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bone::cron::{CronJob, build_cron_line, parse_cron_line, sh_escape};
 use bone::skills::{SkillStore, expand_skill_command};
 use bone::tools::ApprovalMode;
 use bone::tools::command_policy::CommandSafety;
@@ -134,51 +133,4 @@ fn rejects_empty_script_field() {
             .any(|warning| warning.contains("empty script"))
     );
     fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn shell_escape_quotes() {
-    assert_eq!(sh_escape("a'b"), "'a'\\''b'");
-}
-
-#[test]
-fn cron_line_round_trip_with_delimiter_like_prompt() {
-    let job = CronJob {
-        name: "daily-clean".to_string(),
-        minute: 5,
-        hour: 9,
-        approval: ApprovalMode::Edits,
-        cwd: PathBuf::from("/tmp/a' && echo wrong"),
-        prompt: "/clean tricky ' >> /tmp/evil and don't break it".to_string(),
-        log_path: PathBuf::from("/tmp/daily-clean.log"),
-        allow_skill_scripts: true,
-    };
-    let line = build_cron_line(&job).unwrap();
-    assert!(line.contains("--allow-skill-scripts"));
-    let parsed = parse_cron_line(&line).unwrap();
-    assert_eq!(parsed, job);
-}
-
-#[test]
-fn cron_line_round_trip() {
-    let job = CronJob {
-        name: "daily-clean".to_string(),
-        minute: 5,
-        hour: 9,
-        approval: ApprovalMode::Edits,
-        cwd: PathBuf::from("/tmp/a'b"),
-        prompt: "/clean src/main.rs and don't break it".to_string(),
-        log_path: PathBuf::from("/tmp/daily-clean.log"),
-        allow_skill_scripts: false,
-    };
-    let line = build_cron_line(&job).unwrap();
-    let parsed = parse_cron_line(&line).unwrap();
-    assert_eq!(parsed.name, job.name);
-    assert_eq!(parsed.minute, job.minute);
-    assert_eq!(parsed.hour, job.hour);
-    assert_eq!(parsed.approval, job.approval);
-    assert_eq!(parsed.cwd, job.cwd);
-    assert_eq!(parsed.prompt, job.prompt);
-    assert_eq!(parsed.log_path, job.log_path);
-    assert_eq!(parsed.allow_skill_scripts, job.allow_skill_scripts);
 }

@@ -87,6 +87,66 @@ fn separator_with_hint(width: u16, hint: Option<&str>) -> String {
     format!("{}{label}──", "─".repeat(left))
 }
 
+fn prompt_option_line(
+    theme: &crate::ui::theme::Theme,
+    option: &str,
+    selected: bool,
+) -> Line<'static> {
+    let marker_style = if selected {
+        Style::default()
+            .fg(theme.thinking)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ratatui::style::Color::DarkGray)
+    };
+    let text_style = if selected {
+        Style::default()
+            .fg(ratatui::style::Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ratatui::style::Color::White)
+    };
+    let muted_style = Style::default().fg(theme.status_text);
+    let good_style = Style::default().fg(theme.approval_safe);
+
+    let (marker, marker_style) = if selected {
+        ("›", marker_style)
+    } else {
+        (" ", marker_style)
+    };
+
+    let mut spans = vec![Span::styled(format!("  {marker} "), marker_style)];
+    if let Some(rest) = option.strip_prefix("● ") {
+        spans.push(Span::styled("● ", good_style));
+        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
+    } else if let Some(rest) = option.strip_prefix("○ ") {
+        spans.push(Span::styled("○ ", muted_style));
+        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
+    } else {
+        push_prompt_text_spans(option, text_style, muted_style, &mut spans);
+    }
+    Line::from(spans)
+}
+
+fn push_prompt_text_spans(
+    text: &str,
+    text_style: Style,
+    muted_style: Style,
+    spans: &mut Vec<Span<'static>>,
+) {
+    let mut first = true;
+    for part in text.split(" · ") {
+        if !first {
+            spans.push(Span::styled(" · ", muted_style));
+        }
+        spans.push(Span::styled(
+            part.to_string(),
+            if first { text_style } else { muted_style },
+        ));
+        first = false;
+    }
+}
+
 /// Split input buffer at cursor into (before, char-at-cursor, after).
 fn cursor_split(input: &InputState) -> (String, char, String) {
     let chars: Vec<char> = input.buffer.chars().collect();
@@ -349,22 +409,8 @@ impl super::Renderer {
                     }
                     let option = &prompt.options[i];
                     let selected = i == prompt.selected;
-                    let (marker, marker_style) = if selected {
-                        (
-                            ">",
-                            Style::default()
-                                .fg(self.theme.status_text)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        (" ", Style::default().fg(ratatui::style::Color::DarkGray))
-                    };
-                    let option_style = Style::default().fg(ratatui::style::Color::White);
                     frame.render_widget(
-                        Paragraph::new(Line::from(vec![
-                            Span::styled(format!("  {} ", marker), marker_style),
-                            Span::styled(option.clone(), option_style),
-                        ])),
+                        Paragraph::new(prompt_option_line(&self.theme, option, selected)),
                         Rect {
                             y,
                             height: 1,
@@ -398,22 +444,8 @@ impl super::Renderer {
                     }
                     let option = &prompt.options[i];
                     let selected = i == prompt.selected;
-                    let (marker, marker_style) = if selected {
-                        (
-                            ">",
-                            Style::default()
-                                .fg(self.theme.status_text)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        (" ", Style::default().fg(ratatui::style::Color::DarkGray))
-                    };
-                    let option_style = Style::default().fg(ratatui::style::Color::White);
                     frame.render_widget(
-                        Paragraph::new(Line::from(vec![
-                            Span::styled(format!("  {} ", marker), marker_style),
-                            Span::styled(option.clone(), option_style),
-                        ])),
+                        Paragraph::new(prompt_option_line(&self.theme, option, selected)),
                         Rect {
                             y,
                             height: 1,
