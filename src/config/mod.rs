@@ -191,3 +191,10 @@ pub fn seed_file_if_missing(path: &Path, content: &str) {
         eprintln!("bone: warning: could not write {}: {e}", path.display());
     }
 }
+/// Seed all file-based config if missing. Should be called once at startup
+/// from every entry point (TUI, run, agent).
+pub fn seed_all() {
+    seed_providers_if_missing();
+    seed_command_policy_if_missing();
+    seed_agents_md_if_missing();
+}

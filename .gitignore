@@ -13,3 +13,6 @@
 .env
 .env.*
 ~/
+# Scratch / dev notes
+refactor-dynamic-tools.md
+test_edits.txt

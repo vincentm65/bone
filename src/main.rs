@@ -1,7 +1,6 @@
 use bone::agent;
 use bone::config::{
-    UserConfig, custom::CustomConfigs, load_providers, save_providers, seed_agents_md_if_missing,
-    seed_command_policy_if_missing, seed_providers_if_missing,
+    UserConfig, custom::CustomConfigs, load_providers, save_providers,
 };
 use bone::llm::providers;
 use bone::run;
@@ -73,8 +72,11 @@ fn usage() -> String {
 async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Shared bootstrap for all entry points
+    ensure_uv();
+    bone::config::seed_all();
+
     if args.first().map(String::as_str) == Some("run") {
-        ensure_uv();
         let request = run::parse_run_args(&args[1..]).map_err(std::io::Error::other)?;
         let response = run::run_headless(request)
             .await
@@ -85,7 +87,6 @@ async fn main() -> std::io::Result<()> {
 
     // Dispatch headless sub-agent mode
     if args.first().map(String::as_str) == Some("agent") {
-        ensure_uv();
         let request = agent::parse_agent_args(&args[1..]).map_err(std::io::Error::other)?;
         if request.events {
             // Events mode: JSONL is streamed to stdout by the agent loop
@@ -103,13 +104,6 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Normal TUI mode
-    // Check for uv dependency (required for Python-based tools)
-    ensure_uv();
-
-    seed_providers_if_missing();
-    seed_command_policy_if_missing();
-    seed_agents_md_if_missing();
-
     let custom = CustomConfigs::load();
     let cfg = UserConfig::from_custom_configs(&custom);
     let mut providers_config = load_providers();
