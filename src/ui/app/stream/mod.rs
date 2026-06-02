@@ -138,6 +138,12 @@ impl App {
             .push(Message::user(display_text.as_deref().unwrap_or(&text)));
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &text));
+        if let Some(ref db) = self.session_db {
+            if let Some(conv_id) = self.conversation_id {
+                self.session_seq += 1;
+                db.append_message(conv_id, "user", &text, None, None, None, self.session_seq).ok();
+            }
+        }
 
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
@@ -249,7 +255,9 @@ impl App {
                     reasoning_content,
                 );
                 self.transcript.push(msg);
+                let content = self.messages[assistant_idx].content.clone();
                 final_assistant_idx = assistant_idx;
+                self.append_assistant_to_db(&content, None);
                 break;
             }
 
@@ -260,6 +268,9 @@ impl App {
             );
             history.push(assistant.clone());
             self.transcript.push(assistant);
+            let content = self.messages[assistant_idx].content.clone();
+            let tool_calls_json = serde_json::to_string(&tool_calls).ok();
+            self.append_assistant_to_db(&content, tool_calls_json.as_deref());
 
             self.renderer
                 .finalize_streaming_message(&self.messages[assistant_idx].content, term)?;
@@ -283,9 +294,10 @@ impl App {
                 .flush_new_to_scrollback(&self.messages, term)?;
 
             for result in results {
-                let message = ChatMessage::tool(result);
+                let message = ChatMessage::tool(result.clone());
                 history.push(message.clone());
                 self.transcript.push(message);
+                self.append_tool_result_to_db(&result.name, &result.call_id, &result.content);
             }
         }
 
@@ -386,11 +398,16 @@ impl App {
                         tool_calls.push(call);
                         self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
                     }
-                    Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens })) => {
+                    Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens, cached_tokens, cost })) => {
                         idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
-                        self.token_stats.record_request(prompt_tokens, completion_tokens);
+                        self.token_stats.record_request(prompt_tokens, completion_tokens, cached_tokens, cost);
                         stream_estimated_received = self.token_stats.received;
                         had_usage = true;
+                        if let Some(ref db) = self.session_db {
+                            if let Some(conv_id) = self.conversation_id {
+                                db.record_usage(conv_id, &self.llm.id(), self.llm.model(), prompt_tokens, completion_tokens, cached_tokens, cost).ok();
+                            }
+                        }
                     }
                     Some(Err(err)) => {
                         return Ok(Err(StreamFailure::Provider(err)));

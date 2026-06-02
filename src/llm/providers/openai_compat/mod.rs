@@ -344,6 +344,12 @@ impl LlmProvider for OpenAiCompatProvider {
                         yield ChatEvent::TokenUsage {
                             prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                             completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0) as u32,
+                            cached_tokens: usage
+                                .get("prompt_tokens_details")
+                                .and_then(|d| d.get("cached_tokens"))
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32),
+                            cost: usage.get("cost").and_then(|v| v.as_f64()),
                         };
                     }
                     break;

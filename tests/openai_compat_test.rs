@@ -282,11 +282,14 @@ fn test_done_emits_token_usage() {
     let event = ChatEvent::TokenUsage {
         prompt_tokens,
         completion_tokens,
+        cached_tokens: None,
+        cost: None,
     };
     match event {
         ChatEvent::TokenUsage {
             prompt_tokens: p,
             completion_tokens: c,
+            ..
         } => {
             assert_eq!(p, 100);
             assert_eq!(c, 50);

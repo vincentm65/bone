@@ -7,6 +7,7 @@ use crate::skills::SkillStore;
 use crate::skills::types::Skill;
 use crate::tools::script_runner::{ScriptRequest, run_script};
 use crate::tools::{ApprovalMode, ToolCall, ToolHandler};
+use crate::session_db::SessionDb;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
 use std::io;
@@ -56,6 +57,13 @@ pub struct App {
     pub panes_visible: bool,
     /// Map from dynamic tool name to its script (shown in approval prompt).
     dynamic_scripts: std::collections::HashMap<String, String>,
+    /// SQLite session database for conversation persistence and usage tracking.
+    session_db: Option<SessionDb>,
+    /// Current conversation ID in the session database.
+    conversation_id: Option<i64>,
+    /// Message sequence counter for DB ordering.
+    session_seq: i64,
+
 }
 
 impl App {
@@ -124,9 +132,103 @@ impl App {
             panes_visible: true,
             interaction_tools: loaded.interaction_tools,
             dynamic_scripts: loaded.dynamic_scripts,
+            session_db: None,
+            conversation_id: None,
+            session_seq: 0,
         })
     }
-    /// Persist current approval_mode to custom config.
+    /// Initialize or open the session database.
+    fn init_session_db(&mut self) -> Option<String> {
+        if self.session_db.is_some() {
+            return None;
+        }
+        let db_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".bone-rust")
+            .join("data")
+            .join("conversations.db");
+        match SessionDb::open(&db_path) {
+            Ok(db) => {
+                match db.create_conversation(&self.llm.id(), self.llm.model()) {
+                    Ok(conv_id) => {
+                        self.conversation_id = Some(conv_id);
+                        self.session_db = Some(db);
+                        None
+                    }
+                    Err(err) => Some(format!("warning: failed to create conversation: {err}")),
+                }
+            }
+            Err(err) => Some(format!("warning: failed to open session database: {err}")),
+        }
+    }
+    /// Append an assistant message to the session database.
+    pub(crate) fn append_assistant_to_db(&mut self, content: &str, tool_calls_json: Option<&str>) {
+        if let Some(ref db) = self.session_db {
+            if let Some(conv_id) = self.conversation_id {
+                self.session_seq += 1;
+                db.append_message(conv_id, "assistant", content, None, None, tool_calls_json, self.session_seq).ok();
+            }
+        }
+    }
+
+    /// Append a tool result to the session database.
+    pub(crate) fn append_tool_result_to_db(&mut self, name: &str, call_id: &str, content: &str) {
+        if let Some(ref db) = self.session_db {
+            if let Some(conv_id) = self.conversation_id {
+                self.session_seq += 1;
+                db.append_message(conv_id, "tool", content, Some(name), Some(call_id), None, self.session_seq).ok();
+            }
+        }
+    }
+    /// Start a new conversation in the database (used by /clear, /new).
+    fn start_new_conversation(&mut self) {
+        if let Some(ref db) = self.session_db {
+            if let Some(conv_id) = self.conversation_id {
+                db.end_conversation(conv_id).ok();
+            }
+            match db.create_conversation(&self.llm.id(), self.llm.model()) {
+                Ok(conv_id) => {
+                    self.conversation_id = Some(conv_id);
+                    self.session_seq = 0;
+                }
+                Err(err) => {
+                    eprintln!("warning: failed to create conversation: {err}");
+                }
+            }
+        }
+    }
+
+    /// Clear chat history, end the current DB conversation, start a fresh one,
+    /// and display a usage summary.
+    fn clear_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.cancel_streaming = true;
+        self.pages.clear();
+        self.active_page = 0;
+        self.tools.state_map.clear();
+
+        let summary = if self.token_stats.request_count > 0 {
+            format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
+        } else {
+            "Chat cleared.".to_string()
+        };
+
+        self.start_new_conversation();
+        self.token_stats.reset();
+
+        self.messages.clear();
+        self.transcript.clear();
+        self.messages.push(Message::system(
+            "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
+        ));
+        self.messages.push(Message::system(summary));
+        self.renderer.scrollback_cursor = self.messages.len();
+        self.renderer.render_banner(term, &self.provider, &self.model)?;
+        self.renderer.flush_new_to_scrollback(&self.messages, term)?;
+        self.cancel_streaming = false;
+        self.redraw(term)?;
+        Ok(())
+    }
+
     fn persist_runtime_config(&mut self) {
         let mode = match self.user_config.approval_mode {
             crate::tools::ApprovalMode::Danger => "danger",
@@ -145,6 +247,10 @@ impl App {
 
     pub async fn run(&mut self) -> io::Result<()> {
         let mut terminal = Renderer::init_terminal(MIN_ROWS)?;
+
+        if let Some(warning) = self.init_session_db() {
+            self.messages.push(Message::system(warning));
+        }
 
         self.renderer
             .flush_new_to_scrollback(&self.messages, &mut terminal)?;
@@ -432,6 +538,12 @@ impl App {
             .is_some_and(|prev| now.duration_since(prev) < Duration::from_secs(1));
 
         if double_tap {
+            // Best-effort end conversation in DB
+            if let Some(ref db) = self.session_db {
+                if let Some(conv_id) = self.conversation_id {
+                    db.end_conversation(conv_id).ok();
+                }
+            }
             self.should_quit = true;
             return Ok(());
         }
@@ -625,6 +737,8 @@ impl App {
                 | "exit"
                 | "edit"
                 | "e"
+                | "usage"
+                | "recall"
         ) {
             if let Err(err) = self.skills.reload() {
                 return self.show_reply(format!("Failed to refresh skills: {err}"), term);
@@ -635,10 +749,88 @@ impl App {
         }
 
         if matches!(cmd.as_str(), "clear" | "new") {
-            self.pages.clear();
-            self.active_page = 0;
-            self.tools.state_map.clear();
+            return self.clear_chat(term);
         }
+        if cmd == "usage" {
+            let mut reply = self.token_stats.summary();
+            // Tool schema token estimate
+            let defs = self.tools.definitions();
+            let schema_json = serde_json::to_string(&defs).unwrap_or_default();
+            let schema_chars = schema_json.len();
+            let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
+            reply.push_str(&format!(
+                "\n  Tools:     {} tools, ~{} tokens ({} chars)",
+                defs.len(),
+                crate::llm::format_tokens(schema_tokens),
+                crate::llm::format_tokens(schema_chars as u64)
+            ));
+
+            // System prompt token estimate
+            let sys = crate::llm::prompts::system_prompt();
+            let sys_chars = sys.len();
+            let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
+            reply.push_str(&format!(
+                "\n  Sys prompt: ~{} tokens ({} chars)",
+                crate::llm::format_tokens(sys_tokens),
+                crate::llm::format_tokens(sys_chars as u64)
+            ));
+            if let Some(ref db) = self.session_db {
+                if let Some(conv_id) = self.conversation_id {
+                    if let Ok(by_provider) = db.usage_by_provider(conv_id) {
+                        if by_provider.len() > 1 {
+                            reply.push_str("\n\nBy provider/model");
+                            for p in &by_provider {
+                                reply.push_str(&format!(
+                                    "\n  {} / {}\t{} in / {} out",
+                                    p.provider, p.model,
+                                    crate::llm::format_tokens(p.prompt_tokens as u64),
+                                    crate::llm::format_tokens(p.completion_tokens as u64),
+                                ));
+                                if p.cached_tokens > 0 {
+                                    reply.push_str(&format!(" / {} cached", crate::llm::format_tokens(p.cached_tokens as u64)));
+                                }
+                                if p.cost > 0.0 {
+                                    reply.push_str(&format!(" / ${:.4}", p.cost));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return self.show_reply(reply, term);
+        }
+
+        if cmd == "recall" {
+            let query = arg.trim();
+            if query.is_empty() {
+                return self.show_reply("Usage: /recall <query>", term);
+            }
+            let reply = if let Some(ref db) = self.session_db {
+                match db.search(query, 5) {
+                    Ok(hits) => {
+                        if hits.is_empty() {
+                            format!("No results for \"{query}\".")
+                        } else {
+                            let mut lines = vec![format!("Recall results for \"{query}\"")];
+                            for hit in &hits {
+                                lines.push(format!(
+                                    "  {} {}: {}",
+                                    hit.created_at, hit.role, hit.snippet
+                                ));
+                            }
+                            lines.join("\n")
+                        }
+                    }
+                    Err(err) => format!("Search error: {err}"),
+                }
+            } else {
+                "Session database not available.".to_string()
+            };
+            return self.show_reply(reply, term);
+        }
+
+        let prev_provider = self.llm.id().to_string();
+        let prev_model = self.llm.model().to_string();
 
         let result = commands::handle(
             &cmd,
@@ -655,8 +847,20 @@ impl App {
         )
         .await?;
 
+        let provider_changed = self.llm.id() != prev_provider;
+        let model_changed = self.llm.model() != prev_model;
+        if provider_changed || model_changed {
+            self.start_new_conversation();
+        }
+
         match result {
             commands::CommandResult::Quit => {
+                // Best-effort end conversation in DB
+                if let Some(ref db) = self.session_db {
+                    if let Some(conv_id) = self.conversation_id {
+                        db.end_conversation(conv_id).ok();
+                    }
+                }
                 self.should_quit = true;
             }
             commands::CommandResult::Continue { reply } => {

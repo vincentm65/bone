@@ -1,9 +1,98 @@
 use bone::llm::token_tracker::{TokenStats, format_tokens};
 
 #[test]
+fn reset_clears_all_fields() {
+    let mut stats = TokenStats::new();
+    stats.record_request(100, 50, Some(20), Some(0.01));
+    stats.reset();
+    assert_eq!(stats.sent, 0);
+    assert_eq!(stats.received, 0);
+    assert_eq!(stats.cached, 0);
+    assert_eq!(stats.cost, 0.0);
+    assert_eq!(stats.request_count, 0);
+    assert_eq!(stats.context_length, 0);
+}
+
+#[test]
+fn record_request_tracks_cached_and_cost() {
+    let mut stats = TokenStats::new();
+    stats.record_request(1000, 200, Some(300), Some(0.005));
+    assert_eq!(stats.sent, 1000);
+    assert_eq!(stats.received, 200);
+    assert_eq!(stats.cached, 300);
+    assert!((stats.cost - 0.005).abs() < f64::EPSILON);
+    assert_eq!(stats.request_count, 1);
+}
+
+#[test]
+fn record_request_none_cached_and_cost_defaults_to_zero() {
+    let mut stats = TokenStats::new();
+    stats.record_request(100, 50, None, None);
+    assert_eq!(stats.cached, 0);
+    assert_eq!(stats.cost, 0.0);
+}
+
+#[test]
+fn cumulative_cached_and_cost_across_requests() {
+    let mut stats = TokenStats::new();
+    stats.record_request(100, 50, Some(10), Some(0.001));
+    stats.record_request(200, 80, Some(30), Some(0.002));
+    assert_eq!(stats.cached, 40);
+    assert!((stats.cost - 0.003).abs() < f64::EPSILON);
+}
+
+#[test]
+fn summary_includes_all_fields_when_present() {
+    let mut stats = TokenStats::new();
+    stats.record_request(5000, 200, Some(1000), Some(0.0125));
+    let s = stats.summary();
+    assert!(s.contains("Requests:"));
+    assert!(s.contains("5,000"));
+    assert!(s.contains("200"));
+    assert!(s.contains("1,000"));
+    assert!(s.contains("$0.0125"));
+}
+
+#[test]
+fn summary_omits_cached_and_cost_when_zero() {
+    let mut stats = TokenStats::new();
+    stats.record_request(100, 50, None, None);
+    let s = stats.summary();
+    assert!(!s.contains("Cached"));
+    assert!(!s.contains("Cost"));
+}
+
+#[test]
+fn one_liner_includes_cached_and_cost_when_present() {
+    let mut stats = TokenStats::new();
+    stats.record_request(1000, 200, Some(300), Some(0.1234));
+    let s = stats.one_liner();
+    assert!(s.contains("cached"));
+    assert!(s.contains("$0.12"));
+}
+
+#[test]
+fn one_liner_omits_cached_and_cost_when_zero() {
+    let mut stats = TokenStats::new();
+    stats.record_request(100, 50, None, None);
+    let s = stats.one_liner();
+    assert!(!s.contains("cached"));
+    assert!(!s.contains("$"));
+}
+
+#[test]
+fn one_liner_shows_request_count() {
+    let mut stats = TokenStats::new();
+    stats.record_request(100, 50, None, None);
+    stats.record_request(200, 80, None, None);
+    let s = stats.one_liner();
+    assert!(s.starts_with("2 req"));
+}
+
+#[test]
 fn record_real_usage() {
     let mut stats = TokenStats::new();
-    stats.record_request(1234, 56);
+    stats.record_request(1234, 56, None, None);
     assert_eq!(stats.sent, 1234);
     assert_eq!(stats.received, 56);
     assert_eq!(stats.request_count, 1);
@@ -24,7 +113,7 @@ fn record_estimate() {
 #[test]
 fn set_context_estimate_updates_current_only() {
     let mut stats = TokenStats::new();
-    stats.record_request(1000, 50);
+    stats.record_request(1000, 50, None, None);
 
     stats.set_context_estimate(380);
 
@@ -57,7 +146,7 @@ fn format_tokens_millions() {
 #[test]
 fn display_format() {
     let mut stats = TokenStats::new();
-    stats.record_request(1234, 56);
+    stats.record_request(1234, 56, None, None);
     assert_eq!(stats.display(), "curr 1,234 | in 1,234 | out 56");
 }
 
@@ -70,7 +159,7 @@ fn display_format_no_context() {
 #[test]
 fn display_received_override_is_cumulative() {
     let mut stats = TokenStats::new();
-    stats.record_request(100, 25);
+    stats.record_request(100, 25, None, None);
     assert_eq!(
         stats.display_with_received_override(Some(stats.received + 10)),
         "curr 100 | in 100 | out 35"

@@ -273,8 +273,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Ok(ChatEvent::TokenUsage {
                     prompt_tokens,
                     completion_tokens,
+                    ..
                 }) => {
-                    token_stats.record_request(prompt_tokens, completion_tokens);
+                    token_stats.record_request(prompt_tokens, completion_tokens, None, None);
                     emit_event(
                         request.events,
                         &AgentEvent::TokenUsage {

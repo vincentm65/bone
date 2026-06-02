@@ -532,6 +532,8 @@ impl LlmProvider for CodexProvider {
                 yield ChatEvent::TokenUsage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,
+                    cached_tokens: None,
+                    cost: None,
                 };
             }
         };

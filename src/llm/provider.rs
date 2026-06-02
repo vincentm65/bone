@@ -76,6 +76,8 @@ pub enum ChatEvent {
     TokenUsage {
         prompt_tokens: u32,
         completion_tokens: u32,
+        cached_tokens: Option<u32>,
+        cost: Option<f64>,
     },
 }
 

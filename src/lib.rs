@@ -3,6 +3,7 @@ pub mod chat;
 pub mod config;
 pub mod llm;
 pub mod run;
+pub mod session_db;
 pub mod skills;
 pub mod tools;
 pub mod ui;
