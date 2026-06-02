@@ -40,6 +40,11 @@ impl Prompt {
         }
     }
 
+    pub fn set_selected(&mut self, selected: usize) {
+        self.selected = selected.min(self.options.len().saturating_sub(1));
+        self.ensure_visible();
+    }
+
     pub fn up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;

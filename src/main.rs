@@ -1,6 +1,6 @@
 use bone::agent;
 use bone::config::{
-    UserConfig, custom::CustomConfigs, load_providers, save_providers,
+    UserConfig, custom::CustomConfigs, load_providers, save_providers, seed_agents_md_if_missing,
     seed_command_policy_if_missing, seed_providers_if_missing,
 };
 use bone::llm::providers;
@@ -108,6 +108,7 @@ async fn main() -> std::io::Result<()> {
 
     seed_providers_if_missing();
     seed_command_policy_if_missing();
+    seed_agents_md_if_missing();
 
     let custom = CustomConfigs::load();
     let cfg = UserConfig::from_custom_configs(&custom);

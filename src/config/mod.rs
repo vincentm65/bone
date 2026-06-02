@@ -145,6 +145,7 @@ impl Default for SubagentConfig {
 
 const EXAMPLE_PROVIDERS: &str = include_str!("../../example-providers.yaml");
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
+const DEFAULT_AGENTS_MD: &str = include_str!("../../defaults/AGENTS.md");
 
 pub fn seed_providers_if_missing() {
     // Repair the short-lived config/providers.yaml location if a previous build
@@ -169,6 +170,11 @@ pub fn seed_providers_if_missing() {
 pub fn seed_command_policy_if_missing() {
     let path = command_policy_path();
     seed_file_if_missing(&path, DEFAULT_COMMAND_POLICY);
+}
+
+pub fn seed_agents_md_if_missing() {
+    let path = bone_dir().join("AGENTS.md");
+    seed_file_if_missing(&path, DEFAULT_AGENTS_MD);
 }
 
 pub fn seed_file_if_missing(path: &Path, content: &str) {

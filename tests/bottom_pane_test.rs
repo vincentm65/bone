@@ -158,6 +158,19 @@ fn prompt_navigation_scrolls_selected_rows_into_view() {
 }
 
 #[test]
+fn rebuilt_prompt_scrolls_selected_row_into_view() {
+    let mut prompt = Prompt::new(
+        "Providers",
+        (0..20).map(|i| format!("provider {i}")).collect::<Vec<_>>(),
+    );
+    prompt.visible_rows = 4;
+    prompt.set_selected(6);
+
+    assert_eq!(prompt.selected, 6);
+    assert_eq!(prompt.visible_options(), 3..7);
+}
+
+#[test]
 fn long_prompt_uses_a_bounded_viewport_height() {
     let input = InputState::default();
     let prompt = Prompt::new(

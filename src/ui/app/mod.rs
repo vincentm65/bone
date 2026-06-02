@@ -1046,7 +1046,7 @@ impl App {
                 "Save changes".to_string(),
             ];
             let mut prompt = Prompt::new(format!("Edit provider: {id}"), options);
-            prompt.selected = selected;
+            prompt.set_selected(selected);
             prompt.hint = Some("Enter edit/select  Esc back".to_string());
             self.active_prompt = Some(prompt);
             self.redraw(term)?;
@@ -1222,14 +1222,20 @@ impl App {
                         let display = match field.field_type {
                             config::custom::ConfigFieldType::Bool => {
                                 if value == "true" {
-                                    "● enabled".to_string()
+                                    "●".to_string()
                                 } else {
-                                    "○ disabled".to_string()
+                                    "○".to_string()
                                 }
                             }
                             _ => value,
                         };
-                        format!("{:<30} {}", label, display)
+                        if ns == "tools"
+                            && matches!(field.field_type, config::custom::ConfigFieldType::Bool)
+                        {
+                            format!("{display} {label}")
+                        } else {
+                            format!("{:<30} {}", label, display)
+                        }
                     })
                     .collect()
             } else {
@@ -1237,7 +1243,7 @@ impl App {
             };
 
             let mut prompt = Prompt::new(tabs[active].clone(), options);
-            prompt.selected = selected;
+            prompt.set_selected(selected);
             prompt.tabs = tabs.clone();
             prompt.active_tab = active;
             let hint = if active == providers_tab_idx {
