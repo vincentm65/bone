@@ -1,7 +1,5 @@
 use bone::agent;
-use bone::config::{
-    UserConfig, custom::CustomConfigs, load_providers, save_providers,
-};
+use bone::config::{UserConfig, custom::CustomConfigs, load_providers, save_providers};
 use bone::llm::providers;
 use bone::run;
 use bone::ui::app::App;

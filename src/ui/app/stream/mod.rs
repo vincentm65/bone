@@ -734,29 +734,8 @@ impl App {
                                     _ => {}
                                 }
                             }
-                            KeyCode::Up => {
-                                if let Some(ref mut p) = self.active_prompt {
-                                    p.up();
-                                }
-                                self.redraw(term)?;
-                            }
-                            KeyCode::Down => {
-                                if let Some(ref mut p) = self.active_prompt {
-                                    p.down();
-                                }
-                                self.redraw(term)?;
-                            }
-                            KeyCode::PageUp => {
-                                if let Some(ref mut p) = self.active_prompt {
-                                    p.page_up();
-                                }
-                                self.redraw(term)?;
-                            }
-                            KeyCode::PageDown => {
-                                if let Some(ref mut p) = self.active_prompt {
-                                    p.page_down();
-                                }
-                                self.redraw(term)?;
+                            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                                self.navigate_prompt(key.code, false, term)?;
                             }
                             KeyCode::Enter => {
                                 if let Some(prompt) = self.active_prompt.as_ref()

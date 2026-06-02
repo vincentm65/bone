@@ -399,42 +399,29 @@ impl App {
     }
 
     /// Handle a keypress while a blocking prompt is displayed.
-    /// Up/Down move the cursor, Enter confirms, Esc rejects.
     fn handle_prompt_key(&mut self, code: KeyCode, term: &mut BoneTerminal) -> io::Result<()> {
+        self.navigate_prompt(code, true, term).map(|_| ())
+    }
+
+    fn navigate_prompt(
+        &mut self,
+        code: KeyCode,
+        allow_peek: bool,
+        term: &mut BoneTerminal,
+    ) -> io::Result<bool> {
+        let Some(prompt) = self.active_prompt.as_mut() else {
+            return Ok(false);
+        };
         match code {
-            KeyCode::Up => {
-                if let Some(ref mut p) = self.active_prompt {
-                    p.up();
-                }
-                self.redraw(term)?;
-            }
-            KeyCode::Down => {
-                if let Some(ref mut p) = self.active_prompt {
-                    p.down();
-                }
-                self.redraw(term)?;
-            }
-            KeyCode::PageUp => {
-                if let Some(ref mut p) = self.active_prompt {
-                    p.page_up();
-                }
-                self.redraw(term)?;
-            }
-            KeyCode::PageDown => {
-                if let Some(ref mut p) = self.active_prompt {
-                    p.page_down();
-                }
-                self.redraw(term)?;
-            }
-            KeyCode::Char('p') | KeyCode::Char('P') => {
-                if let Some(ref mut p) = self.active_prompt {
-                    p.toggle_peek();
-                    self.redraw(term)?;
-                }
-            }
-            _ => {}
+            KeyCode::Up => prompt.up(),
+            KeyCode::Down => prompt.down(),
+            KeyCode::PageUp => prompt.page_up(),
+            KeyCode::PageDown => prompt.page_down(),
+            KeyCode::Char('p') | KeyCode::Char('P') if allow_peek => prompt.toggle_peek(),
+            _ => return Ok(false),
         }
-        Ok(())
+        self.redraw(term)?;
+        Ok(true)
     }
 
     /// Handle Ctrl+C: cancel streaming response, or quit on double-tap.
@@ -479,8 +466,7 @@ impl App {
             _ => call.name.clone(),
         };
 
-        let prompt = if call.name == "shell" {
-            let full_command = call.arguments["command"].as_str().map(String::from);
+        let mut prompt = if call.name == "shell" {
             let title = call.arguments["display_label"]
                 .as_str()
                 .map(String::from)
@@ -495,45 +481,20 @@ impl App {
                         .take(80)
                         .collect::<String>()
                 });
-            Prompt {
-                title: format!("{} — {}", call.name, title),
-                options: vec![
-                    "Accept".to_string(),
-                    "Advise".to_string(),
-                    "Cancel".to_string(),
-                ],
-                selected: 0,
-                scroll: 0,
-                visible_rows: 10,
-                hint: None,
-                full_command,
-                peek_mode: false,
-                tabs: Vec::new(),
-                active_tab: 0,
-            }
-        } else if let Some(script) = self.dynamic_scripts.get(&call.name) {
-            // Dynamic tool — show the script so the user can see what runs
-            Prompt {
-                title: format!("{} — {}", call.name, summary),
-                options: vec![
-                    "Accept".to_string(),
-                    "Advise".to_string(),
-                    "Cancel".to_string(),
-                ],
-                selected: 0,
-                scroll: 0,
-                visible_rows: 10,
-                hint: None,
-                full_command: Some(script.clone()),
-                peek_mode: false,
-                tabs: Vec::new(),
-                active_tab: 0,
-            }
+            Prompt::new(
+                format!("{} — {}", call.name, title),
+                vec!["Accept", "Advise", "Cancel"],
+            )
         } else {
             Prompt::new(
                 format!("{} — {}", call.name, summary),
                 vec!["Accept", "Advise", "Cancel"],
             )
+        };
+        prompt.full_command = if call.name == "shell" {
+            call.arguments["command"].as_str().map(String::from)
+        } else {
+            self.dynamic_scripts.get(&call.name).cloned()
         };
         self.active_prompt = Some(prompt);
 
@@ -578,35 +539,13 @@ impl App {
                 }
 
                 match key.code {
-                    KeyCode::Up => {
-                        if let Some(ref mut p) = self.active_prompt {
-                            p.up();
-                        }
-                        self.redraw(term)?;
-                    }
-                    KeyCode::Down => {
-                        if let Some(ref mut p) = self.active_prompt {
-                            p.down();
-                        }
-                        self.redraw(term)?;
-                    }
-                    KeyCode::PageUp => {
-                        if let Some(ref mut p) = self.active_prompt {
-                            p.page_up();
-                        }
-                        self.redraw(term)?;
-                    }
-                    KeyCode::PageDown => {
-                        if let Some(ref mut p) = self.active_prompt {
-                            p.page_down();
-                        }
-                        self.redraw(term)?;
-                    }
-                    KeyCode::Char('p') | KeyCode::Char('P') => {
-                        if let Some(ref mut p) = self.active_prompt {
-                            p.toggle_peek();
-                            self.redraw(term)?;
-                        }
+                    KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Char('p')
+                    | KeyCode::Char('P') => {
+                        self.navigate_prompt(key.code, true, term)?;
                     }
                     KeyCode::Enter => {
                         if let Some(prompt) = self.active_prompt.as_ref() {
@@ -914,24 +853,27 @@ impl App {
         }
     }
 
+    fn compacted_message(&self, prefix: &str, saved: u64) -> String {
+        if saved > 0 {
+            format!(
+                "{prefix}. Saved ~{} tokens (was ~{}, now {}).",
+                format_tokens(saved),
+                format_tokens(saved + self.token_stats.context_length),
+                format_tokens(self.token_stats.context_length)
+            )
+        } else {
+            COMPACT_NOTICE.to_string()
+        }
+    }
+
     pub(crate) fn compact_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let (compacted, saved) = self.compact_transcript_state();
-        if compacted {
-            let msg = if saved > 0 {
-                format!(
-                    "Compacted older messages. Saved ~{} tokens (was ~{}, now {}).",
-                    format_tokens(saved),
-                    format_tokens(saved + self.token_stats.context_length),
-                    format_tokens(self.token_stats.context_length)
-                )
-            } else {
-                COMPACT_NOTICE.to_string()
-            };
-            self.messages.push(Message::system(msg));
+        let msg = if compacted {
+            self.compacted_message("Compacted older messages", saved)
         } else {
-            self.messages
-                .push(Message::system("Chat history is already compact."));
-        }
+            "Chat history is already compact.".to_string()
+        };
+        self.messages.push(Message::system(msg));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)
@@ -947,35 +889,15 @@ impl App {
         if should_compact {
             let (compacted, saved) = self.compact_transcript_state();
             if compacted {
-                let msg = if saved > 0 {
-                    format!(
-                        "Auto-compacted. Saved ~{} tokens (was ~{}, now {}).",
-                        format_tokens(saved),
-                        format_tokens(saved + self.token_stats.context_length),
-                        format_tokens(self.token_stats.context_length)
-                    )
-                } else {
-                    COMPACT_NOTICE.to_string()
-                };
-                self.messages.push(Message::system(msg));
+                self.messages.push(Message::system(
+                    self.compacted_message("Auto-compacted", saved),
+                ));
             }
             self.renderer
                 .flush_new_to_scrollback(&self.messages, term)?;
             self.redraw(term)?;
         }
         Ok(())
-    }
-
-    fn navigate_panel(&mut self, code: KeyCode, term: &mut BoneTerminal) -> io::Result<bool> {
-        match code {
-            KeyCode::Up => self.active_prompt.as_mut().unwrap().up(),
-            KeyCode::Down => self.active_prompt.as_mut().unwrap().down(),
-            KeyCode::PageUp => self.active_prompt.as_mut().unwrap().page_up(),
-            KeyCode::PageDown => self.active_prompt.as_mut().unwrap().page_down(),
-            _ => return Ok(false),
-        }
-        self.redraw(term)?;
-        Ok(true)
     }
 
     fn mask_secret(value: &str) -> String {
@@ -1054,7 +976,7 @@ impl App {
             if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                 return Ok(());
             }
-            if self.navigate_panel(code, term)? {
+            if self.navigate_prompt(code, false, term)? {
                 selected = self.active_prompt.as_ref().unwrap().selected;
                 continue;
             }
@@ -1152,12 +1074,14 @@ impl App {
                 let count = self.tools.definitions().len();
                 self.show_reply(format!("Tools reloaded. {count} tools enabled."), term)
             }
-            _ => self.tools_picker(term).await,
+            _ => self.config_picker(term, Some("tools")).await,
         }
     }
 
-    async fn tools_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        self.config_picker(term, Some("tools")).await
+    fn provider_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.providers_config.providers.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 
     async fn config_picker(
@@ -1193,9 +1117,7 @@ impl App {
         loop {
             let options = if active == providers_tab_idx {
                 // Providers tab: list providers like the old provider_picker
-                let mut ids: Vec<String> =
-                    self.providers_config.providers.keys().cloned().collect();
-                ids.sort();
+                let ids = self.provider_ids();
                 ids.iter()
                     .map(|id| {
                         let entry = &self.providers_config.providers[id];
@@ -1259,7 +1181,7 @@ impl App {
             if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                 return self.close_panel(term);
             }
-            if self.navigate_panel(code, term)? {
+            if self.navigate_prompt(code, false, term)? {
                 selected = self.active_prompt.as_ref().unwrap().selected;
                 continue;
             }
@@ -1283,9 +1205,7 @@ impl App {
                 KeyCode::Enter => {
                     if active == providers_tab_idx {
                         // Providers tab: select provider
-                        let mut ids: Vec<String> =
-                            self.providers_config.providers.keys().cloned().collect();
-                        ids.sort();
+                        let ids = self.provider_ids();
                         let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected)
                         else {
                             continue;
@@ -1344,9 +1264,7 @@ impl App {
                     }
                 }
                 KeyCode::Char('e') | KeyCode::Char('E') if active == providers_tab_idx => {
-                    let mut ids: Vec<String> =
-                        self.providers_config.providers.keys().cloned().collect();
-                    ids.sort();
+                    let ids = self.provider_ids();
                     if let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) {
                         self.provider_editor(id.clone(), term)?;
                     }
