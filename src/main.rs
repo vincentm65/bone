@@ -1,7 +1,7 @@
 use bone::agent;
 use bone::config::{
-    load_providers, load_user_config, save_providers, seed_command_policy_if_missing,
-    seed_providers_if_missing,
+    UserConfig, custom::CustomConfigs, load_providers, save_providers,
+    seed_command_policy_if_missing, seed_providers_if_missing,
 };
 use bone::llm::providers;
 use bone::run;
@@ -109,13 +109,14 @@ async fn main() -> std::io::Result<()> {
     seed_providers_if_missing();
     seed_command_policy_if_missing();
 
-    let cfg = load_user_config();
+    let custom = CustomConfigs::load();
+    let cfg = UserConfig::from_custom_configs(&custom);
     let mut providers_config = load_providers();
 
     let cli_options = parse_cli_options(&args).map_err(std::io::Error::other)?;
     let provider_id = cli_options.provider.unwrap_or_else(|| {
         if providers_config.last_provider.is_empty() {
-            cfg.provider.clone()
+            "local".to_string()
         } else {
             providers_config.last_provider.clone()
         }
@@ -137,7 +138,7 @@ async fn main() -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
     provider.validate().await.map_err(std::io::Error::other)?;
 
-    let mut app = App::new(provider, providers_config, cfg)?;
+    let mut app = App::new(provider, providers_config, cfg, custom)?;
     app.run().await?;
     Ok(())
 }

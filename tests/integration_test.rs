@@ -1,7 +1,5 @@
 use bone::chat::Message;
-use bone::config::UserConfig;
 use bone::llm::ChatRole;
-use bone::ui::render::wrap::{visual_line_count, wrap_text, wrap_text_with_prefix};
 
 // ── Message Construction ─────────────────────────────────────────────────────
 
@@ -46,141 +44,6 @@ fn tool_message_error_flag_is_preserved() {
     assert!(!ok_msg.tool.unwrap().is_error);
 }
 
-// ── Text Wrapping ────────────────────────────────────────────────────────────
-
-#[test]
-fn wrap_plain_line_splits_at_spaces() {
-    // Current algorithm prefers the last whitespace within width, so " foo bar"
-    // (8 chars) fits together at width 10 after " world" breaks off.
-    assert_eq!(
-        wrap_text("hello world foo bar", 10),
-        vec!["hello", " world", " foo bar"]
-    );
-}
-
-#[test]
-fn wrap_plain_line_keeps_leading_indent_on_continuations() {
-    assert_eq!(
-        wrap_text("  hello world foo bar", 10),
-        vec!["  hello", "  world", "  foo bar"]
-    );
-}
-
-#[test]
-fn wrap_plain_line_hard_breaks_long_words() {
-    assert_eq!(wrap_text("abcdefghij", 5), vec!["abcde", "fghij"]);
-}
-
-#[test]
-fn wrap_plain_line_empty_string_returns_single_empty_line() {
-    assert_eq!(wrap_text("", 10), vec![""]);
-}
-
-#[test]
-fn wrap_with_prefix_applies_prefixes_correctly() {
-    // With first_prefix "> " (width 2) and rest_prefix "  " (width 2), width 10
-    // gives first_width=8, rest_width=8. "one two three" at width 8 breaks at
-    // the last space: "one two" then "three".
-    assert_eq!(
-        wrap_text_with_prefix("one two three", "> ", "  ", 10),
-        vec!["> one two", "  three"]
-    );
-}
-
-#[test]
-fn wrap_preserves_unicode_display_width() {
-    // Each CJK character is width 2
-    assert_eq!(wrap_text("你好世界", 4), vec!["你好", "世界"]);
-}
-
-#[test]
-fn wrap_respects_minimum_width_one() {
-    assert_eq!(wrap_text("abc", 1), vec!["a", "b", "c"]);
-}
-
-// ── Visual Line Counting ─────────────────────────────────────────────────────
-
-#[test]
-fn empty_text_counts_as_one_line() {
-    assert_eq!(visual_line_count("", 80), 1);
-}
-
-#[test]
-fn short_text_fits_in_one_line() {
-    assert_eq!(visual_line_count("hello", 80), 1);
-}
-
-#[test]
-fn text_exceeding_width_wraps_multiple_lines() {
-    assert_eq!(visual_line_count("hello world foo bar", 10), 2);
-}
-
-#[test]
-fn hard_newlines_add_line_breaks() {
-    assert_eq!(visual_line_count("line1\nline2", 80), 2);
-}
-
-#[test]
-fn wide_characters_count_correctly() {
-    // "你好世界" = 4 chars × 2 width = 8 total
-    // At width 4 => 2 visual lines
-    assert_eq!(visual_line_count("你好世界", 4), 2);
-}
-
-#[test]
-fn mixed_wide_and_narrow_characters() {
-    // "a你好b世界" = 1+2+2+1+2+2 = 10 display width at width 4 => ceil(10/4)=3 lines
-    assert_eq!(visual_line_count("a你好b世界", 4), 3);
-}
-
-// ── UserConfig ───────────────────────────────────────────────────────────────
-
-#[test]
-fn default_provider_is_local() {
-    let cfg = UserConfig::default();
-    assert_eq!(cfg.provider, "local");
-}
-
-#[test]
-fn user_config_serializes_and_deserializes() {
-    let cfg = UserConfig {
-        provider: "openai".into(),
-        ..UserConfig::default()
-    };
-    let yaml = serde_yaml::to_string(&cfg).unwrap();
-    let deserialized: UserConfig = serde_yaml::from_str(&yaml).unwrap();
-    assert_eq!(deserialized.provider, "openai");
-    assert_eq!(deserialized.approval_mode, bone::tools::ApprovalMode::Safe);
-    assert_eq!(deserialized.enabled_tools.len(), 6);
-}
-
-#[test]
-fn config_missing_provider_field_defaults_to_local() {
-    let yaml = "";
-    let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap_or_default();
-    assert_eq!(cfg.provider, "local");
-    assert_eq!(cfg.approval_mode, bone::tools::ApprovalMode::Safe);
-    assert_eq!(cfg.enabled_tools.len(), 6);
-}
-
-#[test]
-fn legacy_config_with_only_provider_defaults_new_settings() {
-    let cfg: UserConfig = serde_yaml::from_str("provider: codex\n").unwrap();
-
-    assert_eq!(cfg.provider, "codex");
-    assert_eq!(cfg.approval_mode, bone::tools::ApprovalMode::Safe);
-    assert_eq!(
-        cfg.enabled_tools,
-        vec![
-            "read_file",
-            "write_file",
-            "edit_file",
-            "shell",
-            "web_search",
-            "task_list"
-        ]
-    );
-}
 // ── Tool Handler (concurrency ordering) ─────────────────────────────────────
 
 #[tokio::test]
@@ -263,4 +126,161 @@ async fn disabled_tools_are_not_advertised_or_executed() {
         .await;
     assert!(results[0].is_error);
     assert!(results[0].content.contains("disabled"));
+}
+// ── Custom Config ────────────────────────────────────────────────────────────
+
+#[test]
+fn custom_configs_get_value_returns_default_when_no_value_set() {
+    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
+
+    let mut configs = CustomConfigs::default();
+    configs.pages.push((
+        "test".to_string(),
+        CustomConfigPage {
+            title: "Test".to_string(),
+            fields: vec![ConfigField {
+                key: "port".to_string(),
+                label: None,
+                field_type: ConfigFieldType::Number,
+                options: Vec::new(),
+                default: Some(serde_yaml::Value::Number(8080.into())),
+                value: None,
+            }],
+        },
+    ));
+
+    assert_eq!(configs.get_value("test", "port"), "8080");
+}
+
+#[test]
+fn custom_configs_set_value_overrides_default() {
+    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
+
+    let mut configs = CustomConfigs::default();
+    configs.pages.push((
+        "test".to_string(),
+        CustomConfigPage {
+            title: "Test".to_string(),
+            fields: vec![ConfigField {
+                key: "mode".to_string(),
+                label: None,
+                field_type: ConfigFieldType::Enum,
+                options: vec!["safe".into(), "edit".into(), "danger".into()],
+                default: Some(serde_yaml::Value::String("safe".into())),
+                value: None,
+            }],
+        },
+    ));
+
+    assert_eq!(configs.get_value("test", "mode"), "safe");
+    configs.set_value("test", "mode", "danger".to_string());
+    assert_eq!(configs.get_value("test", "mode"), "danger");
+}
+
+#[test]
+fn custom_configs_number_field_stores_yaml_number() {
+    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
+
+    let mut configs = CustomConfigs::default();
+    configs.pages.push((
+        "test".to_string(),
+        CustomConfigPage {
+            title: "Test".to_string(),
+            fields: vec![ConfigField {
+                key: "max".to_string(),
+                label: None,
+                field_type: ConfigFieldType::Number,
+                options: Vec::new(),
+                default: None,
+                value: None,
+            }],
+        },
+    ));
+
+    configs.set_value("test", "max", "200".to_string());
+    let field = configs.find_field("test", "max").unwrap();
+    // Should be stored as a YAML number, not a string
+    assert!(matches!(field.value, Some(serde_yaml::Value::Number(_))));
+    assert_eq!(configs.get_value("test", "max"), "200");
+}
+
+#[test]
+fn user_config_from_custom_configs_applies_general_settings() {
+    use bone::config::UserConfig;
+    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
+    use bone::tools::ApprovalMode;
+
+    let mut configs = CustomConfigs::default();
+    configs.pages.push((
+        "general".to_string(),
+        CustomConfigPage {
+            title: "General".to_string(),
+            fields: vec![
+                ConfigField {
+                    key: "approval_mode".to_string(),
+                    label: None,
+                    field_type: ConfigFieldType::Enum,
+                    options: vec!["safe".into(), "edit".into(), "danger".into()],
+                    default: Some(serde_yaml::Value::String("safe".into())),
+                    value: Some(serde_yaml::Value::String("danger".into())),
+                },
+                ConfigField {
+                    key: "max_rounds".to_string(),
+                    label: None,
+                    field_type: ConfigFieldType::Number,
+                    options: Vec::new(),
+                    default: Some(serde_yaml::Value::Number(150.into())),
+                    value: Some(serde_yaml::Value::Number(42.into())),
+                },
+            ],
+        },
+    ));
+
+    let cfg = UserConfig::from_custom_configs(&configs);
+    assert_eq!(cfg.approval_mode, ApprovalMode::Danger);
+    assert_eq!(cfg.max_rounds, 42);
+}
+
+#[test]
+fn enabled_tool_names_only_includes_true_and_unset() {
+    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
+
+    let mut configs = CustomConfigs::default();
+    configs.pages.push((
+        "tools".to_string(),
+        CustomConfigPage {
+            title: "Tools".to_string(),
+            fields: vec![
+                ConfigField {
+                    key: "read_file".to_string(),
+                    label: None,
+                    field_type: ConfigFieldType::Bool,
+                    options: Vec::new(),
+                    default: Some(serde_yaml::Value::Bool(true)),
+                    value: None, // default = true → enabled
+                },
+                ConfigField {
+                    key: "shell".to_string(),
+                    label: None,
+                    field_type: ConfigFieldType::Bool,
+                    options: Vec::new(),
+                    default: Some(serde_yaml::Value::Bool(true)),
+                    value: Some(serde_yaml::Value::Bool(false)), // explicitly disabled
+                },
+                ConfigField {
+                    key: "edit_file".to_string(),
+                    label: None,
+                    field_type: ConfigFieldType::Bool,
+                    options: Vec::new(),
+                    default: Some(serde_yaml::Value::Bool(true)),
+                    value: Some(serde_yaml::Value::Bool(true)), // explicitly enabled
+                },
+            ],
+        },
+    ));
+
+    let enabled = configs.enabled_tool_names();
+    assert!(enabled.contains(&"read_file".to_string()));
+    assert!(!enabled.contains(&"shell".to_string()));
+    assert!(enabled.contains(&"edit_file".to_string()));
 }

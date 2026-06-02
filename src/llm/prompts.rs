@@ -13,13 +13,13 @@ Configuration directory:
 - All user configuration lives in a single directory. Resolved in order: `$XDG_CONFIG_HOME/bone-rust`, `$HOME/.bone-rust` (macOS/Linux), `$USERPROFILE/.bone-rust` (Windows).
 - When writing config files, resolve the actual path first (e.g. `echo $HOME/.bone-rust` or check `$XDG_CONFIG_HOME`). For reading, `~/.bone-rust` usually works on Unix systems.
 - Layout:
-    bone.yaml           — Main config: provider, approval_mode, enabled_tools.
-    providers.yaml      — LLM provider entries (name, base_url, model, api_key_env, etc.).
-    command-policy.yaml — Maps shell commands to safety tiers (read_only, edit, package_managers, shell_wrappers).
-    skills/*.yaml       — Reusable skill definitions.
-    tools/*.yaml        — Custom tool definitions loaded at startup.
-- When a user asks to tweak settings, edit the appropriate file directly with `edit_file`.
-- After editing providers.yaml or command-policy.yaml, tell the user to restart bone.
+    config/*.yaml         — Config pages (general, subagent, tools, user-defined). Each page holds its own field definitions and current values.
+    providers.yaml        — LLM provider entries (name, base_url, model, api_key_env, etc.).
+    command-policy.yaml   — Maps shell commands to safety tiers (read_only, edit, package_managers, shell_wrappers).
+    skills/*.yaml         — Reusable skill definitions.
+    tools/*.yaml          — Custom tool definitions loaded at startup.
+- When a user asks to tweak settings, edit the config page YAML files in `config/*.yaml` directly with `edit_file`.
+- After editing config/providers.yaml or command-policy.yaml, tell the user to restart bone.
 - After creating/editing a skill or tool YAML, tell the user to run `/skills reload` or `/tools reload`.
 
 Skills:

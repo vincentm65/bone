@@ -66,17 +66,18 @@ fn dynamic_display_args_render_in_tool_label() {
         content: "Marked task 3 as done".to_string(),
         is_error: false,
         pane_page: None,
+        state: None,
     };
     let display = ToolDisplayConfig {
         args: vec![
             "action".to_string(),
-            "text".to_string(),
             "texts".to_string(),
             "index".to_string(),
             "indices".to_string(),
         ],
         template: None,
         show: None,
+        show_result: None,
     };
 
     assert_eq!(
@@ -100,11 +101,13 @@ fn dynamic_display_template_renders_in_tool_label() {
         content: String::new(),
         is_error: false,
         pane_page: None,
+        state: None,
     };
     let display = ToolDisplayConfig {
         args: Vec::new(),
         template: Some("search {query}".to_string()),
         show: None,
+        show_result: None,
     };
 
     assert_eq!(

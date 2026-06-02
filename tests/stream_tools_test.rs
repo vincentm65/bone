@@ -81,6 +81,7 @@ impl Tool for PaneTool {
         Ok(ToolOutput {
             content: "pane result".to_string(),
             pane_page: Some(pane),
+            state: None,
         })
     }
 }

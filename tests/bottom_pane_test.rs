@@ -3,7 +3,7 @@ use bone::tools::ApprovalMode;
 use bone::ui::input::InputState;
 use bone::ui::pane_page::PanePage;
 use bone::ui::prompt::Prompt;
-use bone::ui::render::{Renderer, StatusInfo};
+use bone::ui::render::{PaneDraw, Renderer, StatusInfo};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -18,6 +18,21 @@ fn status_info() -> StatusInfo {
     }
 }
 
+fn pane_args<'a>(
+    input: &'a InputState,
+    status_info: &'a StatusInfo,
+    pages: &'a [PanePage],
+    active_page: usize,
+    pane_toggle_hint: Option<&'a str>,
+) -> PaneDraw<'a> {
+    PaneDraw {
+        input,
+        status_info,
+        pages,
+        active_page,
+        pane_toggle_hint,
+    }
+}
 fn row_text(terminal: &Terminal<TestBackend>, row: u16, width: u16) -> String {
     (0..width)
         .map(|column| {
@@ -42,7 +57,11 @@ fn expanded_command_preview_is_clipped_to_a_short_frame() {
 
     terminal
         .draw(|frame| {
-            renderer.draw_bottom_pane(frame, &input, &status_info(), Some(&prompt), &[], 0, None)
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status_info(), &[], 0, None),
+                Some(&prompt),
+            )
         })
         .unwrap();
 
@@ -59,7 +78,13 @@ fn multiline_input_is_clipped_to_a_short_frame() {
     let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
 
     terminal
-        .draw(|frame| renderer.draw_bottom_pane(frame, &input, &status_info(), None, &[], 0, None))
+        .draw(|frame| {
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status_info(), &[], 0, None),
+                None,
+            )
+        })
         .unwrap();
 }
 
@@ -72,7 +97,13 @@ fn multiline_input_renders_hard_newlines_on_separate_rows() {
     let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
 
     terminal
-        .draw(|frame| renderer.draw_bottom_pane(frame, &input, &status_info(), None, &[], 0, None))
+        .draw(|frame| {
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status_info(), &[], 0, None),
+                None,
+            )
+        })
         .unwrap();
 
     assert!(row_text(&terminal, 1, 20).starts_with("> alpha"));
@@ -222,7 +253,11 @@ fn pane_page_does_not_panic_with_tiny_viewport() {
     // This should not panic — content is clipped to what fits
     terminal
         .draw(|frame| {
-            renderer.draw_bottom_pane(frame, &input, &status_info(), None, &pages, 0, None)
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status_info(), &pages, 0, None),
+                None,
+            )
         })
         .unwrap();
 
@@ -245,7 +280,11 @@ fn pane_page_renders_content_between_input_and_status() {
 
     terminal
         .draw(|frame| {
-            renderer.draw_bottom_pane(frame, &input, &status_info(), None, &pages, 0, None)
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status_info(), &pages, 0, None),
+                None,
+            )
         })
         .unwrap();
 
@@ -275,7 +314,11 @@ fn single_pane_page_has_only_the_fixed_bottom_separator() {
 
     terminal
         .draw(|frame| {
-            renderer.draw_bottom_pane(frame, &input, &status_info(), None, &pages, 0, None)
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status_info(), &pages, 0, None),
+                None,
+            )
         })
         .unwrap();
 
@@ -302,12 +345,8 @@ fn bottom_separator_can_show_pane_toggle_hint() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &input,
-                &status_info(),
+                &pane_args(&input, &status_info(), &pages, 0, Some("Ctrl+T hide tasks")),
                 None,
-                &pages,
-                0,
-                Some("Ctrl+T hide tasks"),
             )
         })
         .unwrap();
@@ -336,12 +375,14 @@ fn bottom_separator_hint_uses_display_width_for_unicode_shortcuts() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &input,
-                &status_info(),
+                &pane_args(
+                    &input,
+                    &status_info(),
+                    &pages,
+                    0,
+                    Some("Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓"),
+                ),
                 None,
-                &pages,
-                0,
-                Some("Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓"),
             )
         })
         .unwrap();

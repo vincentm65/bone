@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -54,6 +55,8 @@ struct JsonEnvelope {
     content: String,
     #[serde(default)]
     pane: Option<PaneEnvelope>,
+    #[serde(default)]
+    state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,11 +64,79 @@ struct PaneEnvelope {
     source: String,
     title: String,
     #[serde(default)]
-    lines: Vec<String>,
+    lines: Vec<PaneLineDef>,
     #[serde(default = "default_pane_rows")]
     visible_rows: usize,
     #[serde(default)]
     scroll: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PaneLineDef {
+    Text(String),
+    Styled { spans: Vec<PaneSpanDef> },
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneSpanDef {
+    text: String,
+    #[serde(default)]
+    fg: Option<String>,
+    #[serde(default)]
+    modifiers: Vec<String>,
+}
+
+impl PaneLineDef {
+    fn into_line(self) -> Line<'static> {
+        match self {
+            PaneLineDef::Text(text) => Line::from(text),
+            PaneLineDef::Styled { spans } => Line::from(
+                spans
+                    .into_iter()
+                    .map(|span| {
+                        let style = span.style();
+                        Span::styled(span.text, style)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        }
+    }
+}
+
+impl PaneSpanDef {
+    fn style(&self) -> Style {
+        let mut style = Style::default();
+        if let Some(color) = self.fg.as_deref().and_then(parse_color) {
+            style = style.fg(color);
+        }
+        for modifier in &self.modifiers {
+            match modifier.as_str() {
+                "bold" => style = style.add_modifier(Modifier::BOLD),
+                "dim" => style = style.add_modifier(Modifier::DIM),
+                "italic" => style = style.add_modifier(Modifier::ITALIC),
+                "strike" | "crossed_out" => style = style.add_modifier(Modifier::CROSSED_OUT),
+                _ => {}
+            }
+        }
+        style
+    }
+}
+
+fn parse_color(name: &str) -> Option<Color> {
+    match name {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "gray" | "grey" => Some(Color::Gray),
+        "dark_gray" | "dark_grey" => Some(Color::DarkGray),
+        "white" => Some(Color::White),
+        _ => None,
+    }
 }
 
 fn default_pane_rows() -> usize {
@@ -191,7 +262,13 @@ impl Tool for DynamicTool {
         if self.output.as_ref().map(|o| &o.kind) == Some(&OutputKind::JsonlEvents) {
             return self.run_jsonl_events_live(arguments, events, context).await;
         }
-        self.execute_output(arguments).await
+        self.run_with_context(arguments, Some(&context))
+            .await
+            .and_then(|output| match self.output.as_ref().map(|o| &o.kind) {
+                Some(OutputKind::JsonEnvelope) => parse_json_envelope(&output.stdout),
+                Some(OutputKind::LineEnvelope) => parse_line_envelope(&output.stdout),
+                Some(OutputKind::JsonlEvents) | None => Ok(ToolOutput::text(output.stdout)),
+            })
     }
 }
 
@@ -203,7 +280,7 @@ impl DynamicTool {
 
         let output = run_script(ScriptRequest {
             command: script.clone(),
-            env: self.build_env(&arguments),
+            env: self.build_env(&arguments, None),
             timeout_ms: 300_000,
         })
         .await
@@ -228,8 +305,7 @@ impl DynamicTool {
         let script = self.script()?;
         self.validate_required_args(&arguments)?;
 
-        let mut env = self.build_env(&arguments);
-        env.push(("TOOL_CALL_ID".to_string(), context.call_id));
+        let env = self.build_env(&arguments, Some(&context));
         let sender = events.clone();
         let output = run_script_jsonl(
             ScriptRequest {
@@ -238,8 +314,10 @@ impl DynamicTool {
                 timeout_ms: 300_000,
             },
             move |line| {
-                if let (Some(sender), Some(page)) = (sender.as_ref(), pane_event_from_line(&line)) {
-                    let _ = sender.send(ToolLiveEvent::Pane(page));
+                if let Some(sender) = sender.as_ref()
+                    && let Some(event) = parse_live_event(&line)
+                {
+                    let _ = sender.send(event);
                 }
             },
         )
@@ -271,8 +349,19 @@ impl DynamicTool {
         Ok(())
     }
 
-    fn build_env(&self, arguments: &Value) -> Vec<(String, String)> {
-        let mut env = vec![("BONE_PID".to_string(), std::process::id().to_string())];
+    fn build_env(
+        &self,
+        arguments: &Value,
+        context: Option<&ToolExecutionContext>,
+    ) -> Vec<(String, String)> {
+        let mut env = Vec::new();
+        if let Some(context) = context {
+            env.push(("TOOL_CALL_ID".to_string(), context.call_id.clone()));
+            if let Some(ref state) = context.session_state {
+                env.push(("TOOL_SESSION_STATE".to_string(), state.clone()));
+            }
+        }
+        env.push(("BONE_PID".to_string(), std::process::id().to_string()));
         let Value::Object(map) = arguments else {
             return env;
         };
@@ -317,6 +406,14 @@ impl DynamicTool {
         &self,
         arguments: Value,
     ) -> Result<crate::tools::script_runner::ScriptOutput, String> {
+        self.run_with_context(arguments, None).await
+    }
+
+    async fn run_with_context(
+        &self,
+        arguments: Value,
+        context: Option<&ToolExecutionContext>,
+    ) -> Result<crate::tools::script_runner::ScriptOutput, String> {
         if self.interaction.is_some() {
             return Err("interaction tools should not reach execute(); they are intercepted in prepare_tool_call".to_string());
         }
@@ -326,7 +423,7 @@ impl DynamicTool {
 
         let output = run_script(ScriptRequest {
             command: script.clone(),
-            env: self.build_env(&arguments),
+            env: self.build_env(&arguments, context),
             timeout_ms: 120_000,
         })
         .await
@@ -350,12 +447,33 @@ impl DynamicTool {
     }
 }
 
-fn pane_event_from_line(line: &str) -> Option<PanePage> {
+/// Parse a JSONL line into a ToolLiveEvent.
+/// Handles plain pane events (backward compatible) and state-aware events.
+fn parse_live_event(line: &str) -> Option<ToolLiveEvent> {
     let event: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if event["type"].as_str()? != "pane" {
         return None;
     }
-    pane_page_from_value(&event)
+    let state_key = event["state_key"]
+        .as_str()
+        .map(String::from)
+        .filter(|k| !k.is_empty());
+    let state = event["state"].as_str().map(String::from);
+    let remove = event["remove"].as_bool().unwrap_or(false);
+    let pane = pane_page_from_value(&event)?;
+
+    match (state_key, state, remove) {
+        (Some(sub_key), Some(st), false) => Some(ToolLiveEvent::StateUpdate {
+            source: pane.source.clone(),
+            sub_key,
+            state: st,
+        }),
+        (Some(sub_key), _, true) => Some(ToolLiveEvent::StateRemove {
+            source: pane.source.clone(),
+            sub_key,
+        }),
+        _ => Some(ToolLiveEvent::Pane(pane)),
+    }
 }
 
 fn pane_page_from_value(event: &serde_json::Value) -> Option<PanePage> {
@@ -363,7 +481,7 @@ fn pane_page_from_value(event: &serde_json::Value) -> Option<PanePage> {
     Some(PanePage {
         source: pane.source,
         title: pane.title,
-        content: pane.lines.into_iter().map(Line::from).collect(),
+        content: pane.lines.into_iter().map(PaneLineDef::into_line).collect(),
         visible_rows: pane.visible_rows,
         scroll: pane.scroll,
     })
@@ -431,7 +549,11 @@ fn parse_line_envelope(stdout: &str) -> Result<ToolOutput, String> {
         None
     };
 
-    Ok(ToolOutput { content, pane_page })
+    Ok(ToolOutput {
+        content,
+        pane_page,
+        state: None,
+    })
 }
 
 fn parse_json_envelope(stdout: &str) -> Result<ToolOutput, String> {
@@ -440,27 +562,19 @@ fn parse_json_envelope(stdout: &str) -> Result<ToolOutput, String> {
     let pane_page = envelope.pane.map(|pane| PanePage {
         source: pane.source,
         title: pane.title,
-        content: pane.lines.into_iter().map(Line::from).collect(),
+        content: pane.lines.into_iter().map(PaneLineDef::into_line).collect(),
         visible_rows: pane.visible_rows,
         scroll: pane.scroll,
     });
     Ok(ToolOutput {
         content: envelope.content,
         pane_page,
+        state: envelope.state,
     })
 }
 fn parse_jsonl_events(stdout: &str) -> Result<ToolOutput, String> {
     let mut content = String::new();
-    let mut pane_title = String::from("Sub-agent");
-    let mut pane_source = String::from("subagent");
-    let mut pane_lines: Vec<String> = Vec::new();
     let mut explicit_pane_page: Option<PanePage> = None;
-    let mut tokens_sent: u64 = 0;
-    let mut tokens_received: u64 = 0;
-    #[allow(unused_assignments)]
-    let mut task_preview = String::new();
-    #[allow(unused_assignments)]
-    let mut approval = String::new();
 
     for line in stdout.lines() {
         let line = line.trim();
@@ -474,100 +588,31 @@ fn parse_jsonl_events(stdout: &str) -> Result<ToolOutput, String> {
                 continue;
             }
         };
-        let event_type = event["type"].as_str().unwrap_or("");
-        if event_type == "pane" {
+        if event["type"].as_str() == Some("pane") {
             explicit_pane_page = pane_page_from_value(&event);
             continue;
         }
-
-        match event_type {
-            "started" => {
-                approval = event["approval"].as_str().unwrap_or("").to_string();
-                task_preview = event["task"]
-                    .as_str()
-                    .unwrap_or("")
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                let task_display = if task_preview.len() > 80 {
-                    format!("{}...", &task_preview[..77])
-                } else {
-                    task_preview.clone()
-                };
-                pane_title = format!("Sub-agent: {approval}");
-                pane_source = format!("subagent-{}", approval);
-                pane_lines.push(format!("Task: {task_display}"));
-                pane_lines.push(String::new());
+        if event["type"].as_str() == Some("text_delta") {
+            if let Some(text) = event["text"].as_str() {
+                content.push_str(text);
             }
-            "status" => {}
-            "tool_call" => {
-                let name = event["name"].as_str().unwrap_or("");
-                let summary = event["summary"].as_str().unwrap_or("");
-                let summary_preview = if summary.len() > 100 {
-                    format!("{}...", &summary[..97])
-                } else {
-                    summary.to_string()
-                };
-                pane_lines.push(format!("  > {name}: {summary_preview}"));
-            }
-            "tool_result" => {
-                let is_error = event["is_error"].as_bool().unwrap_or(false);
-                if is_error {
-                    pane_lines.push("    (denied by approval mode)".to_string());
-                }
-            }
-            "token_usage" => {
-                tokens_sent = event["sent"].as_u64().unwrap_or(0);
-                tokens_received = event["received"].as_u64().unwrap_or(0);
-            }
-            "text_delta" => {
-                // accumulate partial text
-                if let Some(text) = event["text"].as_str() {
-                    content.push_str(text);
-                }
-            }
-            "finished" => {
-                // Use the finished content if we didn't accumulate deltas
-                if content.is_empty() {
-                    content = event["content"].as_str().unwrap_or("").to_string();
-                }
-                pane_lines.push(String::new());
-                pane_lines.push(format!(
-                    "Status: finished | Tokens: {tokens_sent} sent / {tokens_received} received"
-                ));
-            }
-            "failed" => {
-                let msg = event["message"].as_str().unwrap_or("unknown error");
-                pane_lines.push(format!("FAILED: {msg}"));
-                if content.is_empty() {
-                    content = format!("Sub-agent failed: {msg}");
-                }
-            }
-            _ => {}
+        } else if event["type"].as_str() == Some("finished") && content.is_empty() {
+            content = event["content"].as_str().unwrap_or("").to_string();
+        } else if event["type"].as_str() == Some("failed") && content.is_empty() {
+            let msg = event["message"].as_str().unwrap_or("unknown error");
+            content = format!("Tool failed: {msg}");
         }
     }
 
-    // If no content was collected from events, use stdout as fallback
     if content.is_empty() && !stdout.is_empty() {
         content = stdout.to_string();
     }
 
-    let pane_page = explicit_pane_page.or_else(|| {
-        if pane_lines.is_empty() {
-            None
-        } else {
-            Some(PanePage {
-                source: pane_source,
-                title: pane_title,
-                content: pane_lines.into_iter().map(Line::from).collect(),
-                visible_rows: DEFAULT_PANE_ROWS,
-                scroll: 0,
-            })
-        }
-    });
-
-    Ok(ToolOutput { content, pane_page })
+    Ok(ToolOutput {
+        content,
+        pane_page: explicit_pane_page,
+        state: None,
+    })
 }
 
 /// Parse all `*.yaml` files in a directory into DynamicTool instances.

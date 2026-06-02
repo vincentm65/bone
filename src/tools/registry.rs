@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::tools::ApprovalMode;
 use crate::tools::command_policy::CommandSafety;
+use crate::tools::state_map::ToolStateMap;
 use crate::tools::types::{
     Tool, ToolCall, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolLiveEvent,
     ToolResult,
@@ -42,6 +43,7 @@ impl ToolRegistry {
                     content: output.content,
                     is_error: false,
                     pane_page: output.pane_page,
+                    state: output.state,
                 },
                 Err(content) => ToolResult {
                     call_id,
@@ -49,6 +51,7 @@ impl ToolRegistry {
                     content,
                     is_error: true,
                     pane_page: None,
+                    state: None,
                 },
             },
             None => ToolResult {
@@ -57,6 +60,7 @@ impl ToolRegistry {
                 content: "Unknown tool".to_string(),
                 is_error: true,
                 pane_page: None,
+                state: None,
             },
         }
     }
@@ -65,6 +69,7 @@ impl ToolRegistry {
         &self,
         call: ToolCall,
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        session_state: Option<String>,
     ) -> ToolResult {
         let name = call.name.clone();
         let call_id = call.id.clone();
@@ -75,6 +80,7 @@ impl ToolRegistry {
                     events,
                     ToolExecutionContext {
                         call_id: call_id.clone(),
+                        session_state,
                     },
                 )
                 .await
@@ -85,6 +91,7 @@ impl ToolRegistry {
                     content: output.content,
                     is_error: false,
                     pane_page: output.pane_page,
+                    state: output.state,
                 },
                 Err(content) => ToolResult {
                     call_id,
@@ -92,6 +99,7 @@ impl ToolRegistry {
                     content,
                     is_error: true,
                     pane_page: None,
+                    state: None,
                 },
             },
             None => ToolResult {
@@ -100,6 +108,7 @@ impl ToolRegistry {
                 content: "Unknown tool".to_string(),
                 is_error: true,
                 pane_page: None,
+                state: None,
             },
         }
     }
@@ -117,9 +126,28 @@ pub struct ToolHandler {
     enabled: HashSet<String>,
     dynamic_safety: HashMap<String, CommandSafety>,
     dynamic_display: HashMap<String, ToolDisplayConfig>,
+    pub state_map: ToolStateMap,
 }
 
 impl ToolHandler {
+    fn is_host_stateful_name(name: &str) -> bool {
+        matches!(name, "task_list")
+    }
+
+    fn host_state_key_for_name(name: &str) -> Option<&'static str> {
+        match name {
+            "task_list" => Some("task_list"),
+            _ => None,
+        }
+    }
+
+    fn result_clears_default_state(result: &ToolResult, state_key: &str) -> bool {
+        result
+            .pane_page
+            .as_ref()
+            .is_some_and(|page| page.source == state_key && page.content.is_empty())
+    }
+
     pub fn new(registry: ToolRegistry) -> Self {
         let enabled = registry
             .definitions()
@@ -131,6 +159,7 @@ impl ToolHandler {
             enabled,
             dynamic_safety: HashMap::new(),
             dynamic_display: HashMap::new(),
+            state_map: ToolStateMap::default(),
         }
     }
 
@@ -140,6 +169,7 @@ impl ToolHandler {
             enabled: enabled.iter().cloned().collect(),
             dynamic_safety: HashMap::new(),
             dynamic_display: HashMap::new(),
+            state_map: ToolStateMap::default(),
         }
     }
 
@@ -153,6 +183,7 @@ impl ToolHandler {
             enabled: enabled.iter().cloned().collect(),
             dynamic_safety,
             dynamic_display: HashMap::new(),
+            state_map: ToolStateMap::default(),
         }
     }
 
@@ -167,6 +198,7 @@ impl ToolHandler {
             enabled: enabled.iter().cloned().collect(),
             dynamic_safety,
             dynamic_display,
+            state_map: ToolStateMap::default(),
         }
     }
 
@@ -215,6 +247,8 @@ impl ToolHandler {
         self.dynamic_display.get(&call.name)
     }
 
+    /// Execute all tool calls. Independent calls run concurrently; calls for
+    /// host-stateful tools run in-order so each call sees the prior result.
     pub async fn execute_all(&self, calls: Vec<ToolCall>) -> Vec<ToolResult> {
         self.execute_all_live(calls, None).await
     }
@@ -224,40 +258,79 @@ impl ToolHandler {
         calls: Vec<ToolCall>,
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
     ) -> Vec<ToolResult> {
-        if calls.iter().filter(|call| call.name == "task_list").count() > 1 {
-            let mut results = Vec::with_capacity(calls.len());
-            for call in calls {
-                if self.is_enabled(&call.name) {
-                    results.push(self.registry.execute_live(call, events.clone()).await);
-                } else {
-                    results.push(ToolResult {
-                        call_id: call.id,
-                        name: call.name,
-                        content: "Tool disabled in /tools settings".to_string(),
-                        is_error: true,
-                        pane_page: None,
-                    });
-                }
-            }
-            return results;
+        if calls
+            .iter()
+            .filter(|call| Self::is_host_stateful_name(&call.name))
+            .count()
+            > 1
+        {
+            return self.execute_all_serial(calls, events).await;
         }
 
         join_all(calls.into_iter().map(|call| {
             let events = events.clone();
-            async move {
-                if self.is_enabled(&call.name) {
-                    self.registry.execute_live(call, events).await
-                } else {
-                    ToolResult {
-                        call_id: call.id,
-                        name: call.name,
-                        content: "Tool disabled in /tools settings".to_string(),
-                        is_error: true,
-                        pane_page: None,
-                    }
-                }
-            }
+            let session_state = self.session_state_for_call(&call);
+            async move { self.execute_one_live(call, events, session_state).await }
         }))
         .await
+    }
+
+    async fn execute_all_serial(
+        &self,
+        calls: Vec<ToolCall>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+    ) -> Vec<ToolResult> {
+        let mut results = Vec::with_capacity(calls.len());
+        let mut state_overrides: HashMap<String, Option<String>> = HashMap::new();
+
+        for call in calls {
+            let state_key = Self::host_state_key_for_name(&call.name);
+            let session_state = state_key.and_then(|key| {
+                state_overrides
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| self.state_map.get(key, "default").map(String::from))
+            });
+            let result = self
+                .execute_one_live(call, events.clone(), session_state)
+                .await;
+            if let Some(key) = Self::host_state_key_for_name(&result.name) {
+                if Self::result_clears_default_state(&result, key) {
+                    state_overrides.insert(key.to_string(), None);
+                } else if let Some(state) = result.state.clone() {
+                    state_overrides.insert(key.to_string(), Some(state));
+                }
+            }
+            results.push(result);
+        }
+
+        results
+    }
+
+    async fn execute_one_live(
+        &self,
+        call: ToolCall,
+        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        session_state: Option<String>,
+    ) -> ToolResult {
+        if self.is_enabled(&call.name) {
+            self.registry
+                .execute_live(call, events, session_state)
+                .await
+        } else {
+            ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content: "Tool disabled in /tools settings".to_string(),
+                is_error: true,
+                pane_page: None,
+                state: None,
+            }
+        }
+    }
+
+    fn session_state_for_call(&self, call: &ToolCall) -> Option<String> {
+        Self::host_state_key_for_name(&call.name)
+            .and_then(|key| self.state_map.get(key, "default").map(String::from))
     }
 }

@@ -7,7 +7,7 @@ use crate::tools::{ApprovalMode, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::prompt::Decision;
-use crate::ui::render::{BoneTerminal, StatusInfo};
+use crate::ui::render::{BoneTerminal, PaneDraw, StatusInfo};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, pin_mut};
@@ -34,6 +34,7 @@ pub fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
         content: content.into(),
         is_error: true,
         pane_page: None,
+        state: None,
     }
 }
 
@@ -271,17 +272,11 @@ impl App {
             }
 
             for (call, result) in calls_for_display.iter().zip(results.iter()) {
-                let visible = self
-                    .tools
-                    .display_for_call(call)
-                    .and_then(|d| d.show)
-                    .unwrap_or(true);
-                if visible && !call_row_shown_during_prepare(call) {
-                    self.messages.push(build_tool_row(
-                        call,
-                        result,
-                        self.tools.display_for_call(call),
-                    ));
+                let display = self.tools.display_for_call(call);
+                let visible = display.and_then(|d| d.show).unwrap_or(true);
+                let has_result = display.and_then(|d| d.show_result).unwrap_or(false);
+                if (visible || has_result) && !call_row_shown_during_prepare(call) {
+                    self.messages.push(build_tool_row(call, result, display));
                 }
             }
             self.renderer
@@ -414,7 +409,7 @@ impl App {
                         &mut self.active_page,
                     ) {
                         self.user_config.approval_mode = self.approval_mode;
-                        crate::config::save_user_config(&self.user_config);
+                        self.persist_runtime_config();
                     }
                     if self.cancel_streaming {
                         self.mark_cancelled(assistant_idx);
@@ -426,13 +421,19 @@ impl App {
                         &[]
                     };
                     let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
-                    self.renderer.tick_spinner(term, &self.input, &self.stream_status_info_with_tokens(Some(stream_estimated_received)), pages, self.active_page, hint)?;
+                    self.renderer.tick_spinner(term, &PaneDraw {
+                        input: &self.input,
+                        status_info: &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
+                        pages,
+                        active_page: self.active_page,
+                        pane_toggle_hint: hint,
+                    })?;
                 }
             }
         }
 
         if !had_usage && !self.cancel_streaming {
-            let prompt_chars = Self::estimate_context_chars(&history, &self.tools.definitions());
+            let prompt_chars = Self::estimate_context_chars(history, &self.tools.definitions());
             let completion_chars = self.messages[assistant_idx].content.chars().count();
             self.token_stats
                 .record_estimate(prompt_chars, completion_chars);
@@ -450,11 +451,13 @@ impl App {
         self.renderer.redraw_streaming_message(
             &self.messages[assistant_idx].content,
             term,
-            &self.input,
-            &self.stream_status_info_with_tokens(Some(tokens)),
-            if self.panes_visible { &self.pages } else { &[] },
-            self.active_page,
-            pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
+            &PaneDraw {
+                input: &self.input,
+                status_info: &self.stream_status_info_with_tokens(Some(tokens)),
+                pages: if self.panes_visible { &self.pages } else { &[] },
+                active_page: self.active_page,
+                pane_toggle_hint: pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
+            },
         )
     }
 
@@ -496,10 +499,20 @@ impl App {
             })
             .collect();
 
-        // Process pane pages from tool results
+        // Process pane pages and session state from tool results
         for result in &results {
+            // Store session state (e.g. task_list state)
+            if let Some(ref state) = result.state {
+                let source = result
+                    .pane_page
+                    .as_ref()
+                    .map(|p| p.source.as_str())
+                    .unwrap_or(&result.name);
+                self.tools.state_map.set(source, "default", state.clone());
+            }
             if let Some(page) = &result.pane_page {
                 if page.content.is_empty() {
+                    self.tools.state_map.remove(&page.source, "default");
                     self.active_page =
                         PanePage::remove(&mut self.pages, &page.source, self.active_page);
                 } else {
@@ -564,6 +577,32 @@ impl App {
                     self.active_page = active;
                 }
             }
+            ToolLiveEvent::StateUpdate {
+                source,
+                sub_key,
+                state,
+            } => {
+                self.tools.state_map.set(&source, &sub_key, state);
+                let merged = self.rebuild_merged_pane(&source);
+                if let Some(page) = merged {
+                    let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+                    self.active_page = active;
+                }
+            }
+            ToolLiveEvent::StateRemove { source, sub_key } => {
+                self.tools.state_map.remove(&source, &sub_key);
+                let merged = self.rebuild_merged_pane(&source);
+                match merged {
+                    Some(page) => {
+                        let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+                        self.active_page = active;
+                    }
+                    None => {
+                        self.active_page =
+                            PanePage::remove(&mut self.pages, &source, self.active_page);
+                    }
+                }
+            }
         }
     }
 
@@ -604,7 +643,7 @@ impl App {
                         &mut self.active_page,
                     ) {
                         self.user_config.approval_mode = self.approval_mode;
-                        crate::config::save_user_config(&self.user_config);
+                        self.persist_runtime_config();
                     }
                     if self.cancel_streaming {
                         let results = cancel_calls
@@ -622,11 +661,13 @@ impl App {
                     let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
                     self.renderer.tick_spinner(
                         term,
-                        &self.input,
-                        &self.status_info(),
-                        visible_pages,
-                        self.active_page,
-                        hint,
+                        &PaneDraw {
+                            input: &self.input,
+                            status_info: &self.status_info(),
+                            pages: visible_pages,
+                            active_page: self.active_page,
+                            pane_toggle_hint: hint,
+                        },
                     )?;
                 }
             }
@@ -763,6 +804,7 @@ impl App {
                     content: choice,
                     is_error: false,
                     pane_page: None,
+                    state: None,
                 }),
                 None => PendingTool::Result(tool_error(&call, "cancelled by user")),
             });
@@ -785,6 +827,7 @@ impl App {
                                 content: String::new(),
                                 is_error: false,
                                 pane_page: None,
+                                state: None,
                             },
                             self.tools.display_for_call(&call),
                         ));
@@ -882,6 +925,7 @@ impl App {
         let renderer = &mut self.renderer;
         let approval_mode = &mut self.approval_mode;
         let user_config = &mut self.user_config;
+        let custom_configs = &mut self.custom_configs;
         let cancel = &mut self.cancel_streaming;
         let panes_visible = &mut self.panes_visible;
         let pages = &mut self.pages;
@@ -905,7 +949,12 @@ impl App {
                     renderer.spinner_tick = renderer.spinner_tick.wrapping_add(1);
                     if Self::drain_keys(input, queue, approval_mode, cancel, panes_visible, pages, active_page) {
                         user_config.approval_mode = *approval_mode;
-                        crate::config::save_user_config(user_config);
+                        let mode = match user_config.approval_mode {
+                            crate::tools::ApprovalMode::Danger => "danger",
+                            crate::tools::ApprovalMode::Edits => "edit",
+                            crate::tools::ApprovalMode::Safe => "safe",
+                        };
+                        custom_configs.set_value("general", "approval_mode", mode.to_string());
                     }
                     let visible_pages = if *panes_visible { pages.as_slice() } else { &[] };
                     let hint = pane_toggle_hint(*panes_visible, !pages.is_empty());
@@ -913,14 +962,20 @@ impl App {
                         .ensure_viewport_height(term, input, None, visible_pages, *active_page)
                         .ok();
                     term.draw(|frame| {
-                        renderer.draw_bottom_pane_with_tick(frame, input, &StatusInfo {
-                            model: model.clone(),
-                            token_stats: token_stats.clone(),
-                            streaming_completion_tokens: None,
-                            streaming: true,
-                            approval_mode: *approval_mode,
-                            queue_len: queue.len(),
-                        }, renderer.spinner_tick, None, visible_pages, *active_page, hint);
+                        renderer.draw_bottom_pane_with_tick(frame, &PaneDraw {
+                            input,
+                            status_info: &StatusInfo {
+                                model: model.clone(),
+                                token_stats: token_stats.clone(),
+                                streaming_completion_tokens: None,
+                                streaming: true,
+                                approval_mode: *approval_mode,
+                                queue_len: queue.len(),
+                            },
+                            pages: visible_pages,
+                            active_page: *active_page,
+                            pane_toggle_hint: hint,
+                        }, renderer.spinner_tick, None);
                     }).ok();
                     spinner.as_mut().reset(time::Instant::now() + Duration::from_millis(90));
                 }

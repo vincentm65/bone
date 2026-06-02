@@ -32,11 +32,7 @@ fn default_subagent_wraps_agent_events_and_uses_python_panel_script() {
     assert!(script.contains("type\": \"pane"));
     assert!(script.contains("pane_source = \"subagents\""));
     assert!(script.contains("\"read_only\": \"read\""));
-    assert!(script.contains("mode_width = max"));
-    assert!(script.contains("model_width = max"));
-    assert!(script.contains("token_width = max"));
-    assert!(script.contains("def list_line(entry, mode_width, model_width, token_width):"));
-    assert!(script.contains("print(line, flush=True)"));
+    assert!(script.contains("state_key"));
     assert!(script.contains("emit_pane(remove=True)"));
 }
 
@@ -77,7 +73,8 @@ fi
     fs::write(&fake_bone, "#!/usr/bin/env bash\nexit 0\n").unwrap();
     fs::set_permissions(&fake_bone, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let mut tool: DynamicTool = serde_yaml::from_str(include_str!("../defaults/tools/cron.yaml")).unwrap();
+    let mut tool: DynamicTool =
+        serde_yaml::from_str(include_str!("../defaults/tools/cron.yaml")).unwrap();
     let script = tool.script.take().unwrap();
     tool.script = Some(format!(
         "export XDG_CONFIG_HOME={}\nexport PATH={}:$PATH\nexport BONE_BIN={}\n{}",
@@ -261,6 +258,47 @@ script: |
 }
 
 #[tokio::test]
+async fn json_envelope_pane_supports_styled_spans() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: pane_styler
+description: write styled pane content
+output:
+  kind: json_envelope
+script: |
+  printf '%s\n' '{"content":"Styled","pane":{"source":"task_list","title":"Tasks (1/1)","lines":[{"spans":[{"text":"  ✓ ","fg":"green","modifiers":["bold"]},{"text":"done task","fg":"green","modifiers":["strike"]}]}]}}'
+"#,
+    )
+    .unwrap();
+    let handler = ToolHandler::new(ToolRegistry::new().register(tool));
+
+    let results = handler
+        .execute_all(vec![ToolCall {
+            id: "call-1".into(),
+            name: "pane_styler".into(),
+            arguments: json!({}),
+        }])
+        .await;
+
+    assert!(!results[0].is_error, "{}", results[0].content);
+    let line = &results[0].pane_page.as_ref().unwrap().content[0];
+    assert_eq!(line.to_string(), "  ✓ done task");
+    assert_eq!(line.spans[0].style.fg, Some(ratatui::style::Color::Green));
+    assert!(
+        line.spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD)
+    );
+    assert!(
+        line.spans[1]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::CROSSED_OUT)
+    );
+}
+
+#[tokio::test]
 async fn json_envelope_pane_visible_rows_is_preserved() {
     let tool: DynamicTool = serde_yaml::from_str(
         r#"
@@ -321,7 +359,8 @@ async fn default_task_list_kill_returns_empty_pane_for_removal() {
         serde_yaml::from_str(include_str!("../defaults/tools/task_list.yaml")).unwrap();
     let script = tool.script.take().unwrap();
     tool.script = Some(format!(
-        "export XDG_CONFIG_HOME='{}'\n{}",
+        "export XDG_CONFIG_HOME='{}'
+{}",
         dir.display(),
         script
     ));
@@ -336,7 +375,7 @@ async fn default_task_list_kill_returns_empty_pane_for_removal() {
         .await;
 
     assert!(!results[0].is_error, "{}", results[0].content);
-    assert_eq!(results[0].content, "Task list killed.");
+    assert_eq!(results[0].content.trim(), "Task list cleared.");
     let page = results[0].pane_page.as_ref().unwrap();
     assert_eq!(page.source, "task_list");
     assert!(page.content.is_empty());
@@ -345,13 +384,13 @@ async fn default_task_list_kill_returns_empty_pane_for_removal() {
 }
 
 #[tokio::test]
-async fn repeated_task_list_calls_execute_in_order() {
-    let dir = temp_dir("task-list-order");
+async fn dynamic_tool_calls_execute_concurrently() {
+    let dir = temp_dir("dynamic-tool-concurrent");
     let counter = dir.join("counter");
     let tool: DynamicTool = serde_yaml::from_str(&format!(
         r#"
-name: task_list
-description: test ordering
+name: stateful_tool
+description: test concurrent execution
 script: |
   n=0
   if [ -f {counter} ]; then n=$(cat {counter}); fi
@@ -369,19 +408,19 @@ script: |
         .execute_all(vec![
             ToolCall {
                 id: "call-1".into(),
-                name: "task_list".into(),
+                name: "stateful_tool".into(),
                 arguments: json!({}),
             },
             ToolCall {
                 id: "call-2".into(),
-                name: "task_list".into(),
+                name: "stateful_tool".into(),
                 arguments: json!({}),
             },
         ])
         .await;
 
     assert_eq!(results[0].content, "1");
-    assert_eq!(results[1].content, "2");
+    assert_eq!(results[1].content, "1");
     let _ = fs::remove_dir_all(dir);
 }
 

@@ -1,23 +1,31 @@
 name: task_list
-version: 4
-description: "Manage a persistent task list displayed in the bottom pane. Actions: create (bulk-add tasks), complete (mark done by index/name), kill (destroy the list). Agent calls kill after all tasks are done."
+version: 12
+description: "Manage a named visible task list. State is held by the host; no state arg needed. Actions: create (pass texts and optional name, max 15 tasks), complete (pass index/indices), kill."
 safety: safe
 output:
-  kind: line_envelope
+  kind: json_envelope
 display:
   show: false
+  template: "{action}"
+  show_result: false
+  args:
+    - action
+    - name
+    - texts
+    - index
+    - indices
 args:
   - name: action
     type: string
     description: "create, complete, or kill"
     required: true
-  - name: text
+  - name: name
     type: string
-    description: "Single task name. Used with complete to match by name."
+    description: "Optional task list name for create."
     required: false
   - name: texts
     type: array
-    description: "Multiple task strings for create, or multiple task names for complete."
+    description: "Task strings for create."
     required: false
   - name: index
     type: integer
@@ -29,44 +37,13 @@ args:
     required: false
 script: |
   uv run -- python3 -c "
-  import json, os, pathlib, sys
+  import os, sys, json
 
-  def bone_dir():
-      xdg = os.environ.get('XDG_CONFIG_HOME')
-      if xdg:
-          return pathlib.Path(xdg) / 'bone-rust'
-      home = os.environ.get('HOME') or os.environ.get('USERPROFILE')
-      if home:
-          return pathlib.Path(home) / '.bone-rust'
-      return pathlib.Path('/tmp/.bone-rust')
-
-  dir_path = bone_dir() / 'tasks' / os.environ.get('BONE_PID', str(os.getpid()))
-  dir_path.mkdir(parents=True, exist_ok=True)
-  tasks_file = dir_path / 'tasks.txt'
-  done_file = dir_path / 'tasks_done.txt'
-
-  def read_lines(p):
-      return p.read_text().splitlines() if p.exists() else []
-
-  def write_lines(p, lines):
-      p.write_text('\n'.join(lines) + ('\n' if lines else ''))
-
-  def append_line(p, line):
-      with open(p, 'a') as f:
-          f.write(line + '\n')
-
-  def total_tasks():
-      return len(read_lines(tasks_file))
-
-  def done_count():
-      return len(read_lines(done_file))
+  DEFAULT_NAME = 'Tasks'
 
   def get_texts():
       count = int(os.environ.get('TOOL_TEXTS_COUNT', '0'))
-      if count > 0:
-          return [os.environ.get(f'TOOL_TEXTS_{i}', '') for i in range(count)]
-      t = os.environ.get('TOOL_TEXT', '')
-      return [t] if t else []
+      return [os.environ.get(f'TOOL_TEXTS_{i}', '') for i in range(count)] if count > 0 else []
 
   def get_indices():
       count = int(os.environ.get('TOOL_INDICES_COUNT', '0'))
@@ -75,110 +52,85 @@ script: |
       idx = os.environ.get('TOOL_INDEX', '')
       return [int(idx)] if idx else []
 
-  def resolve_name(name):
-      tasks = read_lines(tasks_file)
-      for i, t in enumerate(tasks):
-          if t == name:
-              return i + 1
-      name_low = name.lower()
-      for i, t in enumerate(tasks):
-          if t.lower() == name_low:
-              return i + 1
-      return None
+  def styled_line(text, done):
+      if done:
+          return {'spans': [
+              {'text': '  ✓ ', 'fg': 'green', 'modifiers': ['bold']},
+              {'text': text, 'fg': 'dark_gray', 'modifiers': ['strike']},
+          ]}
+      return {'spans': [
+          {'text': '  ○ ', 'fg': 'dark_gray'},
+          {'text': text, 'fg': 'white'},
+      ]}
 
-  def get_targets():
-      indices = get_indices()
-      texts = get_texts()
-      if indices and texts:
-          print('ERROR: Use either indices or names, not both.', file=sys.stderr)
-          sys.exit(1)
-      if indices:
-          return indices
-      if texts:
-          result = []
-          for name in texts:
-              idx = resolve_name(name)
-              if idx is None:
-                  print(f'ERROR: No task found: {name}', file=sys.stderr)
-                  sys.exit(1)
-              result.append(idx)
-          return result
-      print('ERROR: Provide index, indices, text, or texts.', file=sys.stderr)
-      sys.exit(1)
-
-  def emit_pane(msg, scroll=0):
-      total = total_tasks()
-      done = done_count()
-      title = f'Task List ({done}/{total})' if total > 0 else 'Task List'
-      print('@@content@@')
-      print(msg)
-      print('@@pane@@')
-      print('source: task_list')
-      print(f'title: {title}')
-      print('visible_rows: 8')
-      print(f'scroll: {scroll}')
-      print('@@lines@@')
-      if total > 0:
-          tasks = read_lines(tasks_file)
-          done_items = set(read_lines(done_file))
-          for t in tasks:
-              mark = '\u2713' if t in done_items else '\u25cb'
-              print(f'  {mark} {t}')
-      else:
-          print('  No tasks')
-      print('@@end@@')
-
-  def emit_empty_pane(msg):
-      print('@@content@@')
-      print(msg)
-      print('@@pane@@')
-      print('source: task_list')
-      print('title: Task List')
-      print('visible_rows: 8')
-      print('scroll: 0')
-      print('@@lines@@')
-      print('@@end@@')
+  def emit(state):
+      tasks = state.get('tasks', [])
+      done = sum(1 for t in tasks if t[1])
+      total = len(tasks)
+      name = state.get('name') or DEFAULT_NAME
+      lines = [styled_line(t[0], t[1]) for t in tasks]
+      print(json.dumps({
+          'content': f'{done}/{total} done',
+          'state': json.dumps(state),
+          'pane': {
+              'source': 'task_list',
+              'title': f'{name} ({done}/{total})',
+              'visible_rows': 8,
+              'scroll': 0,
+              'lines': lines,
+          }
+      }))
 
   action = os.environ.get('TOOL_ACTION', '')
 
   if action == 'kill':
-      tasks_file.unlink(missing_ok=True)
-      done_file.unlink(missing_ok=True)
-      emit_empty_pane('Task list killed.')
+      print(json.dumps({
+          'content': 'Task list cleared.',
+          'pane': {'source': 'task_list', 'title': DEFAULT_NAME, 'lines': []}
+      }))
+
   elif action == 'create':
       texts = get_texts()
       if not texts:
-          print(\"ERROR: Provide text or texts for 'create'.\", file=sys.stderr)
+          print(\"ERROR: Provide texts for 'create'.\", file=sys.stderr)
           sys.exit(1)
-      write_lines(tasks_file, texts)
-      write_lines(done_file, [])
-      count = len(texts)
-      msg = f'Created {count} task(s).' if count > 1 else f'Created task: {texts[0]}'
-      emit_pane(msg, 0)
+      if len(texts) > 15:
+          print('ERROR: Maximum 15 tasks allowed.', file=sys.stderr)
+          sys.exit(1)
+      name = os.environ.get('TOOL_NAME') or DEFAULT_NAME
+      state = {'name': name, 'tasks': [[t, False] for t in texts]}
+      emit(state)
+
   elif action == 'complete':
-      if not tasks_file.exists():
-          print(\"ERROR: No task list exists. Use 'create' first.\", file=sys.stderr)
+      raw = os.environ.get('TOOL_SESSION_STATE', '')
+      if not raw:
+          print('ERROR: No task list state found. Create one first with action=create.', file=sys.stderr)
           sys.exit(1)
-      targets = get_targets()
-      tasks = read_lines(tasks_file)
-      done_items = set(read_lines(done_file))
-      for idx in targets:
-          task = tasks[idx - 1]
-          if task not in done_items:
-              append_line(done_file, task)
-              done_items.add(task)
-      total = total_tasks()
-      done = done_count()
-      first = targets[0]
-      first_task = tasks[first - 1]
-      if len(targets) == 1:
-          msg = f'Completed: {first_task}'
+      try:
+          state = json.loads(raw)
+      except json.JSONDecodeError:
+          print('ERROR: Invalid state JSON.', file=sys.stderr)
+          sys.exit(1)
+      indices = get_indices()
+      if not indices:
+          print('ERROR: Provide index or indices.', file=sys.stderr)
+          sys.exit(1)
+      tasks = state.get('tasks', [])
+      bad = [idx for idx in indices if idx < 1 or idx > len(tasks)]
+      if bad:
+          print(f'ERROR: Invalid task index/indices: {bad}', file=sys.stderr)
+          sys.exit(1)
+      for idx in indices:
+          tasks[idx - 1][1] = True
+      if all(t[1] for t in tasks):
+          summary = ', '.join(t[0] for t in tasks)
+          print(json.dumps({
+              'content': f'All tasks completed: {summary}',
+              'pane': {'source': 'task_list', 'title': 'Tasks', 'lines': []}
+          }))
       else:
-          msg = f'Completed {len(targets)} tasks.'
-      if done == total:
-          msg += ' All done -- you can kill the list.'
-      scroll = max(0, first - 1)
-      emit_pane(msg, scroll)
+          emit(state)
+
   else:
       print('ERROR: Action must be create, complete, or kill.', file=sys.stderr)
       sys.exit(1)

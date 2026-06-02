@@ -30,6 +30,9 @@ pub struct ToolResult {
     /// Not serialized — this is a UI-only field.
     #[serde(skip)]
     pub pane_page: Option<PanePage>,
+    /// Optional session state to store in ToolStateMap (not sent to LLM).
+    #[serde(skip)]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,22 +47,40 @@ pub struct ToolDisplayConfig {
     /// Whether to show the tool call row in chat. Defaults to true.
     #[serde(default)]
     pub show: Option<bool>,
+    /// Whether to show the tool result content in chat. Defaults to false.
+    #[serde(default)]
+    pub show_result: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub content: String,
     pub pane_page: Option<PanePage>,
+    /// Optional session state to store in ToolStateMap (not sent to LLM).
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolExecutionContext {
     pub call_id: String,
+    /// Session state previously stored by this tool, injected as TOOL_SESSION_STATE.
+    pub session_state: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ToolLiveEvent {
     Pane(PanePage),
+    /// Store or update state for a (source, sub_key) pair.
+    StateUpdate {
+        source: String,
+        sub_key: String,
+        state: String,
+    },
+    /// Remove state for a (source, sub_key) pair.
+    StateRemove {
+        source: String,
+        sub_key: String,
+    },
 }
 
 impl ToolOutput {
@@ -67,6 +88,7 @@ impl ToolOutput {
         Self {
             content,
             pane_page: None,
+            state: None,
         }
     }
 }

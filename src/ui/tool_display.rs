@@ -7,7 +7,26 @@ pub fn build_tool_row(
     result: &ToolResult,
     display: Option<&ToolDisplayConfig>,
 ) -> Message {
-    Message::tool_row(tool_label(call, result, display), result.is_error)
+    let show_label = display.and_then(|d| d.show).unwrap_or(true);
+    let show_result = display.and_then(|d| d.show_result).unwrap_or(false);
+    let label = if show_label {
+        tool_label(call, result, display)
+    } else {
+        String::new()
+    };
+    let content = if show_result {
+        result.content.clone()
+    } else {
+        String::new()
+    };
+    Message {
+        role: crate::llm::ChatRole::Tool,
+        content,
+        tool: Some(crate::chat::ToolDisplay {
+            label,
+            is_error: result.is_error,
+        }),
+    }
 }
 
 pub fn tool_label(

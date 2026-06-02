@@ -1,6 +1,6 @@
 name: subagent
-version: 1
-description: "Run a Bone sub-agent with a chosen approval mode. Optionally override provider and model; omitted values use the last/default provider and that provider's configured model."
+version: 3
+description: "Spawn a sub-agent to handle a self-contained task. Use this to delegate work that benefits from isolation or parallelism: researching a topic, investigating a codebase area, prototyping a solution, getting a second opinion, or running a complex multi-step workflow. The sub-agent runs as a separate bone instance with its own context and tool access. Pass a clear, specific task prompt; the sub-agent will use the full set of tools available to it. Choose the approval mode to control what the sub-agent can do: read_only for research, edit for changes, danger for privileged operations. Optionally override provider and model; omitted values use the last/default provider and its configured model."
 safety: read_only
 args:
   - name: approval
@@ -34,30 +34,15 @@ script: |
   uv run -- python3 - "$approval" "$task" "${TOOL_CALL_ID:-}" "${args[@]}" <<'PY'
   import json
   import os
-  import pathlib
   import subprocess
   import sys
   import threading
   import time
 
-  try:
-      import fcntl
-  except Exception:
-      fcntl = None
-
   approval = sys.argv[1]
   task = sys.argv[2]
   call_id = sys.argv[3]
   args = sys.argv[4:]
-
-  def bone_dir():
-      xdg = os.environ.get("XDG_CONFIG_HOME")
-      if xdg:
-          return pathlib.Path(xdg) / "bone-rust"
-      home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
-      if home:
-          return pathlib.Path(home) / ".bone-rust"
-      return pathlib.Path("/tmp/.bone-rust")
 
   def short_mode(value):
       return {"read_only": "read", "edit": "edit", "danger": "danger"}.get(value, (value or "?")[:6])
@@ -66,6 +51,9 @@ script: |
       first = (value or "").splitlines()[0].strip()
       return first or "subagent"
 
+  def clean(value):
+      return " ".join(str(value or "").split())
+
   def fmt_tokens(sent, received):
       total = int(sent or 0) + int(received or 0)
       if total >= 1_000_000:
@@ -73,21 +61,6 @@ script: |
       if total >= 1000:
           return f"{total / 1000:.1f}k"
       return str(total)
-
-  def clip(value, width):
-      value = " ".join(str(value or "").split())
-      return value if len(value) <= width else value[:max(0, width - 3)] + "..."
-
-  def clean(value):
-      return " ".join(str(value or "").split())
-
-  def compact_status(message):
-      message = " ".join(str(message or "").split())
-      if message.startswith("running shell: "):
-          return message[len("running shell: "):]
-      if message.startswith("running "):
-          return message[len("running "):]
-      return message or "running"
 
   state = {
       "approval": approval,
@@ -105,77 +78,36 @@ script: |
 
   agent_id = call_id or f"{state['mode']}-{os.getpid()}"
   pane_source = "subagents"
-  state_dir = bone_dir() / "subagents" / os.environ.get("BONE_PID", str(os.getppid()))
-  state_dir.mkdir(parents=True, exist_ok=True)
-  state_file = state_dir / "state.json"
-  lock_file = state_dir / "state.lock"
 
-  class StateLock:
-      def __enter__(self):
-          self.handle = open(lock_file, "w")
-          if fcntl:
-              fcntl.flock(self.handle, fcntl.LOCK_EX)
-          return self
-
-      def __exit__(self, exc_type, exc, tb):
-          if fcntl:
-              fcntl.flock(self.handle, fcntl.LOCK_UN)
-          self.handle.close()
-
-  def read_agents():
-      if not state_file.exists():
-          return {}
-      try:
-          data = json.loads(state_file.read_text())
-          return data if isinstance(data, dict) else {}
-      except Exception:
-          return {}
-
-  def write_agents(agents):
-      if agents:
-          state_file.write_text(json.dumps(agents, sort_keys=True))
-      else:
-          state_file.unlink(missing_ok=True)
-
-  def token_text(entry):
-      return f"{fmt_tokens(entry.get('sent'), entry.get('received'))} tok"
-
-  def list_line(entry, mode_width, model_width, token_width):
-      status = "\u2713" if entry.get("done") else "\u25cb"
-      mode = clean(entry.get("mode") or "?")
-      model = clean(entry.get("model") or "current")
-      tokens = token_text(entry)
-      title = clean(entry.get("title") or "subagent")
-      return f"  {status} {mode:<{mode_width}}  {model:<{model_width}}  {tokens:<{token_width}}  {title}"
+  def token_text():
+      return f"{fmt_tokens(state['sent'], state['received'])} tok"
 
   def emit_pane(remove=False):
-      with StateLock():
-          agents = read_agents()
-          if remove:
-              agents.pop(agent_id, None)
-          else:
-              agents[agent_id] = state.copy()
-          write_agents(agents)
-
-          ordered = sorted(agents.values(), key=lambda entry: entry.get("started", 0))
-          running = sum(1 for entry in ordered if not entry.get("done"))
-          title = f"Subagents ({running})" if ordered else "Subagents"
-          visible = 8
-          mode_width = max([len("MODE")] + [len(clean(entry.get("mode") or "?")) for entry in ordered])
-          model_width = max([len("MODEL")] + [len(clean(entry.get("model") or "current")) for entry in ordered])
-          token_width = max([len("TOKENS")] + [len(token_text(entry)) for entry in ordered])
-          lines = [f"    {'MODE':<{mode_width}}  {'MODEL':<{model_width}}  {'TOKENS':<{token_width}}  TASK"]
-          lines.extend(list_line(entry, mode_width, model_width, token_width) for entry in ordered)
-          pane = {
+      event = {"type": "pane", "state_key": agent_id}
+      if not remove:
+          event["state"] = json.dumps(state)
+          tokens = token_text()
+          title = clean(state.get("title") or "subagent")
+          mode = clean(state.get("mode") or "?")
+          model = clean(state.get("model") or "current")
+          line = f"  {'✓' if state.get('done') else '○'} {mode}  {model}  {tokens}  {title}"
+          event["pane"] = {
               "source": pane_source,
               "title": title,
-              "visible_rows": visible,
-              "scroll": max(0, len(lines) - visible) if ordered else 0,
-              "lines": lines,
+              "visible_rows": 8,
+              "scroll": 0,
+              "lines": [line],
           }
-          if not ordered:
-              pane["lines"] = []
-      print(json.dumps({"type": "pane", "pane": pane}), flush=True)
+      else:
+          event["remove"] = True
+          event["pane"] = {
+              "source": pane_source,
+              "title": "",
+              "visible_rows": 8,
+              "scroll": 0,
+              "lines": [],
+          }
+      print(json.dumps(event), flush=True)
 
   emit_pane()
 
@@ -216,8 +148,13 @@ script: |
           state["done"] = False
           state["log"].append("thinking")
       elif event_type == "status":
-          msg = compact_status(event.get("message"))
-          state["now"] = msg
+          msg = event.get("message") or ""
+          msg = " ".join(str(msg).split())
+          if msg.startswith("running shell: "):
+              msg = msg[len("running shell: "):]
+          elif msg.startswith("running "):
+              msg = msg[len("running "):]
+          state["now"] = msg or "running"
           state["done"] = False
           if not state["log"] or state["log"][-1] != msg:
               state["log"].append(msg)

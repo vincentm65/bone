@@ -18,7 +18,8 @@ use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
 use super::render::{
-    BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, Renderer, StatusInfo, clamped_pane_visible_rows,
+    BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, PaneDraw, Renderer, StatusInfo,
+    clamped_pane_visible_rows,
 };
 
 pub struct App {
@@ -33,6 +34,7 @@ pub struct App {
     pub renderer: Renderer,
     pub providers_config: ProvidersConfig,
     pub user_config: UserConfig,
+    pub custom_configs: config::custom::CustomConfigs,
     pub queue: VecDeque<String>,
     pub tools: ToolHandler,
     pub skills: SkillStore,
@@ -61,18 +63,27 @@ impl App {
         llm: Box<dyn LlmProvider>,
         providers_config: ProvidersConfig,
         user_config: UserConfig,
+        custom_configs: config::custom::CustomConfigs,
     ) -> io::Result<Self> {
         let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
         let loaded = crate::tools::load_tools();
-        // Auto-enable any new tools not yet in the user's enabled list
-        let mut enabled = user_config.enabled_tools.clone();
-        for def in loaded.registry.definitions() {
-            if !enabled.contains(&def.name) {
-                enabled.push(def.name);
-            }
-        }
+        // Sync tools page with registry, then rebuild enabled list
+        let all_tool_names: Vec<String> = loaded
+            .registry
+            .definitions()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        let mut custom_configs = custom_configs;
+        custom_configs.sync_tools_from_registry(&all_tool_names);
+        let enabled = custom_configs.enabled_tool_names();
+        let enabled = if enabled.is_empty() {
+            all_tool_names
+        } else {
+            enabled
+        };
         let tools = ToolHandler::with_enabled_safety_and_display(
             loaded.registry,
             &enabled,
@@ -99,6 +110,7 @@ impl App {
             renderer: Renderer::new(),
             providers_config,
             user_config,
+            custom_configs,
             queue: VecDeque::new(),
             tools,
             skills,
@@ -113,6 +125,22 @@ impl App {
             interaction_tools: loaded.interaction_tools,
             dynamic_scripts: loaded.dynamic_scripts,
         })
+    }
+    /// Persist current approval_mode to custom config.
+    fn persist_runtime_config(&mut self) {
+        let mode = match self.user_config.approval_mode {
+            crate::tools::ApprovalMode::Danger => "danger",
+            crate::tools::ApprovalMode::Edits => "edit",
+            crate::tools::ApprovalMode::Safe => "safe",
+        };
+        self.custom_configs
+            .set_value("general", "approval_mode", mode.to_string());
+    }
+
+    fn apply_custom_configs_to_runtime(&mut self, custom: config::custom::CustomConfigs) {
+        self.user_config.apply_custom_configs(&custom);
+        self.approval_mode = self.user_config.approval_mode;
+        self.custom_configs = custom;
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -252,12 +280,14 @@ impl App {
     fn draw(&self, frame: &mut ratatui::Frame) {
         self.renderer.draw_bottom_pane(
             frame,
-            &self.input,
-            &self.status_info(),
+            &PaneDraw {
+                input: &self.input,
+                status_info: &self.status_info(),
+                pages: self.visible_pages(),
+                active_page: self.active_page,
+                pane_toggle_hint: self.pane_toggle_hint(),
+            },
             self.active_prompt.as_ref(),
-            self.visible_pages(),
-            self.active_page,
-            self.pane_toggle_hint(),
         );
     }
 
@@ -269,9 +299,9 @@ impl App {
         if self.pages.is_empty() {
             None
         } else if self.panes_visible {
-            Some("Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓")
+            Some("Ctrl+T hide panel  ──  Ctrl+↑↓")
         } else {
-            Some("Ctrl+T show panel  ──  Ctrl+↑↓/↑↓")
+            Some("Ctrl+T show panel  ──  Ctrl+↑↓")
         }
     }
 
@@ -359,7 +389,7 @@ impl App {
             InputAction::CycleMode => {
                 self.approval_mode = self.approval_mode.cycle();
                 self.user_config.approval_mode = self.approval_mode;
-                config::save_user_config(&self.user_config);
+                self.persist_runtime_config();
                 self.redraw(term)
             }
             InputAction::Redraw | InputAction::Escape => self.redraw(term),
@@ -478,6 +508,8 @@ impl App {
                 hint: None,
                 full_command,
                 peek_mode: false,
+                tabs: Vec::new(),
+                active_tab: 0,
             }
         } else if let Some(script) = self.dynamic_scripts.get(&call.name) {
             // Dynamic tool — show the script so the user can see what runs
@@ -494,6 +526,8 @@ impl App {
                 hint: None,
                 full_command: Some(script.clone()),
                 peek_mode: false,
+                tabs: Vec::new(),
+                active_tab: 0,
             }
         } else {
             Prompt::new(
@@ -626,13 +660,13 @@ impl App {
         let arg = parts.get(1).copied().unwrap_or("").to_string();
 
         if cmd == "provider" && arg.is_empty() {
-            return self.provider_picker(term).await;
+            return self.config_picker(term, Some("providers")).await;
         }
         if cmd == "tools" {
-            return self.handle_tools_command(&arg, term);
+            return self.handle_tools_command(&arg, term).await;
         }
         if cmd == "config" {
-            return self.config_picker(term);
+            return self.config_picker(term, None).await;
         }
         if cmd == "skills" {
             return self.handle_skills_command(&arg, term);
@@ -664,6 +698,7 @@ impl App {
         if matches!(cmd.as_str(), "clear" | "new") {
             self.pages.clear();
             self.active_page = 0;
+            self.tools.state_map.clear();
         }
 
         let result = commands::handle(
@@ -943,79 +978,11 @@ impl App {
         Ok(true)
     }
 
-    async fn provider_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let mut selected = 0usize;
-        loop {
-            let mut ids: Vec<String> = self.providers_config.providers.keys().cloned().collect();
-            ids.sort();
-            let options = ids
-                .iter()
-                .map(|id| {
-                    let entry = &self.providers_config.providers[id];
-                    let active = if id == self.llm.id() { "●" } else { "○" };
-                    let kind = if entry.handler.is_empty() {
-                        "openai"
-                    } else {
-                        entry.handler.as_str()
-                    };
-                    format!("{active} {id} · {} · {} · {kind}", entry.model, entry.label)
-                })
-                .collect::<Vec<_>>();
-            let mut prompt = Prompt::new("Providers", options);
-            prompt.selected = selected.min(ids.len().saturating_sub(1));
-            prompt.scroll = prompt.selected.saturating_sub(prompt.visible_rows - 1);
-            prompt.hint = Some("Enter select  e edit  Esc close".to_string());
-            self.active_prompt = Some(prompt);
-            self.redraw(term)?;
-
-            let (code, modifiers) = self.panel_key(term)?;
-            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                return self.close_panel(term);
-            }
-            match code {
-                code if self.navigate_panel(code, term)? => {
-                    selected = self.active_prompt.as_ref().unwrap().selected;
-                    continue;
-                }
-                KeyCode::Esc => return self.close_panel(term),
-                KeyCode::Char('e') | KeyCode::Char('E') => {
-                    if let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) {
-                        self.provider_editor(id.clone(), term)?;
-                    }
-                }
-                KeyCode::Enter => {
-                    let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) else {
-                        return self.close_panel(term);
-                    };
-                    let reply =
-                        match providers::create_provider_with_config(id, &self.providers_config) {
-                            Ok(new_provider) => match new_provider.validate().await {
-                                Ok(()) => {
-                                    self.provider =
-                                        format!("{} ({})", new_provider.name(), new_provider.id());
-                                    self.model = new_provider.model().to_string();
-                                    self.llm = new_provider;
-                                    self.providers_config.last_provider = id.clone();
-                                    config::save_providers(&self.providers_config);
-                                    format!("Switched to {} ({})", self.model, self.provider)
-                                }
-                                Err(err) => format!("Provider validation failed: {err}"),
-                            },
-                            Err(err) => err.to_string(),
-                        };
-                    self.close_panel(term)?;
-                    return self.show_reply(reply, term);
-                }
-                _ => {}
-            }
-        }
-    }
-
     fn mask_secret(value: &str) -> String {
         if value.is_empty() {
             "(empty)".to_string()
         } else {
-            "*".repeat(value.chars().count().min(12).max(4))
+            "*".repeat(value.chars().count().clamp(4, 12))
         }
     }
 
@@ -1154,18 +1121,25 @@ impl App {
         }
     }
 
-    fn handle_tools_command(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
+    async fn handle_tools_command(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
         let mut parts = arg.split_whitespace();
         let action = parts.next().unwrap_or("");
         match action {
             "reload" => {
                 let loaded = crate::tools::load_tools();
-                let mut enabled = self.tools.enabled_names();
-                for def in loaded.registry.definitions() {
-                    if !enabled.contains(&def.name) {
-                        enabled.push(def.name);
-                    }
-                }
+                let all_names: Vec<String> = loaded
+                    .registry
+                    .definitions()
+                    .iter()
+                    .map(|d| d.name.clone())
+                    .collect();
+                self.custom_configs.sync_tools_from_registry(&all_names);
+                let enabled = self.custom_configs.enabled_tool_names();
+                let enabled = if enabled.is_empty() {
+                    all_names
+                } else {
+                    enabled
+                };
                 self.tools = crate::tools::ToolHandler::with_enabled_safety_and_display(
                     loaded.registry,
                     &enabled,
@@ -1175,49 +1149,106 @@ impl App {
                 self.interaction_tools = loaded.interaction_tools;
                 self.dynamic_scripts = loaded.dynamic_scripts;
                 self.user_config.enabled_tools = self.tools.enabled_names();
-                config::save_user_config(&self.user_config);
                 let count = self.tools.definitions().len();
                 self.show_reply(format!("Tools reloaded. {count} tools enabled."), term)
             }
-            _ => self.tools_picker(term),
+            _ => self.tools_picker(term).await,
         }
     }
 
-    fn tools_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let all_names = self
-            .tools
-            .available_definitions()
-            .iter()
-            .map(|d| d.name.clone())
-            .collect::<Vec<_>>();
-        let builtin_names: Vec<String> = crate::tools::builtin_tools()
-            .definitions()
-            .iter()
-            .map(|d| d.name.clone())
-            .collect();
+    async fn tools_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.config_picker(term, Some("tools")).await
+    }
+
+    async fn config_picker(
+        &mut self,
+        term: &mut BoneTerminal,
+        start_tab: Option<&str>,
+    ) -> io::Result<()> {
+        let mut custom = config::custom::CustomConfigs::load();
+
+        let mut tabs: Vec<String> = Vec::new();
+        let mut namespaces: Vec<String> = Vec::new();
+        for (ns, page) in &custom.pages {
+            tabs.push(page.title.clone());
+            namespaces.push(ns.clone());
+        }
+        // Add Providers tab (not backed by a page file)
+        let providers_tab_idx = tabs.len();
+        tabs.push("Providers".to_string());
+        namespaces.push("__providers__".to_string());
+        let num_tabs = tabs.len();
+
+        let mut active = if let Some(tab) = start_tab {
+            if tab == "providers" {
+                providers_tab_idx
+            } else {
+                namespaces.iter().position(|ns| ns == tab).unwrap_or(0)
+            }
+        } else {
+            0
+        };
         let mut selected = 0usize;
+
         loop {
-            let options = all_names
-                .iter()
-                .map(|name| {
-                    let mark = if self.tools.is_enabled(name) {
-                        "●"
-                    } else {
-                        "○"
-                    };
-                    let source = if builtin_names.contains(name) {
-                        "built-in"
-                    } else {
-                        "custom"
-                    };
-                    format!("{mark} {name} · {source}")
-                })
-                .collect();
-            let mut prompt = Prompt::new("Tools", options);
+            let options = if active == providers_tab_idx {
+                // Providers tab: list providers like the old provider_picker
+                let mut ids: Vec<String> =
+                    self.providers_config.providers.keys().cloned().collect();
+                ids.sort();
+                ids.iter()
+                    .map(|id| {
+                        let entry = &self.providers_config.providers[id];
+                        let active_marker = if id == self.llm.id() { "●" } else { "○" };
+                        let kind = if entry.handler.is_empty() {
+                            "openai"
+                        } else {
+                            entry.handler.as_str()
+                        };
+                        format!(
+                            "{active_marker} {id} · {} · {} · {kind}",
+                            entry.model, entry.label
+                        )
+                    })
+                    .collect()
+            } else if active < namespaces.len() {
+                let ns = &namespaces[active];
+                let page = &custom.pages[active].1;
+                page.fields
+                    .iter()
+                    .map(|field| {
+                        let label = field.label.as_deref().unwrap_or(&field.key);
+                        let value = custom.get_value(ns, &field.key);
+                        let display = match field.field_type {
+                            config::custom::ConfigFieldType::Bool => {
+                                if value == "true" {
+                                    "● enabled".to_string()
+                                } else {
+                                    "○ disabled".to_string()
+                                }
+                            }
+                            _ => value,
+                        };
+                        format!("{:<30} {}", label, display)
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            let mut prompt = Prompt::new(tabs[active].clone(), options);
             prompt.selected = selected;
-            prompt.hint = Some("Space/Enter toggle  Esc close".to_string());
+            prompt.tabs = tabs.clone();
+            prompt.active_tab = active;
+            let hint = if active == providers_tab_idx {
+                "Enter select  e edit  Esc close".to_string()
+            } else {
+                "Tab switch  Enter edit/cycle  Esc close".to_string()
+            };
+            prompt.hint = Some(hint);
             self.active_prompt = Some(prompt);
             self.redraw(term)?;
+
             let (code, modifiers) = self.panel_key(term)?;
             if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                 return self.close_panel(term);
@@ -1226,123 +1257,92 @@ impl App {
                 selected = self.active_prompt.as_ref().unwrap().selected;
                 continue;
             }
+
             match code {
                 KeyCode::Esc => return self.close_panel(term),
-                KeyCode::Char(' ') | KeyCode::Enter => {
-                    let selected = self.active_prompt.as_ref().unwrap().selected;
-                    if let Some(name) = all_names.get(selected) {
-                        self.tools.set_enabled(name, !self.tools.is_enabled(name));
-                        self.user_config.enabled_tools = self.tools.enabled_names();
-                        config::save_user_config(&self.user_config);
+                KeyCode::Tab => {
+                    active = (active + 1) % num_tabs;
+                    selected = 0;
+                    continue;
+                }
+                KeyCode::BackTab => {
+                    active = if active == 0 {
+                        num_tabs - 1
+                    } else {
+                        active - 1
+                    };
+                    selected = 0;
+                    continue;
+                }
+                KeyCode::Enter => {
+                    if active == providers_tab_idx {
+                        // Providers tab: select provider
+                        let mut ids: Vec<String> =
+                            self.providers_config.providers.keys().cloned().collect();
+                        ids.sort();
+                        let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected)
+                        else {
+                            continue;
+                        };
+                        let id = id.clone();
+                        let reply = match providers::create_provider_with_config(
+                            &id,
+                            &self.providers_config,
+                        ) {
+                            Ok(new_provider) => match new_provider.validate().await {
+                                Ok(()) => {
+                                    self.provider =
+                                        format!("{} ({})", new_provider.name(), new_provider.id());
+                                    self.model = new_provider.model().to_string();
+                                    self.llm = new_provider;
+                                    self.providers_config.last_provider = id.clone();
+                                    config::save_providers(&self.providers_config);
+                                    format!("Switched to {} ({})", self.model, self.provider)
+                                }
+                                Err(err) => format!("Provider validation failed: {err}"),
+                            },
+                            Err(err) => err.to_string(),
+                        };
+                        self.close_panel(term)?;
+                        return self.show_reply(reply, term);
+                    }
+                    if active >= namespaces.len() {
+                        continue;
+                    }
+                    let ns = namespaces[active].clone();
+                    let page = &custom.pages[active].1;
+                    let idx = self.active_prompt.as_ref().unwrap().selected;
+                    if idx >= page.fields.len() {
+                        continue;
+                    }
+                    let field = page.fields[idx].clone();
+                    let current = custom.get_value(&ns, &field.key);
+                    match field.field_type {
+                        config::custom::ConfigFieldType::Bool
+                        | config::custom::ConfigFieldType::Enum => {
+                            if let Some(next) = custom.cycle_field(&ns, &field.key, &current) {
+                                custom.set_value(&ns, &field.key, next.clone());
+                                self.apply_custom_configs_to_runtime(custom.clone());
+                                if ns == "tools" {
+                                    self.tools.set_enabled(&field.key, next == "true");
+                                }
+                            }
+                        }
+                        _ => {
+                            let label = field.label.as_deref().unwrap_or(&field.key).to_string();
+                            if let Some(val) = self.edit_value(&label, &current, false, term)? {
+                                custom.set_value(&ns, &field.key, val.trim().to_string());
+                                self.apply_custom_configs_to_runtime(custom.clone());
+                            }
+                        }
                     }
                 }
-                _ => {}
-            }
-        }
-    }
-
-    fn config_picker(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let modes = [
-            ApprovalMode::Safe,
-            ApprovalMode::Edits,
-            ApprovalMode::Danger,
-        ];
-        let mut selected = 0usize;
-        loop {
-            let compact_label = match self.user_config.auto_compact_tokens {
-                Some(t) => format!("auto_compact_tokens: {t}"),
-                None => "auto_compact_tokens: disabled".to_string(),
-            };
-            let keep_label = match self.user_config.auto_compact_keep_messages {
-                Some(n) => format!("auto_compact_keep_messages: {n}"),
-                None => "auto_compact_keep_messages: 12 (default)".to_string(),
-            };
-            let mode_label = format!(
-                "approval_mode: {} {}",
-                self.approval_mode.label(),
-                if self.approval_mode == ApprovalMode::Safe {
-                    "(all approved)"
-                } else if self.approval_mode == ApprovalMode::Edits {
-                    "(edit/danger prompt)"
-                } else {
-                    "(all prompt)"
-                }
-            );
-            let options = vec![mode_label, compact_label, keep_label];
-            let mut prompt = Prompt::new("Config", options);
-            prompt.selected = selected;
-            prompt.hint = Some("Enter edit  Esc close".to_string());
-            self.active_prompt = Some(prompt);
-            self.redraw(term)?;
-            let (code, modifiers) = self.panel_key(term)?;
-            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                return self.close_panel(term);
-            }
-            if self.navigate_panel(code, term)? {
-                selected = self.active_prompt.as_ref().unwrap().selected;
-                continue;
-            }
-            match code {
-                KeyCode::Esc => return self.close_panel(term),
-                KeyCode::Enter => {
-                    let idx = self.active_prompt.as_ref().unwrap().selected;
-                    match idx {
-                        // approval mode: cycle through modes
-                        0 => {
-                            let next = (modes
-                                .iter()
-                                .position(|m| *m == self.approval_mode)
-                                .unwrap_or(0)
-                                + 1)
-                                % modes.len();
-                            self.approval_mode = modes[next];
-                            self.user_config.approval_mode = self.approval_mode;
-                            config::save_user_config(&self.user_config);
-                        }
-                        // auto_compact_tokens
-                        1 => {
-                            let current = self
-                                .user_config
-                                .auto_compact_tokens
-                                .map(|t| t.to_string())
-                                .unwrap_or_default();
-                            if let Some(val) = self.edit_value(
-                                "auto_compact_tokens (empty = disabled)",
-                                &current,
-                                false,
-                                term,
-                            )? {
-                                self.user_config.auto_compact_tokens = if val.trim().is_empty() {
-                                    None
-                                } else {
-                                    val.trim().parse::<u64>().ok()
-                                };
-                                config::save_user_config(&self.user_config);
-                            }
-                        }
-                        // auto_compact_keep_messages
-                        2 => {
-                            let current = self
-                                .user_config
-                                .auto_compact_keep_messages
-                                .map(|n| n.to_string())
-                                .unwrap_or_default();
-                            if let Some(val) = self.edit_value(
-                                "auto_compact_keep_messages (empty = default 12)",
-                                &current,
-                                false,
-                                term,
-                            )? {
-                                self.user_config.auto_compact_keep_messages =
-                                    if val.trim().is_empty() {
-                                        None
-                                    } else {
-                                        val.trim().parse::<usize>().ok()
-                                    };
-                                config::save_user_config(&self.user_config);
-                            }
-                        }
-                        _ => {}
+                KeyCode::Char('e') | KeyCode::Char('E') if active == providers_tab_idx => {
+                    let mut ids: Vec<String> =
+                        self.providers_config.providers.keys().cloned().collect();
+                    ids.sort();
+                    if let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) {
+                        self.provider_editor(id.clone(), term)?;
                     }
                 }
                 _ => {}
@@ -1370,10 +1370,159 @@ impl App {
             self.input.buffer = text;
             self.input.cursor_pos = self.input.buffer.chars().count();
         }
+
         *term = Renderer::init_terminal(MIN_ROWS)?;
         self.renderer.viewport_height = MIN_ROWS;
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.force_redraw(term)
+    }
+
+    /// Rebuild a merged pane page from all state entries for a given source.
+    /// Currently only handles the "subagents" source.
+    fn rebuild_merged_pane(&self, source: &str) -> Option<PanePage> {
+        let entries = self.tools.state_map.get_all(source)?;
+        if entries.is_empty() {
+            return None;
+        }
+
+        match source {
+            "subagents" => Some(rebuild_subagents_pane(entries)),
+            _ => None,
+        }
+    }
+}
+/// Rebuild the merged subagents pane from all agent state entries.
+fn rebuild_subagents_pane(entries: &std::collections::HashMap<String, String>) -> PanePage {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+
+    #[derive(serde::Deserialize)]
+    struct AgentState {
+        mode: String,
+        model: String,
+        title: String,
+        sent: u64,
+        received: u64,
+        done: bool,
+        started: f64,
+    }
+
+    let mut agents: Vec<(String, AgentState)> = Vec::new();
+    for (key, raw) in entries {
+        if let Ok(state) = serde_json::from_str::<AgentState>(raw) {
+            agents.push((key.clone(), state));
+        }
+    }
+    agents.sort_by(|a, b| {
+        a.1.started
+            .partial_cmp(&b.1.started)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let running = agents.iter().filter(|(_, a)| !a.done).count();
+    let title = if agents.is_empty() {
+        "Subagents".to_string()
+    } else {
+        format!("Subagents ({running})")
+    };
+
+    let visible = 8;
+
+    if agents.is_empty() {
+        return PanePage {
+            source: "subagents".to_string(),
+            title,
+            content: Vec::new(),
+            visible_rows: visible,
+            scroll: 0,
+        };
+    }
+
+    /// Format token counts. Mirrors the Python `fmt_tokens` in defaults/tools/subagent.yaml;
+    /// keep both in sync when changing the format.
+    fn fmt_tokens(sent: u64, received: u64) -> String {
+        let total = sent + received;
+        if total >= 1_000_000 {
+            format!("{:.1}M", total as f64 / 1_000_000.0)
+        } else if total >= 1000 {
+            format!("{:.1}k", total as f64 / 1000.0)
+        } else {
+            total.to_string()
+        }
+    }
+
+    let mode_width = agents
+        .iter()
+        .map(|(_, a)| a.mode.chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let model_width = agents
+        .iter()
+        .map(|(_, a)| a.model.chars().count())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    let token_strs: Vec<String> = agents
+        .iter()
+        .map(|(_, a)| fmt_tokens(a.sent, a.received))
+        .collect();
+    let token_width = token_strs
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+
+    // Header line
+    let header = format!(
+        "    {:<mode_w$}  {:<model_w$}  {:<token_w$}  TASK",
+        "MODE",
+        "MODEL",
+        "TOKENS",
+        mode_w = mode_width,
+        model_w = model_width,
+        token_w = token_width
+    );
+    let mut lines = vec![Line::from(header)];
+
+    for ((_, agent), tokens) in agents.iter().zip(token_strs.iter()) {
+        let status_char = if agent.done { "\u{2713}" } else { "\u{25cb}" };
+        let row = format!(
+            "  {} {:<mode_w$}  {:<model_w$}  {:<token_w$}  {}",
+            status_char,
+            agent.mode,
+            agent.model,
+            tokens,
+            agent.title,
+            mode_w = mode_width,
+            model_w = model_width,
+            token_w = token_width
+        );
+        if agent.done {
+            lines.push(Line::from(Span::styled(
+                row,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            )));
+        } else {
+            lines.push(Line::from(row));
+        }
+    }
+
+    let scroll = if lines.len() > visible {
+        lines.len() - visible
+    } else {
+        0
+    };
+
+    PanePage {
+        source: "subagents".to_string(),
+        title,
+        content: lines,
+        visible_rows: visible,
+        scroll,
     }
 }

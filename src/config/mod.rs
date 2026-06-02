@@ -1,11 +1,10 @@
+pub mod custom;
 pub mod providers_config;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
-use crate::tools::ApprovalMode;
+use crate::tools::{ApprovalMode, default_dynamic_tool_names};
 pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers, save_providers};
 
 pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -27,10 +26,6 @@ pub(crate) fn bone_dir() -> PathBuf {
     PathBuf::from("/tmp/.bone-rust")
 }
 
-pub fn config_path() -> PathBuf {
-    bone_dir().join("bone.yaml")
-}
-
 pub fn providers_path() -> PathBuf {
     bone_dir().join("providers.yaml")
 }
@@ -43,24 +38,16 @@ pub fn skills_dir() -> PathBuf {
     bone_dir().join("skills")
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Runtime configuration populated from config/*.yaml pages.
+/// No longer persisted to a single file — all values come from CustomConfigs.
+#[derive(Debug, Clone)]
 pub struct UserConfig {
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    #[serde(default)]
     pub approval_mode: ApprovalMode,
-    #[serde(default = "default_enabled_tools")]
     pub enabled_tools: Vec<String>,
-    #[serde(default = "default_max_rounds")]
     pub max_rounds: u32,
-    #[serde(default)]
     pub auto_compact_tokens: Option<u64>,
-    #[serde(default)]
     pub auto_compact_keep_messages: Option<usize>,
-}
-
-fn default_provider() -> String {
-    "local".to_string()
+    pub subagent: SubagentConfig,
 }
 
 fn default_max_rounds() -> u32 {
@@ -68,50 +55,91 @@ fn default_max_rounds() -> u32 {
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
-    [
-        "read_file",
-        "write_file",
-        "edit_file",
-        "shell",
-        "web_search",
-        "task_list",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+    let mut tools = ["read_file", "write_file", "edit_file", "shell"]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    tools.extend(default_dynamic_tool_names().into_iter().map(String::from));
+    tools
 }
 
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
-            provider: default_provider(),
             approval_mode: ApprovalMode::default(),
             enabled_tools: default_enabled_tools(),
             max_rounds: default_max_rounds(),
             auto_compact_tokens: None,
             auto_compact_keep_messages: None,
+            subagent: SubagentConfig::default(),
         }
     }
 }
 
-pub fn load_user_config() -> UserConfig {
-    let path = config_path();
-    if !path.exists() {
-        return UserConfig::default();
+impl UserConfig {
+    /// Build a UserConfig by reading all values from the custom config pages.
+    pub fn from_custom_configs(custom: &custom::CustomConfigs) -> Self {
+        let mut cfg = Self::default();
+        cfg.apply_custom_configs(custom);
+        cfg
     }
-    load_yaml(&path).unwrap_or_else(|| {
-        eprintln!("bone: warning: failed to parse {}", path.display());
-        UserConfig::default()
-    })
+
+    /// Populate fields from the custom config pages.
+    pub fn apply_custom_configs(&mut self, custom: &custom::CustomConfigs) {
+        // General page
+        self.approval_mode = match custom.get_value("general", "approval_mode").as_str() {
+            "danger" => ApprovalMode::Danger,
+            "edit" => ApprovalMode::Edits,
+            _ => ApprovalMode::Safe,
+        };
+        self.enabled_tools = custom.enabled_tool_names();
+        if self.enabled_tools.is_empty() {
+            self.enabled_tools = default_enabled_tools();
+        }
+        self.max_rounds = custom
+            .get_value("general", "max_rounds")
+            .parse()
+            .unwrap_or(150);
+        self.auto_compact_tokens = {
+            let v = custom.get_value("general", "auto_compact_tokens");
+            if v.is_empty() { None } else { v.parse().ok() }
+        };
+        self.auto_compact_keep_messages = {
+            let v = custom.get_value("general", "auto_compact_keep_messages");
+            if v.is_empty() { None } else { v.parse().ok() }
+        };
+
+        // Subagent page
+        self.subagent.provider = custom.get_value("subagent", "provider");
+        self.subagent.model = custom.get_value("subagent", "model");
+        self.subagent.approval = match custom.get_value("subagent", "approval").as_str() {
+            "danger" => ApprovalMode::Danger,
+            "edit" => ApprovalMode::Edits,
+            _ => ApprovalMode::Safe,
+        };
+        self.subagent.max_rounds = custom
+            .get_value("subagent", "max_rounds")
+            .parse()
+            .unwrap_or(150);
+    }
 }
 
-pub fn save_user_config(config: &UserConfig) {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(yaml) = serde_yaml::to_string(config) {
-        let _ = fs::write(path, yaml);
+#[derive(Debug, Clone)]
+pub struct SubagentConfig {
+    pub provider: String,
+    pub model: String,
+    pub approval: ApprovalMode,
+    pub max_rounds: u32,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            provider: "local".to_string(),
+            model: "local".to_string(),
+            approval: ApprovalMode::Safe,
+            max_rounds: 150,
+        }
     }
 }
 
@@ -119,8 +147,23 @@ const EXAMPLE_PROVIDERS: &str = include_str!("../../example-providers.yaml");
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
 
 pub fn seed_providers_if_missing() {
-    let path = providers_path();
-    seed_file_if_missing(&path, EXAMPLE_PROVIDERS);
+    // Repair the short-lived config/providers.yaml location if a previous build
+    // created it. Providers are intentionally not config pages.
+    let root_path = providers_path();
+    let config_path = custom::config_dir().join("providers.yaml");
+    if config_path.exists() && !root_path.exists() {
+        if let Some(parent) = root_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = fs::rename(&config_path, &root_path) {
+            eprintln!(
+                "bone: warning: could not move {} to {}: {e}",
+                config_path.display(),
+                root_path.display()
+            );
+        }
+    }
+    seed_file_if_missing(&root_path, EXAMPLE_PROVIDERS);
 }
 
 pub fn seed_command_policy_if_missing() {
@@ -128,7 +171,7 @@ pub fn seed_command_policy_if_missing() {
     seed_file_if_missing(&path, DEFAULT_COMMAND_POLICY);
 }
 
-fn seed_file_if_missing(path: &Path, content: &str) {
+pub fn seed_file_if_missing(path: &Path, content: &str) {
     if path.exists() {
         return;
     }

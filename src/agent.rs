@@ -1,5 +1,5 @@
 use crate::chat::build_chat_history;
-use crate::config::{load_providers, load_user_config, save_providers};
+use crate::config::{UserConfig, custom::CustomConfigs, load_providers, save_providers};
 use crate::llm::{
     ChatEvent, ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
 };
@@ -135,23 +135,21 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let new_depth = check_depth()?;
 
     // Load config
-    let user_config = load_user_config();
+    let custom = CustomConfigs::load();
+    let user_config = UserConfig::from_custom_configs(&custom);
     let mut providers_config = load_providers();
 
     // NOTE: provider fallback order differs from main.rs intentionally.
-    // agent.rs prefers the config file (user_config.provider) before last_provider,
-    // so sub-agents follow the configured default. main.rs inverts this to remember
-    // the last provider selected interactively in the TUI.
+    // agent.rs prefers last_provider before "local", since sub-agents
+    // should follow whatever the user has active.
     let provider_id = request
         .provider
         .clone()
         .or_else(|| {
-            if !user_config.provider.is_empty() {
-                Some(user_config.provider.clone())
-            } else if !providers_config.last_provider.is_empty() {
+            if !providers_config.last_provider.is_empty() {
                 Some(providers_config.last_provider.clone())
             } else {
-                None
+                Some("local".to_string())
             }
         })
         .ok_or_else(|| "no provider configured".to_string())?;
@@ -175,9 +173,23 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         .map_err(|e| format!("provider validation failed: {e}"))?;
 
     let loaded = load_tools();
-    let tools = ToolHandler::with_enabled_safety_and_display(
+    let all_tool_names: Vec<String> = loaded
+        .registry
+        .definitions()
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let mut synced_custom = custom;
+    synced_custom.sync_tools_from_registry(&all_tool_names);
+    let enabled = synced_custom.enabled_tool_names();
+    let enabled = if enabled.is_empty() {
+        all_tool_names
+    } else {
+        enabled
+    };
+    let mut tools = ToolHandler::with_enabled_safety_and_display(
         loaded.registry,
-        &user_config.enabled_tools,
+        &enabled,
         loaded.dynamic_safety,
         loaded.dynamic_display,
     );
@@ -305,6 +317,24 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         let results = execute_tool_calls(&tools, request.approval_mode, tool_calls).await;
 
+        // Store session state (e.g. task_list state) into tool handler so
+        // stateful tools persist across rounds in headless mode.
+        for result in &results {
+            if let Some(ref state) = result.state {
+                let source = result
+                    .pane_page
+                    .as_ref()
+                    .map(|p| p.source.as_str())
+                    .unwrap_or(&result.name);
+                tools.state_map.set(source, "default", state.clone());
+            }
+            if let Some(page) = &result.pane_page
+                && page.content.is_empty()
+            {
+                tools.state_map.remove(&page.source, "default");
+            }
+        }
+
         for result in &results {
             emit_event(
                 request.events,
@@ -353,10 +383,11 @@ async fn execute_tool_calls(
                 call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: format!(
-                    "[exit_code=1] Tool not executed. Sub-agent approval mode {mode_label} does not allow {safety:?}."
+                    "[exit_code=1] Tool not executed. Approval mode {mode_label} does not allow {safety:?}."
                 ),
                 is_error: true,
                 pane_page: None,
+                state: None,
             });
         }
     }

@@ -1,0 +1,19 @@
+title: Subagent
+fields:
+  - key: provider
+    label: provider
+    type: string
+    default: "local"
+  - key: model
+    label: model
+    type: string
+    default: "local"
+  - key: approval
+    label: approval
+    type: enum
+    options: [safe, edit, danger]
+    default: safe
+  - key: max_rounds
+    label: max_rounds
+    type: number
+    default: 150

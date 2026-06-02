@@ -23,6 +23,7 @@ use backend::BoneBackend;
 
 /// Minimum viewport rows: top-sep + input(1) + bottom-sep + status.
 pub(crate) const MIN_ROWS: u16 = 4;
+pub use bottom_pane::PaneDraw;
 pub(crate) use bottom_pane::clamped_pane_visible_rows;
 pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -232,13 +233,9 @@ impl Renderer {
         &mut self,
         content: &str,
         term: &mut BoneTerminal,
-        input: &InputState,
-        status_info: &StatusInfo,
-        pages: &[PanePage],
-        active_page: usize,
-        pane_toggle_hint: Option<&str>,
+        args: &PaneDraw<'_>,
     ) -> io::Result<()> {
-        self.ensure_viewport_height(term, input, None, pages, active_page)?;
+        self.ensure_viewport_height(term, args.input, None, args.pages, args.active_page)?;
 
         let safe_end = safe_markdown_prefix_end(content);
         if safe_end > self.streaming_source_flushed {
@@ -253,17 +250,7 @@ impl Renderer {
 
         // Redraw only composer/status UI. Incomplete assistant output is never
         // shown in the input viewport; it is inserted once markdown is stable.
-        term.draw(|frame| {
-            self.draw_bottom_pane(
-                frame,
-                input,
-                status_info,
-                None,
-                pages,
-                active_page,
-                pane_toggle_hint,
-            )
-        })?;
+        term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
         Ok(())
     }
 
@@ -290,28 +277,10 @@ impl Renderer {
     }
 
     /// Advance the spinner and redraw bottom pane.
-    pub fn tick_spinner(
-        &mut self,
-        term: &mut BoneTerminal,
-        input: &InputState,
-        status_info: &StatusInfo,
-        pages: &[PanePage],
-        active_page: usize,
-        pane_toggle_hint: Option<&str>,
-    ) -> io::Result<()> {
+    pub fn tick_spinner(&mut self, term: &mut BoneTerminal, args: &PaneDraw<'_>) -> io::Result<()> {
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
-        self.ensure_viewport_height(term, input, None, pages, active_page)?;
-        term.draw(|frame| {
-            self.draw_bottom_pane(
-                frame,
-                input,
-                status_info,
-                None,
-                pages,
-                active_page,
-                pane_toggle_hint,
-            )
-        })?;
+        self.ensure_viewport_height(term, args.input, None, args.pages, args.active_page)?;
+        term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
         Ok(())
     }
 }
@@ -367,12 +336,12 @@ pub fn safe_markdown_prefix_end(content: &str) -> usize {
             continue;
         }
 
-        if let Some(pipe_start) = pending_pipe.take() {
-            if is_table_delimiter(trimmed) {
-                in_table = true;
-                safe_end = safe_end.min(pipe_start);
-                continue;
-            }
+        if let Some(pipe_start) = pending_pipe.take()
+            && is_table_delimiter(trimmed)
+        {
+            in_table = true;
+            safe_end = safe_end.min(pipe_start);
+            continue;
         }
 
         if is_pipe_line(trimmed) {

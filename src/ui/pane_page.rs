@@ -3,10 +3,10 @@ use ratatui::text::Line;
 /// A single page of tool-provided content rendered in the bottom pane.
 #[derive(Clone, Debug)]
 pub struct PanePage {
-    /// Unique source identifier, e.g. "task_list".
+    /// Unique source identifier, e.g. "build_status".
     /// Tools update their existing page or insert a new one via upsert.
     pub source: String,
-    /// Short label shown in the tab indicator, e.g. "tasks (3)".
+    /// Short label shown in the tab indicator, e.g. "jobs (3)".
     pub title: String,
     /// The content lines to render.
     pub content: Vec<Line<'static>>,

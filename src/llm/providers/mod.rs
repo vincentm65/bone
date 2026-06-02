@@ -33,7 +33,7 @@ pub fn create_provider_with_config(
     let available: Vec<&str> = config.providers.keys().map(|s| s.as_str()).collect();
     let mut msg = format!("unknown provider `{id}`.");
     if available.is_empty() {
-        msg.push_str(" No providers configured — create ~/.bone-rust/providers.yaml");
+        msg.push_str(" No providers configured — create ~/.bone-rust/config/providers.yaml");
     } else {
         msg.push_str(&format!(" Available: {}", available.join(", ")));
     }

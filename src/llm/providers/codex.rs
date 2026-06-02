@@ -425,8 +425,8 @@ impl LlmProvider for CodexProvider {
                             .and_then(|v| v.as_u64())
                             .map(|v| v as usize)
                             .unwrap_or(0);
-                        if let Some(item) = raw.get("item") {
-                            if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                        if let Some(item) = raw.get("item")
+                            && item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
                                 let mut partial = PartialCodexToolCall::default();
                                 if let Some(id) = item.get("call_id").and_then(|v| v.as_str()) {
                                     partial.call_id = id.to_string();
@@ -436,7 +436,6 @@ impl LlmProvider for CodexProvider {
                                 }
                                 partial_tool_calls.insert(output_index, partial);
                             }
-                        }
                     }
 
                     "response.function_call_arguments.delta" => {
@@ -478,8 +477,8 @@ impl LlmProvider for CodexProvider {
                             .and_then(|v| v.as_u64())
                             .map(|v| v as usize)
                             .unwrap_or(0);
-                        if let Some(partial) = partial_tool_calls.remove(&output_index) {
-                            if partial.is_ready() {
+                        if let Some(partial) = partial_tool_calls.remove(&output_index)
+                            && partial.is_ready() {
                                 let arguments =
                                     serde_json::from_str(&partial.arguments)
                                         .unwrap_or(Value::Null);
@@ -490,7 +489,6 @@ impl LlmProvider for CodexProvider {
                                     arguments,
                                 });
                             }
-                        }
                     }
 
                     // ── Final response (fallback for non-streaming tool calls) ─
@@ -502,8 +500,8 @@ impl LlmProvider for CodexProvider {
                             }
                             yield ev;
                         }
-                        if let Some(resp_val) = raw.get("response") {
-                            if let Ok(resp) = serde_json::from_value(resp_val.clone()) {
+                        if let Some(resp_val) = raw.get("response")
+                            && let Ok(resp) = serde_json::from_value(resp_val.clone()) {
                                 let (events, usage) = extract_response_events(&resp);
                                 if let Some(u) = usage {
                                     last_usage = Some(u);
@@ -519,7 +517,6 @@ impl LlmProvider for CodexProvider {
                                     }
                                 }
                             }
-                        }
                     }
 
                     _ => {}

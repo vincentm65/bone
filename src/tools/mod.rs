@@ -5,15 +5,16 @@ pub mod read_file;
 pub mod registry;
 pub mod script_runner;
 pub mod shell;
+pub mod state_map;
 pub mod types;
 pub mod write_atomic;
 pub mod write_file;
 
 use registry::ToolRegistry;
 
-pub use dynamic::DynamicTool as DynamicToolType;
 pub use registry::ToolHandler;
 use std::collections::HashMap;
+include!(concat!(env!("OUT_DIR"), "/default_tools.rs"));
 pub use types::{ToolCall, ToolDefinition, ToolResult};
 
 /// Result of loading all tools (builtins + dynamic) in a single pass.
@@ -92,116 +93,72 @@ pub fn tools_dir() -> std::path::PathBuf {
     crate::config::bone_dir().join("tools")
 }
 
-pub fn seed_default_tools(dir: &std::path::Path) {
-    const DEFAULTS: &[(&str, &str)] = &[
-        (
-            "ask_user.yaml",
-            include_str!("../../defaults/tools/ask_user.yaml"),
-        ),
-        (
-            "web_search.yaml",
-            include_str!("../../defaults/tools/web_search.yaml"),
-        ),
-        (
-            "subagent.yaml",
-            include_str!("../../defaults/tools/subagent.yaml"),
-        ),
-        ("cron.yaml", include_str!("../../defaults/tools/cron.yaml")),
-    ];
-    for (name, content) in DEFAULTS {
-        let path = dir.join(name);
-        if !path.exists() {
-            if let Err(e) = std::fs::write(&path, content) {
-                eprintln!("bone: warning: could not write {}: {e}", path.display());
-            }
-        }
-    }
-
-    // Seed task_list.yaml (cross-platform, uses python3 -c via uv run).
-    let task_list_content: &str = include_str!("../../defaults/tools/task_list.yaml");
-    let task_list_path = dir.join("task_list.yaml");
-    if !task_list_path.exists() {
-        if let Err(e) = std::fs::write(&task_list_path, task_list_content) {
-            eprintln!(
-                "bone: warning: could not write {}: {e}",
-                task_list_path.display()
-            );
-        }
-    } else {
-        migrate_task_list(&task_list_path, task_list_content);
-    }
-
-    clean_stale_task_dirs();
+pub fn default_dynamic_tool_names() -> Vec<&'static str> {
+    DEFAULT_DYNAMIC_TOOLS
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect()
 }
 
-/// Migrate old task_list.yaml to the current version.
-/// Overwrites if the version field is < 4.
-fn migrate_task_list(path: &std::path::Path, new_content: &str) {
-    let Ok(raw) = std::fs::read_to_string(path) else {
+pub fn seed_default_tools(dir: &std::path::Path) {
+    for (_, name, content) in DEFAULT_DYNAMIC_TOOLS {
+        let path = dir.join(name);
+        seed_or_migrate_versioned_tool(&path, content);
+    }
+}
+
+/// Seed bundled dynamic tools. Existing versioned files are never overwritten:
+/// if a bundled default is newer, write `<tool>.yaml.new` and leave the user's
+/// active file intact. Versionless legacy files are replaced because they predate
+/// default-tool versioning and cannot be safely compared.
+fn seed_or_migrate_versioned_tool(path: &std::path::Path, new_content: &str) {
+    if !path.exists() {
+        if let Err(e) = std::fs::write(path, new_content) {
+            eprintln!("bone: warning: could not write {}: {e}", path.display());
+        }
+        return;
+    }
+
+    let new_version = tool_yaml_version(new_content).unwrap_or(0);
+    if new_version == 0 {
+        return;
+    }
+
+    let Ok(existing_raw) = std::fs::read_to_string(path) else {
         return;
     };
-    let existing_version: u64 = serde_yaml::from_str::<serde_yaml::Value>(&raw)
-        .ok()
-        .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
-        .unwrap_or(0);
-    if existing_version >= 4 {
-        return; // current version or user-customized
+    let existing_version = tool_yaml_version(&existing_raw);
+    if existing_version.is_some_and(|version| version >= new_version) {
+        return;
     }
+
+    if existing_version.is_some() {
+        let candidate_path = path.with_extension("yaml.new");
+        if !candidate_path.exists() {
+            if let Err(e) = std::fs::write(&candidate_path, new_content) {
+                eprintln!(
+                    "bone: warning: could not write updated default {}: {e}",
+                    candidate_path.display()
+                );
+            }
+        }
+        eprintln!(
+            "bone: warning: {} is older than the bundled default; wrote {} and left the existing file unchanged",
+            path.display(),
+            candidate_path.display()
+        );
+        return;
+    }
+
     if let Err(e) = std::fs::write(path, new_content) {
         eprintln!("bone: warning: could not update {}: {e}", path.display());
     }
 }
 
-/// Remove stale per-PID task directories left by previous bone instances.
-fn clean_stale_task_dirs() {
-    let tasks_dir = crate::config::bone_dir().join("tasks");
-    let Ok(entries) = std::fs::read_dir(&tasks_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => continue,
-        };
-        // Only consider numeric directory names (PIDs)
-        let Ok(pid) = name_str.parse::<u32>() else {
-            continue;
-        };
-        // Skip our own PID
-        if pid == std::process::id() {
-            continue;
-        }
-        if !is_pid_alive(pid) {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
-}
-
-/// Check whether a process is still running.
-fn is_pid_alive(pid: u32) -> bool {
-    use std::process::Stdio;
-    // On Unix, `kill -0 <pid>` checks existence without sending a signal.
-    // On Windows, `tasklist /FI "PID eq <pid>"` does the same.
-    if cfg!(unix) {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    } else {
-        // Windows: check via tasklist
-        let output = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .stdout(Stdio::piped())
-            .output();
-        match output {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()),
-            Err(_) => false,
-        }
-    }
+fn tool_yaml_version(raw: &str) -> Option<u64> {
+    serde_yaml::from_str::<serde_yaml::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
 }
 
 // ── ApprovalMode ────────────────────────────────────────────────────────────

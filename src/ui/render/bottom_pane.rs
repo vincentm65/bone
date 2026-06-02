@@ -11,6 +11,14 @@ use crate::tools::ApprovalMode;
 use crate::ui::pane_page::PanePage;
 use crate::ui::tool_display;
 
+/// Arguments shared by pane-drawing methods.
+pub struct PaneDraw<'a> {
+    pub input: &'a InputState,
+    pub status_info: &'a StatusInfo,
+    pub pages: &'a [PanePage],
+    pub active_page: usize,
+    pub pane_toggle_hint: Option<&'a str>,
+}
 const COMMAND_PREVIEW_LINES: usize = 6;
 const BLANK_CURSOR_CELL: &str = "\u{00a0}";
 
@@ -229,23 +237,10 @@ impl super::Renderer {
     pub fn draw_bottom_pane(
         &self,
         frame: &mut Frame,
-        input: &InputState,
-        status_info: &StatusInfo,
+        args: &PaneDraw<'_>,
         prompt: Option<&Prompt>,
-        pages: &[PanePage],
-        active_page: usize,
-        pane_toggle_hint: Option<&str>,
     ) {
-        self.draw_bottom_pane_with_tick(
-            frame,
-            input,
-            status_info,
-            self.spinner_tick,
-            prompt,
-            pages,
-            active_page,
-            pane_toggle_hint,
-        );
+        self.draw_bottom_pane_with_tick(frame, args, self.spinner_tick, prompt);
     }
 
     /// Compute the desired viewport height for the current state.
@@ -259,6 +254,7 @@ impl super::Renderer {
         if let Some(p) = prompt {
             let options = p.options.len().min(p.visible_rows) as u16;
             let hint = u16::from(p.hint.is_some());
+            let tab_bar = u16::from(!p.tabs.is_empty());
             let prompt_rows = if let Some(ref cmd) = p.full_command {
                 let title = shell_prompt_title(p);
                 let title_lines = wrap::wrap_text(&title, terminal_width as usize).len() as u16;
@@ -273,11 +269,12 @@ impl super::Renderer {
                     title_lines + preview + hint + options
                 }
             } else {
-                // title + hint + options
-                1 + hint + options
+                // title (only without tabs) + hint + options
+                let title = u16::from(p.tabs.is_empty());
+                title + hint + options
             };
-            // top sep + prompt region + bottom sep + status + page region
-            return 1 + prompt_rows + 1 + 1 + page_extra_height(pages, active_page);
+            // top sep + tab bar + prompt region + bottom sep + status + page region
+            return 1 + tab_bar + prompt_rows + 1 + 1 + page_extra_height(pages, active_page);
         }
         let input_rows = rendered_input_rows(input, terminal_width);
         // top sep + input_rows + bottom sep + status + page region
@@ -287,14 +284,15 @@ impl super::Renderer {
     pub fn draw_bottom_pane_with_tick(
         &self,
         frame: &mut Frame,
-        input: &InputState,
-        status_info: &StatusInfo,
+        args: &PaneDraw<'_>,
         tick: usize,
         prompt: Option<&Prompt>,
-        pages: &[PanePage],
-        active_page: usize,
-        pane_toggle_hint: Option<&str>,
     ) {
+        let input = args.input;
+        let status_info = args.status_info;
+        let pages = args.pages;
+        let active_page = args.active_page;
+        let pane_toggle_hint = args.pane_toggle_hint;
         let area = frame.area();
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
@@ -321,6 +319,46 @@ impl super::Renderer {
                 },
             );
             y += 1;
+        }
+
+        // ── Tab bar (for multi-section prompts like /config) ─────────────
+        if let Some(prompt) = prompt
+            && !prompt.tabs.is_empty()
+        {
+            let tab_y = y;
+            if tab_y < content_bottom {
+                let mut tab_spans = Vec::new();
+                for (i, label) in prompt.tabs.iter().enumerate() {
+                    if i > 0 {
+                        tab_spans.push(Span::styled(
+                            " │ ",
+                            Style::default().fg(self.theme.system_msg),
+                        ));
+                    }
+                    if i == prompt.active_tab {
+                        tab_spans.push(Span::styled(
+                            label.clone(),
+                            Style::default()
+                                .fg(self.theme.tab_active)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    } else {
+                        tab_spans.push(Span::styled(
+                            label.clone(),
+                            Style::default().fg(self.theme.system_msg),
+                        ));
+                    }
+                }
+                frame.render_widget(
+                    Paragraph::new(Line::from(tab_spans)),
+                    Rect {
+                        y: tab_y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
+            }
         }
 
         if let Some(prompt) = prompt {
@@ -420,8 +458,9 @@ impl super::Renderer {
                     y += 1;
                 }
             } else {
-                // Title line
-                if y < options_top {
+                // Title line — skip when tabs are shown (tab bar already displays it)
+                let show_title = prompt.tabs.is_empty();
+                if show_title && y < options_top {
                     frame.render_widget(
                         Paragraph::new(Span::styled(
                             format!("  {}", prompt.title),
@@ -519,13 +558,13 @@ impl super::Renderer {
                 if layout.content_rows > 0 {
                     let page = &pages[page_idx];
                     let scroll = page.scroll.min(page.content.len());
-                    let mut py = page_start + 1;
-                    for line in page
-                        .content
-                        .iter()
-                        .skip(scroll)
-                        .take(layout.content_rows as usize)
-                    {
+
+                    for (py, line) in (page_start + 1..).zip(
+                        page.content
+                            .iter()
+                            .skip(scroll)
+                            .take(layout.content_rows as usize),
+                    ) {
                         if py >= bottom_sep_row {
                             break;
                         }
@@ -537,7 +576,6 @@ impl super::Renderer {
                                 ..area
                             },
                         );
-                        py += 1;
                     }
                 }
 

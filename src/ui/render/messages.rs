@@ -65,22 +65,24 @@ pub fn render_tool(
     let prefix_width = 4;
     let label_width = width.saturating_sub(prefix_width).max(1);
 
-    let wrapped = wrap_tool_label(&tool.label, label_width);
+    if !tool.label.is_empty() {
+        let wrapped = wrap_tool_label(&tool.label, label_width);
 
-    for (i, visual_line) in wrapped.into_iter().enumerate() {
-        if i == 0 {
-            let p = visual_line.find(' ').unwrap_or(visual_line.len());
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(marker, marker_style),
-                Span::styled(visual_line[..p].to_string(), name_style),
-                Span::styled(visual_line[p..].to_string(), rest_style),
-            ]));
-        } else {
-            lines.push(Line::from(vec![
-                Span::raw(indent),
-                Span::styled(visual_line, rest_style),
-            ]));
+        for (i, visual_line) in wrapped.into_iter().enumerate() {
+            if i == 0 {
+                let p = visual_line.find(' ').unwrap_or(visual_line.len());
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(marker, marker_style),
+                    Span::styled(visual_line[..p].to_string(), name_style),
+                    Span::styled(visual_line[p..].to_string(), rest_style),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(indent),
+                    Span::styled(visual_line, rest_style),
+                ]));
+            }
         }
     }
 
