@@ -150,7 +150,7 @@ impl App {
         self.input.reset();
         self.redraw(term)?;
 
-        self.auto_compact_if_needed(term)?;
+        self.auto_compact_if_needed(term).await?;
 
         let mut history = build_chat_history(&self.transcript, None);
 
@@ -310,7 +310,7 @@ impl App {
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
 
-        self.auto_compact_if_needed(term)?;
+        self.auto_compact_if_needed(term).await?;
 
         Ok(())
     }

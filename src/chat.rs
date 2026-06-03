@@ -19,11 +19,36 @@ pub fn build_chat_history(
     out
 }
 
+/// Compute the compact boundary index for `messages` given `keep` count.
+/// Returns `None` if the transcript is short enough that no compaction is needed.
+pub fn find_compact_boundary(messages: &[ChatMessage], keep: usize) -> Option<usize> {
+    let keep = keep.max(1);
+    if messages.len() <= keep {
+        return None;
+    }
+    let boundary = compact_boundary(messages, messages.len() - keep);
+    if boundary == 0 {
+        None
+    } else {
+        Some(boundary)
+    }
+}
+
 /// Notice inserted when older messages are compacted.
 pub const COMPACT_NOTICE: &str = "Compacted older messages.";
 
 /// Default number of recent messages to keep during compaction.
 pub const DEFAULT_KEEP_MESSAGES: usize = 12;
+
+/// Build the messages to send to the LLM for a compaction summary.
+/// Takes the older messages that will be discarded and wraps them with
+/// a summary instruction system prompt.
+pub fn build_summary_messages(old_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(old_messages.len() + 1);
+    out.push(ChatMessage::new(ChatRole::System, crate::llm::prompts::compact_summary_prompt().to_string()));
+    out.extend(old_messages.iter().cloned());
+    out
+}
 
 /// Compact chat transcript by replacing older turns with a short notice.
 ///

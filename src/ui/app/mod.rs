@@ -1,8 +1,8 @@
 pub mod stream;
 
-use crate::chat::{COMPACT_NOTICE, DEFAULT_KEEP_MESSAGES, Message, compact_transcript};
+use crate::chat::{COMPACT_NOTICE, DEFAULT_KEEP_MESSAGES, Message, build_chat_history, find_compact_boundary, build_summary_messages};
 use crate::config::{self, ProvidersConfig, UserConfig};
-use crate::llm::{ChatMessage, LlmProvider, TokenStats, format_tokens, providers};
+use crate::llm::{ChatEvent, ChatMessage, LlmProvider, TokenStats, format_tokens, providers};
 use crate::skills::SkillStore;
 use crate::skills::types::Skill;
 use crate::tools::script_runner::{ScriptRequest, run_script};
@@ -12,7 +12,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
-use tokio::time::Duration;
+use tokio::time::{self, Duration};
+use futures_util::StreamExt;
 
 use super::commands;
 use super::input::{InputAction, InputState};
@@ -731,7 +732,7 @@ impl App {
             return self.handle_skills_command(&arg, term);
         }
         if cmd == "compact" {
-            return self.compact_chat(term);
+            return self.compact_chat(term).await;
         }
         if !matches!(
             cmd.as_str(),
@@ -1045,24 +1046,105 @@ impl App {
         self.redraw(term)
     }
 
-    pub(crate) fn compact_transcript_state(&mut self) -> (bool, u64) {
+    /// Collect all text from a streaming LLM response, showing a spinner while waiting.
+    async fn collect_summary_stream(
+        &mut self,
+        old_messages: &[ChatMessage],
+        term: &mut BoneTerminal,
+    ) -> io::Result<Option<String>> {
+        let summary_messages = build_summary_messages(old_messages);
+        let stream_result = self.llm.chat_stream(summary_messages, vec![]).await;
+
+        let mut stream = match stream_result {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("bone: warning: compaction summary stream failed to start: {err}");
+                return Ok(None);
+            }
+        };
+
+        let mut summary = String::new();
+        let mut spinner = time::interval(Duration::from_millis(90));
+
+        loop {
+            tokio::select! {
+                chunk = stream.next() => match chunk {
+                    Some(Ok(ChatEvent::TextDelta(text))) => summary.push_str(&text),
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => {
+                        eprintln!("bone: warning: compaction summary stream error: {err}");
+                        break
+                    }
+                    None => break,
+                },
+                _ = spinner.tick() => {
+                    self.renderer.spinner_tick = self.renderer.spinner_tick.wrapping_add(1);
+                    let visible_pages = if self.panes_visible {
+                        self.pages.as_slice()
+                    } else {
+                        &[]
+                    };
+                    self.renderer.tick_spinner(term, &PaneDraw {
+                        input: &self.input,
+                        status_info: &self.status_info(),
+                        pages: visible_pages,
+                        active_page: self.active_page,
+                        pane_toggle_hint: None,
+                    })?;
+                }
+            }
+        }
+
+        if summary.trim().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(summary))
+        }
+    }
+
+    pub(crate) async fn compact_transcript_state(&mut self, term: &mut BoneTerminal) -> (bool, u64) {
         let keep = self
             .user_config
             .auto_compact_keep_messages
             .unwrap_or(DEFAULT_KEEP_MESSAGES);
         let before = self.token_stats.context_length;
-        match compact_transcript(&self.transcript, keep) {
-            std::borrow::Cow::Owned(owned) => {
-                self.transcript = owned;
-                let history = crate::chat::build_chat_history(&self.transcript, None);
-                let tools = self.tools.definitions();
-                let prompt_chars = Self::estimate_context_chars(&history, &tools);
-                self.token_stats.set_context_estimate(prompt_chars);
-                let after = self.token_stats.context_length;
-                (true, before.saturating_sub(after))
+
+        let Some(boundary) = find_compact_boundary(&self.transcript, keep) else {
+            return (false, 0);
+        };
+
+        // Try to get an LLM summary of the old messages.
+        let old_messages: Vec<ChatMessage> = self.transcript[..boundary].to_vec();
+        let summary = self
+            .collect_summary_stream(&old_messages, term)
+            .await
+            .ok()
+            .flatten();
+
+        let mut new_transcript = Vec::with_capacity(self.transcript.len() - boundary + 1);
+        match summary {
+            Some(text) => {
+                new_transcript.push(ChatMessage::new(
+                    crate::llm::ChatRole::System,
+                    format!("[Conversation summary]\n{text}"),
+                ));
             }
-            std::borrow::Cow::Borrowed(_) => (false, 0),
+            None => {
+                new_transcript.push(ChatMessage::new(
+                    crate::llm::ChatRole::System,
+                    COMPACT_NOTICE.to_string(),
+                ));
+            }
         }
+        new_transcript.extend(self.transcript[boundary..].iter().cloned());
+        self.transcript = new_transcript;
+
+        let history = build_chat_history(&self.transcript, None);
+        let tools = self.tools.definitions();
+        let prompt_chars = Self::estimate_context_chars(&history, &tools);
+        self.token_stats.set_context_estimate(prompt_chars);
+        let after = self.token_stats.context_length;
+        (true, before.saturating_sub(after))
     }
 
     fn compacted_message(&self, prefix: &str, saved: u64) -> String {
@@ -1078,36 +1160,43 @@ impl App {
         }
     }
 
-    pub(crate) fn compact_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let (compacted, saved) = self.compact_transcript_state();
-        let msg = if compacted {
-            self.compacted_message("Compacted older messages", saved)
+    /// Show a placeholder message, run compaction, then append the result message.
+    async fn run_compact_with_placeholder(
+        &mut self,
+        term: &mut BoneTerminal,
+        compacted_prefix: &str,
+        no_compact_msg: &str,
+    ) -> io::Result<()> {
+        self.messages.push(Message::system("Summarizing conversation..."));
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.redraw(term)?;
+
+        let (compacted, saved) = self.compact_transcript_state(term).await;
+        let result = if compacted {
+            self.compacted_message(compacted_prefix, saved)
         } else {
-            "Chat history is already compact.".to_string()
+            no_compact_msg.to_string()
         };
-        self.messages.push(Message::system(msg));
+        self.messages.push(Message::system(&result));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)
     }
 
+    pub(crate) async fn compact_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.run_compact_with_placeholder(term, "Compacted older messages", "Chat history is already compact.").await
+    }
+
     /// Auto-compact transcript if the token threshold is exceeded.
-    pub(crate) fn auto_compact_if_needed(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    pub(crate) async fn auto_compact_if_needed(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let should_compact = self
             .user_config
             .auto_compact_tokens
             .is_some_and(|limit| limit > 0 && self.token_stats.context_length >= limit);
 
         if should_compact {
-            let (compacted, saved) = self.compact_transcript_state();
-            if compacted {
-                self.messages.push(Message::system(
-                    self.compacted_message("Auto-compacted", saved),
-                ));
-            }
-            self.renderer
-                .flush_new_to_scrollback(&self.messages, term)?;
-            self.redraw(term)?;
+            self.run_compact_with_placeholder(term, "Auto-compacted", "Chat history is already compact.").await?;
         }
         Ok(())
     }

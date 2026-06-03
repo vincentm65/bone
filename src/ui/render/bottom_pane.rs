@@ -609,7 +609,7 @@ impl super::Renderer {
                                 tab_spans.push(Span::styled(
                                     p.title.clone(),
                                     Style::default()
-                                        .fg(self.theme.status_text)
+                                        .fg(self.theme.tab_active)
                                         .add_modifier(Modifier::BOLD),
                                 ));
                             } else {
