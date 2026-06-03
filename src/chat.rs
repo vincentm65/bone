@@ -4,9 +4,17 @@ use crate::llm::{ChatMessage, ChatRole};
 // ── History ─────────────────────────────────────────────────────────────────
 
 /// Build provider history without truncating conversation or tool chains.
-pub fn build_chat_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+/// If `custom_system_prompt` is provided, it replaces the default bone system prompt.
+pub fn build_chat_history(
+    messages: &[ChatMessage],
+    custom_system_prompt: Option<&str>,
+) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
-    out.push(ChatMessage::new(ChatRole::System, prompts::system_prompt()));
+    let system_content = match custom_system_prompt {
+        Some(s) => s.to_string(),
+        None => prompts::system_prompt(),
+    };
+    out.push(ChatMessage::new(ChatRole::System, system_content));
     out.extend(messages.iter().cloned());
     out
 }

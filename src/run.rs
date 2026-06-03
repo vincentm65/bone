@@ -7,6 +7,7 @@ pub struct RunRequest {
     pub approval_mode: ApprovalMode,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub system_prompt: Option<String>,
     pub allow_skill_scripts: bool,
 }
 
@@ -15,6 +16,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
     let mut approval: Option<String> = None;
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
+    let mut system_prompt: Option<String> = None;
     let mut allow_skill_scripts = false;
     let mut positional: Vec<String> = Vec::new();
 
@@ -38,6 +40,10 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
                 model = Some(args.get(i).ok_or("--model requires a value")?.clone());
             }
             "--allow-skill-scripts" => allow_skill_scripts = true,
+            "--system-prompt" => {
+                i += 1;
+                system_prompt = Some(args.get(i).ok_or("--system-prompt requires a value")?.clone());
+            }
             "--help" | "-h" => return Err(run_usage()),
             other if other.starts_with("--") => {
                 return Err(format!("unknown argument: {other}\n{}", run_usage()));
@@ -69,6 +75,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
         approval_mode: parse_approval(approval.as_deref())?,
         provider,
         model,
+        system_prompt,
         allow_skill_scripts,
     })
 }
@@ -95,6 +102,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         approval_mode: request.approval_mode,
         provider: request.provider,
         model: request.model,
+        system_prompt: request.system_prompt,
         events: false,
     })
     .await

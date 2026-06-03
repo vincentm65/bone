@@ -13,6 +13,7 @@ pub struct AgentRequest {
     pub approval_mode: ApprovalMode,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub system_prompt: Option<String>,
     pub events: bool,
 }
 
@@ -206,7 +207,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
     // Build initial history
     let mut transcript: Vec<ChatMessage> = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
-    let mut history = build_chat_history(&transcript);
+    let mut history = build_chat_history(&transcript, request.system_prompt.as_deref());
     let mut token_stats = TokenStats::new();
 
     emit_event(
@@ -425,6 +426,7 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
     let mut approval: Option<String> = None;
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
+    let mut system_prompt: Option<String> = None;
     let mut events = false;
 
     let mut i = 0;
@@ -449,6 +451,10 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
             }
             "--events" => {
                 events = true;
+            }
+            "--system-prompt" => {
+                i += 1;
+                system_prompt = Some(args.get(i).ok_or("--system-prompt requires a value")?.clone());
             }
             other => {
                 return Err(format!("unknown argument: {other}"));
@@ -482,6 +488,7 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
         approval_mode,
         provider,
         model,
+        system_prompt,
         events,
     })
 }

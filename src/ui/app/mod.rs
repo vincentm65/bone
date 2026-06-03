@@ -1054,7 +1054,7 @@ impl App {
         match compact_transcript(&self.transcript, keep) {
             std::borrow::Cow::Owned(owned) => {
                 self.transcript = owned;
-                let history = crate::chat::build_chat_history(&self.transcript);
+                let history = crate::chat::build_chat_history(&self.transcript, None);
                 let tools = self.tools.definitions();
                 let prompt_chars = Self::estimate_context_chars(&history, &tools);
                 self.token_stats.set_context_estimate(prompt_chars);
