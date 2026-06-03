@@ -92,9 +92,9 @@ impl TokenStats {
         if self.cost > 0.0 {
             lines.push(format!("  Cost:      ${:.4}", self.cost));
         }
-        if self.request_count > 0 {
-            let avg_in = self.sent / self.request_count;
-            let avg_out = self.received / self.request_count;
+        if let Some(avg_in) = self.sent.checked_div(self.request_count)
+            && let Some(avg_out) = self.received.checked_div(self.request_count)
+        {
             lines.push(format!(
                 "  Avg/req:   {} in / {} out",
                 format_tokens(avg_in),

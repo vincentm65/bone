@@ -127,6 +127,7 @@ impl SessionDb {
     }
 
     /// Append a message to a conversation (inserts into both messages and messages_fts).
+    #[allow(clippy::too_many_arguments)]
     pub fn append_message(
         &self,
         conversation_id: i64,
@@ -157,6 +158,7 @@ impl SessionDb {
     }
 
     /// Record a usage event.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_usage(
         &self,
         conversation_id: i64,

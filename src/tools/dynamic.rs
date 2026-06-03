@@ -362,6 +362,9 @@ impl DynamicTool {
             }
         }
         env.push(("BONE_PID".to_string(), std::process::id().to_string()));
+        if let Ok(exe) = std::env::current_exe() {
+            env.push(("BONE_BIN".to_string(), exe.to_string_lossy().into_owned()));
+        }
         let Value::Object(map) = arguments else {
             return env;
         };

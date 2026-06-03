@@ -134,14 +134,13 @@ fn seed_or_migrate_versioned_tool(path: &std::path::Path, new_content: &str) {
 
     if existing_version.is_some() {
         let candidate_path = path.with_extension("yaml.new");
-        if !candidate_path.exists() {
-            if let Err(e) = std::fs::write(&candidate_path, new_content) {
+        if !candidate_path.exists()
+            && let Err(e) = std::fs::write(&candidate_path, new_content) {
                 eprintln!(
                     "bone: warning: could not write updated default {}: {e}",
                     candidate_path.display()
                 );
             }
-        }
         eprintln!(
             "bone: warning: {} is older than the bundled default; wrote {} and left the existing file unchanged",
             path.display(),

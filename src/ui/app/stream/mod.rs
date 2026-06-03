@@ -138,12 +138,11 @@ impl App {
             .push(Message::user(display_text.as_deref().unwrap_or(&text)));
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &text));
-        if let Some(ref db) = self.session_db {
-            if let Some(conv_id) = self.conversation_id {
+        if let Some(ref db) = self.session_db
+            && let Some(conv_id) = self.conversation_id {
                 self.session_seq += 1;
                 db.append_message(conv_id, "user", &text, None, None, None, self.session_seq).ok();
             }
-        }
 
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
@@ -421,11 +420,10 @@ impl App {
                         had_usage = true;
                         real_completion_tokens = Some(completion_tokens);
                         stream_end = Some(std::time::Instant::now());
-                        if let Some(ref db) = self.session_db {
-                            if let Some(conv_id) = self.conversation_id {
-                                db.record_usage(conv_id, &self.llm.id(), self.llm.model(), prompt_tokens, completion_tokens, cached_tokens, cost).ok();
+                        if let Some(ref db) = self.session_db
+                            && let Some(conv_id) = self.conversation_id {
+                                db.record_usage(conv_id, self.llm.id(), self.llm.model(), prompt_tokens, completion_tokens, cached_tokens, cost).ok();
                             }
-                        }
                     }
                     Some(Err(err)) => {
                         return Ok(Err(StreamFailure::Provider(err)));
@@ -998,7 +996,7 @@ impl App {
                                 token_stats: token_stats.clone(),
                                 streaming_completion_tokens: None,
                                 tokens_per_sec: None,
-                                show_token_metrics: show_token_metrics,
+                                show_token_metrics,
                                 streaming: true,
                                 approval_mode: *approval_mode,
                                 queue_len: queue.len(),

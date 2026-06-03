@@ -23,6 +23,8 @@ script: |
   approval="${TOOL_APPROVAL:-read_only}"
   task="${TOOL_TASK:-}"
 
+  bone_bin="${BONE_BIN:-bone}"
+
   args=(agent --events --approval "$approval" --prompt "$task")
   if [ -n "${TOOL_PROVIDER:-}" ]; then
     args+=(--provider "$TOOL_PROVIDER")
@@ -31,7 +33,7 @@ script: |
     args+=(--model "$TOOL_MODEL")
   fi
 
-  uv run -- python3 - "$approval" "$task" "${TOOL_CALL_ID:-}" "${args[@]}" <<'PY'
+  uv run -- python3 - "$approval" "$task" "${TOOL_CALL_ID:-}" "$bone_bin" "${args[@]}" <<'PY'
   import json
   import os
   import subprocess
@@ -42,7 +44,8 @@ script: |
   approval = sys.argv[1]
   task = sys.argv[2]
   call_id = sys.argv[3]
-  args = sys.argv[4:]
+  bone_bin = sys.argv[4]
+  args = sys.argv[5:]
 
   def short_mode(value):
       return {"read_only": "read", "edit": "edit", "danger": "danger"}.get(value, (value or "?")[:6])
@@ -112,7 +115,7 @@ script: |
   emit_pane()
 
   proc = subprocess.Popen(
-      ["bone"] + args,
+      [bone_bin] + args,
       stdout=subprocess.PIPE,
       stderr=subprocess.PIPE,
       text=True,

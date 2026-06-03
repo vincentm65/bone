@@ -152,7 +152,7 @@ impl App {
             .join("conversations.db");
         match SessionDb::open(&db_path) {
             Ok(db) => {
-                match db.create_conversation(&self.llm.id(), self.llm.model()) {
+                match db.create_conversation(self.llm.id(), self.llm.model()) {
                     Ok(conv_id) => {
                         self.conversation_id = Some(conv_id);
                         self.session_db = Some(db);
@@ -166,22 +166,20 @@ impl App {
     }
     /// Append an assistant message to the session database.
     pub(crate) fn append_assistant_to_db(&mut self, content: &str, tool_calls_json: Option<&str>) {
-        if let Some(ref db) = self.session_db {
-            if let Some(conv_id) = self.conversation_id {
+        if let Some(ref db) = self.session_db
+            && let Some(conv_id) = self.conversation_id {
                 self.session_seq += 1;
                 db.append_message(conv_id, "assistant", content, None, None, tool_calls_json, self.session_seq).ok();
             }
-        }
     }
 
     /// Append a tool result to the session database.
     pub(crate) fn append_tool_result_to_db(&mut self, name: &str, call_id: &str, content: &str) {
-        if let Some(ref db) = self.session_db {
-            if let Some(conv_id) = self.conversation_id {
+        if let Some(ref db) = self.session_db
+            && let Some(conv_id) = self.conversation_id {
                 self.session_seq += 1;
                 db.append_message(conv_id, "tool", content, Some(name), Some(call_id), None, self.session_seq).ok();
             }
-        }
     }
     /// Start a new conversation in the database (used by /clear, /new).
     fn start_new_conversation(&mut self) {
@@ -189,7 +187,7 @@ impl App {
             if let Some(conv_id) = self.conversation_id {
                 db.end_conversation(conv_id).ok();
             }
-            match db.create_conversation(&self.llm.id(), self.llm.model()) {
+            match db.create_conversation(self.llm.id(), self.llm.model()) {
                 Ok(conv_id) => {
                     self.conversation_id = Some(conv_id);
                     self.session_seq = 0;
@@ -369,6 +367,7 @@ impl App {
 }
 
 /// Build a [`StatusInfo`] with a live streaming cumulative output-token estimate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_status_info_with_token_stats(
     streaming_completion_tokens: Option<u64>,
     tokens_per_sec: Option<f64>,
@@ -548,11 +547,10 @@ impl App {
 
         if double_tap {
             // Best-effort end conversation in DB
-            if let Some(ref db) = self.session_db {
-                if let Some(conv_id) = self.conversation_id {
+            if let Some(ref db) = self.session_db
+                && let Some(conv_id) = self.conversation_id {
                     db.end_conversation(conv_id).ok();
                 }
-            }
             self.should_quit = true;
             return Ok(());
         }
@@ -783,10 +781,10 @@ impl App {
                 crate::llm::format_tokens(sys_tokens),
                 crate::llm::format_tokens(sys_chars as u64)
             ));
-            if let Some(ref db) = self.session_db {
-                if let Some(conv_id) = self.conversation_id {
-                    if let Ok(by_provider) = db.usage_by_provider(conv_id) {
-                        if by_provider.len() > 1 {
+            if let Some(ref db) = self.session_db
+                && let Some(conv_id) = self.conversation_id
+                    && let Ok(by_provider) = db.usage_by_provider(conv_id)
+                        && by_provider.len() > 1 {
                             reply.push_str("\n\nBy provider/model");
                             for p in &by_provider {
                                 reply.push_str(&format!(
@@ -803,9 +801,6 @@ impl App {
                                 }
                             }
                         }
-                    }
-                }
-            }
             return self.show_reply(reply, term);
         }
 
@@ -865,11 +860,10 @@ impl App {
         match result {
             commands::CommandResult::Quit => {
                 // Best-effort end conversation in DB
-                if let Some(ref db) = self.session_db {
-                    if let Some(conv_id) = self.conversation_id {
+                if let Some(ref db) = self.session_db
+                    && let Some(conv_id) = self.conversation_id {
                         db.end_conversation(conv_id).ok();
                     }
-                }
                 self.should_quit = true;
             }
             commands::CommandResult::Continue { reply } => {
