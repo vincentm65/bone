@@ -63,7 +63,8 @@ pub struct App {
     conversation_id: Option<i64>,
     /// Message sequence counter for DB ordering.
     session_seq: i64,
-
+    /// Last measured output tokens/sec from the most recent stream.
+    last_tokens_per_sec: Option<f64>,
 }
 
 impl App {
@@ -135,6 +136,7 @@ impl App {
             session_db: None,
             conversation_id: None,
             session_seq: 0,
+            last_tokens_per_sec: None,
         })
     }
     /// Initialize or open the session database.
@@ -346,19 +348,21 @@ impl App {
     }
 
     pub(crate) fn status_info(&self) -> StatusInfo {
-        self.stream_status_info_with_tokens(None)
+        self.stream_status_info_with_tokens(None, self.last_tokens_per_sec)
     }
 
     /// Build a [`StatusInfo`] for the streaming spinner wait, with an optional
     /// live cumulative output-token estimate.
-    fn stream_status_info_with_tokens(&self, estimated_tokens: Option<u64>) -> StatusInfo {
+    fn stream_status_info_with_tokens(&self, estimated_tokens: Option<u64>, tokens_per_sec: Option<f64>) -> StatusInfo {
         stream_status_info_with_token_stats(
             estimated_tokens,
+            tokens_per_sec,
             &self.model,
             &self.token_stats,
             self.streaming,
             self.approval_mode,
             self.queue.len(),
+            self.user_config.show_token_metrics,
         )
     }
 }
@@ -366,19 +370,23 @@ impl App {
 /// Build a [`StatusInfo`] with a live streaming cumulative output-token estimate.
 pub(crate) fn stream_status_info_with_token_stats(
     streaming_completion_tokens: Option<u64>,
+    tokens_per_sec: Option<f64>,
     model: &str,
     token_stats: &crate::llm::TokenStats,
     streaming: bool,
     approval_mode: crate::tools::ApprovalMode,
     queue_len: usize,
+    show_token_metrics: bool,
 ) -> StatusInfo {
     StatusInfo {
         model: model.to_string(),
         token_stats: token_stats.clone(),
         streaming_completion_tokens,
+        tokens_per_sec,
         streaming,
         approval_mode,
         queue_len,
+        show_token_metrics,
     }
 }
 

@@ -23,10 +23,10 @@ impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         let (_, _, shell_label) = shell_command();
         let desc = format!(
-            "Run a non-interactive shell command with {shell_label} from the current working directory and return its exit code, stdout, and stderr. Use this for builds, tests, formatters, package managers, and other commands that are better expressed in the shell. Do not use it to read or edit files when a dedicated file tool is more appropriate. Always classify the command honestly as read_only, edit, or danger; choose danger when unsure."
+            "Run a non-interactive shell command with {shell_label}. Returns exit code, stdout, and stderr."
         );
         let cmd_desc = format!(
-            "Command line to execute with {shell_label}. It runs without stdin, so avoid interactive prompts and provide flags that make tools non-interactive."
+            "Command to execute with {shell_label}. Runs without stdin."
         );
         ToolDefinition {
             name: "shell".to_string(),
@@ -41,13 +41,13 @@ impl Tool for ShellTool {
                     "classification": {
                         "type": "string",
                         "enum": ["read_only", "edit", "danger"],
-                        "description": "Safety classification. Use read_only only for local inspection commands that do not modify files, services, network state, git state, or external systems, such as pwd, cargo check, cargo test, or listing files. Use edit for normal workspace mutations such as formatters, code generation, dependency installation, or creating/removing build artifacts. Use danger for privileged, destructive, external side-effecting, network-modifying, process/service-control, secret-accessing, or any git command, and whenever unsure."
+                        "description": "read_only, edit, or danger. Choose danger when unsure."
                     },
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 1000,
                         "maximum": 300000,
-                        "description": "Optional timeout in milliseconds. Defaults to 120000 and is clamped between 1000 and 300000."
+                        "description": "Timeout in ms. Default 120000."
                     }
                 },
                 "required": ["command", "classification"],

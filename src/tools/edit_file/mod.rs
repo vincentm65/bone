@@ -53,35 +53,35 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit an existing UTF-8 file transactionally. Use exactly one form: top-level search + replace for one replacement; edits[] for multiple operations, deletion, or insertion; or mode=\"rewrite\" + content to replace the whole file. Never send search without replace. Search/delete/insert anchors must identify one location; the matcher may safely recover minor whitespace/newline drift, but duplicate or uncertain matches fail. Preview is shown before applying.".to_string(),
+            description: "Edit an existing UTF-8 file. Use one of: search+replace (single change), edits[] (multiple changes), or mode=\"rewrite\"+content (full rewrite). Anchors must match one location.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the existing UTF-8 file to edit. Relative paths resolved from cwd."
+                        "description": "File path to edit."
                     },
                     "search": {
                         "type": "string",
-                        "description": "Top-level single-replacement form only. Text to find and replace; replace is required whenever search is provided. Do not use search by itself. For deletion use edits: [{ delete: ... }]. For insertion use edits with insert_before or insert_after. Include enough context to identify one location."
+                        "description": "Single replacement: text to find."
                     },
                     "replace": {
                         "type": "string",
-                        "description": "Top-level single-replacement form only. Required when top-level search is provided; this is the exact replacement text, and it may be an empty string only when intentionally replacing with nothing. Do not use with mode=\"rewrite\" or edits[]."
+                        "description": "Replacement text for top-level search."
                     },
                     "edits": {
                         "type": "array",
-                        "description": "Multi-operation form. Use this instead of top-level search/replace when making more than one change, deleting text, or inserting text. Each item must specify exactly one operation: search+replace, delete, insert_before+text, or insert_after+text. Edits apply in order to an in-memory candidate; if any edit fails, nothing is written.",
+                        "description": "List of edit operations. Each item: search+replace, delete, insert_before+text, or insert_after+text.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "search": { "type": "string", "description": "Replacement operation inside edits[]. Must be paired with replace (preferred) or text (fallback). Do not use by itself. Do not combine with delete, insert_before, or insert_after." },
-                                "replace": { "type": "string", "description": "Replacement text for an edits[] search operation. Required when search is provided, unless text is intentionally used as fallback." },
-                                "delete": { "type": "string", "description": "Deletion operation inside edits[]. Text to remove. Use delete by itself; do not include search, replace, insert_before, insert_after, or text." },
-                                "insert_before": { "type": "string", "description": "Insertion operation inside edits[]. Anchor text to insert before; must be paired with text. Do not combine with search, replace, delete, or insert_after." },
-                                "insert_after": { "type": "string", "description": "Insertion operation inside edits[]. Anchor text to insert after; must be paired with text. Do not combine with search, replace, delete, or insert_before." },
-                                "text": { "type": "string", "description": "Inserted text for insert_before or insert_after. Also accepted as a fallback replacement for search when replace is absent. Do not include text with delete." },
-                                "match": { "type": "string", "enum": ["exact"], "description": "Optional match mode. Only \"exact\" is accepted; omit this unless needed." }
+                                "search": { "type": "string", "description": "Text to find and replace." },
+                                "replace": { "type": "string", "description": "Replacement text." },
+                                "delete": { "type": "string", "description": "Text to delete." },
+                                "insert_before": { "type": "string", "description": "Insert text before this anchor." },
+                                "insert_after": { "type": "string", "description": "Insert text after this anchor." },
+                                "text": { "type": "string", "description": "Text to insert." },
+                                "match": { "type": "string", "enum": ["exact"], "description": "Match mode: \"exact\"." }
                             },
                             "additionalProperties": false
                         }
@@ -89,15 +89,15 @@ impl Tool for EditFileTool {
                     "mode": {
                         "type": "string",
                         "enum": ["rewrite"],
-                        "description": "Whole-file rewrite form. Set to \"rewrite\" only when replacing the entire file; must be paired with content and must not be combined with search, replace, or edits."
+                        "description": "Set to \"rewrite\" to replace entire file; requires content."
                     },
                     "content": {
                         "type": "string",
-                        "description": "Complete new file contents for mode=\"rewrite\". Only valid with mode=\"rewrite\"; do not use with search/replace or edits[]."
+                        "description": "New file contents (only with mode=\"rewrite\")."
                     },
                     "expected_hash": {
                         "type": "string",
-                        "description": "Optional SHA-256 hash from preview. When provided, execution fails if the file changed since preview."
+                        "description": "SHA-256 hash. Fails if file changed since preview."
                     }
                 },
                 "required": ["path"],

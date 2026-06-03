@@ -47,6 +47,7 @@ pub struct UserConfig {
     pub max_rounds: u32,
     pub auto_compact_tokens: Option<u64>,
     pub auto_compact_keep_messages: Option<usize>,
+    pub show_token_metrics: bool,
     pub subagent: SubagentConfig,
 }
 
@@ -71,6 +72,7 @@ impl Default for UserConfig {
             max_rounds: default_max_rounds(),
             auto_compact_tokens: None,
             auto_compact_keep_messages: None,
+            show_token_metrics: true,
             subagent: SubagentConfig::default(),
         }
     }
@@ -110,6 +112,10 @@ impl UserConfig {
         };
 
         // Subagent page
+        self.show_token_metrics = custom
+            .get_value("general", "show_token_metrics")
+            .parse()
+            .unwrap_or(true);
         self.subagent.provider = custom.get_value("subagent", "provider");
         self.subagent.model = custom.get_value("subagent", "model");
         self.subagent.approval = match custom.get_value("subagent", "approval").as_str() {

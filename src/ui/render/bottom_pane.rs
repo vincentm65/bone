@@ -663,14 +663,30 @@ impl super::Renderer {
                     ApprovalMode::Danger => self.theme.approval_danger,
                 }),
             ),
-            Span::styled(" | ", Style::default().fg(self.theme.status_text)),
-            Span::styled(
+        ];
+
+        if status_info.show_token_metrics {
+            status_spans.push(Span::styled(
+                " | ",
+                Style::default().fg(self.theme.status_text),
+            ));
+            status_spans.push(Span::styled(
                 status_info
                     .token_stats
                     .display_with_received_override(status_info.streaming_completion_tokens),
                 Style::default().fg(self.theme.status_text),
-            ),
-        ];
+            ));
+            if let Some(tps) = status_info.tokens_per_sec {
+                status_spans.push(Span::styled(
+                    " | ",
+                    Style::default().fg(self.theme.status_text),
+                ));
+                status_spans.push(Span::styled(
+                    format!("{:.0} tok/s", tps),
+                    Style::default().fg(self.theme.status_text),
+                ));
+            }
+        }
 
         if status_info.queue_len > 0 {
             status_spans.push(Span::styled(

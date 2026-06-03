@@ -19,24 +19,24 @@ impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file".to_string(),
-            description: "Read a UTF-8 text file. Use this to inspect source, config, or notes before editing. Optionally pass start_line and max_lines to read only a range.".to_string(),
+            description: "Read a UTF-8 text file. Optionally pass start_line and max_lines to read a range.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the file to read. Relative paths are resolved from the current working directory; absolute paths are allowed when accessible."
+                        "description": "File path to read."
                     },
                     "start_line": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Optional 1-based first line to include. Omit to start at line 1."
+                        "description": "1-based first line to include. Omit to start at line 1."
                     },
                     "max_lines": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 1000,
-                        "description": "Optional maximum number of lines to return. Defaults to 500; files exceeding this are truncated with a line range header so you know what portion you're seeing."
+                        "description": "Max lines to return. Defaults to 500."
                     }
                 },
                 "required": ["path"],

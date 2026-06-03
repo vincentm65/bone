@@ -373,6 +373,14 @@ impl App {
         let mut tool_calls = Vec::new();
         let mut reasoning_content = String::new();
         let mut stream_estimated_received = self.token_stats.received;
+        let received_baseline = self.token_stats.received;
+        let mut real_completion_tokens: Option<u32> = None;
+        let mut stream_start: Option<std::time::Instant> = None;
+        let mut stream_end: Option<std::time::Instant> = None;
+        let mut stream_chars: u64 = 0;
+        let mut displayed_tps: Option<f64> = None;
+        let mut last_tps_update: Option<std::time::Instant> = None;
+
         pin_mut!(idle);
 
         loop {
@@ -383,10 +391,16 @@ impl App {
             tokio::select! {
                 chunk = stream.next() => match chunk {
                     Some(Ok(ChatEvent::TextDelta(text))) => {
+                        if stream_start.is_none() {
+                            stream_start = Some(std::time::Instant::now());
+                        }
                         idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
                         self.messages[assistant_idx].content.push_str(&text);
-                        stream_estimated_received += text.len() as u64 / 4;
-                        self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
+                        stream_chars += text.len() as u64;
+                        stream_estimated_received = received_baseline + ((stream_chars as f64 / 4.0) as u64);
+                        stream_end = Some(std::time::Instant::now());
+                        Self::refresh_tps(&mut displayed_tps, &mut last_tps_update, stream_start, stream_estimated_received, received_baseline);
+                        self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, displayed_tps, term)?;
                     }
                     Some(Ok(ChatEvent::ReasoningDelta(text))) => {
                         idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
@@ -394,15 +408,19 @@ impl App {
                     }
                     Some(Ok(ChatEvent::ToolCall(call))) => {
                         idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
-                        stream_estimated_received += (call.arguments.to_string().len() as u64 / 4).max(1);
+                        stream_chars += call.arguments.to_string().len() as u64;
+                        stream_estimated_received = received_baseline + ((stream_chars as f64 / 4.0) as u64).max(1);
                         tool_calls.push(call);
-                        self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
+                        Self::refresh_tps(&mut displayed_tps, &mut last_tps_update, stream_start, stream_estimated_received, received_baseline);
+                        self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, displayed_tps, term)?;
                     }
                     Some(Ok(ChatEvent::TokenUsage { prompt_tokens, completion_tokens, cached_tokens, cost })) => {
                         idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
                         self.token_stats.record_request(prompt_tokens, completion_tokens, cached_tokens, cost);
                         stream_estimated_received = self.token_stats.received;
                         had_usage = true;
+                        real_completion_tokens = Some(completion_tokens);
+                        stream_end = Some(std::time::Instant::now());
                         if let Some(ref db) = self.session_db {
                             if let Some(conv_id) = self.conversation_id {
                                 db.record_usage(conv_id, &self.llm.id(), self.llm.model(), prompt_tokens, completion_tokens, cached_tokens, cost).ok();
@@ -438,9 +456,10 @@ impl App {
                         &[]
                     };
                     let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
+                    Self::refresh_tps(&mut displayed_tps, &mut last_tps_update, stream_start, stream_estimated_received, received_baseline);
                     self.renderer.tick_spinner(term, &PaneDraw {
                         input: &self.input,
-                        status_info: &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
+                        status_info: &self.stream_status_info_with_tokens(Some(stream_estimated_received), displayed_tps),
                         pages,
                         active_page: self.active_page,
                         pane_toggle_hint: hint,
@@ -456,6 +475,18 @@ impl App {
                 .record_estimate(prompt_chars, completion_chars);
         }
 
+        // Store final tokens/sec for the status bar after streaming ends.
+        if let (Some(start), Some(end)) = (stream_start, stream_end) {
+            let elapsed = end.duration_since(start).as_secs_f64();
+            if elapsed >= 0.1 {
+                let new_tokens = if let Some(real) = real_completion_tokens {
+                    real as u64
+                } else {
+                    stream_estimated_received.saturating_sub(received_baseline)
+                };
+                self.last_tokens_per_sec = Some(new_tokens as f64 / elapsed);
+            }
+        }
         Ok(Ok((tool_calls, reasoning_content)))
     }
 
@@ -463,6 +494,7 @@ impl App {
         &mut self,
         assistant_idx: usize,
         tokens: u64,
+        tokens_per_sec: Option<f64>,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         self.renderer.redraw_streaming_message(
@@ -470,7 +502,7 @@ impl App {
             term,
             &PaneDraw {
                 input: &self.input,
-                status_info: &self.stream_status_info_with_tokens(Some(tokens)),
+                status_info: &self.stream_status_info_with_tokens(Some(tokens), tokens_per_sec),
                 pages: if self.panes_visible { &self.pages } else { &[] },
                 active_page: self.active_page,
                 pane_toggle_hint: pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
@@ -916,6 +948,7 @@ impl App {
         let tick = self.renderer.spinner_tick;
         let model = self.model.clone();
         let token_stats = self.token_stats.clone();
+        let show_token_metrics = self.user_config.show_token_metrics;
         let input = &mut self.input;
         let queue = &mut self.queue;
         let renderer = &mut self.renderer;
@@ -964,6 +997,8 @@ impl App {
                                 model: model.clone(),
                                 token_stats: token_stats.clone(),
                                 streaming_completion_tokens: None,
+                                tokens_per_sec: None,
+                                show_token_metrics: show_token_metrics,
                                 streaming: true,
                                 approval_mode: *approval_mode,
                                 queue_len: queue.len(),
@@ -1081,4 +1116,38 @@ impl App {
         }
         mode_changed
     }
+
+    /// Compute output tokens/sec from stream start time and cumulative tokens.
+    fn calc_tokens_per_sec(
+        start: Option<std::time::Instant>,
+        estimated: u64,
+        base: u64,
+    ) -> Option<f64> {
+        let start = start?;
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed < 0.1 {
+            return None;
+        }
+        let new_tokens = estimated.saturating_sub(base);
+        Some(new_tokens as f64 / elapsed)
+    }
+
+    /// Refresh `displayed_tps` at most once every 500ms.
+    fn refresh_tps(
+        displayed_tps: &mut Option<f64>,
+        last_update: &mut Option<std::time::Instant>,
+        stream_start: Option<std::time::Instant>,
+        estimated: u64,
+        base: u64,
+    ) {
+        let now = std::time::Instant::now();
+        let should_update = last_update
+            .map(|t| now.duration_since(t) >= Duration::from_millis(500))
+            .unwrap_or(true);
+        if should_update {
+            *displayed_tps = Self::calc_tokens_per_sec(stream_start, estimated, base);
+            *last_update = Some(now);
+        }
+    }
 }
+
