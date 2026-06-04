@@ -324,7 +324,7 @@ fn replace_matched_span(
     label: &str,
 ) -> Result<String, String> {
     match find_match_span(content, needle, label)? {
-        MatchSpan::Exact { start, end } | MatchSpan::Recovered { start, end } => {
+        MatchSpan { start, end } => {
             let mut next = String::with_capacity(content.len() - (end - start) + replacement.len());
             next.push_str(&content[..start]);
             next.push_str(replacement);
@@ -334,9 +334,9 @@ fn replace_matched_span(
     }
 }
 
-enum MatchSpan {
-    Exact { start: usize, end: usize },
-    Recovered { start: usize, end: usize },
+struct MatchSpan {
+    start: usize,
+    end: usize,
 }
 
 fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan, String> {
@@ -353,7 +353,7 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
         })
         .collect();
     if exact.len() == 1 {
-        return Ok(MatchSpan::Exact {
+        return Ok(MatchSpan {
             start: exact[0].start,
             end: exact[0].end,
         });
@@ -369,7 +369,7 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
 
     let normalized = normalized_candidates(content, needle);
     if normalized.len() == 1 {
-        return Ok(MatchSpan::Recovered {
+        return Ok(MatchSpan {
             start: normalized[0].start,
             end: normalized[0].end,
         });
@@ -385,7 +385,7 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
 
     match fuzzy_candidate(content, needle) {
         Some(best) if best.score >= 0.92 && needle.trim().len() >= 30 && best.margin >= 0.08 => {
-            Ok(MatchSpan::Recovered {
+            Ok(MatchSpan {
                 start: best.start,
                 end: best.end,
             })

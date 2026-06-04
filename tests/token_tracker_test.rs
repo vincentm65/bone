@@ -147,13 +147,13 @@ fn format_tokens_millions() {
 fn display_format() {
     let mut stats = TokenStats::new();
     stats.record_request(1234, 56, None, None);
-    assert_eq!(stats.display(), "curr 1,234 | in 1,234 | out 56");
+    assert_eq!(stats.display_with_received_override(None), "curr 1,234 | in 1,234 | out 56");
 }
 
 #[test]
 fn display_format_no_context() {
     let stats = TokenStats::new();
-    assert_eq!(stats.display(), "curr 0 | in 0 | out 0");
+    assert_eq!(stats.display_with_received_override(None), "curr 0 | in 0 | out 0");
 }
 
 #[test]

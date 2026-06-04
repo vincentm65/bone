@@ -127,12 +127,8 @@ impl TokenStats {
         self.context_length = 0;
     }
 
-    /// Format for display: "curr 1,234 | in 1,234 | out 340".
-    pub fn display(&self) -> String {
-        self.display_with_received_override(None)
-    }
 
-    /// Format for display, optionally overriding the cumulative received count.
+    /// Format for display: "curr 1,234 | in 1,234 | out 340".
     /// Used during streaming to show a live estimate until provider usage arrives.
     pub fn display_with_received_override(&self, received_override: Option<u64>) -> String {
         let received = received_override.unwrap_or(self.received);
