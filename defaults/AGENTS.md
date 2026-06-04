@@ -151,6 +151,16 @@ prompt: |
   {{args}}
 ```
 
+### memory (script + prompt)
+Review recent conversations and update `memory.md` with user preferences. If `memory.md` exists in the config directory, its contents are loaded into every conversation's system prompt.
+
+Run manually with `/memory`, or schedule daily:
+```
+cron(action=add, name=memory, time=03:00, approval=edit, prompt=/memory)
+```
+
+Disable with: edit `skills/memory.yaml` and set `enabled: false`, or delete the file.
+
 ## Creating Custom Tools
 
 Tools live as YAML files in the `tools/` subdirectory of the config directory. The agent calls them as typed functions with args, and they return script output to the agent.

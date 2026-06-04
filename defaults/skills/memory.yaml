@@ -1,0 +1,43 @@
+name: memory
+description: "Review recent conversations and update memory.md with user preferences. Run manually with /memory or schedule via cron."
+enabled: true
+safety: edit
+script: |
+  #!/usr/bin/env bash
+  set -euo pipefail
+  DB="$HOME/.bone-rust/data/conversations.db"
+  if [ ! -f "$DB" ]; then
+    echo "No session database found."
+    exit 0
+  fi
+  # Get user messages from the last 20 conversations
+  sqlite3 "$DB" "
+    SELECT m.content
+    FROM messages m
+    JOIN (
+      SELECT id, started_at FROM conversations ORDER BY started_at DESC LIMIT 20
+    ) c ON m.conversation_id = c.id
+    WHERE m.role = 'user'
+    ORDER BY m.seq ASC
+    LIMIT 200;
+  "
+prompt: |
+  You are a memory builder. Review these recent user messages and update the memory.md file in the bone config directory with user preferences.
+
+  Steps:
+  1. Read the current memory.md from the config directory (it may not exist yet).
+  2. Analyze the user messages below for recurring preferences.
+  3. Write an updated memory.md using write_file or edit_file.
+
+  Rules:
+  - Only add preferences clearly demonstrated (observed 2+ times), not one-off choices.
+  - Remove anything contradicted by newer conversations.
+  - Keep the file under 2KB. Compress if needed.
+  - Use these markdown sections: Communication, Coding Style, Tools & Workflow, Project Context, Dislikes.
+  - If memory.md is empty, start fresh.
+  - Output a brief summary of what you added, changed, or removed.
+
+  Recent user messages:
+  ```
+  {{script_output}}
+  ```

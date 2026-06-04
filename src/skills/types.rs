@@ -49,11 +49,13 @@ impl Skill {
     }
 
     pub fn effective_safety(&self) -> CommandSafety {
-        if self.script.is_some() {
-            CommandSafety::Danger
-        } else {
-            self.safety.unwrap_or(CommandSafety::ReadOnly)
-        }
+        self.safety.unwrap_or_else(|| {
+            if self.script.is_some() {
+                CommandSafety::Danger
+            } else {
+                CommandSafety::ReadOnly
+            }
+        })
     }
 }
 
