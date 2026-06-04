@@ -15,6 +15,8 @@ fn status_info() -> StatusInfo {
         streaming: false,
         approval_mode: ApprovalMode::Safe,
         queue_len: 0,
+        tokens_per_sec: None,
+        show_token_metrics: false,
     }
 }
 
@@ -113,9 +115,11 @@ fn multiline_input_renders_hard_newlines_on_separate_rows() {
 
 #[test]
 fn newline_cursor_marker_is_included_in_input_height() {
-    let mut input = InputState::default();
-    input.buffer = format!("{}\nnext", "a".repeat(18));
-    input.cursor_pos = 18;
+    let input = InputState {
+        buffer: format!("{}\nnext", "a".repeat(18)),
+        cursor_pos: 18,
+        ..Default::default()
+    };
 
     assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0), 6);
 }
@@ -131,9 +135,11 @@ fn composer_reserves_terminal_final_column_like_submitted_user_text() {
 
 #[test]
 fn composer_height_uses_the_same_word_wrapping_as_rendering() {
-    let mut input = InputState::default();
-    input.buffer = "alpha beta gamma".to_string();
-    input.cursor_pos = 0;
+    let input = InputState {
+        buffer: "alpha beta gamma".to_string(),
+        cursor_pos: 0,
+        ..Default::default()
+    };
 
     assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0), 6);
 }

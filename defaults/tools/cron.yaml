@@ -1,5 +1,5 @@
 name: cron
-version: 1
+version: 2
 description: "Manage Bone scheduled jobs for the user. Use this when the user asks to schedule, list, remove, or inspect recurring Bone tasks. Fully implemented as a custom tool; supports daily HH:MM schedules."
 safety: edit
 args:
@@ -38,16 +38,8 @@ args:
 script: |
   set -euo pipefail
 
-  if command -v python3 >/dev/null 2>&1; then
-    py=python3
-  elif command -v python >/dev/null 2>&1; then
-    py=python
-  else
-    printf 'python3 or python is required for the cron tool.\n' >&2
-    exit 127
-  fi
+  exec uv run --no-project --no-sync -- python3 <<'PY'
 
-  exec "$py" <<'PY'
   import base64
   import fcntl
   import json

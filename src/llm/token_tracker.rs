@@ -78,10 +78,7 @@ impl TokenStats {
             format_tokens(self.request_count)
         ));
         lines.push(format!("  Tokens in: {}", format_tokens(self.sent)));
-        lines.push(format!(
-            "  Tokens out: {}",
-            format_tokens(self.received)
-        ));
+        lines.push(format!("  Tokens out: {}", format_tokens(self.received)));
         if self.cached > 0 {
             lines.push(format!("  Cached:    {}", format_tokens(self.cached)));
         }

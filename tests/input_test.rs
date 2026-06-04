@@ -2,9 +2,11 @@ use bone::ui::input::InputState;
 
 #[test]
 fn inserted_multiline_text_is_kept_in_the_input_buffer() {
-    let mut input = InputState::default();
-    input.buffer = "ac".to_string();
-    input.cursor_pos = 1;
+    let mut input = InputState {
+        buffer: "ac".to_string(),
+        cursor_pos: 1,
+        ..Default::default()
+    };
 
     input.insert_text("one\ntwo");
 

@@ -42,7 +42,7 @@ async fn web_search_returns_json_results_for_real_query() {
     // Each line should be valid JSON with title, href, body
     let lines: Vec<&str> = output.stdout.lines().collect();
     assert!(
-        lines.len() >= 1,
+        !lines.is_empty(),
         "should have at least 1 result, got: {:?}",
         output.stdout
     );

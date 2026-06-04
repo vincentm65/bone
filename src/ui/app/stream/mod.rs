@@ -139,10 +139,12 @@ impl App {
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &text));
         if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id {
-                self.session_seq += 1;
-                db.append_message(conv_id, "user", &text, None, None, None, self.session_seq).ok();
-            }
+            && let Some(conv_id) = self.conversation_id
+        {
+            self.session_seq += 1;
+            db.append_message(conv_id, "user", &text, None, None, None, self.session_seq)
+                .ok();
+        }
 
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
@@ -560,8 +562,20 @@ impl App {
             if let Some(page) = &result.pane_page {
                 if page.content.is_empty() {
                     self.tools.state_map.remove(&page.source, "default");
-                    self.active_page =
-                        PanePage::remove(&mut self.pages, &page.source, self.active_page);
+                    // Rebuild merged pane instead of blindly removing the whole
+                    // source page — other sub_key entries may still be active.
+                    let merged = self.rebuild_merged_pane(&page.source);
+                    match merged {
+                        Some(merged_page) => {
+                            let (_, new_active) =
+                                PanePage::upsert(&mut self.pages, self.active_page, merged_page);
+                            self.active_page = new_active;
+                        }
+                        None => {
+                            self.active_page =
+                                PanePage::remove(&mut self.pages, &page.source, self.active_page);
+                        }
+                    }
                 } else {
                     let (_, new_active) =
                         PanePage::upsert(&mut self.pages, self.active_page, page.clone());
@@ -611,6 +625,25 @@ impl App {
             term,
         )
         .await
+    }
+
+    /// Track live-state entries in a local set so synthetic StateRemove
+    /// events can be emitted for stale entries on cancellation.
+    fn track_live_state(
+        active: &mut std::collections::HashSet<(String, String)>,
+        event: &ToolLiveEvent,
+    ) {
+        match event {
+            ToolLiveEvent::StateUpdate {
+                source, sub_key, ..
+            } => {
+                active.insert((source.clone(), sub_key.clone()));
+            }
+            ToolLiveEvent::StateRemove { source, sub_key } => {
+                active.remove(&(source.clone(), sub_key.clone()));
+            }
+            ToolLiveEvent::Pane(_) => {}
+        }
     }
 
     fn apply_tool_live_event(&mut self, event: ToolLiveEvent) {
@@ -667,16 +700,21 @@ impl App {
         let (tx, mut rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
         let future = make_future(tx);
         pin_mut!(future);
+        // Track active live-state entries locally so we can emit synthetic
+        // StateRemove events on cancellation.
+        let mut active_live_state = std::collections::HashSet::<(String, String)>::new();
 
         loop {
             tokio::select! {
                 results = &mut future => {
                     while let Ok(event) = rx.try_recv() {
+                        Self::track_live_state(&mut active_live_state, &event);
                         self.apply_tool_live_event(event);
                     }
                     return Ok(results);
                 }
                 Some(event) = rx.recv() => {
+                    Self::track_live_state(&mut active_live_state, &event);
                     self.apply_tool_live_event(event);
                 }
                 _ = spinner.tick() => {
@@ -693,6 +731,21 @@ impl App {
                         self.persist_runtime_config();
                     }
                     if self.cancel_streaming {
+                        // Drain remaining live events before returning so that
+                        // any pending StateRemove events are processed.
+                        while let Ok(event) = rx.try_recv() {
+                            Self::track_live_state(&mut active_live_state, &event);
+                            self.apply_tool_live_event(event);
+                        }
+                        // Clean up any stale live state entries for cancelled
+                        // tools. The child process may have been killed before
+                        // it could emit its own StateRemove events.
+                        for (source, sub_key) in active_live_state {
+                            self.apply_tool_live_event(ToolLiveEvent::StateRemove {
+                                source,
+                                sub_key,
+                            });
+                        }
                         let results = cancel_calls
                             .iter()
                             .map(|call| tool_error(call, "cancelled by user"))
@@ -1148,4 +1201,3 @@ impl App {
         }
     }
 }
-

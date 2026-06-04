@@ -307,7 +307,25 @@ impl DynamicTool {
 
         let env = self.build_env(&arguments, Some(&context));
         let sender = events.clone();
-        let output = run_script_jsonl(
+        let active_sub_keys = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::<(String, String)>::new(),
+        ));
+        let tracked_keys = active_sub_keys.clone();
+        let cleanup_active_state =
+            |events: &Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>| {
+                if let Some(sender) = events.as_ref() {
+                    let keys = active_sub_keys
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for (source, sub_key) in keys.iter() {
+                        let _ = sender.send(ToolLiveEvent::StateRemove {
+                            source: source.clone(),
+                            sub_key: sub_key.clone(),
+                        });
+                    }
+                }
+            };
+        let output = match run_script_jsonl(
             ScriptRequest {
                 command: script.clone(),
                 env,
@@ -317,14 +335,38 @@ impl DynamicTool {
                 if let Some(sender) = sender.as_ref()
                     && let Some(event) = parse_live_event(&line)
                 {
+                    match &event {
+                        ToolLiveEvent::StateUpdate {
+                            source, sub_key, ..
+                        } => {
+                            if let Ok(mut keys) = tracked_keys.lock() {
+                                keys.insert((source.clone(), sub_key.clone()));
+                            }
+                        }
+                        ToolLiveEvent::StateRemove { source, sub_key } => {
+                            if let Ok(mut keys) = tracked_keys.lock() {
+                                keys.remove(&(source.clone(), sub_key.clone()));
+                            }
+                        }
+                        ToolLiveEvent::Pane(_) => {}
+                    }
                     let _ = sender.send(event);
                 }
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+        {
+            Ok(output) => output,
+            Err(err) => {
+                cleanup_active_state(&events);
+                return Err(err.to_string());
+            }
+        };
 
         if output.exit_code != Some(0) {
+            // Script failed — clean up any state entries that were created
+            // during execution but never removed.
+            cleanup_active_state(&events);
             let code = output
                 .exit_code
                 .map_or_else(|| "signal".to_string(), |c| c.to_string());

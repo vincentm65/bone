@@ -132,7 +132,7 @@ async fn tool_handler_execute_all_reports_errors() {
     let calls = vec![make_call("failing", "c1")];
 
     let results = handler.execute_all(calls).await;
-    assert_eq!(results[0].is_error, true);
+    assert!(results[0].is_error);
     assert_eq!(results[0].content, "something broke");
 }
 

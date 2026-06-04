@@ -62,11 +62,7 @@ fn emit_event(events: bool, event: &AgentEvent) {
             task,
             model,
         } => {
-            let task_preview = if task.len() > 200 {
-                &task[..200]
-            } else {
-                *task
-            };
+            let task_preview = truncate_str(task, 200);
             serde_json::json!({
                 "type": "started",
                 "approval": approval,
@@ -78,11 +74,7 @@ fn emit_event(events: bool, event: &AgentEvent) {
             serde_json::json!({ "type": "status", "message": message })
         }
         AgentEvent::ToolCall { name, summary } => {
-            let summary = if summary.len() > 200 {
-                &summary[..200]
-            } else {
-                *summary
-            };
+            let summary = truncate_str(summary, 200);
             serde_json::json!({
                 "type": "tool_call",
                 "name": name,
@@ -116,6 +108,23 @@ fn emit_event(events: bool, event: &AgentEvent) {
 // ── Recursion guard ─────────────────────────────────────────────────────────
 
 const MAX_AGENT_DEPTH: u32 = 3;
+/// Truncate a string to at most `max` bytes, respecting char boundaries.
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        let mut i = max;
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        &s[..i]
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() { None } else { Some(value) }
+}
 
 fn check_depth() -> Result<u32, String> {
     let depth: u32 = std::env::var("BONE_AGENT_DEPTH")
@@ -140,32 +149,29 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let user_config = UserConfig::from_custom_configs(&custom);
     let mut providers_config = load_providers();
 
-    // NOTE: provider fallback order differs from main.rs intentionally.
-    // agent.rs prefers last_provider before "local", since sub-agents
-    // should follow whatever the user has active.
+    let config_provider = non_empty(user_config.subagent.provider.as_str());
+    let config_model = non_empty(user_config.subagent.model.as_str());
+
     let provider_id = request
         .provider
         .clone()
-        .or_else(|| {
-            if !providers_config.last_provider.is_empty() {
-                Some(providers_config.last_provider.clone())
-            } else {
-                Some("local".to_string())
-            }
-        })
+        .or_else(|| config_provider.map(str::to_string))
+        .or_else(|| non_empty(providers_config.last_provider.as_str()).map(str::to_string))
         .ok_or_else(|| "no provider configured".to_string())?;
 
-    if let Some(model) = request.model.as_ref() {
+    let selected_model = request.model.as_deref().or(config_model);
+    if let Some(model) = selected_model {
         let entry = providers_config
             .providers
             .get_mut(&provider_id)
             .ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
-        entry.model = model.clone();
+        entry.model = model.to_string();
     }
     if request.provider.is_some() || request.model.is_some() {
         providers_config.last_provider = provider_id.clone();
         save_providers(&providers_config);
     }
+    crate::config::warn_if_no_api_key_for(&provider_id, &providers_config);
 
     let llm =
         create_provider_with_config(&provider_id, &providers_config).map_err(|e| e.to_string())?;
@@ -197,13 +203,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
     let approval_label = request.approval_mode.mode_str();
 
-    // Set recursion depth for child processes (safe: single-threaded before any spawns)
-    // SAFETY: set_var is safe in single-threaded code before any async tasks spawn.
-    // The recursion depth is only read by child processes (never concurrent).
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("BONE_AGENT_DEPTH", new_depth.to_string());
-    }
+    // Set recursion depth for child processes.
+    // SAFETY: no other tasks have been spawned yet; this is single-threaded code.
+    unsafe { std::env::set_var("BONE_AGENT_DEPTH", new_depth.to_string()); }
 
     // Build initial history
     let mut transcript: Vec<ChatMessage> = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
@@ -225,7 +227,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         },
     );
 
-    let max_rounds = user_config.max_rounds;
+    let max_rounds = user_config.subagent.max_rounds;
 
     let mut rounds = 0u32;
     let final_content = loop {
@@ -454,7 +456,11 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
             }
             "--system-prompt" => {
                 i += 1;
-                system_prompt = Some(args.get(i).ok_or("--system-prompt requires a value")?.clone());
+                system_prompt = Some(
+                    args.get(i)
+                        .ok_or("--system-prompt requires a value")?
+                        .clone(),
+                );
             }
             other => {
                 return Err(format!("unknown argument: {other}"));

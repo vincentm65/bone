@@ -136,17 +136,18 @@ fn do_install() -> std::io::Result<()> {
     };
 
     if !on_path {
-        eprintln!(
-            "\nWarning: {} is not on your PATH.",
-            dir.display()
-        );
+        eprintln!("\nWarning: {} is not on your PATH.", dir.display());
         eprintln!("Add it with:");
         let profile = if cfg!(target_os = "macos") {
             "~/.zprofile"
         } else {
             "~/.profile"
         };
-        eprintln!("  echo 'export PATH=\"{}:$PATH\"' >> {}", dir.display(), profile);
+        eprintln!(
+            "  echo 'export PATH=\"{}:$PATH\"' >> {}",
+            dir.display(),
+            profile
+        );
         eprintln!("  source {}", profile);
     }
 
@@ -217,6 +218,7 @@ async fn main() -> std::io::Result<()> {
         providers_config.last_provider = provider_id.clone();
         save_providers(&providers_config);
     }
+    bone::config::warn_if_no_api_key_for(&provider_id, &providers_config);
 
     let provider = providers::create_provider_with_config(&provider_id, &providers_config)
         .map_err(std::io::Error::other)?;

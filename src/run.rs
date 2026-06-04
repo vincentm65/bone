@@ -42,7 +42,11 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
             "--allow-skill-scripts" => allow_skill_scripts = true,
             "--system-prompt" => {
                 i += 1;
-                system_prompt = Some(args.get(i).ok_or("--system-prompt requires a value")?.clone());
+                system_prompt = Some(
+                    args.get(i)
+                        .ok_or("--system-prompt requires a value")?
+                        .clone(),
+                );
             }
             "--help" | "-h" => return Err(run_usage()),
             other if other.starts_with("--") => {

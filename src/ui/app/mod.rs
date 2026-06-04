@@ -1,19 +1,22 @@
 pub mod stream;
 
-use crate::chat::{COMPACT_NOTICE, DEFAULT_KEEP_MESSAGES, Message, build_chat_history, find_compact_boundary, build_summary_messages};
+use crate::chat::{
+    COMPACT_NOTICE, DEFAULT_KEEP_MESSAGES, Message, build_chat_history, build_summary_messages,
+    find_compact_boundary,
+};
 use crate::config::{self, ProvidersConfig, UserConfig};
 use crate::llm::{ChatEvent, ChatMessage, LlmProvider, TokenStats, format_tokens, providers};
+use crate::session_db::SessionDb;
 use crate::skills::SkillStore;
 use crate::skills::types::Skill;
 use crate::tools::script_runner::{ScriptRequest, run_script};
 use crate::tools::{ApprovalMode, ToolCall, ToolHandler};
-use crate::session_db::SessionDb;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use futures_util::StreamExt;
 use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
 use tokio::time::{self, Duration};
-use futures_util::StreamExt;
 
 use super::commands;
 use super::input::{InputAction, InputState};
@@ -151,35 +154,53 @@ impl App {
             .join("data")
             .join("conversations.db");
         match SessionDb::open(&db_path) {
-            Ok(db) => {
-                match db.create_conversation(self.llm.id(), self.llm.model()) {
-                    Ok(conv_id) => {
-                        self.conversation_id = Some(conv_id);
-                        self.session_db = Some(db);
-                        None
-                    }
-                    Err(err) => Some(format!("warning: failed to create conversation: {err}")),
+            Ok(db) => match db.create_conversation(self.llm.id(), self.llm.model()) {
+                Ok(conv_id) => {
+                    self.conversation_id = Some(conv_id);
+                    self.session_db = Some(db);
+                    None
                 }
-            }
+                Err(err) => Some(format!("warning: failed to create conversation: {err}")),
+            },
             Err(err) => Some(format!("warning: failed to open session database: {err}")),
         }
     }
     /// Append an assistant message to the session database.
     pub(crate) fn append_assistant_to_db(&mut self, content: &str, tool_calls_json: Option<&str>) {
         if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id {
-                self.session_seq += 1;
-                db.append_message(conv_id, "assistant", content, None, None, tool_calls_json, self.session_seq).ok();
-            }
+            && let Some(conv_id) = self.conversation_id
+        {
+            self.session_seq += 1;
+            db.append_message(
+                conv_id,
+                "assistant",
+                content,
+                None,
+                None,
+                tool_calls_json,
+                self.session_seq,
+            )
+            .ok();
+        }
     }
 
     /// Append a tool result to the session database.
     pub(crate) fn append_tool_result_to_db(&mut self, name: &str, call_id: &str, content: &str) {
         if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id {
-                self.session_seq += 1;
-                db.append_message(conv_id, "tool", content, Some(name), Some(call_id), None, self.session_seq).ok();
-            }
+            && let Some(conv_id) = self.conversation_id
+        {
+            self.session_seq += 1;
+            db.append_message(
+                conv_id,
+                "tool",
+                content,
+                Some(name),
+                Some(call_id),
+                None,
+                self.session_seq,
+            )
+            .ok();
+        }
     }
     /// Start a new conversation in the database (used by /clear, /new).
     fn start_new_conversation(&mut self) {
@@ -223,8 +244,10 @@ impl App {
         ));
         self.messages.push(Message::system(summary));
         self.renderer.scrollback_cursor = self.messages.len();
-        self.renderer.render_banner(term, &self.provider, &self.model)?;
-        self.renderer.flush_new_to_scrollback(&self.messages, term)?;
+        self.renderer
+            .render_banner(term, &self.provider, &self.model)?;
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
         self.cancel_streaming = false;
         self.redraw(term)?;
         Ok(())
@@ -352,7 +375,11 @@ impl App {
 
     /// Build a [`StatusInfo`] for the streaming spinner wait, with an optional
     /// live cumulative output-token estimate.
-    fn stream_status_info_with_tokens(&self, estimated_tokens: Option<u64>, tokens_per_sec: Option<f64>) -> StatusInfo {
+    fn stream_status_info_with_tokens(
+        &self,
+        estimated_tokens: Option<u64>,
+        tokens_per_sec: Option<f64>,
+    ) -> StatusInfo {
         stream_status_info_with_token_stats(
             estimated_tokens,
             tokens_per_sec,
@@ -548,9 +575,10 @@ impl App {
         if double_tap {
             // Best-effort end conversation in DB
             if let Some(ref db) = self.session_db
-                && let Some(conv_id) = self.conversation_id {
-                    db.end_conversation(conv_id).ok();
-                }
+                && let Some(conv_id) = self.conversation_id
+            {
+                db.end_conversation(conv_id).ok();
+            }
             self.should_quit = true;
             return Ok(());
         }
@@ -783,24 +811,29 @@ impl App {
             ));
             if let Some(ref db) = self.session_db
                 && let Some(conv_id) = self.conversation_id
-                    && let Ok(by_provider) = db.usage_by_provider(conv_id)
-                        && by_provider.len() > 1 {
-                            reply.push_str("\n\nBy provider/model");
-                            for p in &by_provider {
-                                reply.push_str(&format!(
-                                    "\n  {} / {}\t{} in / {} out",
-                                    p.provider, p.model,
-                                    crate::llm::format_tokens(p.prompt_tokens as u64),
-                                    crate::llm::format_tokens(p.completion_tokens as u64),
-                                ));
-                                if p.cached_tokens > 0 {
-                                    reply.push_str(&format!(" / {} cached", crate::llm::format_tokens(p.cached_tokens as u64)));
-                                }
-                                if p.cost > 0.0 {
-                                    reply.push_str(&format!(" / ${:.4}", p.cost));
-                                }
-                            }
-                        }
+                && let Ok(by_provider) = db.usage_by_provider(conv_id)
+                && by_provider.len() > 1
+            {
+                reply.push_str("\n\nBy provider/model");
+                for p in &by_provider {
+                    reply.push_str(&format!(
+                        "\n  {} / {}\t{} in / {} out",
+                        p.provider,
+                        p.model,
+                        crate::llm::format_tokens(p.prompt_tokens as u64),
+                        crate::llm::format_tokens(p.completion_tokens as u64),
+                    ));
+                    if p.cached_tokens > 0 {
+                        reply.push_str(&format!(
+                            " / {} cached",
+                            crate::llm::format_tokens(p.cached_tokens as u64)
+                        ));
+                    }
+                    if p.cost > 0.0 {
+                        reply.push_str(&format!(" / ${:.4}", p.cost));
+                    }
+                }
+            }
             return self.show_reply(reply, term);
         }
 
@@ -861,9 +894,10 @@ impl App {
             commands::CommandResult::Quit => {
                 // Best-effort end conversation in DB
                 if let Some(ref db) = self.session_db
-                    && let Some(conv_id) = self.conversation_id {
-                        db.end_conversation(conv_id).ok();
-                    }
+                    && let Some(conv_id) = self.conversation_id
+                {
+                    db.end_conversation(conv_id).ok();
+                }
                 self.should_quit = true;
             }
             commands::CommandResult::Continue { reply } => {
@@ -1096,7 +1130,10 @@ impl App {
         }
     }
 
-    pub(crate) async fn compact_transcript_state(&mut self, term: &mut BoneTerminal) -> (bool, u64) {
+    pub(crate) async fn compact_transcript_state(
+        &mut self,
+        term: &mut BoneTerminal,
+    ) -> (bool, u64) {
         let keep = self
             .user_config
             .auto_compact_keep_messages
@@ -1161,7 +1198,8 @@ impl App {
         compacted_prefix: &str,
         no_compact_msg: &str,
     ) -> io::Result<()> {
-        self.messages.push(Message::system("Summarizing conversation..."));
+        self.messages
+            .push(Message::system("Summarizing conversation..."));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
@@ -1179,18 +1217,31 @@ impl App {
     }
 
     pub(crate) async fn compact_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        self.run_compact_with_placeholder(term, "Compacted older messages", "Chat history is already compact.").await
+        self.run_compact_with_placeholder(
+            term,
+            "Compacted older messages",
+            "Chat history is already compact.",
+        )
+        .await
     }
 
     /// Auto-compact transcript if the token threshold is exceeded.
-    pub(crate) async fn auto_compact_if_needed(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    pub(crate) async fn auto_compact_if_needed(
+        &mut self,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
         let should_compact = self
             .user_config
             .auto_compact_tokens
             .is_some_and(|limit| limit > 0 && self.token_stats.context_length >= limit);
 
         if should_compact {
-            self.run_compact_with_placeholder(term, "Auto-compacted", "Chat history is already compact.").await?;
+            self.run_compact_with_placeholder(
+                term,
+                "Auto-compacted",
+                "Chat history is already compact.",
+            )
+            .await?;
         }
         Ok(())
     }

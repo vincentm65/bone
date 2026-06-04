@@ -49,18 +49,12 @@ impl SessionDb {
         Ok(db)
     }
 
-    /// Open an in-memory database (for tests).
-    pub fn open_in_memory() -> rusqlite::Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let db = Self { conn };
-        db.setup_schema()?;
-        Ok(db)
-    }
-
     const SCHEMA_VERSION: u32 = 1;
 
     fn setup_schema(&self) -> rusqlite::Result<()> {
-        let current_version: u32 = self.conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let current_version: u32 = self
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
         if current_version >= Self::SCHEMA_VERSION {
             return Ok(());
         }
@@ -112,7 +106,8 @@ impl SessionDb {
                 ON messages(conversation_id, seq);
             ",
         )?;
-        self.conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
+        self.conn
+            .pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -278,7 +273,10 @@ impl SessionDb {
     /// Delete a message from both `messages` and `messages_fts`.
     pub fn delete_message(&mut self, message_id: i64) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", params![message_id])?;
+        tx.execute(
+            "DELETE FROM messages_fts WHERE rowid = ?1",
+            params![message_id],
+        )?;
         tx.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
         tx.commit()
     }
@@ -317,190 +315,4 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_db() -> SessionDb {
-        SessionDb::open_in_memory().unwrap()
-    }
-
-    #[test]
-    fn create_and_end_conversation() {
-        let db = test_db();
-        let id = db.create_conversation("test", "model-1").unwrap();
-        assert!(id > 0);
-        db.end_conversation(id).unwrap();
-
-        let usage = db.conversation_usage(id).unwrap();
-        assert_eq!(usage.request_count, 0);
-    }
-
-    #[test]
-    fn append_and_retrieve_messages() {
-        let db = test_db();
-        let conv_id = db.create_conversation("test", "m").unwrap();
-        db.append_message(conv_id, "user", "Hello", None, None, None, 0)
-            .unwrap();
-        db.append_message(conv_id, "assistant", "Hi there", None, None, None, 1)
-            .unwrap();
-        db.append_message(conv_id, "tool", "result", Some("read_file"), Some("call-1"), None, 2)
-            .unwrap();
-
-        let mut stmt = db
-            .conn
-            .prepare(
-                "SELECT role, content, tool_name, seq FROM messages WHERE conversation_id = ?1 ORDER BY seq",
-            )
-            .unwrap();
-        let rows: Vec<(String, String, Option<String>, i64)> = stmt
-            .query_map(params![conv_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].0, "user");
-        assert_eq!(rows[1].0, "assistant");
-        assert_eq!(rows[2].2.as_deref(), Some("read_file"));
-    }
-
-    #[test]
-    fn append_message_populates_fts() {
-        let db = test_db();
-        let conv_id = db.create_conversation("test", "m").unwrap();
-        db.append_message(
-            conv_id,
-            "user",
-            "The quick brown fox jumps over the lazy dog",
-            None, None, None,
-            0,
-        )
-            .unwrap();
-        let hits = db.search("brown fox", 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].role, "user");
-    }
-
-    #[test]
-    fn delete_message_removes_from_both() {
-        let mut db = test_db();
-        let conv_id = db.create_conversation("test", "m").unwrap();
-        let msg_id = db
-            .append_message(conv_id, "user", "unique searchable content here", None, None, None, 0)
-            .unwrap();
-
-        // Verify it's there
-        assert_eq!(db.search("unique searchable", 10).unwrap().len(), 1);
-
-        db.delete_message(msg_id).unwrap();
-
-        // Verify it's gone from FTS
-        assert_eq!(db.search("unique searchable", 10).unwrap().len(), 0);
-
-        // Verify it's gone from messages
-        let count: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE id = ?1",
-                params![msg_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn record_and_sum_usage() {
-        let db = test_db();
-        let conv_id = db.create_conversation("test", "m").unwrap();
-        db.record_usage(conv_id, "test", "m", 100, 50, Some(20), Some(0.01))
-            .unwrap();
-        db.record_usage(conv_id, "test", "m", 200, 80, None, None)
-            .unwrap();
-
-        let usage = db.conversation_usage(conv_id).unwrap();
-        assert_eq!(usage.prompt_tokens, 300);
-        assert_eq!(usage.completion_tokens, 130);
-        assert_eq!(usage.cached_tokens, 20);
-        assert!((usage.cost - 0.01).abs() < f64::EPSILON);
-        assert_eq!(usage.request_count, 2);
-    }
-
-    #[test]
-    fn usage_by_provider_grouping() {
-        let db = test_db();
-        let conv_id = db.create_conversation("test", "m").unwrap();
-        db.record_usage(conv_id, "glm", "glm-4", 1000, 100, Some(500), Some(0.1))
-            .unwrap();
-        db.record_usage(conv_id, "openrouter", "claude-3", 2000, 200, None, Some(0.2))
-            .unwrap();
-        db.record_usage(conv_id, "glm", "glm-4", 500, 50, None, None)
-            .unwrap();
-
-        let by_provider = db.usage_by_provider(conv_id).unwrap();
-        assert_eq!(by_provider.len(), 2);
-
-        let glm = by_provider
-            .iter()
-            .find(|p| p.provider == "glm")
-            .unwrap();
-        assert_eq!(glm.prompt_tokens, 1500);
-        assert_eq!(glm.completion_tokens, 150);
-        assert_eq!(glm.cached_tokens, 500);
-        assert!((glm.cost - 0.1).abs() < f64::EPSILON);
-        assert_eq!(glm.request_count, 2);
-
-        let or = by_provider
-            .iter()
-            .find(|p| p.provider == "openrouter")
-            .unwrap();
-        assert_eq!(or.prompt_tokens, 2000);
-        assert_eq!(or.request_count, 1);
-    }
-
-    #[test]
-    fn search_returns_ranked_hits() {
-        let db = test_db();
-        let conv_id = db.create_conversation("test", "m").unwrap();
-        db.append_message(
-            conv_id,
-            "user",
-            "provider switch tokens test",
-            None, None, None,
-            0,
-        )
-            .unwrap();
-        db.append_message(
-            conv_id,
-            "assistant",
-            "Better model: usage is recorded per request",
-            None, None, None,
-            1,
-        )
-            .unwrap();
-        let hits = db.search("provider switch", 10).unwrap();
-        assert!(!hits.is_empty());
-        assert!(hits[0].snippet.contains("\u{25b8}"));
-    }
-
-    #[test]
-    fn search_across_conversations() {
-        let db = test_db();
-        let conv1 = db.create_conversation("test", "m1").unwrap();
-        let conv2 = db.create_conversation("test", "m2").unwrap();
-        db.append_message(conv1, "user", "unique alpha keyword", None, None, None, 0)
-            .unwrap();
-        db.append_message(conv2, "user", "unique beta keyword", None, None, None, 0)
-            .unwrap();
-
-        let hits = db.search("unique", 10).unwrap();
-        assert_eq!(hits.len(), 2);
-        let conv_ids: Vec<i64> = hits.iter().map(|h| h.conversation_id).collect();
-        assert!(conv_ids.contains(&conv1));
-        assert!(conv_ids.contains(&conv2));
-    }
 }

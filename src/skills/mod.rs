@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use types::Skill;
 
-const COMMIT_SKILL: &str = include_str!("../../defaults/skills/commit.yaml");
+include!(concat!(env!("OUT_DIR"), "/default_skills.rs"));
 
 #[derive(Debug, Clone)]
 pub struct LoadedSkill {
@@ -245,9 +245,8 @@ fn seed_example_skills(dir: &Path) -> io::Result<()> {
             .is_some_and(|extension| extension == "yaml")
     });
     if !has_yaml {
-        {
-            let (name, contents) = ("commit.yaml", COMMIT_SKILL);
-            fs::write(dir.join(name), contents)?;
+        for (file_name, content) in DEFAULT_SKILLS {
+            fs::write(dir.join(file_name), content)?;
         }
     }
     fs::write(marker, "seeded\n")

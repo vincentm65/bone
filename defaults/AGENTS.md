@@ -55,7 +55,7 @@ script: |
 ```
 
 ### subagent (script)
-Spawn a sub-agent for isolated or parallel tasks.
+Spawn a sub-agent for isolated or parallel tasks. Explicit provider/model args override `config/subagent.yaml`; if both are omitted, the subagent config is used before falling back to the last/default provider.
 ```yaml
 name: subagent
 version: 3
@@ -98,7 +98,7 @@ args:
     type: string
     required: false
   - name: index
-    type: number
+    type: integer
     required: false
   - name: indices
     type: array

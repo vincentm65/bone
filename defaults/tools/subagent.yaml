@@ -1,6 +1,6 @@
 name: subagent
 version: 3
-description: "Spawn a sub-agent to handle a self-contained task. Use this to delegate work that benefits from isolation or parallelism: researching a topic, investigating a codebase area, prototyping a solution, getting a second opinion, or running a complex multi-step workflow. The sub-agent runs as a separate bone instance with its own context and tool access. Pass a clear, specific task prompt; the sub-agent will use the full set of tools available to it. Choose the approval mode to control what the sub-agent can do: read_only for research, edit for changes, danger for privileged operations. Optionally override provider and model; omitted values use the last/default provider and its configured model."
+description: "Spawn a sub-agent to handle a self-contained task. Use this to delegate work that benefits from isolation or parallelism: researching a topic, investigating a codebase area, prototyping a solution, getting a second opinion, or running a complex multi-step workflow. The sub-agent runs as a separate bone instance with its own context and tool access. Pass a clear, specific task prompt; the sub-agent will use the full set of tools available to it. Choose the approval mode to control what the sub-agent can do: read_only for research, edit for changes, danger for privileged operations. Optionally override provider and model; omitted values use config/subagent.yaml, then the last/default provider and its configured model."
 safety: read_only
 args:
   - name: approval
@@ -13,10 +13,10 @@ args:
     description: "Task for the sub-agent."
   - name: provider
     type: string
-    description: "Optional provider id. If omitted, uses the last/default provider from config."
+    description: "Optional provider id. If omitted, uses config/subagent.yaml, then the last/default provider."
   - name: model
     type: string
-    description: "Optional model name. If omitted, uses the selected provider's configured model."
+    description: "Optional model name. If omitted, uses config/subagent.yaml, then the selected provider's configured model."
 script: |
   set -euo pipefail
 
@@ -32,7 +32,6 @@ script: |
   if [ -n "${TOOL_MODEL:-}" ]; then
     args+=(--model "$TOOL_MODEL")
   fi
-
   uv run -- python3 - "$approval" "$task" "${TOOL_CALL_ID:-}" "$bone_bin" "${args[@]}" <<'PY'
   import json
   import os

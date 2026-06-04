@@ -80,7 +80,7 @@ fn indented_changed_expression_keeps_body_indent_on_continuations() {
         .filter(|line| {
             line.spans.first().and_then(|span| span.style.bg) == Some(Color::Rgb(0, 95, 0))
         })
-        .map(|line| line_text(line))
+        .map(line_text)
         .collect::<Vec<_>>();
 
     assert!(added.len() > 1, "expected wrapped added line: {added:?}");

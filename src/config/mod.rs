@@ -204,3 +204,43 @@ pub fn seed_all() {
     seed_command_policy_if_missing();
     seed_agents_md_if_missing();
 }
+
+fn is_local_base_url(base_url: &str) -> bool {
+    let host_port = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
+}
+
+/// Check if a provider has an API key configured. Print a helpful warning
+/// if not, so new users know what to do next.
+pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
+    let Some(entry) = config.providers.get(provider_id) else {
+        eprintln!(
+            "bone: warning: provider '{}' not found in {}",
+            provider_id,
+            providers_path().display()
+        );
+        return;
+    };
+
+    if !entry.api_key.is_empty() || is_local_base_url(&entry.base_url) {
+        return;
+    }
+    eprintln!(
+        "bone: warning: provider '{}' has no API key configured.",
+        provider_id
+    );
+    eprintln!(
+        "  Edit {} and add your API key.",
+        providers_path().display()
+    );
+}

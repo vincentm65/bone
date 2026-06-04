@@ -25,9 +25,7 @@ impl Tool for ShellTool {
         let desc = format!(
             "Run a non-interactive shell command with {shell_label}. Returns exit code, stdout, and stderr."
         );
-        let cmd_desc = format!(
-            "Command to execute with {shell_label}. Runs without stdin."
-        );
+        let cmd_desc = format!("Command to execute with {shell_label}. Runs without stdin.");
         ToolDefinition {
             name: "shell".to_string(),
             description: desc,

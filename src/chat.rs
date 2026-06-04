@@ -27,11 +27,7 @@ pub fn find_compact_boundary(messages: &[ChatMessage], keep: usize) -> Option<us
         return None;
     }
     let boundary = compact_boundary(messages, messages.len() - keep);
-    if boundary == 0 {
-        None
-    } else {
-        Some(boundary)
-    }
+    if boundary == 0 { None } else { Some(boundary) }
 }
 
 /// Notice inserted when older messages are compacted.
@@ -45,7 +41,10 @@ pub const DEFAULT_KEEP_MESSAGES: usize = 12;
 /// a summary instruction system prompt.
 pub fn build_summary_messages(old_messages: &[ChatMessage]) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(old_messages.len() + 1);
-    out.push(ChatMessage::new(ChatRole::System, crate::llm::prompts::compact_summary_prompt().to_string()));
+    out.push(ChatMessage::new(
+        ChatRole::System,
+        crate::llm::prompts::compact_summary_prompt().to_string(),
+    ));
     out.extend(old_messages.iter().cloned());
     out
 }
