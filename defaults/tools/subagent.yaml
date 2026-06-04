@@ -2,6 +2,8 @@ name: subagent
 version: 3
 description: "Spawn a sub-agent to handle a self-contained task. Use this to delegate work that benefits from isolation or parallelism: researching a topic, investigating a codebase area, prototyping a solution, getting a second opinion, or running a complex multi-step workflow. The sub-agent runs as a separate bone instance with its own context and tool access. Pass a clear, specific task prompt; the sub-agent will use the full set of tools available to it. Choose the approval mode to control what the sub-agent can do: read_only for research, edit for changes, danger for privileged operations. Optionally override provider and model; omitted values use config/subagent.yaml, then the last/default provider and its configured model."
 safety: read_only
+live_state:
+  cleanup: on_finish
 args:
   - name: approval
     type: string
@@ -111,85 +113,106 @@ script: |
           }
       print(json.dumps(event), flush=True)
 
-  emit_pane()
-
-  proc = subprocess.Popen(
-      [bone_bin] + args,
-      stdout=subprocess.PIPE,
-      stderr=subprocess.PIPE,
-      text=True,
-      bufsize=1,
-  )
+  proc = None
+  stderr_thread = None
   stderr_lines = []
+  code = 1
 
-  def drain_stderr():
-      if proc.stderr is None:
-          return
-      for err_line in proc.stderr:
-          stderr_lines.append(err_line)
-
-  stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
-  stderr_thread.start()
-
-  for line in proc.stdout:
-      line = line.rstrip("\n")
-      print(line, flush=True)
-      try:
-          event = json.loads(line)
-      except Exception:
-          continue
-
-      event_type = event.get("type")
-      if event_type == "started":
-          state["approval"] = event.get("approval") or state["approval"]
-          state["mode"] = short_mode(state["approval"])
-          state["model"] = event.get("model") or state["model"]
-          state["task"] = event.get("task") or state["task"]
-          state["title"] = short_title(state["task"])
-          state["now"] = "thinking"
-          state["done"] = False
-          state["log"].append("thinking")
-      elif event_type == "status":
-          msg = event.get("message") or ""
-          msg = " ".join(str(msg).split())
-          if msg.startswith("running shell: "):
-              msg = msg[len("running shell: "):]
-          elif msg.startswith("running "):
-              msg = msg[len("running "):]
-          state["now"] = msg or "running"
-          state["done"] = False
-          if not state["log"] or state["log"][-1] != msg:
-              state["log"].append(msg)
-      elif event_type == "tool_call":
-          name = event.get("name") or "tool"
-          summary = event.get("summary") or ""
-          entry = f"> {name}: {summary}" if summary else f"> {name}"
-          state["now"] = entry
-          state["done"] = False
-          state["log"].append(entry)
-      elif event_type == "token_usage":
-          state["sent"] = event.get("sent") or 0
-          state["received"] = event.get("received") or 0
-      elif event_type == "finished":
-          entry = f"done | {fmt_tokens(state['sent'], state['received'])} tok"
-          state["now"] = "done"
-          state["done"] = True
-          state["log"].append(entry)
-      elif event_type == "failed":
-          msg = str(event.get("message") or "error")
-          state["now"] = "failed"
-          state["done"] = True
-          state["log"].append(f"FAILED: {msg}")
-
+  try:
       emit_pane()
 
-  code = proc.wait()
-  stderr_thread.join(timeout=1)
-  stderr = "".join(stderr_lines)
-  if stderr:
-      print(stderr, file=sys.stderr, end="")
+      proc = subprocess.Popen(
+          [bone_bin] + args,
+          stdout=subprocess.PIPE,
+          stderr=subprocess.PIPE,
+          text=True,
+          bufsize=1,
+      )
 
-  emit_pane(remove=True)
+      def drain_stderr():
+          if proc.stderr is None:
+              return
+          for err_line in proc.stderr:
+              stderr_lines.append(err_line)
+
+      stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+      stderr_thread.start()
+
+      for line in proc.stdout:
+          line = line.rstrip("\n")
+          print(line, flush=True)
+          try:
+              event = json.loads(line)
+          except Exception:
+              continue
+
+          event_type = event.get("type")
+          if event_type == "started":
+              state["approval"] = event.get("approval") or state["approval"]
+              state["mode"] = short_mode(state["approval"])
+              state["model"] = event.get("model") or state["model"]
+              state["task"] = event.get("task") or state["task"]
+              state["title"] = short_title(state["task"])
+              state["now"] = "thinking"
+              state["done"] = False
+              state["log"].append("thinking")
+          elif event_type == "status":
+              msg = event.get("message") or ""
+              msg = " ".join(str(msg).split())
+              if msg.startswith("running shell: "):
+                  msg = msg[len("running shell: "):]
+              elif msg.startswith("running "):
+                  msg = msg[len("running "):]
+              state["now"] = msg or "running"
+              state["done"] = False
+              if not state["log"] or state["log"][-1] != msg:
+                  state["log"].append(msg)
+          elif event_type == "tool_call":
+              name = event.get("name") or "tool"
+              summary = event.get("summary") or ""
+              entry = f"> {name}: {summary}" if summary else f"> {name}"
+              state["now"] = entry
+              state["done"] = False
+              state["log"].append(entry)
+          elif event_type == "token_usage":
+              state["sent"] = event.get("sent") or 0
+              state["received"] = event.get("received") or 0
+          elif event_type == "finished":
+              entry = f"done | {fmt_tokens(state['sent'], state['received'])} tok"
+              state["now"] = "done"
+              state["done"] = True
+              state["log"].append(entry)
+          elif event_type == "failed":
+              msg = str(event.get("message") or "error")
+              state["now"] = "failed"
+              state["done"] = True
+              state["log"].append(f"FAILED: {msg}")
+
+          emit_pane()
+
+      code = proc.wait()
+  except Exception as err:
+      state["now"] = "failed"
+      state["done"] = True
+      state["log"].append(f"FAILED: {err}")
+      emit_pane()
+  finally:
+      if proc is not None and proc.poll() is None:
+          try:
+              proc.kill()
+          except OSError:
+              pass
+          try:
+              proc.wait()
+          except Exception:
+              pass
+      if stderr_thread is not None:
+          stderr_thread.join(timeout=1)
+      stderr = "".join(stderr_lines)
+      if stderr:
+          print(stderr, file=sys.stderr, end="")
+      emit_pane(remove=True)
+
   sys.exit(code)
   PY
 output:

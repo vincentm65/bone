@@ -1,6 +1,7 @@
 use bone::tools::command_policy::CommandSafety;
 use bone::tools::dynamic::{DynamicTool, InteractionType, OutputKind};
 use bone::tools::registry::ToolRegistry;
+use bone::tools::types::ToolLiveEvent;
 use bone::tools::{ApprovalMode, ToolCall, ToolHandler};
 use serde_json::json;
 use std::fs;
@@ -34,6 +35,137 @@ fn default_subagent_wraps_agent_events_and_uses_python_panel_script() {
     assert!(script.contains("\"read_only\": \"read\""));
     assert!(script.contains("state_key"));
     assert!(script.contains("emit_pane(remove=True)"));
+}
+
+fn assert_events(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<ToolLiveEvent>,
+    expect_update: bool,
+    expect_remove: bool,
+) {
+    let mut saw_update = false;
+    let mut saw_remove = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ToolLiveEvent::StateUpdate {
+                source, sub_key, ..
+            } => {
+                saw_update |= source == "status" && sub_key == "row-1";
+            }
+            ToolLiveEvent::StateRemove { source, sub_key } => {
+                saw_remove |= source == "status" && sub_key == "row-1";
+            }
+            ToolLiveEvent::Pane(_) => {}
+        }
+    }
+    assert!(saw_update == expect_update, "saw_update={saw_update}, expected={expect_update}");
+    assert!(saw_remove == expect_remove, "saw_remove={saw_remove}, expected={expect_remove}");
+}
+
+#[tokio::test]
+async fn jsonl_ephemeral_live_state_removes_on_success_without_tool_remove() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: ephemeral_status
+version: 1
+description: test live state cleanup
+output:
+  kind: jsonl_events
+live_state:
+  cleanup: on_finish
+script: |
+  printf '%s\n' '{"type":"pane","state_key":"row-1","state":"{}","pane":{"source":"status","title":"status","lines":["running"]}}'
+  printf '%s\n' '{"type":"finished","content":"done"}'
+"#,
+    )
+    .unwrap();
+    let registry = ToolRegistry::new().register(tool);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let result = registry
+        .execute_live(
+            ToolCall {
+                id: "call-1".into(),
+                name: "ephemeral_status".into(),
+                arguments: json!({}),
+            },
+            Some(tx),
+            None,
+        )
+        .await;
+
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(result.content, "done");
+    assert_events(&mut rx, true, true);
+    assert!(result.pane_page.is_none());
+}
+
+#[tokio::test]
+async fn jsonl_tool_managed_live_state_does_not_auto_remove() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: persistent_status
+description: test live state persistence
+output:
+  kind: jsonl_events
+script: |
+  printf '%s\n' '{"type":"pane","state_key":"row-1","state":"{}","pane":{"source":"status","title":"status","lines":["running"]}}'
+  printf '%s\n' '{"type":"finished","content":"done"}'
+"#,
+    )
+    .unwrap();
+    let registry = ToolRegistry::new().register(tool);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let result = registry
+        .execute_live(
+            ToolCall {
+                id: "call-1".into(),
+                name: "persistent_status".into(),
+                arguments: json!({}),
+            },
+            Some(tx),
+            None,
+        )
+        .await;
+
+    assert!(!result.is_error, "{}", result.content);
+    assert_events(&mut rx, true, false);
+    assert!(result.pane_page.is_none());
+}
+
+#[tokio::test]
+async fn jsonl_ephemeral_live_state_removes_on_nonzero_exit() {
+    let tool: DynamicTool = serde_yaml::from_str(
+        r#"
+name: failing_status
+description: test live state cleanup on failure
+output:
+  kind: jsonl_events
+live_state:
+  cleanup: on_finish
+script: |
+  printf '%s\n' '{"type":"pane","state_key":"row-1","state":"{}","pane":{"source":"status","title":"status","lines":["running"]}}'
+  exit 7
+"#,
+    )
+    .unwrap();
+    let registry = ToolRegistry::new().register(tool);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let result = registry
+        .execute_live(
+            ToolCall {
+                id: "call-1".into(),
+                name: "failing_status".into(),
+                arguments: json!({}),
+            },
+            Some(tx),
+            None,
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert_events(&mut rx, true, true);
 }
 
 #[tokio::test]
