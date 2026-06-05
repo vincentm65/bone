@@ -1,4 +1,7 @@
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn collect_yaml_entries(dir: &std::path::Path, label: &str) -> Vec<PathBuf> {
     let mut entries = fs::read_dir(dir)

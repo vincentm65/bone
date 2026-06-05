@@ -24,7 +24,7 @@ async fn expands_prompt_only_skill() {
         "name: clean\ndescription: Clean file\nprompt: 'Clean {{args}}'\nenabled: true\n",
     )
     .unwrap();
-    let store = SkillStore::load_from_dir(&dir, false).unwrap();
+    let store = SkillStore::load_from_dir(&dir).unwrap();
     let rendered = expand_skill_command(&store, "/clean src/main.rs", false, ApprovalMode::Safe)
         .await
         .unwrap();
@@ -40,7 +40,7 @@ async fn rejects_scripted_skill_without_flag() {
         "name: scripted\ndescription: Scripted\nscript: 'printf hi'\nsafety: read_only\nprompt: 'Output {{script_output}}'\nenabled: true\n",
     )
     .unwrap();
-    let store = SkillStore::load_from_dir(&dir, false).unwrap();
+    let store = SkillStore::load_from_dir(&dir).unwrap();
     let err = expand_skill_command(&store, "/scripted", false, ApprovalMode::Danger)
         .await
         .unwrap_err();
@@ -62,7 +62,7 @@ enabled: true
 "#,
     )
     .unwrap();
-    let store = SkillStore::load_from_dir(&dir, false).unwrap();
+    let store = SkillStore::load_from_dir(&dir).unwrap();
     let rendered = expand_skill_command(&store, "/scripted abc", true, ApprovalMode::Danger)
         .await
         .unwrap();
@@ -78,7 +78,7 @@ async fn rejects_scripted_skill_when_approval_too_low() {
         "name: scripted\ndescription: Scripted\nscript: 'printf hi'\nprompt: 'Output {{script_output}}'\nenabled: true\n",
     )
     .unwrap();
-    let store = SkillStore::load_from_dir(&dir, false).unwrap();
+    let store = SkillStore::load_from_dir(&dir).unwrap();
     let err = expand_skill_command(&store, "/scripted", true, ApprovalMode::Safe)
         .await
         .unwrap_err();
@@ -87,7 +87,7 @@ async fn rejects_scripted_skill_when_approval_too_low() {
 }
 
 #[tokio::test]
-async fn scripted_skill_declared_read_only_still_requires_danger() {
+async fn scripted_skill_declared_read_only_uses_declared_safety() {
     let dir = temp_dir("skill-script-readonly");
     fs::write(
         dir.join("scripted.yaml"),
@@ -100,16 +100,12 @@ enabled: true
 "#,
     )
     .unwrap();
-    let store = SkillStore::load_from_dir(&dir, false).unwrap();
+    let store = SkillStore::load_from_dir(&dir).unwrap();
     assert_eq!(
         store.get_enabled("scripted").unwrap().effective_safety(),
-        CommandSafety::Danger
+        CommandSafety::ReadOnly
     );
-    let err = expand_skill_command(&store, "/scripted", true, ApprovalMode::Safe)
-        .await
-        .unwrap_err();
-    assert!(err.contains("requires Danger approval"));
-    let rendered = expand_skill_command(&store, "/scripted", true, ApprovalMode::Danger)
+    let rendered = expand_skill_command(&store, "/scripted", true, ApprovalMode::Safe)
         .await
         .unwrap();
     assert_eq!(rendered, "Output ok");
@@ -124,7 +120,7 @@ fn rejects_empty_script_field() {
         "name: scripted\ndescription: Scripted\nprompt: 'Output {{script_output}}'\nscript: '   '\nenabled: true\n",
     )
     .unwrap();
-    let store = SkillStore::load_from_dir(&dir, false).unwrap();
+    let store = SkillStore::load_from_dir(&dir).unwrap();
     assert!(store.get_enabled("scripted").is_none());
     assert!(
         store

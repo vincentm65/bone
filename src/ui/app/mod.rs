@@ -275,7 +275,8 @@ impl App {
     }
 
     fn apply_skill_enabled_from_config(&mut self) {
-        self.skills.apply_config_enabled(&self.custom_configs.enabled_skill_names());
+        self.skills
+            .apply_config_enabled(&self.custom_configs.enabled_skill_names());
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -945,7 +946,8 @@ impl App {
                     // Re-sync config page and apply enabled states
                     let names: Vec<String> = self.skills.list().map(|s| s.name.clone()).collect();
                     self.custom_configs.sync_skills_from_registry(&names);
-                    self.skills.apply_config_enabled(&self.custom_configs.enabled_skill_names());
+                    self.skills
+                        .apply_config_enabled(&self.custom_configs.enabled_skill_names());
                     let mut lines = vec!["Skills reloaded.".to_string()];
                     lines.extend(
                         self.skills
@@ -1458,7 +1460,10 @@ impl App {
             tabs.push(page.title.clone());
             namespaces.push(ns.clone());
         }
-        let providers_tab_idx = namespaces.iter().position(|ns| ns == "__providers__").unwrap_or(0);
+        let providers_tab_idx = namespaces
+            .iter()
+            .position(|ns| ns == "__providers__")
+            .unwrap_or(0);
         let num_tabs = tabs.len();
 
         let mut active = if let Some(tab) = start_tab {
@@ -1493,7 +1498,11 @@ impl App {
                     .collect()
             } else if active < namespaces.len() {
                 let ns = &namespaces[active];
-                let page_idx = custom.pages.iter().position(|(page_ns, _)| page_ns == ns).unwrap();
+                let page_idx = custom
+                    .pages
+                    .iter()
+                    .position(|(page_ns, _)| page_ns == ns)
+                    .unwrap();
                 let page = &custom.pages[page_idx].1;
                 page.fields
                     .iter()
@@ -1510,8 +1519,7 @@ impl App {
                             }
                             _ => value,
                         };
-                        if matches!(field.field_type, config::custom::ConfigFieldType::Bool)
-                        {
+                        if matches!(field.field_type, config::custom::ConfigFieldType::Bool) {
                             format!("{display} {label}")
                         } else {
                             format!("{:<30} {}", label, display)
@@ -1594,7 +1602,11 @@ impl App {
                         continue;
                     }
                     let ns = namespaces[active].clone();
-                    let page_idx = custom.pages.iter().position(|(page_ns, _)| page_ns == &ns).unwrap();
+                    let page_idx = custom
+                        .pages
+                        .iter()
+                        .position(|(page_ns, _)| page_ns == &ns)
+                        .unwrap();
                     let page = &custom.pages[page_idx].1;
                     let idx = self.active_prompt.as_ref().unwrap().selected;
                     if idx >= page.fields.len() {

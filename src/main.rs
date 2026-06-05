@@ -47,9 +47,21 @@ struct Dep {
 }
 
 const DEPS: &[Dep] = &[
-    Dep { bin: "uv", pkg: None, label: "uv (needed by web_search, task_list, subagent, cron)" },
-    Dep { bin: "git", pkg: None, label: "git (needed by /r skill and git workflow)" },
-    Dep { bin: "sqlite3", pkg: Some("sqlite3"), label: "sqlite3 (needed by /memory skill)" },
+    Dep {
+        bin: "uv",
+        pkg: None,
+        label: "uv (needed by web_search, task_list, subagent, cron)",
+    },
+    Dep {
+        bin: "git",
+        pkg: None,
+        label: "git (needed by /r skill and git workflow)",
+    },
+    Dep {
+        bin: "sqlite3",
+        pkg: Some("sqlite3"),
+        label: "sqlite3 (needed by /memory skill)",
+    },
 ];
 
 fn have_bin(name: &str) -> bool {
@@ -93,15 +105,37 @@ fn try_install(bin: &str, pkg: Option<&str>) -> bool {
             "sqlite3" => return false,
             _ => return false,
         };
-        return run_silent("winget", &["install", "--id", winget_id, "-e", "--source", "winget", "--accept-package-agreements"]);
+        return run_silent(
+            "winget",
+            &[
+                "install",
+                "--id",
+                winget_id,
+                "-e",
+                "--source",
+                "winget",
+                "--accept-package-agreements",
+            ],
+        );
     }
 
     // Fallback for uv: official installer
     if bin == "uv" {
         if cfg!(windows) {
-            return run_silent("powershell", &["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"]);
+            return run_silent(
+                "powershell",
+                &[
+                    "-ExecutionPolicy",
+                    "ByPass",
+                    "-c",
+                    "irm https://astral.sh/uv/install.ps1 | iex",
+                ],
+            );
         }
-        return run_silent("sh", &["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]);
+        return run_silent(
+            "sh",
+            &["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+        );
     }
 
     false
@@ -146,7 +180,9 @@ fn ensure_deps() {
         for dep in missing {
             eprintln!("  - {}: {}", dep.bin, dep.label);
         }
-        eprintln!("The base app works without these. They're only needed for the tools listed above.");
+        eprintln!(
+            "The base app works without these. They're only needed for the tools listed above."
+        );
     }
 
     let _ = std::fs::write(&marker, "");

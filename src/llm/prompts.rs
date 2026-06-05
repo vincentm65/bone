@@ -11,7 +11,9 @@ pub fn system_prompt() -> String {
         .filter(|m| !m.trim().is_empty())
         .map(|m| format!("\n# User Memory\nThe following preferences were extracted from past conversations:\n\n{m}\n"))
         .unwrap_or_default();
-    format!("{SYSTEM_PROMPT}Resolved config directory: {bone}\nCurrent working directory: {cwd}\n{memory}")
+    format!(
+        "{SYSTEM_PROMPT}Resolved config directory: {bone}\nCurrent working directory: {cwd}\n{memory}"
+    )
 }
 
 static SYSTEM_PROMPT: &str = "\

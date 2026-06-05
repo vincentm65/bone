@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bone codebase map</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; overflow: hidden; }
+#header { height: 50px; padding: 12px 20px; background: #161b22; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 18px; }
+#header h1 { font-size: 16px; font-weight: 650; color: #f0f6fc; }
+.tabs { display: flex; gap: 8px; }
+.tab { background: #0d1117; color: #8b949e; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+.tab.active { color: #f0f6fc; border-color: #58a6ff; background: #1f6feb22; }
+.stats { font-size: 12px; color: #8b949e; margin-left: auto; display: flex; gap: 16px; }
+.num { color: #58a6ff; font-weight: 650; }
+#main { height: calc(100vh - 50px); display: grid; grid-template-columns: 1fr 340px; }
+#canvas { overflow: auto; padding: 24px; }
+#sidebar { background: #161b22; border-left: 1px solid #30363d; overflow-y: auto; padding: 18px; }
+.view { display: none; max-width: 1180px; margin: 0 auto; }
+.view.active { display: block; }
+.title { color: #f0f6fc; font-size: 20px; margin-bottom: 6px; }
+.subtitle { color: #8b949e; font-size: 13px; margin-bottom: 22px; }
+.diagram { background: #0b1017; border: 1px solid #30363d; border-radius: 10px; padding: 24px; }
+.arch-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; align-items: stretch; }
+.box { background: #161b22; border: 1px solid #30363d; border-radius: 9px; padding: 14px; cursor: pointer; min-height: 92px; }
+.box:hover, .box.active { border-color: #58a6ff; background: #1f6feb18; }
+.box h3 { font-size: 14px; color: #f0f6fc; margin-bottom: 7px; }
+.box p { color: #8b949e; font-size: 12px; line-height: 1.4; }
+.box.core { border-color: #8957e5; } .box.llm { border-color: #58a6ff; } .box.ui { border-color: #3fb950; }
+.box.tools { border-color: #d29922; } .box.config { border-color: #ff7b72; } .box.skills { border-color: #d2a8ff; }
+.arrow-row { text-align: center; color: #58a6ff; font-size: 22px; margin: 8px 0; }
+.sequence { display: grid; grid-template-columns: 160px 1fr; gap: 0; }
+.actor { border-right: 1px solid #30363d; padding: 14px; color: #f0f6fc; font-weight: 650; }
+.step { padding: 14px 18px; border-bottom: 1px solid #21262d; cursor: pointer; }
+.step:hover, .step.active { background: #1f6feb18; }
+.step .n { color: #58a6ff; font-weight: 700; margin-right: 8px; }
+.step .files { display: block; color: #8b949e; font-size: 11px; margin-top: 4px; }
+.tree { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.55; }
+.tree-row { padding: 3px 7px; border-radius: 5px; cursor: pointer; white-space: pre; }
+.tree-row:hover, .tree-row.active { background: #1f6feb18; color: #f0f6fc; }
+.tree .dir { color: #58a6ff; font-weight: 650; }
+.tree .file { color: #c9d1d9; }
+.tree .note { color: #8b949e; font-family: system-ui, -apple-system, sans-serif; }
+.side-label { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: #484f58; margin: 14px 0 5px; }
+.side-title { color: #f0f6fc; font-size: 16px; font-weight: 650; margin-bottom: 6px; word-break: break-word; }
+.side-text { color: #8b949e; font-size: 12px; line-height: 1.45; }
+.pill { display: inline-block; font-size: 11px; color: #58a6ff; border: 1px solid #30363d; background: #0d1117; border-radius: 999px; padding: 3px 8px; margin: 3px; cursor: pointer; }
+.pill:hover { border-color: #58a6ff; }
+.flow-wrap { padding: 18px; overflow-x: auto; }
+#flowchart-svg { min-width: 1280px; }
+.fc-node { cursor: pointer; }
+.fc-node:hover rect, .fc-node:hover polygon { stroke: #58a6ff; stroke-width: 2.4; filter: drop-shadow(0 0 8px #1f6feb66); }
+.fc-node rect, .fc-node polygon { transition: stroke 0.15s, stroke-width 0.15s, filter 0.15s; }
+.fc-text { font-family: system-ui, -apple-system, sans-serif; pointer-events: none; }
+.fc-title { fill: #f0f6fc; font-size: 13px; font-weight: 700; }
+.fc-detail { fill: #8b949e; font-size: 10.5px; }
+.fc-file { fill: #58a6ff; font-size: 9px; }
+.fc-small { fill: #8b949e; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; }
+.fc-label-bg { fill: #0d1117; stroke: #30363d; stroke-width: 1; }
+.fc-text.label { fill: #c9d1d9; font-size: 10px; font-weight: 650; }
+.fc-arrow { stroke: #484f58; fill: none; stroke-width: 1.7; }
+.fc-arrow.yes { stroke: #3fb950; }
+.fc-arrow.no { stroke: #ff7b72; }
+.fc-arrow.loop { stroke: #d29922; stroke-dasharray: 6,4; }
+.fc-lane { fill: #0d1117; stroke: #21262d; stroke-width: 1; }
+.fc-lane-title { fill: #8b949e; font-size: 12px; font-weight: 750; letter-spacing: .4px; }
+.fc-note { fill: #161b22; stroke: #30363d; stroke-width: 1; }
+.fc-note-text { fill: #8b949e; font-size: 10px; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>bone codebase map</h1>
+  <div class="tabs">
+    <button class="tab active" data-view="architecture">Architecture</button>
+    <button class="tab" data-view="flowchart">Flowchart</button>
+    <button class="tab" data-view="source">Source map</button>
+  </div>
+  <div class="stats">
+    <span>files <span class="num" id="stat-files">-</span></span>
+    <span>modules <span class="num" id="stat-modules">-</span></span>
+    <span>loc <span class="num" id="stat-lines">-</span></span>
+  </div>
+</div>
+
+<div id="main">
+  <div id="canvas">
+    <section id="architecture" class="view active">
+      <div class="title">Architecture overview</div>
+      <div class="subtitle">C4-style component map: the few runtime parts that matter.</div>
+      <div class="diagram">
+        <div class="arch-grid">
+          <div class="box core" data-key="user"><h3>User</h3><p>Types prompts and approves tool use.</p></div>
+          <div class="box ui" data-key="ui"><h3>CLI / Terminal UI</h3><p>Input, rendering, panes, commands, streaming display.</p></div>
+          <div class="box core" data-key="agent"><h3>Agent runtime</h3><p>Main orchestration loop for chat, LLM calls, tools, and session state.</p></div>
+          <div class="box config" data-key="config"><h3>Config</h3><p>Providers, command policy, custom instructions, skill/tool definitions.</p></div>
+        </div>
+        <div class="arrow-row">↓</div>
+        <div class="arch-grid">
+          <div class="box llm" data-key="llm"><h3>LLM abstraction</h3><p>Provider trait, prompts, token tracking, provider adapters.</p></div>
+          <div class="box tools" data-key="tools"><h3>Tools</h3><p>Shell, file editing, read/write, dynamic tools, registry, policy checks.</p></div>
+          <div class="box skills" data-key="skills"><h3>Skills</h3><p>Reusable YAML/script workflows loaded into the agent.</p></div>
+          <div class="box core" data-key="session"><h3>Session DB</h3><p>Persists conversations and runtime history.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="sequence" class="view">
+      <div class="title">Runtime flow: user sends a prompt</div>
+      <div class="subtitle">Sequence diagram for the main behavior path.</div>
+      <div class="diagram sequence">
+        <div class="actor">User</div><div class="step" data-key="user"><span class="n">1</span>Enters a message<span class="files">terminal input</span></div>
+        <div class="actor">CLI / UI</div><div class="step" data-key="ui"><span class="n">2</span>Reads input and builds chat context<span class="files">src/main.rs, src/ui/app/mod.rs, src/ui/app/stream/mod.rs</span></div>
+        <div class="actor">Agent</div><div class="step" data-key="agent"><span class="n">3</span>Orchestrates the turn and decides whether tools are needed<span class="files">src/agent.rs, src/run.rs, src/chat.rs</span></div>
+        <div class="actor">LLM</div><div class="step" data-key="llm"><span class="n">4</span>Sends request to the selected provider<span class="files">src/llm/provider.rs, src/llm/providers/*</span></div>
+        <div class="actor">Tools</div><div class="step" data-key="tools"><span class="n">5</span>If requested, validates policy and executes tool calls<span class="files">src/tools/registry.rs, src/tools/dynamic.rs, src/tools/*</span></div>
+        <div class="actor">UI / DB</div><div class="step" data-key="session"><span class="n">6</span>Streams output, renders messages, and records session state<span class="files">src/ui/render/*, src/session_db.rs</span></div>
+      </div>
+    </section>
+
+    <section id="source" class="view">
+      <div class="title">Annotated source map</div>
+      <div class="subtitle">File tree grouped by responsibility. Click a row for details.</div>
+      <div class="diagram"><div id="tree" class="tree"></div></div>
+    </section>
+
+    <section id="flowchart" class="view">
+      <div class="title">Main execution flowchart</div>
+      <div class="subtitle">How bone processes a single user turn from input to output.</div>
+      <div class="diagram flow-wrap">
+        <svg id="flowchart-svg" style="width: 100%; height: auto;"></svg>
+      </div>
+    </section>
+  </div>
+  <aside id="sidebar"></aside>
+</div>
+
+<script>
+// ─── Data ─────────────────────────────────────────────────────────────────
+const DATA = {
+  name: "bone", type: "root", path: "src/", loc: 13667,
+  children: [
+    { name: "core", type: "module", children: [
+      { name:"main.rs",        type:"file", path:"src/main.rs",        loc:320, imports:["agent","config","llm","run","ui/app"] },
+      { name:"lib.rs",         type:"file", path:"src/lib.rs",         loc:9,   imports:[] },
+      { name:"agent.rs",       type:"file", path:"src/agent.rs",       loc:502, imports:["chat","config","llm","tools"] },
+      { name:"chat.rs",        type:"file", path:"src/chat.rs",        loc:176, imports:["llm"] },
+      { name:"run.rs",         type:"file", path:"src/run.rs",         loc:127, imports:["agent","skills","tools"] },
+      { name:"session_db.rs",  type:"file", path:"src/session_db.rs",  loc:318, imports:[] },
+    ]},
+    { name: "llm", type: "module", children: [
+      { name:"mod.rs",           type:"file", path:"src/llm/mod.rs",           loc:9,   imports:[] },
+      { name:"provider.rs",      type:"file", path:"src/llm/provider.rs",      loc:218, imports:["tools"] },
+      { name:"prompts.rs",       type:"file", path:"src/llm/prompts.rs",       loc:50,  imports:["config"] },
+      { name:"token_tracker.rs", type:"file", path:"src/llm/token_tracker.rs", loc:147, imports:[] },
+      { name: "providers", type: "module", children: [
+        { name:"mod.rs",               type:"file", path:"src/llm/providers/mod.rs",           loc:41,  imports:["config"] },
+        { name:"codex.rs",             type:"file", path:"src/llm/providers/codex.rs",         loc:565, imports:["config","llm/provider","tools"] },
+        { name:"openai_compat/mod.rs", type:"file", path:"src/llm/providers/openai_compat/mod.rs", loc:375, imports:["config","llm/provider","tools"] },
+      ]},
+    ]},
+    { name: "ui", type: "module", children: [
+      { name:"mod.rs",        type:"file", path:"src/ui/mod.rs",        loc:8,   imports:[] },
+      { name:"input.rs",      type:"file", path:"src/ui/input.rs",      loc:324, imports:[] },
+      { name:"pane_page.rs",  type:"file", path:"src/ui/pane_page.rs",  loc:50,  imports:[] },
+      { name:"prompt.rs",     type:"file", path:"src/ui/prompt.rs",     loc:99,  imports:[] },
+      { name:"theme.rs",      type:"file", path:"src/ui/theme.rs",      loc:40,  imports:[] },
+      { name:"tool_display.rs", type:"file", path:"src/ui/tool_display.rs", loc:387, imports:["chat","tools/types"] },
+      { name: "commands", type: "module", children: [
+        { name:"mod.rs", type:"file", path:"src/ui/commands/mod.rs", loc:176, imports:["chat","config","llm","ui/render"] },
+      ]},
+      { name: "app", type: "module", children: [
+        { name:"mod.rs", type:"file", path:"src/ui/app/mod.rs", loc:1798, imports:["chat","config","llm","session_db","skills","skills/types","tools/script_runner","tools"] },
+        { name: "stream", type: "module", children: [
+          { name:"mod.rs", type:"file", path:"src/ui/app/stream/mod.rs", loc:1203, imports:["chat","llm","tools/edit_file","tools/shell","tools/types","tools","ui/input","ui/pane_page","ui/prompt","ui/render","ui/tool_display","tools/command_policy"] },
+        ]},
+      ]},
+      { name: "render", type: "module", children: [
+        { name:"mod.rs",    type:"file", path:"src/ui/render/mod.rs",    loc:423, imports:["chat","llm","tools","ui/pane_page"] },
+        { name:"backend.rs",type:"file", path:"src/ui/render/backend.rs",loc:188, imports:[] },
+        { name:"banner.rs", type:"file", path:"src/ui/render/banner.rs", loc:91,  imports:[] },
+        { name:"bottom_pane.rs", type:"file", path:"src/ui/render/bottom_pane.rs", loc:728, imports:["tools","ui/pane_page","ui/tool_display"] },
+        { name:"markdown.rs",type:"file", path:"src/ui/render/markdown.rs",loc:799, imports:[] },
+        { name:"messages.rs",type:"file", path:"src/ui/render/messages.rs",loc:304, imports:["chat","llm","ui/render","ui/theme"] },
+        { name:"wrap.rs",   type:"file", path:"src/ui/render/wrap.rs",   loc:114, imports:[] },
+      ]},
+    ]},
+    { name: "tools", type: "module", children: [
+      { name:"mod.rs",         type:"file", path:"src/tools/mod.rs",         loc:220, imports:[] },
+      { name:"types.rs",       type:"file", path:"src/tools/types.rs",       loc:113, imports:["ui/pane_page","tools/command_policy"] },
+      { name:"dynamic.rs",     type:"file", path:"src/tools/dynamic.rs",     loc:740, imports:["tools/command_policy","tools/script_runner","tools/types","ui/pane_page","ui/render"] },
+      { name:"registry.rs",    type:"file", path:"src/tools/registry.rs",    loc:336, imports:["tools/command_policy","tools/state_map","tools/types"] },
+      { name:"script_runner.rs",type:"file",path:"src/tools/script_runner.rs",loc:173, imports:[] },
+      { name:"shell.rs",       type:"file", path:"src/tools/shell.rs",       loc:80,  imports:["tools/script_runner","tools/types"] },
+      { name:"read_file.rs",   type:"file", path:"src/tools/read_file.rs",   loc:70,  imports:["tools/types"] },
+      { name:"write_file.rs",  type:"file", path:"src/tools/write_file.rs",  loc:63,  imports:["tools/types","tools/write_atomic"] },
+      { name:"write_atomic.rs",type:"file", path:"src/tools/write_atomic.rs",loc:48,  imports:[] },
+      { name:"state_map.rs",   type:"file", path:"src/tools/state_map.rs",   loc:43,  imports:[] },
+      { name: "command_policy", type: "module", children: [
+        { name:"mod.rs", type:"file", path:"src/tools/command_policy/mod.rs", loc:478, imports:["config","tools/types"] },
+      ]},
+      { name: "edit_file", type: "module", children: [
+        { name:"mod.rs", type:"file", path:"src/tools/edit_file/mod.rs", loc:600, imports:["tools/types","tools/write_atomic"] },
+        { name:"diff.rs", type:"file", path:"src/tools/edit_file/diff.rs", loc:98,  imports:[] },
+      ]},
+    ]},
+    { name: "config", type: "module", children: [
+      { name:"mod.rs",            type:"file", path:"src/config/mod.rs",            loc:246, imports:["tools"] },
+      { name:"custom.rs",         type:"file", path:"src/config/custom.rs",         loc:306, imports:[] },
+      { name:"providers_config.rs",type:"file",path:"src/config/providers_config.rs",loc:97, imports:[] },
+    ]},
+    { name: "skills", type: "module", children: [
+      { name:"mod.rs",  type:"file", path:"src/skills/mod.rs",  loc:281, imports:["tools","tools/script_runner"] },
+      { name:"types.rs",type:"file", path:"src/skills/types.rs",loc:86,  imports:["tools/command_policy"] },
+    ]},
+  ]
+};
+
+const COLORS = {
+  core:   { fill: "#8957e533", stroke: "#8957e5", text: "#d2a8ff" },
+  llm:    { fill: "#1f6feb33", stroke: "#58a6ff", text: "#58a6ff" },
+  ui:     { fill: "#23863633", stroke: "#3fb950", text: "#3fb950" },
+  tools:  { fill: "#9e6a0333", stroke: "#d29922", text: "#d29922" },
+  config: { fill: "#da363333", stroke: "#ff7b72", text: "#ff7b72" },
+  skills: { fill: "#8957e533", stroke: "#d2a8ff", text: "#d2a8ff" },
+};
+
+// ─── Index ────────────────────────────────────────────────────────────────
+let nodeIndex = {};
+let fileNodes = [];
+let edges = [];
+
+function flatten(node, parent) {
+  node.parent = parent;
+  let key = node.path || node.name;
+  nodeIndex[key] = node;
+  if (node.type === "file") fileNodes.push(node);
+  if (node.children) node.children.forEach(c => flatten(c, node));
+}
+flatten(DATA, null);
+
+// Build edges
+fileNodes.forEach(f => {
+  if (!f.imports) return;
+  f.imports.forEach(imp => {
+    let target = nodeIndex[imp] ||
+      nodeIndex["src/" + imp + ".rs"] ||
+      nodeIndex["src/" + imp + "/mod.rs"];
+    if (!target) {
+      for (let k in nodeIndex) {
+        let n = nodeIndex[k];
+        if (n.type === "file" && (n.name === imp + ".rs" || n.name === imp)) {
+          target = n; break;
+        }
+      }
+    }
+    if (target && target !== f) edges.push({ source: f, target });
+  });
+});
+
+Object.values(nodeIndex).forEach(n => { n.importedBy = []; });
+edges.forEach(e => { e.target.importedBy.push(e.source); });
+
+document.getElementById("stat-files").textContent = fileNodes.length;
+let modCount = Object.keys(nodeIndex).length;
+document.getElementById("stat-modules").textContent = modCount;
+document.getElementById("stat-lines").textContent = DATA.loc.toLocaleString();
+
+// ─── Flowchart rendering ─────────────────────────────────────────────────
+function renderFlowchart() {
+  const svg = document.getElementById("flowchart-svg");
+  const W = 1280, H = 1680;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = "";
+
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (name, attrs = {}, parent = svg) => {
+    const node = document.createElementNS(NS, name);
+    Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, v));
+    parent.appendChild(node);
+    return node;
+  };
+
+  const defs = el("defs");
+  [
+    ["arrowhead", "#58a6ff"],
+    ["arrowhead-yes", "#3fb950"],
+    ["arrowhead-no", "#ff7b72"],
+    ["arrowhead-loop", "#d29922"],
+  ].forEach(([id, color]) => {
+    const marker = el("marker", { id, viewBox: "0 -5 10 10", refX: 10, refY: 0, markerWidth: 7, markerHeight: 7, orient: "auto" }, defs);
+    el("path", { d: "M0,-5L10,0L0,5", fill: color }, marker);
+  });
+
+  const chart = el("g");
+  const lanes = [
+    { x: 40,  w: 260, title: "Terminal / user" },
+    { x: 330, w: 290, title: "Agent orchestration" },
+    { x: 650, w: 260, title: "LLM provider" },
+    { x: 940, w: 300, title: "Tools, policy, storage" },
+  ];
+  lanes.forEach(l => {
+    el("rect", { class: "fc-lane", x: l.x, y: 24, width: l.w, height: H - 58, rx: 12 }, chart);
+    el("text", { class: "fc-text fc-lane-title", x: l.x + 14, y: 50 }, chart).textContent = l.title;
+  });
+
+  const nodes = [
+    { id:"start", type:"term", x:170, y:110, w:180, h:74, title:"Start bone", details:["CLI boots interactive app"], files:["src/main.rs"] },
+    { id:"config", type:"proc", x:475, y:110, w:230, h:96, title:"Load runtime config", details:["providers.yaml", "policy + custom instructions"], files:["src/config/mod.rs"] },
+    { id:"skills", type:"proc", x:1090, y:110, w:230, h:96, title:"Register extensions", details:["built-in tools", "dynamic tools + skills"], files:["src/tools/registry.rs", "src/skills/mod.rs"] },
+    { id:"input", type:"proc", x:170, y:260, w:225, h:98, title:"Read user turn", details:["prompt text", "slash commands / panes"], files:["src/ui/input.rs", "src/ui/commands/mod.rs"] },
+    { id:"command", type:"decision", x:475, y:260, w:168, h:118, title:"Slash command?", details:["route before LLM"], files:["src/ui/commands/mod.rs"] },
+    { id:"command-render", type:"proc", x:170, y:420, w:225, h:96, title:"Handle command", details:["render local response", "update app state"], files:["src/ui/app/mod.rs"] },
+    { id:"context", type:"proc", x:475, y:420, w:240, h:102, title:"Build chat context", details:["system + developer prompts", "history + attachments"], files:["src/chat.rs", "src/llm/prompts.rs"] },
+    { id:"request", type:"proc", x:780, y:420, w:225, h:102, title:"Create LLM request", details:["model, provider, tools", "token tracking"], files:["src/llm/provider.rs", "src/llm/token_tracker.rs"] },
+    { id:"provider", type:"proc", x:780, y:590, w:225, h:102, title:"Stream provider output", details:["Codex or OpenAI compat", "assistant deltas"], files:["src/llm/providers/codex.rs", "src/llm/providers/openai_compat/mod.rs"] },
+    { id:"tool-decision", type:"decision", x:475, y:590, w:176, h:124, title:"Tool calls?", details:["assistant requested actions"], files:["src/agent.rs", "src/ui/app/stream/mod.rs"] },
+    { id:"render", type:"proc", x:170, y:760, w:230, h:102, title:"Render assistant text", details:["markdown, messages", "bottom pane updates"], files:["src/ui/render/messages.rs", "src/ui/render/markdown.rs"] },
+    { id:"dispatch", type:"proc", x:1090, y:760, w:230, h:106, title:"Dispatch tool call", details:["parse args", "match registry entry"], files:["src/tools/registry.rs", "src/tools/types.rs"] },
+    { id:"policy", type:"decision", x:1090, y:930, w:176, h:126, title:"Allowed now?", details:["read-only, edit, danger", "command policy"], files:["src/tools/command_policy/mod.rs"] },
+    { id:"approve", type:"proc", x:780, y:930, w:230, h:102, title:"Ask for approval", details:["show command/tool", "accept custom answer"], files:["src/ui/app/stream/mod.rs"] },
+    { id:"denied", type:"proc", x:1090, y:1100, w:230, h:96, title:"Return denial", details:["tool result explains", "why it was blocked"], files:["src/tools/types.rs"] },
+    { id:"execute", type:"proc", x:1090, y:1260, w:240, h:112, title:"Execute tool", details:["shell / file / dynamic", "capture stdout, diff, errors"], files:["src/tools/shell.rs", "src/tools/edit_file/mod.rs", "src/tools/dynamic.rs"] },
+    { id:"collect", type:"proc", x:780, y:1260, w:235, h:102, title:"Append tool result", details:["add result to chat", "continue same turn"], files:["src/tools/types.rs", "src/chat.rs"] },
+    { id:"again", type:"decision", x:475, y:1260, w:176, h:126, title:"Another LLM pass?", details:["continue tool loop", "or finalize"], files:["src/agent.rs"] },
+    { id:"persist", type:"proc", x:475, y:1480, w:240, h:102, title:"Persist session", details:["messages + metadata", "recover later"], files:["src/session_db.rs"] },
+    { id:"end", type:"term", x:170, y:1480, w:180, h:74, title:"Turn complete", details:["ready for next prompt"], files:[] },
+  ];
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+
+  const links = [
+    ["start","config",""] , ["config","skills",""] , ["skills","input",""] ,
+    ["input","command",""] , ["command","command-render","yes","no"], ["command","context","no","yes"],
+    ["command-render","input","next prompt","loop"], ["context","request",""] , ["request","provider",""] ,
+    ["provider","tool-decision",""] , ["tool-decision","render","no tools","no"], ["tool-decision","dispatch","tool call","yes"],
+    ["dispatch","policy",""] , ["policy","approve","needs approval","yes"], ["approve","execute","approved","yes"],
+    ["approve","denied","denied","no"], ["policy","execute","allowed","yes"], ["policy","denied","blocked","no"],
+    ["execute","collect",""] , ["denied","collect",""] , ["collect","again",""] ,
+    ["again","request","ask LLM again","loop"], ["again","render","final answer","no"],
+    ["render","persist",""] , ["persist","end",""] ,
+  ];
+
+  function edgePoint(n, target) {
+    const dx = target.x - n.x, dy = target.y - n.y;
+    if (Math.abs(dx) > Math.abs(dy)) return { x: n.x + Math.sign(dx) * n.w / 2, y: n.y };
+    return { x: n.x, y: n.y + Math.sign(dy) * n.h / 2 };
+  }
+  function route(a, b, kind) {
+    const s = edgePoint(a, b), e = edgePoint(b, a);
+    if (kind === "loop") {
+      const bend = Math.min(W - 35, Math.max(s.x, e.x) + 70);
+      return `M${s.x},${s.y} C${bend},${s.y} ${bend},${e.y} ${e.x},${e.y}`;
+    }
+    if (Math.abs(s.x - e.x) < 8 || Math.abs(s.y - e.y) < 8) return `M${s.x},${s.y} L${e.x},${e.y}`;
+    const midX = (s.x + e.x) / 2;
+    return `M${s.x},${s.y} L${midX},${s.y} L${midX},${e.y} L${e.x},${e.y}`;
+  }
+  function labelAt(a, b, text, kind) {
+    let x = (a.x + b.x) / 2, y = (a.y + b.y) / 2 - 18;
+    if (kind === "loop") { x += 42; y -= 8; }
+    if (kind === "yes") y -= 8;
+    if (kind === "no") y += 8;
+    const w = Math.max(52, text.length * 6 + 18);
+    el("rect", { class: "fc-label-bg", x: x - w/2, y: y - 14, width: w, height: 18, rx: 9 }, chart);
+    el("text", { class: "fc-text label", x, y, "text-anchor":"middle" }, chart).textContent = text;
+  }
+
+  links.forEach(([from, to, label, kind]) => {
+    const a = byId[from], b = byId[to];
+    const cls = kind === "yes" ? "fc-arrow yes" : kind === "no" ? "fc-arrow no" : kind === "loop" ? "fc-arrow loop" : "fc-arrow";
+    const marker = kind === "yes" ? "arrowhead-yes" : kind === "no" ? "arrowhead-no" : kind === "loop" ? "arrowhead-loop" : "arrowhead";
+    el("path", { class: cls, d: route(a, b, kind), "marker-end": `url(#${marker})` }, chart);
+    if (label) labelAt(a, b, label, kind);
+  });
+
+  function addWrappedText(parent, lines, x, y, cls, size) {
+    lines.forEach((line, i) => {
+      el("text", { class: `fc-text ${cls}`, x, y: y + i * size, "text-anchor": "middle" }, parent).textContent = line;
+    });
+  }
+  nodes.forEach(node => {
+    const g = el("g", { class: "fc-node", "data-node": node.id }, chart);
+    if (node.type === "decision") {
+      el("polygon", { points: `${node.x},${node.y-node.h/2} ${node.x+node.w/2},${node.y} ${node.x},${node.y+node.h/2} ${node.x-node.w/2},${node.y}`, fill: "#9e6a0333", stroke: "#d29922", "stroke-width": 1.6 }, g);
+    } else {
+      const fill = node.type === "term" ? "#23863633" : "#161b22";
+      const stroke = node.type === "term" ? "#3fb950" : "#30363d";
+      el("rect", { x: node.x-node.w/2, y: node.y-node.h/2, width: node.w, height: node.h, rx: node.type === "term" ? 22 : 8, fill, stroke, "stroke-width": 1.6 }, g);
+    }
+    addWrappedText(g, [node.title], node.x, node.y - 24, "fc-title", 13);
+    addWrappedText(g, node.details, node.x, node.y - 5, "fc-detail", 13);
+    if (node.files && node.files.length) {
+      const f = node.files[0].replace("src/", "");
+      el("text", { class: "fc-text fc-file", x: node.x, y: node.y + node.h/2 - 13, "text-anchor": "middle" }, g).textContent = f;
+    }
+    g.addEventListener("click", () => { if (node.files && node.files.length) showFile(node.files[0]); });
+  });
+
+  const legend = el("g", {}, chart);
+  el("rect", { class: "fc-note", x: 42, y: 1588, width: 1196, height: 56, rx: 10 }, legend);
+  el("text", { class: "fc-text fc-small", x: 62, y: 1612 }, legend).textContent = "Legend";
+  el("text", { class: "fc-text fc-note-text", x: 62, y: 1634 }, legend).textContent = "Green arrows are approved/yes paths, red arrows are no/blocked paths, dashed amber arrows are loops back into the same user turn. Click any box to inspect its source files.";
+}
+
+// ─── Clear codebase views ───────────────────────────────────────────────
+const sidebar = document.getElementById("sidebar");
+
+const COMPONENTS = {
+  user: {
+    title: "User",
+    text: "Human operator using the terminal app. Provides prompts and approves tool actions when policy requires it.",
+    files: []
+  },
+  ui: {
+    title: "CLI / Terminal UI",
+    text: "Owns terminal input, app state, streaming display, rendering, panes, slash commands, markdown, and tool output formatting.",
+    files: ["src/main.rs", "src/ui/app/mod.rs", "src/ui/app/stream/mod.rs", "src/ui/input.rs", "src/ui/render/mod.rs", "src/ui/render/messages.rs", "src/ui/render/bottom_pane.rs", "src/ui/tool_display.rs", "src/ui/commands/mod.rs"]
+  },
+  agent: {
+    title: "Agent runtime",
+    text: "Coordinates a user turn: chat history, prompts, LLM calls, tool-call loop, run mode, and high-level orchestration.",
+    files: ["src/agent.rs", "src/run.rs", "src/chat.rs", "src/lib.rs"]
+  },
+  llm: {
+    title: "LLM abstraction and providers",
+    text: "Defines the provider interface, prompt construction, token tracking, and concrete provider implementations.",
+    files: ["src/llm/provider.rs", "src/llm/prompts.rs", "src/llm/token_tracker.rs", "src/llm/providers/codex.rs", "src/llm/providers/openai_compat/mod.rs", "src/llm/providers/mod.rs"]
+  },
+  tools: {
+    title: "Tool system",
+    text: "Registry and execution layer for file tools, shell commands, dynamic tools, edit operations, policy checks, and tool result types.",
+    files: ["src/tools/mod.rs", "src/tools/registry.rs", "src/tools/dynamic.rs", "src/tools/types.rs", "src/tools/shell.rs", "src/tools/read_file.rs", "src/tools/write_file.rs", "src/tools/edit_file/mod.rs", "src/tools/command_policy/mod.rs"]
+  },
+  config: {
+    title: "Config",
+    text: "Loads user/project settings, provider definitions, custom instructions, and command/tool policy configuration.",
+    files: ["src/config/mod.rs", "src/config/custom.rs", "src/config/providers_config.rs", "src/llm/providers/mod.rs", "src/tools/command_policy/mod.rs"]
+  },
+  skills: {
+    title: "Skills",
+    text: "Loads reusable skill definitions and script-backed workflows exposed to the agent.",
+    files: ["src/skills/mod.rs", "src/skills/types.rs"]
+  },
+  session: {
+    title: "Session DB",
+    text: "Stores and retrieves conversation/session history for continuity across runs.",
+    files: ["src/session_db.rs"]
+  }
+};
+
+const NOTES = {
+  "src/main.rs": "binary entry point; wires config, agent, run mode, and UI",
+  "src/lib.rs": "library exports",
+  "src/agent.rs": "main agent orchestration loop",
+  "src/chat.rs": "chat messages and conversation state",
+  "src/run.rs": "run-mode execution path",
+  "src/session_db.rs": "persistent session storage",
+  "src/llm/provider.rs": "provider trait and LLM request/response model",
+  "src/llm/prompts.rs": "system/developer prompt construction",
+  "src/llm/token_tracker.rs": "token accounting",
+  "src/llm/providers/codex.rs": "Codex provider adapter",
+  "src/llm/providers/openai_compat/mod.rs": "OpenAI-compatible provider adapter",
+  "src/ui/app/mod.rs": "main interactive terminal app",
+  "src/ui/app/stream/mod.rs": "streaming turn loop and tool-call UI integration",
+  "src/ui/input.rs": "terminal input handling",
+  "src/ui/render/mod.rs": "rendering facade",
+  "src/ui/render/bottom_pane.rs": "bottom pane rendering",
+  "src/ui/render/markdown.rs": "markdown rendering",
+  "src/ui/tool_display.rs": "formats tool calls and results",
+  "src/tools/registry.rs": "built-in tool registry",
+  "src/tools/dynamic.rs": "dynamic tool execution",
+  "src/tools/types.rs": "tool schemas and result types",
+  "src/tools/command_policy/mod.rs": "approval and command policy checks",
+  "src/tools/edit_file/mod.rs": "edit-file tool",
+  "src/tools/shell.rs": "shell command tool",
+  "src/config/mod.rs": "configuration loader",
+  "src/skills/mod.rs": "skill loader"
+};
+
+function showComponent(key) {
+  const c = COMPONENTS[key];
+  if (!c) return;
+  clearActive();
+  document.querySelectorAll(`[data-key="${key}"]`).forEach(el => el.classList.add("active"));
+  let html = `<div class="side-label">component</div><div class="side-title">${c.title}</div><div class="side-text">${c.text}</div>`;
+  if (c.files.length) {
+    html += `<div class="side-label">important files</div>`;
+    c.files.forEach(f => html += `<span class="pill" data-file="${f}">${f}</span>`);
+  }
+  sidebar.innerHTML = html;
+  sidebar.querySelectorAll("[data-file]").forEach(el => el.addEventListener("click", () => showFile(el.dataset.file)));
+}
+
+function showFile(path) {
+  const f = fileNodes.find(n => n.path === path);
+  clearActive();
+  document.querySelectorAll(`[data-file="${path}"]`).forEach(el => el.classList.add("active"));
+  if (!f) {
+    sidebar.innerHTML = `<div class="side-label">file</div><div class="side-title">${path}</div><div class="side-text">Referenced group path.</div>`;
+    return;
+  }
+  let html = `<div class="side-label">file</div><div class="side-title">${f.path}</div><div class="side-text">${NOTES[f.path] || "Source file in the bone codebase."}</div>`;
+  html += `<div class="side-label">size</div><div class="side-text">${f.loc} lines</div>`;
+  if (f.imports && f.imports.length) {
+    html += `<div class="side-label">imports</div>`;
+    f.imports.forEach(i => html += `<span class="pill" data-import="${i}">${i}</span>`);
+  }
+  if (f.importedBy && f.importedBy.length) {
+    html += `<div class="side-label">used by</div>`;
+    f.importedBy.forEach(i => html += `<span class="pill" data-file="${i.path}">${i.path}</span>`);
+  }
+  sidebar.innerHTML = html;
+  sidebar.querySelectorAll("[data-file]").forEach(el => el.addEventListener("click", () => showFile(el.dataset.file)));
+  sidebar.querySelectorAll("[data-import]").forEach(el => el.addEventListener("click", () => {
+    const t = resolveImport(el.dataset.import);
+    if (t && t.path) showFile(t.path);
+  }));
+}
+
+function resolveImport(imp) {
+  let target = nodeIndex[imp] || nodeIndex["src/" + imp + ".rs"] || nodeIndex["src/" + imp + "/mod.rs"];
+  if (!target) {
+    for (const k in nodeIndex) {
+      const n = nodeIndex[k];
+      if (n.type === "file" && (n.name === imp + ".rs" || n.name === imp || n.path === imp)) return n;
+    }
+  }
+  return target;
+}
+
+function clearActive() {
+  document.querySelectorAll(".active.box, .active.step, .active.tree-row").forEach(el => el.classList.remove("active"));
+}
+
+function renderTree() {
+  const tree = document.getElementById("tree");
+  const lines = [];
+  function walk(n, depth) {
+    if (n.type === "root") {
+      lines.push({ text: "src/", cls: "dir", path: null });
+    } else if (n.type === "module") {
+      lines.push({ text: `${"  ".repeat(depth)}${n.name}/`, cls: "dir", path: null });
+    } else {
+      const note = NOTES[n.path] || `${n.loc} loc`;
+      lines.push({ text: `${"  ".repeat(depth)}${n.name}`, cls: "file", path: n.path, note });
+    }
+    (n.children || []).forEach(c => walk(c, n.type === "root" ? 1 : depth + 1));
+  }
+  walk(DATA, 0);
+  tree.innerHTML = lines.map(l => {
+    if (l.path) return `<div class="tree-row" data-file="${l.path}"><span class="file">${l.text.padEnd(36, " ")}</span> <span class="note"># ${l.note}</span></div>`;
+    return `<div class="tree-row"><span class="dir">${l.text}</span></div>`;
+  }).join("");
+  tree.querySelectorAll("[data-file]").forEach(el => el.addEventListener("click", () => showFile(el.dataset.file)));
+}
+
+function switchView(id) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.view === id));
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === id));
+}
+
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => switchView(t.dataset.view)));
+document.querySelectorAll("[data-key]").forEach(el => el.addEventListener("click", () => showComponent(el.dataset.key)));
+renderTree();
+renderFlowchart();
+showComponent("agent");
+</script>
+</body>
+</html>

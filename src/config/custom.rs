@@ -81,7 +81,6 @@ pub fn seed_builtin_pages() {
 impl CustomConfigs {
     /// Scan `~/.bone-rust/config/` for `*.yaml` files and load them.
     pub fn load() -> Self {
-        seed_builtin_pages();
         migrate_old_values_file();
 
         let dir = config_dir();

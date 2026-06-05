@@ -26,6 +26,9 @@ script: |
   task="${TOOL_TASK:-}"
 
   bone_bin="${BONE_BIN:-bone}"
+  if [ ! -x "$bone_bin" ]; then
+    bone_bin="$(command -v bone || printf '%s' "$bone_bin")"
+  fi
 
   args=(agent --events --approval "$approval" --prompt "$task")
   if [ -n "${TOOL_PROVIDER:-}" ]; then

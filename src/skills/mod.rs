@@ -27,20 +27,16 @@ pub struct SkillStore {
 
 impl SkillStore {
     pub fn load() -> io::Result<Self> {
-        Self::load_from_dir(&crate::config::skills_dir(), true)
+        fs::create_dir_all(&crate::config::skills_dir())?;
+        Self::scan(&crate::config::skills_dir())
     }
 
-    pub fn load_from_dir(dir: &Path, seed_examples: bool) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
-        if seed_examples {
-            seed_example_skills(dir)?;
-        }
+    pub fn load_from_dir(dir: &Path) -> io::Result<Self> {
         Self::scan(dir)
     }
 
     pub fn reload(&mut self) -> io::Result<()> {
-        let dir = crate::config::skills_dir();
-        *self = Self::load_from_dir(&dir, true)?;
+        *self = Self::load()?;
         Ok(())
     }
 
@@ -108,7 +104,6 @@ impl SkillStore {
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
-
 
     /// Override skill enabled/disabled state from config page settings.
     /// Skills not listed in `enabled_names` are disabled.
@@ -229,7 +224,8 @@ fn next_marker<'a>(
     }
 }
 
-fn seed_example_skills(dir: &Path) -> io::Result<()> {
+pub fn seed_example_skills() -> io::Result<()> {
+    let dir = crate::config::skills_dir();
     let data_dir = crate::config::bone_dir().join("data");
     let version_path = data_dir.join("skills_version");
     let current_version = std::fs::read_to_string(&version_path).unwrap_or_default();
@@ -238,13 +234,11 @@ fn seed_example_skills(dir: &Path) -> io::Result<()> {
         return Ok(());
     }
 
-    let has_yaml = fs::read_dir(dir)
-        .ok()
-        .map_or(false, |entries| {
-            entries.filter_map(Result::ok).any(|entry| {
-                entry.path().extension().is_some_and(|ext| ext == "yaml")
-            })
-        });
+    let has_yaml = fs::read_dir(&dir).ok().map_or(false, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "yaml"))
+    });
 
     if !has_yaml {
         for (file_name, content) in DEFAULT_SKILLS {
@@ -255,4 +249,3 @@ fn seed_example_skills(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(&data_dir)?;
     fs::write(&version_path, SKILLS_VERSION)
 }
-

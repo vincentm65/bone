@@ -40,31 +40,11 @@ fn loads_valid_skills_and_reports_invalid_or_duplicate_entries() {
         "name: tools\ndescription: collision\nprompt: no\n",
     );
 
-    let store = SkillStore::load_from_dir(&dir, false).unwrap();
+    let store = SkillStore::load_from_dir(&dir).unwrap();
 
     assert_eq!(store.list().count(), 1);
     assert!(store.get_enabled("report").is_some());
     assert_eq!(store.warnings().len(), 2);
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn skill_enabled_defaults_true_and_toggling_persists() {
-    let dir = temp_dir("toggle");
-    write_skill(
-        &dir,
-        "draft.yaml",
-        "name: draft\ndescription: Draft\nprompt: '{{args}}'\n",
-    );
-    let mut store = SkillStore::load_from_dir(&dir, false).unwrap();
-    assert!(store.get_enabled("draft").is_some());
-
-    store.set_enabled("draft", false).unwrap();
-    assert!(store.get_enabled("draft").is_none());
-
-    let reloaded = SkillStore::load_from_dir(&dir, false).unwrap();
-    assert!(reloaded.get_enabled("draft").is_none());
 
     fs::remove_dir_all(dir).unwrap();
 }
@@ -83,21 +63,6 @@ fn template_interpolation_is_single_pass() {
     let rendered = render_skill(&skill, "{{script_output}}", Some("{{args}}")).unwrap();
 
     assert_eq!(rendered, "Args: {{script_output}}\nOutput: {{args}}");
-}
-
-#[test]
-fn examples_are_seeded_once_and_deleted_files_stay_deleted() {
-    let dir = temp_dir("seed");
-    let first = SkillStore::load_from_dir(&dir, true).unwrap();
-    assert!(first.get_enabled("commit").is_some());
-    assert!(dir.join("commit.yaml").exists());
-
-    fs::remove_file(dir.join("commit.yaml")).unwrap();
-    let second = SkillStore::load_from_dir(&dir, true).unwrap();
-    assert!(second.get_enabled("commit").is_none());
-    assert!(!dir.join("commit.yaml").exists());
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]

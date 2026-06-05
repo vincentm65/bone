@@ -41,8 +41,6 @@ pub fn load_tools() -> LoadedTools {
     // Load dynamic tools from disk (single parse)
     let dir = tools_dir();
     let _ = std::fs::create_dir_all(&dir);
-    seed_default_tools(&dir);
-
     let dynamic = dynamic::load_from_dir(&dir);
 
     let mut interaction_tools = std::collections::HashSet::new();

@@ -85,6 +85,30 @@ impl Drop for LiveStateGuard {
     }
 }
 
+fn bone_bin_path() -> Option<String> {
+    if let Ok(value) = std::env::var("BONE_BIN") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe()
+        && exe.exists()
+    {
+        return Some(exe.to_string_lossy().into_owned());
+    }
+
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("bone".to_owned() + std::env::consts::EXE_SUFFIX);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputKind {
@@ -434,8 +458,8 @@ impl DynamicTool {
             }
         }
         env.push(("BONE_PID".to_string(), std::process::id().to_string()));
-        if let Ok(exe) = std::env::current_exe() {
-            env.push(("BONE_BIN".to_string(), exe.to_string_lossy().into_owned()));
+        if let Some(exe) = bone_bin_path() {
+            env.push(("BONE_BIN".to_string(), exe));
         }
         let Value::Object(map) = arguments else {
             return env;

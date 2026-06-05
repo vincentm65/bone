@@ -57,8 +57,14 @@ fn assert_events(
             ToolLiveEvent::Pane(_) => {}
         }
     }
-    assert!(saw_update == expect_update, "saw_update={saw_update}, expected={expect_update}");
-    assert!(saw_remove == expect_remove, "saw_remove={saw_remove}, expected={expect_remove}");
+    assert!(
+        saw_update == expect_update,
+        "saw_update={saw_update}, expected={expect_update}"
+    );
+    assert!(
+        saw_remove == expect_remove,
+        "saw_remove={saw_remove}, expected={expect_remove}"
+    );
 }
 
 #[tokio::test]
