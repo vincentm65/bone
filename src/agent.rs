@@ -229,34 +229,29 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         },
     );
 
-    let max_rounds = user_config.subagent.max_rounds;
-
-    let mut rounds = 0u32;
+    let mut consecutive_errors = 0u32;
     let final_content = loop {
-        rounds += 1;
-        if rounds > max_rounds {
-            break "[tool-call round limit reached]".to_string();
-        }
-
-        // Request stream
-        let stream_result = llm.chat_stream(history.clone(), tools.definitions()).await;
-
-        let mut stream = match stream_result {
-            Ok(s) => s,
-            Err(e) => {
-                emit_event(
-                    request.events,
-                    &AgentEvent::Failed {
-                        message: &e.to_string(),
-                    },
-                );
-                return Err(format!("provider error: {e}"));
+        // Request stream with retry
+        let mut stream = None;
+        for attempt in 1..=3 {
+            match llm.chat_stream(history.clone(), tools.definitions()).await {
+                Ok(s) => { stream = Some(s); break; }
+                Err(e) if attempt < 3 => {
+                    emit_event(request.events, &AgentEvent::Status { message: &format!("retry {attempt}/3: {e}") });
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+                Err(e) => {
+                    emit_event(request.events, &AgentEvent::Failed { message: &e.to_string() });
+                    return Err(format!("provider error after 3 attempts: {e}"));
+                }
             }
-        };
+        }
+        let mut stream = stream.unwrap();
 
         // Consume stream
         let mut assistant_text = String::new();
         let mut tool_calls = Vec::new();
+        let mut stream_error = false;
 
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -292,14 +287,26 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Err(e) => {
                     emit_event(
                         request.events,
-                        &AgentEvent::Failed {
-                            message: &e.to_string(),
+                        &AgentEvent::Status {
+                            message: &format!("stream error, will retry: {e}"),
                         },
                     );
-                    return Err(format!("stream error: {e}"));
+                    stream_error = true;
+                    break;
                 }
             }
         }
+
+        if stream_error {
+            consecutive_errors += 1;
+            if consecutive_errors >= 5 {
+                emit_event(request.events, &AgentEvent::Failed { message: "too many stream errors" });
+                return Err("aborted after 5 consecutive stream errors".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        }
+        consecutive_errors = 0;
 
         // No tool calls -> done
         if tool_calls.is_empty() {

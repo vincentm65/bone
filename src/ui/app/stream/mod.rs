@@ -159,23 +159,14 @@ impl App {
         self.streaming = true;
         self.redraw(term)?;
 
-        let mut rounds = 0u32;
         let final_assistant_idx;
         loop {
-            rounds += 1;
             self.messages.push(Message::assistant(String::new()));
             self.renderer.streaming_source_flushed = 0;
             self.renderer.streaming_lines_flushed = 0;
             self.renderer.scrollback_cursor += 1;
             let assistant_idx = self.messages.len() - 1;
 
-            if rounds > self.user_config.max_rounds {
-                self.messages[assistant_idx]
-                    .content
-                    .push_str("\n[tool-call round limit reached]");
-                final_assistant_idx = assistant_idx;
-                break;
-            }
             if self.cancel_streaming {
                 self.mark_cancelled(assistant_idx);
                 final_assistant_idx = assistant_idx;

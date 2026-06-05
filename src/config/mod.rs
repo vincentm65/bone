@@ -46,15 +46,10 @@ pub fn skills_dir() -> PathBuf {
 pub struct UserConfig {
     pub approval_mode: ApprovalMode,
     pub enabled_tools: Vec<String>,
-    pub max_rounds: u32,
     pub auto_compact_tokens: Option<u64>,
     pub auto_compact_keep_messages: Option<usize>,
     pub show_token_metrics: bool,
     pub subagent: SubagentConfig,
-}
-
-fn default_max_rounds() -> u32 {
-    150
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
@@ -71,7 +66,6 @@ impl Default for UserConfig {
         Self {
             approval_mode: ApprovalMode::default(),
             enabled_tools: default_enabled_tools(),
-            max_rounds: default_max_rounds(),
             auto_compact_tokens: None,
             auto_compact_keep_messages: None,
             show_token_metrics: true,
@@ -100,10 +94,6 @@ impl UserConfig {
         if self.enabled_tools.is_empty() {
             self.enabled_tools = default_enabled_tools();
         }
-        self.max_rounds = custom
-            .get_value("general", "max_rounds")
-            .parse()
-            .unwrap_or(150);
         self.auto_compact_tokens = {
             let v = custom.get_value("general", "auto_compact_tokens");
             if v.is_empty() { None } else { v.parse().ok() }
@@ -125,10 +115,6 @@ impl UserConfig {
             "edit" => ApprovalMode::Edits,
             _ => ApprovalMode::Safe,
         };
-        self.subagent.max_rounds = custom
-            .get_value("subagent", "max_rounds")
-            .parse()
-            .unwrap_or(150);
     }
 }
 
@@ -137,7 +123,6 @@ pub struct SubagentConfig {
     pub provider: String,
     pub model: String,
     pub approval: ApprovalMode,
-    pub max_rounds: u32,
 }
 
 impl Default for SubagentConfig {
@@ -146,7 +131,6 @@ impl Default for SubagentConfig {
             provider: "local".to_string(),
             model: "local".to_string(),
             approval: ApprovalMode::Safe,
-            max_rounds: 150,
         }
     }
 }

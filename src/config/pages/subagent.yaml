@@ -13,7 +13,3 @@ fields:
     type: enum
     options: [safe, edit, danger]
     default: safe
-  - key: max_rounds
-    label: max_rounds
-    type: number
-    default: 150
