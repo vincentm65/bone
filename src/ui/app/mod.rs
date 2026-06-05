@@ -1451,6 +1451,9 @@ impl App {
         start_tab: Option<&str>,
     ) -> io::Result<()> {
         let mut custom = config::custom::CustomConfigs::load();
+        // Sync skills/tools so newly-added items appear immediately
+        let skill_names: Vec<String> = self.skills.list().map(|s| s.name.clone()).collect();
+        custom.sync_skills_from_registry(&skill_names);
 
         let mut tabs: Vec<String> = Vec::new();
         let mut namespaces: Vec<String> = Vec::new();

@@ -142,7 +142,7 @@ async fn provider_switch(
         lines.push(String::new());
         if providers_config.providers.is_empty() {
             lines.push(
-                "No providers configured. Create ~/.bone-rust/config/providers.yaml".to_string(),
+                "No providers configured. Create ~/.bone-rust/providers.yaml".to_string(),
             );
         } else {
             lines.push("Available:".to_string());

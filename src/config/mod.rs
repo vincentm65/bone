@@ -151,7 +151,7 @@ impl Default for SubagentConfig {
     }
 }
 
-const EXAMPLE_PROVIDERS: &str = include_str!("../../example-providers.yaml");
+const EXAMPLE_PROVIDERS: &str = include_str!("../../defaults/providers.yaml");
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
 const DEFAULT_AGENTS_MD: &str = include_str!("../../defaults/AGENTS.md");
 
