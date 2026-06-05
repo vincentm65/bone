@@ -211,7 +211,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
     // Build initial history
     let mut transcript: Vec<ChatMessage> = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
-    let mut history = build_chat_history(&transcript, request.system_prompt.as_deref());
+    let mut history = build_chat_history(&transcript, request.system_prompt.as_deref(), "");
     let mut token_stats = TokenStats::new();
 
     emit_event(

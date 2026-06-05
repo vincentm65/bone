@@ -32,6 +32,20 @@ Config:
 
 ";
 
+/// Build a compact skill catalog string for the system prompt.
+/// Each enabled skill contributes one line: `-/name — description`.
+/// Returns an empty string if no skills are provided.
+pub fn skills_catalog(skills: &[(impl AsRef<str>, impl AsRef<str>)]) -> String {
+    if skills.is_empty() {
+        return String::new();
+    }
+    let mut out = "\n# Available Skills\n".to_string();
+    for (name, desc) in skills {
+        out.push_str(&format!("- /{} — {}\n", name.as_ref(), desc.as_ref()));
+    }
+    out
+}
+
 /// System prompt for the compaction summary LLM call.
 /// Sent along with the older messages that are about to be discarded,
 /// instructing the LLM to produce a concise but information-preserving summary.

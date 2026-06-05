@@ -1172,12 +1172,22 @@ impl App {
         new_transcript.extend(self.transcript[boundary..].iter().cloned());
         self.transcript = new_transcript;
 
-        let history = build_chat_history(&self.transcript, None);
+        let catalog = self.skills_catalog();
+        let history = build_chat_history(&self.transcript, None, &catalog);
         let tools = self.tools.definitions();
         let prompt_chars = Self::estimate_context_chars(&history, &tools);
         self.token_stats.set_context_estimate(prompt_chars);
         let after = self.token_stats.context_length;
         (true, before.saturating_sub(after))
+    }
+
+    fn skills_catalog(&self) -> String {
+        crate::llm::prompts::skills_catalog(
+            &self.skills.list()
+                .filter(|s| s.enabled)
+                .map(|s| (s.name.clone(), s.description.clone()))
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn compacted_message(&self, prefix: &str, saved: u64) -> String {

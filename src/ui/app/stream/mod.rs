@@ -153,7 +153,8 @@ impl App {
 
         self.auto_compact_if_needed(term).await?;
 
-        let mut history = build_chat_history(&self.transcript, None);
+        let catalog = self.skills_catalog();
+        let mut history = build_chat_history(&self.transcript, None, &catalog);
 
         self.streaming = true;
         self.redraw(term)?;
