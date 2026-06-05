@@ -205,7 +205,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
     // Set recursion depth for child processes.
     // SAFETY: no other tasks have been spawned yet; this is single-threaded code.
-    unsafe { std::env::set_var("BONE_AGENT_DEPTH", new_depth.to_string()); }
+    unsafe {
+        std::env::set_var("BONE_AGENT_DEPTH", new_depth.to_string());
+    }
 
     // Build initial history
     let mut transcript: Vec<ChatMessage> = vec![ChatMessage::new(ChatRole::User, &request.prompt)];

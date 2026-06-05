@@ -103,7 +103,12 @@ impl App {
             loaded.dynamic_safety,
             loaded.dynamic_display,
         );
-        let skills = SkillStore::load()?;
+        let mut skills = SkillStore::load()?;
+        // Sync skills page with registry (enable/disable via /config)
+        let skill_names: Vec<String> = skills.list().map(|s| s.name.clone()).collect();
+        custom_configs.sync_skills_from_registry(&skill_names);
+        skills.apply_config_enabled(&custom_configs.enabled_skill_names());
+
         let mut messages = vec![Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
         )];
@@ -267,6 +272,10 @@ impl App {
         self.user_config.apply_custom_configs(&custom);
         self.approval_mode = self.user_config.approval_mode;
         self.custom_configs = custom;
+    }
+
+    fn apply_skill_enabled_from_config(&mut self) {
+        self.skills.apply_config_enabled(&self.custom_configs.enabled_skill_names());
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -931,21 +940,12 @@ impl App {
                 }
                 lines.join("\n")
             }
-            "enable" | "disable" => match parts.next() {
-                Some(name) => {
-                    let enabled = action == "enable";
-                    match self.skills.set_enabled(name, enabled) {
-                        Ok(()) => format!(
-                            "Skill /{name} {}.",
-                            if enabled { "enabled" } else { "disabled" }
-                        ),
-                        Err(err) => err,
-                    }
-                }
-                None => format!("Usage: /skills {action} <name>"),
-            },
             "reload" => match self.skills.reload() {
                 Ok(()) => {
+                    // Re-sync config page and apply enabled states
+                    let names: Vec<String> = self.skills.list().map(|s| s.name.clone()).collect();
+                    self.custom_configs.sync_skills_from_registry(&names);
+                    self.skills.apply_config_enabled(&self.custom_configs.enabled_skill_names());
                     let mut lines = vec!["Skills reloaded.".to_string()];
                     lines.extend(
                         self.skills
@@ -1402,6 +1402,9 @@ impl App {
                     .map(|d| d.name.clone())
                     .collect();
                 self.custom_configs.sync_tools_from_registry(&all_names);
+                let skill_names: Vec<String> = self.skills.list().map(|s| s.name.clone()).collect();
+                self.custom_configs.sync_skills_from_registry(&skill_names);
+
                 let enabled = self.custom_configs.enabled_tool_names();
                 let enabled = if enabled.is_empty() {
                     all_names
@@ -1439,14 +1442,23 @@ impl App {
 
         let mut tabs: Vec<String> = Vec::new();
         let mut namespaces: Vec<String> = Vec::new();
+        for ns in ["general", "__providers__", "subagent", "tools", "skills"] {
+            if ns == "__providers__" {
+                tabs.push("Providers".to_string());
+                namespaces.push(ns.to_string());
+            } else if let Some((_, page)) = custom.pages.iter().find(|(page_ns, _)| page_ns == ns) {
+                tabs.push(page.title.clone());
+                namespaces.push(ns.to_string());
+            }
+        }
         for (ns, page) in &custom.pages {
+            if namespaces.iter().any(|existing| existing == ns) {
+                continue;
+            }
             tabs.push(page.title.clone());
             namespaces.push(ns.clone());
         }
-        // Add Providers tab (not backed by a page file)
-        let providers_tab_idx = tabs.len();
-        tabs.push("Providers".to_string());
-        namespaces.push("__providers__".to_string());
+        let providers_tab_idx = namespaces.iter().position(|ns| ns == "__providers__").unwrap_or(0);
         let num_tabs = tabs.len();
 
         let mut active = if let Some(tab) = start_tab {
@@ -1481,7 +1493,8 @@ impl App {
                     .collect()
             } else if active < namespaces.len() {
                 let ns = &namespaces[active];
-                let page = &custom.pages[active].1;
+                let page_idx = custom.pages.iter().position(|(page_ns, _)| page_ns == ns).unwrap();
+                let page = &custom.pages[page_idx].1;
                 page.fields
                     .iter()
                     .map(|field| {
@@ -1497,8 +1510,7 @@ impl App {
                             }
                             _ => value,
                         };
-                        if ns == "tools"
-                            && matches!(field.field_type, config::custom::ConfigFieldType::Bool)
+                        if matches!(field.field_type, config::custom::ConfigFieldType::Bool)
                         {
                             format!("{display} {label}")
                         } else {
@@ -1582,7 +1594,8 @@ impl App {
                         continue;
                     }
                     let ns = namespaces[active].clone();
-                    let page = &custom.pages[active].1;
+                    let page_idx = custom.pages.iter().position(|(page_ns, _)| page_ns == &ns).unwrap();
+                    let page = &custom.pages[page_idx].1;
                     let idx = self.active_prompt.as_ref().unwrap().selected;
                     if idx >= page.fields.len() {
                         continue;
@@ -1595,6 +1608,7 @@ impl App {
                             if let Some(next) = custom.cycle_field(&ns, &field.key, &current) {
                                 custom.set_value(&ns, &field.key, next.clone());
                                 self.apply_custom_configs_to_runtime(custom.clone());
+                                self.apply_skill_enabled_from_config();
                                 if ns == "tools" {
                                     self.tools.set_enabled(&field.key, next == "true");
                                 }

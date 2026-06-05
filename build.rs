@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::{Path, PathBuf}};
 
 fn collect_yaml_entries(dir: &std::path::Path, label: &str) -> Vec<PathBuf> {
     let mut entries = fs::read_dir(dir)
@@ -55,10 +55,43 @@ fn generate_default_skills(manifest_dir: &std::path::Path, out_dir: &std::path::
     fs::write(out_dir.join("default_skills.rs"), generated).unwrap();
 }
 
+/// Compute a deterministic FNV-1a hash of the default skills directory contents.
+/// This ensures any change to default skills changes the version.
+/// FNV-1a is stable across Rust versions and compilations.
+fn compute_skills_version(dir: &Path) -> String {
+    const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+
+    fn fnv1a_hash(data: &[u8], hash: u64) -> u64 {
+        let mut h = hash;
+        for &byte in data {
+            h ^= byte as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+        h
+    }
+
+    let entries = collect_yaml_entries(dir, "skills");
+    let mut hash = FNV_OFFSET_BASIS;
+    for path in &entries {
+        let name = path.file_name().unwrap().to_string_lossy();
+        hash = fnv1a_hash(name.as_bytes(), hash);
+        if let Ok(contents) = fs::read(path) {
+            hash = fnv1a_hash(&contents, hash);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     generate_default_tools(&manifest_dir, &out_dir);
     generate_default_skills(&manifest_dir, &out_dir);
+
+    let skills_version = compute_skills_version(&manifest_dir.join("defaults/skills"));
+    let generated = format!("pub const SKILLS_VERSION: &str = {skills_version:?};\n");
+    fs::write(out_dir.join("skills_version.rs"), generated).unwrap();
+    println!("cargo:rerun-if-changed=defaults/skills");
 }

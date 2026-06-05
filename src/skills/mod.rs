@@ -6,13 +6,12 @@ use crate::tools::script_runner::{ScriptRequest, run_script};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use types::Skill;
 
 include!(concat!(env!("OUT_DIR"), "/default_skills.rs"));
+include!(concat!(env!("OUT_DIR"), "/skills_version.rs"));
 
 #[derive(Debug, Clone)]
 pub struct LoadedSkill {
@@ -110,17 +109,15 @@ impl SkillStore {
         &self.warnings
     }
 
-    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), String> {
-        let loaded = self
-            .skills
-            .get_mut(name)
-            .ok_or_else(|| format!("Unknown skill: {name}"))?;
-        let mut updated = loaded.skill.clone();
-        updated.enabled = enabled;
-        let yaml = serde_yaml::to_string(&updated).map_err(|err| err.to_string())?;
-        write_skill_atomic(&loaded.path, &yaml)?;
-        loaded.skill = updated;
-        Ok(())
+
+    /// Override skill enabled/disabled state from config page settings.
+    /// Skills not listed in `enabled_names` are disabled.
+    pub fn apply_config_enabled(&mut self, enabled_names: &[String]) {
+        let enabled_set: std::collections::HashSet<&str> =
+            enabled_names.iter().map(|s| s.as_str()).collect();
+        for (_, loaded) in &mut self.skills {
+            loaded.skill.enabled = enabled_set.contains(loaded.skill.name.as_str());
+        }
     }
 }
 
@@ -135,7 +132,6 @@ pub fn render_skill(
         (None, None) => Err(format!("skill {} produced no input", skill.name)),
     }
 }
-
 pub async fn expand_skill_command(
     store: &SkillStore,
     input: &str,
@@ -234,48 +230,29 @@ fn next_marker<'a>(
 }
 
 fn seed_example_skills(dir: &Path) -> io::Result<()> {
-    let marker = dir.join(".examples-initialized");
-    if marker.exists() {
+    let data_dir = crate::config::bone_dir().join("data");
+    let version_path = data_dir.join("skills_version");
+    let current_version = std::fs::read_to_string(&version_path).unwrap_or_default();
+
+    if current_version == SKILLS_VERSION {
         return Ok(());
     }
-    let has_yaml = fs::read_dir(dir)?.filter_map(Result::ok).any(|entry| {
-        entry
-            .path()
-            .extension()
-            .is_some_and(|extension| extension == "yaml")
-    });
+
+    let has_yaml = fs::read_dir(dir)
+        .ok()
+        .map_or(false, |entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.path().extension().is_some_and(|ext| ext == "yaml")
+            })
+        });
+
     if !has_yaml {
         for (file_name, content) in DEFAULT_SKILLS {
             fs::write(dir.join(file_name), content)?;
         }
     }
-    fs::write(marker, "seeded\n")
+
+    fs::create_dir_all(&data_dir)?;
+    fs::write(&version_path, SKILLS_VERSION)
 }
 
-fn write_skill_atomic(path: &Path, content: &str) -> Result<(), String> {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_else(|_| std::process::id() as u128);
-    let temporary = path.with_extension(format!("bone-tmp-{}-{suffix}", std::process::id()));
-    let permissions = fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    let write_result = (|| -> io::Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(content.as_bytes())?;
-        file.flush()?;
-        if let Some(permissions) = permissions {
-            fs::set_permissions(&temporary, permissions)?;
-        }
-        fs::rename(&temporary, path)
-    })();
-    if let Err(err) = write_result {
-        let _ = fs::remove_file(&temporary);
-        return Err(err.to_string());
-    }
-    Ok(())
-}

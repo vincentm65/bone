@@ -64,6 +64,7 @@ pub fn config_dir() -> PathBuf {
 const GENERAL_YAML: &str = include_str!("pages/general.yaml");
 const SUBAGENT_YAML: &str = include_str!("pages/subagent.yaml");
 const TOOLS_YAML: &str = include_str!("pages/tools.yaml");
+const SKILLS_YAML: &str = include_str!("pages/skills.yaml");
 
 /// Seed built-in config pages into `~/.bone-rust/config/` if missing.
 pub fn seed_builtin_pages() {
@@ -72,6 +73,7 @@ pub fn seed_builtin_pages() {
     seed_file_if_missing(&dir.join("general.yaml"), GENERAL_YAML);
     seed_file_if_missing(&dir.join("subagent.yaml"), SUBAGENT_YAML);
     seed_file_if_missing(&dir.join("tools.yaml"), TOOLS_YAML);
+    seed_file_if_missing(&dir.join("skills.yaml"), SKILLS_YAML);
 }
 
 // ── Load / save ─────────────────────────────────────────────────────────────
@@ -178,6 +180,58 @@ impl CustomConfigs {
             .iter()
             .filter(|f| {
                 let val = self.get_value("tools", &f.key);
+                val == "true" || val.is_empty()
+            })
+            .map(|f| f.key.clone())
+            .collect()
+    }
+
+    /// Sync skills from a list of skill names into the "skills" page.
+    /// New skills are added as enabled (true). Returns true if fields were added.
+    pub fn sync_skills_from_registry(&mut self, skill_names: &[String]) -> bool {
+        let pos = match self.pages.iter().position(|(ns, _)| ns == "skills") {
+            Some(p) => p,
+            None => return false,
+        };
+        let existing: std::collections::HashSet<&str> = self.pages[pos]
+            .1
+            .fields
+            .iter()
+            .map(|f| f.key.as_str())
+            .collect();
+        let new_names: Vec<&String> = skill_names
+            .iter()
+            .filter(|n| !existing.contains(n.as_str()))
+            .collect();
+        if new_names.is_empty() {
+            return false;
+        }
+        let page = &mut self.pages[pos].1;
+        for name in new_names {
+            page.fields.push(ConfigField {
+                key: name.clone(),
+                label: Some(name.clone()),
+                field_type: ConfigFieldType::Bool,
+                options: Vec::new(),
+                default: Some(serde_yaml::Value::Bool(true)),
+                value: None,
+            });
+        }
+        self.save_page("skills");
+        true
+    }
+
+    /// Get all enabled skill names from the "skills" page.
+    pub fn enabled_skill_names(&self) -> Vec<String> {
+        let pos = match self.pages.iter().position(|(ns, _)| ns == "skills") {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        let page = &self.pages[pos].1;
+        page.fields
+            .iter()
+            .filter(|f| {
+                let val = self.get_value("skills", &f.key);
                 val == "true" || val.is_empty()
             })
             .map(|f| f.key.clone())

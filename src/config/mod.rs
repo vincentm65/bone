@@ -27,7 +27,7 @@ pub(crate) fn bone_dir() -> PathBuf {
 }
 
 pub fn providers_path() -> PathBuf {
-    bone_dir().join("providers.yaml")
+    bone_dir().join("config/providers.yaml")
 }
 
 pub fn command_policy_path() -> PathBuf {
@@ -154,23 +154,7 @@ const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.
 const DEFAULT_AGENTS_MD: &str = include_str!("../../defaults/AGENTS.md");
 
 pub fn seed_providers_if_missing() {
-    // Repair the short-lived config/providers.yaml location if a previous build
-    // created it. Providers are intentionally not config pages.
-    let root_path = providers_path();
-    let config_path = custom::config_dir().join("providers.yaml");
-    if config_path.exists() && !root_path.exists() {
-        if let Some(parent) = root_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Err(e) = fs::rename(&config_path, &root_path) {
-            eprintln!(
-                "bone: warning: could not move {} to {}: {e}",
-                config_path.display(),
-                root_path.display()
-            );
-        }
-    }
-    seed_file_if_missing(&root_path, EXAMPLE_PROVIDERS);
+    seed_file_if_missing(&providers_path(), EXAMPLE_PROVIDERS);
 }
 
 pub fn seed_command_policy_if_missing() {

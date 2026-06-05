@@ -49,18 +49,27 @@ impl SessionDb {
         Ok(db)
     }
 
-    const SCHEMA_VERSION: u32 = 1;
-
     fn setup_schema(&self) -> rusqlite::Result<()> {
+        const SCHEMA_VERSION: u32 = 1;
+
         let current_version: u32 = self
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if current_version >= Self::SCHEMA_VERSION {
+
+        if current_version == SCHEMA_VERSION {
             return Ok(());
         }
+
+        // Schema mismatch or fresh database: drop everything and recreate.
+        // (This is a single-user app; historical data is expendable.)
         self.conn.execute_batch(
             "
-            CREATE TABLE IF NOT EXISTS conversations (
+            DROP TABLE IF EXISTS messages_fts;
+            DROP TABLE IF EXISTS messages;
+            DROP TABLE IF EXISTS usage_events;
+            DROP TABLE IF EXISTS conversations;
+
+            CREATE TABLE conversations (
                 id         INTEGER PRIMARY KEY,
                 started_at TEXT NOT NULL,
                 ended_at   TEXT,
@@ -68,7 +77,7 @@ impl SessionDb {
                 model      TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS messages (
+            CREATE TABLE messages (
                 id              INTEGER PRIMARY KEY,
                 conversation_id INTEGER NOT NULL REFERENCES conversations(id),
                 role            TEXT NOT NULL,
@@ -80,7 +89,7 @@ impl SessionDb {
                 created_at      TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS usage_events (
+            CREATE TABLE usage_events (
                 id                INTEGER PRIMARY KEY,
                 conversation_id   INTEGER NOT NULL REFERENCES conversations(id),
                 provider          TEXT NOT NULL,
@@ -92,22 +101,22 @@ impl SessionDb {
                 created_at        TEXT NOT NULL
             );
 
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
                 content,
                 role UNINDEXED,
                 conversation_id UNINDEXED,
                 tokenize='unicode61'
             );
 
-            CREATE INDEX IF NOT EXISTS idx_usage_events_conversation
+            CREATE INDEX idx_usage_events_conversation
                 ON usage_events(conversation_id);
 
-            CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
+            CREATE INDEX idx_messages_conversation_seq
                 ON messages(conversation_id, seq);
             ",
         )?;
         self.conn
-            .pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
+            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
 

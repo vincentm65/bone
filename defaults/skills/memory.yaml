@@ -77,10 +77,10 @@ prompt: |
   - Keep the file under 400 tokens. Merge, compress, and drop lower-priority items to fit. Prefer short bullet points over prose. When the file exceeds this limit, consolidate by merging similar items and dropping the least important entries until it fits.
   - Start the file with a metadata line: <!-- last_updated: YYYY-MM-DD -->
   - Use these markdown sections (drop empty ones, add relevant ones):
-    - Communication
-    - Coding Style
-    - Tools & Workflow
-    - Project Context
-    - Dislikes
+    - Communication — how the user likes to communicate, verbosity preferences, response format preferences
+    - Coding Style — language preferences, patterns, naming conventions, architecture tastes
+    - Tools & Workflow — preferred tools, workflows, development habits
+    - Dislikes — things the user consistently avoids or objects to
+  - Do NOT include project-specific context, task details, or one-off requirements. This file captures general preferences and habits, not what the user is working on right now.
   - If no meaningful changes are needed, leave memory.md as-is and say "No changes."
   - Output a brief summary of what you added, changed, or removed (or "No changes.").

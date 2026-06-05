@@ -26,6 +26,8 @@ pub struct DynamicTool {
     #[serde(default)]
     pub output: Option<OutputConfig>,
     #[serde(default)]
+    pub live_state: LiveStateConfig,
+    #[serde(default)]
     pub safety: Option<CommandSafety>,
     #[serde(default)]
     pub display: Option<ToolDisplayConfig>,
@@ -40,6 +42,47 @@ pub enum InteractionType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
     pub kind: OutputKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LiveStateConfig {
+    #[serde(default)]
+    pub cleanup: LiveStateCleanup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveStateCleanup {
+    #[default]
+    ToolManaged,
+    OnFinish,
+}
+
+struct LiveStateGuard {
+    sender: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+    keys: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+    cleanup_on_drop: bool,
+}
+
+impl Drop for LiveStateGuard {
+    fn drop(&mut self) {
+        if !self.cleanup_on_drop {
+            return;
+        }
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        let keys = self
+            .keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (source, sub_key) in keys.iter() {
+            let _ = sender.send(ToolLiveEvent::StateRemove {
+                source: source.clone(),
+                sub_key: sub_key.clone(),
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,20 +354,11 @@ impl DynamicTool {
             std::collections::HashSet::<(String, String)>::new(),
         ));
         let tracked_keys = active_sub_keys.clone();
-        let cleanup_active_state =
-            |events: &Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>| {
-                if let Some(sender) = events.as_ref() {
-                    let keys = active_sub_keys
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    for (source, sub_key) in keys.iter() {
-                        let _ = sender.send(ToolLiveEvent::StateRemove {
-                            source: source.clone(),
-                            sub_key: sub_key.clone(),
-                        });
-                    }
-                }
-            };
+        let _guard = LiveStateGuard {
+            sender: events.clone(),
+            keys: active_sub_keys.clone(),
+            cleanup_on_drop: self.live_state.cleanup == LiveStateCleanup::OnFinish,
+        };
         let output = match run_script_jsonl(
             ScriptRequest {
                 command: script.clone(),
@@ -358,15 +392,11 @@ impl DynamicTool {
         {
             Ok(output) => output,
             Err(err) => {
-                cleanup_active_state(&events);
                 return Err(err.to_string());
             }
         };
 
         if output.exit_code != Some(0) {
-            // Script failed — clean up any state entries that were created
-            // during execution but never removed.
-            cleanup_active_state(&events);
             let code = output
                 .exit_code
                 .map_or_else(|| "signal".to_string(), |c| c.to_string());
@@ -634,7 +664,9 @@ fn parse_jsonl_events(stdout: &str) -> Result<ToolOutput, String> {
             }
         };
         if event["type"].as_str() == Some("pane") {
-            explicit_pane_page = pane_page_from_value(&event);
+            if event.get("state_key").is_none() {
+                explicit_pane_page = pane_page_from_value(&event);
+            }
             continue;
         }
         if event["type"].as_str() == Some("text_delta") {
