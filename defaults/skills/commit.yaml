@@ -1,6 +1,0 @@
-name: commit
-description: "Draft a concise commit message from the provided change summary"
-enabled: true
-prompt: |
-  Draft a concise conventional-style git commit message for these changes:
-  {{args}}
