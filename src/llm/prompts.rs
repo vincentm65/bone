@@ -43,6 +43,8 @@ pub fn skills_catalog(skills: &[(impl AsRef<str>, impl AsRef<str>)]) -> String {
     for (name, desc) in skills {
         out.push_str(&format!("- /{} — {}\n", name.as_ref(), desc.as_ref()));
     }
+    out.push_str("To use a skill: read its YAML from skills/<name>.yaml in the config directory, run any script via the shell tool (set BONE_ARGS env to the user's arguments), then follow the prompt instructions, substituting {{args}} and {{script_output}} with the user's arguments and script stdout respectively.
+");
     out
 }
 
