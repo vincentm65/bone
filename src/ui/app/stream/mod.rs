@@ -462,6 +462,7 @@ impl App {
                         pages,
                         active_page: self.active_page,
                         pane_toggle_hint: hint,
+                        autocomplete: None,
                     })?;
                 }
             }
@@ -505,6 +506,7 @@ impl App {
                 pages: if self.panes_visible { &self.pages } else { &[] },
                 active_page: self.active_page,
                 pane_toggle_hint: pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
+                autocomplete: None,
             },
         )
     }
@@ -590,6 +592,7 @@ impl App {
             self.active_prompt.as_ref(),
             if self.panes_visible { &self.pages } else { &[] },
             self.active_page,
+            None,
         )?;
 
         Ok((calls_for_display, results))
@@ -766,6 +769,7 @@ impl App {
                             pages: visible_pages,
                             active_page: self.active_page,
                             pane_toggle_hint: hint,
+                            autocomplete: None,
                         },
                     )?;
                 }
@@ -1054,7 +1058,7 @@ impl App {
                     });                    let visible_pages = if *panes_visible { pages.as_slice() } else { &[] };
                     let hint = pane_toggle_hint(*panes_visible, !pages.is_empty());
                     renderer
-                        .ensure_viewport_height(term, input, None, visible_pages, *active_page)
+                        .ensure_viewport_height(term, input, None, visible_pages, *active_page, None)
                         .ok();
                     term.draw(|frame| {
                         renderer.draw_bottom_pane_with_tick(frame, &PaneDraw {
@@ -1082,6 +1086,7 @@ impl App {
                             pages: visible_pages,
                             active_page: *active_page,
                             pane_toggle_hint: hint,
+                            autocomplete: None,
                         }, renderer.spinner_tick, None);
                     }).ok();
                     spinner.as_mut().reset(time::Instant::now() + Duration::from_millis(90));

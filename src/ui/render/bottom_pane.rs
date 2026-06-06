@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 use super::wrap;
 use super::{InputState, Prompt, SPINNER, StatusInfo};
 use crate::tools::ApprovalMode;
+use crate::ui::autocomplete::AutocompleteState;
 use crate::ui::pane_page::PanePage;
 use crate::ui::tool_display;
 
@@ -18,6 +19,7 @@ pub struct PaneDraw<'a> {
     pub pages: &'a [PanePage],
     pub active_page: usize,
     pub pane_toggle_hint: Option<&'a str>,
+    pub autocomplete: Option<&'a AutocompleteState>,
 }
 const COMMAND_PREVIEW_LINES: usize = 6;
 const BLANK_CURSOR_CELL: &str = "\u{00a0}";
@@ -250,6 +252,7 @@ impl super::Renderer {
         terminal_width: u16,
         pages: &[PanePage],
         active_page: usize,
+        autocomplete: Option<&AutocompleteState>,
     ) -> u16 {
         if let Some(p) = prompt {
             let options = p.options.len().min(p.visible_rows) as u16;
@@ -277,8 +280,11 @@ impl super::Renderer {
             return 1 + tab_bar + prompt_rows + 1 + 1 + page_extra_height(pages, active_page);
         }
         let input_rows = rendered_input_rows(input, terminal_width);
-        // top sep + input_rows + bottom sep + status + page region
-        1 + input_rows.max(1) + 1 + 1 + page_extra_height(pages, active_page)
+        let ac_rows = autocomplete
+            .map(|ac| ac.visible_rows())
+            .unwrap_or(0);
+        // top sep + input_rows + autocomplete + bottom sep + status + page region
+        1 + input_rows.max(1) + ac_rows + 1 + 1 + page_extra_height(pages, active_page)
     }
 
     pub fn draw_bottom_pane_with_tick(
@@ -293,6 +299,7 @@ impl super::Renderer {
         let pages = args.pages;
         let active_page = args.active_page;
         let pane_toggle_hint = args.pane_toggle_hint;
+        let ac = args.autocomplete;
         let area = frame.area();
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
@@ -300,6 +307,7 @@ impl super::Renderer {
 
         // Reserve rows from the bottom: status bar (1) + bottom sep (1) + page region
         let page_height = page_extra_height(pages, active_page);
+        let ac_rows = ac.map(|a| a.visible_rows()).unwrap_or(0);
         let content_bottom = area.bottom().saturating_sub(2 + page_height).max(area.y);
 
         let input_view = if prompt.is_some() {
@@ -527,6 +535,34 @@ impl super::Renderer {
                         ..area
                     },
                 );
+            }
+            y += visible_input_rows;
+        }
+
+        // ── Autocomplete dropdown ──────────────────────────────────────
+        if let Some(ac) = ac {
+            let ac_end = y + ac_rows;
+            for (i, cmd) in ac.matches.iter().enumerate() {
+                if y >= ac_end {
+                    break;
+                }
+                let selected = i == ac.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(ratatui::style::Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.status_text)
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!("  /{}", cmd), style)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
             }
         }
 

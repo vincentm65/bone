@@ -1,4 +1,5 @@
 pub mod app;
+pub mod autocomplete;
 pub mod commands;
 pub mod input;
 pub mod pane_page;

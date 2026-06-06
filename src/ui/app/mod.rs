@@ -19,6 +19,7 @@ use std::time::Instant;
 use tokio::time::{self, Duration};
 
 use super::commands;
+use super::autocomplete::AutocompleteState;
 use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
@@ -75,6 +76,8 @@ pub struct App {
     turn_paused_duration: std::time::Duration,
     /// Instant when the current approval pause started.
     turn_pause_start: Option<Instant>,
+    /// Active autocomplete state (shown when typing `/`).
+    autocomplete: Option<AutocompleteState>,
 }
 
 impl App {
@@ -155,6 +158,7 @@ impl App {
             turn_start: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
+            autocomplete: None,
         })
     }
     /// Initialize or open the session database.
@@ -365,6 +369,7 @@ impl App {
             width,
             self.visible_pages(),
             self.active_page,
+            self.autocomplete.as_ref(),
         );
 
         if desired != self.renderer.viewport_height {
@@ -493,6 +498,7 @@ impl App {
                 pages: self.visible_pages(),
                 active_page: self.active_page,
                 pane_toggle_hint: self.pane_toggle_hint(),
+                autocomplete: self.autocomplete.as_ref(),
             },
             self.active_prompt.as_ref(),
         );
@@ -509,6 +515,43 @@ impl App {
             Some("Ctrl+T hide panel  ──  Ctrl+↑↓")
         } else {
             Some("Ctrl+T show panel  ──  Ctrl+↑↓")
+        }
+    }
+
+    /// Collect all available slash command names (builtins + skills).
+    fn collect_command_names(&self) -> Vec<String> {
+        let builtins = [
+            "help", "clear", "new", "context", "model", "provider",
+            "quit", "exit", "edit", "e", "compact", "tools", "config",
+            "skills", "usage", "recall",
+        ];
+        let mut names: Vec<String> = builtins.iter().map(|s| s.to_string()).collect();
+        for skill in self.skills.list() {
+            names.push(skill.name.clone());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Update autocomplete state based on current input buffer.
+    /// Shows autocomplete when buffer starts with `/`, hides otherwise.
+    fn update_autocomplete(&mut self) {
+        let buf = &self.input.buffer;
+        if let Some(query) = buf.strip_prefix('/') {
+            // Don't show if there's a space (user typed args already)
+            if query.contains(' ') {
+                self.autocomplete = None;
+                return;
+            }
+            if self.autocomplete.is_none() {
+                self.autocomplete = Some(AutocompleteState::new(self.collect_command_names()));
+            }
+            if let Some(ref mut ac) = self.autocomplete {
+                ac.update(query);
+            }
+        } else {
+            self.autocomplete = None;
         }
     }
 
@@ -578,9 +621,55 @@ impl App {
             return self.handle_prompt_key(code, term);
         }
 
+        // Autocomplete key interception (before input.apply_key)
+        if self.autocomplete.is_some() {
+            match code {
+                KeyCode::Up | KeyCode::Down if modifiers.is_empty() => {
+                    if let Some(ref mut ac) = self.autocomplete {
+                        match code {
+                            KeyCode::Up => ac.up(),
+                            KeyCode::Down => ac.down(),
+                            _ => {}
+                        }
+                    }
+                    return self.redraw(term);
+                }
+                KeyCode::Tab | KeyCode::Enter if modifiers.is_empty() => {
+                    if let Some(ref ac) = self.autocomplete {
+                        if let Some(cmd) = ac.selected_command() {
+                            self.input.buffer = format!("/{}", cmd);
+                            self.input.cursor_pos = self.input.buffer.chars().count();
+                            // If Enter, also submit — but for Tab just accept
+                            if code == KeyCode::Enter {
+                                self.autocomplete = None;
+                                self.send_message(term).await?;
+                                while let Some(queued) = self.queue.pop_front() {
+                                    self.input.buffer = queued;
+                                    self.input.cursor_pos = self.input.buffer.chars().count();
+                                    self.send_message(term).await?;
+                                }
+                            } else {
+                                self.autocomplete = None;
+                                self.redraw(term)?;
+                            }
+                            return Ok(());
+                        }
+                    }
+                    self.autocomplete = None;
+                    return self.redraw(term);
+                }
+                KeyCode::Esc => {
+                    self.autocomplete = None;
+                    return self.redraw(term);
+                }
+                _ => {}
+            }
+        }
+
         match self.input.apply_key(code, modifiers) {
             InputAction::Cancel => self.handle_ctrl_c(term),
             InputAction::Submit => {
+                self.autocomplete = None;
                 self.send_message(term).await?;
                 while let Some(queued) = self.queue.pop_front() {
                     self.input.buffer = queued;
@@ -599,7 +688,10 @@ impl App {
                 self.persist_runtime_config();
                 self.redraw(term)
             }
-            InputAction::Redraw | InputAction::Escape => self.redraw(term),
+            InputAction::Redraw | InputAction::Escape => {
+                self.update_autocomplete();
+                self.redraw(term)
+            }
             InputAction::OpenEditor => self.open_editor(term).await,
             InputAction::None => Ok(()),
         }
@@ -1176,6 +1268,7 @@ impl App {
                         pages: visible_pages,
                         active_page: self.active_page,
                         pane_toggle_hint: None,
+                        autocomplete: None,
                     })?;
                 }
             }
