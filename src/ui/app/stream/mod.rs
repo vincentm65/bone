@@ -13,6 +13,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, pin_mut};
 use std::collections::VecDeque;
 use std::io;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
@@ -157,6 +158,9 @@ impl App {
         let mut history = build_chat_history(&self.transcript, None, &catalog);
 
         self.streaming = true;
+        self.turn_start = Some(Instant::now());
+        self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_pause_start = None;
         self.redraw(term)?;
 
         let final_assistant_idx;
@@ -295,6 +299,9 @@ impl App {
         }
 
         self.streaming = false;
+        self.turn_start = None;
+        self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_pause_start = None;
         self.cancel_streaming = false;
         self.last_ctrl_c = None;
         self.renderer
@@ -774,6 +781,7 @@ impl App {
     ) -> io::Result<PendingTool> {
         // Check if this is a dynamic tool with interaction
         if self.interaction_tools.contains(&call.name) {
+            self.timer_pause();
             let question = call.arguments["question"].as_str().unwrap_or("");
             let mut options: Vec<String> = call.arguments["options"]
                 .as_array()
@@ -868,6 +876,7 @@ impl App {
             self.active_prompt = None;
             self.redraw(term)?;
 
+            self.timer_resume();
             return Ok(match selection {
                 Some(choice) => PendingTool::Result(ToolResult {
                     call_id: call.id.clone(),
@@ -921,7 +930,10 @@ impl App {
         Ok(if self.tools.allows_call(self.approval_mode, &call) {
             PendingTool::Approved(call)
         } else {
-            match self.prompt_and_wait(display_call, term)? {
+            self.timer_pause();
+            let decision = self.prompt_and_wait(display_call, term)?;
+            self.timer_resume();
+            match decision {
                 Decision::Accept => PendingTool::Approved(call),
                 Decision::Cancel => {
                     self.cancel_streaming = true;
@@ -991,7 +1003,6 @@ impl App {
         let tick = self.renderer.spinner_tick;
         let model = self.model.clone();
         let token_stats = self.token_stats.clone();
-        let show_token_metrics = self.user_config.show_token_metrics;
         let input = &mut self.input;
         let queue = &mut self.queue;
         let renderer = &mut self.renderer;
@@ -1002,6 +1013,9 @@ impl App {
         let panes_visible = &mut self.panes_visible;
         let pages = &mut self.pages;
         let active_page = &mut self.active_page;
+        let turn_start = self.turn_start;
+        let turn_paused_duration = self.turn_paused_duration;
+        let turn_pause_start = self.turn_pause_start;
         pin_mut!(request, spinner, timeout);
 
         loop {
@@ -1028,7 +1042,16 @@ impl App {
                         };
                         custom_configs.set_value("general", "approval_mode", mode.to_string());
                     }
-                    let visible_pages = if *panes_visible { pages.as_slice() } else { &[] };
+                    let elapsed = turn_start.map(|start| {
+                        let mut e = start.elapsed();
+                        if turn_pause_start.is_none() {
+                            e = e.saturating_sub(turn_paused_duration);
+                        } else {
+                            e = e.saturating_sub(turn_paused_duration);
+                        }
+                        let s = e.as_secs();
+                        format!("{}:{:02}", s / 60, s % 60)
+                    });                    let visible_pages = if *panes_visible { pages.as_slice() } else { &[] };
                     let hint = pane_toggle_hint(*panes_visible, !pages.is_empty());
                     renderer
                         .ensure_viewport_height(term, input, None, visible_pages, *active_page)
@@ -1041,10 +1064,20 @@ impl App {
                                 token_stats: token_stats.clone(),
                                 streaming_completion_tokens: None,
                                 tokens_per_sec: None,
-                                show_token_metrics,
+                                status_show_model: user_config.status_show_model,
+                                status_show_approval: user_config.status_show_approval,
+                                status_show_tokens_curr: user_config.status_show_tokens_curr,
+                                status_show_tokens_in: user_config.status_show_tokens_in,
+                                status_show_tokens_out: user_config.status_show_tokens_out,
+                                status_show_tokens_total: user_config.status_show_tokens_total,
+                                status_show_tps: user_config.status_show_tps,
+                                status_show_queue: user_config.status_show_queue,
+                                status_show_spinner: user_config.status_show_spinner,
+                                status_show_timer: user_config.status_show_timer,
                                 streaming: true,
                                 approval_mode: *approval_mode,
                                 queue_len: queue.len(),
+                                elapsed,
                             },
                             pages: visible_pages,
                             active_page: *active_page,

@@ -48,7 +48,16 @@ pub struct UserConfig {
     pub enabled_tools: Vec<String>,
     pub auto_compact_tokens: Option<u64>,
     pub auto_compact_keep_messages: Option<usize>,
-    pub show_token_metrics: bool,
+    pub status_show_model: bool,
+    pub status_show_approval: bool,
+    pub status_show_tokens_curr: bool,
+    pub status_show_tokens_in: bool,
+    pub status_show_tokens_out: bool,
+    pub status_show_tokens_total: bool,
+    pub status_show_tps: bool,
+    pub status_show_queue: bool,
+    pub status_show_spinner: bool,
+    pub status_show_timer: bool,
     pub subagent: SubagentConfig,
 }
 
@@ -68,7 +77,16 @@ impl Default for UserConfig {
             enabled_tools: default_enabled_tools(),
             auto_compact_tokens: None,
             auto_compact_keep_messages: None,
-            show_token_metrics: true,
+            status_show_model: true,
+            status_show_approval: true,
+            status_show_tokens_curr: true,
+            status_show_tokens_in: true,
+            status_show_tokens_out: true,
+            status_show_tokens_total: true,
+            status_show_tps: true,
+            status_show_queue: true,
+            status_show_spinner: true,
+            status_show_timer: true,
             subagent: SubagentConfig::default(),
         }
     }
@@ -103,9 +121,45 @@ impl UserConfig {
             if v.is_empty() { None } else { v.parse().ok() }
         };
 
-        // Subagent page
-        self.show_token_metrics = custom
-            .get_value("general", "show_token_metrics")
+        // Status bar toggles
+        self.status_show_model = custom
+            .get_value("general", "status_show_model")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_approval = custom
+            .get_value("general", "status_show_approval")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_tokens_curr = custom
+            .get_value("general", "status_show_tokens_curr")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_tokens_in = custom
+            .get_value("general", "status_show_tokens_in")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_tokens_out = custom
+            .get_value("general", "status_show_tokens_out")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_tokens_total = custom
+            .get_value("general", "status_show_tokens_total")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_tps = custom
+            .get_value("general", "status_show_tps")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_queue = custom
+            .get_value("general", "status_show_queue")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_spinner = custom
+            .get_value("general", "status_show_spinner")
+            .parse()
+            .unwrap_or(true);
+        self.status_show_timer = custom
+            .get_value("general", "status_show_timer")
             .parse()
             .unwrap_or(true);
         self.subagent.provider = custom.get_value("subagent", "provider");

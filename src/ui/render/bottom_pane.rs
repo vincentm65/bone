@@ -649,61 +649,101 @@ impl super::Renderer {
         }
 
         // ── Status bar ───────────────────────────────────────────────────
-        let mut status_spans: Vec<Span> = vec![
-            Span::styled(
+        let mut status_spans: Vec<Span> = vec![];
+        let sep = || Span::styled(" | ", Style::default().fg(self.theme.status_text));
+
+        if status_info.status_show_model {
+            status_spans.push(Span::styled(
                 status_info.model.to_string(),
                 Style::default().fg(self.theme.status_text),
-            ),
-            Span::styled(" | ", Style::default().fg(self.theme.status_text)),
-            Span::styled(
+            ));
+            status_spans.push(sep());
+        }
+
+        if status_info.status_show_approval {
+            status_spans.push(Span::styled(
                 status_info.approval_mode.label().to_string(),
                 Style::default().fg(match status_info.approval_mode {
                     ApprovalMode::Safe => self.theme.approval_safe,
                     ApprovalMode::Edits => self.theme.approval_edits,
                     ApprovalMode::Danger => self.theme.approval_danger,
                 }),
-            ),
-        ];
+            ));
+            status_spans.push(sep());
+        }
 
-        if status_info.show_token_metrics {
-            status_spans.push(Span::styled(
-                " | ",
-                Style::default().fg(self.theme.status_text),
-            ));
-            status_spans.push(Span::styled(
-                status_info
-                    .token_stats
-                    .display_with_received_override(status_info.streaming_completion_tokens),
-                Style::default().fg(self.theme.status_text),
-            ));
-            if let Some(tps) = status_info.tokens_per_sec {
-                status_spans.push(Span::styled(
-                    " | ",
+        use crate::llm::token_tracker::format_tokens;
+
+        let received = status_info.streaming_completion_tokens.unwrap_or(status_info.token_stats.received);
+        let any_token_metric = status_info.status_show_tokens_curr
+            || status_info.status_show_tokens_in
+            || status_info.status_show_tokens_out
+            || status_info.status_show_tokens_total;
+
+        if any_token_metric {
+            let mut metric_parts: Vec<Span> = vec![];
+            if status_info.status_show_tokens_curr {
+                metric_parts.push(Span::styled(
+                    format!("curr {}", format_tokens(status_info.token_stats.context_length)),
                     Style::default().fg(self.theme.status_text),
                 ));
+            }
+            if status_info.status_show_tokens_in {
+                metric_parts.push(Span::styled(
+                    format!("in {}", format_tokens(status_info.token_stats.sent)),
+                    Style::default().fg(self.theme.status_text),
+                ));
+            }
+            if status_info.status_show_tokens_out {
+                if !metric_parts.is_empty() {
+                    metric_parts.push(Span::styled(" / ", Style::default().fg(self.theme.status_text)));
+                }
+                metric_parts.push(Span::styled(
+                    format!("out {}", format_tokens(received)),
+                    Style::default().fg(self.theme.status_text),
+                ));
+            }
+            if status_info.status_show_tokens_total {
+                if !metric_parts.is_empty() {
+                    metric_parts.push(Span::styled(" / ", Style::default().fg(self.theme.status_text)));
+                }
+                metric_parts.push(Span::styled(
+                    format!("total {}", format_tokens(status_info.token_stats.sent + received)),
+                    Style::default().fg(self.theme.status_text),
+                ));
+            }
+            status_spans.extend(metric_parts);
+            if status_info.status_show_tps
+                && let Some(tps) = status_info.tokens_per_sec
+            {
+                status_spans.push(sep());
                 status_spans.push(Span::styled(
                     format!("{:.0} tok/s", tps),
                     Style::default().fg(self.theme.status_text),
                 ));
             }
+            status_spans.push(sep());
         }
 
-        if status_info.queue_len > 0 {
-            status_spans.push(Span::styled(
-                " | ",
-                Style::default().fg(self.theme.status_text),
-            ));
+        if status_info.status_show_queue && status_info.queue_len > 0 {
             status_spans.push(Span::styled(
                 format!("Q: {}", status_info.queue_len),
                 Style::default().fg(self.theme.status_text),
             ));
+            status_spans.push(sep());
         }
 
-        if status_info.streaming {
-            status_spans.push(Span::styled(
-                " | ",
-                Style::default().fg(self.theme.status_text),
-            ));
+        if status_info.status_show_timer {
+            if let Some(ref elapsed) = status_info.elapsed {
+                status_spans.push(Span::styled(
+                    elapsed.clone(),
+                    Style::default().fg(self.theme.status_text),
+                ));
+                status_spans.push(sep());
+            }
+        }
+
+        if status_info.status_show_spinner && status_info.streaming {
             status_spans.push(Span::styled(
                 SPINNER[tick % SPINNER.len()],
                 Style::default().fg(self.theme.thinking),
@@ -712,6 +752,13 @@ impl super::Renderer {
                 " thinking",
                 Style::default().fg(self.theme.status_text),
             ));
+        }
+
+        // Remove trailing separator if present
+        if let Some(last) = status_spans.last()
+            && last.content == " | "
+        {
+            status_spans.pop();
         }
 
         if area.height > 0 {

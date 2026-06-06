@@ -69,6 +69,12 @@ pub struct App {
     session_seq: i64,
     /// Last measured output tokens/sec from the most recent stream.
     last_tokens_per_sec: Option<f64>,
+    /// Wall-clock start of the current agent turn (set when streaming begins).
+    turn_start: Option<Instant>,
+    /// Accumulated time spent paused for user approvals during this turn.
+    turn_paused_duration: std::time::Duration,
+    /// Instant when the current approval pause started.
+    turn_pause_start: Option<Instant>,
 }
 
 impl App {
@@ -146,6 +152,9 @@ impl App {
             conversation_id: None,
             session_seq: 0,
             last_tokens_per_sec: None,
+            turn_start: None,
+            turn_paused_duration: std::time::Duration::ZERO,
+            turn_pause_start: None,
         })
     }
     /// Initialize or open the session database.
@@ -379,6 +388,40 @@ impl App {
         self.ensure_viewport_and_draw(terminal)
     }
 
+    /// Pause the turn timer (call before entering approval prompt).
+    pub(crate) fn timer_pause(&mut self) {
+        if self.turn_start.is_some() && self.turn_pause_start.is_none() {
+            self.turn_pause_start = Some(Instant::now());
+        }
+    }
+
+    /// Resume the turn timer (call after approval prompt returns).
+    pub(crate) fn timer_resume(&mut self) {
+        if let Some(pause_start) = self.turn_pause_start.take() {
+            self.turn_paused_duration += pause_start.elapsed();
+        }
+    }
+
+    /// Compute the active elapsed time for the current turn, formatted as M:SS.
+    pub(crate) fn timer_elapsed(&self) -> Option<String> {
+        let start = self.turn_start?;
+        let mut elapsed = start.elapsed();
+        // If currently paused, don't add the ongoing pause
+        // If NOT currently paused, subtract accumulated pause time
+        if self.turn_pause_start.is_none() {
+            elapsed = elapsed.saturating_sub(self.turn_paused_duration);
+        } else {
+            // Currently paused: subtract accumulated + current pause so far
+            // But we don't add to turn_paused_duration until resume,
+            // so just subtract what we've accumulated so far
+            elapsed = elapsed.saturating_sub(self.turn_paused_duration);
+        }
+        let total_secs = elapsed.as_secs();
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        Some(format!("{}:{:02}", mins, secs))
+    }
+
     pub(crate) fn status_info(&self) -> StatusInfo {
         self.stream_status_info_with_tokens(None, self.last_tokens_per_sec)
     }
@@ -390,6 +433,7 @@ impl App {
         estimated_tokens: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) -> StatusInfo {
+        let elapsed = self.timer_elapsed();
         stream_status_info_with_token_stats(
             estimated_tokens,
             tokens_per_sec,
@@ -398,7 +442,8 @@ impl App {
             self.streaming,
             self.approval_mode,
             self.queue.len(),
-            self.user_config.show_token_metrics,
+            &self.user_config,
+            elapsed,
         )
     }
 }
@@ -413,7 +458,8 @@ pub(crate) fn stream_status_info_with_token_stats(
     streaming: bool,
     approval_mode: crate::tools::ApprovalMode,
     queue_len: usize,
-    show_token_metrics: bool,
+    cfg: &crate::config::UserConfig,
+    elapsed: Option<String>,
 ) -> StatusInfo {
     StatusInfo {
         model: model.to_string(),
@@ -423,7 +469,17 @@ pub(crate) fn stream_status_info_with_token_stats(
         streaming,
         approval_mode,
         queue_len,
-        show_token_metrics,
+        status_show_model: cfg.status_show_model,
+        status_show_approval: cfg.status_show_approval,
+        status_show_tokens_curr: cfg.status_show_tokens_curr,
+        status_show_tokens_in: cfg.status_show_tokens_in,
+        status_show_tokens_out: cfg.status_show_tokens_out,
+        status_show_tokens_total: cfg.status_show_tokens_total,
+        status_show_tps: cfg.status_show_tps,
+        status_show_queue: cfg.status_show_queue,
+        status_show_spinner: cfg.status_show_spinner,
+        status_show_timer: cfg.status_show_timer,
+        elapsed,
     }
 }
 
@@ -1445,6 +1501,72 @@ impl App {
         ids
     }
 
+    /// Submenu for status bar toggles.
+    fn status_bar_submenu(
+        &mut self,
+        custom: &mut config::custom::CustomConfigs,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        let mut selected = 0usize;
+        let status_fields: Vec<(String, String)> = custom
+            .pages
+            .iter()
+            .find(|(ns, _)| ns == "general")
+            .map(|(_, page)| {
+                page.fields
+                    .iter()
+                    .filter(|f| f.key.starts_with("status_show_"))
+                    .map(|f| (f.key.clone(), f.label.clone().unwrap_or_default()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if status_fields.is_empty() {
+            return Ok(());
+        }
+
+        loop {
+            let options: Vec<String> = status_fields
+                .iter()
+                .map(|(key, label)| {
+                    let val = custom.get_value("general", key);
+                    let icon = if val == "true" { "●" } else { "○" };
+                    format!("{icon} {label}")
+                })
+                .collect();
+
+            let mut prompt = Prompt::new("Status bar".to_string(), options);
+            prompt.set_selected(selected);
+            prompt.hint = Some("Enter toggle  Esc back".to_string());
+            self.active_prompt = Some(prompt);
+            self.redraw(term)?;
+
+            let (code, modifiers) = self.panel_key(term)?;
+            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                return self.close_panel(term);
+            }
+            if self.navigate_prompt(code, false, term)? {
+                selected = self.active_prompt.as_ref().unwrap().selected;
+                continue;
+            }
+
+            match code {
+                KeyCode::Esc => {
+                    // Go back to parent config picker
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    let (key, _) = &status_fields[selected];
+                    let current = custom.get_value("general", key);
+                    if let Some(next) = custom.cycle_field("general", key, &current) {
+                        custom.set_value("general", key, next);
+                        self.apply_custom_configs_to_runtime(custom.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     async fn config_picker(
         &mut self,
         term: &mut BoneTerminal,
@@ -1519,6 +1641,7 @@ impl App {
                 let page = &custom.pages[page_idx].1;
                 page.fields
                     .iter()
+                    .filter(|field| !field.key.starts_with("status_show_"))
                     .map(|field| {
                         let label = field.label.as_deref().unwrap_or(&field.key);
                         let value = custom.get_value(ns, &field.key);
@@ -1538,6 +1661,7 @@ impl App {
                             format!("{:<30} {}", label, display)
                         }
                     })
+                    .chain(std::iter::once("  Status bar  →".to_string()))
                     .collect()
             } else {
                 vec![]
@@ -1622,10 +1746,32 @@ impl App {
                         .unwrap();
                     let page = &custom.pages[page_idx].1;
                     let idx = self.active_prompt.as_ref().unwrap().selected;
+
+                    // Check if "Status bar" submenu was selected
+                    let non_status_count = page.fields.iter().filter(|f| !f.key.starts_with("status_show_")).count();
+                    if idx == non_status_count {
+                        // Status bar submenu
+                        self.status_bar_submenu(&mut custom, term)?;
+                        continue;
+                    }
+
                     if idx >= page.fields.len() {
                         continue;
                     }
-                    let field = page.fields[idx].clone();
+                    // Map visible idx back to actual field index
+                    let mut field_actual_idx = 0;
+                    let mut visible_idx = 0;
+                    for (i, f) in page.fields.iter().enumerate() {
+                        if visible_idx == idx {
+                            field_actual_idx = i;
+                            break;
+                        }
+                        if !f.key.starts_with("status_show_") {
+                            visible_idx += 1;
+                        }
+                        field_actual_idx = i;
+                    }
+                    let field = page.fields[field_actual_idx].clone();
                     let current = custom.get_value(&ns, &field.key);
                     match field.field_type {
                         config::custom::ConfigFieldType::Bool

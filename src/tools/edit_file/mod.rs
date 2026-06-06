@@ -323,15 +323,12 @@ fn replace_matched_span(
     replacement: &str,
     label: &str,
 ) -> Result<String, String> {
-    match find_match_span(content, needle, label)? {
-        MatchSpan { start, end } => {
-            let mut next = String::with_capacity(content.len() - (end - start) + replacement.len());
-            next.push_str(&content[..start]);
-            next.push_str(replacement);
-            next.push_str(&content[end..]);
-            Ok(next)
-        }
-    }
+    let MatchSpan { start, end } = find_match_span(content, needle, label)?;
+    let mut next = String::with_capacity(content.len() - (end - start) + replacement.len());
+    next.push_str(&content[..start]);
+    next.push_str(replacement);
+    next.push_str(&content[end..]);
+    Ok(next)
 }
 
 struct MatchSpan {

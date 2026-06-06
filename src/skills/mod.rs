@@ -27,7 +27,7 @@ pub struct SkillStore {
 
 impl SkillStore {
     pub fn load() -> io::Result<Self> {
-        fs::create_dir_all(&crate::config::skills_dir())?;
+        fs::create_dir_all(crate::config::skills_dir())?;
         Self::scan(&crate::config::skills_dir())
     }
 
@@ -110,7 +110,7 @@ impl SkillStore {
     pub fn apply_config_enabled(&mut self, enabled_names: &[String]) {
         let enabled_set: std::collections::HashSet<&str> =
             enabled_names.iter().map(|s| s.as_str()).collect();
-        for (_, loaded) in &mut self.skills {
+        for loaded in self.skills.values_mut() {
             loaded.skill.enabled = enabled_set.contains(loaded.skill.name.as_str());
         }
     }
@@ -234,7 +234,7 @@ pub fn seed_example_skills() -> io::Result<()> {
         return Ok(());
     }
 
-    let has_yaml = fs::read_dir(&dir).ok().map_or(false, |entries| {
+    let has_yaml = fs::read_dir(&dir).ok().is_some_and(|entries| {
         entries
             .filter_map(Result::ok)
             .any(|entry| entry.path().extension().is_some_and(|ext| ext == "yaml"))

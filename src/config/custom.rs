@@ -105,7 +105,7 @@ impl CustomConfigs {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            if stem.is_empty() {
+            if stem.is_empty() || stem == "providers" {
                 continue;
             }
             match load_yaml::<CustomConfigPage>(&path) {
