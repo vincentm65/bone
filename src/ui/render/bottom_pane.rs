@@ -542,7 +542,7 @@ impl super::Renderer {
         // ── Autocomplete dropdown ──────────────────────────────────────
         if let Some(ac) = ac {
             let ac_end = y + ac_rows;
-            for (local_i, cmd) in ac.matches.iter().skip(ac.scroll_offset).take(MAX_VISIBLE).enumerate() {
+            for (local_i, (name, desc)) in ac.matches.iter().skip(ac.scroll_offset).take(MAX_VISIBLE).enumerate() {
                 if y >= ac_end {
                     break;
                 }
@@ -555,8 +555,9 @@ impl super::Renderer {
                 } else {
                     Style::default().fg(self.theme.status_text)
                 };
+                let label = format!("  /{name} — {desc}");
                 frame.render_widget(
-                    Paragraph::new(Span::styled(format!("  /{}", cmd), style)),
+                    Paragraph::new(Span::styled(label, style)),
                     Rect {
                         y,
                         height: 1,

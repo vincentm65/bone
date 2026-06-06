@@ -7,12 +7,32 @@
 /// Maximum number of suggestions shown at once.
 pub const MAX_VISIBLE: usize = 5;
 
+/// Built-in command descriptions paired with their names.
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("clear", "clear chat history"),
+    ("compact", "compact chat history"),
+    ("config", "change application settings"),
+    ("context", "show context token count"),
+    ("edit", "open system editor for input"),
+    ("e", "open system editor for input"),
+    ("exit", "exit bone"),
+    ("help", "show this message"),
+    ("model", "set or show model"),
+    ("new", "clear chat history"),
+    ("provider", "pick or switch provider"),
+    ("quit", "exit bone"),
+    ("recall", "search past conversations"),
+    ("skills", "list, enable, disable, or reload skills"),
+    ("tools", "enable or disable tools"),
+    ("usage", "show token usage for current conversation"),
+];
+
 #[derive(Debug, Clone)]
 pub struct AutocompleteState {
-    /// All command names (builtins + skills), pre-sorted.
-    all_commands: Vec<String>,
-    /// Currently filtered matches (all of them, not truncated).
-    pub matches: Vec<String>,
+    /// All commands: (name, description), pre-sorted by name.
+    all_commands: Vec<(String, String)>,
+    /// Currently filtered matches.
+    pub matches: Vec<(String, String)>,
     /// Index of the highlighted item in `matches`.
     pub selected: usize,
     /// Top index of the visible window within `matches`.
@@ -20,10 +40,10 @@ pub struct AutocompleteState {
 }
 
 impl AutocompleteState {
-    pub fn new(all_commands: Vec<String>) -> Self {
+    pub fn new(all_commands: Vec<(String, String)>) -> Self {
         let mut all_commands = all_commands;
-        all_commands.sort();
-        all_commands.dedup();
+        all_commands.sort_by(|a, b| a.0.cmp(&b.0));
+        all_commands.dedup_by(|a, b| a.0 == b.0);
         let matches = all_commands.clone();
         let selected = 0;
         Self {
@@ -41,7 +61,7 @@ impl AutocompleteState {
         self.matches = self
             .all_commands
             .iter()
-            .filter(|cmd| cmd.to_lowercase().starts_with(&q))
+            .filter(|(name, _)| name.to_lowercase().starts_with(&q))
             .cloned()
             .collect();
         self.selected = 0;
@@ -85,7 +105,7 @@ impl AutocompleteState {
 
     /// Get the currently selected command name.
     pub fn selected_command(&self) -> Option<&str> {
-        self.matches.get(self.selected).map(|s| s.as_str())
+        self.matches.get(self.selected).map(|(name, _)| name.as_str())
     }
 
     /// Number of visible rows this autocomplete needs.
@@ -97,4 +117,12 @@ impl AutocompleteState {
     pub fn more_count(&self) -> usize {
         self.matches.len().saturating_sub(self.scroll_offset + MAX_VISIBLE)
     }
+}
+
+/// Build the built-in commands list with descriptions.
+pub fn builtin_commands() -> Vec<(String, String)> {
+    BUILTIN_COMMANDS
+        .iter()
+        .map(|(name, desc)| (name.to_string(), desc.to_string()))
+        .collect()
 }

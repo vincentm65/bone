@@ -518,22 +518,6 @@ impl App {
         }
     }
 
-    /// Collect all available slash command names (builtins + skills).
-    fn collect_command_names(&self) -> Vec<String> {
-        let builtins = [
-            "help", "clear", "new", "context", "model", "provider",
-            "quit", "exit", "edit", "e", "compact", "tools", "config",
-            "skills", "usage", "recall",
-        ];
-        let mut names: Vec<String> = builtins.iter().map(|s| s.to_string()).collect();
-        for skill in self.skills.list() {
-            names.push(skill.name.clone());
-        }
-        names.sort();
-        names.dedup();
-        names
-    }
-
     /// Update autocomplete state based on current input buffer.
     /// Shows autocomplete when buffer starts with `/`, hides otherwise.
     fn update_autocomplete(&mut self) {
@@ -545,7 +529,7 @@ impl App {
                 return;
             }
             if self.autocomplete.is_none() {
-                self.autocomplete = Some(AutocompleteState::new(self.collect_command_names()));
+                self.autocomplete = Some(AutocompleteState::new(self.collect_commands()));
             }
             if let Some(ref mut ac) = self.autocomplete {
                 ac.update(query);
@@ -553,6 +537,15 @@ impl App {
         } else {
             self.autocomplete = None;
         }
+    }
+
+    /// Collect all available slash commands with descriptions (builtins + skills).
+    fn collect_commands(&self) -> Vec<(String, String)> {
+        let mut cmds = crate::ui::autocomplete::builtin_commands();
+        for skill in self.skills.list() {
+            cmds.push((skill.name.clone(), skill.description.clone()));
+        }
+        cmds
     }
 
     async fn handle_key(
