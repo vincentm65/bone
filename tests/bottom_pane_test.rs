@@ -1,5 +1,6 @@
 use bone::llm::TokenStats;
 use bone::tools::ApprovalMode;
+use bone::ui::autocomplete::AutocompleteState;
 use bone::ui::input::InputState;
 use bone::ui::pane_page::PanePage;
 use bone::ui::prompt::Prompt;
@@ -16,7 +17,17 @@ fn status_info() -> StatusInfo {
         approval_mode: ApprovalMode::Safe,
         queue_len: 0,
         tokens_per_sec: None,
-        show_token_metrics: false,
+        status_show_model: true,
+        status_show_approval: true,
+        status_show_tokens_curr: true,
+        status_show_tokens_in: true,
+        status_show_tokens_out: true,
+        status_show_tokens_total: true,
+        status_show_tps: true,
+        status_show_queue: true,
+        status_show_spinner: true,
+        status_show_timer: true,
+        elapsed: None,
     }
 }
 
@@ -26,6 +37,7 @@ fn pane_args<'a>(
     pages: &'a [PanePage],
     active_page: usize,
     pane_toggle_hint: Option<&'a str>,
+    autocomplete: Option<&'a AutocompleteState>,
 ) -> PaneDraw<'a> {
     PaneDraw {
         input,
@@ -33,6 +45,7 @@ fn pane_args<'a>(
         pages,
         active_page,
         pane_toggle_hint,
+        autocomplete,
     }
 }
 fn row_text(terminal: &Terminal<TestBackend>, row: u16, width: u16) -> String {
@@ -61,7 +74,7 @@ fn expanded_command_preview_is_clipped_to_a_short_frame() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &[], 0, None),
+                &pane_args(&input, &status_info(), &[], 0, None, None),
                 Some(&prompt),
             )
         })
@@ -83,7 +96,7 @@ fn multiline_input_is_clipped_to_a_short_frame() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &[], 0, None),
+                &pane_args(&input, &status_info(), &[], 0, None, None),
                 None,
             )
         })
@@ -102,7 +115,7 @@ fn multiline_input_renders_hard_newlines_on_separate_rows() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &[], 0, None),
+                &pane_args(&input, &status_info(), &[], 0, None, None),
                 None,
             )
         })
@@ -121,7 +134,7 @@ fn newline_cursor_marker_is_included_in_input_height() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0), 6);
+    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 6);
 }
 
 #[test]
@@ -130,7 +143,7 @@ fn composer_reserves_terminal_final_column_like_submitted_user_text() {
     input.buffer = "a".repeat(17);
     input.cursor_pos = input.buffer.chars().count();
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0), 5);
+    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 5);
 }
 
 #[test]
@@ -141,7 +154,7 @@ fn composer_height_uses_the_same_word_wrapping_as_rendering() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0), 6);
+    assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0, None), 6);
 }
 
 #[test]
@@ -185,7 +198,7 @@ fn long_prompt_uses_a_bounded_viewport_height() {
     );
 
     assert_eq!(
-        Renderer::desired_height(&input, Some(&prompt), 80, &[], 0),
+        Renderer::desired_height(&input, Some(&prompt), 80, &[], 0, None),
         14
     );
 }
@@ -206,10 +219,10 @@ fn pane_page_adds_height_to_viewport() {
     }];
 
     // Without pages: top_sep(1) + input(1) + bottom_sep(1) + status(1) = 4
-    assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0), 4);
+    assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0, None), 4);
 
     // With 3-line page: base(4) + page_sep(1) + content(3) = 8
-    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0), 8);
+    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0, None), 8);
 }
 
 #[test]
@@ -226,7 +239,7 @@ fn pane_page_honors_visible_rows() {
     }];
 
     // base(4) + page_sep(1) + tool-requested content rows(12)
-    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0), 17);
+    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0, None), 17);
 }
 
 #[test]
@@ -250,7 +263,7 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
     ];
 
     // base(4) + page_sep(1) + content(1) + page_sep(1) + tab_indicator(1) = 8
-    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0), 8);
+    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0, None), 8);
 }
 
 #[test]
@@ -274,7 +287,7 @@ fn pane_page_does_not_panic_with_tiny_viewport() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &pages, 0, None),
+                &pane_args(&input, &status_info(), &pages, 0, None, None),
                 None,
             )
         })
@@ -301,7 +314,7 @@ fn pane_page_renders_content_between_input_and_status() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &pages, 0, None),
+                &pane_args(&input, &status_info(), &pages, 0, None, None),
                 None,
             )
         })
@@ -335,7 +348,7 @@ fn single_pane_page_has_only_the_fixed_bottom_separator() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &pages, 0, None),
+                &pane_args(&input, &status_info(), &pages, 0, None, None),
                 None,
             )
         })
@@ -364,7 +377,7 @@ fn bottom_separator_can_show_pane_toggle_hint() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &pages, 0, Some("Ctrl+T hide tasks")),
+                &pane_args(&input, &status_info(), &pages, 0, Some("Ctrl+T hide tasks"), None),
                 None,
             )
         })
@@ -400,6 +413,7 @@ fn bottom_separator_hint_uses_display_width_for_unicode_shortcuts() {
                     &pages,
                     0,
                     Some("Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓"),
+                    None,
                 ),
                 None,
             )
