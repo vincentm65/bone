@@ -423,7 +423,7 @@ impl App {
                         stream_end = Some(std::time::Instant::now());
                         if let Some(ref db) = self.session_db
                             && let Some(conv_id) = self.conversation_id {
-                                db.record_usage(conv_id, self.llm.id(), self.llm.model(), prompt_tokens, completion_tokens, cached_tokens, cost).ok();
+                                db.record_usage(conv_id, self.llm.id(), self.llm.model(), prompt_tokens, completion_tokens, cached_tokens, cost, false).ok();
                             }
                     }
                     Some(Err(err)) => {

@@ -50,7 +50,7 @@ impl SessionDb {
     }
 
     fn setup_schema(&self) -> rusqlite::Result<()> {
-        const SCHEMA_VERSION: u32 = 1;
+        const SCHEMA_VERSION: u32 = 2;
 
         let current_version: u32 = self
             .conn
@@ -98,6 +98,7 @@ impl SessionDb {
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 cached_tokens     INTEGER NOT NULL DEFAULT 0,
                 cost              REAL    NOT NULL DEFAULT 0.0,
+                is_estimated      INTEGER NOT NULL DEFAULT 0,
                 created_at        TEXT NOT NULL
             );
 
@@ -172,10 +173,11 @@ impl SessionDb {
         completion_tokens: u32,
         cached_tokens: Option<u32>,
         cost: Option<f64>,
+        is_estimated: bool,
     ) -> rusqlite::Result<()> {
         let now = now_iso();
         self.conn.execute(
-            "INSERT INTO usage_events (conversation_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO usage_events (conversation_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, is_estimated, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 conversation_id,
                 provider,
@@ -184,6 +186,7 @@ impl SessionDb {
                 completion_tokens as i64,
                 cached_tokens.unwrap_or(0) as i64,
                 cost.unwrap_or(0.0),
+                is_estimated as i64,
                 now,
             ],
         )?;
@@ -296,6 +299,10 @@ fn now_iso() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    iso_from_unix_secs(secs)
+}
+
+fn iso_from_unix_secs(secs: u64) -> String {
     let days = secs / 86400;
     let tod = secs % 86400;
     let (y, m, d) = civil_from_days(days as i64);
@@ -316,12 +323,28 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = z.div_euclid(146097);
     let doe = z.rem_euclid(146097); // [0, 146096]
-    let yoe = (doe - doe / 4 + doe / 100 - doe / 400) / 365; // [0, 399]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
     let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100 + yoe / 400);
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{civil_from_days, iso_from_unix_secs};
+
+    #[test]
+    fn unix_epoch_formats_as_valid_iso_date() {
+        assert_eq!(iso_from_unix_secs(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn current_era_date_formats_as_valid_iso_date() {
+        assert_eq!(iso_from_unix_secs(1_780_745_545), "2026-06-06T11:32:25Z");
+        assert_eq!(civil_from_days(20_610), (2026, 6, 6));
+    }
 }

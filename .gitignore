@@ -1,5 +1,6 @@
 # Build
 /target/
+/npm/dist/
 
 # Temp/scratch
 .temp/

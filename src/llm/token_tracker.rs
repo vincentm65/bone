@@ -1,5 +1,9 @@
 use num_format::ToFormattedString;
 
+/// Rough heuristic: ~3.8 UTF-8 chars per token for typical text.
+/// Shared between TokenStats and the headless agent's estimate_tokens().
+pub const CHARS_PER_TOKEN: f64 = 3.8;
+
 /// Lightweight token usage tracker.
 ///
 /// Tracks cumulative tokens sent to and received from the LLM provider.
@@ -45,8 +49,7 @@ impl TokenStats {
 
     /// Record a request using a fallback character-based estimate.
     pub fn record_estimate(&mut self, prompt_chars: usize, completion_chars: usize) {
-        // Rough heuristic: ~3.8 UTF-8 chars per token for typical text.
-        let chars_per_token = 3.8;
+        let chars_per_token = CHARS_PER_TOKEN;
         let estimated_prompt = (prompt_chars as f64 / chars_per_token).ceil() as u64;
         self.context_length = estimated_prompt;
         self.sent += estimated_prompt;
@@ -59,8 +62,7 @@ impl TokenStats {
     /// This is for local transcript changes such as compaction, where no provider
     /// request has occurred yet, so cumulative sent/received totals must not change.
     pub fn set_context_estimate(&mut self, prompt_chars: usize) {
-        // Rough heuristic: ~3.8 UTF-8 chars per token for typical text.
-        let chars_per_token = 3.8;
+        let chars_per_token = CHARS_PER_TOKEN;
         self.context_length = (prompt_chars as f64 / chars_per_token).ceil() as u64;
     }
 

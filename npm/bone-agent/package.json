@@ -1,0 +1,40 @@
+{
+  "name": "bone-agent",
+  "version": "2.0.0",
+  "description": "A terminal-based AI coding assistant",
+  "bin": {
+    "bone": "bin/bone.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "optionalDependencies": {
+    "bone-agent-linux-x64": "2.0.0",
+    "bone-agent-linux-arm64": "2.0.0",
+    "bone-agent-darwin-x64": "2.0.0",
+    "bone-agent-darwin-arm64": "2.0.0",
+    "bone-agent-win32-x64": "2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "author": "Vincent Miranda <vincentmiranda65@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/vincentm65/bone",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vincentm65/bone.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vincentm65/bone/issues"
+  }
+}

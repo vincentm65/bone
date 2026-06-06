@@ -1,10 +1,99 @@
 use crate::chat::build_chat_history;
 use crate::config::{UserConfig, custom::CustomConfigs, load_providers, save_providers};
 use crate::llm::{
-    ChatEvent, ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
+    ChatEvent, ChatMessage, ChatRole, TokenStats,
+    token_tracker::CHARS_PER_TOKEN,
+    providers::create_provider_with_config,
 };
+use crate::session_db::SessionDb;
 use crate::tools::{ApprovalMode, ToolHandler, load_tools};
 use futures_util::StreamExt;
+
+/// Thin wrapper around the optional session DB that eliminates repetitive
+/// `if let Some((db, conv_id))` guards throughout the agent loop.
+struct SessionWriter<'a> {
+    inner: Option<(&'a SessionDb, i64)>,
+}
+
+impl<'a> SessionWriter<'a> {
+    fn from_opt(opt: &'a Option<(SessionDb, i64)>) -> Self {
+        Self {
+            inner: opt.as_ref().map(|(db, id)| (db, *id)),
+        }
+    }
+
+    fn append_message(
+        &mut self,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
+        tool_calls: Option<&str>,
+        seq: i64,
+    ) {
+        if let Some((db, conv_id)) = self.inner {
+            if let Err(e) = db.append_message(conv_id, role, content, tool_name, tool_call_id, tool_calls, seq) {
+                eprintln!("bone: warning: session db append_message failed: {e}");
+            }
+        }
+    }
+
+    fn record_real_usage(
+        &self,
+        provider: &str,
+        model: &str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cached_tokens: Option<u32>,
+        cost: Option<f64>,
+    ) {
+        if let Some((db, conv_id)) = self.inner {
+            if let Err(e) = db.record_usage(
+                conv_id,
+                provider,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cost,
+                false,
+            ) {
+                eprintln!("bone: warning: session db record_usage failed: {e}");
+            }
+        }
+    }
+
+    fn record_estimated_usage(
+        &self,
+        provider: &str,
+        model: &str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) {
+        if let Some((db, conv_id)) = self.inner {
+            if let Err(e) = db.record_usage(
+                conv_id,
+                provider,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                None,
+                None,
+                true,
+            ) {
+                eprintln!("bone: warning: session db record_usage (estimated) failed: {e}");
+            }
+        }
+    }
+
+    fn end(&self) {
+        if let Some((db, conv_id)) = self.inner {
+            if let Err(e) = db.end_conversation(conv_id) {
+                eprintln!("bone: warning: session db end_conversation failed: {e}");
+            }
+        }
+    }
+}
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -213,6 +302,12 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let mut transcript: Vec<ChatMessage> = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
     let mut history = build_chat_history(&transcript, request.system_prompt.as_deref(), "");
     let mut token_stats = TokenStats::new();
+    let tool_defs = tools.definitions();
+    let tool_defs_json_chars = serde_json::to_string(&tool_defs).map(|j| j.chars().count()).unwrap_or(0);
+    let session_db = open_headless_session_db(llm.id(), llm.model());
+    let mut session = SessionWriter::from_opt(&session_db);
+    let mut session_seq = 0i64;
+    session.append_message("user", &request.prompt, None, None, None, session_seq);
 
     emit_event(
         request.events,
@@ -234,14 +329,28 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         // Request stream with retry
         let mut stream = None;
         for attempt in 1..=3 {
-            match llm.chat_stream(history.clone(), tools.definitions()).await {
-                Ok(s) => { stream = Some(s); break; }
+            match llm.chat_stream(history.clone(), tool_defs.clone()).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
                 Err(e) if attempt < 3 => {
-                    emit_event(request.events, &AgentEvent::Status { message: &format!("retry {attempt}/3: {e}") });
+                    emit_event(
+                        request.events,
+                        &AgentEvent::Status {
+                            message: &format!("retry {attempt}/3: {e}"),
+                        },
+                    );
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
                 Err(e) => {
-                    emit_event(request.events, &AgentEvent::Failed { message: &e.to_string() });
+                    emit_event(
+                        request.events,
+                        &AgentEvent::Failed {
+                            message: &e.to_string(),
+                        },
+                    );
+                    session.end();
                     return Err(format!("provider error after 3 attempts: {e}"));
                 }
             }
@@ -252,6 +361,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         let mut assistant_text = String::new();
         let mut tool_calls = Vec::new();
         let mut stream_error = false;
+        let mut had_usage = false;
 
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -273,9 +383,24 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Ok(ChatEvent::TokenUsage {
                     prompt_tokens,
                     completion_tokens,
-                    ..
+                    cached_tokens,
+                    cost,
                 }) => {
-                    token_stats.record_request(prompt_tokens, completion_tokens, None, None);
+                    token_stats.record_request(
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                        cost,
+                    );
+                    had_usage = true;
+                    session.record_real_usage(
+                        llm.id(),
+                        llm.model(),
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                        cost,
+                    );
                     emit_event(
                         request.events,
                         &AgentEvent::TokenUsage {
@@ -297,10 +422,41 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             }
         }
 
+        if !had_usage && !stream_error {
+            let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
+            let completion_chars = assistant_text.chars().count()
+                + tool_calls
+                    .iter()
+                    .map(|call| call.arguments.to_string().chars().count())
+                    .sum::<usize>();
+            let prompt_tokens = estimate_tokens(prompt_chars);
+            let completion_tokens = estimate_tokens(completion_chars);
+            token_stats.record_estimate(prompt_chars, completion_chars);
+            session.record_estimated_usage(
+                llm.id(),
+                llm.model(),
+                prompt_tokens,
+                completion_tokens,
+            );
+            emit_event(
+                request.events,
+                &AgentEvent::TokenUsage {
+                    sent: token_stats.sent,
+                    received: token_stats.received,
+                },
+            );
+        }
+
         if stream_error {
             consecutive_errors += 1;
             if consecutive_errors >= 5 {
-                emit_event(request.events, &AgentEvent::Failed { message: "too many stream errors" });
+                emit_event(
+                    request.events,
+                    &AgentEvent::Failed {
+                        message: "too many stream errors",
+                    },
+                );
+                session.end();
                 return Err("aborted after 5 consecutive stream errors".to_string());
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -310,6 +466,15 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         // No tool calls -> done
         if tool_calls.is_empty() {
+            session_seq += 1;
+            session.append_message(
+                "assistant",
+                &assistant_text,
+                None,
+                None,
+                None,
+                session_seq,
+            );
             break assistant_text;
         }
 
@@ -317,6 +482,16 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         let assistant = ChatMessage::assistant_with_tools(&assistant_text, tool_calls.clone());
         history.push(assistant.clone());
         transcript.push(assistant);
+        session_seq += 1;
+        let tool_calls_json = serde_json::to_string(&tool_calls).ok();
+        session.append_message(
+            "assistant",
+            &assistant_text,
+            None,
+            None,
+            tool_calls_json.as_deref(),
+            session_seq,
+        );
 
         // Execute tool calls
         for call in &tool_calls {
@@ -356,6 +531,15 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                     is_error: result.is_error,
                 },
             );
+            session_seq += 1;
+            session.append_message(
+                "tool",
+                &result.content,
+                Some(&result.name),
+                Some(&result.call_id),
+                None,
+                session_seq,
+            );
             let message = ChatMessage::tool(result.clone());
             history.push(message.clone());
             transcript.push(message);
@@ -368,10 +552,45 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             content: &final_content,
         },
     );
+    session.end();
 
     Ok(AgentResponse {
         content: final_content,
     })
+}
+
+fn estimate_tokens(chars: usize) -> u32 {
+    (chars as f64 / CHARS_PER_TOKEN).ceil() as u32
+}
+
+fn opt_str_chars(s: Option<&str>) -> usize {
+    s.map(str::chars).map(Iterator::count).unwrap_or(0)
+}
+
+fn estimate_context_chars(history: &[ChatMessage], tool_defs_json_chars: usize) -> usize {
+    let message_chars: usize = history
+        .iter()
+        .map(|msg| {
+            msg.content.chars().count()
+                + opt_str_chars(msg.reasoning_content.as_deref())
+                + serde_json::to_string(&msg.tool_calls)
+                    .map(|json| json.chars().count())
+                    .unwrap_or(0)
+                + opt_str_chars(msg.tool_call_id.as_deref())
+                + opt_str_chars(msg.name.as_deref())
+        })
+        .sum();
+    message_chars + tool_defs_json_chars
+}
+
+fn open_headless_session_db(provider: &str, model: &str) -> Option<(SessionDb, i64)> {
+    let db_path = dirs::home_dir()?
+        .join(".bone-rust")
+        .join("data")
+        .join("conversations.db");
+    let db = SessionDb::open(&db_path).ok()?;
+    let conv_id = db.create_conversation(provider, model).ok()?;
+    Some((db, conv_id))
 }
 
 /// Execute tool calls respecting the approval mode.

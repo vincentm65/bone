@@ -280,9 +280,7 @@ impl super::Renderer {
             return 1 + tab_bar + prompt_rows + 1 + 1 + page_extra_height(pages, active_page);
         }
         let input_rows = rendered_input_rows(input, terminal_width);
-        let ac_rows = autocomplete
-            .map(|ac| ac.visible_rows())
-            .unwrap_or(0);
+        let ac_rows = autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
         // top sep + input_rows + autocomplete + bottom sep + status + page region
         1 + input_rows.max(1) + ac_rows + 1 + 1 + page_extra_height(pages, active_page)
     }
@@ -539,11 +537,17 @@ impl super::Renderer {
             y += visible_input_rows;
         }
 
-         // ── Autocomplete dropdown ──────────────────────────────────────
+        // ── Autocomplete dropdown ──────────────────────────────────────
         if let Some(ac) = ac {
             let ac_end = y + ac_rows;
             let name_width = ac.max_name_width();
-            for (local_i, (name, desc)) in ac.matches.iter().skip(ac.scroll_offset).take(MAX_VISIBLE).enumerate() {
+            for (local_i, (name, desc)) in ac
+                .matches
+                .iter()
+                .skip(ac.scroll_offset)
+                .take(MAX_VISIBLE)
+                .enumerate()
+            {
                 if y >= ac_end {
                     break;
                 }
@@ -575,7 +579,10 @@ impl super::Renderer {
                     " ".repeat((area.width as usize).saturating_sub(display_width))
                 );
                 frame.render_widget(
-                    Paragraph::new(Span::styled(padded, Style::default().fg(self.theme.status_text))),
+                    Paragraph::new(Span::styled(
+                        padded,
+                        Style::default().fg(self.theme.status_text),
+                    )),
                     Rect {
                         y,
                         height: 1,
@@ -729,7 +736,9 @@ impl super::Renderer {
 
         use crate::llm::token_tracker::format_tokens;
 
-        let received = status_info.streaming_completion_tokens.unwrap_or(status_info.token_stats.received);
+        let received = status_info
+            .streaming_completion_tokens
+            .unwrap_or(status_info.token_stats.received);
         let any_token_metric = status_info.status_show_tokens_curr
             || status_info.status_show_tokens_in
             || status_info.status_show_tokens_out
@@ -739,11 +748,20 @@ impl super::Renderer {
             let mut metric_parts: Vec<Span> = vec![];
             if status_info.status_show_tokens_curr {
                 metric_parts.push(Span::styled(
-                    format!("curr {}", format_tokens(status_info.token_stats.context_length)),
+                    format!(
+                        "curr {}",
+                        format_tokens(status_info.token_stats.context_length)
+                    ),
                     Style::default().fg(self.theme.status_text),
                 ));
             }
             if status_info.status_show_tokens_in {
+                if !metric_parts.is_empty() {
+                    metric_parts.push(Span::styled(
+                        " / ",
+                        Style::default().fg(self.theme.status_text),
+                    ));
+                }
                 metric_parts.push(Span::styled(
                     format!("in {}", format_tokens(status_info.token_stats.sent)),
                     Style::default().fg(self.theme.status_text),
@@ -751,7 +769,10 @@ impl super::Renderer {
             }
             if status_info.status_show_tokens_out {
                 if !metric_parts.is_empty() {
-                    metric_parts.push(Span::styled(" / ", Style::default().fg(self.theme.status_text)));
+                    metric_parts.push(Span::styled(
+                        " / ",
+                        Style::default().fg(self.theme.status_text),
+                    ));
                 }
                 metric_parts.push(Span::styled(
                     format!("out {}", format_tokens(received)),
@@ -760,10 +781,16 @@ impl super::Renderer {
             }
             if status_info.status_show_tokens_total {
                 if !metric_parts.is_empty() {
-                    metric_parts.push(Span::styled(" / ", Style::default().fg(self.theme.status_text)));
+                    metric_parts.push(Span::styled(
+                        " / ",
+                        Style::default().fg(self.theme.status_text),
+                    ));
                 }
                 metric_parts.push(Span::styled(
-                    format!("total {}", format_tokens(status_info.token_stats.sent + received)),
+                    format!(
+                        "total {}",
+                        format_tokens(status_info.token_stats.sent + received)
+                    ),
                     Style::default().fg(self.theme.status_text),
                 ));
             }

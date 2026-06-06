@@ -250,14 +250,17 @@ impl InputState {
                 }
             }
             KeyCode::Char(c) => {
+                self.history_index = None;
                 self.insert_char(c);
                 InputAction::Redraw
             }
             KeyCode::Backspace => {
+                self.history_index = None;
                 self.delete_backward();
                 InputAction::Redraw
             }
             KeyCode::Delete => {
+                self.history_index = None;
                 self.delete_forward();
                 InputAction::Redraw
             }

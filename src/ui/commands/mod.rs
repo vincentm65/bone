@@ -95,20 +95,43 @@ fn context(messages: &[ChatMessage]) -> String {
     format!("Context: ~{used} tokens in transcript. No local token cap is applied.")
 }
 fn help() -> String {
-    [
-        "/clear     — clear chat history",
-        "/compact   — compact chat history",
-        "/edit      — open system editor for input",
-        "/help      — show this message",
-        "/model     — set or show model (/model <name>)",
-        "/provider  — pick or switch provider (/provider <name>)",
-        "/recall    — search past conversations (/recall <query>)",
-        "/tools     — enable or disable tools, /tools reload to rescan",
-        "/skills    — list, enable, disable, or reload skills",
-        "/usage     — show token usage for current conversation",
-        "/config    — change application settings",
-        "/quit      — exit bone",
-        ":        — run a command inline (: <command>)",
+    let bold = "\x1b[1m";
+    let reset = "\x1b[0m";
+    vec![
+        format!("{bold}Commands{reset}"),
+        "  /clear      — clear chat history".to_string(),
+        "  /compact    — compact chat history".to_string(),
+        "  /config     — change application settings".to_string(),
+        "  /context    — show context token count".to_string(),
+        "  /edit, /e   — open system editor for input".to_string(),
+        "  /help       — show this message".to_string(),
+        "  /model      — set or show model (/model <name>)".to_string(),
+        "  /new        — clear chat history (alias for /clear)".to_string(),
+        "  /provider   — pick or switch provider (/provider <name>)".to_string(),
+        "  /recall     — search past conversations (/recall <query>)".to_string(),
+        "  /skills     — list, enable, disable, or reload skills".to_string(),
+        "  /tools      — enable or disable tools, /tools reload to rescan".to_string(),
+        "  /usage      — show token usage for current conversation".to_string(),
+        "  /quit       — exit bone".to_string(),
+        "  :           — run a shell command inline (: <command>)".to_string(),
+        String::new(),
+        format!("{bold}Input shortcuts{reset}"),
+        "  Ctrl+A       — move cursor to start of line".to_string(),
+        "  Ctrl+E       — move cursor to end of line".to_string(),
+        "  Ctrl+W       — delete word backward".to_string(),
+        "  Ctrl+U       — clear line before cursor".to_string(),
+        "  Ctrl+K       — clear line after cursor".to_string(),
+        "  Ctrl+X       — open system editor".to_string(),
+        "  Ctrl+D       — clear message queue".to_string(),
+        "  Ctrl+C       — cancel streaming (double-tap to quit)".to_string(),
+        "  Esc          — clear input buffer".to_string(),
+        String::new(),
+        format!("{bold}Pane navigation{reset}"),
+        "  Ctrl+T       — toggle pane visibility".to_string(),
+        "  Tab          — cycle active pane (when panes visible)".to_string(),
+        "  Shift+Tab    — cycle approval mode".to_string(),
+        "  PageUp/Down  — scroll active pane".to_string(),
+        "  Ctrl+Up/Down — scroll active pane by one line".to_string(),
     ]
     .join("\n")
 }
@@ -142,7 +165,7 @@ async fn provider_switch(
         lines.push(String::new());
         if providers_config.providers.is_empty() {
             lines.push(
-                "No providers configured. Create ~/.bone-rust/providers.yaml".to_string(),
+                "No providers configured. Create ~/.bone-rust/config/providers.yaml".to_string(),
             );
         } else {
             lines.push("Available:".to_string());

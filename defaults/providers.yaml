@@ -1,8 +1,8 @@
 # Example providers configuration for bone-rust.
-# Copy this to ~/.bone-rust/providers.yaml and fill in your API keys.
+# Seeded to ~/.bone-rust/config/providers.yaml. Fill in your API keys there.
 #
 # On first run, bone-rust will copy this file automatically if no
-# providers.yaml exists.  Edit the copy — this file is never overwritten.
+# config/providers.yaml exists. Edit the seeded copy — this file is never overwritten.
 
 last_provider: local
 

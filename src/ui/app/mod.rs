@@ -18,8 +18,8 @@ use std::io;
 use std::time::Instant;
 use tokio::time::{self, Duration};
 
-use super::commands;
 use super::autocomplete::AutocompleteState;
+use super::commands;
 use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
@@ -521,6 +521,13 @@ impl App {
     /// Update autocomplete state based on current input buffer.
     /// Shows autocomplete when buffer starts with `/`, hides otherwise.
     fn update_autocomplete(&mut self) {
+        // Don't open autocomplete while navigating history — prevents the
+        // dropdown from reopening on every arrow press when a history entry
+        // starts with '/'.
+        if self.input.history_index.is_some() {
+            self.autocomplete = None;
+            return;
+        }
         let buf = &self.input.buffer;
         if let Some(query) = buf.strip_prefix('/') {
             // Don't show if there's a space (user typed args already)
@@ -615,38 +622,45 @@ impl App {
         }
 
         // Autocomplete key interception (before input.apply_key)
-        if self.autocomplete.is_some() {
+        if let Some(ref mut ac) = self.autocomplete {
             match code {
+                // Arrow Up/Down: if buffer is a complete command (exact match),
+                // dismiss autocomplete and fall through to history navigation.
+                // Otherwise scroll the suggestion list.
                 KeyCode::Up | KeyCode::Down if modifiers.is_empty() => {
-                    if let Some(ref mut ac) = self.autocomplete {
-                        match code {
-                            KeyCode::Up => ac.up(),
-                            KeyCode::Down => ac.down(),
-                            _ => {}
+                    let buf = &self.input.buffer;
+                    let complete = buf.starts_with('/')
+                        && ac.matches.iter().any(|(name, _)| *buf == format!("/{}", name));
+                    if complete {
+                        self.autocomplete = None;
+                        // fall through to apply_key for history
+                    } else {
+                        if code == KeyCode::Up {
+                            ac.up();
+                        } else {
+                            ac.down();
                         }
+                        self.redraw(term)?;
+                        return Ok(());
                     }
-                    return self.redraw(term);
                 }
                 KeyCode::Tab | KeyCode::Enter if modifiers.is_empty() => {
-                    if let Some(ref ac) = self.autocomplete {
-                        if let Some(cmd) = ac.selected_command() {
-                            self.input.buffer = format!("/{}", cmd);
-                            self.input.cursor_pos = self.input.buffer.chars().count();
-                            // If Enter, also submit — but for Tab just accept
-                            if code == KeyCode::Enter {
-                                self.autocomplete = None;
+                    if let Some(cmd) = ac.selected_command() {
+                        self.input.buffer = format!("/{}", cmd);
+                        self.input.cursor_pos = self.input.buffer.chars().count();
+                        if code == KeyCode::Enter {
+                            self.autocomplete = None;
+                            self.send_message(term).await?;
+                            while let Some(queued) = self.queue.pop_front() {
+                                self.input.buffer = queued;
+                                self.input.cursor_pos = self.input.buffer.chars().count();
                                 self.send_message(term).await?;
-                                while let Some(queued) = self.queue.pop_front() {
-                                    self.input.buffer = queued;
-                                    self.input.cursor_pos = self.input.buffer.chars().count();
-                                    self.send_message(term).await?;
-                                }
-                            } else {
-                                self.autocomplete = None;
-                                self.redraw(term)?;
                             }
-                            return Ok(());
+                        } else {
+                            self.autocomplete = None;
+                            self.redraw(term)?;
                         }
+                        return Ok(());
                     }
                     self.autocomplete = None;
                     return self.redraw(term);

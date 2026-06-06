@@ -105,7 +105,9 @@ impl AutocompleteState {
 
     /// Get the currently selected command name.
     pub fn selected_command(&self) -> Option<&str> {
-        self.matches.get(self.selected).map(|(name, _)| name.as_str())
+        self.matches
+            .get(self.selected)
+            .map(|(name, _)| name.as_str())
     }
 
     /// Number of visible rows this autocomplete needs.
@@ -115,7 +117,9 @@ impl AutocompleteState {
 
     /// Number of additional items below the visible window.
     pub fn more_count(&self) -> usize {
-        self.matches.len().saturating_sub(self.scroll_offset + MAX_VISIBLE)
+        self.matches
+            .len()
+            .saturating_sub(self.scroll_offset + MAX_VISIBLE)
     }
 
     /// Max display width of any command name in the matches list.

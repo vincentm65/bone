@@ -1,0 +1,113 @@
+name: npm-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: npm version to publish
+        required: true
+        default: 2.0.0
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: bone-linux-x64
+            binary: bone
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: bone-linux-arm64
+            binary: bone
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: bone-darwin-x64
+            binary: bone
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: bone-darwin-arm64
+            binary: bone
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: bone-win32-x64
+            binary: bone.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: stage binary
+        shell: bash
+        run: |
+          mkdir -p artifacts/${{ matrix.target }}/release
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} artifacts/${{ matrix.target }}/release/${{ matrix.binary }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/${{ matrix.target }}/release/${{ matrix.binary }}
+
+  publish:
+    name: publish npm packages
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: set package versions
+        run: |
+          npm version --prefix npm/bone-agent ${{ inputs.version }} --no-git-tag-version
+          node - <<'NODE'
+          const fs = require('fs');
+          const file = 'npm/bone-agent/package.json';
+          const version = process.env.VERSION;
+          const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+          for (const dep of Object.keys(pkg.optionalDependencies)) pkg.optionalDependencies[dep] = version;
+          fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+        env:
+          VERSION: ${{ inputs.version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: bone-linux-x64
+          path: target/x86_64-unknown-linux-gnu/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: bone-linux-arm64
+          path: target/aarch64-unknown-linux-gnu/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: bone-darwin-x64
+          path: target/x86_64-apple-darwin/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: bone-darwin-arm64
+          path: target/aarch64-apple-darwin/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: bone-win32-x64
+          path: target/x86_64-pc-windows-msvc/release
+      - name: create platform packages
+        run: node npm/make-platform-packages.js ${{ inputs.version }}
+      - name: publish platform packages
+        run: |
+          for dir in npm/dist/*; do
+            npm publish "$dir" --access public
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: publish main package
+        run: npm publish npm/bone-agent --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
