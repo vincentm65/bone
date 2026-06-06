@@ -117,6 +117,16 @@ impl AutocompleteState {
     pub fn more_count(&self) -> usize {
         self.matches.len().saturating_sub(self.scroll_offset + MAX_VISIBLE)
     }
+
+    /// Max display width of any command name in the matches list.
+    pub fn max_name_width(&self) -> usize {
+        self.matches
+            .iter()
+            .map(|(name, _)| name.len())
+            .max()
+            .unwrap_or(0)
+            .max(6)
+    }
 }
 
 /// Build the built-in commands list with descriptions.

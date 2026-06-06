@@ -539,9 +539,10 @@ impl super::Renderer {
             y += visible_input_rows;
         }
 
-        // ── Autocomplete dropdown ──────────────────────────────────────
+         // ── Autocomplete dropdown ──────────────────────────────────────
         if let Some(ac) = ac {
             let ac_end = y + ac_rows;
+            let name_width = ac.max_name_width();
             for (local_i, (name, desc)) in ac.matches.iter().skip(ac.scroll_offset).take(MAX_VISIBLE).enumerate() {
                 if y >= ac_end {
                     break;
@@ -555,7 +556,7 @@ impl super::Renderer {
                 } else {
                     Style::default().fg(self.theme.status_text)
                 };
-                let label = format!("  /{name} — {desc}");
+                let label = format!("  /{name:<name_width$} — {desc}");
                 frame.render_widget(
                     Paragraph::new(Span::styled(label, style)),
                     Rect {
