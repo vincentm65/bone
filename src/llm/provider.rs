@@ -150,7 +150,7 @@ impl From<reqwest::Error> for LlmError {
             _ => {
                 if err.is_timeout() {
                     LlmErrorKind::Timeout
-                } else if err.is_connect() {
+                } else if err.is_connect() || err.is_request() {
                     LlmErrorKind::Connection
                 } else {
                     LlmErrorKind::Config
