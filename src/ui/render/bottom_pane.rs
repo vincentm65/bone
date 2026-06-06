@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthStr;
 use super::wrap;
 use super::{InputState, Prompt, SPINNER, StatusInfo};
 use crate::tools::ApprovalMode;
-use crate::ui::autocomplete::AutocompleteState;
+use crate::ui::autocomplete::{AutocompleteState, MAX_VISIBLE};
 use crate::ui::pane_page::PanePage;
 use crate::ui::tool_display;
 
@@ -542,10 +542,11 @@ impl super::Renderer {
         // ── Autocomplete dropdown ──────────────────────────────────────
         if let Some(ac) = ac {
             let ac_end = y + ac_rows;
-            for (i, cmd) in ac.matches.iter().enumerate() {
+            for (local_i, cmd) in ac.matches.iter().skip(ac.scroll_offset).take(MAX_VISIBLE).enumerate() {
                 if y >= ac_end {
                     break;
                 }
+                let i = ac.scroll_offset + local_i;
                 let selected = i == ac.selected;
                 let style = if selected {
                     Style::default()
@@ -563,6 +564,22 @@ impl super::Renderer {
                     },
                 );
                 y += 1;
+            }
+            if ac.more_count() > 0 && y < ac_end {
+                let hint = format!("  … [+{} more]", ac.more_count());
+                let display_width = UnicodeWidthStr::width(hint.as_str());
+                let padded = format!(
+                    "{hint}{}",
+                    " ".repeat((area.width as usize).saturating_sub(display_width))
+                );
+                frame.render_widget(
+                    Paragraph::new(Span::styled(padded, Style::default().fg(self.theme.status_text))),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
             }
         }
 
