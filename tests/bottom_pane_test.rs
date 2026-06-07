@@ -222,7 +222,10 @@ fn pane_page_adds_height_to_viewport() {
     assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0, None), 4);
 
     // With 3-line page: base(4) + page_sep(1) + content(3) = 8
-    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0, None), 8);
+    assert_eq!(
+        Renderer::desired_height(&input, None, 80, &pages, 0, None),
+        8
+    );
 }
 
 #[test]
@@ -239,7 +242,10 @@ fn pane_page_honors_visible_rows() {
     }];
 
     // base(4) + page_sep(1) + tool-requested content rows(12)
-    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0, None), 17);
+    assert_eq!(
+        Renderer::desired_height(&input, None, 80, &pages, 0, None),
+        17
+    );
 }
 
 #[test]
@@ -263,7 +269,10 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
     ];
 
     // base(4) + page_sep(1) + content(1) + page_sep(1) + tab_indicator(1) = 8
-    assert_eq!(Renderer::desired_height(&input, None, 80, &pages, 0, None), 8);
+    assert_eq!(
+        Renderer::desired_height(&input, None, 80, &pages, 0, None),
+        8
+    );
 }
 
 #[test]
@@ -377,7 +386,14 @@ fn bottom_separator_can_show_pane_toggle_hint() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &pages, 0, Some("Ctrl+T hide tasks"), None),
+                &pane_args(
+                    &input,
+                    &status_info(),
+                    &pages,
+                    0,
+                    Some("Ctrl+T hide tasks"),
+                    None,
+                ),
                 None,
             )
         })

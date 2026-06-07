@@ -107,12 +107,12 @@ async fn execute_all_returns_results_in_request_order_after_concurrent_execution
 #[tokio::test]
 async fn disabled_tools_are_not_advertised_or_executed() {
     use bone::tools::{ToolCall, ToolHandler, builtin_tools};
+    use std::collections::HashMap;
     use serde_json::json;
 
     let enabled = vec!["read_file".to_string()];
-    let handler = ToolHandler::with_enabled(builtin_tools(), &enabled);
+    let handler = ToolHandler::with_enabled_safety_and_display(builtin_tools(), &enabled, HashMap::new(), HashMap::new());
 
-    assert_eq!(handler.available_definitions().len(), 4);
     let definitions = handler.definitions();
     assert_eq!(definitions.len(), 1);
     assert_eq!(definitions[0].name, "read_file");
@@ -224,21 +224,13 @@ fn user_config_from_custom_configs_applies_general_settings() {
                     default: Some(serde_yaml::Value::String("safe".into())),
                     value: Some(serde_yaml::Value::String("danger".into())),
                 },
-                ConfigField {
-                    key: "max_rounds".to_string(),
-                    label: None,
-                    field_type: ConfigFieldType::Number,
-                    options: Vec::new(),
-                    default: Some(serde_yaml::Value::Number(150.into())),
-                    value: Some(serde_yaml::Value::Number(42.into())),
-                },
+
             ],
         },
     ));
 
     let cfg = UserConfig::from_custom_configs(&configs);
     assert_eq!(cfg.approval_mode, ApprovalMode::Danger);
-    assert_eq!(cfg.max_rounds, 42);
 }
 
 #[test]

@@ -110,6 +110,7 @@ fn help() -> String {
         "  /provider   — pick or switch provider (/provider <name>)".to_string(),
         "  /recall     — search past conversations (/recall <query>)".to_string(),
         "  /skills     — list, enable, disable, or reload skills".to_string(),
+        "  /stats      — open full-screen token stats dashboard".to_string(),
         "  /tools      — enable or disable tools, /tools reload to rescan".to_string(),
         "  /usage      — show token usage for current conversation".to_string(),
         "  /quit       — exit bone".to_string(),

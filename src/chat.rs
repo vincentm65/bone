@@ -52,34 +52,6 @@ pub fn build_summary_messages(old_messages: &[ChatMessage]) -> Vec<ChatMessage> 
     out
 }
 
-/// Compact chat transcript by replacing older turns with a short notice.
-///
-/// This does not summarize removed content; it only keeps the most recent
-/// messages, expanding the retained range when needed to avoid splitting
-/// assistant/tool-call chains.
-///
-/// Returns a `Cow` to avoid allocation when the transcript is already short
-/// enough to keep as-is.
-pub fn compact_transcript<'a>(
-    messages: &'a [ChatMessage],
-    keep: usize,
-) -> std::borrow::Cow<'a, [ChatMessage]> {
-    let keep = keep.max(1);
-    if messages.len() <= keep {
-        return std::borrow::Cow::Borrowed(messages);
-    }
-
-    let keep_from = compact_boundary(messages, messages.len() - keep);
-    if keep_from == 0 {
-        return std::borrow::Cow::Borrowed(messages);
-    }
-
-    let mut out = Vec::with_capacity(messages.len() - keep_from + 1);
-    out.push(ChatMessage::new(ChatRole::System, COMPACT_NOTICE));
-    out.extend(messages[keep_from..].iter().cloned());
-    std::borrow::Cow::Owned(out)
-}
-
 fn compact_boundary(messages: &[ChatMessage], requested: usize) -> usize {
     let mut boundary = requested;
 

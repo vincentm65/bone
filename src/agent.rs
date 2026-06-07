@@ -1,11 +1,10 @@
 use crate::chat::build_chat_history;
 use crate::config::{UserConfig, custom::CustomConfigs, load_providers, save_providers};
 use crate::llm::{
-    ChatEvent, ChatMessage, ChatRole, TokenStats,
+    ChatEvent, ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
     token_tracker::CHARS_PER_TOKEN,
-    providers::create_provider_with_config,
 };
-use crate::session_db::SessionDb;
+use crate::session_db::{SessionDb, db_path};
 use crate::tools::{ApprovalMode, ToolHandler, load_tools};
 use futures_util::StreamExt;
 
@@ -32,7 +31,15 @@ impl<'a> SessionWriter<'a> {
         seq: i64,
     ) {
         if let Some((db, conv_id)) = self.inner {
-            if let Err(e) = db.append_message(conv_id, role, content, tool_name, tool_call_id, tool_calls, seq) {
+            if let Err(e) = db.append_message(
+                conv_id,
+                role,
+                content,
+                tool_name,
+                tool_call_id,
+                tool_calls,
+                seq,
+            ) {
                 eprintln!("bone: warning: session db append_message failed: {e}");
             }
         }
@@ -303,7 +310,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let mut history = build_chat_history(&transcript, request.system_prompt.as_deref(), "");
     let mut token_stats = TokenStats::new();
     let tool_defs = tools.definitions();
-    let tool_defs_json_chars = serde_json::to_string(&tool_defs).map(|j| j.chars().count()).unwrap_or(0);
+    let tool_defs_json_chars = serde_json::to_string(&tool_defs)
+        .map(|j| j.chars().count())
+        .unwrap_or(0);
     let session_db = open_headless_session_db(llm.id(), llm.model());
     let mut session = SessionWriter::from_opt(&session_db);
     let mut session_seq = 0i64;
@@ -432,12 +441,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             let prompt_tokens = estimate_tokens(prompt_chars);
             let completion_tokens = estimate_tokens(completion_chars);
             token_stats.record_estimate(prompt_chars, completion_chars);
-            session.record_estimated_usage(
-                llm.id(),
-                llm.model(),
-                prompt_tokens,
-                completion_tokens,
-            );
+            session.record_estimated_usage(llm.id(), llm.model(), prompt_tokens, completion_tokens);
             emit_event(
                 request.events,
                 &AgentEvent::TokenUsage {
@@ -467,14 +471,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         // No tool calls -> done
         if tool_calls.is_empty() {
             session_seq += 1;
-            session.append_message(
-                "assistant",
-                &assistant_text,
-                None,
-                None,
-                None,
-                session_seq,
-            );
+            session.append_message("assistant", &assistant_text, None, None, None, session_seq);
             break assistant_text;
         }
 
@@ -584,11 +581,7 @@ fn estimate_context_chars(history: &[ChatMessage], tool_defs_json_chars: usize) 
 }
 
 fn open_headless_session_db(provider: &str, model: &str) -> Option<(SessionDb, i64)> {
-    let db_path = dirs::home_dir()?
-        .join(".bone-rust")
-        .join("data")
-        .join("conversations.db");
-    let db = SessionDb::open(&db_path).ok()?;
+    let db = SessionDb::open(&db_path()).ok()?;
     let conv_id = db.create_conversation(provider, model).ok()?;
     Some((db, conv_id))
 }

@@ -32,39 +32,6 @@ impl ToolRegistry {
         self.tools.values().map(|tool| tool.definition()).collect()
     }
 
-    pub async fn execute(&self, call: ToolCall) -> ToolResult {
-        let name = call.name.clone();
-        let call_id = call.id.clone();
-        match self.tools.get(&name) {
-            Some(tool) => match tool.execute_output(call.arguments).await {
-                Ok(output) => ToolResult {
-                    call_id,
-                    name,
-                    content: output.content,
-                    is_error: false,
-                    pane_page: output.pane_page,
-                    state: output.state,
-                },
-                Err(content) => ToolResult {
-                    call_id,
-                    name,
-                    content,
-                    is_error: true,
-                    pane_page: None,
-                    state: None,
-                },
-            },
-            None => ToolResult {
-                call_id,
-                name,
-                content: "Unknown tool".to_string(),
-                is_error: true,
-                pane_page: None,
-                state: None,
-            },
-        }
-    }
-
     pub async fn execute_live(
         &self,
         call: ToolCall,
@@ -163,30 +130,6 @@ impl ToolHandler {
         }
     }
 
-    pub fn with_enabled(registry: ToolRegistry, enabled: &[String]) -> Self {
-        Self {
-            registry,
-            enabled: enabled.iter().cloned().collect(),
-            dynamic_safety: HashMap::new(),
-            dynamic_display: HashMap::new(),
-            state_map: ToolStateMap::default(),
-        }
-    }
-
-    pub fn with_enabled_and_safety(
-        registry: ToolRegistry,
-        enabled: &[String],
-        dynamic_safety: HashMap<String, CommandSafety>,
-    ) -> Self {
-        Self {
-            registry,
-            enabled: enabled.iter().cloned().collect(),
-            dynamic_safety,
-            dynamic_display: HashMap::new(),
-            state_map: ToolStateMap::default(),
-        }
-    }
-
     pub fn with_enabled_safety_and_display(
         registry: ToolRegistry,
         enabled: &[String],
@@ -226,10 +169,6 @@ impl ToolHandler {
             .into_iter()
             .filter(|tool| self.is_enabled(&tool.name))
             .collect()
-    }
-
-    pub fn available_definitions(&self) -> Vec<ToolDefinition> {
-        self.registry.definitions()
     }
 
     pub fn safety_for_call(&self, call: &ToolCall) -> CommandSafety {

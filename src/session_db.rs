@@ -1,6 +1,17 @@
 use rusqlite::{Connection, params};
 use std::path::Path;
 
+/// Returns the path to the conversations database.
+/// Centralizes the path so all callers (TUI, headless, stats-popup) stay in sync.
+/// Uses `~/.bone-rust` directly (not XDG) so existing databases aren't orphaned.
+pub fn db_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".bone-rust")
+        .join("data")
+        .join("conversations.db")
+}
+
 /// A search hit from FTS5 query.
 pub struct SearchHit {
     pub message_id: i64,
@@ -11,6 +22,7 @@ pub struct SearchHit {
 }
 
 /// Aggregated usage for one conversation.
+#[derive(Clone, Debug)]
 pub struct UsageSummary {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
@@ -20,6 +32,7 @@ pub struct UsageSummary {
 }
 
 /// Usage broken down by provider/model.
+#[derive(Clone, Debug)]
 pub struct ProviderUsage {
     pub provider: String,
     pub model: String,
@@ -28,6 +41,93 @@ pub struct ProviderUsage {
     pub cached_tokens: i64,
     pub cost: f64,
     pub request_count: i64,
+}
+
+/// One time-bucket row for historical usage charts.
+#[derive(Clone, Debug)]
+pub struct UsageBucket {
+    pub label: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+    pub cost: f64,
+    pub request_count: i64,
+}
+
+/// One hour-of-day aggregate row.
+#[derive(Clone, Debug)]
+pub struct HourUsage {
+    pub hour: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+    pub request_count: i64,
+}
+
+/// Full historical usage snapshot for the stats dashboard.
+#[derive(Clone, Debug)]
+pub struct UsageStatsSnapshot {
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub total: UsageSummary,
+    pub by_model_today: Vec<ProviderUsage>,
+    pub by_model_7d: Vec<ProviderUsage>,
+    pub by_model_4w: Vec<ProviderUsage>,
+    pub by_model_all: Vec<ProviderUsage>,
+    pub daily: Vec<UsageBucket>,
+    pub weekly: Vec<UsageBucket>,
+    pub monthly: Vec<UsageBucket>,
+    pub all_time: Vec<UsageBucket>,
+    pub hourly_today: Vec<HourUsage>,
+    pub hourly_7d: Vec<HourUsage>,
+    pub hourly_4w: Vec<HourUsage>,
+    pub hourly_all: Vec<HourUsage>,
+    pub daily_activity: Vec<UsageBucket>,
+}
+
+/// Mirror of stats UI view mode, used for range-aware summaries.
+#[derive(Clone, Copy)]
+pub enum ViewModeRef {
+    Today,
+    SevenDays,
+    FourWeeks,
+    Months,
+}
+
+impl UsageStatsSnapshot {
+    /// Compute a summary for the given time range by aggregating buckets.
+    pub fn range_summary(&self, mode: ViewModeRef) -> UsageSummary {
+        let buckets: &[UsageBucket] = match mode {
+            ViewModeRef::Today => &self.daily,
+            ViewModeRef::SevenDays => &self.weekly,
+            ViewModeRef::FourWeeks => &self.monthly,
+            ViewModeRef::Months => &self.all_time,
+        };
+        let mut s = UsageSummary {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cost: 0.0,
+            request_count: 0,
+        };
+        for b in buckets {
+            s.prompt_tokens += b.prompt_tokens;
+            s.completion_tokens += b.completion_tokens;
+            s.cached_tokens += b.cached_tokens;
+            s.cost += b.cost;
+            s.request_count += b.request_count;
+        }
+        s
+    }
+
+    pub fn range_models(&self, mode: ViewModeRef) -> &[ProviderUsage] {
+        match mode {
+            ViewModeRef::Today => &self.by_model_today,
+            ViewModeRef::SevenDays => &self.by_model_7d,
+            ViewModeRef::FourWeeks => &self.by_model_4w,
+            ViewModeRef::Months => &self.by_model_all,
+        }
+    }
 }
 
 /// SQLite-backed conversation and usage storage.
@@ -50,7 +150,7 @@ impl SessionDb {
     }
 
     fn setup_schema(&self) -> rusqlite::Result<()> {
-        const SCHEMA_VERSION: u32 = 2;
+        const SCHEMA_VERSION: u32 = 3;
 
         let current_version: u32 = self
             .conn
@@ -112,6 +212,8 @@ impl SessionDb {
             CREATE INDEX idx_usage_events_conversation
                 ON usage_events(conversation_id);
 
+            CREATE INDEX idx_usage_events_created_at
+                ON usage_events(created_at);
             CREATE INDEX idx_messages_conversation_seq
                 ON messages(conversation_id, seq);
             ",
@@ -203,22 +305,6 @@ impl SessionDb {
         Ok(())
     }
 
-    /// Get aggregated usage for a conversation.
-    pub fn conversation_usage(&self, conversation_id: i64) -> rusqlite::Result<UsageSummary> {
-        let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) FROM usage_events WHERE conversation_id = ?1"
-        )?;
-        stmt.query_row(params![conversation_id], |row| {
-            Ok(UsageSummary {
-                prompt_tokens: row.get(0)?,
-                completion_tokens: row.get(1)?,
-                cached_tokens: row.get(2)?,
-                cost: row.get(3)?,
-                request_count: row.get(4)?,
-            })
-        })
-    }
-
     /// Get usage broken down by provider/model for a conversation.
     pub fn usage_by_provider(&self, conversation_id: i64) -> rusqlite::Result<Vec<ProviderUsage>> {
         let mut stmt = self.conn.prepare(
@@ -233,6 +319,288 @@ impl SessionDb {
                 cached_tokens: row.get(4)?,
                 cost: row.get(5)?,
                 request_count: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Get a full historical usage snapshot for the native stats dashboard.
+    pub fn usage_stats_snapshot(&self) -> rusqlite::Result<UsageStatsSnapshot> {
+        let (started_at, ended_at): (Option<String>, Option<String>) = self.conn.query_row(
+            "SELECT datetime(MIN(created_at), 'localtime'), datetime(MAX(created_at), 'localtime') FROM usage_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let total = self.conn.query_row(
+            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) FROM usage_events",
+            [],
+            |row| {
+                Ok(UsageSummary {
+                    prompt_tokens: row.get(0)?,
+                    completion_tokens: row.get(1)?,
+                    cached_tokens: row.get(2)?,
+                    cost: row.get(3)?,
+                    request_count: row.get(4)?,
+                })
+            },
+        )?;
+
+        let by_model_today = self.usage_by_model_since(Some("= date('now', 'localtime')"))?;
+        let by_model_7d =
+            self.usage_by_model_since(Some(">= date('now', 'localtime', '-6 days')"))?;
+        let by_model_4w =
+            self.usage_by_model_since(Some(">= date('now', 'localtime', '-27 days')"))?;
+        let by_model_all = self.usage_by_model_since(None)?;
+        let daily = self.usage_today_by_hour()?;
+        let weekly = self.usage_recent_days(7)?;
+        let monthly = self.usage_recent_weeks(4)?;
+        let all_time = self.usage_buckets(36)?;
+        let hourly_today = self.usage_by_hour_since(Some("= date('now', 'localtime')"))?;
+        let hourly_7d = self.usage_by_hour_since(Some(">= date('now', 'localtime', '-6 days')"))?;
+        let hourly_4w =
+            self.usage_by_hour_since(Some(">= date('now', 'localtime', '-27 days')"))?;
+        let hourly_all = self.usage_by_hour_since(None)?;
+        let daily_activity = self.usage_recent_days(730)?;
+
+        Ok(UsageStatsSnapshot {
+            started_at,
+            ended_at,
+            total,
+            by_model_today,
+            by_model_7d,
+            by_model_4w,
+            by_model_all,
+            daily,
+            weekly,
+            monthly,
+            all_time,
+            hourly_today,
+            hourly_7d,
+            hourly_4w,
+            hourly_all,
+            daily_activity,
+        })
+    }
+
+    fn usage_by_model_since(
+        &self,
+        date_filter: Option<&str>,
+    ) -> rusqlite::Result<Vec<ProviderUsage>> {
+        let sql = match date_filter {
+            Some(filter) => format!(
+                "SELECT provider, model, \
+                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+                 COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
+                 FROM usage_events WHERE date(created_at, 'localtime') {} \
+                 GROUP BY provider, model \
+                 ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC",
+                filter
+            ),
+            None =>
+                "SELECT provider, model, \
+                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+                 COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
+                 FROM usage_events GROUP BY provider, model \
+                 ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC"
+                    .to_string(),
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProviderUsage {
+                provider: row.get(0)?,
+                model: row.get(1)?,
+                prompt_tokens: row.get(2)?,
+                completion_tokens: row.get(3)?,
+                cached_tokens: row.get(4)?,
+                cost: row.get(5)?,
+                request_count: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn usage_today_by_hour(&self) -> rusqlite::Result<Vec<UsageBucket>> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE hours(hour) AS (
+                VALUES(0)
+                UNION ALL SELECT hour + 1 FROM hours WHERE hour < 23
+             ), usage AS (
+                SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER) AS hour,
+                       COALESCE(SUM(prompt_tokens),0) AS prompt,
+                       COALESCE(SUM(completion_tokens),0) AS completion,
+                       COALESCE(SUM(cached_tokens),0) AS cached,
+                       COALESCE(SUM(cost),0.0) AS cost,
+                       COUNT(*) AS requests
+                FROM usage_events
+                WHERE date(created_at, 'localtime') = date('now', 'localtime')
+                GROUP BY hour
+             )
+             SELECT printf('%02d:00', hours.hour),
+                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
+                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
+                    COALESCE(usage.requests,0)
+             FROM hours
+             LEFT JOIN usage ON usage.hour = hours.hour
+             ORDER BY hours.hour ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UsageBucket {
+                label: row.get(0)?,
+                prompt_tokens: row.get(1)?,
+                completion_tokens: row.get(2)?,
+                cached_tokens: row.get(3)?,
+                cost: row.get(4)?,
+                request_count: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn usage_recent_days(&self, days: i64) -> rusqlite::Result<Vec<UsageBucket>> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE series(n, day) AS (
+                VALUES(0, date('now', 'localtime', ?1))
+                UNION ALL SELECT n + 1, date(day, '+1 day') FROM series WHERE n + 1 < ?2
+             ), usage AS (
+                SELECT date(created_at, 'localtime') AS day,
+                       COALESCE(SUM(prompt_tokens),0) AS prompt,
+                       COALESCE(SUM(completion_tokens),0) AS completion,
+                       COALESCE(SUM(cached_tokens),0) AS cached,
+                       COALESCE(SUM(cost),0.0) AS cost,
+                       COUNT(*) AS requests
+                FROM usage_events
+                WHERE date(created_at, 'localtime') >= date('now', 'localtime', ?1)
+                GROUP BY day
+             )
+             SELECT series.day,
+                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
+                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
+                    COALESCE(usage.requests,0)
+             FROM series
+             LEFT JOIN usage ON usage.day = series.day
+             ORDER BY series.day ASC",
+        )?;
+        let modifier = format!("-{} days", days.saturating_sub(1));
+        let rows = stmt.query_map(params![modifier, days], |row| {
+            Ok(UsageBucket {
+                label: row.get(0)?,
+                prompt_tokens: row.get(1)?,
+                completion_tokens: row.get(2)?,
+                cached_tokens: row.get(3)?,
+                cost: row.get(4)?,
+                request_count: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn usage_recent_weeks(&self, weeks: i64) -> rusqlite::Result<Vec<UsageBucket>> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE series(n, week) AS (
+                VALUES(0, strftime('%Y-W%W', date('now', 'localtime', ?1)))
+                UNION ALL
+                SELECT n + 1, strftime('%Y-W%W', date('now', 'localtime', printf('-%d days', (?2 - n - 2) * 7)))
+                FROM series WHERE n + 1 < ?2
+             ), usage AS (
+                SELECT strftime('%Y-W%W', created_at, 'localtime') AS week,
+                       COALESCE(SUM(prompt_tokens),0) AS prompt,
+                       COALESCE(SUM(completion_tokens),0) AS completion,
+                       COALESCE(SUM(cached_tokens),0) AS cached,
+                       COALESCE(SUM(cost),0.0) AS cost,
+                       COUNT(*) AS requests
+                FROM usage_events
+                WHERE date(created_at, 'localtime') >= date('now', 'localtime', ?3)
+                GROUP BY week
+             )
+             SELECT series.week,
+                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
+                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
+                    COALESCE(usage.requests,0)
+             FROM series
+             LEFT JOIN usage ON usage.week = series.week
+             ORDER BY series.n ASC",
+        )?;
+        let first_label_modifier = format!("-{} days", weeks.saturating_sub(1).saturating_mul(7));
+        let usage_modifier = format!("-{} days", weeks.saturating_mul(7).saturating_sub(1));
+        let rows = stmt.query_map(
+            params![first_label_modifier, weeks, usage_modifier],
+            |row| {
+                Ok(UsageBucket {
+                    label: row.get(0)?,
+                    prompt_tokens: row.get(1)?,
+                    completion_tokens: row.get(2)?,
+                    cached_tokens: row.get(3)?,
+                    cost: row.get(4)?,
+                    request_count: row.get(5)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    fn usage_buckets(&self, limit: i64) -> rusqlite::Result<Vec<UsageBucket>> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE series(n, month) AS (
+                VALUES(0, strftime('%Y-%m', date('now', 'localtime', ?1)))
+                UNION ALL
+                SELECT n + 1, strftime('%Y-%m', date(month || '-01', '+1 month'))
+                FROM series WHERE n + 1 < ?2
+             ), usage AS (
+                SELECT strftime('%Y-%m', created_at, 'localtime') AS month,
+                       COALESCE(SUM(prompt_tokens),0) AS prompt,
+                       COALESCE(SUM(completion_tokens),0) AS completion,
+                       COALESCE(SUM(cached_tokens),0) AS cached,
+                       COALESCE(SUM(cost),0.0) AS cost,
+                       COUNT(*) AS requests
+                FROM usage_events
+                GROUP BY month
+             )
+             SELECT series.month,
+                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
+                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
+                    COALESCE(usage.requests,0)
+             FROM series
+             LEFT JOIN usage ON usage.month = series.month
+             ORDER BY series.month ASC",
+        )?;
+        let modifier = format!("-{} months", limit.saturating_sub(1));
+        let rows = stmt.query_map(params![modifier, limit], |row| {
+            Ok(UsageBucket {
+                label: row.get(0)?,
+                prompt_tokens: row.get(1)?,
+                completion_tokens: row.get(2)?,
+                cached_tokens: row.get(3)?,
+                cost: row.get(4)?,
+                request_count: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn usage_by_hour_since(&self, date_filter: Option<&str>) -> rusqlite::Result<Vec<HourUsage>> {
+        let sql = match date_filter {
+            Some(filter) => format!(
+                "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
+                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+                 COALESCE(SUM(cached_tokens),0), COUNT(*) \
+                 FROM usage_events WHERE date(created_at, 'localtime') {} GROUP BY 1 ORDER BY 1",
+                filter
+            ),
+            None => "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
+                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+                 COALESCE(SUM(cached_tokens),0), COUNT(*) \
+                 FROM usage_events GROUP BY 1 ORDER BY 1"
+                .to_string(),
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(HourUsage {
+                hour: row.get(0)?,
+                prompt_tokens: row.get(1)?,
+                completion_tokens: row.get(2)?,
+                cached_tokens: row.get(3)?,
+                request_count: row.get(4)?,
             })
         })?;
         rows.collect()
@@ -280,17 +648,6 @@ impl SessionDb {
             })
         })?;
         rows.collect()
-    }
-
-    /// Delete a message from both `messages` and `messages_fts`.
-    pub fn delete_message(&mut self, message_id: i64) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM messages_fts WHERE rowid = ?1",
-            params![message_id],
-        )?;
-        tx.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
-        tx.commit()
     }
 }
 

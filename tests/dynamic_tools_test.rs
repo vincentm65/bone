@@ -9,6 +9,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
 
 fn temp_dir(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
@@ -312,7 +313,7 @@ fn dynamic_tool_declared_safe_safety_is_allowed_in_safe_mode() {
     let safety = [("safe_tool".to_string(), CommandSafety::ReadOnly)]
         .into_iter()
         .collect();
-    let handler = ToolHandler::with_enabled_and_safety(ToolRegistry::new(), &[], safety);
+    let handler = ToolHandler::with_enabled_safety_and_display(ToolRegistry::new(), &[], safety, HashMap::new());
 
     assert_eq!(handler.safety_for_call(&call), CommandSafety::ReadOnly);
     assert!(handler.allows_call(ApprovalMode::Safe, &call));
@@ -337,7 +338,7 @@ fn task_list_without_declared_safety_defaults_to_danger() {
         registry = registry.register(tool);
     }
     let handler =
-        ToolHandler::with_enabled_and_safety(registry, &["my_tool".into()], dynamic_safety);
+        ToolHandler::with_enabled_safety_and_display(registry, &["my_tool".into()], dynamic_safety, HashMap::new());
 
     assert_eq!(
         handler.safety_for_call(&ToolCall {

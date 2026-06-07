@@ -296,6 +296,15 @@ async fn main() -> std::io::Result<()> {
         println!("{}", response.content);
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("stats-popup") {
+        let db = bone::session_db::SessionDb::open(&bone::session_db::db_path())
+            .map_err(std::io::Error::other)?;
+        bone::ui::stats::run(|| {
+            db.usage_stats_snapshot()
+                .map_err(|err| std::io::Error::other(err.to_string()))
+        })?;
+        return Ok(());
+    }
     // Install: symlink bone binary into PATH
     if args.first().map(String::as_str) == Some("install") {
         return do_install();

@@ -23,6 +23,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("quit", "exit bone"),
     ("recall", "search past conversations"),
     ("skills", "list, enable, disable, or reload skills"),
+    ("stats", "open full-screen token stats dashboard"),
     ("tools", "enable or disable tools"),
     ("usage", "show token usage for current conversation"),
 ];

@@ -166,11 +166,7 @@ impl App {
         if self.session_db.is_some() {
             return None;
         }
-        let db_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".bone-rust")
-            .join("data")
-            .join("conversations.db");
+        let db_path = crate::session_db::db_path();
         match SessionDb::open(&db_path) {
             Ok(db) => match db.create_conversation(self.llm.id(), self.llm.model()) {
                 Ok(conv_id) => {
@@ -630,7 +626,10 @@ impl App {
                 KeyCode::Up | KeyCode::Down if modifiers.is_empty() => {
                     let buf = &self.input.buffer;
                     let complete = buf.starts_with('/')
-                        && ac.matches.iter().any(|(name, _)| *buf == format!("/{}", name));
+                        && ac
+                            .matches
+                            .iter()
+                            .any(|(name, _)| *buf == format!("/{}", name));
                     if complete {
                         self.autocomplete = None;
                         // fall through to apply_key for history
@@ -950,6 +949,9 @@ impl App {
 
         if matches!(cmd.as_str(), "clear" | "new") {
             return self.clear_chat(term);
+        }
+        if cmd == "stats" {
+            return self.open_stats_dashboard(term);
         }
         if cmd == "usage" {
             let mut reply = self.token_stats.summary();
@@ -1339,7 +1341,9 @@ impl App {
 
     fn skills_catalog(&self) -> String {
         crate::llm::prompts::skills_catalog(
-            &self.skills.list()
+            &self
+                .skills
+                .list()
                 .filter(|s| s.enabled)
                 .map(|s| (s.name.clone(), s.description.clone()))
                 .collect::<Vec<_>>(),
@@ -1848,7 +1852,11 @@ impl App {
                     let idx = self.active_prompt.as_ref().unwrap().selected;
 
                     // Check if "Status bar" submenu was selected
-                    let non_status_count = page.fields.iter().filter(|f| !f.key.starts_with("status_show_")).count();
+                    let non_status_count = page
+                        .fields
+                        .iter()
+                        .filter(|f| !f.key.starts_with("status_show_"))
+                        .count();
                     if idx == non_status_count {
                         // Status bar submenu
                         self.status_bar_submenu(&mut custom, term)?;
@@ -1905,6 +1913,50 @@ impl App {
         }
     }
 
+    fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if std::env::var_os("TMUX").is_some()
+            && std::process::Command::new("tmux")
+                .arg("display-message")
+                .arg("-p")
+                .arg("ok")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        {
+            let exe = std::env::current_exe()?;
+            let cmd = format!("{} stats-popup", shell_quote(&exe.to_string_lossy()));
+            let result = std::process::Command::new("tmux")
+                .arg("display-popup")
+                .arg("-E")
+                .arg("-w")
+                .arg("96%")
+                .arg("-h")
+                .arg("92%")
+                .arg(cmd)
+                .status();
+            self.force_redraw(term)?;
+            if result.is_ok_and(|s| s.success()) {
+                return Ok(());
+            }
+        }
+
+        let Some(ref db) = self.session_db else {
+            return self.show_reply("Stats database is not available.".to_string(), term);
+        };
+
+        let result = crate::ui::stats::run(|| {
+            db.usage_stats_snapshot()
+                .map_err(|err| io::Error::other(err.to_string()))
+        });
+
+        self.force_redraw(term)?;
+        if let Err(err) = result {
+            return self.show_reply(format!("Stats dashboard failed: {err}"), term);
+        }
+        Ok(())
+    }
+
     async fn open_editor(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         Renderer::prepare_exit(term)?;
         Renderer::shutdown_terminal()?;
@@ -1947,6 +1999,10 @@ impl App {
         }
     }
 }
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Rebuild the merged subagents pane from all agent state entries.
 fn rebuild_subagents_pane(entries: &std::collections::HashMap<String, String>) -> PanePage {
     use ratatui::style::{Color, Modifier, Style};

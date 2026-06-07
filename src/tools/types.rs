@@ -3,9 +3,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// Re-export types moved to dedicated modules so existing imports keep working.
-pub use crate::tools::command_policy::{CommandSafety, classify_command};
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,

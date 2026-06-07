@@ -249,6 +249,21 @@ fn is_local_base_url(base_url: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
 }
 
+fn has_codex_auth_token() -> bool {
+    let path = bone_dir()
+        .parent()
+        .map_or_else(dirs::home_dir, |p| Some(p.to_path_buf()))
+        .unwrap_or_default()
+        .join(".codex/auth.json");
+    let Ok(data) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(doc): Result<serde_json::Value, _> = serde_json::from_str(&data) else {
+        return false;
+    };
+    doc["tokens"]["access_token"].as_str().is_some_and(|s| !s.is_empty())
+}
+
 /// Check if a provider has an API key configured. Print a helpful warning
 /// if not, so new users know what to do next.
 pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
@@ -261,7 +276,10 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
         return;
     };
 
-    if !entry.api_key.is_empty() || is_local_base_url(&entry.base_url) {
+    if !entry.api_key.is_empty()
+        || is_local_base_url(&entry.base_url)
+        || (entry.handler == "codex" && has_codex_auth_token())
+    {
         return;
     }
     eprintln!(

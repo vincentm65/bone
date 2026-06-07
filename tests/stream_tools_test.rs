@@ -5,6 +5,7 @@ use bone::tools::registry::{ToolHandler, ToolRegistry};
 use bone::tools::types::{Tool, ToolCall, ToolDefinition, ToolLiveEvent, ToolOutput};
 use bone::ui::app::stream::{StreamFailure, timeout_message};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 // ── Mock tool for testing the execution pipeline ────────────────────────────
@@ -154,7 +155,7 @@ async fn tool_handler_execute_all_disabled_tool() {
         result: Ok("ok".to_string()),
     });
 
-    let handler = ToolHandler::with_enabled(registry, &[]);
+    let handler = ToolHandler::with_enabled_safety_and_display(registry, &[], HashMap::new(), HashMap::new());
     let calls = vec![make_call("disabled_tool", "c1")];
 
     let results = handler.execute_all(calls).await;

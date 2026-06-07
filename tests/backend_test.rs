@@ -6,7 +6,10 @@ use ratatui::style::{Color, Style};
 
 #[test]
 fn full_width_background_uses_erase_to_end_instead_of_padding_spaces() {
-    let area = Rect::new(0, 0, 10, 1);
+    // background_suffix_start only triggers when the row fills the terminal
+    // width, so use crossterm's reported terminal width.
+    let term_width = crossterm::terminal::size().unwrap().0;
+    let area = Rect::new(0, 0, term_width, 1);
     let mut next = Buffer::empty(area);
     next.set_style(area, Style::default().bg(Color::DarkGray));
     next.set_string(

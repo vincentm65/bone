@@ -20,8 +20,8 @@ fn create_and_end_conversation() {
     assert!(id > 0);
     db.end_conversation(id).unwrap();
 
-    let usage = db.conversation_usage(id).unwrap();
-    assert_eq!(usage.request_count, 0);
+    let usage = db.usage_by_provider(id).unwrap();
+    assert!(usage.is_empty());
 }
 
 #[test]
@@ -81,40 +81,17 @@ fn append_message_populates_fts() {
 }
 
 #[test]
-fn delete_message_removes_from_both() {
-    let mut db = test_db();
-    let conv_id = db.create_conversation("test", "m").unwrap();
-    let msg_id = db
-        .append_message(
-            conv_id,
-            "user",
-            "unique searchable content here",
-            None,
-            None,
-            None,
-            0,
-        )
-        .unwrap();
-
-    // Verify it's there via FTS search (which JOINs messages, so both must exist)
-    assert_eq!(db.search("unique searchable", 10).unwrap().len(), 1);
-
-    db.delete_message(msg_id).unwrap();
-
-    // Verify it's gone — search JOINs messages, confirming both tables are clean
-    assert_eq!(db.search("unique searchable", 10).unwrap().len(), 0);
-}
-
-#[test]
 fn record_and_sum_usage() {
     let db = test_db();
     let conv_id = db.create_conversation("test", "m").unwrap();
-    db.record_usage(conv_id, "test", "m", 100, 50, Some(20), Some(0.01))
+    db.record_usage(conv_id, "test", "m", 100, 50, Some(20), Some(0.01), false)
         .unwrap();
-    db.record_usage(conv_id, "test", "m", 200, 80, None, None)
+    db.record_usage(conv_id, "test", "m", 200, 80, None, None, false)
         .unwrap();
 
-    let usage = db.conversation_usage(conv_id).unwrap();
+    let by_provider = db.usage_by_provider(conv_id).unwrap();
+    assert_eq!(by_provider.len(), 1);
+    let usage = &by_provider[0];
     assert_eq!(usage.prompt_tokens, 300);
     assert_eq!(usage.completion_tokens, 130);
     assert_eq!(usage.cached_tokens, 20);
@@ -126,8 +103,17 @@ fn record_and_sum_usage() {
 fn usage_by_provider_grouping() {
     let db = test_db();
     let conv_id = db.create_conversation("test", "m").unwrap();
-    db.record_usage(conv_id, "glm", "glm-4", 1000, 100, Some(500), Some(0.1))
-        .unwrap();
+    db.record_usage(
+        conv_id,
+        "glm",
+        "glm-4",
+        1000,
+        100,
+        Some(500),
+        Some(0.1),
+        false,
+    )
+    .unwrap();
     db.record_usage(
         conv_id,
         "openrouter",
@@ -136,9 +122,10 @@ fn usage_by_provider_grouping() {
         200,
         None,
         Some(0.2),
+        false,
     )
     .unwrap();
-    db.record_usage(conv_id, "glm", "glm-4", 500, 50, None, None)
+    db.record_usage(conv_id, "glm", "glm-4", 500, 50, None, None, false)
         .unwrap();
 
     let by_provider = db.usage_by_provider(conv_id).unwrap();

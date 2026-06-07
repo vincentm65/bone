@@ -1,7 +1,9 @@
 use std::io::{self, Write};
 
 use crossterm::cursor::MoveTo;
-use crossterm::style::{Color as CrosstermColor, ResetColor, SetBackgroundColor};
+use crossterm::style::{
+    Attribute, Color as CrosstermColor, ResetColor, SetAttribute, SetBackgroundColor,
+};
 use crossterm::terminal::{Clear, ClearType as CrosstermClearType};
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
 use ratatui::buffer::Cell;
@@ -28,9 +30,11 @@ impl<W: Write> BoneBackend<W> {
         crossterm::queue!(
             self.inner.writer_mut(),
             MoveTo(x, y),
+            SetAttribute(Attribute::Reset),
             SetBackgroundColor(to_crossterm_color(bg)),
             Clear(CrosstermClearType::UntilNewLine),
-            ResetColor
+            ResetColor,
+            SetAttribute(Attribute::Reset)
         )
     }
 }
@@ -61,7 +65,9 @@ impl<W: Write> Backend for BoneBackend<W> {
                 row_end += 1;
             }
 
-            if let Some(fill_start) = background_suffix_start(&cells[row_start..row_end]) {
+            if let Some(fill_start) =
+                background_suffix_start(&cells[row_start..row_end], self.size()?.width)
+            {
                 let fill_start = row_start + fill_start;
                 if pending_start < fill_start {
                     self.inner
@@ -138,9 +144,9 @@ impl<W: Write> Backend for BoneBackend<W> {
     }
 }
 
-fn background_suffix_start(row: &[(u16, u16, &Cell)]) -> Option<usize> {
-    let (_, _, last) = row.last()?;
-    if !is_background_fill(last) {
+fn background_suffix_start(row: &[(u16, u16, &Cell)], width: u16) -> Option<usize> {
+    let (last_x, _, last) = row.last()?;
+    if last_x + 1 != width || !is_background_fill(last) {
         return None;
     }
     let bg = last.bg;

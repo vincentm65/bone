@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,23 +25,31 @@ fn write_skill(dir: &std::path::Path, filename: &str, contents: &str) {
 #[test]
 fn loads_valid_skills_and_reports_invalid_or_duplicate_entries() {
     let dir = temp_dir("load");
+    let skills_dir = dir.join("bone-rust").join("skills");
+    fs::create_dir_all(&skills_dir).unwrap();
     write_skill(
-        &dir,
+        &skills_dir,
         "a.yaml",
         "name: report\ndescription: first\nprompt: 'Report {{args}}'\n",
     );
     write_skill(
-        &dir,
+        &skills_dir,
         "b.yaml",
         "name: report\ndescription: second\nprompt: duplicate\n",
     );
     write_skill(
-        &dir,
+        &skills_dir,
         "c.yaml",
         "name: tools\ndescription: collision\nprompt: no\n",
     );
 
-    let store = SkillStore::load_from_dir(&dir).unwrap();
+    let prev_xdg = env::var("XDG_CONFIG_HOME").ok();
+    unsafe { env::set_var("XDG_CONFIG_HOME", &dir); }
+    let store = SkillStore::load().unwrap();
+    match prev_xdg {
+        Some(v) => unsafe { env::set_var("XDG_CONFIG_HOME", v); },
+        None => unsafe { env::remove_var("XDG_CONFIG_HOME"); },
+    }
 
     assert_eq!(store.list().count(), 1);
     assert!(store.get_enabled("report").is_some());
