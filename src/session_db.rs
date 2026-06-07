@@ -161,7 +161,6 @@ impl SessionDb {
         }
 
         // Schema mismatch or fresh database: drop everything and recreate.
-        // (This is a single-user app; historical data is expendable.)
         self.conn.execute_batch(
             "
             DROP TABLE IF EXISTS messages_fts;
@@ -214,12 +213,14 @@ impl SessionDb {
 
             CREATE INDEX idx_usage_events_created_at
                 ON usage_events(created_at);
+
             CREATE INDEX idx_messages_conversation_seq
                 ON messages(conversation_id, seq);
             ",
         )?;
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
         Ok(())
     }
 
