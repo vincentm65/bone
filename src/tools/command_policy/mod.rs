@@ -270,88 +270,14 @@ fn classify_segment(command: &str) -> CommandSafety {
     CommandSafety::Edit
 }
 
+
 fn shell_segments(command: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    let mut at_word_start = true;
-    let mut chars = command.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            at_word_start = ch.is_whitespace();
-            continue;
-        }
-        if ch == '\\' {
-            current.push(ch);
-            escaped = true;
-            at_word_start = false;
-            continue;
-        }
-        if ch == '\'' && !double {
-            single = !single;
-            current.push(ch);
-            at_word_start = false;
-            continue;
-        }
-        if ch == '"' && !single {
-            double = !double;
-            current.push(ch);
-            at_word_start = false;
-            continue;
-        }
-        if ch == '#' && !single && !double && at_word_start {
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    push_segment(&mut segments, &mut current);
-                    at_word_start = true;
-                    break;
-                }
-            }
-            continue;
-        }
-        if !single && !double {
-            match ch {
-                '&' if chars.peek() == Some(&'&') => {
-                    chars.next();
-                    push_segment(&mut segments, &mut current);
-                    at_word_start = true;
-                    continue;
-                }
-                '|' if chars.peek() == Some(&'|') => {
-                    chars.next();
-                    push_segment(&mut segments, &mut current);
-                    at_word_start = true;
-                    continue;
-                }
-                ';' | '|' | '\n' => {
-                    push_segment(&mut segments, &mut current);
-                    at_word_start = true;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-
-        current.push(ch);
-        at_word_start = ch.is_whitespace();
-    }
-    push_segment(&mut segments, &mut current);
-    segments
+    crate::shell_split::shell_split(command, &crate::shell_split::ShellSplitOptions {
+        keep_separators: false,
+        split_newlines: true,
+        strip_comments: true,
+    })
 }
-
-fn push_segment(segments: &mut Vec<String>, segment: &mut String) {
-    let trimmed = segment.trim();
-    if !trimmed.is_empty() {
-        segments.push(trimmed.to_string());
-    }
-    segment.clear();
-}
-
 fn command_name(token: &str) -> String {
     let name = token
         .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '&' | '(' | ')' | '{' | '}' | ','))

@@ -39,7 +39,7 @@ pub fn insert_lines(term: &mut BoneTerminal, lines: &[Line<'static>]) -> io::Res
     })
 }
 
-fn wrapped_line_count(line: &Line<'static>, width: u16) -> u16 {
+pub(crate) fn wrapped_line_count(line: &Line<'static>, width: u16) -> u16 {
     Paragraph::new(line.clone())
         .wrap(Wrap { trim: false })
         .line_count(width)

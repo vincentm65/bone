@@ -1,7 +1,8 @@
+mod common;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bone::skills::SkillStore;
 use bone::skills::render_skill;
@@ -9,11 +10,7 @@ use bone::skills::types::Skill;
 use bone::tools::script_runner::{ScriptRequest, run_script};
 
 fn temp_dir(label: &str) -> PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("bone-skills-{label}-{suffix}"));
+    let path = common::temp_dir(&format!("skills-{label}"));
     fs::create_dir_all(&path).unwrap();
     path
 }

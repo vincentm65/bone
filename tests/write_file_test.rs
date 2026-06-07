@@ -1,5 +1,6 @@
+mod common;
+
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tokio::fs;
@@ -8,11 +9,7 @@ use bone::tools::types::Tool;
 use bone::tools::write_file::WriteFileTool;
 
 fn temp_path(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after unix epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("bone-write-file-{name}-{nanos}"))
+    common::temp_path(&format!("write-file-{name}"))
 }
 
 #[tokio::test]

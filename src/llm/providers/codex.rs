@@ -207,6 +207,8 @@ struct CodexUsage {
     output_tokens: Option<u64>,
     #[serde(rename = "total_tokens")]
     total_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens_details: Option<CodexInputTokenDetails>,
 }
 
 pub fn codex_tools(tools: Vec<ToolDefinition>) -> Vec<CodexTool> {
@@ -252,6 +254,12 @@ pub fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
     items
 }
 
+#[derive(Deserialize)]
+struct CodexInputTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
 pub fn build_instructions(messages: &[ChatMessage]) -> String {
     let system_parts: Vec<&str> = messages
         .iter()
@@ -269,7 +277,7 @@ pub fn build_instructions(messages: &[ChatMessage]) -> String {
 /// Text is NOT emitted here — it was already streamed via
 /// `response.output_text.delta` events, and re-emitting would
 /// duplicate content and confuse the LLM on subsequent rounds.
-fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32, u32)>) {
+fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32, u32, Option<u32>)>) {
     let tool_calls: Vec<ChatEvent> = resp
         .output
         .iter()
@@ -291,12 +299,19 @@ fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32
         .collect();
 
     let usage = resp.usage.as_ref().and_then(|u| {
-        u.input_tokens
-            .map(|i| i as u32)
-            .zip(u.output_tokens.map(|o| o as u32))
+        let prompt = u.input_tokens.map(|i| i as u32);
+        let completion = u.output_tokens.map(|o| o as u32);
+        let cached = u
+            .input_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .map(|c| c as u32);
+        prompt
+            .zip(completion)
+            .map(|(p, c)| (p, c, cached))
             .or_else(|| {
                 u.total_tokens
-                    .map(|t| (t as u32 / 2, t as u32 - t as u32 / 2))
+                    .map(|t| (t as u32 / 2, t as u32 - t as u32 / 2, cached))
             })
     });
 
@@ -381,7 +396,7 @@ impl LlmProvider for CodexProvider {
             futures_util::pin_mut!(events);
             let mut partial_tool_calls: BTreeMap<usize, PartialCodexToolCall> = BTreeMap::new();
             let mut emitted_tool_call_ids: BTreeSet<String> = BTreeSet::new();
-            let mut last_usage: Option<(u32, u32)> = None;
+            let mut last_usage: Option<(u32, u32, Option<u32>)> = None;
 
             while let Some(event) = events.try_next().await.map_err(|err| {
                 LlmError::new_with_kind(LlmErrorKind::Connection, err.to_string())
@@ -528,11 +543,11 @@ impl LlmProvider for CodexProvider {
                 yield ev;
             }
 
-            if let Some((prompt, completion)) = last_usage {
+            if let Some((prompt, completion, cached)) = last_usage {
                 yield ChatEvent::TokenUsage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,
-                    cached_tokens: None,
+                    cached_tokens: cached,
                     cost: None,
                 };
             }

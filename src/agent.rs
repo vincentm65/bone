@@ -14,6 +14,16 @@ struct SessionWriter<'a> {
     inner: Option<(&'a SessionDb, i64)>,
 }
 
+/// Execute a session DB operation if a session is active.
+macro_rules! session_op {
+    ($self:expr, $db:ident, $conv_id:ident, $body:expr) => {
+        if let Some(($db, $conv_id)) = $self.inner {
+            let $db: &SessionDb = $db;
+            $body
+        }
+    };
+}
+
 impl<'a> SessionWriter<'a> {
     fn from_opt(opt: &'a Option<(SessionDb, i64)>) -> Self {
         Self {
@@ -30,19 +40,13 @@ impl<'a> SessionWriter<'a> {
         tool_calls: Option<&str>,
         seq: i64,
     ) {
-        if let Some((db, conv_id)) = self.inner {
+        session_op!(self, db, conv_id, {
             if let Err(e) = db.append_message(
-                conv_id,
-                role,
-                content,
-                tool_name,
-                tool_call_id,
-                tool_calls,
-                seq,
+                conv_id, role, content, tool_name, tool_call_id, tool_calls, seq,
             ) {
                 eprintln!("bone: warning: session db append_message failed: {e}");
             }
-        }
+        });
     }
 
     fn record_real_usage(
@@ -54,20 +58,13 @@ impl<'a> SessionWriter<'a> {
         cached_tokens: Option<u32>,
         cost: Option<f64>,
     ) {
-        if let Some((db, conv_id)) = self.inner {
+        session_op!(self, db, conv_id, {
             if let Err(e) = db.record_usage(
-                conv_id,
-                provider,
-                model,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                cost,
-                false,
+                conv_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, false,
             ) {
                 eprintln!("bone: warning: session db record_usage failed: {e}");
             }
-        }
+        });
     }
 
     fn record_estimated_usage(
@@ -77,28 +74,21 @@ impl<'a> SessionWriter<'a> {
         prompt_tokens: u32,
         completion_tokens: u32,
     ) {
-        if let Some((db, conv_id)) = self.inner {
+        session_op!(self, db, conv_id, {
             if let Err(e) = db.record_usage(
-                conv_id,
-                provider,
-                model,
-                prompt_tokens,
-                completion_tokens,
-                None,
-                None,
-                true,
+                conv_id, provider, model, prompt_tokens, completion_tokens, None, None, true,
             ) {
                 eprintln!("bone: warning: session db record_usage (estimated) failed: {e}");
             }
-        }
+        });
     }
 
     fn end(&self) {
-        if let Some((db, conv_id)) = self.inner {
+        session_op!(self, db, conv_id, {
             if let Err(e) = db.end_conversation(conv_id) {
                 eprintln!("bone: warning: session db end_conversation failed: {e}");
             }
-        }
+        });
     }
 }
 
@@ -317,17 +307,17 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let mut session = SessionWriter::from_opt(&session_db);
     let mut session_seq = 0i64;
     session.append_message("user", &request.prompt, None, None, None, session_seq);
+    let events = request.events;
+    let emit = |event: &AgentEvent| emit_event(events, event);
 
-    emit_event(
-        request.events,
+    emit(
         &AgentEvent::Started {
             approval: approval_label,
             task: &request.prompt,
             model: llm.model(),
         },
     );
-    emit_event(
-        request.events,
+    emit(
         &AgentEvent::Status {
             message: "thinking",
         },
@@ -344,8 +334,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                     break;
                 }
                 Err(e) if attempt < 3 => {
-                    emit_event(
-                        request.events,
+                    emit(
                         &AgentEvent::Status {
                             message: &format!("retry {attempt}/3: {e}"),
                         },
@@ -353,8 +342,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
                 Err(e) => {
-                    emit_event(
-                        request.events,
+                    emit(
                         &AgentEvent::Failed {
                             message: &e.to_string(),
                         },
@@ -380,8 +368,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Ok(ChatEvent::ReasoningDelta(_)) => {}
                 Ok(ChatEvent::ToolCall(call)) => {
                     let summary = format!("{}: {}", call.name, summarize_call_args(&call));
-                    emit_event(
-                        request.events,
+                    emit(
                         &AgentEvent::ToolCall {
                             name: &call.name,
                             summary: &summary,
@@ -410,8 +397,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                         cached_tokens,
                         cost,
                     );
-                    emit_event(
-                        request.events,
+                    emit(
                         &AgentEvent::TokenUsage {
                             sent: token_stats.sent,
                             received: token_stats.received,
@@ -419,8 +405,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                     );
                 }
                 Err(e) => {
-                    emit_event(
-                        request.events,
+                    emit(
                         &AgentEvent::Status {
                             message: &format!("stream error, will retry: {e}"),
                         },
@@ -442,8 +427,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             let completion_tokens = estimate_tokens(completion_chars);
             token_stats.record_estimate(prompt_chars, completion_chars);
             session.record_estimated_usage(llm.id(), llm.model(), prompt_tokens, completion_tokens);
-            emit_event(
-                request.events,
+            emit(
                 &AgentEvent::TokenUsage {
                     sent: token_stats.sent,
                     received: token_stats.received,
@@ -454,8 +438,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         if stream_error {
             consecutive_errors += 1;
             if consecutive_errors >= 5 {
-                emit_event(
-                    request.events,
+                emit(
                     &AgentEvent::Failed {
                         message: "too many stream errors",
                     },
@@ -492,8 +475,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         // Execute tool calls
         for call in &tool_calls {
-            emit_event(
-                request.events,
+            emit(
                 &AgentEvent::Status {
                     message: &format!("running {}: {}", call.name, summarize_call_args(call)),
                 },
@@ -521,8 +503,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         }
 
         for result in &results {
-            emit_event(
-                request.events,
+            emit(
                 &AgentEvent::ToolResult {
                     name: &result.name,
                     is_error: result.is_error,
@@ -543,8 +524,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         }
     };
 
-    emit_event(
-        request.events,
+    emit(
         &AgentEvent::Finished {
             content: &final_content,
         },

@@ -1,14 +1,11 @@
+mod common;
+
 use bone::tools::seed_default_tools;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_dir(label: &str) -> PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("bone-tools-mod-{label}-{suffix}"));
+    let path = common::temp_dir(&format!("tools-mod-{label}"));
     fs::create_dir_all(&path).unwrap();
     path
 }

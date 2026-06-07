@@ -1,5 +1,6 @@
+mod common;
+
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tokio::fs;
@@ -8,11 +9,7 @@ use bone::tools::edit_file::{EditFileTool, preview_edit_file, sha256_hex};
 use bone::tools::types::Tool;
 
 fn temp_path(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("bone-edit-file-{name}-{nanos}"))
+    common::temp_path(&format!("edit-file-{name}"))
 }
 
 #[tokio::test]

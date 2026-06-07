@@ -154,74 +154,11 @@ pub(crate) fn format_shell_command(command: &str) -> Vec<String> {
     if find_heredoc_marker(command).is_some() {
         return expand_collapsed_heredoc_line(command);
     }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut chars = command.chars().peekable();
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-
-    while let Some(ch) = chars.next() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            continue;
-        }
-
-        if ch == '\\' {
-            current.push(ch);
-            escaped = true;
-            continue;
-        }
-
-        if ch == '\'' && !double {
-            single = !single;
-            current.push(ch);
-            continue;
-        }
-
-        if ch == '"' && !single {
-            double = !double;
-            current.push(ch);
-            continue;
-        }
-
-        if !single && !double {
-            match ch {
-                '&' if chars.peek() == Some(&'&') => {
-                    current.push_str("&&");
-                    chars.next();
-                    push_shell_line(&mut lines, &mut current);
-                    continue;
-                }
-                '|' if chars.peek() == Some(&'|') => {
-                    current.push_str("||");
-                    chars.next();
-                    push_shell_line(&mut lines, &mut current);
-                    continue;
-                }
-                '|' | ';' => {
-                    current.push(ch);
-                    push_shell_line(&mut lines, &mut current);
-                    continue;
-                }
-                _ => {}
-            }
-        }
-
-        current.push(ch);
-    }
-
-    push_shell_line(&mut lines, &mut current);
-    lines
-}
-
-fn push_shell_line(lines: &mut Vec<String>, current: &mut String) {
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        lines.push(trimmed.to_string());
-    }
-    current.clear();
+    crate::shell_split::shell_split(command, &crate::shell_split::ShellSplitOptions {
+        keep_separators: true,
+        split_newlines: false,
+        strip_comments: false,
+    })
 }
 
 fn expand_collapsed_heredoc_line(line: &str) -> Vec<String> {

@@ -1,18 +1,15 @@
+mod common;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bone::skills::{SkillStore, expand_skill_command};
 use bone::tools::ApprovalMode;
 use bone::tools::command_policy::CommandSafety;
 
 fn temp_dir(label: &str) -> PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("bone-{label}-{suffix}"));
+    let path = common::temp_dir(label);
     fs::create_dir_all(&path).unwrap();
     path
 }

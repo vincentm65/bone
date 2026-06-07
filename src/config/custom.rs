@@ -133,10 +133,10 @@ impl CustomConfigs {
         }
     }
 
-    /// Ensure the "tools" page has a bool field for every tool in the registry.
-    /// New tools are added as enabled (true). Returns true if fields were added.
-    pub fn sync_tools_from_registry(&mut self, tool_names: &[String]) -> bool {
-        let pos = match self.pages.iter().position(|(ns, _)| ns == "tools") {
+    /// Ensure a namespace page has a bool field for every name in the registry.
+    /// New entries are added as enabled (true). Returns true if fields were added.
+    fn sync_from_registry(&mut self, namespace: &str, names: &[String]) -> bool {
+        let pos = match self.pages.iter().position(|(ns, _)| ns == namespace) {
             Some(p) => p,
             None => return false,
         };
@@ -146,7 +146,7 @@ impl CustomConfigs {
             .iter()
             .map(|f| f.key.as_str())
             .collect();
-        let new_names: Vec<&String> = tool_names
+        let new_names: Vec<&String> = names
             .iter()
             .filter(|n| !existing.contains(n.as_str()))
             .collect();
@@ -164,13 +164,13 @@ impl CustomConfigs {
                 value: None,
             });
         }
-        self.save_page("tools");
+        self.save_page(namespace);
         true
     }
 
-    /// Get all enabled tool names from the "tools" page.
-    pub fn enabled_tool_names(&self) -> Vec<String> {
-        let pos = match self.pages.iter().position(|(ns, _)| ns == "tools") {
+    /// Get all enabled names from a namespace page.
+    fn enabled_names(&self, namespace: &str) -> Vec<String> {
+        let pos = match self.pages.iter().position(|(ns, _)| ns == namespace) {
             Some(p) => p,
             None => return Vec::new(),
         };
@@ -178,63 +178,33 @@ impl CustomConfigs {
         page.fields
             .iter()
             .filter(|f| {
-                let val = self.get_value("tools", &f.key);
+                let val = self.get_value(namespace, &f.key);
                 val == "true" || val.is_empty()
             })
             .map(|f| f.key.clone())
             .collect()
+    }
+
+    /// Ensure the "tools" page has a bool field for every tool in the registry.
+    /// New tools are added as enabled (true). Returns true if fields were added.
+    pub fn sync_tools_from_registry(&mut self, tool_names: &[String]) -> bool {
+        self.sync_from_registry("tools", tool_names)
+    }
+
+    /// Get all enabled tool names from the "tools" page.
+    pub fn enabled_tool_names(&self) -> Vec<String> {
+        self.enabled_names("tools")
     }
 
     /// Sync skills from a list of skill names into the "skills" page.
     /// New skills are added as enabled (true). Returns true if fields were added.
     pub fn sync_skills_from_registry(&mut self, skill_names: &[String]) -> bool {
-        let pos = match self.pages.iter().position(|(ns, _)| ns == "skills") {
-            Some(p) => p,
-            None => return false,
-        };
-        let existing: std::collections::HashSet<&str> = self.pages[pos]
-            .1
-            .fields
-            .iter()
-            .map(|f| f.key.as_str())
-            .collect();
-        let new_names: Vec<&String> = skill_names
-            .iter()
-            .filter(|n| !existing.contains(n.as_str()))
-            .collect();
-        if new_names.is_empty() {
-            return false;
-        }
-        let page = &mut self.pages[pos].1;
-        for name in new_names {
-            page.fields.push(ConfigField {
-                key: name.clone(),
-                label: Some(name.clone()),
-                field_type: ConfigFieldType::Bool,
-                options: Vec::new(),
-                default: Some(serde_yaml::Value::Bool(true)),
-                value: None,
-            });
-        }
-        self.save_page("skills");
-        true
+        self.sync_from_registry("skills", skill_names)
     }
 
     /// Get all enabled skill names from the "skills" page.
     pub fn enabled_skill_names(&self) -> Vec<String> {
-        let pos = match self.pages.iter().position(|(ns, _)| ns == "skills") {
-            Some(p) => p,
-            None => return Vec::new(),
-        };
-        let page = &self.pages[pos].1;
-        page.fields
-            .iter()
-            .filter(|f| {
-                let val = self.get_value("skills", &f.key);
-                val == "true" || val.is_empty()
-            })
-            .map(|f| f.key.clone())
-            .collect()
+        self.enabled_names("skills")
     }
 
     /// Get the display value for a field, falling back to the default.

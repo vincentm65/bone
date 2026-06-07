@@ -5,6 +5,7 @@ pub mod markdown;
 pub mod messages;
 pub mod wrap;
 
+use messages::wrapped_line_count;
 use ratatui::layout::Rect;
 
 use ratatui::text::Line;
@@ -213,7 +214,7 @@ impl Renderer {
         term.insert_before(line_count, |buf| {
             let mut row = 0u16;
             for line in &rendered {
-                let height = logical_line_row_count(line, buf.area.width.max(1));
+                let height = wrapped_line_count(line, buf.area.width.max(1));
                 let msg_area = Rect {
                     x: 0,
                     y: row,
@@ -302,15 +303,8 @@ impl Renderer {
 fn logical_lines_row_count(lines: &[Line<'static>], width: u16) -> u16 {
     lines
         .iter()
-        .map(|line| logical_line_row_count(line, width))
+        .map(|line| wrapped_line_count(line, width))
         .sum()
-}
-
-fn logical_line_row_count(line: &Line<'static>, width: u16) -> u16 {
-    Paragraph::new(line.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(width.max(1))
-        .max(1) as u16
 }
 
 pub fn safe_markdown_prefix_end(content: &str) -> usize {

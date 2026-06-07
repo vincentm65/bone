@@ -449,19 +449,13 @@ impl App {
                         self.mark_cancelled(assistant_idx);
                         break;
                     }
-                    let pages = if self.panes_visible {
-                        self.pages.as_slice()
-                    } else {
-                        &[]
-                    };
-                    let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
                     Self::refresh_tps(&mut displayed_tps, &mut last_tps_update, stream_start, stream_estimated_received, received_baseline);
                     self.renderer.tick_spinner(term, &PaneDraw {
                         input: &self.input,
                         status_info: &self.stream_status_info_with_tokens(Some(stream_estimated_received), displayed_tps),
-                        pages,
+                        pages: if self.panes_visible { &self.pages } else { &[] },
                         active_page: self.active_page,
-                        pane_toggle_hint: hint,
+                        pane_toggle_hint: pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
                         autocomplete: None,
                     })?;
                 }

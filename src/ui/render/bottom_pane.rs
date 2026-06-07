@@ -21,6 +21,40 @@ pub struct PaneDraw<'a> {
     pub pane_toggle_hint: Option<&'a str>,
     pub autocomplete: Option<&'a AutocompleteState>,
 }
+fn build_tab_bar(items: &[String], active_idx: usize, separator: &str, suffix: Option<&str>) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, label) in items.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                format!(" {separator} "),
+                Style::default().fg(ratatui::style::Color::DarkGray),
+            ));
+        }
+        spans.push(Span::styled(
+            label.clone(),
+            if i == active_idx {
+                Style::default().fg(ratatui::style::Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(ratatui::style::Color::DarkGray)
+            },
+        ));
+    }
+    if let Some(s) = suffix {
+        spans.push(Span::styled(
+            format!("  {s}"),
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn push_metric(parts: &mut Vec<Span<'static>>, style: Style, label: &str) {
+    if !parts.is_empty() {
+        parts.push(Span::styled(" / ", style));
+    }
+    parts.push(Span::styled(label.to_string(), style));
+}
+
 const COMMAND_PREVIEW_LINES: usize = 6;
 const BLANK_CURSOR_CELL: &str = "\u{00a0}";
 
@@ -333,30 +367,9 @@ impl super::Renderer {
         {
             let tab_y = y;
             if tab_y < content_bottom {
-                let mut tab_spans = Vec::new();
-                for (i, label) in prompt.tabs.iter().enumerate() {
-                    if i > 0 {
-                        tab_spans.push(Span::styled(
-                            " │ ",
-                            Style::default().fg(self.theme.system_msg),
-                        ));
-                    }
-                    if i == prompt.active_tab {
-                        tab_spans.push(Span::styled(
-                            label.clone(),
-                            Style::default()
-                                .fg(self.theme.tab_active)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                    } else {
-                        tab_spans.push(Span::styled(
-                            label.clone(),
-                            Style::default().fg(self.theme.system_msg),
-                        ));
-                    }
-                }
+                let tab_bar = build_tab_bar(&prompt.tabs, prompt.active_tab, "│", None);
                 frame.render_widget(
-                    Paragraph::new(Line::from(tab_spans)),
+                    Paragraph::new(tab_bar),
                     Rect {
                         y: tab_y,
                         height: 1,
@@ -659,34 +672,10 @@ impl super::Renderer {
                     // Tab indicator
                     let tab_y = bot_sep_y + 1;
                     if tab_y < status_row {
-                        let mut tab_spans = Vec::new();
-                        for (i, p) in pages.iter().enumerate() {
-                            if i > 0 {
-                                tab_spans.push(Span::styled(
-                                    " | ",
-                                    Style::default().fg(self.theme.system_msg),
-                                ));
-                            }
-                            if i == page_idx {
-                                tab_spans.push(Span::styled(
-                                    p.title.clone(),
-                                    Style::default()
-                                        .fg(self.theme.tab_active)
-                                        .add_modifier(Modifier::BOLD),
-                                ));
-                            } else {
-                                tab_spans.push(Span::styled(
-                                    p.title.clone(),
-                                    Style::default().fg(self.theme.system_msg),
-                                ));
-                            }
-                        }
-                        tab_spans.push(Span::styled(
-                            "  Tab to switch",
-                            Style::default().fg(ratatui::style::Color::DarkGray),
-                        ));
+                        let page_titles: Vec<String> = pages.iter().map(|p| p.title.clone()).collect();
+                        let tab_bar = build_tab_bar(&page_titles, page_idx, "|", Some("Tab to switch"));
                         frame.render_widget(
-                            Paragraph::new(Line::from(tab_spans)),
+                            Paragraph::new(tab_bar),
                             Rect {
                                 y: tab_y,
                                 height: 1,
@@ -746,53 +735,18 @@ impl super::Renderer {
 
         if any_token_metric {
             let mut metric_parts: Vec<Span> = vec![];
+            let s = Style::default().fg(self.theme.status_text);
             if status_info.status_show_tokens_curr {
-                metric_parts.push(Span::styled(
-                    format!(
-                        "curr {}",
-                        format_tokens(status_info.token_stats.context_length)
-                    ),
-                    Style::default().fg(self.theme.status_text),
-                ));
+                push_metric(&mut metric_parts, s, &format!("curr {}", format_tokens(status_info.token_stats.context_length)));
             }
             if status_info.status_show_tokens_in {
-                if !metric_parts.is_empty() {
-                    metric_parts.push(Span::styled(
-                        " / ",
-                        Style::default().fg(self.theme.status_text),
-                    ));
-                }
-                metric_parts.push(Span::styled(
-                    format!("in {}", format_tokens(status_info.token_stats.sent)),
-                    Style::default().fg(self.theme.status_text),
-                ));
+                push_metric(&mut metric_parts, s, &format!("in {}", format_tokens(status_info.token_stats.sent)));
             }
             if status_info.status_show_tokens_out {
-                if !metric_parts.is_empty() {
-                    metric_parts.push(Span::styled(
-                        " / ",
-                        Style::default().fg(self.theme.status_text),
-                    ));
-                }
-                metric_parts.push(Span::styled(
-                    format!("out {}", format_tokens(received)),
-                    Style::default().fg(self.theme.status_text),
-                ));
+                push_metric(&mut metric_parts, s, &format!("out {}", format_tokens(received)));
             }
             if status_info.status_show_tokens_total {
-                if !metric_parts.is_empty() {
-                    metric_parts.push(Span::styled(
-                        " / ",
-                        Style::default().fg(self.theme.status_text),
-                    ));
-                }
-                metric_parts.push(Span::styled(
-                    format!(
-                        "total {}",
-                        format_tokens(status_info.token_stats.sent + received)
-                    ),
-                    Style::default().fg(self.theme.status_text),
-                ));
+                push_metric(&mut metric_parts, s, &format!("total {}", format_tokens(status_info.token_stats.sent + received)));
             }
             status_spans.extend(metric_parts);
             if status_info.status_show_tps

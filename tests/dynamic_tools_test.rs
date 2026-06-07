@@ -1,3 +1,5 @@
+mod common;
+
 use bone::tools::command_policy::CommandSafety;
 use bone::tools::dynamic::{DynamicTool, InteractionType, OutputKind};
 use bone::tools::registry::ToolRegistry;
@@ -8,15 +10,10 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 
 fn temp_dir(label: &str) -> PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("bone-tools-{label}-{suffix}"));
+    let path = common::temp_dir(&format!("tools-{label}"));
     fs::create_dir_all(&path).unwrap();
     path
 }

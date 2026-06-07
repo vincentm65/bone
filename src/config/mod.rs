@@ -92,6 +92,9 @@ impl Default for UserConfig {
     }
 }
 
+fn bool_config(custom: &custom::CustomConfigs, key: &str) -> bool {
+    custom.get_value("general", key).parse().unwrap_or(true)
+}
 impl UserConfig {
     /// Build a UserConfig by reading all values from the custom config pages.
     pub fn from_custom_configs(custom: &custom::CustomConfigs) -> Self {
@@ -122,46 +125,17 @@ impl UserConfig {
         };
 
         // Status bar toggles
-        self.status_show_model = custom
-            .get_value("general", "status_show_model")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_approval = custom
-            .get_value("general", "status_show_approval")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_tokens_curr = custom
-            .get_value("general", "status_show_tokens_curr")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_tokens_in = custom
-            .get_value("general", "status_show_tokens_in")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_tokens_out = custom
-            .get_value("general", "status_show_tokens_out")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_tokens_total = custom
-            .get_value("general", "status_show_tokens_total")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_tps = custom
-            .get_value("general", "status_show_tps")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_queue = custom
-            .get_value("general", "status_show_queue")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_spinner = custom
-            .get_value("general", "status_show_spinner")
-            .parse()
-            .unwrap_or(true);
-        self.status_show_timer = custom
-            .get_value("general", "status_show_timer")
-            .parse()
-            .unwrap_or(true);
+        // Status bar toggles
+        self.status_show_model = bool_config(custom, "status_show_model");
+        self.status_show_approval = bool_config(custom, "status_show_approval");
+        self.status_show_tokens_curr = bool_config(custom, "status_show_tokens_curr");
+        self.status_show_tokens_in = bool_config(custom, "status_show_tokens_in");
+        self.status_show_tokens_out = bool_config(custom, "status_show_tokens_out");
+        self.status_show_tokens_total = bool_config(custom, "status_show_tokens_total");
+        self.status_show_tps = bool_config(custom, "status_show_tps");
+        self.status_show_queue = bool_config(custom, "status_show_queue");
+        self.status_show_spinner = bool_config(custom, "status_show_spinner");
+        self.status_show_timer = bool_config(custom, "status_show_timer");
         self.subagent.provider = custom.get_value("subagent", "provider");
         self.subagent.model = custom.get_value("subagent", "model");
         self.subagent.approval = match custom.get_value("subagent", "approval").as_str() {

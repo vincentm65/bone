@@ -47,7 +47,7 @@ impl Drop for RawModeGuard {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum ViewMode {
     Today,
     SevenDays,
@@ -56,6 +56,12 @@ enum ViewMode {
 }
 
 impl ViewMode {
+    const ALL: [Self; 4] = [Self::Today, Self::SevenDays, Self::FourWeeks, Self::Months];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|&m| m == self).unwrap()
+    }
+
     fn title(self) -> &'static str {
         match self {
             Self::Today => "Today",
@@ -75,21 +81,13 @@ impl ViewMode {
     }
 
     fn prev(self) -> Self {
-        match self {
-            Self::Today => Self::Months,
-            Self::SevenDays => Self::Today,
-            Self::FourWeeks => Self::SevenDays,
-            Self::Months => Self::FourWeeks,
-        }
+        let idx = self.index();
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 
     fn next(self) -> Self {
-        match self {
-            Self::Today => Self::SevenDays,
-            Self::SevenDays => Self::FourWeeks,
-            Self::FourWeeks => Self::Months,
-            Self::Months => Self::Today,
-        }
+        let idx = self.index();
+        Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 }
 
@@ -448,7 +446,7 @@ fn draw_hourly_chart(
     mode: ViewMode,
 ) {
     let (heat, title) = hourly_chart_lines(data, mode);
-    frame.render_widget(Paragraph::new(heat).block(panel(title, BORDER)), area);
+    frame.render_widget(Paragraph::new(heat).block(panel(&title, BORDER)), area);
 }
 
 fn draw_heat_and_conversations(
@@ -463,7 +461,7 @@ fn draw_heat_and_conversations(
         .split(area);
 
     let (heat, title) = hourly_chart_lines(data, mode);
-    frame.render_widget(Paragraph::new(heat).block(panel(title, BORDER)), chunks[0]);
+    frame.render_widget(Paragraph::new(heat).block(panel(&title, BORDER)), chunks[0]);
 
     draw_daily_activity(frame, chunks[1], data);
 }
@@ -471,7 +469,7 @@ fn draw_heat_and_conversations(
 fn hourly_chart_lines(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
-) -> (Vec<Line<'static>>, &'static str) {
+) -> (Vec<Line<'static>>, String) {
     let hourly_data: &[HourUsage] = match mode {
         ViewMode::Today => &data.hourly_today,
         ViewMode::SevenDays => &data.hourly_7d,
@@ -521,12 +519,7 @@ fn hourly_chart_lines(
             dim(),
         ),
     ]));
-    let title = match mode {
-        ViewMode::Today => "Today by hour",
-        ViewMode::SevenDays => "7 days by hour",
-        ViewMode::FourWeeks => "4 weeks by hour",
-        ViewMode::Months => "All time by hour",
-    };
+    let title = format!("{} by hour", mode.title());
     (heat, title)
 }
 
