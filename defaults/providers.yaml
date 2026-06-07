@@ -76,13 +76,6 @@ minimax_plan:
   api_key: ''
   endpoint: /chat/completions
   handler: anthropic
-bone_proxy:
-  label: Bone Proxy
-  base_url: ''
-  model: z-ai/glm-4.5-air:free
-  api_key: ''
-  endpoint: /chat/completions
-  handler: openai
 codex:
   label: Codex
   base_url: https://chatgpt.com/backend-api/codex
