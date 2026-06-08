@@ -35,28 +35,36 @@ pub struct ProviderEntry {
     pub handler: String,
 }
 
-fn string_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn string_or_default_with<'de, D>(
+    deserializer: D,
+    fallback: fn() -> String,
+) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_default())
+    Ok(opt.unwrap_or_else(fallback))
+}
+
+fn string_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    string_or_default_with(deserializer, || String::new())
 }
 
 fn string_or_default_endpoint<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_else(default_endpoint))
+    string_or_default_with(deserializer, default_endpoint)
 }
 
 fn string_or_default_handler<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_else(default_handler))
+    string_or_default_with(deserializer, default_handler)
 }
 
 fn default_endpoint() -> String {

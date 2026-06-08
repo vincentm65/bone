@@ -1,8 +1,7 @@
 mod common;
 
-use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bone::skills::{SkillStore, expand_skill_command};
 use bone::tools::ApprovalMode;
@@ -14,23 +13,16 @@ fn temp_dir(label: &str) -> PathBuf {
     path
 }
 
-fn load_skills(dir: &PathBuf) -> SkillStore {
-    let skills_dir = dir.join("bone-rust").join("skills");
+fn load_skills(dir: &Path) -> SkillStore {
+    let skills_dir = dir.join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
-    let prev_xdg = env::var("XDG_CONFIG_HOME").ok();
-    unsafe { env::set_var("XDG_CONFIG_HOME", dir); }
-    let store = SkillStore::load().unwrap();
-    match prev_xdg {
-        Some(v) => unsafe { env::set_var("XDG_CONFIG_HOME", v); },
-        None => unsafe { env::remove_var("XDG_CONFIG_HOME"); },
-    }
-    store
+    SkillStore::load_from(&skills_dir).unwrap()
 }
 
 #[tokio::test]
 async fn expands_prompt_only_skill() {
     let dir = temp_dir("skill-expand");
-    let skills_dir = dir.join("bone-rust").join("skills");
+    let skills_dir = dir.join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     fs::write(
         skills_dir.join("clean.yaml"),
@@ -48,7 +40,7 @@ async fn expands_prompt_only_skill() {
 #[tokio::test]
 async fn rejects_scripted_skill_without_flag() {
     let dir = temp_dir("skill-script-reject");
-    let skills_dir = dir.join("bone-rust").join("skills");
+    let skills_dir = dir.join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     fs::write(
         skills_dir.join("scripted.yaml"),
@@ -66,7 +58,7 @@ async fn rejects_scripted_skill_without_flag() {
 #[tokio::test]
 async fn expands_scripted_skill_with_flag() {
     let dir = temp_dir("skill-script-expand");
-    let skills_dir = dir.join("bone-rust").join("skills");
+    let skills_dir = dir.join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     fs::write(
         skills_dir.join("scripted.yaml"),
@@ -90,7 +82,7 @@ enabled: true
 #[tokio::test]
 async fn rejects_scripted_skill_when_approval_too_low() {
     let dir = temp_dir("skill-script-approval");
-    let skills_dir = dir.join("bone-rust").join("skills");
+    let skills_dir = dir.join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     fs::write(
         skills_dir.join("scripted.yaml"),
@@ -108,7 +100,7 @@ async fn rejects_scripted_skill_when_approval_too_low() {
 #[tokio::test]
 async fn scripted_skill_declared_read_only_uses_declared_safety() {
     let dir = temp_dir("skill-script-readonly");
-    let skills_dir = dir.join("bone-rust").join("skills");
+    let skills_dir = dir.join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     fs::write(
         skills_dir.join("scripted.yaml"),
@@ -136,7 +128,7 @@ enabled: true
 #[test]
 fn rejects_empty_script_field() {
     let dir = temp_dir("skill-empty-script");
-    let skills_dir = dir.join("bone-rust").join("skills");
+    let skills_dir = dir.join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     fs::write(
         skills_dir.join("scripted.yaml"),

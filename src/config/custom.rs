@@ -124,19 +124,30 @@ impl CustomConfigs {
 
     /// Save a single page back to its YAML file.
     fn save_page(&self, namespace: &str) {
-        let Some((_, page)) = self.pages.iter().find(|(ns, _)| ns == namespace) else {
-            return;
-        };
-        let path = config_dir().join(format!("{namespace}.yaml"));
-        if let Ok(yaml) = serde_yaml::to_string(page) {
-            let _ = std::fs::write(path, yaml);
+        if let Some(page) = self.page_ref(namespace) {
+            let path = config_dir().join(format!("{namespace}.yaml"));
+            if let Ok(yaml) = serde_yaml::to_string(page) {
+                let _ = std::fs::write(path, yaml);
+            }
         }
+    }
+
+    fn page_ref(&self, namespace: &str) -> Option<&CustomConfigPage> {
+        self.pages.iter().find(|(ns, _)| ns == namespace).map(|(_, page)| page)
+    }
+
+    fn page_mut(&mut self, namespace: &str) -> Option<&mut CustomConfigPage> {
+        self.pages.iter_mut().find(|(ns, _)| ns == namespace).map(|(_, page)| page)
+    }
+
+    fn page_index(&self, namespace: &str) -> Option<usize> {
+        self.pages.iter().position(|(ns, _)| ns == namespace)
     }
 
     /// Ensure a namespace page has a bool field for every name in the registry.
     /// New entries are added as enabled (true). Returns true if fields were added.
     fn sync_from_registry(&mut self, namespace: &str, names: &[String]) -> bool {
-        let pos = match self.pages.iter().position(|(ns, _)| ns == namespace) {
+        let pos = match self.page_index(namespace) {
             Some(p) => p,
             None => return false,
         };
@@ -170,7 +181,7 @@ impl CustomConfigs {
 
     /// Get all enabled names from a namespace page.
     fn enabled_names(&self, namespace: &str) -> Vec<String> {
-        let pos = match self.pages.iter().position(|(ns, _)| ns == namespace) {
+        let pos = match self.page_index(namespace) {
             Some(p) => p,
             None => return Vec::new(),
         };
@@ -209,8 +220,7 @@ impl CustomConfigs {
 
     /// Get the display value for a field, falling back to the default.
     pub fn get_value(&self, namespace: &str, key: &str) -> String {
-        let page = self.pages.iter().find(|(ns, _)| ns == namespace);
-        let Some((_, page)) = page else {
+        let Some(page) = self.page_ref(namespace) else {
             return String::new();
         };
         let field = page.fields.iter().find(|f| f.key == key);
@@ -229,8 +239,7 @@ impl CustomConfigs {
 
     /// Set a value and persist immediately to the page YAML.
     pub fn set_value(&mut self, namespace: &str, key: &str, value: String) {
-        let page = self.pages.iter_mut().find(|(ns, _)| ns == namespace);
-        let Some((_, page)) = page else {
+        let Some(page) = self.page_mut(namespace) else {
             return;
         };
         let field = page.fields.iter_mut().find(|f| f.key == key);
@@ -255,8 +264,8 @@ impl CustomConfigs {
 
     /// Find a field definition by namespace and key.
     pub fn find_field(&self, namespace: &str, key: &str) -> Option<&ConfigField> {
-        let page = self.pages.iter().find(|(ns, _)| ns == namespace)?;
-        page.1.fields.iter().find(|f| f.key == key)
+        let page = self.page_ref(namespace)?;
+        page.fields.iter().find(|f| f.key == key)
     }
 
     /// Cycle to the next option for a bool or enum field.

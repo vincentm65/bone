@@ -703,7 +703,7 @@ impl super::Renderer {
         let mut status_spans: Vec<Span> = vec![];
         let sep = || Span::styled(" | ", Style::default().fg(self.theme.status_text));
 
-        if status_info.status_show_model {
+        if status_info.show("status_show_model") {
             status_spans.push(Span::styled(
                 status_info.model.to_string(),
                 Style::default().fg(self.theme.status_text),
@@ -711,7 +711,7 @@ impl super::Renderer {
             status_spans.push(sep());
         }
 
-        if status_info.status_show_approval {
+        if status_info.show("status_show_approval") {
             status_spans.push(Span::styled(
                 status_info.approval_mode.label().to_string(),
                 Style::default().fg(match status_info.approval_mode {
@@ -728,28 +728,28 @@ impl super::Renderer {
         let received = status_info
             .streaming_completion_tokens
             .unwrap_or(status_info.token_stats.received);
-        let any_token_metric = status_info.status_show_tokens_curr
-            || status_info.status_show_tokens_in
-            || status_info.status_show_tokens_out
-            || status_info.status_show_tokens_total;
+        let any_token_metric = status_info.show("status_show_tokens_curr")
+            || status_info.show("status_show_tokens_in")
+            || status_info.show("status_show_tokens_out")
+            || status_info.show("status_show_tokens_total");
 
         if any_token_metric {
             let mut metric_parts: Vec<Span> = vec![];
             let s = Style::default().fg(self.theme.status_text);
-            if status_info.status_show_tokens_curr {
+            if status_info.show("status_show_tokens_curr") {
                 push_metric(&mut metric_parts, s, &format!("curr {}", format_tokens(status_info.token_stats.context_length)));
             }
-            if status_info.status_show_tokens_in {
+            if status_info.show("status_show_tokens_in") {
                 push_metric(&mut metric_parts, s, &format!("in {}", format_tokens(status_info.token_stats.sent)));
             }
-            if status_info.status_show_tokens_out {
+            if status_info.show("status_show_tokens_out") {
                 push_metric(&mut metric_parts, s, &format!("out {}", format_tokens(received)));
             }
-            if status_info.status_show_tokens_total {
+            if status_info.show("status_show_tokens_total") {
                 push_metric(&mut metric_parts, s, &format!("total {}", format_tokens(status_info.token_stats.sent + received)));
             }
             status_spans.extend(metric_parts);
-            if status_info.status_show_tps
+            if status_info.show("status_show_tps")
                 && let Some(tps) = status_info.tokens_per_sec
             {
                 status_spans.push(sep());
@@ -761,7 +761,7 @@ impl super::Renderer {
             status_spans.push(sep());
         }
 
-        if status_info.status_show_queue && status_info.queue_len > 0 {
+        if status_info.show("status_show_queue") && status_info.queue_len > 0 {
             status_spans.push(Span::styled(
                 format!("Q: {}", status_info.queue_len),
                 Style::default().fg(self.theme.status_text),
@@ -769,7 +769,7 @@ impl super::Renderer {
             status_spans.push(sep());
         }
 
-        if status_info.status_show_timer {
+        if status_info.show("status_show_timer") {
             if let Some(ref elapsed) = status_info.elapsed {
                 status_spans.push(Span::styled(
                     elapsed.clone(),
@@ -779,7 +779,7 @@ impl super::Renderer {
             }
         }
 
-        if status_info.status_show_spinner && status_info.streaming {
+        if status_info.show("status_show_spinner") && status_info.streaming {
             status_spans.push(Span::styled(
                 SPINNER[tick % SPINNER.len()],
                 Style::default().fg(self.theme.thinking),

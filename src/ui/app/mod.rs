@@ -470,16 +470,7 @@ pub(crate) fn stream_status_info_with_token_stats(
         streaming,
         approval_mode,
         queue_len,
-        status_show_model: cfg.status_show_model,
-        status_show_approval: cfg.status_show_approval,
-        status_show_tokens_curr: cfg.status_show_tokens_curr,
-        status_show_tokens_in: cfg.status_show_tokens_in,
-        status_show_tokens_out: cfg.status_show_tokens_out,
-        status_show_tokens_total: cfg.status_show_tokens_total,
-        status_show_tps: cfg.status_show_tps,
-        status_show_queue: cfg.status_show_queue,
-        status_show_spinner: cfg.status_show_spinner,
-        status_show_timer: cfg.status_show_timer,
+        status_show: cfg.status_show.clone(),
         elapsed,
     }
 }

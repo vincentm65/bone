@@ -49,7 +49,7 @@ impl<'a> SessionWriter<'a> {
         });
     }
 
-    fn record_real_usage(
+    fn record_usage(
         &self,
         provider: &str,
         model: &str,
@@ -57,28 +57,13 @@ impl<'a> SessionWriter<'a> {
         completion_tokens: u32,
         cached_tokens: Option<u32>,
         cost: Option<f64>,
+        is_estimated: bool,
     ) {
         session_op!(self, db, conv_id, {
             if let Err(e) = db.record_usage(
-                conv_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, false,
+                conv_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, is_estimated,
             ) {
-                eprintln!("bone: warning: session db record_usage failed: {e}");
-            }
-        });
-    }
-
-    fn record_estimated_usage(
-        &self,
-        provider: &str,
-        model: &str,
-        prompt_tokens: u32,
-        completion_tokens: u32,
-    ) {
-        session_op!(self, db, conv_id, {
-            if let Err(e) = db.record_usage(
-                conv_id, provider, model, prompt_tokens, completion_tokens, None, None, true,
-            ) {
-                eprintln!("bone: warning: session db record_usage (estimated) failed: {e}");
+                eprintln!("bone: warning: session db record_usage{} failed: {e}", if is_estimated { " (estimated)" } else { "" });
             }
         });
     }
@@ -389,13 +374,14 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                         cost,
                     );
                     had_usage = true;
-                    session.record_real_usage(
+                    session.record_usage(
                         llm.id(),
                         llm.model(),
                         prompt_tokens,
                         completion_tokens,
                         cached_tokens,
                         cost,
+                        false,
                     );
                     emit(
                         &AgentEvent::TokenUsage {
@@ -426,7 +412,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             let prompt_tokens = estimate_tokens(prompt_chars);
             let completion_tokens = estimate_tokens(completion_chars);
             token_stats.record_estimate(prompt_chars, completion_chars);
-            session.record_estimated_usage(llm.id(), llm.model(), prompt_tokens, completion_tokens);
+            session.record_usage(llm.id(), llm.model(), prompt_tokens, completion_tokens, None, None, true);
             emit(
                 &AgentEvent::TokenUsage {
                     sent: token_stats.sent,

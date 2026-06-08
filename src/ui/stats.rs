@@ -19,7 +19,7 @@ const ACCENT: Color = Color::Indexed(250);
 const BAR: Color = Color::Cyan;
 const BAR_EMPTY: Color = Color::Indexed(236);
 
-use crate::session_db::{HourUsage, UsageBucket, UsageStatsSnapshot, ViewModeRef};
+use crate::session_db::{HourUsage, UsageBucket, UsageStatsSnapshot, ViewMode};
 use crate::ui::render::backend::BoneBackend;
 
 /// RAII guard that disables raw mode on drop.
@@ -43,61 +43,6 @@ impl Drop for RawModeGuard {
             if let Err(e) = crossterm::terminal::disable_raw_mode() {
                 eprintln!("bone: warning: failed to disable raw mode: {e}");
             }
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum ViewMode {
-    Today,
-    SevenDays,
-    FourWeeks,
-    Months,
-}
-
-impl ViewMode {
-    const ALL: [Self; 4] = [Self::Today, Self::SevenDays, Self::FourWeeks, Self::Months];
-
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|&m| m == self).unwrap()
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Today => "Today",
-            Self::SevenDays => "7 days",
-            Self::FourWeeks => "4 weeks",
-            Self::Months => "All time",
-        }
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            Self::Today => "1",
-            Self::SevenDays => "2",
-            Self::FourWeeks => "3",
-            Self::Months => "4",
-        }
-    }
-
-    fn prev(self) -> Self {
-        let idx = self.index();
-        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
-    }
-
-    fn next(self) -> Self {
-        let idx = self.index();
-        Self::ALL[(idx + 1) % Self::ALL.len()]
-    }
-}
-
-impl From<ViewMode> for ViewModeRef {
-    fn from(m: ViewMode) -> Self {
-        match m {
-            ViewMode::Today => ViewModeRef::Today,
-            ViewMode::SevenDays => ViewModeRef::SevenDays,
-            ViewMode::FourWeeks => ViewModeRef::FourWeeks,
-            ViewMode::Months => ViewModeRef::Months,
         }
     }
 }
@@ -290,7 +235,7 @@ fn draw_header(
 }
 
 fn draw_cards(frame: &mut ratatui::Frame, area: Rect, data: &UsageStatsSnapshot, mode: ViewMode) {
-    let total = data.range_summary(ViewModeRef::from(mode));
+    let total = data.range_summary(mode);
     let tokens = total.prompt_tokens + total.completion_tokens;
     let cache_pct = if total.prompt_tokens > 0 {
         (total.cached_tokens as f64 / total.prompt_tokens as f64 * 100.0).round() as i64
@@ -300,17 +245,17 @@ fn draw_cards(frame: &mut ratatui::Frame, area: Rect, data: &UsageStatsSnapshot,
     let cards = [
         (
             "Requests",
-            compact_tokens(total.request_count as u64),
+            compact_number(total.request_count as u64),
             ACCENT,
         ),
-        ("Prompt", compact_tokens(total.prompt_tokens as u64), ACCENT),
+        ("Prompt", compact_number(total.prompt_tokens as u64), ACCENT),
         (
             "Completion",
-            compact_tokens(total.completion_tokens as u64),
+            compact_number(total.completion_tokens as u64),
             ACCENT,
         ),
-        ("Cached", compact_tokens(total.cached_tokens as u64), ACCENT),
-        ("Total", compact_tokens(tokens as u64), ACCENT),
+        ("Cached", compact_number(total.cached_tokens as u64), ACCENT),
+        ("Total", compact_number(tokens as u64), ACCENT),
         ("Cache", format!("{cache_pct}%"), ACCENT),
     ];
     let constraints = (0..cards.len())
@@ -336,12 +281,7 @@ fn draw_chart(
     mode: ViewMode,
     scroll: usize,
 ) {
-    let buckets: Vec<&UsageBucket> = match mode {
-        ViewMode::Today => data.daily.iter().rev().collect(),
-        ViewMode::SevenDays => data.weekly.iter().rev().collect(),
-        ViewMode::FourWeeks => data.monthly.iter().rev().collect(),
-        ViewMode::Months => data.all_time.iter().rev().collect(),
-    };
+    let buckets: Vec<&UsageBucket> = data.buckets(mode).iter().rev().collect();
     let max_rows = area.height.saturating_sub(2) as usize;
     let max_tokens = buckets
         .iter()
@@ -369,7 +309,7 @@ fn draw_chart(
                 Style::default().fg(BAR_EMPTY),
             ),
             Span::styled(
-                format!(" {:>8}", compact_tokens(tokens as u64)),
+                format!(" {:>8}", compact_number(tokens as u64)),
                 Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -388,7 +328,7 @@ fn draw_chart(
 }
 
 fn draw_models(frame: &mut ratatui::Frame, area: Rect, data: &UsageStatsSnapshot, mode: ViewMode) {
-    let models = data.range_models(ViewModeRef::from(mode));
+    let models = data.range_models(mode);
     let max_rows = area.height.saturating_sub(3) as usize;
     let w = area.width.saturating_sub(4) as usize; // inner width minus borders
     let name_w = (w / 2).max(12);
@@ -427,7 +367,7 @@ fn draw_models(frame: &mut ratatui::Frame, area: Rect, data: &UsageStatsSnapshot
                 Style::default().fg(ACCENT),
             ),
             Span::styled(
-                format!("{:>tw$} ", compact_tokens(tokens as u64), tw = tok_w),
+                format!("{:>tw$} ", compact_number(tokens as u64), tw = tok_w),
                 Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{:>4}%", cache), Style::default().fg(ACCENT)),
@@ -470,12 +410,7 @@ fn hourly_chart_lines(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
 ) -> (Vec<Line<'static>>, String) {
-    let hourly_data: &[HourUsage] = match mode {
-        ViewMode::Today => &data.hourly_today,
-        ViewMode::SevenDays => &data.hourly_7d,
-        ViewMode::FourWeeks => &data.hourly_4w,
-        ViewMode::Months => &data.hourly_all,
-    };
+    let hourly_data: &[HourUsage] = data.hourly(mode);
     let mut by_hour = [0i64; 24];
     for h in hourly_data {
         if (0..24).contains(&h.hour) {
@@ -515,7 +450,7 @@ fn hourly_chart_lines(
             Style::default().fg(TEXT),
         ),
         Span::styled(
-            format!("   total {}", compact_tokens(total_hourly as u64)),
+            format!("   total {}", compact_number(total_hourly as u64)),
             dim(),
         ),
     ]));
@@ -614,14 +549,14 @@ fn draw_daily_activity(frame: &mut ratatui::Frame, area: Rect, data: &UsageStats
                 )),
                 2 => spans.push(Span::styled(
                     most_active
-                        .map(|b| compact_tokens(bucket_tokens(b) as u64))
+                        .map(|b| compact_number(bucket_tokens(b) as u64))
                         .unwrap_or_else(|| "0".to_string()),
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 )),
                 4 => spans.push(Span::styled(format!("{} days", activity.len()), dim())),
                 5 => spans.push(Span::styled("total", dim())),
                 6 => spans.push(Span::styled(
-                    compact_tokens(total_tokens as u64),
+                    compact_number(total_tokens as u64),
                     Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
                 )),
                 _ => {}
@@ -728,10 +663,6 @@ fn weekday_index(date: &str) -> Option<usize> {
     Some(((sunday_based + 6) % 7) as usize)
 }
 
-fn compact_tokens(count: u64) -> String {
-    compact_number(count)
-}
-
 fn compact_number(count: u64) -> String {
     if count < 100_000 {
         return count.to_string();
@@ -802,12 +733,7 @@ fn heat_style(value: i64, max: i64) -> Style {
 }
 
 fn range_label(data: &UsageStatsSnapshot, mode: ViewMode) -> String {
-    let buckets: &[UsageBucket] = match mode {
-        ViewMode::Today => &data.daily,
-        ViewMode::SevenDays => &data.weekly,
-        ViewMode::FourWeeks => &data.monthly,
-        ViewMode::Months => &data.all_time,
-    };
+    let buckets: &[UsageBucket] = data.buckets(mode);
     let first = buckets.first().map(|b| b.label.as_str()).unwrap_or("");
     let last = buckets.last().map(|b| b.label.as_str()).unwrap_or("");
     if first.is_empty() {

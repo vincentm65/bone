@@ -85,24 +85,75 @@ pub struct UsageStatsSnapshot {
     pub daily_activity: Vec<UsageBucket>,
 }
 
-/// Mirror of stats UI view mode, used for range-aware summaries.
-#[derive(Clone, Copy)]
-pub enum ViewModeRef {
+/// Time range selector shared between session_db and stats UI.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
     Today,
     SevenDays,
     FourWeeks,
     Months,
 }
 
+impl ViewMode {
+    const ALL: [Self; 4] = [Self::Today, Self::SevenDays, Self::FourWeeks, Self::Months];
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|&m| m == self).unwrap()
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::SevenDays => "7 days",
+            Self::FourWeeks => "4 weeks",
+            Self::Months => "All time",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Today => "1",
+            Self::SevenDays => "2",
+            Self::FourWeeks => "3",
+            Self::Months => "4",
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = self.index();
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    pub fn next(self) -> Self {
+        let idx = self.index();
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
 impl UsageStatsSnapshot {
+    /// Select the usage buckets for a given view mode.
+    pub fn buckets(&self, mode: ViewMode) -> &[UsageBucket] {
+        match mode {
+            ViewMode::Today => &self.daily,
+            ViewMode::SevenDays => &self.weekly,
+            ViewMode::FourWeeks => &self.monthly,
+            ViewMode::Months => &self.all_time,
+        }
+    }
+
+    /// Select hourly data for a given view mode.
+    pub fn hourly(&self, mode: ViewMode) -> &[HourUsage] {
+        match mode {
+            ViewMode::Today => &self.hourly_today,
+            ViewMode::SevenDays => &self.hourly_7d,
+            ViewMode::FourWeeks => &self.hourly_4w,
+            ViewMode::Months => &self.hourly_all,
+        }
+    }
+
     /// Compute a summary for the given time range by aggregating buckets.
-    pub fn range_summary(&self, mode: ViewModeRef) -> UsageSummary {
-        let buckets: &[UsageBucket] = match mode {
-            ViewModeRef::Today => &self.daily,
-            ViewModeRef::SevenDays => &self.weekly,
-            ViewModeRef::FourWeeks => &self.monthly,
-            ViewModeRef::Months => &self.all_time,
-        };
+    pub fn range_summary(&self, mode: ViewMode) -> UsageSummary {
+        let buckets: &[UsageBucket] = self.buckets(mode);
         let mut s = UsageSummary {
             prompt_tokens: 0,
             completion_tokens: 0,
@@ -120,12 +171,12 @@ impl UsageStatsSnapshot {
         s
     }
 
-    pub fn range_models(&self, mode: ViewModeRef) -> &[ProviderUsage] {
+    pub fn range_models(&self, mode: ViewMode) -> &[ProviderUsage] {
         match mode {
-            ViewModeRef::Today => &self.by_model_today,
-            ViewModeRef::SevenDays => &self.by_model_7d,
-            ViewModeRef::FourWeeks => &self.by_model_4w,
-            ViewModeRef::Months => &self.by_model_all,
+            ViewMode::Today => &self.by_model_today,
+            ViewMode::SevenDays => &self.by_model_7d,
+            ViewMode::FourWeeks => &self.by_model_4w,
+            ViewMode::Months => &self.by_model_all,
         }
     }
 }
@@ -421,8 +472,29 @@ impl SessionDb {
         rows.collect()
     }
 
+    fn read_usage_bucket_row(row: &rusqlite::Row) -> rusqlite::Result<UsageBucket> {
+        Ok(UsageBucket {
+            label: row.get(0)?,
+            prompt_tokens: row.get(1)?,
+            completion_tokens: row.get(2)?,
+            cached_tokens: row.get(3)?,
+            cost: row.get(4)?,
+            request_count: row.get(5)?,
+        })
+    }
+
+    fn query_buckets(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> rusqlite::Result<Vec<UsageBucket>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params, Self::read_usage_bucket_row)?;
+        rows.collect()
+    }
+
     fn usage_today_by_hour(&self) -> rusqlite::Result<Vec<UsageBucket>> {
-        let mut stmt = self.conn.prepare(
+        self.query_buckets(
             "WITH RECURSIVE hours(hour) AS (
                 VALUES(0)
                 UNION ALL SELECT hour + 1 FROM hours WHERE hour < 23
@@ -444,22 +516,13 @@ impl SessionDb {
              FROM hours
              LEFT JOIN usage ON usage.hour = hours.hour
              ORDER BY hours.hour ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(UsageBucket {
-                label: row.get(0)?,
-                prompt_tokens: row.get(1)?,
-                completion_tokens: row.get(2)?,
-                cached_tokens: row.get(3)?,
-                cost: row.get(4)?,
-                request_count: row.get(5)?,
-            })
-        })?;
-        rows.collect()
+            [],
+        )
     }
 
     fn usage_recent_days(&self, days: i64) -> rusqlite::Result<Vec<UsageBucket>> {
-        let mut stmt = self.conn.prepare(
+        let modifier = format!("-{} days", days.saturating_sub(1));
+        self.query_buckets(
             "WITH RECURSIVE series(n, day) AS (
                 VALUES(0, date('now', 'localtime', ?1))
                 UNION ALL SELECT n + 1, date(day, '+1 day') FROM series WHERE n + 1 < ?2
@@ -481,23 +544,14 @@ impl SessionDb {
              FROM series
              LEFT JOIN usage ON usage.day = series.day
              ORDER BY series.day ASC",
-        )?;
-        let modifier = format!("-{} days", days.saturating_sub(1));
-        let rows = stmt.query_map(params![modifier, days], |row| {
-            Ok(UsageBucket {
-                label: row.get(0)?,
-                prompt_tokens: row.get(1)?,
-                completion_tokens: row.get(2)?,
-                cached_tokens: row.get(3)?,
-                cost: row.get(4)?,
-                request_count: row.get(5)?,
-            })
-        })?;
-        rows.collect()
+            params![modifier, days],
+        )
     }
 
     fn usage_recent_weeks(&self, weeks: i64) -> rusqlite::Result<Vec<UsageBucket>> {
-        let mut stmt = self.conn.prepare(
+        let first_label_modifier = format!("-{} days", weeks.saturating_sub(1).saturating_mul(7));
+        let usage_modifier = format!("-{} days", weeks.saturating_mul(7).saturating_sub(1));
+        self.query_buckets(
             "WITH RECURSIVE series(n, week) AS (
                 VALUES(0, strftime('%Y-W%W', date('now', 'localtime', ?1)))
                 UNION ALL
@@ -521,27 +575,13 @@ impl SessionDb {
              FROM series
              LEFT JOIN usage ON usage.week = series.week
              ORDER BY series.n ASC",
-        )?;
-        let first_label_modifier = format!("-{} days", weeks.saturating_sub(1).saturating_mul(7));
-        let usage_modifier = format!("-{} days", weeks.saturating_mul(7).saturating_sub(1));
-        let rows = stmt.query_map(
             params![first_label_modifier, weeks, usage_modifier],
-            |row| {
-                Ok(UsageBucket {
-                    label: row.get(0)?,
-                    prompt_tokens: row.get(1)?,
-                    completion_tokens: row.get(2)?,
-                    cached_tokens: row.get(3)?,
-                    cost: row.get(4)?,
-                    request_count: row.get(5)?,
-                })
-            },
-        )?;
-        rows.collect()
+        )
     }
 
     fn usage_buckets(&self, limit: i64) -> rusqlite::Result<Vec<UsageBucket>> {
-        let mut stmt = self.conn.prepare(
+        let modifier = format!("-{} months", limit.saturating_sub(1));
+        self.query_buckets(
             "WITH RECURSIVE series(n, month) AS (
                 VALUES(0, strftime('%Y-%m', date('now', 'localtime', ?1)))
                 UNION ALL
@@ -564,19 +604,8 @@ impl SessionDb {
              FROM series
              LEFT JOIN usage ON usage.month = series.month
              ORDER BY series.month ASC",
-        )?;
-        let modifier = format!("-{} months", limit.saturating_sub(1));
-        let rows = stmt.query_map(params![modifier, limit], |row| {
-            Ok(UsageBucket {
-                label: row.get(0)?,
-                prompt_tokens: row.get(1)?,
-                completion_tokens: row.get(2)?,
-                cached_tokens: row.get(3)?,
-                cost: row.get(4)?,
-                request_count: row.get(5)?,
-            })
-        })?;
-        rows.collect()
+            params![modifier, limit],
+        )
     }
 
     fn usage_by_hour_since(&self, date_filter: Option<&str>) -> rusqlite::Result<Vec<HourUsage>> {

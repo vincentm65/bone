@@ -147,37 +147,7 @@ pub struct CodexTool {
     pub strict: bool,
 }
 
-/// Partial tool call accumulated from streaming Responses API deltas.
-#[derive(Debug, Default)]
-struct PartialCodexToolCall {
-    call_id: String,
-    name: String,
-    arguments: String,
-}
-
-impl PartialCodexToolCall {
-    fn is_ready(&self) -> bool {
-        !self.call_id.is_empty() && !self.name.is_empty()
-    }
-}
-
-/// Flush completed partial tool calls, emitting a [`ChatEvent::ToolCall`]
-/// for each one that has both id and name set.
-fn flush_partial_tool_calls(partial: &mut BTreeMap<usize, PartialCodexToolCall>) -> Vec<ChatEvent> {
-    let completed = std::mem::take(partial);
-    let mut events = Vec::new();
-    for (_, call) in completed {
-        if call.is_ready() {
-            let arguments = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
-            events.push(ChatEvent::ToolCall(ToolCall {
-                id: call.call_id,
-                name: call.name,
-                arguments,
-            }));
-        }
-    }
-    events
-}
+use super::openai_compat::{PartialToolCall, flush_partial_tool_calls};
 
 #[derive(Deserialize)]
 struct CodexOutputItem {
@@ -394,7 +364,7 @@ impl LlmProvider for CodexProvider {
 
         let stream = try_stream! {
             futures_util::pin_mut!(events);
-            let mut partial_tool_calls: BTreeMap<usize, PartialCodexToolCall> = BTreeMap::new();
+            let mut partial_tool_calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
             let mut emitted_tool_call_ids: BTreeSet<String> = BTreeSet::new();
             let mut last_usage: Option<(u32, u32, Option<u32>)> = None;
 
@@ -442,9 +412,9 @@ impl LlmProvider for CodexProvider {
                             .unwrap_or(0);
                         if let Some(item) = raw.get("item")
                             && item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                                let mut partial = PartialCodexToolCall::default();
+                                let mut partial = PartialToolCall::default();
                                 if let Some(id) = item.get("call_id").and_then(|v| v.as_str()) {
-                                    partial.call_id = id.to_string();
+                                    partial.id = id.to_string();
                                 }
                                 if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                                     partial.name = name.to_string();
@@ -493,13 +463,13 @@ impl LlmProvider for CodexProvider {
                             .map(|v| v as usize)
                             .unwrap_or(0);
                         if let Some(partial) = partial_tool_calls.remove(&output_index)
-                            && partial.is_ready() {
+                            && !partial.id.is_empty() && !partial.name.is_empty() {
                                 let arguments =
                                     serde_json::from_str(&partial.arguments)
                                         .unwrap_or(Value::Null);
-                                emitted_tool_call_ids.insert(partial.call_id.clone());
+                                emitted_tool_call_ids.insert(partial.id.clone());
                                 yield ChatEvent::ToolCall(ToolCall {
-                                    id: partial.call_id,
+                                    id: partial.id,
                                     name: partial.name,
                                     arguments,
                                 });

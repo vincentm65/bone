@@ -42,18 +42,15 @@ pub struct StatusInfo {
     pub streaming: bool,
     pub approval_mode: ApprovalMode,
     pub queue_len: usize,
-    pub status_show_model: bool,
-    pub status_show_approval: bool,
-    pub status_show_tokens_curr: bool,
-    pub status_show_tokens_in: bool,
-    pub status_show_tokens_out: bool,
-    pub status_show_tokens_total: bool,
-    pub status_show_tps: bool,
-    pub status_show_queue: bool,
-    pub status_show_spinner: bool,
-    pub status_show_timer: bool,
+    pub status_show: std::collections::HashMap<String, bool>,
     /// Formatted elapsed time string (e.g. "1:23") for the current turn.
     pub elapsed: Option<String>,
+}
+
+impl StatusInfo {
+    pub fn show(&self, key: &str) -> bool {
+        self.status_show.get(key).copied().unwrap_or(true)
+    }
 }
 
 /// Owns all terminal rendering state and drawing logic.

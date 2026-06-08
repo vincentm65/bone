@@ -9,6 +9,21 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 fn status_info() -> StatusInfo {
+    let mut status_show = std::collections::HashMap::new();
+    for key in &[
+        "status_show_model",
+        "status_show_approval",
+        "status_show_tokens_curr",
+        "status_show_tokens_in",
+        "status_show_tokens_out",
+        "status_show_tokens_total",
+        "status_show_tps",
+        "status_show_queue",
+        "status_show_spinner",
+        "status_show_timer",
+    ] {
+        status_show.insert((*key).to_string(), true);
+    }
     StatusInfo {
         model: "test-model".to_string(),
         token_stats: TokenStats::new(),
@@ -17,16 +32,7 @@ fn status_info() -> StatusInfo {
         approval_mode: ApprovalMode::Safe,
         queue_len: 0,
         tokens_per_sec: None,
-        status_show_model: true,
-        status_show_approval: true,
-        status_show_tokens_curr: true,
-        status_show_tokens_in: true,
-        status_show_tokens_out: true,
-        status_show_tokens_total: true,
-        status_show_tps: true,
-        status_show_queue: true,
-        status_show_spinner: true,
-        status_show_timer: true,
+        status_show,
         elapsed: None,
     }
 }

@@ -31,6 +31,11 @@ impl SkillStore {
         Self::scan(&crate::config::skills_dir())
     }
 
+    pub fn load_from(dir: &Path) -> io::Result<Self> {
+        fs::create_dir_all(dir)?;
+        Self::scan(dir)
+    }
+
     pub fn reload(&mut self) -> io::Result<()> {
         *self = Self::load()?;
         Ok(())

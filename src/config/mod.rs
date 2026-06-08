@@ -48,16 +48,7 @@ pub struct UserConfig {
     pub enabled_tools: Vec<String>,
     pub auto_compact_tokens: Option<u64>,
     pub auto_compact_keep_messages: Option<usize>,
-    pub status_show_model: bool,
-    pub status_show_approval: bool,
-    pub status_show_tokens_curr: bool,
-    pub status_show_tokens_in: bool,
-    pub status_show_tokens_out: bool,
-    pub status_show_tokens_total: bool,
-    pub status_show_tps: bool,
-    pub status_show_queue: bool,
-    pub status_show_spinner: bool,
-    pub status_show_timer: bool,
+    pub status_show: std::collections::HashMap<String, bool>,
     pub subagent: SubagentConfig,
 }
 
@@ -77,16 +68,7 @@ impl Default for UserConfig {
             enabled_tools: default_enabled_tools(),
             auto_compact_tokens: None,
             auto_compact_keep_messages: None,
-            status_show_model: true,
-            status_show_approval: true,
-            status_show_tokens_curr: true,
-            status_show_tokens_in: true,
-            status_show_tokens_out: true,
-            status_show_tokens_total: true,
-            status_show_tps: true,
-            status_show_queue: true,
-            status_show_spinner: true,
-            status_show_timer: true,
+            status_show: Self::default_status_show(),
             subagent: SubagentConfig::default(),
         }
     }
@@ -96,6 +78,31 @@ fn bool_config(custom: &custom::CustomConfigs, key: &str) -> bool {
     custom.get_value("general", key).parse().unwrap_or(true)
 }
 impl UserConfig {
+    const STATUS_TOGGLE_KEYS: [&'static str; 10] = [
+        "status_show_model",
+        "status_show_approval",
+        "status_show_tokens_curr",
+        "status_show_tokens_in",
+        "status_show_tokens_out",
+        "status_show_tokens_total",
+        "status_show_tps",
+        "status_show_queue",
+        "status_show_spinner",
+        "status_show_timer",
+    ];
+
+    fn default_status_show() -> std::collections::HashMap<String, bool> {
+        Self::STATUS_TOGGLE_KEYS
+            .iter()
+            .map(|&k| (k.to_string(), true))
+            .collect()
+    }
+
+    /// Helper to check a status_show toggle. Returns true if missing (default on).
+    pub fn status_show(&self, key: &str) -> bool {
+        self.status_show.get(key).copied().unwrap_or(true)
+    }
+
     /// Build a UserConfig by reading all values from the custom config pages.
     pub fn from_custom_configs(custom: &custom::CustomConfigs) -> Self {
         let mut cfg = Self::default();
@@ -125,17 +132,11 @@ impl UserConfig {
         };
 
         // Status bar toggles
-        // Status bar toggles
-        self.status_show_model = bool_config(custom, "status_show_model");
-        self.status_show_approval = bool_config(custom, "status_show_approval");
-        self.status_show_tokens_curr = bool_config(custom, "status_show_tokens_curr");
-        self.status_show_tokens_in = bool_config(custom, "status_show_tokens_in");
-        self.status_show_tokens_out = bool_config(custom, "status_show_tokens_out");
-        self.status_show_tokens_total = bool_config(custom, "status_show_tokens_total");
-        self.status_show_tps = bool_config(custom, "status_show_tps");
-        self.status_show_queue = bool_config(custom, "status_show_queue");
-        self.status_show_spinner = bool_config(custom, "status_show_spinner");
-        self.status_show_timer = bool_config(custom, "status_show_timer");
+        for key in Self::STATUS_TOGGLE_KEYS {
+            if let Some(val) = self.status_show.get_mut(key) {
+                *val = bool_config(custom, key);
+            }
+        }
         self.subagent.provider = custom.get_value("subagent", "provider");
         self.subagent.model = custom.get_value("subagent", "model");
         self.subagent.approval = match custom.get_value("subagent", "approval").as_str() {
