@@ -27,26 +27,10 @@ Rules:
 
 Config:
 - The bone config directory is printed below as \"Resolved config directory\".
-- For config schema and tool/skill docs, read AGENTS.md in that directory.
-- Edit settings in config/*.yaml. After editing providers.yaml or command-policy.yaml, tell the user to restart. After editing a skill or tool YAML, tell the user to run /skills reload or /tools reload.
+- For tool, command, and Lua API docs, read AGENTS.md in that directory.
+- After editing providers.yaml or command-policy.yaml, tell the user to restart.
 
 ";
-
-/// Build a compact skill catalog string for the system prompt.
-/// Each enabled skill contributes one line: `-/name — description`.
-/// Returns an empty string if no skills are provided.
-pub fn skills_catalog(skills: &[(impl AsRef<str>, impl AsRef<str>)]) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-    let mut out = "\n# Available Skills\n".to_string();
-    for (name, desc) in skills {
-        out.push_str(&format!("- /{} — {}\n", name.as_ref(), desc.as_ref()));
-    }
-    out.push_str("To use a skill: read its YAML from skills/<name>.yaml in the config directory, run any script via the shell tool (set BONE_ARGS env to the user's arguments), then follow the prompt instructions, substituting {{args}} and {{script_output}} with the user's arguments and script stdout respectively.
-");
-    out
-}
 
 /// System prompt for the compaction summary LLM call.
 /// Sent along with the older messages that are about to be discarded,

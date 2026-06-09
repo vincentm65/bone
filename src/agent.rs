@@ -5,7 +5,8 @@ use crate::llm::{
     token_tracker::CHARS_PER_TOKEN,
 };
 use crate::session_db::{SessionDb, db_path};
-use crate::tools::{ApprovalMode, ToolHandler, load_tools};
+use crate::tools::registry::ToolHandler;
+use crate::tools::{ApprovalMode, load_tools};
 use futures_util::StreamExt;
 
 /// Thin wrapper around the optional session DB that eliminates repetitive
@@ -250,7 +251,14 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         .await
         .map_err(|e| format!("provider validation failed: {e}"))?;
 
-    let loaded = load_tools();
+    // Boot Lua extension system first so Lua tools can be registered.
+   let crate::ext::BootResult { manager: extensions, tools: lua_tools, commands: _, config_snapshot: _, theme_snapshot: _, keymap_snapshot: _ } = crate::ext::boot(        &crate::config::bone_dir(),
+        &std::env::current_dir().unwrap_or_default(),
+    );
+
+    let mut loaded = load_tools();
+    // Register Lua tools into the tool registry.
+    crate::tools::register_lua_tools(&mut loaded, lua_tools);
     let all_tool_names: Vec<String> = loaded
         .registry
         .definitions()
@@ -268,9 +276,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let mut tools = ToolHandler::with_enabled_safety_and_display(
         loaded.registry,
         &enabled,
-        loaded.dynamic_safety,
         loaded.dynamic_display,
     );
+
 
     let approval_label = request.approval_mode.mode_str();
 
@@ -282,7 +290,11 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
     // Build initial history
     let mut transcript: Vec<ChatMessage> = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
-    let mut history = build_chat_history(&transcript, request.system_prompt.as_deref(), "");
+    extensions.dispatch_simple(
+        "message",
+        serde_json::json!({ "role": "user", "content": &request.prompt }),
+    );
+    let mut history = build_chat_history(&transcript, request.system_prompt.as_deref());
     let mut token_stats = TokenStats::new();
     let tool_defs = tools.definitions();
     let tool_defs_json_chars = serde_json::to_string(&tool_defs)
@@ -302,6 +314,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             model: llm.model(),
         },
     );
+    extensions.dispatch_simple("session_start", serde_json::json!({}));
     emit(
         &AgentEvent::Status {
             message: "thinking",
@@ -468,7 +481,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             );
         }
 
-        let results = execute_tool_calls(&tools, request.approval_mode, tool_calls).await;
+        let results = execute_tool_calls(&tools, request.approval_mode, tool_calls, &extensions).await;
 
         // Store session state (e.g. task_list state) into tool handler so
         // stateful tools persist across rounds in headless mode.
@@ -516,6 +529,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         },
     );
     session.end();
+    extensions.dispatch_simple("session_end", serde_json::json!({}));
 
     Ok(AgentResponse {
         content: final_content,
@@ -558,19 +572,51 @@ async fn execute_tool_calls(
     tools: &ToolHandler,
     mode: ApprovalMode,
     calls: Vec<crate::tools::ToolCall>,
+    extensions: &crate::ext::ExtensionManager,
 ) -> Vec<crate::tools::ToolResult> {
     let mode_label = mode.mode_str();
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
+        // Dispatch tool_call event, check for blocking.
+        let safety_str = match crate::tools::command_policy::CommandSafety::for_call(&call) {
+            crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
+            crate::tools::command_policy::CommandSafety::Edit => "edit",
+            crate::tools::command_policy::CommandSafety::Danger => "danger",
+        };
+        match extensions.dispatch_tool_call(
+            &call.name,
+            &call.id,
+            &call.arguments,
+            safety_str,
+        ) {
+            crate::ext::event::EventDispatchResult::Blocked { reason } => {
+                out.push(crate::tools::ToolResult {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    content: reason,
+                    is_error: true,
+                    pane_page: None,
+                    state: None,
+                });
+                continue;
+            }
+            crate::ext::event::EventDispatchResult::Continue => {}
+        }
+
         if tools.allows_call(mode, &call) {
             let mut executed = tools.execute_all(vec![call.clone()]).await;
             let result = executed
                 .pop()
                 .expect("execute_all returns one result per call");
+            extensions.dispatch_tool_result(
+                &result.name,
+                &result.call_id,
+                result.is_error,
+            );
             out.push(result);
         } else {
             let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
-            out.push(crate::tools::ToolResult {
+            let result = crate::tools::ToolResult {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: format!(
@@ -579,7 +625,13 @@ async fn execute_tool_calls(
                 is_error: true,
                 pane_page: None,
                 state: None,
-            });
+            };
+            extensions.dispatch_tool_result(
+                &result.name,
+                &result.call_id,
+                result.is_error,
+            );
+            out.push(result);
         }
     }
     out

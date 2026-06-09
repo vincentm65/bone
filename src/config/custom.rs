@@ -64,7 +64,6 @@ pub fn config_dir() -> PathBuf {
 const GENERAL_YAML: &str = include_str!("pages/general.yaml");
 const SUBAGENT_YAML: &str = include_str!("pages/subagent.yaml");
 const TOOLS_YAML: &str = include_str!("pages/tools.yaml");
-const SKILLS_YAML: &str = include_str!("pages/skills.yaml");
 
 /// Seed built-in config pages into `~/.bone-rust/config/` if missing.
 pub fn seed_builtin_pages() {
@@ -73,7 +72,6 @@ pub fn seed_builtin_pages() {
     seed_file_if_missing(&dir.join("general.yaml"), GENERAL_YAML);
     seed_file_if_missing(&dir.join("subagent.yaml"), SUBAGENT_YAML);
     seed_file_if_missing(&dir.join("tools.yaml"), TOOLS_YAML);
-    seed_file_if_missing(&dir.join("skills.yaml"), SKILLS_YAML);
 }
 
 // ── Load / save ─────────────────────────────────────────────────────────────
@@ -207,16 +205,7 @@ impl CustomConfigs {
         self.enabled_names("tools")
     }
 
-    /// Sync skills from a list of skill names into the "skills" page.
-    /// New skills are added as enabled (true). Returns true if fields were added.
-    pub fn sync_skills_from_registry(&mut self, skill_names: &[String]) -> bool {
-        self.sync_from_registry("skills", skill_names)
-    }
 
-    /// Get all enabled skill names from the "skills" page.
-    pub fn enabled_skill_names(&self) -> Vec<String> {
-        self.enabled_names("skills")
-    }
 
     /// Get the display value for a field, falling back to the default.
     pub fn get_value(&self, namespace: &str, key: &str) -> String {

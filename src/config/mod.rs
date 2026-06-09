@@ -4,9 +4,9 @@ pub mod providers_config;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::skills;
 use crate::tools;
-use crate::tools::{ApprovalMode, default_dynamic_tool_names};
+use crate::tools::ApprovalMode;
+use crate::ext;
 pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers, save_providers};
 
 pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -36,10 +36,6 @@ pub fn command_policy_path() -> PathBuf {
     bone_dir().join("command-policy.yaml")
 }
 
-pub fn skills_dir() -> PathBuf {
-    bone_dir().join("skills")
-}
-
 /// Runtime configuration populated from config/*.yaml pages.
 /// No longer persisted to a single file — all values come from CustomConfigs.
 #[derive(Debug, Clone)]
@@ -53,12 +49,10 @@ pub struct UserConfig {
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
-    let mut tools = ["read_file", "write_file", "edit_file", "shell"]
+    ["read_file", "write_file", "edit_file", "shell"]
         .into_iter()
         .map(String::from)
-        .collect::<Vec<_>>();
-    tools.extend(default_dynamic_tool_names().into_iter().map(String::from));
-    tools
+        .collect()
 }
 
 impl Default for UserConfig {
@@ -203,10 +197,7 @@ pub fn seed_all() {
     seed_command_policy_if_missing();
     seed_agents_md_if_missing();
     custom::seed_builtin_pages();
-    if let Err(e) = skills::seed_example_skills() {
-        eprintln!("bone: warning: could not seed skills: {e}");
-    }
-    tools::seed_default_tools(&tools::tools_dir());
+    tools::seed_default_lua_tools(&ext::lua_tools_dir());
 }
 
 fn is_local_base_url(base_url: &str) -> bool {

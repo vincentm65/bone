@@ -5,18 +5,15 @@ use crate::llm::{ChatMessage, ChatRole};
 
 /// Build provider history without truncating conversation or tool chains.
 /// If `custom_system_prompt` is provided, it replaces the default bone system prompt.
-/// If `skills_catalog` is provided, it is appended to the system prompt.
 pub fn build_chat_history(
     messages: &[ChatMessage],
     custom_system_prompt: Option<&str>,
-    skills_catalog: &str,
 ) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
-    let mut system_content = match custom_system_prompt {
+    let system_content = match custom_system_prompt {
         Some(s) => s.to_string(),
         None => prompts::system_prompt(),
     };
-    system_content.push_str(skills_catalog);
     out.push(ChatMessage::new(ChatRole::System, system_content));
     out.extend(messages.iter().cloned());
     out

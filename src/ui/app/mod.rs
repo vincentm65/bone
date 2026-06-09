@@ -7,12 +7,14 @@ use crate::chat::{
 use crate::config::{self, ProvidersConfig, UserConfig};
 use crate::llm::{ChatEvent, ChatMessage, LlmProvider, TokenStats, format_tokens, providers};
 use crate::session_db::SessionDb;
-use crate::skills::SkillStore;
-use crate::skills::types::Skill;
-use crate::tools::script_runner::{ScriptRequest, run_script};
-use crate::tools::{ApprovalMode, ToolCall, ToolHandler};
+
+
+use crate::tools::{ApprovalMode, ToolCall};
+use crate::tools::registry::ToolHandler;
+use crate::ext::ExtensionManager;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
+use mlua::Value as LuaValue;
 use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
@@ -43,7 +45,7 @@ pub struct App {
     pub custom_configs: config::custom::CustomConfigs,
     pub queue: VecDeque<String>,
     pub tools: ToolHandler,
-    pub skills: SkillStore,
+
     pub approval_mode: ApprovalMode,
     pub active_prompt: Option<Prompt>,
     /// Set to `true` to abort the current streaming response.
@@ -52,16 +54,14 @@ pub struct App {
     pub last_ctrl_c: Option<Instant>,
     /// Cumulative token usage stats.
     pub token_stats: TokenStats,
-    /// Cached set of dynamic tool names that use interaction: select.
-    interaction_tools: std::collections::HashSet<String>,
+
     /// Active pane pages displayed between input and status bar.
     pub pages: Vec<PanePage>,
     /// Index of the currently visible pane page.
     pub active_page: usize,
     /// Whether pane pages are shown in the bottom pane.
     pub panes_visible: bool,
-    /// Map from dynamic tool name to its script (shown in approval prompt).
-    dynamic_scripts: std::collections::HashMap<String, String>,
+
     /// SQLite session database for conversation persistence and usage tracking.
     session_db: Option<SessionDb>,
     /// Current conversation ID in the session database.
@@ -78,19 +78,31 @@ pub struct App {
     turn_pause_start: Option<Instant>,
     /// Active autocomplete state (shown when typing `/`).
     autocomplete: Option<AutocompleteState>,
+     /// Lua extension manager.
+    extensions: ExtensionManager,
+    /// Lua keymap snapshot for custom bindings.
+    lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
 }
 
 impl App {
     pub fn new(
         llm: Box<dyn LlmProvider>,
         providers_config: ProvidersConfig,
-        user_config: UserConfig,
+        mut user_config: UserConfig,
         custom_configs: config::custom::CustomConfigs,
     ) -> io::Result<Self> {
         let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
-        let loaded = crate::tools::load_tools();
+        // Boot Lua extension system first so Lua tools can be registered.
+        let crate::ext::BootResult { manager: extensions, tools: lua_tools, commands: _, config_snapshot, theme_snapshot, keymap_snapshot } = crate::ext::boot(
+            &crate::config::bone_dir(),
+            &std::env::current_dir().unwrap_or_default(),
+        );
+
+        let mut loaded = crate::tools::load_tools();
+        // Register Lua tools into the tool registry.
+        crate::tools::register_lua_tools(&mut loaded, lua_tools);
         // Sync tools page with registry, then rebuild enabled list
         let all_tool_names: Vec<String> = loaded
             .registry
@@ -109,21 +121,20 @@ impl App {
         let tools = ToolHandler::with_enabled_safety_and_display(
             loaded.registry,
             &enabled,
-            loaded.dynamic_safety,
             loaded.dynamic_display,
         );
-        let mut skills = SkillStore::load()?;
-        // Sync skills page with registry (enable/disable via /config)
-        let skill_names: Vec<String> = skills.list().map(|s| s.name.clone()).collect();
-        custom_configs.sync_skills_from_registry(&skill_names);
-        skills.apply_config_enabled(&custom_configs.enabled_skill_names());
 
-        let mut messages = vec![Message::system(
+        // Create renderer with Lua theme applied over defaults.
+        let mut renderer = Renderer::new();
+        theme_snapshot.apply_to(&mut renderer.theme);
+
+        // Apply Lua config snapshot — overrides YAML config values.
+        apply_lua_config_snapshot(&mut user_config, &config_snapshot);
+
+        let messages = vec![Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
         )];
-        for warning in skills.warnings() {
-            messages.push(Message::system(format!("skill warning: {warning}")));
-        }
+
 
         Ok(Self {
             messages,
@@ -134,13 +145,13 @@ impl App {
             model,
             llm,
             should_quit: false,
-            renderer: Renderer::new(),
+            renderer,
             providers_config,
             user_config,
             custom_configs,
             queue: VecDeque::new(),
             tools,
-            skills,
+
             approval_mode,
             active_prompt: None,
             cancel_streaming: false,
@@ -149,8 +160,7 @@ impl App {
             pages: Vec::new(),
             active_page: 0,
             panes_visible: true,
-            interaction_tools: loaded.interaction_tools,
-            dynamic_scripts: loaded.dynamic_scripts,
+
             session_db: None,
             conversation_id: None,
             session_seq: 0,
@@ -158,9 +168,16 @@ impl App {
             turn_start: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
-            autocomplete: None,
+               autocomplete: None,
+            extensions,
+            lua_keymap: keymap_snapshot,
         })
     }
+    /// Dispatch a `session_end` event to Lua handlers.
+    pub fn dispatch_session_end(&self) {
+        self.extensions.dispatch_simple("session_end", serde_json::json!({}));
+    }
+
     /// Initialize or open the session database.
     fn init_session_db(&mut self) -> Option<String> {
         if self.session_db.is_some() {
@@ -275,6 +292,10 @@ impl App {
         };
         self.custom_configs
             .set_value("general", "approval_mode", mode.to_string());
+        self.extensions.dispatch_simple(
+            "mode_change",
+            serde_json::json!({ "mode": mode }),
+        );
     }
 
     fn apply_custom_configs_to_runtime(&mut self, custom: config::custom::CustomConfigs) {
@@ -283,10 +304,6 @@ impl App {
         self.custom_configs = custom;
     }
 
-    fn apply_skill_enabled_from_config(&mut self) {
-        self.skills
-            .apply_config_enabled(&self.custom_configs.enabled_skill_names());
-    }
 
     pub async fn run(&mut self) -> io::Result<()> {
         let mut terminal = Renderer::init_terminal(MIN_ROWS)?;
@@ -350,6 +367,8 @@ impl App {
             self.renderer
                 .flush_new_to_scrollback(&self.messages, &mut terminal)?;
         }
+
+        self.dispatch_session_end();
 
         Renderer::prepare_exit(&mut terminal)?;
         Renderer::shutdown_terminal()?;
@@ -447,6 +466,61 @@ impl App {
             elapsed,
         )
     }
+
+    /// Look up a keymap binding for the given key combo.
+    /// Returns the action name if found in the current mode.
+    fn lookup_keymap(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<String> {
+        let mode = if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
+            "n"
+        } else {
+            "i"
+        };
+
+        let bindings = match mode {
+            "n" => &self.lua_keymap.normal,
+            "i" => &self.lua_keymap.insert,
+            _ => return None,
+        };
+
+        for binding in bindings {
+            if key_matches(&binding.key, code, modifiers) {
+                return Some(binding.action.clone());
+            }
+        }
+        None
+    }
+
+    /// Execute a keymap action.
+    async fn handle_keymap_action(
+        &mut self,
+        action: String,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        match action.as_str() {
+            "toggle_panes" => {
+                self.panes_visible = !self.panes_visible;
+                self.redraw(term)
+            }
+            "cycle_approval_mode" => {
+                self.approval_mode = self.approval_mode.cycle();
+                self.user_config.approval_mode = self.approval_mode;
+                self.persist_runtime_config();
+                self.redraw(term)
+            }
+            "cursor_to_start" => {
+                self.input.cursor_to_start();
+                self.redraw(term)
+            }
+            "cursor_to_end" => {
+                self.input.cursor_to_end();
+                self.redraw(term)
+            }
+            other => {
+                eprintln!("bone-lua warn: unknown keymap action '{other}'; ignoring");
+                self.redraw(term)
+            }
+        }
+    }
 }
 
 /// Build a [`StatusInfo`] with a live streaming cumulative output-token estimate.
@@ -533,11 +607,13 @@ impl App {
         }
     }
 
-    /// Collect all available slash commands with descriptions (builtins + skills).
+    /// Collect all available slash commands with descriptions (builtins + Lua).
     fn collect_commands(&self) -> Vec<(String, String)> {
         let mut cmds = crate::ui::autocomplete::builtin_commands();
-        for skill in self.skills.list() {
-            cmds.push((skill.name.clone(), skill.description.clone()));
+        if self.extensions.is_available() {
+            for cmd in self.extensions.commands() {
+                cmds.push((cmd.name.clone(), cmd.description.clone()));
+            }
         }
         cmds
     }
@@ -661,6 +737,11 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // Check Lua keymap bindings before default input handling.
+        if let Some(action) = self.lookup_keymap(code, modifiers) {
+            return self.handle_keymap_action(action, term).await;
         }
 
         match self.input.apply_key(code, modifiers) {
@@ -796,7 +877,7 @@ impl App {
         prompt.full_command = if call.name == "shell" {
             call.arguments["command"].as_str().map(String::from)
         } else {
-            self.dynamic_scripts.get(&call.name).cloned()
+            None
         };
         self.active_prompt = Some(prompt);
 
@@ -909,32 +990,23 @@ impl App {
         if cmd == "config" {
             return self.config_picker(term, None).await;
         }
-        if cmd == "skills" {
-            return self.handle_skills_command(&arg, term);
-        }
+
         if cmd == "compact" {
             return self.compact_chat(term).await;
         }
-        if !matches!(
+
+        // Protected built-ins always win.
+        if matches!(
             cmd.as_str(),
             "help"
-                | "clear"
-                | "new"
-                | "context"
-                | "model"
-                | "provider"
                 | "quit"
                 | "exit"
-                | "edit"
-                | "e"
-                | "usage"
-                | "recall"
         ) {
-            if let Err(err) = self.skills.reload() {
-                return self.show_reply(format!("Failed to refresh skills: {err}"), term);
-            }
-            if let Some(skill) = self.skills.get_enabled(&cmd).cloned() {
-                return self.invoke_skill(skill, &arg, term).await;
+            // Fall through to commands::handle below.
+        } else if self.extensions.is_available() {
+            // Check Lua commands.
+            if let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
+                return Ok(());
             }
         }
 
@@ -1069,133 +1141,84 @@ impl App {
         Ok(())
     }
 
-    fn handle_skills_command(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
-        let mut parts = arg.split_whitespace();
-        let action = parts.next().unwrap_or("list");
-        if action != "reload"
-            && let Err(err) = self.skills.reload()
-        {
-            return self.show_reply(format!("Failed to refresh skills: {err}"), term);
-        }
-        let reply = match action {
-            "list" => {
-                let mut lines = vec!["Skills:".to_string()];
-                lines.extend(self.skills.list().map(|skill| {
-                    let status = if skill.enabled { "enabled" } else { "disabled" };
-                    format!("  /{} [{status}] — {}", skill.name, skill.description)
-                }));
-                if lines.len() == 1 {
-                    lines.push("  (none)".to_string());
-                }
-                lines.join("\n")
-            }
-            "reload" => match self.skills.reload() {
-                Ok(()) => {
-                    // Re-sync config page and apply enabled states
-                    let names: Vec<String> = self.skills.list().map(|s| s.name.clone()).collect();
-                    self.custom_configs.sync_skills_from_registry(&names);
-                    self.skills
-                        .apply_config_enabled(&self.custom_configs.enabled_skill_names());
-                    let mut lines = vec!["Skills reloaded.".to_string()];
-                    lines.extend(
-                        self.skills
-                            .warnings()
-                            .iter()
-                            .map(|warning| format!("warning: {warning}")),
-                    );
-                    lines.join("\n")
-                }
-                Err(err) => format!("Failed to reload skills: {err}"),
-            },
-            _ => "Usage: /skills [list|enable <name>|disable <name>|reload]".to_string(),
-        };
-        self.show_reply(reply, term)
-    }
-
-    async fn invoke_skill(
+    /// Run a Lua-registered command. Returns `Some(())` if the command was found and handled.
+    async fn run_lua_command(
         &mut self,
-        skill: Skill,
-        args: &str,
+        cmd: &str,
+        arg: &str,
         term: &mut BoneTerminal,
-    ) -> io::Result<()> {
-        let script_output = if let Some(script) = skill.script.as_ref() {
-            let approval_call = ToolCall {
-                id: format!("skill:{}", skill.name),
-                name: "shell".to_string(),
-                arguments: serde_json::json!({
-                    "command": script,
-                    "classification": "danger",
-                    "display_label": format!("skill: /{}", skill.name),
-                }),
-            };
-            if !self.approval_mode.allows_call(&approval_call) {
-                match self.prompt_and_wait(&approval_call, term)? {
-                    Decision::Accept => {}
-                    Decision::Cancel => {
-                        return self.show_reply(
-                            format!("Skill /{} cancelled; script was not executed.", skill.name),
-                            term,
-                        );
-                    }
-                    Decision::Advise(advice) => {
-                        let suffix = if advice.trim().is_empty() {
-                            String::new()
-                        } else {
-                            format!(" Advice: {}", advice.trim())
-                        };
-                        return self.show_reply(
-                            format!("Skill /{} not executed.{suffix}", skill.name),
-                            term,
-                        );
-                    }
-                }
-            }
-            let output = match run_script(ScriptRequest {
-                command: script.clone(),
-                env: vec![("BONE_ARGS".to_string(), args.to_string())],
-                timeout_ms: 120_000,
-            })
-            .await
-            {
-                Ok(output) => output,
-                Err(err) => {
-                    return self.show_reply(format!("Skill /{} failed: {err}", skill.name), term);
-                }
-            };
-            if output.exit_code != Some(0) {
-                let detail = if output.stderr.is_empty() {
-                    output.stdout
-                } else {
-                    output.stderr
-                };
-                return self.show_reply(
-                    format!(
-                        "Skill /{} failed (exit code {}).\n{}",
-                        skill.name,
-                        output
-                            .exit_code
-                            .map_or_else(|| "signal".to_string(), |code| code.to_string()),
-                        detail
-                    ),
-                    term,
-                );
-            }
-            Some(output.stdout)
-        } else {
-            None
-        };
+    ) -> Option<()> {
+        // Extract the result while holding the Lua lock, then release it.
+        let reply = {
+            let lua = self.extensions.lua();
 
-        match crate::skills::render_skill(&skill, args, script_output.as_deref()) {
-            Ok(rendered) => {
-                let display = if args.trim().is_empty() {
-                    format!("/{}\n[skill input submitted]", skill.name)
-                } else {
-                    format!("/{} {}\n[skill input submitted]", skill.name, args)
-                };
-                self.submit_user_turn(rendered, Some(display), term).await
+            // Find the command in _commands.
+            let bone_table = lua.globals().get::<mlua::Table>("bone").ok()?;
+            let commands_table = bone_table.get::<mlua::Table>("_commands").ok()?;
+
+            let mut found_entry: Option<mlua::Table> = None;
+            for entry in commands_table.sequence_values::<mlua::Table>() {
+                let entry = entry.ok()?;
+                let name: String = entry.get("name").ok()?;
+                if name == cmd {
+                    found_entry = Some(entry);
+                    break;
+                }
             }
-            Err(err) => self.show_reply(err, term),
+
+            let entry = found_entry?;
+
+            // Get the handler.
+            let handler: LuaValue = entry.get("handler").ok()?;
+            let handler = match handler {
+                LuaValue::Function(f) => f,
+                LuaValue::Table(t) => t.get("handler").ok()?,
+                _ => {
+                    eprintln!("bone-lua warn: command '{cmd}': handler is not a function or table; skipping");
+                    return Some(());
+                }
+            };
+
+            // Create ctx table.
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
+            let shared_state: crate::ext::ctx::SharedState =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let ctx_cfg = crate::ext::ctx::CtxConfig {
+                cwd,
+                config_dir,
+                shared_state,
+            };
+            let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
+
+            // Call handler(args, ctx).
+            let result = handler.call::<LuaValue>((arg.to_string(), ctx_table));
+
+            match result {
+                Ok(LuaValue::String(s)) => {
+                    let output = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                    if !output.is_empty() {
+                        Some(output)
+                    } else {
+                        None
+                    }
+                }
+                Ok(LuaValue::Nil) => None,
+                Ok(v) => Some(format!("{v:?}")),
+                Err(e) => {
+                    eprintln!("bone-lua error: command '{cmd}': {e}");
+                    Some(format!("Lua command error: {e}"))
+                }
+            }
+        }; // lua lock released here
+
+        if let Some(reply) = reply {
+            self.show_reply(reply, term).ok();
         }
+
+        Some(())
     }
 
     fn panel_key(&mut self, term: &mut BoneTerminal) -> io::Result<(KeyCode, KeyModifiers)> {
@@ -1321,8 +1344,7 @@ impl App {
         new_transcript.extend(self.transcript[boundary..].iter().cloned());
         self.transcript = new_transcript;
 
-        let catalog = self.skills_catalog();
-        let history = build_chat_history(&self.transcript, None, &catalog);
+        let history = build_chat_history(&self.transcript, None);
         let tools = self.tools.definitions();
         let prompt_chars = Self::estimate_context_chars(&history, &tools);
         self.token_stats.set_context_estimate(prompt_chars);
@@ -1330,16 +1352,7 @@ impl App {
         (true, before.saturating_sub(after))
     }
 
-    fn skills_catalog(&self) -> String {
-        crate::llm::prompts::skills_catalog(
-            &self
-                .skills
-                .list()
-                .filter(|s| s.enabled)
-                .map(|s| (s.name.clone(), s.description.clone()))
-                .collect::<Vec<_>>(),
-        )
-    }
+
 
     fn compacted_message(&self, prefix: &str, saved: u64) -> String {
         if saved > 0 {
@@ -1565,8 +1578,6 @@ impl App {
                     .map(|d| d.name.clone())
                     .collect();
                 self.custom_configs.sync_tools_from_registry(&all_names);
-                let skill_names: Vec<String> = self.skills.list().map(|s| s.name.clone()).collect();
-                self.custom_configs.sync_skills_from_registry(&skill_names);
 
                 let enabled = self.custom_configs.enabled_tool_names();
                 let enabled = if enabled.is_empty() {
@@ -1574,14 +1585,12 @@ impl App {
                 } else {
                     enabled
                 };
-                self.tools = crate::tools::ToolHandler::with_enabled_safety_and_display(
+                self.tools = ToolHandler::with_enabled_safety_and_display(
                     loaded.registry,
                     &enabled,
-                    loaded.dynamic_safety,
                     loaded.dynamic_display,
                 );
-                self.interaction_tools = loaded.interaction_tools;
-                self.dynamic_scripts = loaded.dynamic_scripts;
+
                 self.user_config.enabled_tools = self.tools.enabled_names();
                 let count = self.tools.definitions().len();
                 self.show_reply(format!("Tools reloaded. {count} tools enabled."), term)
@@ -1668,13 +1677,10 @@ impl App {
         start_tab: Option<&str>,
     ) -> io::Result<()> {
         let mut custom = config::custom::CustomConfigs::load();
-        // Sync skills/tools so newly-added items appear immediately
-        let skill_names: Vec<String> = self.skills.list().map(|s| s.name.clone()).collect();
-        custom.sync_skills_from_registry(&skill_names);
 
         let mut tabs: Vec<String> = Vec::new();
         let mut namespaces: Vec<String> = Vec::new();
-        for ns in ["general", "__providers__", "subagent", "tools", "skills"] {
+        for ns in ["general", "__providers__", "subagent", "tools"] {
             if ns == "__providers__" {
                 tabs.push("Providers".to_string());
                 namespaces.push(ns.to_string());
@@ -1878,7 +1884,6 @@ impl App {
                             if let Some(next) = custom.cycle_field(&ns, &field.key, &current) {
                                 custom.set_value(&ns, &field.key, next.clone());
                                 self.apply_custom_configs_to_runtime(custom.clone());
-                                self.apply_skill_enabled_from_config();
                                 if ns == "tools" {
                                     self.tools.set_enabled(&field.key, next == "true");
                                 }
@@ -2120,11 +2125,116 @@ fn rebuild_subagents_pane(entries: &std::collections::HashMap<String, String>) -
         0
     };
 
-    PanePage {
+      PanePage {
         source: "subagents".to_string(),
         title,
         content: lines,
         visible_rows: visible,
         scroll,
+    }
+}
+
+/// Match a Lua key string (e.g. "<C-p>", "<S-Tab>") against a KeyCode + modifiers.
+fn key_matches(key_str: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    let key_str = key_str.trim();
+    let mut expected_mods = KeyModifiers::NONE;
+    let mut key_part = key_str;
+
+    if key_str.starts_with('<') && key_str.ends_with('>') {
+        key_part = &key_str[1..key_str.len() - 1];
+         let parts: Vec<&str> = key_part.split('-').collect();
+        for part in &parts {
+            match *part {
+                "C" | "Ctrl" => expected_mods |= KeyModifiers::CONTROL,
+                "S" | "Shift" => expected_mods |= KeyModifiers::SHIFT,
+                "A" | "Alt" => expected_mods |= KeyModifiers::ALT,
+                _ => {}
+            }
+        }
+        key_part = parts.last().copied().unwrap_or(&key_part);
+    }
+
+    if modifiers != expected_mods {
+        return false;
+    }
+
+    match key_part {
+        "Tab" => code == KeyCode::Tab,
+        "BackTab" | "Backtab" => code == KeyCode::BackTab,
+        "Enter" => code == KeyCode::Enter,
+        "Esc" | "Escape" => code == KeyCode::Esc,
+        "Space" => code == KeyCode::Char(' '),
+        "Backspace" => code == KeyCode::Backspace,
+        "Delete" => code == KeyCode::Delete,
+        "Insert" => code == KeyCode::Insert,
+        "Home" => code == KeyCode::Home,
+        "End" => code == KeyCode::End,
+        "PageUp" => code == KeyCode::PageUp,
+        "PageDown" => code == KeyCode::PageDown,
+        "Up" => code == KeyCode::Up,
+        "Down" => code == KeyCode::Down,
+        "Left" => code == KeyCode::Left,
+        "Right" => code == KeyCode::Right,
+         "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12" => {
+            if let Some(n) = key_part[1..].parse::<u8>().ok() {
+                code == KeyCode::F(n)
+            } else {
+                false
+            }
+        }
+        _ if key_part.len() == 1 => {
+            if let Some(ch) = key_part.chars().next() {
+                code == KeyCode::Char(ch)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Apply a Lua config snapshot to the Rust `UserConfig`.
+/// Lua values override YAML config values.
+fn apply_lua_config_snapshot(cfg: &mut crate::config::UserConfig, snapshot: &crate::ext::snapshots::LuaConfigSnapshot) {
+    if let Some(ref approval_mode) = snapshot.approval_mode {
+        cfg.approval_mode = match approval_mode.as_str() {
+            "danger" => crate::tools::ApprovalMode::Danger,
+            "edit" => crate::tools::ApprovalMode::Edits,
+            _ => {
+                eprintln!("bone-lua warn: unknown approval_mode '{approval_mode}'; using default");
+                cfg.approval_mode.clone()
+            }
+        };
+    }
+
+    if let Some(v) = snapshot.auto_compact_tokens {
+        cfg.auto_compact_tokens = Some(v);
+    }
+    if let Some(v) = snapshot.auto_compact_keep_messages {
+        cfg.auto_compact_keep_messages = Some(v);
+    }
+
+    // Merge status_show — Lua values override, missing keys keep defaults.
+    if !snapshot.status_show.is_empty() {
+        for (k, v) in &snapshot.status_show {
+            cfg.status_show.insert(k.clone(), *v);
+        }
+    }
+
+    if let Some(ref provider) = snapshot.subagent.provider {
+        cfg.subagent.provider = provider.clone();
+    }
+    if let Some(ref model) = snapshot.subagent.model {
+        cfg.subagent.model = model.clone();
+    }
+    if let Some(ref approval) = snapshot.subagent.approval {
+        cfg.subagent.approval = match approval.as_str() {
+            "danger" => crate::tools::ApprovalMode::Danger,
+            "edit" => crate::tools::ApprovalMode::Edits,
+            _ => {
+                eprintln!("bone-lua warn: unknown subagent approval '{approval}'; using default");
+                cfg.subagent.approval.clone()
+            }
+        };
     }
 }

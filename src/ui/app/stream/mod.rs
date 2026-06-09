@@ -1,5 +1,7 @@
 use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
+use crate::ext::event::EventDispatchResult;
+use crate::tools::command_policy::CommandSafety;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
 use crate::tools::types::{Tool, ToolLiveEvent};
@@ -139,6 +141,10 @@ impl App {
             .push(Message::user(display_text.as_deref().unwrap_or(&text)));
         self.transcript
             .push(ChatMessage::new(ChatRole::User, &text));
+        self.extensions.dispatch_simple(
+            "message",
+            serde_json::json!({ "role": "user", "content": text }),
+        );
         if let Some(ref db) = self.session_db
             && let Some(conv_id) = self.conversation_id
         {
@@ -154,8 +160,7 @@ impl App {
 
         self.auto_compact_if_needed(term).await?;
 
-        let catalog = self.skills_catalog();
-        let mut history = build_chat_history(&self.transcript, None, &catalog);
+        let mut history = build_chat_history(&self.transcript, None);
 
         self.streaming = true;
         self.turn_start = Some(Instant::now());
@@ -528,6 +533,31 @@ impl App {
             })
             .collect();
 
+        // Dispatch tool_call events and filter blocked calls.
+        let mut blocked_results: Vec<ToolResult> = Vec::new();
+        let approved: Vec<ToolCall> = approved
+            .into_iter()
+            .filter(|call| {
+                let safety = match self.tools.safety_for_call(call) {
+                    CommandSafety::ReadOnly => "read_only",
+                    CommandSafety::Edit => "edit",
+                    CommandSafety::Danger => "danger",
+                };
+                match self.extensions.dispatch_tool_call(
+                    &call.name,
+                    &call.id,
+                    &call.arguments,
+                    safety,
+                ) {
+                    EventDispatchResult::Blocked { reason } => {
+                        blocked_results.push(tool_error(call, reason));
+                        false
+                    }
+                    EventDispatchResult::Continue => true,
+                }
+            })
+            .collect();
+
         self.show_immediate_tool_rows(&approved, term)?;
         let mut exec_results = self
             .execute_tools_responsive(approved, term)
@@ -541,7 +571,17 @@ impl App {
                     .next()
                     .unwrap_or_else(|| tool_error(&call, "internal error: tool result missing")),
             })
+            .chain(blocked_results)
             .collect();
+
+        // Dispatch tool_result events.
+        for result in &results {
+            self.extensions.dispatch_tool_result(
+                &result.name,
+                &result.call_id,
+                result.is_error,
+            );
+        }
 
         // Process pane pages and session state from tool results
         for result in &results {
@@ -777,116 +817,7 @@ impl App {
         mut call: ToolCall,
         term: &mut BoneTerminal,
     ) -> io::Result<PendingTool> {
-        // Check if this is a dynamic tool with interaction
-        if self.interaction_tools.contains(&call.name) {
-            self.timer_pause();
-            let question = call.arguments["question"].as_str().unwrap_or("");
-            let mut options: Vec<String> = call.arguments["options"]
-                .as_array()
-                .and_then(|a| a.iter().map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            if options.is_empty() {
-                return Ok(PendingTool::Result(tool_error(
-                    &call,
-                    "interaction tool: options must be a non-empty array of strings",
-                )));
-            }
-            let allow_custom = call.arguments["allow_custom"].as_bool().unwrap_or(true);
-            let custom_option_index = if allow_custom {
-                options.push("Other (type answer)".to_string());
-                Some(options.len() - 1)
-            } else {
-                None
-            };
-            let prompt = crate::ui::prompt::Prompt::new(question, options.clone());
-            self.active_prompt = Some(prompt);
-            self.redraw(term)?;
-
-            let selection = loop {
-                if event::poll(std::time::Duration::from_millis(50))? {
-                    let event = event::read()?;
-                    if let Event::Paste(text) = event {
-                        if self.active_prompt.is_none() {
-                            self.input.insert_paste(&text);
-                            self.redraw(term)?;
-                        }
-                        continue;
-                    }
-                    match event {
-                        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                            code if self.active_prompt.is_none() => {
-                                match self.input.apply_key(code, key.modifiers) {
-                                    InputAction::Submit => {
-                                        let answer = self.input.buffer.trim().to_string();
-                                        self.input.reset();
-                                        break Some(answer);
-                                    }
-                                    InputAction::Cancel | InputAction::Escape => {
-                                        self.input.clear_buffer();
-                                        break None;
-                                    }
-                                    InputAction::Redraw => self.redraw(term)?,
-                                    InputAction::None if code == KeyCode::Enter => {
-                                        break Some(String::new());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                                self.navigate_prompt(key.code, false, term)?;
-                            }
-                            KeyCode::Enter => {
-                                if let Some(prompt) = self.active_prompt.as_ref()
-                                    && Some(prompt.selected) == custom_option_index
-                                {
-                                    self.input.clear_buffer();
-                                    self.active_prompt = None;
-                                    self.redraw(term)?;
-                                    continue;
-                                }
-                                break self
-                                    .active_prompt
-                                    .as_ref()
-                                    .and_then(|p| options.get(p.selected).cloned());
-                            }
-                            KeyCode::Esc => break None,
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                break None;
-                            }
-                            KeyCode::Char(c)
-                                if key.modifiers.is_empty()
-                                    && self.active_prompt.as_ref().is_some_and(|prompt| {
-                                        Some(prompt.selected) == custom_option_index
-                                    }) =>
-                            {
-                                self.input.clear_buffer();
-                                self.input.insert_char(c);
-                                self.active_prompt = None;
-                                self.redraw(term)?;
-                            }
-                            _ => {}
-                        },
-                        _ => {}
-                    }
-                }
-            };
-
-            self.active_prompt = None;
-            self.redraw(term)?;
-
-            self.timer_resume();
-            return Ok(match selection {
-                Some(choice) => PendingTool::Result(ToolResult {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    content: choice,
-                    is_error: false,
-                    pane_page: None,
-                    state: None,
-                }),
-                None => PendingTool::Result(tool_error(&call, "cancelled by user")),
-            });
-        }
+        let _pending = self.prompt_and_wait(&call, term)?;
 
         if call.name == "edit_file" {
             match preview_edit_file(call.arguments.clone()).await {

@@ -55,6 +55,16 @@ impl AutocompleteState {
         }
     }
 
+    /// Build a combined list of built-in and Lua commands.
+    pub fn combined(lua_commands: &[(String, String)]) -> Self {
+        let mut all = BUILTIN_COMMANDS
+            .iter()
+            .map(|(n, d)| (n.to_string(), d.to_string()))
+            .collect::<Vec<_>>();
+        all.extend(lua_commands.iter().cloned());
+        Self::new(all)
+    }
+
     /// Re-filter matches based on the text typed after `/`.
     /// `query` is the part after the leading `/` (may be empty).
     pub fn update(&mut self, query: &str) {

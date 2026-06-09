@@ -1,10 +1,10 @@
 pub mod agent;
 pub mod chat;
 pub mod config;
+pub mod ext;
 pub mod llm;
 pub mod run;
 pub mod shell_split;
 pub mod session_db;
-pub mod skills;
 pub mod tools;
 pub mod ui;

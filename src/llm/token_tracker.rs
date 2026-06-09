@@ -66,11 +66,6 @@ impl TokenStats {
         self.context_length = (prompt_chars as f64 / chars_per_token).ceil() as u64;
     }
 
-    /// Total tokens across all requests.
-    pub fn total(&self) -> u64 {
-        self.sent + self.received
-    }
-
     /// Multi-line summary for `/usage` command.
     pub fn summary(&self) -> String {
         let mut lines = Vec::new();

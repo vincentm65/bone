@@ -91,7 +91,6 @@ impl Default for ToolRegistry {
 pub struct ToolHandler {
     registry: ToolRegistry,
     enabled: HashSet<String>,
-    dynamic_safety: HashMap<String, CommandSafety>,
     dynamic_display: HashMap<String, ToolDisplayConfig>,
     pub state_map: ToolStateMap,
 }
@@ -124,7 +123,6 @@ impl ToolHandler {
         Self {
             registry,
             enabled,
-            dynamic_safety: HashMap::new(),
             dynamic_display: HashMap::new(),
             state_map: ToolStateMap::default(),
         }
@@ -133,13 +131,11 @@ impl ToolHandler {
     pub fn with_enabled_safety_and_display(
         registry: ToolRegistry,
         enabled: &[String],
-        dynamic_safety: HashMap<String, CommandSafety>,
         dynamic_display: HashMap<String, ToolDisplayConfig>,
     ) -> Self {
         Self {
             registry,
             enabled: enabled.iter().cloned().collect(),
-            dynamic_safety,
             dynamic_display,
             state_map: ToolStateMap::default(),
         }
@@ -172,10 +168,7 @@ impl ToolHandler {
     }
 
     pub fn safety_for_call(&self, call: &ToolCall) -> CommandSafety {
-        self.dynamic_safety
-            .get(&call.name)
-            .copied()
-            .unwrap_or_else(|| CommandSafety::for_call(call))
+        CommandSafety::for_call(call)
     }
 
     pub fn allows_call(&self, mode: ApprovalMode, call: &ToolCall) -> bool {
