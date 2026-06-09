@@ -11,5 +11,5 @@ fields:
   - key: approval
     label: approval
     type: enum
-    options: [safe, edit, danger]
+    options: [safe, danger]
     default: safe

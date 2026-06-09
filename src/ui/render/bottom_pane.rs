@@ -716,7 +716,6 @@ impl super::Renderer {
                 status_info.approval_mode.label().to_string(),
                 Style::default().fg(match status_info.approval_mode {
                     ApprovalMode::Safe => self.theme.approval_safe,
-                    ApprovalMode::Edits => self.theme.approval_edits,
                     ApprovalMode::Danger => self.theme.approval_danger,
                 }),
             ));

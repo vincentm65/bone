@@ -82,6 +82,8 @@ pub struct App {
     extensions: ExtensionManager,
     /// Lua keymap snapshot for custom bindings.
     lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
+    /// Call IDs that already have a tool row in chat (to avoid duplicates).
+    shown_tool_rows: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -122,6 +124,7 @@ impl App {
             loaded.registry,
             &enabled,
             loaded.dynamic_display,
+            loaded.dynamic_safety,
         );
 
         // Create renderer with Lua theme applied over defaults.
@@ -171,6 +174,7 @@ impl App {
                autocomplete: None,
             extensions,
             lua_keymap: keymap_snapshot,
+            shown_tool_rows: std::collections::HashSet::new(),
         })
     }
     /// Dispatch a `session_end` event to Lua handlers.
@@ -287,7 +291,6 @@ impl App {
     fn persist_runtime_config(&mut self) {
         let mode = match self.user_config.approval_mode {
             crate::tools::ApprovalMode::Danger => "danger",
-            crate::tools::ApprovalMode::Edits => "edit",
             crate::tools::ApprovalMode::Safe => "safe",
         };
         self.custom_configs
@@ -1190,6 +1193,8 @@ impl App {
                 cwd,
                 config_dir,
                 shared_state,
+                pane_sender: None,
+                call_id: None,
             };
             let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
@@ -1570,7 +1575,15 @@ impl App {
         let action = parts.next().unwrap_or("");
         match action {
             "reload" => {
-                let loaded = crate::tools::load_tools();
+                let mut loaded = crate::tools::load_tools();
+
+                // Re-boot Lua to pick up new/changed Lua tools.
+                let config_dir = crate::config::bone_dir();
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let crate::ext::BootResult { tools: lua_tools, .. } =
+                    crate::ext::boot(&config_dir, &cwd);
+                crate::tools::register_lua_tools(&mut loaded, lua_tools);
+
                 let all_names: Vec<String> = loaded
                     .registry
                     .definitions()
@@ -1589,6 +1602,7 @@ impl App {
                     loaded.registry,
                     &enabled,
                     loaded.dynamic_display,
+                    loaded.dynamic_safety,
                 );
 
                 self.user_config.enabled_tools = self.tools.enabled_names();
@@ -1762,7 +1776,13 @@ impl App {
                             format!("{:<30} {}", label, display)
                         }
                     })
-                    .chain(std::iter::once("  Status bar  →".to_string()))
+                    .chain({
+                        let mut items: Vec<String> = Vec::new();
+                        if ns == "general" {
+                            items.push("  Status bar  →".to_string());
+                        }
+                        items
+                    })
                     .collect()
             } else {
                 vec![]
@@ -1848,16 +1868,18 @@ impl App {
                     let page = &custom.pages[page_idx].1;
                     let idx = self.active_prompt.as_ref().unwrap().selected;
 
-                    // Check if "Status bar" submenu was selected
-                    let non_status_count = page
-                        .fields
-                        .iter()
-                        .filter(|f| !f.key.starts_with("status_show_"))
-                        .count();
-                    if idx == non_status_count {
-                        // Status bar submenu
-                        self.status_bar_submenu(&mut custom, term)?;
-                        continue;
+                    // Check if "Status bar" submenu was selected (general only)
+                    if ns == "general" {
+                        let non_status_count = page
+                            .fields
+                            .iter()
+                            .filter(|f| !f.key.starts_with("status_show_"))
+                            .count();
+                        if idx == non_status_count {
+                            // Status bar submenu
+                            self.status_bar_submenu(&mut custom, term)?;
+                            continue;
+                        }
                     }
 
                     if idx >= page.fields.len() {
@@ -2199,11 +2221,7 @@ fn apply_lua_config_snapshot(cfg: &mut crate::config::UserConfig, snapshot: &cra
     if let Some(ref approval_mode) = snapshot.approval_mode {
         cfg.approval_mode = match approval_mode.as_str() {
             "danger" => crate::tools::ApprovalMode::Danger,
-            "edit" => crate::tools::ApprovalMode::Edits,
-            _ => {
-                eprintln!("bone-lua warn: unknown approval_mode '{approval_mode}'; using default");
-                cfg.approval_mode.clone()
-            }
+            _ => crate::tools::ApprovalMode::Safe,
         };
     }
 
@@ -2230,11 +2248,7 @@ fn apply_lua_config_snapshot(cfg: &mut crate::config::UserConfig, snapshot: &cra
     if let Some(ref approval) = snapshot.subagent.approval {
         cfg.subagent.approval = match approval.as_str() {
             "danger" => crate::tools::ApprovalMode::Danger,
-            "edit" => crate::tools::ApprovalMode::Edits,
-            _ => {
-                eprintln!("bone-lua warn: unknown subagent approval '{approval}'; using default");
-                cfg.subagent.approval.clone()
-            }
+            _ => crate::tools::ApprovalMode::Safe,
         };
     }
 }

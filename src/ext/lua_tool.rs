@@ -13,6 +13,7 @@ use crate::tools::types::{Tool, ToolDefinition, ToolDisplayConfig, ToolOutput};
 use crate::ui::pane_page::PanePage;
 
 use super::ctx::{self, CtxConfig, SharedState};
+use crate::tools::command_policy::CommandSafety;
 
 pub struct LuaTool {
     name: String,
@@ -20,10 +21,11 @@ pub struct LuaTool {
     parameters: Value,
     display: ToolDisplayConfig,
     lua: Arc<Mutex<Lua>>,
-    registry_key: mlua::RegistryKey,
+    registry_key: Arc<mlua::RegistryKey>,
     cwd: String,
     config_dir: String,
     shared_state: SharedState,
+    safety: CommandSafety,
 }
 
 impl LuaTool {
@@ -86,6 +88,14 @@ impl LuaTool {
             _ => ToolDisplayConfig::default(),
         };
 
+        // Extract safety classification.
+        let safety = match entry.get::<String>("safety") {
+            Ok(s) => match s.as_str() {
+                "read_only" | "safe" => CommandSafety::ReadOnly,
+                _ => CommandSafety::Danger,
+            },
+            _ => CommandSafety::Danger,
+        };
         // Take ownership of the execute function via the registry.
         let execute_fn: mlua::Value = entry
             .get("execute")
@@ -100,8 +110,9 @@ impl LuaTool {
             parameters,
             display,
             lua: lua_arc,
-            registry_key,
+            registry_key: Arc::new(registry_key),
             cwd,
+            safety,
             config_dir,
             shared_state,
         })
@@ -109,6 +120,9 @@ impl LuaTool {
 
     pub fn display(&self) -> &ToolDisplayConfig {
         &self.display
+    }
+    pub fn safety(&self) -> CommandSafety {
+        self.safety
     }
 }
 
@@ -125,30 +139,29 @@ impl Tool for LuaTool {
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Retrieve the stored execute function.
         let execute_fn: mlua::Value = lua
-            .registry_value(&self.registry_key)
+            .registry_value(&*self.registry_key)
             .map_err(|e| format!("lua tool '{}': execute function lost: {e}", self.name))?;
         let execute_fn = match execute_fn {
             mlua::Value::Function(f) => f,
             _ => return Err(format!("lua tool '{}': execute is not a function", self.name)),
         };
 
-        // Convert arguments Value → Lua table.
         let args_lua = lua
             .to_value(&arguments)
             .map_err(|e| format!("lua tool '{}': failed to convert arguments: {e}", self.name))?;
 
-        // Create the ctx table.
+        // execute (non-live)
         let ctx_cfg = CtxConfig {
             cwd: self.cwd.clone(),
             config_dir: self.config_dir.clone(),
             shared_state: self.shared_state.clone(),
+            pane_sender: None,
+            call_id: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-            .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
+                        .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
 
-        // Call execute(params, ctx).
         let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
 
         match result {
@@ -162,30 +175,28 @@ impl Tool for LuaTool {
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
         let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Retrieve the stored execute function.
         let execute_fn: mlua::Value = lua
-            .registry_value(&self.registry_key)
+            .registry_value(&*self.registry_key)
             .map_err(|e| format!("lua tool '{}': execute function lost: {e}", self.name))?;
         let execute_fn = match execute_fn {
             mlua::Value::Function(f) => f,
             _ => return Err(format!("lua tool '{}': execute is not a function", self.name)),
         };
 
-        // Convert arguments Value → Lua table.
         let args_lua = lua
             .to_value(&arguments)
             .map_err(|e| format!("lua tool '{}': failed to convert arguments: {e}", self.name))?;
 
-        // Create the ctx table.
         let ctx_cfg = CtxConfig {
             cwd: self.cwd.clone(),
             config_dir: self.config_dir.clone(),
             shared_state: self.shared_state.clone(),
+            pane_sender: None,
+            call_id: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-            .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
+                        .map_err(|e| format!("lua tool '{}': failed to create ctx: {}", self.name, e))?;
 
-        // Call execute(params, ctx).
         let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
 
         let text = match result {
@@ -195,65 +206,123 @@ impl Tool for LuaTool {
             Err(e) => return Err(format!("lua tool '{}': {e}", self.name)),
         };
 
-        // Try to parse as JSON envelope (content + optional pane + optional state).
-        match serde_json::from_str::<serde_json::Value>(text.trim()) {
-            Ok(obj) if obj.is_object() => {
-                let map = obj.as_object().unwrap();
-                let content = map.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let state = map.get("state").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let pane_page = map.get("pane").and_then(|pane_val| {
-                    let pane = pane_val.as_object()?;
-                    let source = pane.get("source").and_then(|v| v.as_str())?.to_string();
-                    let title = pane.get("title").and_then(|v| v.as_str())?.to_string();
-                    let visible_rows = pane.get("visible_rows").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
-                    let scroll = pane.get("scroll").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let lines: Vec<ratatui::text::Line<'static>> = pane
-                        .get("lines")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|line_val| {
-                                    if let Some(text) = line_val.as_str() {
-                                        Some(ratatui::text::Line::from(text.to_string()))
-                                    } else if let Some(styled) = line_val.as_object() {
-                                        let spans: Vec<ratatui::text::Span<'static>> = styled
-                                            .get("spans")
-                                            .and_then(|v| v.as_array())
-                                            .map(|spans_arr| {
-                                                spans_arr.iter()
-                                                    .filter_map(|span_val| {
-                                                        let span_obj = span_val.as_object()?;
-                                                        let text = span_obj.get("text").and_then(|v| v.as_str())?.to_string();
-                                                        let style = span_obj_to_style(span_obj);
-                                                        Some(ratatui::text::Span::styled(text, style))
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default();
-                                        Some(ratatui::text::Line::from(spans))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    Some(PanePage {
-                        source,
-                        title,
-                        content: lines,
-                        visible_rows,
-                        scroll,
+        parse_tool_output(&text)
+    }
+
+    async fn execute_output_live(
+        &self,
+        arguments: Value,
+        events: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
+        _context: crate::tools::types::ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        // Clone handles for move into spawn_blocking.
+        let lua_arc = self.lua.clone();
+        let registry_key = self.registry_key.clone();
+        let name = self.name.clone();
+        let cwd = self.cwd.clone();
+        let config_dir = self.config_dir.clone();
+        let shared_state = self.shared_state.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let lua = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
+
+            let execute_fn: mlua::Value = lua
+                .registry_value(&*registry_key)
+                .map_err(|e| format!("lua tool '{name}': execute function lost: {e}"))?;
+            let execute_fn = match execute_fn {
+                mlua::Value::Function(f) => f,
+                _ => return Err(format!("lua tool '{name}': execute is not a function")),
+            };
+
+            let args_lua = lua
+                .to_value(&arguments)
+                .map_err(|e| format!("lua tool '{name}': failed to convert arguments: {e}"))?;
+
+            let ctx_cfg = CtxConfig {
+                cwd,
+                config_dir,
+                shared_state,
+                pane_sender: events,
+                call_id: Some(_context.call_id),
+            };
+            let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
+                .map_err(|e| format!("lua tool '{name}': failed to create ctx: {e}"))?;
+
+            let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
+
+            let text = match result {
+                Ok(mlua::Value::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_else(|e| format!("(lua string error: {e})")),
+                Ok(mlua::Value::Nil) => String::new(),
+                Ok(v) => format!("{v:?}"),
+                Err(e) => return Err(format!("lua tool '{name}': {e}")),
+            };
+
+            parse_tool_output(&text)
+        })
+        .await
+        .map_err(|e| format!("lua tool '{}': spawn_blocking panicked: {e}", self.name))?
+    }
+}
+
+/// Parse tool output text — tries JSON envelope, falls back to plain text.
+fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
+    match serde_json::from_str::<serde_json::Value>(text.trim()) {
+        Ok(obj) if obj.is_object() => {
+            let map = obj.as_object().unwrap();
+            let content = map.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let state = map.get("state").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let pane_page = map.get("pane").and_then(|pane_val| {
+                let pane = pane_val.as_object()?;
+                let source = pane.get("source").and_then(|v| v.as_str())?.to_string();
+                let title = pane.get("title").and_then(|v| v.as_str())?.to_string();
+                let visible_rows = pane.get("visible_rows").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
+                let scroll = pane.get("scroll").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let lines: Vec<ratatui::text::Line<'static>> = pane
+                    .get("lines")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|line_val| {
+                                if let Some(text) = line_val.as_str() {
+                                    Some(ratatui::text::Line::from(text.to_string()))
+                                } else if let Some(styled) = line_val.as_object() {
+                                    let spans: Vec<ratatui::text::Span<'static>> = styled
+                                        .get("spans")
+                                        .and_then(|v| v.as_array())
+                                        .map(|spans_arr| {
+                                            spans_arr.iter()
+                                                .filter_map(|span_val| {
+                                                    let span_obj = span_val.as_object()?;
+                                                    let text = span_obj.get("text").and_then(|v| v.as_str())?.to_string();
+                                                    let style = span_obj_to_style(span_obj);
+                                                    Some(ratatui::text::Span::styled(text, style))
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    Some(ratatui::text::Line::from(spans))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
                     })
-                });
-                Ok(ToolOutput {
-                    content,
-                    pane_page,
-                    state,
+                    .unwrap_or_default();
+                Some(PanePage {
+                    source,
+                    title,
+                    content: lines,
+                    visible_rows,
+                    scroll,
                 })
-            }
-            _ => Ok(ToolOutput::text(text)),
+            });
+            Ok(ToolOutput {
+                content,
+                pane_page,
+                state,
+            })
         }
+        _ => Ok(ToolOutput::text(text.to_string())),
     }
 }
 

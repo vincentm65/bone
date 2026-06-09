@@ -236,7 +236,6 @@ async fn tool_handler_allows_call_based_on_approval_mode() {
     let call = make_call("read_file", "c1");
 
     assert!(handler.allows_call(ApprovalMode::Safe, &call));
-    assert!(handler.allows_call(ApprovalMode::Edits, &call));
     assert!(handler.allows_call(ApprovalMode::Danger, &call));
 }
 
@@ -296,15 +295,13 @@ fn timeout_message_formats_with_and_without_retry() {
 // ── ApprovalMode cycling ────────────────────────────────────────────────────
 
 #[test]
-fn approval_mode_cycles_through_safe_edit_danger() {
-    assert!(matches!(ApprovalMode::Safe.cycle(), ApprovalMode::Edits));
-    assert!(matches!(ApprovalMode::Edits.cycle(), ApprovalMode::Danger));
+fn approval_mode_cycles() {
+    assert!(matches!(ApprovalMode::Safe.cycle(), ApprovalMode::Danger));
     assert!(matches!(ApprovalMode::Danger.cycle(), ApprovalMode::Safe));
 }
 
 #[test]
 fn approval_mode_labels() {
     assert_eq!(ApprovalMode::Safe.label(), "Safe");
-    assert_eq!(ApprovalMode::Edits.label(), "Edit");
     assert_eq!(ApprovalMode::Danger.label(), "Danger");
 }

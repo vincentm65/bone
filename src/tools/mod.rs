@@ -22,6 +22,8 @@ pub struct LoadedTools {
     pub registry: ToolRegistry,
     /// Map from tool name to UI-only display metadata.
     pub dynamic_display: HashMap<String, types::ToolDisplayConfig>,
+    /// Map from tool name to its declared safety level.
+    pub dynamic_safety: HashMap<String, CommandSafety>,
 }
 
 pub fn load_tools() -> LoadedTools {
@@ -30,13 +32,16 @@ pub fn load_tools() -> LoadedTools {
     LoadedTools {
         registry,
         dynamic_display: HashMap::new(),
+        dynamic_safety: HashMap::new(),
     }
 }
 
 /// Register Lua tools into an existing `LoadedTools`, respecting name conflict rules.
 pub fn register_lua_tools(loaded: &mut LoadedTools, lua_tools: Vec<LuaTool>) {
     for tool in lua_tools {
-        loaded.dynamic_display.insert(tool.definition().name.clone(), tool.display().clone());
+        let name = tool.definition().name.clone();
+        loaded.dynamic_display.insert(name.clone(), tool.display().clone());
+        loaded.dynamic_safety.insert(name, tool.safety());
         loaded.registry = loaded.registry.clone().register(tool);
     }
 }
@@ -64,8 +69,6 @@ pub enum ApprovalMode {
     /// Read-only calls are auto-approved.
     #[default]
     Safe,
-    /// Read-only and edit calls are auto-approved.
-    Edits,
     /// All calls are auto-approved.
     Danger,
 }
@@ -74,7 +77,6 @@ impl ApprovalMode {
     pub fn allows_safety(&self, safety: CommandSafety) -> bool {
         match self {
             Self::Safe => safety == CommandSafety::ReadOnly,
-            Self::Edits => matches!(safety, CommandSafety::ReadOnly | CommandSafety::Edit),
             Self::Danger => true,
         }
     }
@@ -86,8 +88,7 @@ impl ApprovalMode {
 
     pub fn cycle(self) -> Self {
         match self {
-            Self::Safe => Self::Edits,
-            Self::Edits => Self::Danger,
+            Self::Safe => Self::Danger,
             Self::Danger => Self::Safe,
         }
     }
@@ -95,7 +96,6 @@ impl ApprovalMode {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Safe => "Safe",
-            Self::Edits => "Edit",
             Self::Danger => "Danger",
         }
     }
@@ -103,8 +103,7 @@ impl ApprovalMode {
     /// Lowercase short labels used in sub-agent JSONL events.
     pub fn mode_str(&self) -> &'static str {
         match self {
-            Self::Safe => "read_only",
-            Self::Edits => "edit",
+            Self::Safe => "safe",
             Self::Danger => "danger",
         }
     }

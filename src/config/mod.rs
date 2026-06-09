@@ -109,7 +109,6 @@ impl UserConfig {
         // General page
         self.approval_mode = match custom.get_value("general", "approval_mode").as_str() {
             "danger" => ApprovalMode::Danger,
-            "edit" => ApprovalMode::Edits,
             _ => ApprovalMode::Safe,
         };
         self.enabled_tools = custom.enabled_tool_names();
@@ -135,7 +134,6 @@ impl UserConfig {
         self.subagent.model = custom.get_value("subagent", "model");
         self.subagent.approval = match custom.get_value("subagent", "approval").as_str() {
             "danger" => ApprovalMode::Danger,
-            "edit" => ApprovalMode::Edits,
             _ => ApprovalMode::Safe,
         };
     }

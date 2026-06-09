@@ -49,9 +49,8 @@ fn tool_message_error_flag_is_preserved() {
 #[tokio::test]
 async fn execute_all_returns_results_in_request_order_after_concurrent_execution() {
     use async_trait::async_trait;
-    use bone::tools::registry::ToolRegistry;
-    use bone::tools::types::Tool;
-    use bone::tools::{ToolCall, ToolDefinition, ToolHandler};
+    use bone::tools::registry::{ToolHandler, ToolRegistry};
+    use bone::tools::types::{Tool, ToolCall, ToolDefinition};
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use tokio::time::{Duration, sleep};
@@ -106,7 +105,9 @@ async fn execute_all_returns_results_in_request_order_after_concurrent_execution
 
 #[tokio::test]
 async fn disabled_tools_are_not_advertised_or_executed() {
-    use bone::tools::{ToolCall, ToolHandler, builtin_tools};
+    use bone::tools::registry::ToolHandler;
+    use bone::tools::types::ToolCall;
+    use bone::tools::builtin_tools;
     use std::collections::HashMap;
     use serde_json::json;
 

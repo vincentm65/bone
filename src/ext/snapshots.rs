@@ -93,7 +93,6 @@ pub struct LuaThemeSnapshot {
     pub input_border: Option<Color>,
     pub system_msg: Option<Color>,
     pub approval_safe: Option<Color>,
-    pub approval_edits: Option<Color>,
     pub approval_danger: Option<Color>,
     pub tool_call: Option<Color>,
     pub tool_error: Option<Color>,
@@ -112,7 +111,6 @@ impl Default for LuaThemeSnapshot {
             input_border: None,
             system_msg: None,
             approval_safe: None,
-            approval_edits: None,
             approval_danger: None,
             tool_call: None,
             tool_error: None,
@@ -146,7 +144,6 @@ impl LuaThemeSnapshot {
             input_border: parse_color("input_border")?,
             system_msg: parse_color("system_msg")?,
             approval_safe: parse_color("approval_safe")?,
-            approval_edits: parse_color("approval_edits")?,
             approval_danger: parse_color("approval_danger")?,
             tool_call: parse_color("tool_call")?,
             tool_error: parse_color("tool_error")?,
@@ -172,7 +169,6 @@ impl LuaThemeSnapshot {
         apply!(input_border);
         apply!(system_msg);
         apply!(approval_safe);
-        apply!(approval_edits);
         apply!(approval_danger);
         apply!(tool_call);
         apply!(tool_error);

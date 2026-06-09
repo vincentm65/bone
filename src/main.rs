@@ -38,7 +38,7 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     })
 }
 
-/// Deps that bone tools/skills need at runtime. None are required for the base app.
+/// Deps that bone tools need at runtime. None are required for the base app.
 struct Dep {
     bin: &'static str,
     /// Package name if different from binary name. None = same as bin.
@@ -55,12 +55,12 @@ const DEPS: &[Dep] = &[
     Dep {
         bin: "git",
         pkg: None,
-        label: "git (needed by /r skill and git workflow)",
+        label: "git (needed by /r command and git workflow)",
     },
     Dep {
         bin: "sqlite3",
         pkg: Some("sqlite3"),
-        label: "sqlite3 (needed by /memory skill)",
+        label: "sqlite3 (needed by /memory command)",
     },
 ];
 

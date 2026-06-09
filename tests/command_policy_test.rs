@@ -85,7 +85,7 @@ fn policy_danger_systemctl() {
     // Non-destructive systemctl is at least Edit
     assert_eq!(
         classify_command("systemctl status nginx"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 
@@ -102,7 +102,7 @@ fn policy_danger_service() {
     // Non-destructive service is at least Edit
     assert_eq!(
         classify_command("service nginx status"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 
@@ -123,11 +123,11 @@ fn policy_danger_curl_wget_output() {
     // Plain curl/wget is at least Edit (network access)
     assert_eq!(
         classify_command("curl http://example.com"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
     assert_eq!(
         classify_command("wget http://example.com"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 
@@ -175,26 +175,26 @@ fn policy_danger_git_destructive() {
 
 #[test]
 fn policy_edit_mv_cp_mkdir_touch_tee() {
-    assert_eq!(classify_command("mv a b"), CommandSafety::Edit);
-    assert_eq!(classify_command("cp a b"), CommandSafety::Edit);
-    assert_eq!(classify_command("mkdir foo"), CommandSafety::Edit);
-    assert_eq!(classify_command("touch foo"), CommandSafety::Edit);
-    assert_eq!(classify_command("tee file.txt"), CommandSafety::Edit);
+    assert_eq!(classify_command("mv a b"), CommandSafety::Danger);
+    assert_eq!(classify_command("cp a b"), CommandSafety::Danger);
+    assert_eq!(classify_command("mkdir foo"), CommandSafety::Danger);
+    assert_eq!(classify_command("touch foo"), CommandSafety::Danger);
+    assert_eq!(classify_command("tee file.txt"), CommandSafety::Danger);
 }
 
 #[test]
 fn policy_edit_package_managers() {
-    assert_eq!(classify_command("apt install curl"), CommandSafety::Edit);
-    assert_eq!(classify_command("pacman -Syu"), CommandSafety::Edit);
-    assert_eq!(classify_command("brew install rust"), CommandSafety::Edit);
+    assert_eq!(classify_command("apt install curl"), CommandSafety::Danger);
+    assert_eq!(classify_command("pacman -Syu"), CommandSafety::Danger);
+    assert_eq!(classify_command("brew install rust"), CommandSafety::Danger);
     assert_eq!(
         classify_command("pip install requests"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
-    assert_eq!(classify_command("npm install express"), CommandSafety::Edit);
+    assert_eq!(classify_command("npm install express"), CommandSafety::Danger);
     assert_eq!(
         classify_command("cargo install ripgrep"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 
@@ -202,12 +202,12 @@ fn policy_edit_package_managers() {
 fn policy_edit_redirections() {
     assert_eq!(
         classify_command("echo hello > file.txt"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
-    assert_eq!(classify_command("cat a >> b"), CommandSafety::Edit);
+    assert_eq!(classify_command("cat a >> b"), CommandSafety::Danger);
     assert_eq!(
         classify_command("some_cmd | tee log.txt"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 
@@ -215,15 +215,15 @@ fn policy_edit_redirections() {
 fn policy_edit_sed_inplace() {
     assert_eq!(
         classify_command("sed -i 's/foo/bar/' file.txt"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
     assert_eq!(
         classify_command("sed -i.bak 's/foo/bar/' file.txt"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
     assert_eq!(
         classify_command("sed --in-place 's/foo/bar/' file.txt"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 
@@ -361,7 +361,6 @@ fn policy_overrides_model_classification() {
         json!({ "command": "rm -rf /", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c1));
-    assert!(!ApprovalMode::Edits.allows_call(&c1));
     assert!(ApprovalMode::Danger.allows_call(&c1));
 
     // Model says read_only but sudo is always Danger
@@ -370,7 +369,6 @@ fn policy_overrides_model_classification() {
         json!({ "command": "sudo apt install foo", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c2));
-    assert!(!ApprovalMode::Edits.allows_call(&c2));
     assert!(ApprovalMode::Danger.allows_call(&c2));
 
     // Model says read_only but mv is at least Edit
@@ -379,7 +377,6 @@ fn policy_overrides_model_classification() {
         json!({ "command": "mv a b", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c3));
-    assert!(ApprovalMode::Edits.allows_call(&c3));
     assert!(ApprovalMode::Danger.allows_call(&c3));
 
     // Model says read_only but echo > file is at least Edit
@@ -388,7 +385,6 @@ fn policy_overrides_model_classification() {
         json!({ "command": "echo hello > file.txt", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c4));
-    assert!(ApprovalMode::Edits.allows_call(&c4));
     assert!(ApprovalMode::Danger.allows_call(&c4));
 
     // Model says danger but ls is ReadOnly — deterministic policy wins.
@@ -397,7 +393,6 @@ fn policy_overrides_model_classification() {
         json!({ "command": "ls -la", "classification": "danger" }),
     );
     assert!(ApprovalMode::Safe.allows_call(&c5));
-    assert!(ApprovalMode::Edits.allows_call(&c5));
     assert!(ApprovalMode::Danger.allows_call(&c5));
 
     // Model says danger but git status is ReadOnly — policy wins.
@@ -414,7 +409,6 @@ fn policy_overrides_model_classification() {
         json!({ "command": "git push", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&c7));
-    assert!(!ApprovalMode::Edits.allows_call(&c7));
     assert!(ApprovalMode::Danger.allows_call(&c7));
 }
 
@@ -445,7 +439,7 @@ fn shell_policy_is_source_of_truth() {
         json!({ "command": "rm foo", "classification": "read_only" }),
     );
     assert!(!ApprovalMode::Safe.allows_call(&rm));
-    assert!(!ApprovalMode::Edits.allows_call(&rm));
+    assert!(ApprovalMode::Danger.allows_call(&rm));
 
     let ls = call(
         "shell",
@@ -511,11 +505,11 @@ fn peel_preserves_danger_classification() {
 
 #[test]
 fn peel_preserves_edit_classification() {
-    assert_eq!(classify_command("bash mv a b"), CommandSafety::Edit);
-    assert_eq!(classify_command("bash mkdir foo"), CommandSafety::Edit);
+    assert_eq!(classify_command("bash mv a b"), CommandSafety::Danger);
+    assert_eq!(classify_command("bash mkdir foo"), CommandSafety::Danger);
     assert_eq!(
         classify_command("zsh -c \"echo hello > file.txt\""),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 
@@ -524,7 +518,7 @@ fn no_peel_for_direct_commands() {
     // Commands not starting with a shell name are unaffected
     assert_eq!(classify_command("rg -n foo"), CommandSafety::ReadOnly);
     assert_eq!(classify_command("rm foo"), CommandSafety::Danger);
-    assert_eq!(classify_command("mv a b"), CommandSafety::Edit);
+    assert_eq!(classify_command("mv a b"), CommandSafety::Danger);
 }
 
 // ------------------------------------------------------------------
@@ -547,11 +541,11 @@ fn compound_and_danger() {
 fn compound_and_edit() {
     assert_eq!(
         classify_command("echo hello && mv a b"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
     assert_eq!(
         classify_command("cd /tmp && mkdir foo"),
-        CommandSafety::Edit
+        CommandSafety::Danger
     );
 }
 

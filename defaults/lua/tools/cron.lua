@@ -35,8 +35,8 @@ def parse_time(value):
     return hour, minute
 
 def validate_approval(value):
-    if value not in ("read_only", "edit", "danger"):
-        fail("approval must be read_only, edit, or danger")
+    if value not in ("read_only", "danger"):
+        fail("approval must be read_only or danger")
     return value
 
 def fail(message, code=2):
@@ -87,18 +87,17 @@ def parse_cron_line(line):
     if not meta:
         name = encoded.strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]+", name): return None
-        meta = {"name": name, "approval": "", "cwd": "", "prompt": "", "log_path": "", "allow_skill_scripts": False}
+        meta = {"name": name, "approval": "", "cwd": "", "prompt": "", "log_path": ""}
     meta["minute"] = minute
     meta["hour"] = hour
     return meta
 
 def build_cron_line(job):
     args = [job["bone_bin"], "run", "--approval", job["approval"]]
-    if job["allow_skill_scripts"]: args.append("--allow-skill-scripts")
     args.extend(["--prompt", job["prompt"]])
     command = "cd " + shlex.quote(job["cwd"]) + " && " + " ".join(shlex.quote(a) for a in args)
     command += " >> " + shlex.quote(job["log_path"]) + " 2>&1"
-    meta = {k: job[k] for k in ("name", "approval", "cwd", "prompt", "log_path", "allow_skill_scripts")}
+    meta = {k: job[k] for k in ("name", "approval", "cwd", "prompt", "log_path")}
     return f'{job["minute"]} {job["hour"]} * * * {command} # BONE:{encode_metadata(meta)}'
 
 def list_jobs():
@@ -120,10 +119,9 @@ def add_job():
     cwd = str(Path(env("TOOL_CWD") or os.getcwd()).resolve())
     log_dir = bone_dir() / "runs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    allow = env("TOOL_ALLOW_SKILL_SCRIPTS", "false").lower() in ("true", "1", "yes", "on")
     job = {"name": name, "hour": hour, "minute": minute, "approval": approval,
            "cwd": cwd, "prompt": prompt, "log_path": str(log_dir / f"{name}.log"),
-           "allow_skill_scripts": allow, "bone_bin": find_bone()}
+           "bone_bin": find_bone()}
     existing = current_crontab().splitlines()
     kept = []
     for line in existing:
@@ -168,7 +166,7 @@ def help_text():
 
   Examples:
     cron(action=list)
-    cron(action=add, name=daily-clean, time=09:00, approval=edit, prompt=/clean src/main.rs)
+    cron(action=add, name=daily-clean, time=09:00, approval=danger, prompt=/clean src/main.rs)
     cron(action=remove, name=daily-clean)
     cron(action=logs, name=daily-clean, tail=100)""")
 
@@ -189,7 +187,6 @@ local function execute(params, ctx)
     local prompt = params.prompt or ""
     local cwd = params.cwd or ""
     local tail = params.tail or ""
-    local allow_skill_scripts = params.allow_skill_scripts or false
 
     -- Build export commands for TOOL_* variables
     local exports = {}
@@ -200,7 +197,6 @@ local function execute(params, ctx)
     if prompt ~= "" then table.insert(exports, 'export TOOL_PROMPT="' .. prompt:gsub('"', '\\"') .. '"') end
     if cwd ~= "" then table.insert(exports, 'export TOOL_CWD="' .. cwd:gsub('"', '\\"') .. '"') end
     if tail ~= "" then table.insert(exports, 'export TOOL_TAIL="' .. tail:gsub('"', '\\"') .. '"') end
-    if allow_skill_scripts then table.insert(exports, 'export TOOL_ALLOW_SKILL_SCRIPTS=true') end
 
     local cmd = table.concat(exports, "; ")
     cmd = cmd .. "; uv run --no-project --no-sync -- python3 <<'PYEOF'\n"
@@ -235,11 +231,11 @@ bone.register_tool({
             },
             approval = {
                 type = "string",
-                description = "Approval mode for add: read_only, edit, or danger. Defaults to read_only.",
+                description = "Approval mode for add: read_only or danger. Defaults to read_only.",
             },
             prompt = {
                 type = "string",
-                description = "Prompt or skill invocation for add.",
+                description = "Prompt or command invocation for add.",
             },
             cwd = {
                 type = "string",
@@ -249,14 +245,10 @@ bone.register_tool({
                 type = "number",
                 description = "Number of log lines for logs.",
             },
-            allow_skill_scripts = {
-                type = "boolean",
-                description = "For add: pass --allow-skill-scripts to scheduled bone run. Defaults to false.",
-            },
         },
         required = { "action" },
         additionalProperties = false,
     },
-    safety = "edit",
+    safety = "danger",
     execute = execute,
 })

@@ -8,7 +8,6 @@ pub struct Theme {
     pub input_border: Color,
     pub system_msg: Color,
     pub approval_safe: Color,
-    pub approval_edits: Color,
     pub approval_danger: Color,
     pub tool_call: Color,
     pub tool_error: Color,
@@ -27,7 +26,6 @@ impl Default for Theme {
             input_border: Color::DarkGray,
             system_msg: Color::White,
             approval_safe: Color::Rgb(120, 179, 115), // #78B373 — safe green (vmcode)
-            approval_edits: Color::Rgb(184, 160, 64), // #B8A040 — muted gold (vmcode)
             approval_danger: Color::Rgb(224, 80, 80), // #E05050 — danger red (vmcode)
             tool_call: Color::DarkGray,
             tool_error: Color::Red,

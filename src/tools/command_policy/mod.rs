@@ -8,26 +8,26 @@ use crate::tools::types::ToolCall;
 
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../../default-command-policy.yaml");
 
-/// Safety classification for shell commands.
+/// Safety classification for shell commands and tools.
+///
+/// In safe mode only `ReadOnly` calls auto-run. In danger mode everything
+/// auto-runs. There is no edit mode — anything that mutates state is `Danger`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandSafety {
     /// Read-only: does not modify files, services, network state, or git state.
     #[serde(alias = "safe")]
     ReadOnly,
-    /// Edit: creates, updates, or deletes project files, installs dependencies, etc.
-    Edit,
-    /// Danger: destructive, privileged, external side-effecting, or high-risk.
+    /// Danger: anything that creates, updates, deletes, installs, or has side effects.
     Danger,
 }
 
 impl CommandSafety {
-    /// Numeric rank (ReadOnly=0, Edit=1, Danger=2).
+    /// Numeric rank (ReadOnly=0, Danger=1).
     pub fn rank(self) -> u8 {
         match self {
             Self::ReadOnly => 0,
-            Self::Edit => 1,
-            Self::Danger => 2,
+            Self::Danger => 1,
         }
     }
 
@@ -45,7 +45,7 @@ impl CommandSafety {
     pub fn for_call(call: &ToolCall) -> Self {
         match call.name.as_str() {
             "read_file" => Self::ReadOnly,
-            "write_file" | "edit_file" => Self::Edit,
+            "write_file" | "edit_file" => Self::Danger,
             "shell" => call
                 .arguments
                 .get("command")
@@ -173,7 +173,7 @@ fn classify_segment(command: &str) -> CommandSafety {
         .iter()
         .any(|token| matches!(token.as_str(), "systemctl" | "service"))
     {
-        return CommandSafety::Edit;
+        return CommandSafety::Danger;
     }
 
     if names
@@ -198,28 +198,28 @@ fn classify_segment(command: &str) -> CommandSafety {
     let policy = command_policy();
     if names
         .iter()
-        .any(|token| policy.edit.contains(token) || policy.package_managers.contains(token))
+        .any(|token| policy.danger.contains(token) || policy.package_managers.contains(token))
     {
-        return CommandSafety::Edit;
+        return CommandSafety::Danger;
     }
 
     for (i, token) in names.iter().enumerate() {
         if matches!(token.as_str(), "pip" | "pip3" | "npm")
             && names.get(i + 1).is_some_and(|sub| sub == "install")
         {
-            return CommandSafety::Edit;
+            return CommandSafety::Danger;
         }
         if token == "cargo" && names.get(i + 1).is_some_and(|sub| sub == "install") {
-            return CommandSafety::Edit;
+            return CommandSafety::Danger;
         }
     }
 
     if has_non_dev_null_redirection(command) {
-        return CommandSafety::Edit;
+        return CommandSafety::Danger;
     }
 
     if command.contains("| tee") {
-        return CommandSafety::Edit;
+        return CommandSafety::Danger;
     }
 
     for (i, token) in tokens.iter().enumerate() {
@@ -229,12 +229,12 @@ fn classify_segment(command: &str) -> CommandSafety {
                 .skip(i + 1)
                 .any(|t| t.starts_with("-i") || *t == "--in-place")
         {
-            return CommandSafety::Edit;
+            return CommandSafety::Danger;
         }
     }
 
     if names.iter().any(|token| token == "awk") && command.contains('>') {
-        return CommandSafety::Edit;
+        return CommandSafety::Danger;
     }
 
     let first = names[0].as_str();
@@ -267,7 +267,7 @@ fn classify_segment(command: &str) -> CommandSafety {
         return CommandSafety::ReadOnly;
     }
 
-    CommandSafety::Edit
+    CommandSafety::Danger
 }
 
 
@@ -307,7 +307,7 @@ struct RawCommandPolicy {
 struct CommandPolicy {
     shell_wrappers: Vec<String>,
     read_only: Vec<String>,
-    edit: Vec<String>,
+    danger: Vec<String>,
     package_managers: Vec<String>,
 }
 
@@ -327,10 +327,13 @@ fn load_command_policy() -> CommandPolicy {
         default_raw_command_policy()
     };
 
+    // Merge edit + package_managers into danger (edit mode removed).
+    let danger = raw.edit.into_iter().chain(raw.package_managers.clone()).collect();
+
     CommandPolicy {
         shell_wrappers: normalize_shell_wrappers(raw.shell_wrappers),
         read_only: normalize_list(raw.read_only),
-        edit: normalize_list(raw.edit),
+        danger: normalize_list(danger),
         package_managers: normalize_list(raw.package_managers),
     }
 }

@@ -26,18 +26,6 @@ fn safe_mode_only_allows_read_only() {
 }
 
 #[test]
-fn edit_mode_allows_read_only_and_edit() {
-    assert!(ApprovalMode::Edits.allows_call(&call(
-        "shell",
-        json!({ "command": "cargo fmt", "classification": "edit" })
-    )));
-    assert!(!ApprovalMode::Edits.allows_call(&call(
-        "shell",
-        json!({ "command": "rm -rf target", "classification": "danger" })
-    )));
-}
-
-#[test]
 fn danger_mode_allows_all() {
     assert!(ApprovalMode::Danger.allows_call(&call(
         "shell",

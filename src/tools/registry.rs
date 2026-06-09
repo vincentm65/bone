@@ -93,6 +93,7 @@ pub struct ToolHandler {
     enabled: HashSet<String>,
     dynamic_display: HashMap<String, ToolDisplayConfig>,
     pub state_map: ToolStateMap,
+    dynamic_safety: HashMap<String, CommandSafety>,
 }
 
 impl ToolHandler {
@@ -125,6 +126,7 @@ impl ToolHandler {
             enabled,
             dynamic_display: HashMap::new(),
             state_map: ToolStateMap::default(),
+            dynamic_safety: HashMap::new(),
         }
     }
 
@@ -132,11 +134,13 @@ impl ToolHandler {
         registry: ToolRegistry,
         enabled: &[String],
         dynamic_display: HashMap<String, ToolDisplayConfig>,
+        dynamic_safety: HashMap<String, CommandSafety>,
     ) -> Self {
         Self {
             registry,
             enabled: enabled.iter().cloned().collect(),
             dynamic_display,
+            dynamic_safety,
             state_map: ToolStateMap::default(),
         }
     }
@@ -168,7 +172,10 @@ impl ToolHandler {
     }
 
     pub fn safety_for_call(&self, call: &ToolCall) -> CommandSafety {
-        CommandSafety::for_call(call)
+        self.dynamic_safety
+            .get(&call.name)
+            .copied()
+            .unwrap_or_else(|| CommandSafety::for_call(call))
     }
 
     pub fn allows_call(&self, mode: ApprovalMode, call: &ToolCall) -> bool {

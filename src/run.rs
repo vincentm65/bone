@@ -8,6 +8,7 @@ pub struct RunRequest {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
+    pub events: bool,
 }
 
 pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
@@ -16,6 +17,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
     let mut system_prompt: Option<String> = None;
+    let mut events = false;
     let mut positional: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -37,7 +39,9 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
                 i += 1;
                 model = Some(args.get(i).ok_or("--model requires a value")?.clone());
             }
-
+            "--events" => {
+                events = true;
+            }
             "--system-prompt" => {
                 i += 1;
                 system_prompt = Some(
@@ -78,7 +82,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
         provider,
         model,
         system_prompt,
-
+        events,
     })
 }
 
@@ -93,12 +97,11 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             provider: request.provider,
             model: request.model,
             system_prompt: request.system_prompt,
-            events: false,
+            events: request.events,
         })
         .await;
     }
 
-    // No YAML skills — pass prompt directly to agent.
     let prompt = request.prompt.clone();
 
     agent::run_agent(AgentRequest {
@@ -107,7 +110,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         provider: request.provider,
         model: request.model,
         system_prompt: request.system_prompt,
-        events: false,
+        events: request.events,
     })
     .await
 }
@@ -168,6 +171,8 @@ fn expand_lua_command(prompt: &str, config_dir: &std::path::Path) -> Option<Stri
         cwd,
         config_dir: config_dir_str,
         shared_state,
+        pane_sender: None,
+        call_id: None,
     };
     let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
@@ -179,7 +184,6 @@ fn expand_lua_command(prompt: &str, config_dir: &std::path::Path) -> Option<Stri
 pub(crate) fn parse_approval(value: Option<&str>) -> Result<ApprovalMode, String> {
     match value {
         Some("read_only") | Some("safe") => Ok(ApprovalMode::Safe),
-        Some("edit") | Some("edits") => Ok(ApprovalMode::Edits),
         Some("danger") => Ok(ApprovalMode::Danger),
         None => Ok(ApprovalMode::Safe),
         Some(other) => Err(format!("unknown approval mode: {other}")),
@@ -187,5 +191,5 @@ pub(crate) fn parse_approval(value: Option<&str>) -> Result<ApprovalMode, String
 }
 
 fn run_usage() -> String {
-    "Usage: bone run [--approval read_only|edit|danger] [--provider <id>] [--model <name>] [--prompt <text>|<text>]".to_string()
+    "Usage: bone run [--approval safe|danger] [--events] [--provider <id>] [--model <name>] [--prompt <text>|<text>]".to_string()
 }

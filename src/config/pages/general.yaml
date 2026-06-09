@@ -3,7 +3,7 @@ fields:
   - key: approval_mode
     label: approval_mode
     type: enum
-    options: [safe, edit, danger]
+    options: [safe, danger]
     default: safe
   - key: auto_compact_tokens
     label: auto_compact_tokens

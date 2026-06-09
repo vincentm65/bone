@@ -46,8 +46,8 @@ pub(crate) fn setup_register_tool(lua: &Lua, bone: &Table) -> Result<(), String>
                     return Ok(());
                 }
             };
-            if !matches!(safety_str.as_str(), "read_only" | "edit" | "danger") {
-                eprintln!("bone-lua warn: register_tool '{name}': safety must be 'read_only', 'edit', or 'danger'; skipping");
+            if !matches!(safety_str.as_str(), "read_only" | "danger") {
+                eprintln!("bone-lua warn: register_tool '{name}': safety must be 'read_only' or 'danger'; skipping");
                 return Ok(());
             }
 

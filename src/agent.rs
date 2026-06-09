@@ -231,6 +231,13 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         .or_else(|| non_empty(providers_config.last_provider.as_str()).map(str::to_string))
         .ok_or_else(|| "no provider configured".to_string())?;
 
+    // Persist last_provider before any model override (don't want to save the override).
+    if request.provider.is_some() {
+        providers_config.last_provider = provider_id.clone();
+        save_providers(&providers_config);
+    }
+
+    // Apply model override session-only (never persisted).
     let selected_model = request.model.as_deref().or(config_model);
     if let Some(model) = selected_model {
         let entry = providers_config
@@ -238,10 +245,6 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             .get_mut(&provider_id)
             .ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
         entry.model = model.to_string();
-    }
-    if request.provider.is_some() || request.model.is_some() {
-        providers_config.last_provider = provider_id.clone();
-        save_providers(&providers_config);
     }
     crate::config::warn_if_no_api_key_for(&provider_id, &providers_config);
 
@@ -277,6 +280,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         loaded.registry,
         &enabled,
         loaded.dynamic_display,
+        loaded.dynamic_safety,
     );
 
 
@@ -567,7 +571,8 @@ fn open_headless_session_db(provider: &str, model: &str) -> Option<(SessionDb, i
 }
 
 /// Execute tool calls respecting the approval mode.
-/// Denied calls get an error result instead of execution.
+/// Denied/blocked calls get an error result immediately;
+/// allowed calls are dispatched concurrently via `execute_all`.
 async fn execute_tool_calls(
     tools: &ToolHandler,
     mode: ApprovalMode,
@@ -575,12 +580,14 @@ async fn execute_tool_calls(
     extensions: &crate::ext::ExtensionManager,
 ) -> Vec<crate::tools::ToolResult> {
     let mode_label = mode.mode_str();
-    let mut out = Vec::with_capacity(calls.len());
-    for call in calls {
+    // Track original index to preserve call order in output.
+    let mut out: Vec<(usize, crate::tools::ToolResult)> = Vec::with_capacity(calls.len());
+    let mut approved: Vec<(usize, crate::tools::ToolCall)> = Vec::new();
+
+    for (i, call) in calls.into_iter().enumerate() {
         // Dispatch tool_call event, check for blocking.
         let safety_str = match crate::tools::command_policy::CommandSafety::for_call(&call) {
             crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
-            crate::tools::command_policy::CommandSafety::Edit => "edit",
             crate::tools::command_policy::CommandSafety::Danger => "danger",
         };
         match extensions.dispatch_tool_call(
@@ -590,33 +597,24 @@ async fn execute_tool_calls(
             safety_str,
         ) {
             crate::ext::event::EventDispatchResult::Blocked { reason } => {
-                out.push(crate::tools::ToolResult {
+                out.push((i, crate::tools::ToolResult {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
                     content: reason,
                     is_error: true,
                     pane_page: None,
                     state: None,
-                });
+                }));
                 continue;
             }
             crate::ext::event::EventDispatchResult::Continue => {}
         }
 
         if tools.allows_call(mode, &call) {
-            let mut executed = tools.execute_all(vec![call.clone()]).await;
-            let result = executed
-                .pop()
-                .expect("execute_all returns one result per call");
-            extensions.dispatch_tool_result(
-                &result.name,
-                &result.call_id,
-                result.is_error,
-            );
-            out.push(result);
+            approved.push((i, call));
         } else {
             let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
-            let result = crate::tools::ToolResult {
+            out.push((i, crate::tools::ToolResult {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: format!(
@@ -625,16 +623,28 @@ async fn execute_tool_calls(
                 is_error: true,
                 pane_page: None,
                 state: None,
-            };
+            }));
+        }
+    }
+
+    // Execute all approved calls concurrently.
+    if !approved.is_empty() {
+        let approved_calls: Vec<crate::tools::ToolCall> =
+            approved.iter().map(|(_, c)| c.clone()).collect();
+        let results = tools.execute_all(approved_calls).await;
+        for ((orig_idx, _call), result) in approved.into_iter().zip(results) {
             extensions.dispatch_tool_result(
                 &result.name,
                 &result.call_id,
                 result.is_error,
             );
-            out.push(result);
+            out.push((orig_idx, result));
         }
     }
-    out
+
+    // Restore original call order.
+    out.sort_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, r)| r).collect()
 }
 
 fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
@@ -722,7 +732,6 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
 
     let approval_mode = match approval.as_deref() {
         Some("read_only") | Some("safe") => ApprovalMode::Safe,
-        Some("edit") | Some("edits") => ApprovalMode::Edits,
         Some("danger") => ApprovalMode::Danger,
         None => ApprovalMode::Safe,
         Some(other) => return Err(format!("unknown approval mode: {other}")),

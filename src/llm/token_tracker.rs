@@ -27,6 +27,10 @@ pub struct TokenStats {
 
 impl TokenStats {
     /// Create a new empty tracker.
+    pub fn total(&self) -> u64 {
+        self.sent + self.received
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

@@ -36,7 +36,7 @@ bone.version        -- string: app version
 bone.cwd            -- string: startup CWD
 bone.config_dir     -- string: config directory path
 
--- Logging
+-- Logging (outputs to stderr)
 bone.log.info("message")
 bone.log.warn("message")
 bone.log.error("message")
@@ -50,9 +50,14 @@ bone.register_command("name", function(args, ctx) ... end)  -- short form
 
 -- Event hooks
 bone.on("event_name", function(event, ctx) ... end)
+```
 
--- Tool management
-bone.tools.disable("tool_name")   -- disable a default tool
+### `cjson` Global
+
+A `cjson` global is available for JSON encoding/decoding:
+```lua
+local json_str = cjson.encode({ key = "value" })
+local table = cjson.decode(json_str)
 ```
 
 ### `ctx` API (passed to tool/command handlers)
@@ -87,7 +92,7 @@ These tools are bundled with bone and seeded to `lua/tools/` on first launch.
 Run a non-interactive shell command with bash -lc. Returns exit code, stdout, and stderr.
 ```lua
 -- Native Rust tool, not Lua. Called by the LLM directly.
--- Parameters: command (string, required), classification (string), timeout_ms (integer, optional)
+-- Parameters: command (string, required), classification (string: "read_only" or "danger"), timeout_ms (integer, optional)
 ```
 
 ### read_file (native Rust)
@@ -109,7 +114,7 @@ Edit an existing UTF-8 file. Use search+replace, edits[], or mode="rewrite".
 ```
 
 ### web_search (Lua)
-Search the web via DuckDuckGo. Returns titles, URLs and summaries.
+Search the web via DuckDuckGo. Returns titles, URLs and summaries. Requires `uv` and the `ddgs` Python package.
 ```lua
 bone.register_tool({
     name = "web_search",
@@ -154,7 +159,7 @@ Manage a named visible task list with TUI pane rendering.
 bone.register_tool({
     name = "task_list",
     description = "Manage a named visible task list. State is held by the host; no state arg needed. Actions: create (pass texts and optional name, max 15 tasks), complete (pass index/indices), kill.",
-    safety = "safe",
+    safety = "read_only",
     parameters = {
         type = "object",
         properties = {
@@ -172,29 +177,57 @@ bone.register_tool({
 ```
 
 ### cron (Lua)
-Manage scheduled bone jobs via crontab.
+Manage scheduled bone jobs via crontab. Requires `crontab`, `uv`, and Python.
 ```lua
 bone.register_tool({
     name = "cron",
     description = "Manage Bone scheduled jobs for the user...",
-    safety = "edit",
+    safety = "danger",
     parameters = {
         type = "object",
         properties = {
             action = { type = "string", description = "add, list, remove, logs, help" },
             name = { type = "string", description = "Job name (letters, numbers, '-' or '_')" },
             time = { type = "string", description = "HH:MM 24-hour local time" },
-            approval = { type = "string", description = "read_only, edit, or danger. Defaults to read_only." },
-            prompt = { type = "string", description = "Prompt or skill invocation for add." },
+            approval = { type = "string", description = "safe or danger. Defaults to safe." },
+            prompt = { type = "string", description = "Prompt or command invocation for add." },
             cwd = { type = "string", description = "Working directory for add." },
             tail = { type = "number", description = "Number of log lines for logs." },
-            allow_skill_scripts = { type = "boolean", description = "Pass --allow-skill-scripts to scheduled bone run." },
         },
         required = { "action" },
         additionalProperties = false,
     },
 })
 ```
+
+### subagent (Lua)
+Spawn an independent AI agent via `bone run`. The subagent has its own conversation loop, tool access, and Lua extensions. Use for parallel tasks, code review, research, planning, or any isolated task.
+```lua
+bone.register_tool({
+    name = "subagent",
+    description = "Spawn an independent AI sub-agent...",
+    safety = "danger",
+    parameters = {
+        type = "object",
+        properties = {
+            task = { type = "string", description = "Task description for the subagent." },
+            strategy = { type = "string", description = 'Strategy: "code", "review", "search", "plan", or "custom". Default: "code".' },
+            approval = { type = "string", description = 'Approval mode: "read_only" or "danger". Default: "read_only".' },
+            model = { type = "string", description = "Override model (optional)." },
+        },
+        required = { "task" },
+        additionalProperties = false,
+    },
+})
+```
+Strategies:
+- `"code"` — focused coding task, returns result summary
+- `"review"` — code review, returns categorized findings (CRITICAL > WARNING > INFO > SUGGESTION)
+- `"search"` — research with web search, returns structured summary
+- `"plan"` — breaks down task into ordered actionable steps
+- `"custom"` — raw prompt, no system prompt added
+
+Max recursion depth: 3 levels (enforced by bone).
 
 ## Pre-Seeded Commands
 
@@ -212,7 +245,7 @@ Incremental memory builder. Processes all conversations since last run and updat
 
 Run manually with `/memory`, or schedule daily:
 ```
-cron(action=add, name=memory, time=03:00, approval=edit, prompt=/memory)
+cron(action=add, name=memory, time=03:00, approval=danger, prompt=/memory)
 ```
 
 Disable by removing `lua/commands/memory.lua` from the config directory.
@@ -251,7 +284,7 @@ bone.register_tool({
 - **name** — unique string identifier. Native tools (`shell`, `read_file`, `write_file`, `edit_file`) cannot be overridden.
 - **description** — shown to the LLM when deciding which tool to call.
 - **parameters** — JSON Schema object describing the tool's arguments.
-- **safety** — `"read_only"` | `"edit"` | `"danger"` | `"safe"`. Overrides approval level.
+- **safety** — `"read_only"` or `"danger"`. In safe mode only `read_only` tools auto-run; in danger mode everything auto-runs.
 - **display** — optional table controlling TUI visibility:
   ```lua
   display = {
@@ -330,7 +363,7 @@ end)
 | string | Injected as user prompt/output |
 | error | Show error in UI |
 
-Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/model`, `/provider`, `/config`, `/tools`, `/skills`, `/edit`, `/e`) cannot be overridden.
+Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/compact`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/context`, `/recall`, `/stats`, `/usage`) cannot be overridden.
 
 ## Event Hooks
 
@@ -373,7 +406,7 @@ Set these in `init.lua`. Rust snapshots them once at boot; no per-frame Lua read
 
 ```lua
 bone.config = {
-    approval_mode = "edit",               -- "safe" | "edit" | "danger"
+    approval_mode = "safe",               -- "safe" | "danger"
     auto_compact_tokens = 8000,           -- token threshold for auto-compact
     auto_compact_keep_messages = 12,      -- messages to keep after compact
     subagent = {
@@ -401,7 +434,6 @@ bone.theme = {
     input_border = "#808080",
     system_msg = "#ffffff",
     approval_safe = "#78b373",
-    approval_edits = "#b8a040",
     approval_danger = "#e05050",
     tool_call = "#808080",
     tool_error = "#ff0000",
@@ -455,12 +487,18 @@ Plugins do not auto-run. Repeated `load` is a no-op.
   command-policy.yaml           -- shell command safety (Rust-managed)
   memory.md                    -- user preferences (auto-maintained)
   memory.last_run              -- /memory checkpoint timestamp
+  AGENTS.md                    -- this reference file
+  config/
+    general.yaml               -- general settings (approval mode, status bar)
+    subagent.yaml              -- subagent settings (provider, model, approval)
+    tools.yaml                 -- tool enable/disable toggles
   lua/
     tools/
       web_search.lua           -- seeded default
       ask_user.lua             -- seeded default
       task_list.lua            -- seeded default
       cron.lua                 -- seeded default
+      subagent.lua             -- seeded default
       my_custom_tool.lua       -- user-created
     commands/
       memory.lua               -- seeded default

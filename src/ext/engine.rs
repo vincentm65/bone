@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use mlua::{Lua, Result as LuaResult, Table};
+use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table};
 
 /// Build a ready-to-use Lua state with the `bone` table populated.
 pub(crate) fn create_engine(
@@ -54,6 +54,9 @@ pub(crate) fn create_engine(
     package.set("path", new_path).map_err(|e| e.to_string())?;
 
     globals.set("bone", bone).map_err(|e| e.to_string())?;
+
+    // Inject cjson global (encode/decode via serde_json).
+    inject_cjson(&lua, &globals)?;
 
     // bone.register_tool + bone._tools array
     let bone = &globals.get::<Table>("bone").map_err(|e| e.to_string())?;
@@ -144,5 +147,40 @@ fn sandbox_table(lua: &Lua, table: &Table, keys: &[&str]) -> Result<(), String> 
     for &key in keys {
         table.set(key, stub.clone()).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Inject a `cjson` global table with `encode` and `decode` functions
+/// backed by serde_json. This matches the lua-cjson API used by seeded tools.
+fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
+    let cjson = lua.create_table().map_err(|e| e.to_string())?;
+
+    let encode_fn = lua
+        .create_function(|lua, value: mlua::Value| {
+            let json: serde_json::Value = lua.from_value(value)?;
+            let s = serde_json::to_string(&json)
+                .map_err(|e| mlua::Error::external(format!("cjson.encode: {e}")))?;
+            Ok(s)
+        })
+        .map_err(|e| e.to_string())?;
+    cjson
+        .set("encode", encode_fn)
+        .map_err(|e| e.to_string())?;
+
+    let decode_fn = lua
+        .create_function(|lua, s: String| {
+            let json: serde_json::Value = serde_json::from_str(&s)
+                .map_err(|e| mlua::Error::external(format!("cjson.decode: {e}")))?;
+            let value = lua.to_value(&json)?;
+            Ok(value)
+        })
+        .map_err(|e| e.to_string())?;
+    cjson
+        .set("decode", decode_fn)
+        .map_err(|e| e.to_string())?;
+
+    globals
+        .set("cjson", cjson)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

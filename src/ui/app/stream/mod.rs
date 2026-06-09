@@ -166,6 +166,7 @@ impl App {
         self.turn_start = Some(Instant::now());
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_pause_start = None;
+        self.shown_tool_rows.clear();
         self.redraw(term)?;
 
         let final_assistant_idx;
@@ -288,7 +289,8 @@ impl App {
                 let display = self.tools.display_for_call(call);
                 let visible = display.and_then(|d| d.show).unwrap_or(true);
                 let has_result = display.and_then(|d| d.show_result).unwrap_or(false);
-                if (visible || has_result) && !call_row_shown_during_prepare(call) {
+                let already_shown = self.shown_tool_rows.contains(&call.id);
+                if (visible || has_result) && !call_row_shown_during_prepare(call) && !already_shown {
                     self.messages.push(build_tool_row(call, result, display));
                 }
             }
@@ -326,7 +328,6 @@ impl App {
         let safety = classify_command(cmd);
         let classification = match safety {
             crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
-            crate::tools::command_policy::CommandSafety::Edit => "edit",
             crate::tools::command_policy::CommandSafety::Danger => "danger",
         };
 
@@ -540,7 +541,6 @@ impl App {
             .filter(|call| {
                 let safety = match self.tools.safety_for_call(call) {
                     CommandSafety::ReadOnly => "read_only",
-                    CommandSafety::Edit => "edit",
                     CommandSafety::Danger => "danger",
                 };
                 match self.extensions.dispatch_tool_call(
@@ -634,11 +634,28 @@ impl App {
 
     fn show_immediate_tool_rows(
         &mut self,
-        _approved: &[ToolCall],
+        approved: &[ToolCall],
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        // Subagent calls stream their output in real-time via child process,
-        // so they don't need placeholder rows in chat history.
+        for call in approved {
+            let display = self.tools.display_for_call(call);
+            let visible = display.and_then(|d| d.show).unwrap_or(true);
+            if visible {
+                self.messages.push(build_tool_row(
+                    call,
+                    &ToolResult {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        content: String::new(),
+                        is_error: false,
+                        pane_page: None,
+                        state: None,
+                    },
+                    display,
+                ));
+                self.shown_tool_rows.insert(call.id.clone());
+            }
+        }
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)
@@ -817,7 +834,11 @@ impl App {
         mut call: ToolCall,
         term: &mut BoneTerminal,
     ) -> io::Result<PendingTool> {
-        let _pending = self.prompt_and_wait(&call, term)?;
+        let auto_approved = self.tools.allows_call(self.approval_mode, &call);
+
+        if !auto_approved {
+            let _pending = self.prompt_and_wait(&call, term)?;
+        }
 
         if call.name == "edit_file" {
             match preview_edit_file(call.arguments.clone()).await {
@@ -840,6 +861,7 @@ impl App {
                             },
                             self.tools.display_for_call(&call),
                         ));
+                        self.shown_tool_rows.insert(call.id.clone());
                     }
                     call.arguments["expected_hash"] =
                         serde_json::Value::String(preview.before_hash);
@@ -966,7 +988,6 @@ impl App {
                         user_config.approval_mode = *approval_mode;
                         let mode = match user_config.approval_mode {
                             crate::tools::ApprovalMode::Danger => "danger",
-                            crate::tools::ApprovalMode::Edits => "edit",
                             crate::tools::ApprovalMode::Safe => "safe",
                         };
                         custom_configs.set_value("general", "approval_mode", mode.to_string());

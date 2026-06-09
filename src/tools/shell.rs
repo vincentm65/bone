@@ -145,8 +145,8 @@ impl Tool for ShellTool {
                     },
                     "classification": {
                         "type": "string",
-                        "enum": ["read_only", "edit", "danger"],
-                        "description": "read_only, edit, or danger. Choose danger when unsure."
+                        "enum": ["read_only", "danger"],
+                        "description": "read_only or danger. Choose danger when unsure."
                     },
                     "timeout_ms": {
                         "type": "integer",
