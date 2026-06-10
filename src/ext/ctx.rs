@@ -51,6 +51,7 @@ pub(crate) struct UsageContext {
 /// Context for creating the ctx table. These values come from the Rust side.
 pub(crate) struct CtxConfig {
     pub config_dir: String,
+    pub cwd: String,
     pub shared_state: SharedState,
     pub pane_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
     pub call_id: Option<String>,
@@ -71,6 +72,10 @@ impl CtxConfig {
     pub fn new(config_dir: String, shared_state: SharedState) -> Self {
         Self {
             config_dir,
+            cwd: std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
             shared_state,
             pane_sender: None,
             call_id: None,
@@ -92,6 +97,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     let ctx = lua.create_table()?;
 
     ctx.set("config_dir", cfg.config_dir.as_str())?;
+    ctx.set("cwd", cfg.cwd.as_str())?;
 
     // ctx.log — print-to-stderr helpers
     let log_table = lua.create_table()?;
@@ -512,6 +518,11 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
 
         let call_fn = lua.create_function(
             move |lua, (name, args, opts): (String, mlua::Table, Option<mlua::Table>)| {
+                // depth is the tool_call_depth of the *current* tool (captured
+                // when this ctx table was created). If it is already at the
+                // limit, reject the call. Otherwise pass depth + 1 to the
+                // nested execution so that the next level gets its own
+                // incremented depth in its ctx table.
                 if depth >= MAX_TOOL_CALL_DEPTH {
                     let result = lua.create_table()?;
                     result.set("ok", false)?;

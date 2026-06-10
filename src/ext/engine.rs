@@ -118,7 +118,25 @@ fn sandbox_globals(lua: &Lua, globals: &Table) -> Result<(), String> {
     }
 
     if let Ok(Some(io)) = globals.get::<Option<Table>>("io") {
-        sandbox_table(lua, &io, &["open", "popen", "tmpfile"])?;
+        sandbox_table(
+            lua,
+            &io,
+            &["open", "popen", "tmpfile", "input", "lines", "output", "read", "write", "flush", "close"],
+        )?;
+    }
+
+    // Block package.loadlib to prevent loading native C modules.
+    if let Ok(Some(package)) = globals.get::<Option<Table>>("package") {
+        let loadlib_stub = lua
+            .create_function(|_, _: mlua::Value| -> LuaResult<()> {
+                Err(mlua::Error::external(
+                    "not available in bone Lua sandbox; use ctx APIs instead",
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        package
+            .set("loadlib", loadlib_stub)
+            .map_err(|e| e.to_string())?;
     }
 
     let stub = lua

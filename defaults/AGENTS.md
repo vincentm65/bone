@@ -60,29 +60,140 @@ local json_str = cjson.encode({ key = "value" })
 local table = cjson.decode(json_str)
 ```
 
-### `ctx` API (passed to tool/command handlers)
+### `ctx` API
 
+A `ctx` table is passed as the second argument to tool `execute(params, ctx)` and command `handler(args, ctx)` functions. Event handlers receive a smaller `ctx` (see [Context Availability](#context-availability) below).
+
+To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search = "...", replace = "..." })` which goes through the full approval pipeline. There is no convenience `ctx.edit_file` method.
+
+#### Reference Table
+
+| API | Returns | Description |
+|---|---|---|
+| `ctx.config_dir` | `string` | Bone config directory path |
+| `ctx.cwd` | `string` | Startup working directory |
+| `ctx.call_id` | `string\|nil` | Current tool call's unique ID (tools only) |
+| **`ctx.log.*`** | | Log to stderr |
+| `ctx.log.debug(val)` | | Log at debug level |
+| `ctx.log.info(val)` | | Log at info level |
+| `ctx.log.warn(val)` | | Log at warn level |
+| `ctx.log.error(val)` | | Log at error level |
+| **`ctx.fs.*`** | | Filesystem helpers (read-only queries) |
+| `ctx.fs.exists(path)` | `bool` | Path exists check |
+| `ctx.fs.is_file(path)` | `bool` | Path is a regular file |
+| `ctx.fs.is_dir(path)` | `bool` | Path is a directory |
+| `ctx.fs.read_dir(path)` | `array` | List `{name, path, kind}` entries, sorted by name |
+| `ctx.fs.metadata(path)` | `table` | `{path, kind, len, readonly}` |
+| **Shell** | | Run commands through native approval + policy |
+| `ctx.shell(cmd, opts?)` | `table` | `{stdout, stderr, exit_code}` |
+| `ctx.shell_streaming(cmd, cb, opts?)` | `table` | Calls `cb(line)` per stdout line; returns `{stdout, stderr, exit_code}` |
+| **Files** | | Read/write |
+| `ctx.read_file(path)` | `string` | Read entire file contents (raises Lua error on failure) |
+| `ctx.write_file(path, content)` | `true` | Create new file; fails if file exists (raises Lua error) |
+
+| **`ctx.ui.*`** | | UI output |
+| `ctx.ui.notify(msg, level?)` | | Show notification (`"info"`, `"warn"`, `"error"`) |
+| `ctx.ui.status(msg)` | | Write status line to stderr |
+| `ctx.ui.pane(table)` | `true\|(false, string)` | Emit a live pane update (tools only) |
+| **Live events** | | During `execute_output_live` only |
+| `ctx.emit_pane(table)` | `true` | Same as `ctx.ui.pane` |
+| `ctx.emit_state(src, key, json)` | `true` | Emit StateUpdate live event |
+| `ctx.emit_state_remove(src, key)` | `true` | Emit StateRemove live event |
+| **`ctx.usage.*`** | | Token usage |
+| `ctx.usage.snapshot()` | `table\|nil` | See [Usage Snapshot](#usage-snapshot) below |
+| **`ctx.state.*`** | | Session-scoped key-value store |
+| `ctx.state.get(key)` | `string\|nil` | Get value |
+| `ctx.state.set(key, value)` | `true` | Set value |
+| `ctx.state.clear(key)` | `true` | Remove key |
+| **`ctx.tools.*`** | | Call registered tools |
+| `ctx.tools.definitions()` | `array` | `{name, description, input_schema}` for all tools |
+| `ctx.tools.call(name, args, opts?)` | `table` | `{ok, name, call_id, content, is_error}` |
+| **`ctx.agent.*`** | | Spawn subagents |
+| `ctx.agent.run(prompt, opts?)` | `table` | `{ok, content, error}` |
+| `ctx.agent.run_stream(prompt, opts?)` | `table` | Same with event callbacks |
+| **`ctx.config.*`** | | Read-only config access |
+| `ctx.config.dir` | `string` | Same as `ctx.config_dir` |
+| `ctx.config.get(section, key)` | `value\|nil` | Read a value from `config/<section>.yaml` |
+| `ctx.config.get_table(section)` | `table\|nil` | Read entire config section as table |
+| **`ctx.session.*`** | | Conversation history |
+| `ctx.session.current()` | `table\|nil` | `{id, provider, model}` for current session |
+| `ctx.session.list(opts?)` | `array` | Recent conversations (default limit 20, max 100) |
+| `ctx.session.messages(id, opts?)` | `array` | Messages for a conversation (default limit 200, max 1000) |
+
+#### Context Availability
+
+Not all `ctx` fields are available in every handler type:
+
+| | Tool `execute` | Command `handler` | Event `bone.on` handler |
+|---|:---:|:---:|:---:|
+| `config_dir` | yes | yes | yes |
+| `cwd` | yes | yes | — |
+| `log` | yes | yes | — |
+| `fs` | yes | yes | — |
+| `shell` / `shell_streaming` | yes | yes | — |
+| `read_file` / `write_file` | yes | yes | — |
+| `ui.notify` | yes | yes | yes |
+| `ui.status` / `ui.pane` | yes | yes | — |
+| `emit_pane` / `emit_state` | yes | — | — |
+| `usage` | yes | yes | — |
+| `state` | yes | yes | — |
+| `tools` | yes | yes | — |
+| `agent` | yes | yes | — |
+| `config` | yes | yes | `config.dir` only |
+| `session` | yes | yes | — |
+| `call_id` | yes | — | — |
+
+Event handlers receive a minimal `ctx` with only `config_dir`, `ui.notify`, and `config.dir`. They cannot execute shell commands, read files, or call tools. This is intentional — event handlers run inline during the event loop and must not block.
+
+#### Shell Options
+
+`ctx.shell` and `ctx.shell_streaming` accept an optional opts table:
 ```lua
-ctx.cwd                  -- string: working directory
-ctx.config_dir           -- string: config directory path
-
--- Shell execution (reuses native approval + policy)
-ctx.shell(command, opts)
-  -- opts: { timeout_ms = 120000 }  (min 1000, max 300000)
-  -- returns: { stdout = "", stderr = "", exit_code = 0 }
-
--- File operations
-ctx.read_file(path)             -- returns content string or nil
-ctx.write_file(path, content)   -- returns true or nil (fails if file exists)
-
--- UI notifications
-ctx.ui.notify(message, level)   -- level: "info" | "warn" | "error"
-
--- Session state (persists across calls within a session)
-ctx.state.get(key)              -- returns string or nil
-ctx.state.set(key, value)       -- value: string
-ctx.state.clear(key)
+{ timeout_ms = 120000 }  -- min 1000, max 300000
 ```
+Default timeout: 120s for `ctx.shell`, 300s for `ctx.shell_streaming`. Commands run through the same approval and policy system as the native `shell` tool.
+
+#### `ctx.tools.call`
+
+Call a registered tool by name with typed arguments:
+```lua
+local result = ctx.tools.call("read_file", { path = "/tmp/test.txt" }, { approval = "safe" })
+if result.ok then
+    ctx.log.info(result.content)
+else
+    ctx.log.error(result.content)
+end
+```
+Opts: `{ approval = "safe" | "read_only" | "danger" }`. Max nesting depth: 4 levels of tool calls from Lua.
+
+#### `ctx.agent.run` / `ctx.agent.run_stream`
+
+Spawn a subagent:
+```lua
+local result = ctx.agent.run("Summarize this file", {
+    approval = "safe",
+    system_prompt = "You are a summarizer.",
+    timeout_ms = 300000,
+})
+if result.ok then
+    ctx.log.info(result.content)
+end
+```
+Opts: `{ approval, provider, model, system_prompt, timeout_ms }`. Default timeout: 300s, max 900s. Max nesting depth: 3 levels.
+
+`run_stream` accepts additional callback opts: `on_started`, `on_status`, `on_tool_call`, `on_tool_result`, `on_token_usage`, `on_finished`, `on_failed`. Each callback receives a table with event-specific fields.
+
+#### Usage Snapshot
+
+`ctx.usage.snapshot()` returns a table with the current conversation's token usage:
+```lua
+local u = ctx.usage.snapshot()
+-- u.request_count, u.sent, u.received, u.cached, u.cost
+-- u.context_length, u.tool_count, u.tool_schema_chars, u.tool_schema_tokens
+-- u.system_prompt_chars, u.system_prompt_tokens
+-- u.by_provider: array of { provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, request_count }
+```
+Returns `nil` if usage data is unavailable in the current context.
 
 ## Pre-Seeded Tools
 
@@ -326,7 +437,7 @@ end)
 | table with `display`/`reply`/`content` and `submit = false` | Show message in UI without submitting a prompt |
 | error | Show error in UI |
 
-Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/compact`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/stats`) cannot be overridden.
+Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/stats`) cannot be overridden.
 
 ## Event Hooks
 

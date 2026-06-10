@@ -63,9 +63,14 @@ impl ExtensionManager {
         self.engine_ok
     }
 
-    /// Clone the underlying Lua state handle for background execution.
+    /// Clone the underlying Lua state handle.
     pub(crate) fn lua_handle(&self) -> Arc<Mutex<Lua>> {
         self.lua.clone()
+    }
+
+    /// Clone the underlying Lua state handle (public for testing).
+    pub fn lua_arc(&self) -> Arc<Mutex<Lua>> {
+        self.lua_handle()
     }
 
     /// Get registered Lua commands.
