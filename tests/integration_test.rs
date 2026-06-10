@@ -105,14 +105,19 @@ async fn execute_all_returns_results_in_request_order_after_concurrent_execution
 
 #[tokio::test]
 async fn disabled_tools_are_not_advertised_or_executed() {
+    use bone::tools::builtin_tools;
     use bone::tools::registry::ToolHandler;
     use bone::tools::types::ToolCall;
-    use bone::tools::builtin_tools;
-    use std::collections::HashMap;
     use serde_json::json;
+    use std::collections::HashMap;
 
     let enabled = vec!["read_file".to_string()];
-    let handler = ToolHandler::with_enabled_safety_and_display(builtin_tools(), &enabled, HashMap::new(), HashMap::new());
+    let handler = ToolHandler::with_enabled_safety_and_display(
+        builtin_tools(),
+        &enabled,
+        HashMap::new(),
+        HashMap::new(),
+    );
 
     let definitions = handler.definitions();
     assert_eq!(definitions.len(), 1);
@@ -216,17 +221,14 @@ fn user_config_from_custom_configs_applies_general_settings() {
         "general".to_string(),
         CustomConfigPage {
             title: "General".to_string(),
-            fields: vec![
-                ConfigField {
-                    key: "approval_mode".to_string(),
-                    label: None,
-                    field_type: ConfigFieldType::Enum,
-                    options: vec!["safe".into(), "edit".into(), "danger".into()],
-                    default: Some(serde_yaml::Value::String("safe".into())),
-                    value: Some(serde_yaml::Value::String("danger".into())),
-                },
-
-            ],
+            fields: vec![ConfigField {
+                key: "approval_mode".to_string(),
+                label: None,
+                field_type: ConfigFieldType::Enum,
+                options: vec!["safe".into(), "edit".into(), "danger".into()],
+                default: Some(serde_yaml::Value::String("safe".into())),
+                value: Some(serde_yaml::Value::String("danger".into())),
+            }],
         },
     ));
 

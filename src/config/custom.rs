@@ -62,7 +62,6 @@ pub fn config_dir() -> PathBuf {
 // ── Built-in seed pages ────────────────────────────────────────────────────
 
 const GENERAL_YAML: &str = include_str!("pages/general.yaml");
-const SUBAGENT_YAML: &str = include_str!("pages/subagent.yaml");
 const TOOLS_YAML: &str = include_str!("pages/tools.yaml");
 
 /// Seed built-in config pages into `~/.bone-rust/config/` if missing.
@@ -70,7 +69,6 @@ pub fn seed_builtin_pages() {
     let dir = config_dir();
     let _ = std::fs::create_dir_all(&dir);
     seed_file_if_missing(&dir.join("general.yaml"), GENERAL_YAML);
-    seed_file_if_missing(&dir.join("subagent.yaml"), SUBAGENT_YAML);
     seed_file_if_missing(&dir.join("tools.yaml"), TOOLS_YAML);
 }
 
@@ -131,11 +129,17 @@ impl CustomConfigs {
     }
 
     fn page_ref(&self, namespace: &str) -> Option<&CustomConfigPage> {
-        self.pages.iter().find(|(ns, _)| ns == namespace).map(|(_, page)| page)
+        self.pages
+            .iter()
+            .find(|(ns, _)| ns == namespace)
+            .map(|(_, page)| page)
     }
 
     fn page_mut(&mut self, namespace: &str) -> Option<&mut CustomConfigPage> {
-        self.pages.iter_mut().find(|(ns, _)| ns == namespace).map(|(_, page)| page)
+        self.pages
+            .iter_mut()
+            .find(|(ns, _)| ns == namespace)
+            .map(|(_, page)| page)
     }
 
     fn page_index(&self, namespace: &str) -> Option<usize> {
@@ -204,8 +208,6 @@ impl CustomConfigs {
     pub fn enabled_tool_names(&self) -> Vec<String> {
         self.enabled_names("tools")
     }
-
-
 
     /// Get the display value for a field, falling back to the default.
     pub fn get_value(&self, namespace: &str, key: &str) -> String {

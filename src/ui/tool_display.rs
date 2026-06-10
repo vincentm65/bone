@@ -154,11 +154,14 @@ pub(crate) fn format_shell_command(command: &str) -> Vec<String> {
     if find_heredoc_marker(command).is_some() {
         return expand_collapsed_heredoc_line(command);
     }
-    crate::shell_split::shell_split(command, &crate::shell_split::ShellSplitOptions {
-        keep_separators: true,
-        split_newlines: false,
-        strip_comments: false,
-    })
+    crate::shell_split::shell_split(
+        command,
+        &crate::shell_split::ShellSplitOptions {
+            keep_separators: true,
+            split_newlines: false,
+            strip_comments: false,
+        },
+    )
 }
 
 fn expand_collapsed_heredoc_line(line: &str) -> Vec<String> {

@@ -98,6 +98,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             model: request.model,
             system_prompt: request.system_prompt,
             events: request.events,
+            event_sender: None,
         })
         .await;
     }
@@ -111,6 +112,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         model: request.model,
         system_prompt: request.system_prompt,
         events: request.events,
+        event_sender: None,
     })
     .await
 }
@@ -172,8 +174,8 @@ fn expand_lua_command(prompt: &str, config_dir: &std::path::Path) -> Option<Stri
         config_dir: config_dir_str,
         shared_state,
         pane_sender: None,
-        call_id: None,
-    };
+            call_id: None,
+        };
     let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
     // Call handler(args, ctx).

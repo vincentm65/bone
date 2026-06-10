@@ -406,10 +406,7 @@ fn draw_heat_and_conversations(
     draw_daily_activity(frame, chunks[1], data);
 }
 
-fn hourly_chart_lines(
-    data: &UsageStatsSnapshot,
-    mode: ViewMode,
-) -> (Vec<Line<'static>>, String) {
+fn hourly_chart_lines(data: &UsageStatsSnapshot, mode: ViewMode) -> (Vec<Line<'static>>, String) {
     let hourly_data: &[HourUsage] = data.hourly(mode);
     let mut by_hour = [0i64; 24];
     for h in hourly_data {

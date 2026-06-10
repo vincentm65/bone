@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use mlua::{Lua, LuaSerdeExt};
 
 use super::event::EventDispatchResult;
-use super::snapshots::{LuaConfigSnapshot, LuaThemeSnapshot, LuaKeymapSnapshot};
+use super::snapshots::{LuaConfigSnapshot, LuaKeymapSnapshot, LuaThemeSnapshot};
 
 /// Owning manager for the Lua VM and all registered extension data.
 pub struct ExtensionManager {

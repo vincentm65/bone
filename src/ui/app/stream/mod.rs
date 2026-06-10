@@ -1,6 +1,6 @@
 use crate::chat::{Message, build_chat_history};
-use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
 use crate::ext::event::EventDispatchResult;
+use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
 use crate::tools::command_policy::CommandSafety;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
@@ -290,7 +290,8 @@ impl App {
                 let visible = display.and_then(|d| d.show).unwrap_or(true);
                 let has_result = display.and_then(|d| d.show_result).unwrap_or(false);
                 let already_shown = self.shown_tool_rows.contains(&call.id);
-                if (visible || has_result) && !call_row_shown_during_prepare(call) && !already_shown {
+                if (visible || has_result) && !call_row_shown_during_prepare(call) && !already_shown
+                {
                     self.messages.push(build_tool_row(call, result, display));
                 }
             }
@@ -576,11 +577,8 @@ impl App {
 
         // Dispatch tool_result events.
         for result in &results {
-            self.extensions.dispatch_tool_result(
-                &result.name,
-                &result.call_id,
-                result.is_error,
-            );
+            self.extensions
+                .dispatch_tool_result(&result.name, &result.call_id, result.is_error);
         }
 
         // Process pane pages and session state from tool results
@@ -653,7 +651,6 @@ impl App {
                     },
                     display,
                 ));
-                self.shown_tool_rows.insert(call.id.clone());
             }
         }
         self.renderer

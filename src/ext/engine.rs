@@ -6,11 +6,7 @@ use std::path::Path;
 use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table};
 
 /// Build a ready-to-use Lua state with the `bone` table populated.
-pub(crate) fn create_engine(
-    version: &str,
-    cwd: &Path,
-    config_dir: &Path,
-) -> Result<Lua, String> {
+pub(crate) fn create_engine(version: &str, cwd: &Path, config_dir: &Path) -> Result<Lua, String> {
     let lua = Lua::new();
 
     let globals = lua.globals();
@@ -21,8 +17,7 @@ pub(crate) fn create_engine(
     // Create the `bone` table.
     let bone = lua.create_table().map_err(|e| e.to_string())?;
 
-    bone.set("version", version)
-        .map_err(|e| e.to_string())?;
+    bone.set("version", version).map_err(|e| e.to_string())?;
 
     bone.set("cwd", cwd.to_string_lossy().to_string())
         .map_err(|e| e.to_string())?;
@@ -32,8 +27,7 @@ pub(crate) fn create_engine(
 
     // bone.log table
     let log = create_log_table(&lua).map_err(|e| e.to_string())?;
-    bone.set("log", log)
-        .map_err(|e| e.to_string())?;
+    bone.set("log", log).map_err(|e| e.to_string())?;
 
     // Set safe package.path entries so users can `require` from their lua dir.
     let lua_dir = config_dir.join("lua");
@@ -76,8 +70,8 @@ pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
         return Ok(false);
     }
 
-    let source = std::fs::read_to_string(&init_path)
-        .map_err(|e| format!("failed to read init.lua: {e}"))?;
+    let source =
+        std::fs::read_to_string(&init_path).map_err(|e| format!("failed to read init.lua: {e}"))?;
 
     match lua.load(&source).set_name("init.lua").exec() {
         Ok(()) => Ok(true),
@@ -116,7 +110,11 @@ fn create_log_table(lua: &Lua) -> LuaResult<Table> {
 /// Replace dangerous `os` and `io` entries with error stubs.
 fn sandbox_globals(lua: &Lua, globals: &Table) -> Result<(), String> {
     if let Ok(Some(os)) = globals.get::<Option<Table>>("os") {
-        sandbox_table(lua, &os, &["execute", "exit", "remove", "rename", "tmpname"])?;
+        sandbox_table(
+            lua,
+            &os,
+            &["execute", "exit", "remove", "rename", "tmpname"],
+        )?;
     }
 
     if let Ok(Some(io)) = globals.get::<Option<Table>>("io") {
@@ -130,7 +128,9 @@ fn sandbox_globals(lua: &Lua, globals: &Table) -> Result<(), String> {
             ))
         })
         .map_err(|e| e.to_string())?;
-    globals.set("dofile", stub.clone()).map_err(|e| e.to_string())?;
+    globals
+        .set("dofile", stub.clone())
+        .map_err(|e| e.to_string())?;
     globals.set("loadfile", stub).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -163,9 +163,7 @@ fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
             Ok(s)
         })
         .map_err(|e| e.to_string())?;
-    cjson
-        .set("encode", encode_fn)
-        .map_err(|e| e.to_string())?;
+    cjson.set("encode", encode_fn).map_err(|e| e.to_string())?;
 
     let decode_fn = lua
         .create_function(|lua, s: String| {
@@ -175,12 +173,8 @@ fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
             Ok(value)
         })
         .map_err(|e| e.to_string())?;
-    cjson
-        .set("decode", decode_fn)
-        .map_err(|e| e.to_string())?;
+    cjson.set("decode", decode_fn).map_err(|e| e.to_string())?;
 
-    globals
-        .set("cjson", cjson)
-        .map_err(|e| e.to_string())?;
+    globals.set("cjson", cjson).map_err(|e| e.to_string())?;
     Ok(())
 }

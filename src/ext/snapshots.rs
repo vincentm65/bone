@@ -16,7 +16,6 @@ pub struct LuaConfigSnapshot {
     pub auto_compact_tokens: Option<u64>,
     pub auto_compact_keep_messages: Option<usize>,
     pub status_show: HashMap<String, bool>,
-    pub subagent: LuaSubagentConfig,
 }
 
 impl Default for LuaConfigSnapshot {
@@ -26,16 +25,8 @@ impl Default for LuaConfigSnapshot {
             auto_compact_tokens: None,
             auto_compact_keep_messages: None,
             status_show: HashMap::new(),
-            subagent: LuaSubagentConfig::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct LuaSubagentConfig {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub approval: Option<String>,
 }
 
 impl LuaConfigSnapshot {
@@ -45,17 +36,6 @@ impl LuaConfigSnapshot {
         let auto_compact_tokens: Option<u64> = table.get("auto_compact_tokens").ok().flatten();
         let auto_compact_keep_messages: Option<usize> =
             table.get("auto_compact_keep_messages").ok().flatten();
-
-        let subagent = table
-            .get::<Option<mlua::Table>>("subagent")
-            .ok()
-            .flatten()
-            .map(|t| LuaSubagentConfig {
-                provider: t.get("provider").ok().flatten(),
-                model: t.get("model").ok().flatten(),
-                approval: t.get("approval").ok().flatten(),
-            })
-            .unwrap_or_default();
 
         let status_show = table
             .get::<Option<mlua::Table>>("status_show")
@@ -77,7 +57,6 @@ impl LuaConfigSnapshot {
             auto_compact_tokens,
             auto_compact_keep_messages,
             status_show,
-            subagent,
         })
     }
 }
@@ -128,11 +107,9 @@ impl LuaThemeSnapshot {
         let parse_color = |key: &str| -> Result<Option<Color>, String> {
             let hex: Option<String> = table.get(key).ok().flatten();
             match hex {
-                Some(h) => Ok(Some(
-                    parse_hex_color(&h).ok_or_else(|| {
-                        format!("bone-lua warn: invalid theme color for {key}: #{h}")
-                    })?,
-                )),
+                Some(h) => Ok(Some(parse_hex_color(&h).ok_or_else(|| {
+                    format!("bone-lua warn: invalid theme color for {key}: #{h}")
+                })?)),
                 None => Ok(None),
             }
         };

@@ -4,15 +4,15 @@
 //! Stage 02: Lua tool registration and execution.
 //! Stage 03: Lua command registration and dispatch.
 
-mod engine;
-mod loader;
 pub mod ctx;
+mod engine;
+pub mod event;
+mod loader;
 pub mod lua_tool;
 pub mod ops_commands;
-pub mod ops_tools;
-pub mod event;
 pub mod ops_events;
 pub mod ops_plugins;
+pub mod ops_tools;
 pub mod snapshots;
 pub mod types;
 

@@ -18,7 +18,7 @@ pub struct Prompt {
     pub full_command: Option<String>,
     /// When true, show all command lines instead of the truncated preview.
     pub peek_mode: bool,
-    /// Tab labels for multi-section prompts (e.g. Config / Subagent).
+    /// Tab labels for multi-section prompts.
     pub tabs: Vec<String>,
     /// Index of the currently active tab.
     pub active_tab: usize,

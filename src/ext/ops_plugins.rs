@@ -34,9 +34,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
             }
 
             let config_dir: String = bone.get::<String>("config_dir")?;
-            let init_path = plugins_dir(&config_dir)
-                .join(&name)
-                .join("init.lua");
+            let init_path = plugins_dir(&config_dir).join(&name).join("init.lua");
 
             if !init_path.exists() {
                 eprintln!(
@@ -110,9 +108,8 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                 } else {
                     src.to_path_buf()
                 };
-                std::os::unix::fs::symlink(&abs, &dest).map_err(|e| {
-                    mlua::Error::external(format!("symlink failed: {e}"))
-                })?;
+                std::os::unix::fs::symlink(&abs, &dest)
+                    .map_err(|e| mlua::Error::external(format!("symlink failed: {e}")))?;
                 Ok(name)
             } else {
                 // GitHub-style "user/repo" — git clone.
@@ -146,9 +143,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                         "git clone failed (exit {})",
                         status.code().unwrap_or(-1)
                     ))),
-                    Err(e) => Err(mlua::Error::external(format!(
-                        "git clone failed: {e}"
-                    ))),
+                    Err(e) => Err(mlua::Error::external(format!("git clone failed: {e}"))),
                 }
             }
         })
@@ -169,9 +164,8 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                     name
                 )));
             }
-            std::fs::remove_dir_all(&dir).map_err(|e| {
-                mlua::Error::external(format!("remove failed: {e}"))
-            })?;
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| mlua::Error::external(format!("remove failed: {e}")))?;
 
             // Clear loaded flag.
             let loaded: Table = bone.get::<Table>("_loaded_plugins")?;
@@ -255,9 +249,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                     "git pull failed (exit {})",
                     status.code().unwrap_or(-1)
                 ))),
-                Err(e) => Err(mlua::Error::external(format!(
-                    "git pull failed: {e}"
-                ))),
+                Err(e) => Err(mlua::Error::external(format!("git pull failed: {e}"))),
             }
         })
         .map_err(|e| e.to_string())?;

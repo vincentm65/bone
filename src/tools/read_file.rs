@@ -55,16 +55,7 @@ impl Tool for ReadFileTool {
 
         let start = args.start_line.unwrap_or(1).saturating_sub(1);
         let max = args.max_lines.unwrap_or(500).min(1000);
-        let total_lines = content.lines().count();
-
-        if start == 0 && total_lines <= max {
-            return Ok(content);
-        }
-
         let lines: Vec<&str> = content.lines().skip(start).take(max).collect();
-        let end = start + lines.len();
-        let mut out = format!("(lines {}-{} of {total_lines})\n", start + 1, end);
-        out.push_str(&lines.join("\n"));
-        Ok(out)
+        Ok(lines.join("\n"))
     }
 }

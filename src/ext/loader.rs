@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use super::engine;
 use super::ctx::SharedState;
+use super::engine;
 use super::lua_tool::LuaTool;
 use super::types::{BootResult, ExtensionManager};
 
@@ -190,7 +190,7 @@ fn collect_commands(
             }
         };
 
-            let description: String = entry
+        let description: String = entry
             .get::<mlua::Value>("description")
             .ok()
             .and_then(|v| {
@@ -200,19 +200,14 @@ fn collect_commands(
             })
             .unwrap_or_default();
 
-        commands.push(super::ops_commands::RegisteredLuaCommand {
-            name,
-            description,
-        });
+        commands.push(super::ops_commands::RegisteredLuaCommand { name, description });
     }
 
     commands
 }
 
 /// Collect `bone.config` snapshot from Lua.
-fn collect_config_snapshot(
-    lua_arc: &Arc<Mutex<mlua::Lua>>,
-) -> super::snapshots::LuaConfigSnapshot {
+fn collect_config_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaConfigSnapshot {
     let lua = match lua_arc.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -239,9 +234,7 @@ fn collect_config_snapshot(
 }
 
 /// Collect `bone.theme` snapshot from Lua.
-fn collect_theme_snapshot(
-    lua_arc: &Arc<Mutex<mlua::Lua>>,
-) -> super::snapshots::LuaThemeSnapshot {
+fn collect_theme_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaThemeSnapshot {
     let lua = match lua_arc.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -268,9 +261,7 @@ fn collect_theme_snapshot(
 }
 
 /// Collect `bone.keymap` snapshot from Lua.
-fn collect_keymap_snapshot(
-    lua_arc: &Arc<Mutex<mlua::Lua>>,
-) -> super::snapshots::LuaKeymapSnapshot {
+fn collect_keymap_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaKeymapSnapshot {
     let lua = match lua_arc.lock() {
         Ok(g) => g,
         Err(e) => {

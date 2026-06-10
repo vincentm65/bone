@@ -3,7 +3,6 @@ use std::collections::HashMap;
 /// In-memory tool state keyed by (source, sub_key).
 ///
 /// - Single-entry tools (task_list): source="task_list", sub_key="default"
-/// - Multi-entry tools (subagent):   source="subagents",  sub_key="<call_id>"
 #[derive(Clone, Debug, Default)]
 pub struct ToolStateMap {
     /// source -> sub_key -> opaque state blob

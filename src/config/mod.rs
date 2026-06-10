@@ -4,9 +4,9 @@ pub mod providers_config;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::ext;
 use crate::tools;
 use crate::tools::ApprovalMode;
-use crate::ext;
 pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers, save_providers};
 
 pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -45,7 +45,7 @@ pub struct UserConfig {
     pub auto_compact_tokens: Option<u64>,
     pub auto_compact_keep_messages: Option<usize>,
     pub status_show: std::collections::HashMap<String, bool>,
-    pub subagent: SubagentConfig,
+
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
@@ -63,7 +63,7 @@ impl Default for UserConfig {
             auto_compact_tokens: None,
             auto_compact_keep_messages: None,
             status_show: Self::default_status_show(),
-            subagent: SubagentConfig::default(),
+
         }
     }
 }
@@ -130,31 +130,11 @@ impl UserConfig {
                 *val = bool_config(custom, key);
             }
         }
-        self.subagent.provider = custom.get_value("subagent", "provider");
-        self.subagent.model = custom.get_value("subagent", "model");
-        self.subagent.approval = match custom.get_value("subagent", "approval").as_str() {
-            "danger" => ApprovalMode::Danger,
-            _ => ApprovalMode::Safe,
-        };
+
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SubagentConfig {
-    pub provider: String,
-    pub model: String,
-    pub approval: ApprovalMode,
-}
 
-impl Default for SubagentConfig {
-    fn default() -> Self {
-        Self {
-            provider: "local".to_string(),
-            model: "local".to_string(),
-            approval: ApprovalMode::Safe,
-        }
-    }
-}
 
 const EXAMPLE_PROVIDERS: &str = include_str!("../../defaults/providers.yaml");
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
@@ -225,7 +205,9 @@ fn has_codex_auth_token() -> bool {
     let Ok(doc): Result<serde_json::Value, _> = serde_json::from_str(&data) else {
         return false;
     };
-    doc["tokens"]["access_token"].as_str().is_some_and(|s| !s.is_empty())
+    doc["tokens"]["access_token"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty())
 }
 
 /// Check if a provider has an API key configured. Print a helpful warning

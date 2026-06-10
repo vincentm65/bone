@@ -37,6 +37,7 @@ impl ToolRegistry {
         call: ToolCall,
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
         session_state: Option<String>,
+        owner: String,
     ) -> ToolResult {
         let name = call.name.clone();
         let call_id = call.id.clone();
@@ -48,6 +49,7 @@ impl ToolRegistry {
                     ToolExecutionContext {
                         call_id: call_id.clone(),
                         session_state,
+                        owner,
                     },
                 )
                 .await
@@ -93,6 +95,7 @@ pub struct ToolHandler {
     enabled: HashSet<String>,
     dynamic_display: HashMap<String, ToolDisplayConfig>,
     pub state_map: ToolStateMap,
+    pub owner: String,
     dynamic_safety: HashMap<String, CommandSafety>,
 }
 
@@ -126,6 +129,7 @@ impl ToolHandler {
             enabled,
             dynamic_display: HashMap::new(),
             state_map: ToolStateMap::default(),
+            owner: String::new(),
             dynamic_safety: HashMap::new(),
         }
     }
@@ -142,6 +146,7 @@ impl ToolHandler {
             dynamic_display,
             dynamic_safety,
             state_map: ToolStateMap::default(),
+            owner: String::new(),
         }
     }
 
@@ -209,7 +214,11 @@ impl ToolHandler {
         join_all(calls.into_iter().map(|call| {
             let events = events.clone();
             let session_state = self.session_state_for_call(&call);
-            async move { self.execute_one_live(call, events, session_state).await }
+            let owner = self.owner.clone();
+            async move {
+                self.execute_one_live(call, events, session_state, owner)
+                    .await
+            }
         }))
         .await
     }
@@ -231,7 +240,12 @@ impl ToolHandler {
                     .unwrap_or_else(|| self.state_map.get(key, "default").map(String::from))
             });
             let result = self
-                .execute_one_live(call, events.clone(), session_state)
+                .execute_one_live(
+                    call,
+                    events.clone(),
+                    session_state,
+                    self.owner.clone(),
+                )
                 .await;
             if let Some(key) = Self::host_state_key_for_name(&result.name) {
                 if Self::result_clears_default_state(&result, key) {
@@ -251,10 +265,11 @@ impl ToolHandler {
         call: ToolCall,
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
         session_state: Option<String>,
+        owner: String,
     ) -> ToolResult {
         if self.is_enabled(&call.name) {
             self.registry
-                .execute_live(call, events, session_state)
+                .execute_live(call, events, session_state, owner)
                 .await
         } else {
             ToolResult {

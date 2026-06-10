@@ -15,6 +15,10 @@ use crate::ui::pane_page::PanePage;
 use super::ctx::{self, CtxConfig, SharedState};
 use crate::tools::command_policy::CommandSafety;
 
+enum LuaExecution {
+    Output(ToolOutput),
+}
+
 pub struct LuaTool {
     name: String,
     description: String,
@@ -69,14 +73,10 @@ impl LuaTool {
                     })
                     .unwrap_or_default();
 
-                let template: Option<String> = t
-                    .get::<Option<String>>("template")
-                    .ok()
-                    .flatten();
+                let template: Option<String> = t.get::<Option<String>>("template").ok().flatten();
 
                 let show: Option<bool> = t.get::<Option<bool>>("show").ok().flatten();
-                let show_result: Option<bool> =
-                    t.get::<Option<bool>>("show_result").ok().flatten();
+                let show_result: Option<bool> = t.get::<Option<bool>>("show_result").ok().flatten();
 
                 ToolDisplayConfig {
                     args,
@@ -144,7 +144,12 @@ impl Tool for LuaTool {
             .map_err(|e| format!("lua tool '{}': execute function lost: {e}", self.name))?;
         let execute_fn = match execute_fn {
             mlua::Value::Function(f) => f,
-            _ => return Err(format!("lua tool '{}': execute is not a function", self.name)),
+            _ => {
+                return Err(format!(
+                    "lua tool '{}': execute is not a function",
+                    self.name
+                ));
+            }
         };
 
         let args_lua = lua
@@ -160,12 +165,15 @@ impl Tool for LuaTool {
             call_id: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-                        .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
+            .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
 
         let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
 
         match result {
-            Ok(mlua::Value::String(s)) => Ok(s.to_str().map(|s| s.to_string()).unwrap_or_else(|e| format!("(lua string error: {e})"))),
+            Ok(mlua::Value::String(s)) => Ok(s
+                .to_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|e| format!("(lua string error: {e})"))),
             Ok(mlua::Value::Nil) => Ok(String::new()),
             Ok(v) => Ok(format!("{v:?}")),
             Err(e) => Err(format!("lua tool '{}': {e}", self.name)),
@@ -180,13 +188,17 @@ impl Tool for LuaTool {
             .map_err(|e| format!("lua tool '{}': execute function lost: {e}", self.name))?;
         let execute_fn = match execute_fn {
             mlua::Value::Function(f) => f,
-            _ => return Err(format!("lua tool '{}': execute is not a function", self.name)),
+            _ => {
+                return Err(format!(
+                    "lua tool '{}': execute is not a function",
+                    self.name
+                ));
+            }
         };
 
         let args_lua = lua
             .to_value(&arguments)
             .map_err(|e| format!("lua tool '{}': failed to convert arguments: {e}", self.name))?;
-
         let ctx_cfg = CtxConfig {
             cwd: self.cwd.clone(),
             config_dir: self.config_dir.clone(),
@@ -195,12 +207,15 @@ impl Tool for LuaTool {
             call_id: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-                        .map_err(|e| format!("lua tool '{}': failed to create ctx: {}", self.name, e))?;
+            .map_err(|e| format!("lua tool '{}': failed to create ctx: {}", self.name, e))?;
 
         let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
 
         let text = match result {
-            Ok(mlua::Value::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_else(|e| format!("(lua string error: {e})")),
+            Ok(mlua::Value::String(s)) => s
+                .to_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|e| format!("(lua string error: {e})")),
             Ok(mlua::Value::Nil) => String::new(),
             Ok(v) => format!("{v:?}"),
             Err(e) => return Err(format!("lua tool '{}': {e}", self.name)),
@@ -213,7 +228,7 @@ impl Tool for LuaTool {
         &self,
         arguments: Value,
         events: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
-        _context: crate::tools::types::ToolExecutionContext,
+        context: crate::tools::types::ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
         // Clone handles for move into spawn_blocking.
         let lua_arc = self.lua.clone();
@@ -222,8 +237,10 @@ impl Tool for LuaTool {
         let cwd = self.cwd.clone();
         let config_dir = self.config_dir.clone();
         let shared_state = self.shared_state.clone();
+        let call_id = context.call_id.clone();
+        let call_id_for_ctx = call_id.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let execution = tokio::task::spawn_blocking(move || {
             let lua = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
 
             let execute_fn: mlua::Value = lua
@@ -243,24 +260,61 @@ impl Tool for LuaTool {
                 config_dir,
                 shared_state,
                 pane_sender: events,
-                call_id: Some(_context.call_id),
+                call_id: Some(call_id_for_ctx),
             };
             let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
                 .map_err(|e| format!("lua tool '{name}': failed to create ctx: {e}"))?;
 
             let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
 
-            let text = match result {
-                Ok(mlua::Value::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_else(|e| format!("(lua string error: {e})")),
-                Ok(mlua::Value::Nil) => String::new(),
-                Ok(v) => format!("{v:?}"),
-                Err(e) => return Err(format!("lua tool '{name}': {e}")),
-            };
+            let execution = match result {
+                Ok(value) => lua_value_to_execution(&lua, &name, value),
+                Err(e) => Err(format!("lua tool '{name}': {e}")),
+            }?;
 
-            parse_tool_output(&text)
+            Ok::<LuaExecution, String>(execution)
         })
         .await
-        .map_err(|e| format!("lua tool '{}': spawn_blocking panicked: {e}", self.name))?
+        .map_err(|e| format!("lua tool '{}': spawn_blocking panicked: {e}", self.name))??;
+
+        match execution {
+            LuaExecution::Output(output) => Ok(output),
+        }
+    }
+}
+
+fn lua_value_to_execution(
+    _lua: &Lua,
+    name: &str,
+    value: mlua::Value,
+) -> Result<LuaExecution, String> {
+    match value {
+        mlua::Value::Table(table) => {
+            let op: Option<String> = table
+                .get::<Option<String>>(ctx::runtime_op_key())
+                .map_err(|e| format!("lua tool '{name}': invalid runtime op marker: {e}"))?;
+            if op.is_some() {
+                // Runtime op markers are no longer handled; treat as output.
+                Ok(LuaExecution::Output(ToolOutput::text(format!(
+                    "{:?}",
+                    mlua::Value::Table(table)
+                ))))
+            } else {
+                Ok(LuaExecution::Output(ToolOutput::text(format!(
+                    "{:?}",
+                    mlua::Value::Table(table)
+                ))))
+            }
+        }
+        mlua::Value::String(s) => {
+            let text = s
+                .to_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|e| format!("(lua string error: {e})"));
+            parse_tool_output(&text).map(LuaExecution::Output)
+        }
+        mlua::Value::Nil => Ok(LuaExecution::Output(ToolOutput::text(String::new()))),
+        v => Ok(LuaExecution::Output(ToolOutput::text(format!("{v:?}")))),
     }
 }
 
@@ -269,13 +323,23 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
     match serde_json::from_str::<serde_json::Value>(text.trim()) {
         Ok(obj) if obj.is_object() => {
             let map = obj.as_object().unwrap();
-            let content = map.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let state = map.get("state").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let content = map
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let state = map
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let pane_page = map.get("pane").and_then(|pane_val| {
                 let pane = pane_val.as_object()?;
                 let source = pane.get("source").and_then(|v| v.as_str())?.to_string();
                 let title = pane.get("title").and_then(|v| v.as_str())?.to_string();
-                let visible_rows = pane.get("visible_rows").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
+                let visible_rows = pane
+                    .get("visible_rows")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(8) as usize;
                 let scroll = pane.get("scroll").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let lines: Vec<ratatui::text::Line<'static>> = pane
                     .get("lines")
@@ -290,10 +354,14 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                                         .get("spans")
                                         .and_then(|v| v.as_array())
                                         .map(|spans_arr| {
-                                            spans_arr.iter()
+                                            spans_arr
+                                                .iter()
                                                 .filter_map(|span_val| {
                                                     let span_obj = span_val.as_object()?;
-                                                    let text = span_obj.get("text").and_then(|v| v.as_str())?.to_string();
+                                                    let text = span_obj
+                                                        .get("text")
+                                                        .and_then(|v| v.as_str())?
+                                                        .to_string();
                                                     let style = span_obj_to_style(span_obj);
                                                     Some(ratatui::text::Span::styled(text, style))
                                                 })

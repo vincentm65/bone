@@ -4,7 +4,7 @@ pub mod config;
 pub mod ext;
 pub mod llm;
 pub mod run;
-pub mod shell_split;
 pub mod session_db;
+pub mod shell_split;
 pub mod tools;
 pub mod ui;

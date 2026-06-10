@@ -247,7 +247,9 @@ pub fn build_instructions(messages: &[ChatMessage]) -> String {
 /// Text is NOT emitted here — it was already streamed via
 /// `response.output_text.delta` events, and re-emitting would
 /// duplicate content and confuse the LLM on subsequent rounds.
-fn extract_response_events(resp: &CodexResponse) -> (Vec<ChatEvent>, Option<(u32, u32, Option<u32>)>) {
+fn extract_response_events(
+    resp: &CodexResponse,
+) -> (Vec<ChatEvent>, Option<(u32, u32, Option<u32>)>) {
     let tool_calls: Vec<ChatEvent> = resp
         .output
         .iter()

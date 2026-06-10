@@ -1,4 +1,3 @@
-use bone::agent;
 use bone::config::{UserConfig, custom::CustomConfigs, load_providers, save_providers};
 use bone::llm::providers;
 use bone::run;
@@ -50,7 +49,7 @@ const DEPS: &[Dep] = &[
     Dep {
         bin: "uv",
         pkg: None,
-        label: "uv (needed by web_search, task_list, subagent, cron)",
+        label: "uv (needed by web_search, task_list, cron)",
     },
     Dep {
         bin: "git",
@@ -308,24 +307,6 @@ async fn main() -> std::io::Result<()> {
     // Install: symlink bone binary into PATH
     if args.first().map(String::as_str) == Some("install") {
         return do_install();
-    }
-
-    // Dispatch headless sub-agent mode
-    if args.first().map(String::as_str) == Some("agent") {
-        let request = agent::parse_agent_args(&args[1..]).map_err(std::io::Error::other)?;
-        if request.events {
-            // Events mode: JSONL is streamed to stdout by the agent loop
-            agent::run_agent(request)
-                .await
-                .map_err(std::io::Error::other)?;
-        } else {
-            // Plain mode: print final answer
-            let response = agent::run_agent(request)
-                .await
-                .map_err(std::io::Error::other)?;
-            println!("{}", response.content);
-        }
-        return Ok(());
     }
 
     // Normal TUI mode

@@ -40,7 +40,9 @@ pub fn load_tools() -> LoadedTools {
 pub fn register_lua_tools(loaded: &mut LoadedTools, lua_tools: Vec<LuaTool>) {
     for tool in lua_tools {
         let name = tool.definition().name.clone();
-        loaded.dynamic_display.insert(name.clone(), tool.display().clone());
+        loaded
+            .dynamic_display
+            .insert(name.clone(), tool.display().clone());
         loaded.dynamic_safety.insert(name, tool.safety());
         loaded.registry = loaded.registry.clone().register(tool);
     }
@@ -100,7 +102,7 @@ impl ApprovalMode {
         }
     }
 
-    /// Lowercase short labels used in sub-agent JSONL events.
+    /// Lowercase short labels used in JSONL events.
     pub fn mode_str(&self) -> &'static str {
         match self {
             Self::Safe => "safe",

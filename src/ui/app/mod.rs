@@ -8,10 +8,9 @@ use crate::config::{self, ProvidersConfig, UserConfig};
 use crate::llm::{ChatEvent, ChatMessage, LlmProvider, TokenStats, format_tokens, providers};
 use crate::session_db::SessionDb;
 
-
-use crate::tools::{ApprovalMode, ToolCall};
-use crate::tools::registry::ToolHandler;
 use crate::ext::ExtensionManager;
+use crate::tools::registry::ToolHandler;
+use crate::tools::{ApprovalMode, ToolCall};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use mlua::Value as LuaValue;
@@ -78,7 +77,7 @@ pub struct App {
     turn_pause_start: Option<Instant>,
     /// Active autocomplete state (shown when typing `/`).
     autocomplete: Option<AutocompleteState>,
-     /// Lua extension manager.
+    /// Lua extension manager.
     extensions: ExtensionManager,
     /// Lua keymap snapshot for custom bindings.
     lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
@@ -97,7 +96,14 @@ impl App {
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
         // Boot Lua extension system first so Lua tools can be registered.
-        let crate::ext::BootResult { manager: extensions, tools: lua_tools, commands: _, config_snapshot, theme_snapshot, keymap_snapshot } = crate::ext::boot(
+        let crate::ext::BootResult {
+            manager: extensions,
+            tools: lua_tools,
+            commands: _,
+            config_snapshot,
+            theme_snapshot,
+            keymap_snapshot,
+        } = crate::ext::boot(
             &crate::config::bone_dir(),
             &std::env::current_dir().unwrap_or_default(),
         );
@@ -138,7 +144,6 @@ impl App {
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
         )];
 
-
         Ok(Self {
             messages,
             transcript: Vec::new(),
@@ -171,7 +176,7 @@ impl App {
             turn_start: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
-               autocomplete: None,
+            autocomplete: None,
             extensions,
             lua_keymap: keymap_snapshot,
             shown_tool_rows: std::collections::HashSet::new(),
@@ -179,7 +184,8 @@ impl App {
     }
     /// Dispatch a `session_end` event to Lua handlers.
     pub fn dispatch_session_end(&self) {
-        self.extensions.dispatch_simple("session_end", serde_json::json!({}));
+        self.extensions
+            .dispatch_simple("session_end", serde_json::json!({}));
     }
 
     /// Initialize or open the session database.
@@ -295,10 +301,8 @@ impl App {
         };
         self.custom_configs
             .set_value("general", "approval_mode", mode.to_string());
-        self.extensions.dispatch_simple(
-            "mode_change",
-            serde_json::json!({ "mode": mode }),
-        );
+        self.extensions
+            .dispatch_simple("mode_change", serde_json::json!({ "mode": mode }));
     }
 
     fn apply_custom_configs_to_runtime(&mut self, custom: config::custom::CustomConfigs) {
@@ -306,7 +310,6 @@ impl App {
         self.approval_mode = self.user_config.approval_mode;
         self.custom_configs = custom;
     }
-
 
     pub async fn run(&mut self) -> io::Result<()> {
         let mut terminal = Renderer::init_terminal(MIN_ROWS)?;
@@ -999,12 +1002,7 @@ impl App {
         }
 
         // Protected built-ins always win.
-        if matches!(
-            cmd.as_str(),
-            "help"
-                | "quit"
-                | "exit"
-        ) {
+        if matches!(cmd.as_str(), "help" | "quit" | "exit") {
             // Fall through to commands::handle below.
         } else if self.extensions.is_available() {
             // Check Lua commands.
@@ -1177,7 +1175,9 @@ impl App {
                 LuaValue::Function(f) => f,
                 LuaValue::Table(t) => t.get("handler").ok()?,
                 _ => {
-                    eprintln!("bone-lua warn: command '{cmd}': handler is not a function or table; skipping");
+                    eprintln!(
+                        "bone-lua warn: command '{cmd}': handler is not a function or table; skipping"
+                    );
                     return Some(());
                 }
             };
@@ -1356,8 +1356,6 @@ impl App {
         let after = self.token_stats.context_length;
         (true, before.saturating_sub(after))
     }
-
-
 
     fn compacted_message(&self, prefix: &str, saved: u64) -> String {
         if saved > 0 {
@@ -1580,8 +1578,9 @@ impl App {
                 // Re-boot Lua to pick up new/changed Lua tools.
                 let config_dir = crate::config::bone_dir();
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let crate::ext::BootResult { tools: lua_tools, .. } =
-                    crate::ext::boot(&config_dir, &cwd);
+                let crate::ext::BootResult {
+                    tools: lua_tools, ..
+                } = crate::ext::boot(&config_dir, &cwd);
                 crate::tools::register_lua_tools(&mut loaded, lua_tools);
 
                 let all_names: Vec<String> = loaded
@@ -1694,7 +1693,7 @@ impl App {
 
         let mut tabs: Vec<String> = Vec::new();
         let mut namespaces: Vec<String> = Vec::new();
-        for ns in ["general", "__providers__", "subagent", "tools"] {
+        for ns in ["general", "__providers__", "tools"] {
             if ns == "__providers__" {
                 tabs.push("Providers".to_string());
                 namespaces.push(ns.to_string());
@@ -2004,156 +2003,15 @@ impl App {
     }
 
     /// Rebuild a merged pane page from all state entries for a given source.
-    /// Currently only handles the "subagents" source.
-    fn rebuild_merged_pane(&self, source: &str) -> Option<PanePage> {
-        let entries = self.tools.state_map.get_all(source)?;
-        if entries.is_empty() {
-            return None;
-        }
-
-        match source {
-            "subagents" => Some(rebuild_subagents_pane(entries)),
-            _ => None,
-        }
+    fn rebuild_merged_pane(&self, _source: &str) -> Option<PanePage> {
+        // No longer handles any sources.
+        None
     }
+
 }
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Rebuild the merged subagents pane from all agent state entries.
-fn rebuild_subagents_pane(entries: &std::collections::HashMap<String, String>) -> PanePage {
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
-
-    #[derive(serde::Deserialize)]
-    struct AgentState {
-        mode: String,
-        model: String,
-        title: String,
-        sent: u64,
-        received: u64,
-        done: bool,
-        started: f64,
-    }
-
-    let mut agents: Vec<(String, AgentState)> = Vec::new();
-    for (key, raw) in entries {
-        if let Ok(state) = serde_json::from_str::<AgentState>(raw) {
-            agents.push((key.clone(), state));
-        }
-    }
-    agents.sort_by(|a, b| {
-        a.1.started
-            .partial_cmp(&b.1.started)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let running = agents.iter().filter(|(_, a)| !a.done).count();
-    let title = if agents.is_empty() {
-        "Subagents".to_string()
-    } else {
-        format!("Subagents ({running})")
-    };
-
-    let visible = 8;
-
-    if agents.is_empty() {
-        return PanePage {
-            source: "subagents".to_string(),
-            title,
-            content: Vec::new(),
-            visible_rows: visible,
-            scroll: 0,
-        };
-    }
-
-    /// Format token counts. Mirrors the Python `fmt_tokens` in defaults/tools/subagent.yaml;
-    /// keep both in sync when changing the format.
-    fn fmt_tokens(sent: u64, received: u64) -> String {
-        let total = sent + received;
-        if total >= 1_000_000 {
-            format!("{:.1}M", total as f64 / 1_000_000.0)
-        } else if total >= 1000 {
-            format!("{:.1}k", total as f64 / 1000.0)
-        } else {
-            total.to_string()
-        }
-    }
-
-    let mode_width = agents
-        .iter()
-        .map(|(_, a)| a.mode.chars().count())
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let model_width = agents
-        .iter()
-        .map(|(_, a)| a.model.chars().count())
-        .max()
-        .unwrap_or(5)
-        .max(5);
-    let token_strs: Vec<String> = agents
-        .iter()
-        .map(|(_, a)| fmt_tokens(a.sent, a.received))
-        .collect();
-    let token_width = token_strs
-        .iter()
-        .map(|s| s.chars().count())
-        .max()
-        .unwrap_or(6)
-        .max(6);
-
-    // Header line
-    let header = format!(
-        "    {:<mode_w$}  {:<model_w$}  {:<token_w$}  TASK",
-        "MODE",
-        "MODEL",
-        "TOKENS",
-        mode_w = mode_width,
-        model_w = model_width,
-        token_w = token_width
-    );
-    let mut lines = vec![Line::from(header)];
-
-    for ((_, agent), tokens) in agents.iter().zip(token_strs.iter()) {
-        let status_char = if agent.done { "\u{2713}" } else { "\u{25cb}" };
-        let row = format!(
-            "  {} {:<mode_w$}  {:<model_w$}  {:<token_w$}  {}",
-            status_char,
-            agent.mode,
-            agent.model,
-            tokens,
-            agent.title,
-            mode_w = mode_width,
-            model_w = model_width,
-            token_w = token_width
-        );
-        if agent.done {
-            lines.push(Line::from(Span::styled(
-                row,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )));
-        } else {
-            lines.push(Line::from(row));
-        }
-    }
-
-    let scroll = if lines.len() > visible {
-        lines.len() - visible
-    } else {
-        0
-    };
-
-      PanePage {
-        source: "subagents".to_string(),
-        title,
-        content: lines,
-        visible_rows: visible,
-        scroll,
-    }
 }
 
 /// Match a Lua key string (e.g. "<C-p>", "<S-Tab>") against a KeyCode + modifiers.
@@ -2164,7 +2022,7 @@ fn key_matches(key_str: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
 
     if key_str.starts_with('<') && key_str.ends_with('>') {
         key_part = &key_str[1..key_str.len() - 1];
-         let parts: Vec<&str> = key_part.split('-').collect();
+        let parts: Vec<&str> = key_part.split('-').collect();
         for part in &parts {
             match *part {
                 "C" | "Ctrl" => expected_mods |= KeyModifiers::CONTROL,
@@ -2197,7 +2055,7 @@ fn key_matches(key_str: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
         "Down" => code == KeyCode::Down,
         "Left" => code == KeyCode::Left,
         "Right" => code == KeyCode::Right,
-         "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12" => {
+        "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12" => {
             if let Some(n) = key_part[1..].parse::<u8>().ok() {
                 code == KeyCode::F(n)
             } else {
@@ -2217,7 +2075,10 @@ fn key_matches(key_str: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
 
 /// Apply a Lua config snapshot to the Rust `UserConfig`.
 /// Lua values override YAML config values.
-fn apply_lua_config_snapshot(cfg: &mut crate::config::UserConfig, snapshot: &crate::ext::snapshots::LuaConfigSnapshot) {
+fn apply_lua_config_snapshot(
+    cfg: &mut crate::config::UserConfig,
+    snapshot: &crate::ext::snapshots::LuaConfigSnapshot,
+) {
     if let Some(ref approval_mode) = snapshot.approval_mode {
         cfg.approval_mode = match approval_mode.as_str() {
             "danger" => crate::tools::ApprovalMode::Danger,
@@ -2237,18 +2098,5 @@ fn apply_lua_config_snapshot(cfg: &mut crate::config::UserConfig, snapshot: &cra
         for (k, v) in &snapshot.status_show {
             cfg.status_show.insert(k.clone(), *v);
         }
-    }
-
-    if let Some(ref provider) = snapshot.subagent.provider {
-        cfg.subagent.provider = provider.clone();
-    }
-    if let Some(ref model) = snapshot.subagent.model {
-        cfg.subagent.model = model.clone();
-    }
-    if let Some(ref approval) = snapshot.subagent.approval {
-        cfg.subagent.approval = match approval.as_str() {
-            "danger" => crate::tools::ApprovalMode::Danger,
-            _ => crate::tools::ApprovalMode::Safe,
-        };
     }
 }

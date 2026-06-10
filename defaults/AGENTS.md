@@ -200,35 +200,6 @@ bone.register_tool({
 })
 ```
 
-### subagent (Lua)
-Spawn an independent AI agent via `bone run`. The subagent has its own conversation loop, tool access, and Lua extensions. Use for parallel tasks, code review, research, planning, or any isolated task.
-```lua
-bone.register_tool({
-    name = "subagent",
-    description = "Spawn an independent AI sub-agent...",
-    safety = "danger",
-    parameters = {
-        type = "object",
-        properties = {
-            task = { type = "string", description = "Task description for the subagent." },
-            strategy = { type = "string", description = 'Strategy: "code", "review", "search", "plan", or "custom". Default: "code".' },
-            approval = { type = "string", description = 'Approval mode: "read_only" or "danger". Default: "read_only".' },
-            model = { type = "string", description = "Override model (optional)." },
-        },
-        required = { "task" },
-        additionalProperties = false,
-    },
-})
-```
-Strategies:
-- `"code"` — focused coding task, returns result summary
-- `"review"` — code review, returns categorized findings (CRITICAL > WARNING > INFO > SUGGESTION)
-- `"search"` — research with web search, returns structured summary
-- `"plan"` — breaks down task into ordered actionable steps
-- `"custom"` — raw prompt, no system prompt added
-
-Max recursion depth: 3 levels (enforced by bone).
-
 ## Pre-Seeded Commands
 
 ### /review
@@ -409,11 +380,6 @@ bone.config = {
     approval_mode = "safe",               -- "safe" | "danger"
     auto_compact_tokens = 8000,           -- token threshold for auto-compact
     auto_compact_keep_messages = 12,      -- messages to keep after compact
-    subagent = {
-        provider = "openai",
-        model = "gpt-4o",
-        approval = "safe",
-    },
     status_show = {
         model = true, approval = true, tokens_curr = true,
         tokens_in = true, tokens_out = true, tokens_total = true,
@@ -490,7 +456,6 @@ Plugins do not auto-run. Repeated `load` is a no-op.
   AGENTS.md                    -- this reference file
   config/
     general.yaml               -- general settings (approval mode, status bar)
-    subagent.yaml              -- subagent settings (provider, model, approval)
     tools.yaml                 -- tool enable/disable toggles
   lua/
     tools/
@@ -498,7 +463,6 @@ Plugins do not auto-run. Repeated `load` is a no-op.
       ask_user.lua             -- seeded default
       task_list.lua            -- seeded default
       cron.lua                 -- seeded default
-      subagent.lua             -- seeded default
       my_custom_tool.lua       -- user-created
     commands/
       memory.lua               -- seeded default

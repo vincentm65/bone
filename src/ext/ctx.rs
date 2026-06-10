@@ -12,8 +12,14 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use crate::tools::shell::{ScriptRequest, run_script};
 use crate::tools::write_atomic::write_atomic;
 
+const RUNTIME_OP_KEY: &str = "__bone_runtime_op";
+
 /// Shared mutable state accessible via ctx.state.
 pub(crate) type SharedState = Arc<Mutex<HashMap<String, String>>>;
+
+pub(crate) fn runtime_op_key() -> &'static str {
+    RUNTIME_OP_KEY
+}
 
 /// Context for creating the ctx table. These values come from the Rust side.
 pub(crate) struct CtxConfig {
@@ -25,10 +31,7 @@ pub(crate) struct CtxConfig {
 }
 
 /// Create the `ctx` table for a single tool invocation.
-pub(crate) fn create_ctx_table(
-    lua: &Lua,
-    cfg: &CtxConfig,
-) -> Result<Table, mlua::Error> {
+pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let ctx = lua.create_table()?;
 
     ctx.set("cwd", cfg.cwd.as_str())?;
@@ -61,12 +64,7 @@ pub(crate) fn create_ctx_table(
                 let result = lua.create_table()?;
                 result.set("stdout", out.stdout)?;
                 result.set("stderr", out.stderr)?;
-                result.set(
-                    "exit_code",
-                    out.exit_code
-                        .map(|c| c as i64)
-                        .unwrap_or(-1),
-                )?;
+                result.set("exit_code", out.exit_code.map(|c| c as i64).unwrap_or(-1))?;
                 Ok(Value::Table(result))
             }
             Err(e) => Err(mlua::Error::external(e)),
@@ -187,9 +185,8 @@ pub(crate) fn create_ctx_table(
     let read_fn = lua.create_function(|_, path: String| {
         // block_in_place for async fs::read_to_string
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                tokio::fs::read_to_string(&path).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { tokio::fs::read_to_string(&path).await })
         });
         match result {
             Ok(content) => Ok(content),
@@ -199,34 +196,30 @@ pub(crate) fn create_ctx_table(
     ctx.set("read_file", read_fn)?;
 
     // ctx.write_file(path, content) → true or nil, error_string
-    let write_fn =
-        lua.create_function(|_, (path, content): (String, String)| {
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let path = Path::new(&path);
-                    // Reject if file exists — same policy as native write_file tool.
-                    if path.exists() {
-                        return Err(
-                            "file already exists; use edit_file for modifications"
-                                .to_string(),
-                        );
-                    }
-                    // Create parent directories.
-                    if let Some(parent) = path.parent()
-                        && !parent.as_os_str().is_empty()
-                    {
-                        tokio::fs::create_dir_all(parent)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    }
-                    write_atomic(path, &content, None).await
-                })
-            });
-            match result {
-                Ok(()) => Ok(true),
-                Err(e) => Err(mlua::Error::external(e)),
-            }
-        })?;
+    let write_fn = lua.create_function(|_, (path, content): (String, String)| {
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let path = Path::new(&path);
+                // Reject if file exists — same policy as native write_file tool.
+                if path.exists() {
+                    return Err("file already exists; use edit_file for modifications".to_string());
+                }
+                // Create parent directories.
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                write_atomic(path, &content, None).await
+            })
+        });
+        match result {
+            Ok(()) => Ok(true),
+            Err(e) => Err(mlua::Error::external(e)),
+        }
+    })?;
     ctx.set("write_file", write_fn)?;
 
     // ctx.ui.notify(message, level?) — show a notification in the UI
@@ -251,14 +244,18 @@ pub(crate) fn create_ctx_table(
     let state_get = lua.create_function({
         let state_ref = cfg.shared_state.clone();
         move |_, key: String| {
-            let map = state_ref.lock().map_err(|e| mlua::Error::external(e.to_string()))?;
+            let map = state_ref
+                .lock()
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
             Ok(map.get(&key).cloned())
         }
     })?;
     let state_set = lua.create_function({
         let state_ref = cfg.shared_state.clone();
         move |_, (key, value): (String, String)| {
-            let mut map = state_ref.lock().map_err(|e| mlua::Error::external(e.to_string()))?;
+            let mut map = state_ref
+                .lock()
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
             map.insert(key, value);
             Ok(true)
         }
@@ -266,7 +263,9 @@ pub(crate) fn create_ctx_table(
     let state_clear = lua.create_function({
         let state_ref = cfg.shared_state.clone();
         move |_, key: String| {
-            let mut map = state_ref.lock().map_err(|e| mlua::Error::external(e.to_string()))?;
+            let mut map = state_ref
+                .lock()
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
             map.remove(&key);
             Ok(true)
         }
@@ -300,29 +299,32 @@ pub(crate) fn create_ctx_table(
     // Only works when called from execute_output_live (sender is Some).
     if let Some(sender) = cfg.pane_sender.clone() {
         let sender_clone = sender.clone();
-        let emit_state_fn = lua.create_function(move |_, (source, sub_key, state): (String, String, String)| {
-            sender_clone
-                .send(crate::tools::types::ToolLiveEvent::StateUpdate {
-                    source,
-                    sub_key,
-                    state,
-                })
-                .map_err(|e| mlua::Error::external(format!("emit_state send failed: {e}")))?;
-            Ok(true)
-        })?;
+        let emit_state_fn = lua.create_function(
+            move |_, (source, sub_key, state): (String, String, String)| {
+                sender_clone
+                    .send(crate::tools::types::ToolLiveEvent::StateUpdate {
+                        source,
+                        sub_key,
+                        state,
+                    })
+                    .map_err(|e| mlua::Error::external(format!("emit_state send failed: {e}")))?;
+                Ok(true)
+            },
+        )?;
         ctx.set("emit_state", emit_state_fn)?;
 
-        let emit_state_remove_fn = lua.create_function(move |_, (source, sub_key): (String, String)| {
-            sender
-                .send(crate::tools::types::ToolLiveEvent::StateRemove {
-                    source,
-                    sub_key,
-                })
-                .map_err(|e| mlua::Error::external(format!("emit_state_remove send failed: {e}")))?;
-            Ok(true)
-        })?;
+        let emit_state_remove_fn =
+            lua.create_function(move |_, (source, sub_key): (String, String)| {
+                sender
+                    .send(crate::tools::types::ToolLiveEvent::StateRemove { source, sub_key })
+                    .map_err(|e| {
+                        mlua::Error::external(format!("emit_state_remove send failed: {e}"))
+                    })?;
+                Ok(true)
+            })?;
         ctx.set("emit_state_remove", emit_state_remove_fn)?;
     }
+
     Ok(ctx)
 }
 
@@ -346,10 +348,7 @@ fn pane_from_json(val: &serde_json::Value) -> Result<crate::ui::pane_page::PaneP
         .get("visible_rows")
         .and_then(|v| v.as_u64())
         .unwrap_or(8) as usize;
-    let scroll = pane
-        .get("scroll")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let scroll = pane.get("scroll").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     let lines: Vec<Line<'static>> = pane
         .get("lines")
@@ -386,9 +385,18 @@ fn pane_from_json(val: &serde_json::Value) -> Result<crate::ui::pane_page::PaneP
                                             for m in mods {
                                                 if let Some(s) = m.as_str() {
                                                     match s {
-                                                        "bold" => style = style.add_modifier(Modifier::BOLD),
-                                                        "dim" => style = style.add_modifier(Modifier::DIM),
-                                                        "italic" => style = style.add_modifier(Modifier::ITALIC),
+                                                        "bold" => {
+                                                            style =
+                                                                style.add_modifier(Modifier::BOLD)
+                                                        }
+                                                        "dim" => {
+                                                            style =
+                                                                style.add_modifier(Modifier::DIM)
+                                                        }
+                                                        "italic" => {
+                                                            style =
+                                                                style.add_modifier(Modifier::ITALIC)
+                                                        }
                                                         "strike" | "crossed_out" => {
                                                             style = style
                                                                 .add_modifier(Modifier::CROSSED_OUT)

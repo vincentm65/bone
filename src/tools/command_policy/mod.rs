@@ -270,13 +270,15 @@ fn classify_segment(command: &str) -> CommandSafety {
     CommandSafety::Danger
 }
 
-
 fn shell_segments(command: &str) -> Vec<String> {
-    crate::shell_split::shell_split(command, &crate::shell_split::ShellSplitOptions {
-        keep_separators: false,
-        split_newlines: true,
-        strip_comments: true,
-    })
+    crate::shell_split::shell_split(
+        command,
+        &crate::shell_split::ShellSplitOptions {
+            keep_separators: false,
+            split_newlines: true,
+            strip_comments: true,
+        },
+    )
 }
 fn command_name(token: &str) -> String {
     let name = token
@@ -328,7 +330,11 @@ fn load_command_policy() -> CommandPolicy {
     };
 
     // Merge edit + package_managers into danger (edit mode removed).
-    let danger = raw.edit.into_iter().chain(raw.package_managers.clone()).collect();
+    let danger = raw
+        .edit
+        .into_iter()
+        .chain(raw.package_managers.clone())
+        .collect();
 
     CommandPolicy {
         shell_wrappers: normalize_shell_wrappers(raw.shell_wrappers),

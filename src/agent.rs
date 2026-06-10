@@ -8,30 +8,16 @@ use crate::session_db::{SessionDb, db_path};
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalMode, load_tools};
 use futures_util::StreamExt;
+use std::path::PathBuf;
 
-/// Thin wrapper around the optional session DB that eliminates repetitive
-/// `if let Some((db, conv_id))` guards throughout the agent loop.
-struct SessionWriter<'a> {
-    inner: Option<(&'a SessionDb, i64)>,
+/// Thin wrapper around the optional session DB. It stores only Send data so
+/// headless agent futures can run concurrently on the async runtime.
+struct SessionWriter {
+    db_path: PathBuf,
+    conv_id: Option<i64>,
 }
 
-/// Execute a session DB operation if a session is active.
-macro_rules! session_op {
-    ($self:expr, $db:ident, $conv_id:ident, $body:expr) => {
-        if let Some(($db, $conv_id)) = $self.inner {
-            let $db: &SessionDb = $db;
-            $body
-        }
-    };
-}
-
-impl<'a> SessionWriter<'a> {
-    fn from_opt(opt: &'a Option<(SessionDb, i64)>) -> Self {
-        Self {
-            inner: opt.as_ref().map(|(db, id)| (db, *id)),
-        }
-    }
-
+impl SessionWriter {
     fn append_message(
         &mut self,
         role: &str,
@@ -41,13 +27,25 @@ impl<'a> SessionWriter<'a> {
         tool_calls: Option<&str>,
         seq: i64,
     ) {
-        session_op!(self, db, conv_id, {
-            if let Err(e) = db.append_message(
-                conv_id, role, content, tool_name, tool_call_id, tool_calls, seq,
-            ) {
-                eprintln!("bone: warning: session db append_message failed: {e}");
+        let Some(conv_id) = self.conv_id else {
+            return;
+        };
+        match SessionDb::open(&self.db_path) {
+            Ok(db) => {
+                if let Err(e) = db.append_message(
+                    conv_id,
+                    role,
+                    content,
+                    tool_name,
+                    tool_call_id,
+                    tool_calls,
+                    seq,
+                ) {
+                    eprintln!("bone: warning: session db append_message failed: {e}");
+                }
             }
-        });
+            Err(e) => eprintln!("bone: warning: session db append_message failed: {e}"),
+        }
     }
 
     fn record_usage(
@@ -60,26 +58,52 @@ impl<'a> SessionWriter<'a> {
         cost: Option<f64>,
         is_estimated: bool,
     ) {
-        session_op!(self, db, conv_id, {
-            if let Err(e) = db.record_usage(
-                conv_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, is_estimated,
-            ) {
-                eprintln!("bone: warning: session db record_usage{} failed: {e}", if is_estimated { " (estimated)" } else { "" });
+        let Some(conv_id) = self.conv_id else {
+            return;
+        };
+        match SessionDb::open(&self.db_path) {
+            Ok(db) => {
+                if let Err(e) = db.record_usage(
+                    conv_id,
+                    provider,
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    cost,
+                    is_estimated,
+                ) {
+                    eprintln!(
+                        "bone: warning: session db record_usage{} failed: {e}",
+                        if is_estimated { " (estimated)" } else { "" }
+                    );
+                }
             }
-        });
+            Err(e) => eprintln!(
+                "bone: warning: session db record_usage{} failed: {e}",
+                if is_estimated { " (estimated)" } else { "" }
+            ),
+        }
     }
 
     fn end(&self) {
-        session_op!(self, db, conv_id, {
-            if let Err(e) = db.end_conversation(conv_id) {
-                eprintln!("bone: warning: session db end_conversation failed: {e}");
+        let Some(conv_id) = self.conv_id else {
+            return;
+        };
+        match SessionDb::open(&self.db_path) {
+            Ok(db) => {
+                if let Err(e) = db.end_conversation(conv_id) {
+                    eprintln!("bone: warning: session db end_conversation failed: {e}");
+                }
             }
-        });
+            Err(e) => eprintln!("bone: warning: session db end_conversation failed: {e}"),
+        }
     }
 }
 
 // ── Public types ────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct AgentRequest {
     pub prompt: String,
     pub approval_mode: ApprovalMode,
@@ -87,6 +111,7 @@ pub struct AgentRequest {
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub events: bool,
+    pub event_sender: Option<tokio::sync::mpsc::UnboundedSender<AgentRunEvent>>,
 }
 
 pub struct AgentResponse {
@@ -94,6 +119,36 @@ pub struct AgentResponse {
 }
 
 // ── JSONL event helpers ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum AgentRunEvent {
+    Started {
+        approval: String,
+        task: String,
+        model: String,
+    },
+    Status {
+        message: String,
+    },
+    ToolCall {
+        name: String,
+        summary: String,
+    },
+    ToolResult {
+        name: String,
+        is_error: bool,
+    },
+    TokenUsage {
+        sent: u64,
+        received: u64,
+    },
+    Finished {
+        content: String,
+    },
+    Failed {
+        message: String,
+    },
+}
 
 enum AgentEvent<'a> {
     Started {
@@ -124,7 +179,46 @@ enum AgentEvent<'a> {
     },
 }
 
-fn emit_event(events: bool, event: &AgentEvent) {
+fn emit_event(
+    events: bool,
+    sender: Option<&tokio::sync::mpsc::UnboundedSender<AgentRunEvent>>,
+    event: &AgentEvent,
+) {
+    if let Some(sender) = sender {
+        let owned = match event {
+            AgentEvent::Started {
+                approval,
+                task,
+                model,
+            } => AgentRunEvent::Started {
+                approval: (*approval).to_string(),
+                task: (*task).to_string(),
+                model: (*model).to_string(),
+            },
+            AgentEvent::Status { message } => AgentRunEvent::Status {
+                message: (*message).to_string(),
+            },
+            AgentEvent::ToolCall { name, summary } => AgentRunEvent::ToolCall {
+                name: (*name).to_string(),
+                summary: (*summary).to_string(),
+            },
+            AgentEvent::ToolResult { name, is_error } => AgentRunEvent::ToolResult {
+                name: (*name).to_string(),
+                is_error: *is_error,
+            },
+            AgentEvent::TokenUsage { sent, received } => AgentRunEvent::TokenUsage {
+                sent: *sent,
+                received: *received,
+            },
+            AgentEvent::Finished { content } => AgentRunEvent::Finished {
+                content: (*content).to_string(),
+            },
+            AgentEvent::Failed { message } => AgentRunEvent::Failed {
+                message: (*message).to_string(),
+            },
+        };
+        let _ = sender.send(owned);
+    }
     if !events {
         return;
     }
@@ -177,57 +271,44 @@ fn emit_event(events: bool, event: &AgentEvent) {
     println!("{json}");
 }
 
-// ── Recursion guard ─────────────────────────────────────────────────────────
-
-const MAX_AGENT_DEPTH: u32 = 3;
-/// Truncate a string to at most `max` bytes, respecting char boundaries.
-fn truncate_str(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        let mut i = max;
-        while i > 0 && !s.is_char_boundary(i) {
-            i -= 1;
-        }
-        &s[..i]
-    }
-}
+// ── Headless agent loop ─────────────────────────────────────────────────────
 
 fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     if value.is_empty() { None } else { Some(value) }
 }
 
-fn check_depth() -> Result<u32, String> {
-    let depth: u32 = std::env::var("BONE_AGENT_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    if depth >= MAX_AGENT_DEPTH {
-        return Err(format!(
-            "sub-agent recursion depth {depth} >= {MAX_AGENT_DEPTH}; refusing to launch"
-        ));
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
     }
-    Ok(depth + 1)
 }
 
-// ── Headless agent loop ─────────────────────────────────────────────────────
+/// Result of the synchronous setup phase for `run_agent`.
+struct AgentSetup {
+    llm: Box<dyn crate::llm::provider::LlmProvider>,
+    extensions: crate::ext::ExtensionManager,
+    tools: ToolHandler,
+    history: Vec<ChatMessage>,
+    session: SessionWriter,
+    token_stats: TokenStats,
+    transcript: Vec<ChatMessage>,
+}
 
-pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
-    let new_depth = check_depth()?;
-
-    // Load config
+/// Perform the synchronous setup for a headless agent (config loading,
+/// provider creation, Lua boot, tool registry). Designed to run on the
+/// blocking thread pool so concurrent headless agents don't starve the tokio
+/// runtime.
+fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     let custom = CustomConfigs::load();
-    let user_config = UserConfig::from_custom_configs(&custom);
+    let _user_config = UserConfig::from_custom_configs(&custom);
     let mut providers_config = load_providers();
-
-    let config_provider = non_empty(user_config.subagent.provider.as_str());
-    let config_model = non_empty(user_config.subagent.model.as_str());
 
     let provider_id = request
         .provider
         .clone()
-        .or_else(|| config_provider.map(str::to_string))
         .or_else(|| non_empty(providers_config.last_provider.as_str()).map(str::to_string))
         .ok_or_else(|| "no provider configured".to_string())?;
 
@@ -238,7 +319,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     }
 
     // Apply model override session-only (never persisted).
-    let selected_model = request.model.as_deref().or(config_model);
+    let selected_model = request.model.as_deref();
     if let Some(model) = selected_model {
         let entry = providers_config
             .providers
@@ -250,17 +331,21 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
     let llm =
         create_provider_with_config(&provider_id, &providers_config).map_err(|e| e.to_string())?;
-    llm.validate()
-        .await
-        .map_err(|e| format!("provider validation failed: {e}"))?;
 
     // Boot Lua extension system first so Lua tools can be registered.
-   let crate::ext::BootResult { manager: extensions, tools: lua_tools, commands: _, config_snapshot: _, theme_snapshot: _, keymap_snapshot: _ } = crate::ext::boot(        &crate::config::bone_dir(),
+    let crate::ext::BootResult {
+        manager: extensions,
+        tools: lua_tools,
+        commands: _,
+        config_snapshot: _,
+        theme_snapshot: _,
+        keymap_snapshot: _,
+    } = crate::ext::boot(
+        &crate::config::bone_dir(),
         &std::env::current_dir().unwrap_or_default(),
     );
 
     let mut loaded = load_tools();
-    // Register Lua tools into the tool registry.
     crate::tools::register_lua_tools(&mut loaded, lua_tools);
     let all_tool_names: Vec<String> = loaded
         .registry
@@ -276,54 +361,75 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     } else {
         enabled
     };
-    let mut tools = ToolHandler::with_enabled_safety_and_display(
+    let tools = ToolHandler::with_enabled_safety_and_display(
         loaded.registry,
         &enabled,
         loaded.dynamic_display,
         loaded.dynamic_safety,
     );
 
-
-    let approval_label = request.approval_mode.mode_str();
-
-    // Set recursion depth for child processes.
-    // SAFETY: no other tasks have been spawned yet; this is single-threaded code.
-    unsafe {
-        std::env::set_var("BONE_AGENT_DEPTH", new_depth.to_string());
-    }
-
-    // Build initial history
-    let mut transcript: Vec<ChatMessage> = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
+    let transcript = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
     extensions.dispatch_simple(
         "message",
         serde_json::json!({ "role": "user", "content": &request.prompt }),
     );
-    let mut history = build_chat_history(&transcript, request.system_prompt.as_deref());
-    let mut token_stats = TokenStats::new();
+    let history = build_chat_history(&transcript, request.system_prompt.as_deref());
+
+    let session = open_headless_session(llm.id(), llm.model());
+
+    Ok(AgentSetup {
+        llm,
+        extensions,
+        tools,
+        history,
+        session,
+        token_stats: TokenStats::new(),
+        transcript,
+    })
+}
+
+pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
+    // Run synchronous setup on the blocking thread pool so concurrent
+    // headless agents don't starve tokio worker threads during config loading,
+    // Lua VM creation, and tool registration.
+    let request_clone = request.clone();
+    let setup = tokio::task::spawn_blocking(move || agent_setup(&request_clone))
+        .await
+        .map_err(|e| format!("agent setup panicked: {e}"))??;
+
+    let AgentSetup {
+        llm,
+        extensions,
+        mut tools,
+        mut history,
+        mut session,
+        mut token_stats,
+        mut transcript,
+    } = setup;
+
     let tool_defs = tools.definitions();
     let tool_defs_json_chars = serde_json::to_string(&tool_defs)
         .map(|j| j.chars().count())
         .unwrap_or(0);
-    let session_db = open_headless_session_db(llm.id(), llm.model());
-    let mut session = SessionWriter::from_opt(&session_db);
+
+    let approval_label = request.approval_mode.mode_str();
+
     let mut session_seq = 0i64;
     session.append_message("user", &request.prompt, None, None, None, session_seq);
-    let events = request.events;
-    let emit = |event: &AgentEvent| emit_event(events, event);
 
-    emit(
-        &AgentEvent::Started {
-            approval: approval_label,
-            task: &request.prompt,
-            model: llm.model(),
-        },
-    );
+    let events = request.events;
+    let event_sender = request.event_sender.clone();
+    let emit = |event: &AgentEvent| emit_event(events, event_sender.as_ref(), event);
+
+    emit(&AgentEvent::Started {
+        approval: approval_label,
+        task: &request.prompt,
+        model: llm.model(),
+    });
     extensions.dispatch_simple("session_start", serde_json::json!({}));
-    emit(
-        &AgentEvent::Status {
-            message: "thinking",
-        },
-    );
+    emit(&AgentEvent::Status {
+        message: "thinking",
+    });
 
     let mut consecutive_errors = 0u32;
     let final_content = loop {
@@ -336,19 +442,15 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                     break;
                 }
                 Err(e) if attempt < 3 => {
-                    emit(
-                        &AgentEvent::Status {
-                            message: &format!("retry {attempt}/3: {e}"),
-                        },
-                    );
+                    emit(&AgentEvent::Status {
+                        message: &format!("retry {attempt}/3: {e}"),
+                    });
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
                 Err(e) => {
-                    emit(
-                        &AgentEvent::Failed {
-                            message: &e.to_string(),
-                        },
-                    );
+                    emit(&AgentEvent::Failed {
+                        message: &e.to_string(),
+                    });
                     session.end();
                     return Err(format!("provider error after 3 attempts: {e}"));
                 }
@@ -370,12 +472,10 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Ok(ChatEvent::ReasoningDelta(_)) => {}
                 Ok(ChatEvent::ToolCall(call)) => {
                     let summary = format!("{}: {}", call.name, summarize_call_args(&call));
-                    emit(
-                        &AgentEvent::ToolCall {
-                            name: &call.name,
-                            summary: &summary,
-                        },
-                    );
+                    emit(&AgentEvent::ToolCall {
+                        name: &call.name,
+                        summary: &summary,
+                    });
                     tool_calls.push(call);
                 }
                 Ok(ChatEvent::TokenUsage {
@@ -400,19 +500,15 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                         cost,
                         false,
                     );
-                    emit(
-                        &AgentEvent::TokenUsage {
-                            sent: token_stats.sent,
-                            received: token_stats.received,
-                        },
-                    );
+                    emit(&AgentEvent::TokenUsage {
+                        sent: token_stats.sent,
+                        received: token_stats.received,
+                    });
                 }
                 Err(e) => {
-                    emit(
-                        &AgentEvent::Status {
-                            message: &format!("stream error, will retry: {e}"),
-                        },
-                    );
+                    emit(&AgentEvent::Status {
+                        message: &format!("stream error, will retry: {e}"),
+                    });
                     stream_error = true;
                     break;
                 }
@@ -429,23 +525,27 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             let prompt_tokens = estimate_tokens(prompt_chars);
             let completion_tokens = estimate_tokens(completion_chars);
             token_stats.record_estimate(prompt_chars, completion_chars);
-            session.record_usage(llm.id(), llm.model(), prompt_tokens, completion_tokens, None, None, true);
-            emit(
-                &AgentEvent::TokenUsage {
-                    sent: token_stats.sent,
-                    received: token_stats.received,
-                },
+            session.record_usage(
+                llm.id(),
+                llm.model(),
+                prompt_tokens,
+                completion_tokens,
+                None,
+                None,
+                true,
             );
+            emit(&AgentEvent::TokenUsage {
+                sent: token_stats.sent,
+                received: token_stats.received,
+            });
         }
 
         if stream_error {
             consecutive_errors += 1;
             if consecutive_errors >= 5 {
-                emit(
-                    &AgentEvent::Failed {
-                        message: "too many stream errors",
-                    },
-                );
+                emit(&AgentEvent::Failed {
+                    message: "too many stream errors",
+                });
                 session.end();
                 return Err("aborted after 5 consecutive stream errors".to_string());
             }
@@ -478,14 +578,13 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         // Execute tool calls
         for call in &tool_calls {
-            emit(
-                &AgentEvent::Status {
-                    message: &format!("running {}: {}", call.name, summarize_call_args(call)),
-                },
-            );
+            emit(&AgentEvent::Status {
+                message: &format!("running {}: {}", call.name, summarize_call_args(call)),
+            });
         }
 
-        let results = execute_tool_calls(&tools, request.approval_mode, tool_calls, &extensions).await;
+        let results =
+            execute_tool_calls(&tools, request.approval_mode, tool_calls, &extensions).await;
 
         // Store session state (e.g. task_list state) into tool handler so
         // stateful tools persist across rounds in headless mode.
@@ -506,12 +605,10 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         }
 
         for result in &results {
-            emit(
-                &AgentEvent::ToolResult {
-                    name: &result.name,
-                    is_error: result.is_error,
-                },
-            );
+            emit(&AgentEvent::ToolResult {
+                name: &result.name,
+                is_error: result.is_error,
+            });
             session_seq += 1;
             session.append_message(
                 "tool",
@@ -527,11 +624,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         }
     };
 
-    emit(
-        &AgentEvent::Finished {
-            content: &final_content,
-        },
-    );
+    emit(&AgentEvent::Finished {
+        content: &final_content,
+    });
     session.end();
     extensions.dispatch_simple("session_end", serde_json::json!({}));
 
@@ -564,10 +659,15 @@ fn estimate_context_chars(history: &[ChatMessage], tool_defs_json_chars: usize) 
     message_chars + tool_defs_json_chars
 }
 
-fn open_headless_session_db(provider: &str, model: &str) -> Option<(SessionDb, i64)> {
-    let db = SessionDb::open(&db_path()).ok()?;
-    let conv_id = db.create_conversation(provider, model).ok()?;
-    Some((db, conv_id))
+fn open_headless_session(provider: &str, model: &str) -> SessionWriter {
+    let path = db_path();
+    let conv_id = SessionDb::open(&path)
+        .ok()
+        .and_then(|db| db.create_conversation(provider, model).ok());
+    SessionWriter {
+        db_path: path,
+        conv_id,
+    }
 }
 
 /// Execute tool calls respecting the approval mode.
@@ -590,21 +690,19 @@ async fn execute_tool_calls(
             crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
             crate::tools::command_policy::CommandSafety::Danger => "danger",
         };
-        match extensions.dispatch_tool_call(
-            &call.name,
-            &call.id,
-            &call.arguments,
-            safety_str,
-        ) {
+        match extensions.dispatch_tool_call(&call.name, &call.id, &call.arguments, safety_str) {
             crate::ext::event::EventDispatchResult::Blocked { reason } => {
-                out.push((i, crate::tools::ToolResult {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    content: reason,
-                    is_error: true,
-                    pane_page: None,
-                    state: None,
-                }));
+                out.push((
+                    i,
+                    crate::tools::ToolResult {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        content: reason,
+                        is_error: true,
+                        pane_page: None,
+                        state: None,
+                    },
+                ));
                 continue;
             }
             crate::ext::event::EventDispatchResult::Continue => {}
@@ -633,11 +731,7 @@ async fn execute_tool_calls(
             approved.iter().map(|(_, c)| c.clone()).collect();
         let results = tools.execute_all(approved_calls).await;
         for ((orig_idx, _call), result) in approved.into_iter().zip(results) {
-            extensions.dispatch_tool_result(
-                &result.name,
-                &result.call_id,
-                result.is_error,
-            );
+            extensions.dispatch_tool_result(&result.name, &result.call_id, result.is_error);
             out.push((orig_idx, result));
         }
     }
@@ -744,5 +838,6 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
         model,
         system_prompt,
         events,
+        event_sender: None,
     })
 }

@@ -1,14 +1,16 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-};
+use std::{env, fs, path::PathBuf};
 
 fn generate_default_lua_tools(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
     let dir = manifest_dir.join("defaults/lua/tools");
     println!("cargo:rerun-if-changed={}", dir.display());
 
     let entries = fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("failed to read default lua tools dir {}: {e}", dir.display()))
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to read default lua tools dir {}: {e}",
+                dir.display()
+            )
+        })
         .map(|entry| {
             entry
                 .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", dir.display()))
@@ -19,8 +21,7 @@ fn generate_default_lua_tools(manifest_dir: &std::path::Path, out_dir: &std::pat
     let mut entries = entries;
     entries.sort();
 
-    let mut generated =
-        String::from("pub const DEFAULT_LUA_TOOLS: &[(&str, &str)] = &[\n");
+    let mut generated = String::from("pub const DEFAULT_LUA_TOOLS: &[(&str, &str)] = &[\n");
     for path in entries {
         let file_name = path.file_name().unwrap().to_string_lossy();
         generated.push_str(&format!(
@@ -38,7 +39,12 @@ fn generate_default_lua_commands(manifest_dir: &std::path::Path, out_dir: &std::
     println!("cargo:rerun-if-changed={}", dir.display());
 
     let entries = fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("failed to read default lua commands dir {}: {e}", dir.display()))
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to read default lua commands dir {}: {e}",
+                dir.display()
+            )
+        })
         .map(|entry| {
             entry
                 .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", dir.display()))

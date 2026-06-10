@@ -21,7 +21,12 @@ pub struct PaneDraw<'a> {
     pub pane_toggle_hint: Option<&'a str>,
     pub autocomplete: Option<&'a AutocompleteState>,
 }
-fn build_tab_bar(items: &[String], active_idx: usize, separator: &str, suffix: Option<&str>) -> Line<'static> {
+fn build_tab_bar(
+    items: &[String],
+    active_idx: usize,
+    separator: &str,
+    suffix: Option<&str>,
+) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, label) in items.iter().enumerate() {
         if i > 0 {
@@ -33,7 +38,9 @@ fn build_tab_bar(items: &[String], active_idx: usize, separator: &str, suffix: O
         spans.push(Span::styled(
             label.clone(),
             if i == active_idx {
-                Style::default().fg(ratatui::style::Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(ratatui::style::Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(ratatui::style::Color::DarkGray)
             },
@@ -672,8 +679,10 @@ impl super::Renderer {
                     // Tab indicator
                     let tab_y = bot_sep_y + 1;
                     if tab_y < status_row {
-                        let page_titles: Vec<String> = pages.iter().map(|p| p.title.clone()).collect();
-                        let tab_bar = build_tab_bar(&page_titles, page_idx, "|", Some("Tab to switch"));
+                        let page_titles: Vec<String> =
+                            pages.iter().map(|p| p.title.clone()).collect();
+                        let tab_bar =
+                            build_tab_bar(&page_titles, page_idx, "|", Some("Tab to switch"));
                         frame.render_widget(
                             Paragraph::new(tab_bar),
                             Rect {
@@ -736,16 +745,38 @@ impl super::Renderer {
             let mut metric_parts: Vec<Span> = vec![];
             let s = Style::default().fg(self.theme.status_text);
             if status_info.show("status_show_tokens_curr") {
-                push_metric(&mut metric_parts, s, &format!("curr {}", format_tokens(status_info.token_stats.context_length)));
+                push_metric(
+                    &mut metric_parts,
+                    s,
+                    &format!(
+                        "curr {}",
+                        format_tokens(status_info.token_stats.context_length)
+                    ),
+                );
             }
             if status_info.show("status_show_tokens_in") {
-                push_metric(&mut metric_parts, s, &format!("in {}", format_tokens(status_info.token_stats.sent)));
+                push_metric(
+                    &mut metric_parts,
+                    s,
+                    &format!("in {}", format_tokens(status_info.token_stats.sent)),
+                );
             }
             if status_info.show("status_show_tokens_out") {
-                push_metric(&mut metric_parts, s, &format!("out {}", format_tokens(received)));
+                push_metric(
+                    &mut metric_parts,
+                    s,
+                    &format!("out {}", format_tokens(received)),
+                );
             }
             if status_info.show("status_show_tokens_total") {
-                push_metric(&mut metric_parts, s, &format!("total {}", format_tokens(status_info.token_stats.sent + received)));
+                push_metric(
+                    &mut metric_parts,
+                    s,
+                    &format!(
+                        "total {}",
+                        format_tokens(status_info.token_stats.sent + received)
+                    ),
+                );
             }
             status_spans.extend(metric_parts);
             if status_info.show("status_show_tps")

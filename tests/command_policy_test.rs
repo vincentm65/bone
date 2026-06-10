@@ -191,7 +191,10 @@ fn policy_edit_package_managers() {
         classify_command("pip install requests"),
         CommandSafety::Danger
     );
-    assert_eq!(classify_command("npm install express"), CommandSafety::Danger);
+    assert_eq!(
+        classify_command("npm install express"),
+        CommandSafety::Danger
+    );
     assert_eq!(
         classify_command("cargo install ripgrep"),
         CommandSafety::Danger
