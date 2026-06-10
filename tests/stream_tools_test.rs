@@ -114,7 +114,7 @@ async fn tool_handler_execute_all_returns_results_in_order() {
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("tool_a", "c1"), make_call("tool_b", "c2")];
 
-    let results = handler.execute_all(calls).await;
+    let results = handler.execute_all(calls, 0).await;
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].content, "result_a");
     assert!(!results[0].is_error);
@@ -132,7 +132,7 @@ async fn tool_handler_execute_all_reports_errors() {
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("failing", "c1")];
 
-    let results = handler.execute_all(calls).await;
+    let results = handler.execute_all(calls, 0).await;
     assert!(results[0].is_error);
     assert_eq!(results[0].content, "something broke");
 }
@@ -143,7 +143,7 @@ async fn tool_handler_execute_all_unknown_tool() {
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("nonexistent", "c1")];
 
-    let results = handler.execute_all(calls).await;
+    let results = handler.execute_all(calls, 0).await;
     assert!(results[0].is_error);
     assert_eq!(results[0].content, "Tool disabled in /tools settings");
 }
@@ -159,7 +159,7 @@ async fn tool_handler_execute_all_disabled_tool() {
         ToolHandler::with_enabled_safety_and_display(registry, &[], HashMap::new(), HashMap::new());
     let calls = vec![make_call("disabled_tool", "c1")];
 
-    let results = handler.execute_all(calls).await;
+    let results = handler.execute_all(calls, 0).await;
     assert!(results[0].is_error);
     assert!(results[0].content.contains("disabled"));
 }
@@ -182,7 +182,7 @@ async fn tool_handler_execute_all_runs_in_parallel() {
     let calls = vec![make_call("slow_a", "c1"), make_call("slow_b", "c2")];
 
     let start = std::time::Instant::now();
-    let results = handler.execute_all(calls).await;
+    let results = handler.execute_all(calls, 0).await;
     let elapsed = start.elapsed();
 
     assert_eq!(results.len(), 2);
@@ -202,7 +202,7 @@ async fn tool_handler_execute_live_receives_pane_events() {
     let calls = vec![make_call("pane_tool", "c1")];
 
     let (tx, _rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
-    let results = handler.execute_all_live(calls, Some(tx)).await;
+    let results = handler.execute_all_live(calls, Some(tx), 0, 0).await;
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].content, "pane result");
@@ -221,7 +221,7 @@ async fn tool_handler_execute_live_no_events_channel() {
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("simple", "c1")];
 
-    let results = handler.execute_all_live(calls, None).await;
+    let results = handler.execute_all_live(calls, None, 0, 0).await;
     assert_eq!(results[0].content, "ok");
     assert!(!results[0].is_error);
 }

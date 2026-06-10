@@ -1,5 +1,6 @@
 use bone::chat::Message;
 use bone::llm::ChatRole;
+use bone::ui::commands::is_protected_builtin;
 
 // ── Message Construction ─────────────────────────────────────────────────────
 
@@ -44,6 +45,19 @@ fn tool_message_error_flag_is_preserved() {
     assert!(!ok_msg.tool.unwrap().is_error);
 }
 
+#[test]
+fn documented_builtins_are_protected_from_lua_overrides() {
+    for cmd in [
+        "help", "quit", "exit", "new", "clear", "compact", "model", "provider", "config", "tools",
+        "edit", "e", "context", "recall", "stats", "usage",
+    ] {
+        assert!(is_protected_builtin(cmd), "/{cmd} should be protected");
+    }
+
+    assert!(!is_protected_builtin("memory"));
+    assert!(!is_protected_builtin("review"));
+}
+
 // ── Tool Handler (concurrency ordering) ─────────────────────────────────────
 
 #[tokio::test]
@@ -84,18 +98,21 @@ async fn execute_all_returns_results_in_request_order_after_concurrent_execution
     }));
 
     let results = handler
-        .execute_all(vec![
-            ToolCall {
-                id: "slow".into(),
-                name: "record".into(),
-                arguments: json!({ "value": "first", "delay_ms": 20 }),
-            },
-            ToolCall {
-                id: "fast".into(),
-                name: "record".into(),
-                arguments: json!({ "value": "second", "delay_ms": 0 }),
-            },
-        ])
+        .execute_all(
+            vec![
+                ToolCall {
+                    id: "slow".into(),
+                    name: "record".into(),
+                    arguments: json!({ "value": "first", "delay_ms": 20 }),
+                },
+                ToolCall {
+                    id: "fast".into(),
+                    name: "record".into(),
+                    arguments: json!({ "value": "second", "delay_ms": 0 }),
+                },
+            ],
+            0,
+        )
         .await;
 
     assert_eq!(*order.lock().unwrap(), vec!["second", "first"]);
@@ -124,11 +141,14 @@ async fn disabled_tools_are_not_advertised_or_executed() {
     assert_eq!(definitions[0].name, "read_file");
 
     let results = handler
-        .execute_all(vec![ToolCall {
-            id: "disabled".into(),
-            name: "shell".into(),
-            arguments: json!({ "command": "pwd" }),
-        }])
+        .execute_all(
+            vec![ToolCall {
+                id: "disabled".into(),
+                name: "shell".into(),
+                arguments: json!({ "command": "pwd" }),
+            }],
+            0,
+        )
         .await;
     assert!(results[0].is_error);
     assert!(results[0].content.contains("disabled"));

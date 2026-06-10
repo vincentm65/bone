@@ -13,6 +13,26 @@ pub fn db_path() -> std::path::PathBuf {
 }
 
 /// A search hit from FTS5 query.
+/// Summary of a conversation for listing.
+#[derive(Clone, Debug)]
+pub(crate) struct ConversationSummary {
+    pub id: i64,
+    pub provider: String,
+    pub model: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+/// A stored message for retrieval.
+#[derive(Clone, Debug)]
+pub(crate) struct StoredMessage {
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub tool_name: Option<String>,
+    pub tool_call_id: Option<String>,
+}
+
 pub struct SearchHit {
     pub message_id: i64,
     pub conversation_id: i64,
@@ -637,6 +657,49 @@ impl SessionDb {
     }
 
     /// Full-text search across all conversations.
+    /// List recent conversations, most recent first.
+    pub(crate) fn list_conversations(&self, limit: usize) -> rusqlite::Result<Vec<ConversationSummary>> {
+        let limit = limit.clamp(1, 100);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider, model, started_at, ended_at \
+             FROM conversations ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(ConversationSummary {
+                id: row.get(0)?,
+                provider: row.get(1)?,
+                model: row.get(2)?,
+                started_at: row.get(3)?,
+                ended_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// List messages for a conversation, ordered by seq ascending.
+    pub(crate) fn list_messages(
+        &self,
+        conversation_id: i64,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<StoredMessage>> {
+        let limit = limit.clamp(1, 1000);
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, role, content, tool_name, tool_call_id \
+             FROM messages WHERE conversation_id = ?1 \
+             ORDER BY seq ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, limit as i64], |row| {
+            Ok(StoredMessage {
+                seq: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                tool_name: row.get(3)?,
+                tool_call_id: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     ///
     /// Uses the raw query with FTS5's implicit OR between terms (`hello world` ->
     /// match "hello" OR "world"). If FTS5 rejects the query as a syntax error

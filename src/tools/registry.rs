@@ -38,6 +38,10 @@ impl ToolRegistry {
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
         session_state: Option<String>,
         owner: String,
+        cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        agent_depth: usize,
+        tool_call_depth: usize,
+        tool_handler: Option<ToolHandler>,
     ) -> ToolResult {
         let name = call.name.clone();
         let call_id = call.id.clone();
@@ -50,6 +54,10 @@ impl ToolRegistry {
                         call_id: call_id.clone(),
                         session_state,
                         owner,
+                        cancelled,
+                        agent_depth,
+                        tool_call_depth,
+                        tool_handler,
                     },
                 )
                 .await
@@ -97,6 +105,8 @@ pub struct ToolHandler {
     pub state_map: ToolStateMap,
     pub owner: String,
     dynamic_safety: HashMap<String, CommandSafety>,
+    /// Cancellation token set by TUI when user cancels streaming.
+    pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ToolHandler {
@@ -131,6 +141,7 @@ impl ToolHandler {
             state_map: ToolStateMap::default(),
             owner: String::new(),
             dynamic_safety: HashMap::new(),
+            cancel_token: None,
         }
     }
 
@@ -147,6 +158,7 @@ impl ToolHandler {
             dynamic_safety,
             state_map: ToolStateMap::default(),
             owner: String::new(),
+            cancel_token: None,
         }
     }
 
@@ -193,30 +205,53 @@ impl ToolHandler {
 
     /// Execute all tool calls. Independent calls run concurrently; calls for
     /// host-stateful tools run in-order so each call sees the prior result.
-    pub async fn execute_all(&self, calls: Vec<ToolCall>) -> Vec<ToolResult> {
-        self.execute_all_live(calls, None).await
+    pub async fn execute_all(&self, calls: Vec<ToolCall>, agent_depth: usize) -> Vec<ToolResult> {
+        self.execute_all_live(calls, None, agent_depth, 0).await
     }
 
     pub async fn execute_all_live(
         &self,
         calls: Vec<ToolCall>,
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        agent_depth: usize,
+        tool_call_depth: usize,
     ) -> Vec<ToolResult> {
+        // Bail out early if cancellation was requested.
+        if self
+            .cancel_token
+            .as_ref()
+            .is_some_and(|t| t.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return calls
+                .into_iter()
+                .map(|call| ToolResult {
+                    call_id: call.id,
+                    name: call.name,
+                    content: "cancelled by user".to_string(),
+                    is_error: true,
+                    pane_page: None,
+                    state: None,
+                })
+                .collect();
+        }
+
         if calls
             .iter()
             .filter(|call| Self::is_host_stateful_name(&call.name))
             .count()
             > 1
         {
-            return self.execute_all_serial(calls, events).await;
+            return self.execute_all_serial(calls, events, agent_depth, tool_call_depth).await;
         }
 
         join_all(calls.into_iter().map(|call| {
             let events = events.clone();
             let session_state = self.session_state_for_call(&call);
             let owner = self.owner.clone();
+            let agent_depth = agent_depth;
+            let tool_call_depth = tool_call_depth;
             async move {
-                self.execute_one_live(call, events, session_state, owner)
+                self.execute_one_live(call, events, session_state, owner, agent_depth, tool_call_depth)
                     .await
             }
         }))
@@ -227,6 +262,8 @@ impl ToolHandler {
         &self,
         calls: Vec<ToolCall>,
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        agent_depth: usize,
+        tool_call_depth: usize,
     ) -> Vec<ToolResult> {
         let mut results = Vec::with_capacity(calls.len());
         let mut state_overrides: HashMap<String, Option<String>> = HashMap::new();
@@ -245,6 +282,8 @@ impl ToolHandler {
                     events.clone(),
                     session_state,
                     self.owner.clone(),
+                    agent_depth,
+                    tool_call_depth,
                 )
                 .await;
             if let Some(key) = Self::host_state_key_for_name(&result.name) {
@@ -266,10 +305,12 @@ impl ToolHandler {
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
         session_state: Option<String>,
         owner: String,
+        agent_depth: usize,
+        tool_call_depth: usize,
     ) -> ToolResult {
         if self.is_enabled(&call.name) {
             self.registry
-                .execute_live(call, events, session_state, owner)
+                .execute_live(call, events, session_state, owner, self.cancel_token.clone(), agent_depth, tool_call_depth, Some(self.clone()))
                 .await
         } else {
             ToolResult {
@@ -286,5 +327,14 @@ impl ToolHandler {
     fn session_state_for_call(&self, call: &ToolCall) -> Option<String> {
         Self::host_state_key_for_name(&call.name)
             .and_then(|key| self.state_map.get(key, "default").map(String::from))
+    }
+}
+
+impl std::fmt::Debug for ToolHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolHandler")
+            .field("enabled", &self.enabled)
+            .field("owner", &self.owner)
+            .finish()
     }
 }

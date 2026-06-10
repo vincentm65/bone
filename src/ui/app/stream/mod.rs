@@ -61,6 +61,10 @@ pub fn call_row_shown_during_prepare(call: &ToolCall) -> bool {
     call.name == "edit_file"
 }
 
+pub fn show_immediate_tool_row(call: &ToolCall) -> bool {
+    !matches!(call.name.as_str(), "read_file" | "edit_file")
+}
+
 pub enum StreamFailure {
     Provider(LlmError),
     InitialTimeout,
@@ -636,6 +640,9 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         for call in approved {
+            if !show_immediate_tool_row(call) {
+                continue;
+            }
             let display = self.tools.display_for_call(call);
             let visible = display.and_then(|d| d.show).unwrap_or(true);
             if visible {
@@ -668,11 +675,15 @@ impl App {
         }
 
         let cancel_calls = approved.clone();
+        // Create a cancellation token for this batch of tool calls.
+        let cancel_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.tools.cancel_token = Some(cancel_token.clone());
         let tools = self.tools.clone();
         self.wait_for_tool_future_live(
-            |events| async move { tools.execute_all_live(approved, Some(events)).await },
+            |events| async move { tools.execute_all_live(approved, Some(events), 0, 0).await },
             &cancel_calls,
             term,
+            cancel_token,
         )
         .await
     }
@@ -741,6 +752,7 @@ impl App {
         make_future: F,
         cancel_calls: &[ToolCall],
         term: &mut BoneTerminal,
+        cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> io::Result<Vec<ToolResult>>
     where
         F: FnOnce(mpsc::UnboundedSender<ToolLiveEvent>) -> Fut,
@@ -781,6 +793,8 @@ impl App {
                         self.persist_runtime_config();
                     }
                     if self.cancel_streaming {
+                        // Signal cancellation to any running subagents.
+                        cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
                         // Drain remaining live events before returning so that
                         // any pending StateRemove events are processed.
                         while let Ok(event) = rx.try_recv() {

@@ -57,12 +57,20 @@ pub struct ToolOutput {
     pub state: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ToolExecutionContext {
     pub call_id: String,
     /// Session state previously stored by this tool, injected as TOOL_SESSION_STATE.
     pub session_state: Option<String>,
     pub owner: String,
+    /// Cancellation flag set by the TUI when the user cancels streaming.
+    pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Nesting depth of subagent calls (0 = top-level).
+    pub agent_depth: usize,
+    /// Nesting depth of Lua ctx.tools.call delegation (0 = top-level tool call).
+    pub tool_call_depth: usize,
+    /// Tool handler for ctx.tools.* delegation (set by ToolHandler).
+    pub tool_handler: Option<crate::tools::registry::ToolHandler>,
 }
 
 #[derive(Debug, Clone)]

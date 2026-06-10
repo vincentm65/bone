@@ -1,6 +1,7 @@
 use bone::tools::types::ToolCall;
 use bone::ui::app::stream::{
-    assistant_message, call_row_shown_during_prepare, pane_toggle_hint, tool_error,
+    assistant_message, call_row_shown_during_prepare, pane_toggle_hint, show_immediate_tool_row,
+    tool_error,
 };
 use serde_json::json;
 
@@ -45,6 +46,29 @@ fn call_row_shown_during_prepare_only_for_edit_file() {
     };
     assert!(call_row_shown_during_prepare(&edit_call));
     assert!(!call_row_shown_during_prepare(&shell_call));
+}
+
+#[test]
+fn immediate_tool_rows_skip_read_file_and_edit_file() {
+    let read_call = ToolCall {
+        id: "c1".to_string(),
+        name: "read_file".to_string(),
+        arguments: json!({}),
+    };
+    let edit_call = ToolCall {
+        id: "c2".to_string(),
+        name: "edit_file".to_string(),
+        arguments: json!({}),
+    };
+    let shell_call = ToolCall {
+        id: "c3".to_string(),
+        name: "shell".to_string(),
+        arguments: json!({}),
+    };
+
+    assert!(!show_immediate_tool_row(&read_call));
+    assert!(!show_immediate_tool_row(&edit_call));
+    assert!(show_immediate_tool_row(&shell_call));
 }
 
 #[test]

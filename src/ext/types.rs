@@ -54,6 +54,11 @@ impl ExtensionManager {
         self.lua.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Clone the underlying Lua state handle for background execution.
+    pub(crate) fn lua_handle(&self) -> Arc<Mutex<Lua>> {
+        self.lua.clone()
+    }
+
     /// Get registered Lua commands.
     pub fn commands(&self) -> &[super::ops_commands::RegisteredLuaCommand] {
         &self.commands

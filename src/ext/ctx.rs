@@ -5,14 +5,19 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 
 use crate::tools::shell::{ScriptRequest, run_script};
+use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
 
 const RUNTIME_OP_KEY: &str = "__bone_runtime_op";
+
+/// Counter for synthetic Lua tool call IDs.
+static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Shared mutable state accessible via ctx.state.
 pub(crate) type SharedState = Arc<Mutex<HashMap<String, String>>>;
@@ -28,6 +33,14 @@ pub(crate) struct CtxConfig {
     pub shared_state: SharedState,
     pub pane_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
     pub call_id: Option<String>,
+    pub tool_handler: Option<crate::tools::registry::ToolHandler>,
+    pub approval_mode: crate::tools::ApprovalMode,
+    pub tool_call_depth: usize,
+    pub session_id: Option<i64>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub agent_depth: usize,
+    pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Create the `ctx` table for a single tool invocation.
@@ -36,6 +49,81 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
 
     ctx.set("cwd", cfg.cwd.as_str())?;
     ctx.set("config_dir", cfg.config_dir.as_str())?;
+
+     // ctx.log — print-to-stderr helpers
+    let log_table = lua.create_table()?;
+    for level in &["debug", "info", "warn", "error"] {
+        let lvl = level.to_string();
+        let log_fn = lua.create_function(move |lua, val: Value| {
+            let msg: String = lua.from_value(val).unwrap_or_default();
+            let _ = eprintln!("bone-lua [{lvl}]: {msg}");
+            Ok(())
+        })?;
+        log_table.set(*level, log_fn)?;
+    }
+    ctx.set("log", log_table)?;
+
+    // ctx.fs — filesystem helpers
+    let fs_table = lua.create_table()?;
+
+    // ctx.fs.exists(path) → bool
+    let fs_exists = lua.create_function(|_, path: String| Ok(Path::new(&path).exists()))?;
+    fs_table.set("exists", fs_exists)?;
+
+    // ctx.fs.is_file(path) → bool
+    let fs_is_file = lua.create_function(|_, path: String| Ok(Path::new(&path).is_file()))?;
+    fs_table.set("is_file", fs_is_file)?;
+
+    // ctx.fs.is_dir(path) → bool
+    let fs_is_dir = lua.create_function(|_, path: String| Ok(Path::new(&path).is_dir()))?;
+    fs_table.set("is_dir", fs_is_dir)?;
+
+    // ctx.fs.read_dir(path) → array of {name, path, kind}
+    let fs_read_dir = lua.create_function(|lua, path: String| {
+        let entries = std::fs::read_dir(&path)
+            .map_err(|e| mlua::Error::external(e.to_string()))?;
+        let mut vec: Vec<(String, String, String)> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| mlua::Error::external(e.to_string()))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let entry_path = entry.path();
+            let entry_path_str = entry_path.to_string_lossy().into_owned();
+            let kind = if entry_path.is_file() {
+                "file"
+            } else if entry_path.is_dir() {
+                "dir"
+            } else {
+                "other"
+            };
+            vec.push((name, entry_path_str, kind.to_string()));
+        }
+        vec.sort_by(|a, b| a.0.cmp(&b.0));
+        let result = lua.create_table()?;
+        for (name, entry_path, kind) in vec {
+            let entry_table = lua.create_table()?;
+            entry_table.set("name", name)?;
+            entry_table.set("path", entry_path)?;
+            entry_table.set("kind", kind)?;
+            result.push(entry_table)?;
+        }
+        Ok(Value::Table(result))
+    })?;
+    fs_table.set("read_dir", fs_read_dir)?;
+
+    // ctx.fs.metadata(path) → table or nil, error
+    let fs_metadata = lua.create_function(|lua, path: String| {
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| mlua::Error::external(e.to_string()))?;
+        let result = lua.create_table()?;
+        result.set("path", Path::new(&path).to_string_lossy().into_owned())?;
+        result.set("kind", if meta.is_file() { "file" } else if meta.is_dir() { "dir" } else { "other" })?;
+        result.set("len", meta.len())?;
+        result.set("readonly", meta.permissions().readonly())?;
+        Ok(Value::Table(result))
+    })?;
+    fs_table.set("metadata", fs_metadata)?;
+
+    ctx.set("fs", fs_table)?;
 
     // ctx.shell(command, opts?) → { stdout, stderr, exit_code }
     let shell_fn = lua.create_function(|lua, (command, opts): (String, Option<Table>)| {
@@ -236,6 +324,33 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         Ok(())
     })?;
     ui_table.set("notify", notify_fn)?;
+
+    // ctx.ui.status(message) — write a notification-style stderr line
+    let status_fn = lua.create_function(|_, msg: String| {
+        eprintln!("bone-lua: {msg}");
+        Ok(())
+    })?;
+    ui_table.set("status", status_fn)?;
+
+    // ctx.ui.pane(opts) — thin alias over emit_pane
+    // Only works when pane_sender exists; returns false, "pane unavailable" otherwise.
+    if let Some(sender) = cfg.pane_sender.clone() {
+        let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
+            let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
+            let pane = pane_from_json(&val).map_err(|e| mlua::Error::external(e))?;
+            sender
+                .send(crate::tools::types::ToolLiveEvent::Pane(pane))
+                .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
+            Ok(true)
+        })?;
+        ui_table.set("pane", pane_fn)?;
+    } else {
+        let pane_unavailable_fn = lua.create_function(|_, _: ()| {
+            Ok((false, "pane unavailable"))
+        })?;
+        ui_table.set("pane", pane_unavailable_fn)?;
+    }
+
     ctx.set("ui", ui_table)?;
 
     // ctx.state.get(key) → string or nil
@@ -275,6 +390,278 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     state_table.set("set", state_set)?;
     state_table.set("clear", state_clear)?;
     ctx.set("state", state_table)?;
+
+    // ctx.tools — invoke registered tool definitions and call tools directly
+    let tools_table = lua.create_table()?;
+
+    // ctx.tools.definitions() → array of {name, description, input_schema}
+    let defs = if let Some(ref handler) = cfg.tool_handler {
+        handler.definitions()
+    } else {
+        Vec::new()
+    };
+    let defs_fn = lua.create_function(move |lua, _: ()| {
+        let tbl = lua.create_table()?;
+        for def in &defs {
+            let entry = lua.create_table()?;
+            entry.set("name", def.name.clone())?;
+            entry.set("description", def.description.clone())?;
+            let schema: mlua::Value = lua.to_value(&def.input_schema)?;
+            entry.set("input_schema", schema)?;
+            tbl.push(entry)?;
+        }
+        Ok(Value::Table(tbl))
+    })?;
+    tools_table.set("definitions", defs_fn)?;
+
+    // ctx.tools.call(name, args, opts?) → { ok, name, call_id, content, is_error }
+    if let Some(ref handler) = cfg.tool_handler {
+        let mut handler = handler.clone();
+        let pane_sender = cfg.pane_sender.clone();
+        let depth = cfg.tool_call_depth;
+        let agent_depth = cfg.agent_depth;
+        // Wire parent cancellation flag so tools stop if user cancels.
+        handler.cancel_token = cfg.cancelled.clone();
+
+        let call_fn = lua.create_function(move |lua, (name, args, opts): (String, mlua::Table, Option<mlua::Table>)| {
+            if depth >= MAX_TOOL_CALL_DEPTH {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("name", name)?;
+                result.set("call_id", Value::Nil)?;
+                result.set("content", "max tool call depth exceeded")?;
+                result.set("is_error", true)?;
+                return Ok(Value::Table(result));
+            }
+
+            // Determine approval mode: opts.approval or inherited
+            let mode_str: Option<String> = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("approval").ok().flatten());
+            // Generate synthetic call id (needed for error responses)
+            let call_id = format!("lua-call-{}", LUA_CALL_COUNTER.fetch_add(1, Ordering::Relaxed));
+
+            let mode = match mode_str.as_deref() {
+                Some("safe") | Some("read_only") => crate::tools::ApprovalMode::Safe,
+                Some("danger") => crate::tools::ApprovalMode::Danger,
+                _ => {
+                    let mode_str = mode_str.as_deref().unwrap_or("(none)");
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("name", name)?;
+                    result.set("call_id", call_id.clone())?;
+                    result.set("content", format!("Unknown approval mode: {mode_str}"))?;
+                    result.set("is_error", true)?;
+                    return Ok(Value::Table(result));
+                }
+            };
+
+            // Convert args table to serde_json::Value
+            let args_val: serde_json::Value = lua.from_value(mlua::Value::Table(args))?;
+
+            let call = ToolCall {
+                id: call_id.clone(),
+                name: name.clone(),
+                arguments: args_val,
+            };
+
+            if !handler.allows_call(mode, &call) {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("name", name)?;
+                result.set("call_id", call_id)?;
+                result.set("content", "Tool not executed. Approval mode does not allow this call.")?;
+                result.set("is_error", true)?;
+                return Ok(Value::Table(result));
+            }
+
+            // Execute the tool synchronously (block_in_place).
+            let results = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    handler.execute_all_live(vec![call], pane_sender.clone(), agent_depth, depth + 1).await
+                })
+            });
+
+            if let Some(result) = results.into_iter().next() {
+                let out = lua.create_table()?;
+                out.set("ok", !result.is_error)?;
+                out.set("name", result.name)?;
+                out.set("call_id", result.call_id)?;
+                out.set("content", result.content)?;
+                out.set("is_error", result.is_error)?;
+                Ok(Value::Table(out))
+            } else {
+                let out = lua.create_table()?;
+                out.set("ok", false)?;
+                out.set("name", name)?;
+                out.set("call_id", call_id)?;
+                out.set("content", "tool execution returned no results")?;
+                out.set("is_error", true)?;
+                Ok(Value::Table(out))
+            }
+        })?;
+        tools_table.set("call", call_fn)?;
+    } else {
+        let no_handler_fn = lua.create_function(|lua, _: ()| {
+            let out = lua.create_table()?;
+            out.set("ok", false)?;
+            out.set("name", Value::Nil)?;
+            out.set("call_id", Value::Nil)?;
+            out.set("content", "tools unavailable")?;
+            out.set("is_error", true)?;
+            Ok(Value::Table(out))
+        })?;
+        tools_table.set("call", no_handler_fn)?;
+    }
+
+     ctx.set("tools", tools_table)?;
+
+    // ctx.agent.run(prompt, opts?) → { ok, content, error }
+    add_agent_table(&lua, &ctx, cfg)?;
+
+    // ctx.config — read-only access to configuration.
+    let config_table = lua.create_table()?;
+    config_table.set("dir", cfg.config_dir.as_str())?;
+    config_table.set("cwd", cfg.cwd.as_str())?;
+
+    // ctx.config.get(section, key)
+    let config_dir_for_get = cfg.config_dir.clone();
+    let config_get_fn = lua.create_function(move |lua, (section, key): (String, String)| {
+        let path = std::path::Path::new(&config_dir_for_get)
+            .join("config")
+            .join(format!("{section}.yaml"));
+        if !path.is_file() {
+            return Ok(Value::Nil);
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| mlua::Error::external(format!("failed to read config: {e}")))?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&content)
+            .map_err(|e| mlua::Error::external(format!("invalid YAML in {section}.yaml: {e}")))?;
+        let Some(mapping) = doc.as_mapping() else {
+            return Ok(Value::Nil);
+        };
+        // Look in fields array for matching key, then top-level mapping.
+        if let Some(fields) = mapping.get(&serde_yaml::Value::String("fields".into()))
+            && let Some(fields_arr) = fields.as_sequence()
+        {
+            for field in fields_arr {
+                if let Some(field_map) = field.as_mapping() {
+                    let field_key = field_map.get(&serde_yaml::Value::String("key".into()));
+                    if field_key.and_then(|v| v.as_str()) == Some(&key) {
+                        // Prefer "value", fall back to "default".
+                        let val = field_map
+                            .get(&serde_yaml::Value::String("value".into()))
+                            .or_else(|| field_map.get(&serde_yaml::Value::String("default".into())));
+                        if let Some(v) = val {
+                            return yaml_to_lua(lua, v);
+                        }
+                    }
+                }
+            }
+        }
+        // Fall back to top-level key in the mapping.
+        if let Some(v) = mapping.get(&serde_yaml::Value::String(key.clone())) {
+            return yaml_to_lua(lua, v);
+        }
+        Ok(Value::Nil)
+    })?;
+    config_table.set("get", config_get_fn)?;
+
+    // ctx.config.get_table(section)
+    let config_dir_for_table = cfg.config_dir.clone();
+    let config_get_table_fn = lua.create_function(move |lua, section: String| {
+        let path = std::path::Path::new(&config_dir_for_table)
+            .join("config")
+            .join(format!("{section}.yaml"));
+        if !path.is_file() {
+            return Ok(Value::Nil);
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| mlua::Error::external(format!("failed to read config: {e}")))?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&content)
+            .map_err(|e| mlua::Error::external(format!("invalid YAML in {section}.yaml: {e}")))?;
+        yaml_to_lua(lua, &doc)
+    })?;
+    config_table.set("get_table", config_get_table_fn)?;
+
+    ctx.set("config", config_table)?;
+
+    // ctx.session — read-only access to session/conversation history.
+    let session_table = lua.create_table()?;
+
+    // ctx.session.current() → table or nil
+    let current_session_id = cfg.session_id;
+    let current_provider = cfg.provider.clone();
+    let current_model = cfg.model.clone();
+    let session_current_fn = lua.create_function(move |lua, _: ()| {
+        match current_session_id {
+            Some(id) => {
+                let t = lua.create_table()?;
+                t.set("id", id)?;
+                if let Some(ref p) = current_provider { t.set("provider", p.as_str())?; }
+                if let Some(ref m) = current_model { t.set("model", m.as_str())?; }
+                Ok(Value::Table(t))
+            }
+            None => Ok(Value::Nil),
+        }
+    })?;
+    session_table.set("current", session_current_fn)?;
+
+    // ctx.session.list(opts?) → array of conversation summaries
+    let session_list_fn = lua.create_function(move |lua, opts: Option<mlua::Table>| {
+        let limit = opts
+            .as_ref()
+            .and_then(|t| t.get::<Option<usize>>("limit").ok().flatten())
+            .unwrap_or(20)
+            .clamp(1, 100);
+        let db_path = crate::session_db::db_path();
+        let db = crate::session_db::SessionDb::open(&db_path)
+            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+        let conversations = db.list_conversations(limit)
+            .map_err(|e| mlua::Error::external(format!("failed to list conversations: {e}")))?;
+        let result = lua.create_table()?;
+        for conv in conversations {
+            let t = lua.create_table()?;
+            t.set("id", conv.id)?;
+            t.set("provider", conv.provider)?;
+            t.set("model", conv.model)?;
+            t.set("started_at", conv.started_at)?;
+            if let Some(ended) = conv.ended_at {
+                t.set("ended_at", ended)?;
+            }
+            result.push(t)?;
+        }
+        Ok(Value::Table(result))
+    })?;
+    session_table.set("list", session_list_fn)?;
+
+    // ctx.session.messages(conversation_id, opts?) → array of messages
+    let session_messages_fn = lua.create_function(move |lua, (conversation_id, opts): (i64, Option<mlua::Table>)| {
+        let limit = opts
+            .as_ref()
+            .and_then(|t| t.get::<Option<usize>>("limit").ok().flatten())
+            .unwrap_or(200)
+            .clamp(1, 1000);
+        let db_path = crate::session_db::db_path();
+        let db = crate::session_db::SessionDb::open(&db_path)
+            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+        let messages = db.list_messages(conversation_id, limit)
+            .map_err(|e| mlua::Error::external(format!("failed to list messages: {e}")))?;
+        let result = lua.create_table()?;
+        for msg in messages {
+            let t = lua.create_table()?;
+            t.set("seq", msg.seq)?;
+            t.set("role", msg.role)?;
+            t.set("content", msg.content)?;
+            if let Some(tn) = msg.tool_name { t.set("tool_name", tn)?; }
+            if let Some(tci) = msg.tool_call_id { t.set("tool_call_id", tci)?; }
+            result.push(t)?;
+        }
+        Ok(Value::Table(result))
+    })?;
+    session_table.set("messages", session_messages_fn)?;
+
+    ctx.set("session", session_table)?;
 
     // ctx.call_id — the tool call's unique ID (available during execute_output_live).
     if let Some(cid) = &cfg.call_id {
@@ -326,6 +713,363 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     }
 
     Ok(ctx)
+}
+
+/// Maximum nesting depth for subagent calls.
+const MAX_AGENT_DEPTH: usize = 3;
+/// Maximum nesting depth for tool calls from Lua.
+const MAX_TOOL_CALL_DEPTH: usize = 4;
+/// Default and max timeout for subagent calls.
+const DEFAULT_AGENT_TIMEOUT_MS: u64 = 300_000;
+const MAX_AGENT_TIMEOUT_MS: u64 = 900_000;
+
+/// Create the `ctx.agent` table with `run` and `run_stream` functions.
+fn add_agent_table(
+    lua: &Lua,
+    ctx: &Table,
+    cfg: &CtxConfig,
+) -> Result<(), mlua::Error> {
+    let agent_table = lua.create_table()?;
+
+    // Clone needed fields for the 'static closures.
+    let inherited_approval = cfg.approval_mode;
+    let inherited_provider = cfg.provider.clone();
+    let inherited_model = cfg.model.clone();
+    let agent_depth = cfg.agent_depth;
+    let cancelled_flag = cfg.cancelled.clone();
+
+    // --- ctx.agent.run(prompt, opts?) ---
+    let run_fn = lua.create_function(
+        move |lua, (prompt, opts): (String, Option<Table>)| {
+            if agent_depth >= MAX_AGENT_DEPTH {
+                return agent_depth_exceeded(lua);
+            }
+
+            let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(&opts, inherited_approval, &inherited_provider, &inherited_model) {
+                Ok(v) => v,
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("content", "")?;
+                    result.set("error", e)?;
+                    return Ok(Value::Table(result));
+                }
+            };
+
+            let request = crate::agent::AgentRequest {
+                prompt,
+                approval_mode: approval,
+                provider,
+                model,
+                system_prompt,
+                events: false,
+                event_sender: None,
+                agent_depth: agent_depth + 1,
+            };
+
+            let cancelled = cancelled_flag.clone();
+            let response = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(timeout_ms),
+                        async {
+                            tokio::select! {
+                                result = crate::agent::run_agent(request) => result,
+                                _ = await_cancelled(&cancelled) => Err("cancelled".to_string()),
+                            }
+                        },
+                    ).await
+                })
+            });
+
+            agent_result_to_lua(lua, response, timeout_ms)
+        },
+    )?;
+    agent_table.set("run", run_fn)?;
+
+    // --- ctx.agent.run_stream(prompt, opts?) ---
+    // Re-clone for the stream closure (same captures).
+    let inherited_approval_s = cfg.approval_mode;
+    let inherited_provider_s = cfg.provider.clone();
+    let inherited_model_s = cfg.model.clone();
+    let agent_depth_s = cfg.agent_depth;
+    let cancelled_flag_s = cfg.cancelled.clone();
+    let run_stream_fn = lua.create_function(
+        move |lua, (prompt, opts): (String, Option<Table>)| {
+            if agent_depth_s >= MAX_AGENT_DEPTH {
+                return agent_depth_exceeded(lua);
+            }
+
+            let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(&opts, inherited_approval_s, &inherited_provider_s, &inherited_model_s) {
+                Ok(v) => v,
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("ok", false)?;
+                    result.set("content", "")?;
+                    result.set("error", e)?;
+                    return Ok(Value::Table(result));
+                }
+            };
+
+            // Extract Lua callbacks from opts.
+            let on_started = opts_cb(&opts, "on_started");
+            let on_status = opts_cb(&opts, "on_status");
+            let on_tool_call = opts_cb(&opts, "on_tool_call");
+            let on_tool_result = opts_cb(&opts, "on_tool_result");
+            let on_token_usage = opts_cb(&opts, "on_token_usage");
+            let on_finished = opts_cb(&opts, "on_finished");
+            let on_failed = opts_cb(&opts, "on_failed");
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
+            let request = crate::agent::AgentRequest {
+                prompt,
+                approval_mode: approval,
+                provider,
+                model,
+                system_prompt,
+                events: false,
+                event_sender: Some(tx),
+                agent_depth: agent_depth_s + 1,
+            };
+
+            let cancelled = cancelled_flag_s.clone();
+            let response = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(timeout_ms),
+                        async {
+                            let agent_future = crate::agent::run_agent(request);
+                            tokio::pin!(agent_future);
+
+                            // Process events and agent result concurrently.
+                            let agent_result = loop {
+                                tokio::select! {
+                                    result = &mut agent_future => {
+                                        // Drain remaining events.
+                                        let mut drain_err: Option<String> = None;
+                                        loop {
+                                            match rx.try_recv() {
+                                                Ok(event) => {
+                                                    if let Err(e) = dispatch_event(lua, &event,
+                                                        &on_started, &on_status, &on_tool_call,
+                                                        &on_tool_result, &on_token_usage,
+                                                        &on_finished, &on_failed) {
+                                                        drain_err = Some(format!("callback error: {e}"));
+                                                        break;
+                                                    }
+                                                }
+                                                Err(_) => break,
+                                            }
+                                        }
+                                        if let Some(e) = drain_err {
+                                            break Err(e);
+                                        }
+                                        break result;
+                                    }
+                                    Some(event) = rx.recv() => {
+                                        if let Err(e) = dispatch_event(lua, &event,
+                                            &on_started, &on_status, &on_tool_call,
+                                            &on_tool_result, &on_token_usage,
+                                            &on_finished, &on_failed) {
+                                            break Err(format!("callback error: {e}"));
+                                        }
+                                    }
+                                    _ = await_cancelled(&cancelled) => {
+                                        // Drain remaining events.
+                                        let mut drain_err: Option<String> = None;
+                                        loop {
+                                            match rx.try_recv() {
+                                                Ok(event) => {
+                                                    if let Err(e) = dispatch_event(lua, &event,
+                                                        &on_started, &on_status, &on_tool_call,
+                                                        &on_tool_result, &on_token_usage,
+                                                        &on_finished, &on_failed) {
+                                                        drain_err = Some(format!("callback error: {e}"));
+                                                        break;
+                                                    }
+                                                }
+                                                Err(_) => break,
+                                            }
+                                        }
+                                        if let Some(e) = drain_err {
+                                            break Err(e);
+                                        }
+                                        break Err("cancelled".to_string());
+                                    }
+                                }
+                            };
+                            agent_result
+                        },
+                    ).await
+                })
+            });
+
+            agent_result_to_lua(lua, response, timeout_ms)
+        },
+    )?;
+    agent_table.set("run_stream", run_stream_fn)?;
+
+    ctx.set("agent", agent_table)?;
+    Ok(())
+}
+
+/// Return `{ ok=false, content="", error="max agent depth exceeded" }`.
+fn agent_depth_exceeded(lua: &Lua) -> Result<Value, mlua::Error> {
+    let result = lua.create_table()?;
+    result.set("ok", false)?;
+    result.set("content", "")?;
+    result.set("error", "max agent depth exceeded")?;
+    Ok(Value::Table(result))
+}
+
+/// Parse common opts for both `run` and `run_stream`.
+fn parse_agent_opts(
+    opts: &Option<Table>,
+    inherited_approval: crate::tools::ApprovalMode,
+    inherited_provider: &Option<String>,
+    inherited_model: &Option<String>,
+) -> Result<(crate::tools::ApprovalMode, Option<String>, Option<String>, Option<String>, u64), String> {
+    let approval = match opts
+        .as_ref()
+        .and_then(|t| t.get::<Option<String>>("approval").ok().flatten())
+        .as_deref()
+    {
+        Some("safe") | Some("read_only") => crate::tools::ApprovalMode::Safe,
+        Some("danger") => crate::tools::ApprovalMode::Danger,
+        Some(s) => return Err(format!("Unknown approval mode: {s}")),
+        None => inherited_approval,
+    };
+
+    let provider = opts
+        .as_ref()
+        .and_then(|t| t.get::<Option<String>>("provider").ok().flatten())
+        .or_else(|| inherited_provider.clone());
+
+    let model = opts
+        .as_ref()
+        .and_then(|t| t.get::<Option<String>>("model").ok().flatten())
+        .or_else(|| inherited_model.clone());
+
+    let system_prompt: Option<String> = opts
+        .as_ref()
+        .and_then(|t| t.get::<Option<String>>("system_prompt").ok().flatten());
+
+    let timeout_ms = opts
+        .as_ref()
+        .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
+        .unwrap_or(DEFAULT_AGENT_TIMEOUT_MS)
+        .clamp(1_000, MAX_AGENT_TIMEOUT_MS);
+
+    Ok((approval, provider, model, system_prompt, timeout_ms))
+}
+
+/// Extract an optional callback from opts table.
+fn opts_cb(opts: &Option<Table>, key: &str) -> Option<mlua::Function> {
+    opts.as_ref().and_then(|t| t.get::<Option<mlua::Function>>(key).ok().flatten())
+}
+
+/// Dispatch a single AgentRunEvent to the appropriate Lua callback.
+fn dispatch_event(
+    lua: &Lua,
+    event: &crate::agent::AgentRunEvent,
+    on_started: &Option<mlua::Function>,
+    on_status: &Option<mlua::Function>,
+    on_tool_call: &Option<mlua::Function>,
+    on_tool_result: &Option<mlua::Function>,
+    on_token_usage: &Option<mlua::Function>,
+    on_finished: &Option<mlua::Function>,
+    on_failed: &Option<mlua::Function>,
+) -> Result<(), mlua::Error> {
+    use crate::agent::AgentRunEvent;
+    match event {
+        AgentRunEvent::Started { approval, task, model } => {
+            if let Some(cb) = on_started {
+                let t = lua.create_table()?;
+                t.set("approval", approval.as_str())?;
+                t.set("task", task.as_str())?;
+                t.set("model", model.as_str())?;
+                cb.call::<()>(Value::Table(t))?;
+            }
+        }
+        AgentRunEvent::Status { message } => {
+            if let Some(cb) = on_status {
+                cb.call::<()>(message.as_str())?;
+            }
+        }
+        AgentRunEvent::ToolCall { name, summary } => {
+            if let Some(cb) = on_tool_call {
+                let t = lua.create_table()?;
+                t.set("name", name.as_str())?;
+                t.set("summary", summary.as_str())?;
+                cb.call::<()>(Value::Table(t))?;
+            }
+        }
+        AgentRunEvent::ToolResult { name, is_error } => {
+            if let Some(cb) = on_tool_result {
+                let t = lua.create_table()?;
+                t.set("name", name.as_str())?;
+                t.set("is_error", *is_error)?;
+                cb.call::<()>(Value::Table(t))?;
+            }
+        }
+        AgentRunEvent::TokenUsage { sent, received } => {
+            if let Some(cb) = on_token_usage {
+                let t = lua.create_table()?;
+                t.set("sent", *sent as i64)?;
+                t.set("received", *received as i64)?;
+                cb.call::<()>(Value::Table(t))?;
+            }
+        }
+        AgentRunEvent::Finished { content } => {
+            if let Some(cb) = on_finished {
+                cb.call::<()>(content.as_str())?;
+            }
+        }
+        AgentRunEvent::Failed { message } => {
+            if let Some(cb) = on_failed {
+                cb.call::<()>(message.as_str())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Convert the timeout-wrapped agent result into a Lua return table.
+fn agent_result_to_lua(
+    lua: &Lua,
+    response: Result<Result<crate::agent::AgentResponse, String>, tokio::time::error::Elapsed>,
+    timeout_ms: u64,
+) -> Result<Value, mlua::Error> {
+    let result = lua.create_table()?;
+    match response {
+        Ok(Ok(resp)) => {
+            result.set("ok", true)?;
+            result.set("content", resp.content)?;
+            result.set("error", Value::Nil)?;
+        }
+        Ok(Err(e)) => {
+            result.set("ok", false)?;
+            result.set("content", "")?;
+            result.set("error", e)?;
+        }
+        Err(_) => {
+            result.set("ok", false)?;
+            result.set("content", "")?;
+            result.set("error", format!("agent timed out after {timeout_ms}ms"))?;
+        }
+    }
+    Ok(Value::Table(result))
+}
+
+/// Future that resolves when the cancellation flag is set.
+async fn await_cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+    if let Some(f) = flag {
+        while !f.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Parse a pane definition from a serde_json::Value (same format as the JSON envelope).
@@ -431,6 +1175,47 @@ fn pane_from_json(val: &serde_json::Value) -> Result<crate::ui::pane_page::PaneP
         visible_rows,
         scroll,
     })
+}
+
+/// Convert a serde_yaml::Value to a Lua value.
+fn yaml_to_lua(lua: &Lua, val: &serde_yaml::Value) -> Result<Value, mlua::Error> {
+    match val {
+        serde_yaml::Value::Null => Ok(Value::Nil),
+        serde_yaml::Value::Bool(b) => Ok(Value::Boolean(*b)),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Value::Number(f))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        serde_yaml::Value::String(s) => {
+            let s = lua.create_string(s)?;
+            Ok(Value::String(s))
+        }
+        serde_yaml::Value::Sequence(arr) => {
+            let t = lua.create_table()?;
+            for item in arr {
+                t.push(yaml_to_lua(lua, item)?)?;
+            }
+            Ok(Value::Table(t))
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let t = lua.create_table()?;
+            for (k, v) in map {
+                let key_str = match k {
+                    serde_yaml::Value::String(s) => s.as_str(),
+                    serde_yaml::Value::Number(_) => continue,
+                    _ => continue,
+                };
+                t.set(key_str, yaml_to_lua(lua, v)?)?;
+            }
+            Ok(Value::Table(t))
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_to_lua(lua, &tagged.value),
+    }
 }
 
 fn parse_color(s: &str) -> Option<ratatui::style::Color> {

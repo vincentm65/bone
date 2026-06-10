@@ -163,6 +163,14 @@ impl Tool for LuaTool {
             shared_state: self.shared_state.clone(),
             pane_sender: None,
             call_id: None,
+            tool_handler: None,
+            approval_mode: crate::tools::ApprovalMode::Safe,
+            tool_call_depth: 0,
+            session_id: None,
+            provider: None,
+            model: None,
+            agent_depth: 0,
+            cancelled: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
             .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
@@ -205,9 +213,17 @@ impl Tool for LuaTool {
             shared_state: self.shared_state.clone(),
             pane_sender: None,
             call_id: None,
+            tool_handler: None,
+            approval_mode: crate::tools::ApprovalMode::Safe,
+            tool_call_depth: 0,
+            session_id: None,
+            provider: None,
+            model: None,
+            agent_depth: 0,
+            cancelled: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-            .map_err(|e| format!("lua tool '{}': failed to create ctx: {}", self.name, e))?;
+            .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
 
         let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
 
@@ -239,8 +255,15 @@ impl Tool for LuaTool {
         let shared_state = self.shared_state.clone();
         let call_id = context.call_id.clone();
         let call_id_for_ctx = call_id.clone();
+        let agent_depth = context.agent_depth;
+        let tool_call_depth = context.tool_call_depth;
+        let cancelled = context.cancelled.clone();
 
         let execution = tokio::task::spawn_blocking(move || {
+            // Hold the Lua lock only long enough to extract the execute function,
+            // arguments, and the ctx table.  This avoids a deadlock when the Lua
+            // tool's execute function calls ctx.tools.call (which may invoke
+            // another Lua tool).
             let lua = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
 
             let execute_fn: mlua::Value = lua
@@ -261,14 +284,28 @@ impl Tool for LuaTool {
                 shared_state,
                 pane_sender: events,
                 call_id: Some(call_id_for_ctx),
+                tool_handler: context.tool_handler.clone(),
+                approval_mode: crate::tools::ApprovalMode::Safe,
+                tool_call_depth,
+                session_id: None,
+                provider: None,
+                model: None,
+                agent_depth,
+                cancelled,
             };
             let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
                 .map_err(|e| format!("lua tool '{name}': failed to create ctx: {e}"))?;
 
+            // Lua lock released when `lua` goes out of scope above.
+            drop(lua);
+
+            // Call the execute function outside the Lua lock.
+            // mlua::Function::call acquires the lock internally, so this is safe
+            // and avoids deadlocking on nested Lua tool invocations.
             let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
 
             let execution = match result {
-                Ok(value) => lua_value_to_execution(&lua, &name, value),
+                Ok(value) => lua_value_to_execution(&name, value),
                 Err(e) => Err(format!("lua tool '{name}': {e}")),
             }?;
 
@@ -284,7 +321,6 @@ impl Tool for LuaTool {
 }
 
 fn lua_value_to_execution(
-    _lua: &Lua,
     name: &str,
     value: mlua::Value,
 ) -> Result<LuaExecution, String> {

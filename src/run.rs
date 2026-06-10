@@ -90,7 +90,14 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
     let config_dir = crate::config::bone_dir();
 
     // Try Lua command expansion first.
-    if let Some(prompt) = expand_lua_command(&request.prompt, &config_dir) {
+    if let Some(prompt) = expand_lua_command(
+        &request.prompt,
+        &config_dir,
+        request.approval_mode,
+        request.provider.clone(),
+        request.model.clone(),
+    )
+    .await {
         return agent::run_agent(AgentRequest {
             prompt,
             approval_mode: request.approval_mode,
@@ -99,6 +106,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             system_prompt: request.system_prompt,
             events: request.events,
             event_sender: None,
+            agent_depth: 0,
         })
         .await;
     }
@@ -113,13 +121,20 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         system_prompt: request.system_prompt,
         events: request.events,
         event_sender: None,
+        agent_depth: 0,
     })
     .await
 }
 
 /// Try to expand a prompt as a Lua command.
 /// Returns the rendered prompt if the command exists and executes successfully.
-fn expand_lua_command(prompt: &str, config_dir: &std::path::Path) -> Option<String> {
+async fn expand_lua_command(
+    prompt: &str,
+    config_dir: &std::path::Path,
+    approval_mode: crate::tools::ApprovalMode,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Option<String> {
     let trimmed = prompt.trim();
     let command = trimmed.strip_prefix('/')?;
     let mut parts = command.splitn(2, char::is_whitespace);
@@ -129,58 +144,76 @@ fn expand_lua_command(prompt: &str, config_dir: &std::path::Path) -> Option<Stri
     }
     let args = parts.next().unwrap_or("").trim_start();
 
-    // Boot Lua.
-    let (lua, _loaded) = ext::boot_lua(config_dir).ok()?;
+    // Clone owned values for spawn_blocking.
+    let name_owned = name.clone();
+    let args_owned = args.to_string();
+    let config_dir_owned = config_dir.to_path_buf();
 
-    // Seed and run default commands.
-    ext::seed_default_lua_commands(&config_dir.join("lua/commands"));
-    if ext::run_default_commands(&lua, config_dir).is_err() {
-        return None;
-    }
+    // Run blocking Lua execution on a separate thread to avoid blocking the tokio worker.
+    tokio::task::spawn_blocking(move || {
+        // Boot Lua.
+        let (lua, _loaded) = ext::boot_lua(&config_dir_owned).ok()?;
 
-    // Find the command in _commands.
-    let bone_table = lua.globals().get::<mlua::Table>("bone").ok()?;
-    let commands_table = bone_table.get::<mlua::Table>("_commands").ok()?;
-
-    let mut found_entry: Option<mlua::Table> = None;
-    for entry in commands_table.sequence_values::<mlua::Table>() {
-        let entry = entry.ok()?;
-        let cmd_name: String = entry.get("name").ok()?;
-        if cmd_name == name {
-            found_entry = Some(entry);
-            break;
+        // Seed and run default commands.
+        ext::seed_default_lua_commands(&config_dir_owned.join("lua/commands"));
+        if ext::run_default_commands(&lua, &config_dir_owned).is_err() {
+            return None;
         }
-    }
 
-    let entry = found_entry?;
+        // Find the command in _commands.
+        let bone_table = lua.globals().get::<mlua::Table>("bone").ok()?;
+        let commands_table = bone_table.get::<mlua::Table>("_commands").ok()?;
 
-    // Get the handler.
-    let handler: mlua::Value = entry.get("handler").ok()?;
-    let handler = match handler {
-        mlua::Value::Function(f) => f,
-        mlua::Value::Table(t) => t.get("handler").ok()?,
-        _ => return None,
-    };
+        let mut found_entry: Option<mlua::Table> = None;
+        for entry in commands_table.sequence_values::<mlua::Table>() {
+            let entry = entry.ok()?;
+            let cmd_name: String = entry.get("name").ok()?;
+            if cmd_name == name_owned {
+                found_entry = Some(entry);
+                break;
+            }
+        }
 
-    // Create ctx table.
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let config_dir_str = config_dir.to_string_lossy().to_string();
-    let shared_state: crate::ext::ctx::SharedState =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let ctx_cfg = crate::ext::ctx::CtxConfig {
-        cwd,
-        config_dir: config_dir_str,
-        shared_state,
-        pane_sender: None,
-            call_id: None,
+        let entry = found_entry?;
+
+        // Get the handler.
+        let handler: mlua::Value = entry.get("handler").ok()?;
+        let handler = match handler {
+            mlua::Value::Function(f) => f,
+            mlua::Value::Table(t) => t.get("handler").ok()?,
+            _ => return None,
         };
-    let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
-    // Call handler(args, ctx).
-    let result: Result<String, mlua::Error> = handler.call((args, ctx_table));
-    result.ok()
+        // Create ctx table.
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let config_dir_str = config_dir_owned.to_string_lossy().to_string();
+        let shared_state: crate::ext::ctx::SharedState =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let ctx_cfg = crate::ext::ctx::CtxConfig {
+            cwd,
+            config_dir: config_dir_str,
+            shared_state,
+            pane_sender: None,
+            call_id: None,
+            tool_handler: None,
+            approval_mode,
+            tool_call_depth: 0,
+            session_id: None,
+            provider,
+            model,
+            agent_depth: 0,
+            cancelled: None,
+        };
+        let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
+
+        // Call handler(args, ctx).
+        let result: Result<String, mlua::Error> = handler.call((args_owned, ctx_table));
+        result.ok()
+    })
+    .await
+    .ok()?
 }
 
 pub(crate) fn parse_approval(value: Option<&str>) -> Result<ApprovalMode, String> {

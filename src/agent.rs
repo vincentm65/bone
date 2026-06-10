@@ -112,6 +112,7 @@ pub struct AgentRequest {
     pub system_prompt: Option<String>,
     pub events: bool,
     pub event_sender: Option<tokio::sync::mpsc::UnboundedSender<AgentRunEvent>>,
+    pub agent_depth: usize,
 }
 
 pub struct AgentResponse {
@@ -584,7 +585,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         }
 
         let results =
-            execute_tool_calls(&tools, request.approval_mode, tool_calls, &extensions).await;
+            execute_tool_calls(&tools, request.approval_mode, tool_calls, &extensions, request.agent_depth).await;
 
         // Store session state (e.g. task_list state) into tool handler so
         // stateful tools persist across rounds in headless mode.
@@ -678,6 +679,7 @@ async fn execute_tool_calls(
     mode: ApprovalMode,
     calls: Vec<crate::tools::ToolCall>,
     extensions: &crate::ext::ExtensionManager,
+    agent_depth: usize,
 ) -> Vec<crate::tools::ToolResult> {
     let mode_label = mode.mode_str();
     // Track original index to preserve call order in output.
@@ -729,7 +731,7 @@ async fn execute_tool_calls(
     if !approved.is_empty() {
         let approved_calls: Vec<crate::tools::ToolCall> =
             approved.iter().map(|(_, c)| c.clone()).collect();
-        let results = tools.execute_all(approved_calls).await;
+        let results = tools.execute_all(approved_calls, agent_depth).await;
         for ((orig_idx, _call), result) in approved.into_iter().zip(results) {
             extensions.dispatch_tool_result(&result.name, &result.call_id, result.is_error);
             out.push((orig_idx, result));
@@ -839,5 +841,6 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
         system_prompt,
         events,
         event_sender: None,
+        agent_depth: 0,
     })
 }

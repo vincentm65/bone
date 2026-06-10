@@ -202,15 +202,6 @@ bone.register_tool({
 
 ## Pre-Seeded Commands
 
-### /review
-Review unstaged git changes for bugs, dead code, mess, and improvements. Categorized by importance (CRITICAL > WARNING > INFO > SUGGESTION).
-```lua
-bone.register_command("review", {
-    description = "Review unstaged git changes for bugs, dead code, mess, and improvements.",
-    -- handler runs git diff and returns a review prompt
-})
-```
-
 ### /memory
 Incremental memory builder. Processes all conversations since last run and updates `memory.md`. If `memory.md` exists in the config directory, its contents are loaded into every conversation's system prompt.
 
@@ -466,7 +457,6 @@ Plugins do not auto-run. Repeated `load` is a no-op.
       my_custom_tool.lua       -- user-created
     commands/
       memory.lua               -- seeded default
-      review.lua               -- seeded default
       my_custom_command.lua    -- user-created
     plugins/
       tokyonight/

@@ -1001,10 +1001,8 @@ impl App {
             return self.compact_chat(term).await;
         }
 
-        // Protected built-ins always win.
-        if matches!(cmd.as_str(), "help" | "quit" | "exit") {
-            // Fall through to commands::handle below.
-        } else if self.extensions.is_available() {
+        // Protected built-ins always win over Lua commands.
+        if !commands::is_protected_builtin(cmd.as_str()) && self.extensions.is_available() {
             // Check Lua commands.
             if let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
                 return Ok(());
@@ -1149,11 +1147,18 @@ impl App {
         arg: &str,
         term: &mut BoneTerminal,
     ) -> Option<()> {
-        // Extract the result while holding the Lua lock, then release it.
-        let reply = {
-            let lua = self.extensions.lua();
+        let lua = self.extensions.lua_handle();
+        let cmd_owned = cmd.to_string();
+        let arg_owned = arg.to_string();
+        let session_id = self.conversation_id;
+        let provider = self.llm.id().to_string();
+        let model = self.llm.model().to_string();
+        let approval_mode = self.approval_mode;
+        let tools = self.tools.clone();
 
-            // Find the command in _commands.
+        let mut task = tokio::task::spawn_blocking(move || {
+            let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
+
             let bone_table = lua.globals().get::<mlua::Table>("bone").ok()?;
             let commands_table = bone_table.get::<mlua::Table>("_commands").ok()?;
 
@@ -1161,28 +1166,25 @@ impl App {
             for entry in commands_table.sequence_values::<mlua::Table>() {
                 let entry = entry.ok()?;
                 let name: String = entry.get("name").ok()?;
-                if name == cmd {
+                if name == cmd_owned {
                     found_entry = Some(entry);
                     break;
                 }
             }
 
             let entry = found_entry?;
-
-            // Get the handler.
             let handler: LuaValue = entry.get("handler").ok()?;
             let handler = match handler {
                 LuaValue::Function(f) => f,
                 LuaValue::Table(t) => t.get("handler").ok()?,
                 _ => {
                     eprintln!(
-                        "bone-lua warn: command '{cmd}': handler is not a function or table; skipping"
+                        "bone-lua warn: command '{cmd_owned}': handler is not a function or table; skipping"
                     );
-                    return Some(());
+                    return Some(None);
                 }
             };
 
-            // Create ctx table.
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
@@ -1195,32 +1197,72 @@ impl App {
                 shared_state,
                 pane_sender: None,
                 call_id: None,
+                tool_handler: Some(tools),
+                approval_mode,
+                tool_call_depth: 0,
+                session_id,
+                provider: Some(provider),
+                model: Some(model),
+                agent_depth: 0,
+                cancelled: None,
             };
             let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
+            let result = handler.call::<LuaValue>((arg_owned, ctx_table));
 
-            // Call handler(args, ctx).
-            let result = handler.call::<LuaValue>((arg.to_string(), ctx_table));
-
-            match result {
+            let reply = match result {
                 Ok(LuaValue::String(s)) => {
                     let output = s.to_str().map(|s| s.to_string()).unwrap_or_default();
-                    if !output.is_empty() {
-                        Some(output)
-                    } else {
-                        None
-                    }
+                    if output.is_empty() { None } else { Some(output) }
                 }
                 Ok(LuaValue::Nil) => None,
                 Ok(v) => Some(format!("{v:?}")),
                 Err(e) => {
-                    eprintln!("bone-lua error: command '{cmd}': {e}");
+                    eprintln!("bone-lua error: command '{cmd_owned}': {e}");
                     Some(format!("Lua command error: {e}"))
                 }
-            }
-        }; // lua lock released here
+            };
+            Some(reply)
+        });
 
-        if let Some(reply) = reply {
-            self.show_reply(reply, term).ok();
+        self.streaming = true;
+        self.turn_start = Some(Instant::now());
+        self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_pause_start = None;
+        self.redraw(term).ok();
+
+        let mut spinner = time::interval(Duration::from_millis(90));
+        let reply = loop {
+            tokio::select! {
+                result = &mut task => {
+                    self.streaming = false;
+                    self.turn_start = None;
+                    break result.ok().flatten();
+                }
+                _ = spinner.tick() => {
+                    let status_info = self.status_info();
+                    let pages: &[PanePage] = if self.panes_visible { &self.pages } else { &[] };
+                    let pane_toggle_hint = self.pane_toggle_hint();
+                    self.renderer.tick_spinner(term, &PaneDraw {
+                        input: &self.input,
+                        status_info: &status_info,
+                        pages,
+                        active_page: self.active_page,
+                        pane_toggle_hint,
+                        autocomplete: None,
+                    }).ok();
+                }
+            }
+        };
+
+        if let Some(Some(reply)) = reply {
+            if reply.starts_with("Lua command error:") {
+                self.show_reply(reply, term).ok();
+            } else {
+                let display = format!("/{cmd}{}", if arg.is_empty() { "".to_string() } else { format!(" {arg}") });
+                self.submit_user_turn(reply, Some(display), term).await.ok();
+            }
+        } else {
+            self.redraw(term).ok();
         }
 
         Some(())

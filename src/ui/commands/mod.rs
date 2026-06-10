@@ -14,6 +14,29 @@ pub enum CommandResult {
     OpenEditor,
 }
 
+/// Built-in slash commands that Lua commands cannot override.
+pub fn is_protected_builtin(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "help"
+            | "quit"
+            | "exit"
+            | "new"
+            | "clear"
+            | "compact"
+            | "model"
+            | "provider"
+            | "config"
+            | "tools"
+            | "edit"
+            | "e"
+            | "context"
+            | "recall"
+            | "stats"
+            | "usage"
+    )
+}
+
 /// Dispatch a slash command. Returns a reply string or a quit signal.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle(
