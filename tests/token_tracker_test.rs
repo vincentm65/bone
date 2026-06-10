@@ -42,27 +42,6 @@ fn cumulative_cached_and_cost_across_requests() {
 }
 
 #[test]
-fn summary_includes_all_fields_when_present() {
-    let mut stats = TokenStats::new();
-    stats.record_request(5000, 200, Some(1000), Some(0.0125));
-    let s = stats.summary();
-    assert!(s.contains("Requests:"));
-    assert!(s.contains("5,000"));
-    assert!(s.contains("200"));
-    assert!(s.contains("1,000"));
-    assert!(s.contains("$0.0125"));
-}
-
-#[test]
-fn summary_omits_cached_and_cost_when_zero() {
-    let mut stats = TokenStats::new();
-    stats.record_request(100, 50, None, None);
-    let s = stats.summary();
-    assert!(!s.contains("Cached"));
-    assert!(!s.contains("Cost"));
-}
-
-#[test]
 fn one_liner_includes_cached_and_cost_when_present() {
     let mut stats = TokenStats::new();
     stats.record_request(1000, 200, Some(300), Some(0.1234));

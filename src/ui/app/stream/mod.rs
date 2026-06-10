@@ -1,5 +1,5 @@
 use crate::chat::{Message, build_chat_history};
-use crate::ext::event::EventDispatchResult;
+use crate::ext::EventDispatchResult;
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
 use crate::tools::command_policy::CommandSafety;
 use crate::tools::edit_file::preview_edit_file;

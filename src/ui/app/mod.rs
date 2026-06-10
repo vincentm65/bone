@@ -84,55 +84,30 @@ impl App {
         llm: Box<dyn LlmProvider>,
         providers_config: ProvidersConfig,
         mut user_config: UserConfig,
-        custom_configs: config::custom::CustomConfigs,
+        mut custom_configs: config::custom::CustomConfigs,
     ) -> io::Result<Self> {
         let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
-        // Boot Lua extension system first so Lua tools can be registered.
-        let crate::ext::BootResult {
-            manager: extensions,
-            tools: lua_tools,
-            commands: _,
-            config_snapshot,
-            theme_snapshot,
-            keymap_snapshot,
-        } = crate::ext::boot(
+        // Boot Lua extension system and build tool handler.
+        let booted = crate::ext::boot_with_tools(
             &crate::config::bone_dir(),
             &std::env::current_dir().unwrap_or_default(),
+            &mut custom_configs,
+            true,
         );
-
-        let mut loaded = crate::tools::load_tools();
-        // Register Lua tools into the tool registry.
-        crate::tools::register_lua_tools(&mut loaded, lua_tools);
-        // Sync tools page with registry, then rebuild enabled list
-        let all_tool_names: Vec<String> = loaded
-            .registry
-            .definitions()
-            .iter()
-            .map(|d| d.name.clone())
-            .collect();
-        let mut custom_configs = custom_configs;
-        custom_configs.sync_tools_from_registry(&all_tool_names);
-        let enabled = custom_configs.enabled_tool_names();
-        let enabled = if enabled.is_empty() {
-            all_tool_names
-        } else {
-            enabled
-        };
-        let tools = ToolHandler::with_enabled_safety_and_display(
-            loaded.registry,
-            &enabled,
-            loaded.dynamic_display,
-            loaded.dynamic_safety,
-        );
+        let extensions = booted.manager;
+        let tools = booted.tools;
 
         // Create renderer with Lua theme applied over defaults.
         let mut renderer = Renderer::new();
-        theme_snapshot.apply_to(&mut renderer.theme);
+        extensions.theme_snapshot().apply_to(&mut renderer.theme);
 
         // Apply Lua config snapshot — overrides YAML config values.
-        apply_lua_config_snapshot(&mut user_config, &config_snapshot);
+        apply_lua_config_snapshot(&mut user_config, extensions.config_snapshot());
+
+        // Capture keymap snapshot before `extensions` is moved into the struct.
+        let lua_keymap = extensions.keymap_snapshot().clone();
 
         let messages = vec![Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
@@ -171,7 +146,7 @@ impl App {
             turn_pause_start: None,
             autocomplete: None,
             extensions,
-            lua_keymap: keymap_snapshot,
+            lua_keymap,
             shown_tool_rows: std::collections::HashSet::new(),
         })
     }
@@ -985,9 +960,25 @@ impl App {
 
         // Protected built-ins always win over Lua commands.
         if !commands::is_protected_builtin(cmd.as_str()) && self.extensions.is_available() {
-            // Check Lua commands.
-            if let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
-                return Ok(());
+            // Check if the lua command is enabled in skills config.
+            // If the skills page is absent or empty, treat all registered commands as enabled
+            // (same fallback semantics as tools).
+            let all_command_names: Vec<String> = self
+                .extensions
+                .commands()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            let enabled_skills = self.custom_configs.enabled_skill_names();
+            let enabled = if enabled_skills.is_empty() {
+                all_command_names
+            } else {
+                enabled_skills
+            };
+            if enabled.contains(&cmd) {
+                if let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
+                    return Ok(());
+                }
             }
         }
 
@@ -1099,51 +1090,29 @@ impl App {
         let mut task = tokio::task::spawn_blocking(move || {
             let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
 
-            let bone_table = lua.globals().get::<mlua::Table>("bone").ok()?;
-            let commands_table = bone_table.get::<mlua::Table>("_commands").ok()?;
-
-            let mut found_entry: Option<mlua::Table> = None;
-            for entry in commands_table.sequence_values::<mlua::Table>() {
-                let entry = entry.ok()?;
-                let name: String = entry.get("name").ok()?;
-                if name == cmd_owned {
-                    found_entry = Some(entry);
-                    break;
-                }
-            }
-
-            let entry = found_entry?;
-            let handler: LuaValue = entry.get("handler").ok()?;
-            let handler = match handler {
-                LuaValue::Function(f) => f,
-                LuaValue::Table(t) => t.get("handler").ok()?,
-                _ => {
-                    eprintln!(
-                        "bone-lua warn: command '{cmd_owned}': handler is not a function or table; skipping"
-                    );
-                    return Some(None);
-                }
+            // Find the command handler using the shared lookup.
+            let handler = match crate::ext::ops_commands::find_handler(&lua, &cmd_owned) {
+                Some(f) => f,
+                None => return Some(None),
             };
 
             let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
             let shared_state: crate::ext::ctx::SharedState =
                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-            let ctx_cfg = crate::ext::ctx::CtxConfig {
-                config_dir,
-                shared_state,
-                pane_sender: None,
-                call_id: None,
-                tool_handler: Some(tools),
-                approval_mode,
-                tool_call_depth: 0,
-                session_id,
-                provider: Some(provider),
-                model: Some(model),
-                agent_depth: 0,
-                cancelled: None,
-                usage: Some(usage),
-            };
+            let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
+            ctx_cfg.tool_handler = Some(tools);
+            ctx_cfg.approval_mode = approval_mode;
+            ctx_cfg.session_id = session_id;
+            ctx_cfg.provider = Some(provider);
+            ctx_cfg.model = Some(model);
+            ctx_cfg.usage = Some(usage);
             let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
+
+            // Release the project Lua mutex before calling into Lua: a nested
+            // LuaTool invocation via ctx.tools.call runs inline on this thread
+            // and must re-acquire it (std::sync::Mutex is not reentrant).
+            drop(lua);
+
             let result = handler.call::<LuaValue>((arg_owned, ctx_table));
 
             let reply = match result {
@@ -1409,40 +1378,20 @@ impl App {
         let action = parts.next().unwrap_or("");
         match action {
             "reload" => {
-                let mut loaded = crate::tools::load_tools();
-
-                // Re-boot Lua to pick up new/changed Lua tools.
+                // Full reload: re-boot extensions and rebuild tool handler.
                 let config_dir = crate::config::bone_dir();
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let crate::ext::BootResult {
-                    tools: lua_tools, ..
-                } = crate::ext::boot(&config_dir, &cwd);
-                crate::tools::register_lua_tools(&mut loaded, lua_tools);
-
-                let all_names: Vec<String> = loaded
-                    .registry
-                    .definitions()
-                    .iter()
-                    .map(|d| d.name.clone())
-                    .collect();
-                self.custom_configs.sync_tools_from_registry(&all_names);
-
-                let enabled = self.custom_configs.enabled_tool_names();
-                let enabled = if enabled.is_empty() {
-                    all_names
-                } else {
-                    enabled
-                };
-                self.tools = ToolHandler::with_enabled_safety_and_display(
-                    loaded.registry,
-                    &enabled,
-                    loaded.dynamic_display,
-                    loaded.dynamic_safety,
-                );
+                let booted =
+                    crate::ext::boot_with_tools(&config_dir, &cwd, &mut self.custom_configs, true);
+                self.extensions = booted.manager;
+                self.tools = booted.tools;
 
                 self.user_config.enabled_tools = self.tools.enabled_names();
                 let count = self.tools.definitions().len();
-                self.show_reply(format!("Tools reloaded. {count} tools enabled."), term)
+                self.show_reply(
+                    format!("Tools and Lua extensions reloaded. {count} tools enabled."),
+                    term,
+                )
             }
             _ => self.config_picker(term, Some("tools")).await,
         }

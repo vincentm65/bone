@@ -13,18 +13,13 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use crate::tools::shell::{ScriptRequest, run_script};
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
-
-const RUNTIME_OP_KEY: &str = "__bone_runtime_op";
+use crate::ui::pane_page::PanePage;
 
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Shared mutable state accessible via ctx.state.
 pub(crate) type SharedState = Arc<Mutex<HashMap<String, String>>>;
-
-pub(crate) fn runtime_op_key() -> &'static str {
-    RUNTIME_OP_KEY
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct UsageProviderContext {
@@ -68,6 +63,28 @@ pub(crate) struct CtxConfig {
     pub agent_depth: usize,
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
+}
+
+impl CtxConfig {
+    /// Create a CtxConfig with default/inert values for all fields except
+    /// `config_dir` and `shared_state`.
+    pub fn new(config_dir: String, shared_state: SharedState) -> Self {
+        Self {
+            config_dir,
+            shared_state,
+            pane_sender: None,
+            call_id: None,
+            tool_handler: None,
+            approval_mode: crate::tools::ApprovalMode::Safe,
+            tool_call_depth: 0,
+            session_id: None,
+            provider: None,
+            model: None,
+            agent_depth: 0,
+            cancelled: None,
+            usage: None,
+        }
+    }
 }
 
 /// Create the `ctx` table for a single tool invocation.
@@ -302,7 +319,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     )?;
     ctx.set("shell_streaming", shell_streaming_fn)?;
 
-    // ctx.read_file(path) → content string or nil, error_string
+    // ctx.read_file(path) → content string (raises a Lua error on failure)
     let read_fn = lua.create_function(|_, path: String| {
         // block_in_place for async fs::read_to_string
         let result = tokio::task::block_in_place(|| {
@@ -370,7 +387,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = pane_from_json(&val).map_err(|e| mlua::Error::external(e))?;
+            let pane = PanePage::from_json(&val).map_err(|e| mlua::Error::external(e))?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -768,7 +785,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let emit_pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = pane_from_json(&val).map_err(|e| mlua::Error::external(e))?;
+            let pane = PanePage::from_json(&val).map_err(|e| mlua::Error::external(e))?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -1179,111 +1196,6 @@ async fn await_cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicB
     }
 }
 
-/// Parse a pane definition from a serde_json::Value (same format as the JSON envelope).
-fn pane_from_json(val: &serde_json::Value) -> Result<crate::ui::pane_page::PanePage, String> {
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span};
-
-    let pane = val.as_object().ok_or("pane must be an object")?;
-    let source = pane
-        .get("source")
-        .and_then(|v| v.as_str())
-        .ok_or("pane missing source")?
-        .to_string();
-    let title = pane
-        .get("title")
-        .and_then(|v| v.as_str())
-        .ok_or("pane missing title")?
-        .to_string();
-    let visible_rows = pane
-        .get("visible_rows")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(8) as usize;
-    let scroll = pane.get("scroll").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-    let lines: Vec<Line<'static>> = pane
-        .get("lines")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|line_val| {
-                    if let Some(text) = line_val.as_str() {
-                        Some(Line::from(text.to_string()))
-                    } else if let Some(obj) = line_val.as_object() {
-                        let spans: Vec<Span<'static>> = obj
-                            .get("spans")
-                            .and_then(|v| v.as_array())
-                            .map(|spans_arr| {
-                                spans_arr
-                                    .iter()
-                                    .filter_map(|span_val| {
-                                        let span_obj = span_val.as_object()?;
-                                        let text = span_obj
-                                            .get("text")
-                                            .and_then(|v| v.as_str())?
-                                            .to_string();
-                                        let mut style = Style::default();
-                                        if let Some(fg) =
-                                            span_obj.get("fg").and_then(|v| v.as_str())
-                                        {
-                                            if let Some(c) = parse_color(fg) {
-                                                style = style.fg(c);
-                                            }
-                                        }
-                                        if let Some(mods) =
-                                            span_obj.get("modifiers").and_then(|v| v.as_array())
-                                        {
-                                            for m in mods {
-                                                if let Some(s) = m.as_str() {
-                                                    match s {
-                                                        "bold" => {
-                                                            style =
-                                                                style.add_modifier(Modifier::BOLD)
-                                                        }
-                                                        "dim" => {
-                                                            style =
-                                                                style.add_modifier(Modifier::DIM)
-                                                        }
-                                                        "italic" => {
-                                                            style =
-                                                                style.add_modifier(Modifier::ITALIC)
-                                                        }
-                                                        "strike" | "crossed_out" => {
-                                                            style = style
-                                                                .add_modifier(Modifier::CROSSED_OUT)
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Some(Span::styled(text, style))
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if spans.is_empty() {
-                            Some(Line::from(""))
-                        } else {
-                            Some(Line::from(spans))
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok(crate::ui::pane_page::PanePage {
-        source,
-        title,
-        content: lines,
-        visible_rows,
-        scroll,
-    })
-}
-
 /// Convert a serde_yaml::Value to a Lua value.
 fn yaml_to_lua(lua: &Lua, val: &serde_yaml::Value) -> Result<Value, mlua::Error> {
     match val {
@@ -1322,33 +1234,5 @@ fn yaml_to_lua(lua: &Lua, val: &serde_yaml::Value) -> Result<Value, mlua::Error>
             Ok(Value::Table(t))
         }
         serde_yaml::Value::Tagged(tagged) => yaml_to_lua(lua, &tagged.value),
-    }
-}
-
-fn parse_color(s: &str) -> Option<ratatui::style::Color> {
-    match s {
-        "black" => Some(ratatui::style::Color::Black),
-        "red" => Some(ratatui::style::Color::Red),
-        "green" => Some(ratatui::style::Color::Green),
-        "yellow" => Some(ratatui::style::Color::Yellow),
-        "blue" => Some(ratatui::style::Color::Blue),
-        "magenta" => Some(ratatui::style::Color::Magenta),
-        "cyan" => Some(ratatui::style::Color::Cyan),
-        "gray" | "grey" => Some(ratatui::style::Color::Gray),
-        "dark_gray" | "dark_grey" => Some(ratatui::style::Color::DarkGray),
-        "white" => Some(ratatui::style::Color::White),
-        "lightred" => Some(ratatui::style::Color::LightRed),
-        "lightgreen" => Some(ratatui::style::Color::LightGreen),
-        "lightyellow" => Some(ratatui::style::Color::LightYellow),
-        "lightblue" => Some(ratatui::style::Color::LightBlue),
-        "lightmagenta" => Some(ratatui::style::Color::LightMagenta),
-        "lightcyan" => Some(ratatui::style::Color::LightCyan),
-        hex if hex.starts_with('#') && hex.len() == 7 => {
-            let r = u8::from_str_radix(&hex[1..3], 16).ok()?;
-            let g = u8::from_str_radix(&hex[3..5], 16).ok()?;
-            let b = u8::from_str_radix(&hex[5..7], 16).ok()?;
-            Some(ratatui::style::Color::Rgb(r, g, b))
-        }
-        _ => None,
     }
 }

@@ -7,6 +7,41 @@
 
 use mlua::{Lua, Table, Value, Variadic};
 
+/// Look up a command handler by name from `bone._commands`.
+/// Returns the handler as a `mlua::Function` if found.
+pub(crate) fn find_handler(lua: &Lua, name: &str) -> Option<mlua::Function> {
+    let bone_table = lua.globals().get::<Table>("bone").ok()?;
+    let commands_table = bone_table.get::<Table>("_commands").ok()?;
+
+    for entry in commands_table.sequence_values::<Table>() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let cmd_name: String = match entry.get::<Value>("name") {
+            Ok(Value::String(s)) => match s.to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        if cmd_name != name {
+            continue;
+        }
+
+        let handler: Value = entry.get("handler").ok()?;
+        return match handler {
+            Value::Function(f) => Some(f),
+            Value::Table(t) => t.get("handler").ok().and_then(|v| match v {
+                Value::Function(f) => Some(f),
+                _ => None,
+            }),
+            _ => None,
+        };
+    }
+    None
+}
+
 /// A command registered from Lua via `bone.register_command()`.
 #[derive(Clone)]
 pub struct RegisteredLuaCommand {

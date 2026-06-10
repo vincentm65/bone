@@ -5,7 +5,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ext;
-use crate::tools;
 use crate::tools::ApprovalMode;
 pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers, save_providers};
 
@@ -157,7 +156,7 @@ pub fn seed_all() {
     seed_command_policy_if_missing();
     seed_agents_md_if_missing();
     custom::seed_builtin_pages();
-    tools::seed_default_lua_tools(&ext::lua_tools_dir());
+    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"));
 }
 
 fn is_local_base_url(base_url: &str) -> bool {

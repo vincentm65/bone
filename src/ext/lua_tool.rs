@@ -9,15 +9,13 @@ use async_trait::async_trait;
 use mlua::{Lua, LuaSerdeExt};
 use serde_json::Value;
 
-use crate::tools::types::{Tool, ToolDefinition, ToolDisplayConfig, ToolOutput};
+use crate::tools::types::{
+    Tool, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolOutput,
+};
 use crate::ui::pane_page::PanePage;
 
 use super::ctx::{self, CtxConfig, SharedState};
 use crate::tools::command_policy::CommandSafety;
-
-enum LuaExecution {
-    Output(ToolOutput),
-}
 
 pub struct LuaTool {
     name: String,
@@ -121,6 +119,69 @@ impl LuaTool {
     pub fn safety(&self) -> CommandSafety {
         self.safety
     }
+
+    /// Run the tool's Lua execute function synchronously on the current thread.
+    ///
+    /// The project `Arc<Mutex<Lua>>` is held only while extracting the execute
+    /// function, converting arguments, and building the ctx table. It is
+    /// released before calling into Lua: `std::sync::Mutex` is not reentrant,
+    /// and a nested LuaTool invocation (via `ctx.tools.call`) runs inline on
+    /// this same thread and must be able to re-acquire it. Cross-thread access
+    /// to the VM during the call is still serialized by mlua's internal
+    /// reentrant VM mutex (`send` feature).
+    #[allow(clippy::too_many_arguments)]
+    fn run_execute(
+        lua_arc: &Arc<Mutex<Lua>>,
+        registry_key: &mlua::RegistryKey,
+        name: &str,
+        arguments: &Value,
+        config_dir: String,
+        shared_state: SharedState,
+        events: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
+        context: &ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        let lua = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
+
+        let execute_fn: mlua::Value = lua
+            .registry_value(registry_key)
+            .map_err(|e| format!("lua tool '{name}': execute function lost: {e}"))?;
+        let execute_fn = match execute_fn {
+            mlua::Value::Function(f) => f,
+            _ => return Err(format!("lua tool '{name}': execute is not a function")),
+        };
+
+        let args_lua = lua
+            .to_value(arguments)
+            .map_err(|e| format!("lua tool '{name}': failed to convert arguments: {e}"))?;
+
+        let mut ctx_cfg = CtxConfig::new(config_dir, shared_state);
+        ctx_cfg.pane_sender = events;
+        ctx_cfg.call_id = Some(context.call_id.clone());
+        ctx_cfg.tool_handler = context.tool_handler.clone();
+        ctx_cfg.approval_mode = crate::tools::ApprovalMode::Safe;
+        ctx_cfg.tool_call_depth = context.tool_call_depth;
+        ctx_cfg.agent_depth = context.agent_depth;
+        ctx_cfg.cancelled = context.cancelled.clone();
+        let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
+            .map_err(|e| format!("lua tool '{name}': failed to create ctx: {e}"))?;
+
+        // Release the project mutex before calling into Lua (see doc comment).
+        drop(lua);
+
+        let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
+
+        let text = match result {
+            Ok(mlua::Value::String(s)) => s
+                .to_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|e| format!("(lua string error: {e})")),
+            Ok(mlua::Value::Nil) => String::new(),
+            Ok(v) => format!("{v:?}"),
+            Err(e) => return Err(format!("lua tool '{name}': {e}")),
+        };
+
+        parse_tool_output(&text)
+    }
 }
 
 #[async_trait]
@@ -134,107 +195,15 @@ impl Tool for LuaTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
-
-        let execute_fn: mlua::Value = lua
-            .registry_value(&*self.registry_key)
-            .map_err(|e| format!("lua tool '{}': execute function lost: {e}", self.name))?;
-        let execute_fn = match execute_fn {
-            mlua::Value::Function(f) => f,
-            _ => {
-                return Err(format!(
-                    "lua tool '{}': execute is not a function",
-                    self.name
-                ));
-            }
-        };
-
-        let args_lua = lua
-            .to_value(&arguments)
-            .map_err(|e| format!("lua tool '{}': failed to convert arguments: {e}", self.name))?;
-
-        // execute (non-live)
-        let ctx_cfg = CtxConfig {
-            config_dir: self.config_dir.clone(),
-            shared_state: self.shared_state.clone(),
-            pane_sender: None,
-            call_id: None,
-            tool_handler: None,
-            approval_mode: crate::tools::ApprovalMode::Safe,
-            tool_call_depth: 0,
-            session_id: None,
-            provider: None,
-            model: None,
-            agent_depth: 0,
-            cancelled: None,
-            usage: None,
-        };
-        let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-            .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
-
-        let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
-
-        match result {
-            Ok(mlua::Value::String(s)) => Ok(s
-                .to_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|e| format!("(lua string error: {e})"))),
-            Ok(mlua::Value::Nil) => Ok(String::new()),
-            Ok(v) => Ok(format!("{v:?}")),
-            Err(e) => Err(format!("lua tool '{}': {e}", self.name)),
-        }
+        let output = self
+            .execute_output_live(arguments, None, ToolExecutionContext::default())
+            .await?;
+        Ok(output.content)
     }
 
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
-        let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
-
-        let execute_fn: mlua::Value = lua
-            .registry_value(&*self.registry_key)
-            .map_err(|e| format!("lua tool '{}': execute function lost: {e}", self.name))?;
-        let execute_fn = match execute_fn {
-            mlua::Value::Function(f) => f,
-            _ => {
-                return Err(format!(
-                    "lua tool '{}': execute is not a function",
-                    self.name
-                ));
-            }
-        };
-
-        let args_lua = lua
-            .to_value(&arguments)
-            .map_err(|e| format!("lua tool '{}': failed to convert arguments: {e}", self.name))?;
-        let ctx_cfg = CtxConfig {
-            config_dir: self.config_dir.clone(),
-            shared_state: self.shared_state.clone(),
-            pane_sender: None,
-            call_id: None,
-            tool_handler: None,
-            approval_mode: crate::tools::ApprovalMode::Safe,
-            tool_call_depth: 0,
-            session_id: None,
-            provider: None,
-            model: None,
-            agent_depth: 0,
-            cancelled: None,
-            usage: None,
-        };
-        let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-            .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
-
-        let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
-
-        let text = match result {
-            Ok(mlua::Value::String(s)) => s
-                .to_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|e| format!("(lua string error: {e})")),
-            Ok(mlua::Value::Nil) => String::new(),
-            Ok(v) => format!("{v:?}"),
-            Err(e) => return Err(format!("lua tool '{}': {e}", self.name)),
-        };
-
-        parse_tool_output(&text)
+        self.execute_output_live(arguments, None, ToolExecutionContext::default())
+            .await
     }
 
     async fn execute_output_live(
@@ -243,107 +212,49 @@ impl Tool for LuaTool {
         events: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
         context: crate::tools::types::ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
-        // Clone handles for move into spawn_blocking.
+        if context.tool_call_depth > 0 {
+            // Nested invocation via ctx.tools.call: we are already on the
+            // thread that is executing Lua (inside Function::call), which
+            // holds mlua's internal VM mutex. That mutex is reentrant only
+            // for the *same* thread, so hopping to another thread here would
+            // deadlock: the new thread would block on the VM mutex while this
+            // thread blocks waiting for its result. Execute inline instead —
+            // same-thread re-entry into the VM is sound (Lua supports
+            // recursive lua_pcall from callbacks). The caller is already
+            // inside block_in_place/block_on, so blocking here is fine.
+            return Self::run_execute(
+                &self.lua,
+                &self.registry_key,
+                &self.name,
+                &arguments,
+                self.config_dir.clone(),
+                self.shared_state.clone(),
+                events,
+                &context,
+            );
+        }
+
+        // Top-level call: run blocking Lua execution off the async workers.
         let lua_arc = self.lua.clone();
         let registry_key = self.registry_key.clone();
         let name = self.name.clone();
-       let config_dir = self.config_dir.clone();
+        let config_dir = self.config_dir.clone();
         let shared_state = self.shared_state.clone();
-        let call_id = context.call_id.clone();
-        let call_id_for_ctx = call_id.clone();
-        let agent_depth = context.agent_depth;
-        let tool_call_depth = context.tool_call_depth;
-        let cancelled = context.cancelled.clone();
 
-        let execution = tokio::task::spawn_blocking(move || {
-            // Hold the Lua lock only long enough to extract the execute function,
-            // arguments, and the ctx table.  This avoids a deadlock when the Lua
-            // tool's execute function calls ctx.tools.call (which may invoke
-            // another Lua tool).
-            let lua = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
-
-            let execute_fn: mlua::Value = lua
-                .registry_value(&*registry_key)
-                .map_err(|e| format!("lua tool '{name}': execute function lost: {e}"))?;
-            let execute_fn = match execute_fn {
-                mlua::Value::Function(f) => f,
-                _ => return Err(format!("lua tool '{name}': execute is not a function")),
-            };
-
-            let args_lua = lua
-                .to_value(&arguments)
-                .map_err(|e| format!("lua tool '{name}': failed to convert arguments: {e}"))?;
-
-            let ctx_cfg = CtxConfig {
+        tokio::task::spawn_blocking(move || {
+            Self::run_execute(
+                &lua_arc,
+                &registry_key,
+                &name,
+                &arguments,
                 config_dir,
                 shared_state,
-                pane_sender: events,
-                call_id: Some(call_id_for_ctx),
-                tool_handler: context.tool_handler.clone(),
-                approval_mode: crate::tools::ApprovalMode::Safe,
-                tool_call_depth,
-                session_id: None,
-                provider: None,
-                model: None,
-                agent_depth,
-                cancelled,
-                usage: None,
-            };
-            let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
-                .map_err(|e| format!("lua tool '{name}': failed to create ctx: {e}"))?;
-
-            // Lua lock released when `lua` goes out of scope above.
-            drop(lua);
-
-            // Call the execute function outside the Lua lock.
-            // mlua::Function::call acquires the lock internally, so this is safe
-            // and avoids deadlocking on nested Lua tool invocations.
-            let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
-
-            let execution = match result {
-                Ok(value) => lua_value_to_execution(&name, value),
-                Err(e) => Err(format!("lua tool '{name}': {e}")),
-            }?;
-
-            Ok::<LuaExecution, String>(execution)
+                events,
+                &context,
+            )
         })
         .await
-        .map_err(|e| format!("lua tool '{}': spawn_blocking panicked: {e}", self.name))??;
-
-        match execution {
-            LuaExecution::Output(output) => Ok(output),
-        }
-    }
-}
-
-fn lua_value_to_execution(name: &str, value: mlua::Value) -> Result<LuaExecution, String> {
-    match value {
-        mlua::Value::Table(table) => {
-            let op: Option<String> = table
-                .get::<Option<String>>(ctx::runtime_op_key())
-                .map_err(|e| format!("lua tool '{name}': invalid runtime op marker: {e}"))?;
-            if op.is_some() {
-                // Runtime op markers are no longer handled; treat as output.
-                Ok(LuaExecution::Output(ToolOutput::text(format!(
-                    "{:?}",
-                    mlua::Value::Table(table)
-                ))))
-            } else {
-                Ok(LuaExecution::Output(ToolOutput::text(format!(
-                    "{:?}",
-                    mlua::Value::Table(table)
-                ))))
-            }
-        }
-        mlua::Value::String(s) => {
-            let text = s
-                .to_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|e| format!("(lua string error: {e})"));
-            parse_tool_output(&text).map(LuaExecution::Output)
-        }
-        mlua::Value::Nil => Ok(LuaExecution::Output(ToolOutput::text(String::new()))),
-        v => Ok(LuaExecution::Output(ToolOutput::text(format!("{v:?}")))),
+        .map_err(|e| format!("lua tool '{}': spawn_blocking panicked: {e}", self.name))?
     }
 }
 
@@ -361,58 +272,9 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                 .get("state")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let pane_page = map.get("pane").and_then(|pane_val| {
-                let pane = pane_val.as_object()?;
-                let source = pane.get("source").and_then(|v| v.as_str())?.to_string();
-                let title = pane.get("title").and_then(|v| v.as_str())?.to_string();
-                let visible_rows = pane
-                    .get("visible_rows")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(8) as usize;
-                let scroll = pane.get("scroll").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let lines: Vec<ratatui::text::Line<'static>> = pane
-                    .get("lines")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|line_val| {
-                                if let Some(text) = line_val.as_str() {
-                                    Some(ratatui::text::Line::from(text.to_string()))
-                                } else if let Some(styled) = line_val.as_object() {
-                                    let spans: Vec<ratatui::text::Span<'static>> = styled
-                                        .get("spans")
-                                        .and_then(|v| v.as_array())
-                                        .map(|spans_arr| {
-                                            spans_arr
-                                                .iter()
-                                                .filter_map(|span_val| {
-                                                    let span_obj = span_val.as_object()?;
-                                                    let text = span_obj
-                                                        .get("text")
-                                                        .and_then(|v| v.as_str())?
-                                                        .to_string();
-                                                    let style = span_obj_to_style(span_obj);
-                                                    Some(ratatui::text::Span::styled(text, style))
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default();
-                                    Some(ratatui::text::Line::from(spans))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(PanePage {
-                    source,
-                    title,
-                    content: lines,
-                    visible_rows,
-                    scroll,
-                })
-            });
+            let pane_page = map
+                .get("pane")
+                .and_then(|pane_val| PanePage::from_json(pane_val).ok());
             Ok(ToolOutput {
                 content,
                 pane_page,
@@ -421,39 +283,4 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
         }
         _ => Ok(ToolOutput::text(text.to_string())),
     }
-}
-
-fn span_obj_to_style(obj: &serde_json::Map<String, serde_json::Value>) -> ratatui::style::Style {
-    use ratatui::style::{Color, Modifier, Style};
-    let mut style = Style::default();
-    if let Some(color) = obj.get("fg").and_then(|v| v.as_str()) {
-        let color = match color {
-            "black" => Color::Black,
-            "red" => Color::Red,
-            "green" => Color::Green,
-            "yellow" => Color::Yellow,
-            "blue" => Color::Blue,
-            "magenta" => Color::Magenta,
-            "cyan" => Color::Cyan,
-            "gray" | "grey" => Color::Gray,
-            "dark_gray" | "dark_grey" => Color::DarkGray,
-            "white" => Color::White,
-            _ => return style,
-        };
-        style = style.fg(color);
-    }
-    if let Some(modifiers) = obj.get("modifiers").and_then(|v| v.as_array()) {
-        for mod_val in modifiers {
-            if let Some(m) = mod_val.as_str() {
-                match m {
-                    "bold" => style = style.add_modifier(Modifier::BOLD),
-                    "dim" => style = style.add_modifier(Modifier::DIM),
-                    "italic" => style = style.add_modifier(Modifier::ITALIC),
-                    "strike" | "crossed_out" => style = style.add_modifier(Modifier::CROSSED_OUT),
-                    _ => {}
-                }
-            }
-        }
-    }
-    style
 }

@@ -4,13 +4,23 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt};
 
-use super::event::EventDispatchResult;
 use super::snapshots::{LuaConfigSnapshot, LuaKeymapSnapshot, LuaThemeSnapshot};
+
+/// Result of dispatching an event through all Lua handlers.
+#[derive(Debug, Clone)]
+pub enum EventDispatchResult {
+    /// No handler blocked; continue normally.
+    Continue,
+    /// A handler requested blocking.
+    Blocked { reason: String },
+}
 
 /// Owning manager for the Lua VM and all registered extension data.
 pub struct ExtensionManager {
     /// The Lua state, shared so LuaTool can also hold a reference.
     lua: Arc<Mutex<Lua>>,
+    /// `true` when the Lua engine booted successfully.
+    engine_ok: bool,
     /// `true` when `init.lua` was loaded without errors.
     loaded: bool,
     /// Commands registered via `bone.register_command()` during init.lua.
@@ -27,6 +37,7 @@ impl ExtensionManager {
     /// Wrap a pre-created `Arc<Mutex<Lua>>`.
     pub(crate) fn from_arc(
         lua: Arc<Mutex<Lua>>,
+        engine_ok: bool,
         loaded: bool,
         commands: Vec<super::ops_commands::RegisteredLuaCommand>,
         config_snapshot: LuaConfigSnapshot,
@@ -35,6 +46,7 @@ impl ExtensionManager {
     ) -> Self {
         Self {
             lua,
+            engine_ok,
             loaded,
             commands,
             config_snapshot,
@@ -45,13 +57,10 @@ impl ExtensionManager {
 
     /// Returns `true` when the Lua runtime booted and `init.lua` (if present)
     /// executed without errors.
+    /// Returns `true` when the Lua engine booted successfully
+    /// (regardless of whether `init.lua` exists or ran without errors).
     pub fn is_available(&self) -> bool {
-        self.loaded
-    }
-
-    /// Borrow the underlying Lua state.
-    pub fn lua(&self) -> std::sync::MutexGuard<'_, Lua> {
-        self.lua.lock().unwrap_or_else(|e| e.into_inner())
+        self.engine_ok
     }
 
     /// Clone the underlying Lua state handle for background execution.
@@ -142,14 +151,14 @@ pub struct BootResult {
     pub manager: ExtensionManager,
     /// Tools registered via `bone.register_tool()` during init.lua.
     pub tools: Vec<super::lua_tool::LuaTool>,
-    /// Commands registered via `bone.register_command()` during init.lua.
-    pub commands: Vec<super::ops_commands::RegisteredLuaCommand>,
-    /// Snapshot of `bone.config` captured at boot.
-    pub config_snapshot: LuaConfigSnapshot,
-    /// Snapshot of `bone.theme` captured at boot.
-    pub theme_snapshot: LuaThemeSnapshot,
-    /// Snapshot of `bone.keymap` captured at boot.
-    pub keymap_snapshot: LuaKeymapSnapshot,
+}
+
+/// Fully booted tool system: extension manager + configured tool handler.
+pub struct BootedTools {
+    /// The extension manager (keeps the Lua VM alive).
+    pub manager: ExtensionManager,
+    /// The configured tool handler.
+    pub tools: crate::tools::registry::ToolHandler,
 }
 
 // ── Private helpers ─────────────────────────────────────────────────────────

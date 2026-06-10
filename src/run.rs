@@ -152,59 +152,34 @@ async fn expand_lua_command(
 
     // Run blocking Lua execution on a separate thread to avoid blocking the tokio worker.
     tokio::task::spawn_blocking(move || {
-        // Boot Lua.
-        let (lua, _loaded) = ext::boot_lua(&config_dir_owned).ok()?;
+        // Boot extensions for command lookup only — no config sync/persist.
+        let booted = ext::boot_with_tools(
+            &config_dir_owned,
+            &std::env::current_dir().unwrap_or_default(),
+            &mut crate::config::custom::CustomConfigs::default(),
+            false,
+        );
+        let lua = booted.manager.lua_handle();
+        let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Seed and run default commands.
-        ext::seed_default_lua_commands(&config_dir_owned.join("lua/commands"));
-        if ext::run_default_commands(&lua, &config_dir_owned).is_err() {
-            return None;
-        }
-
-        // Find the command in _commands.
-        let bone_table = lua.globals().get::<mlua::Table>("bone").ok()?;
-        let commands_table = bone_table.get::<mlua::Table>("_commands").ok()?;
-
-        let mut found_entry: Option<mlua::Table> = None;
-        for entry in commands_table.sequence_values::<mlua::Table>() {
-            let entry = entry.ok()?;
-            let cmd_name: String = entry.get("name").ok()?;
-            if cmd_name == name_owned {
-                found_entry = Some(entry);
-                break;
-            }
-        }
-
-        let entry = found_entry?;
-
-        // Get the handler.
-        let handler: mlua::Value = entry.get("handler").ok()?;
-        let handler = match handler {
-            mlua::Value::Function(f) => f,
-            mlua::Value::Table(t) => t.get("handler").ok()?,
-            _ => return None,
-        };
+        // Find the command handler.
+        let handler = ext::ops_commands::find_handler(&lua, &name_owned)?;
 
         // Create ctx table.
         let config_dir_str = config_dir_owned.to_string_lossy().to_string();
         let shared_state: crate::ext::ctx::SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let ctx_cfg = crate::ext::ctx::CtxConfig {
-            config_dir: config_dir_str,
-            shared_state,
-            pane_sender: None,
-            call_id: None,
-            tool_handler: None,
-            approval_mode,
-            tool_call_depth: 0,
-            session_id: None,
-            provider,
-            model,
-            agent_depth: 0,
-            cancelled: None,
-            usage: None,
-        };
+        let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir_str, shared_state);
+        ctx_cfg.tool_handler = Some(booted.tools);
+        ctx_cfg.approval_mode = approval_mode;
+        ctx_cfg.provider = provider;
+        ctx_cfg.model = model;
         let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
+
+        // Release the project Lua mutex before calling into Lua: a nested
+        // LuaTool invocation via ctx.tools.call runs inline on this thread
+        // and must re-acquire it (std::sync::Mutex is not reentrant).
+        drop(lua);
 
         // Call handler(args, ctx).
         let result: Result<String, mlua::Error> = handler.call((args_owned, ctx_table));

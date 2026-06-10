@@ -57,7 +57,7 @@ pub struct ToolOutput {
     pub state: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolExecutionContext {
     pub call_id: String,
     /// Session state previously stored by this tool, injected as TOOL_SESSION_STATE.

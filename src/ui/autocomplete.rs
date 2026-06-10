@@ -1,28 +1,13 @@
-/// Inline autocomplete dropdown for slash commands.
-///
-/// Appears below the input field when the user types `/` and filters
-/// in real-time as they type more characters. Shows up to 5 items at
-/// a time with scroll support for longer lists.
+//! Inline autocomplete dropdown for slash commands.
+//!
+//! Appears below the input field when the user types `/` and filters
+//! in real-time as they type more characters. Shows up to 5 items at
+//! a time with scroll support for longer lists.
+
+use crate::ui::commands::BUILTINS;
 
 /// Maximum number of suggestions shown at once.
 pub const MAX_VISIBLE: usize = 5;
-
-/// Built-in command descriptions paired with their names.
-const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    ("clear", "clear chat history"),
-    ("compact", "compact chat history"),
-    ("config", "change application settings"),
-    ("edit", "open system editor for input"),
-    ("e", "open system editor for input"),
-    ("exit", "exit bone"),
-    ("help", "show this message"),
-    ("model", "set or show model"),
-    ("new", "clear chat history"),
-    ("provider", "pick or switch provider"),
-    ("quit", "exit bone"),
-    ("stats", "open full-screen token stats dashboard"),
-    ("tools", "enable or disable tools"),
-];
 
 #[derive(Debug, Clone)]
 pub struct AutocompleteState {
@@ -49,16 +34,6 @@ impl AutocompleteState {
             selected,
             scroll_offset: 0,
         }
-    }
-
-    /// Build a combined list of built-in and Lua commands.
-    pub fn combined(lua_commands: &[(String, String)]) -> Self {
-        let mut all = BUILTIN_COMMANDS
-            .iter()
-            .map(|(n, d)| (n.to_string(), d.to_string()))
-            .collect::<Vec<_>>();
-        all.extend(lua_commands.iter().cloned());
-        Self::new(all)
     }
 
     /// Re-filter matches based on the text typed after `/`.
@@ -142,7 +117,7 @@ impl AutocompleteState {
 
 /// Build the built-in commands list with descriptions.
 pub fn builtin_commands() -> Vec<(String, String)> {
-    BUILTIN_COMMANDS
+    BUILTINS
         .iter()
         .map(|(name, desc)| (name.to_string(), desc.to_string()))
         .collect()

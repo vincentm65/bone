@@ -48,14 +48,16 @@ fn tool_message_error_flag_is_preserved() {
 #[test]
 fn documented_builtins_are_protected_from_lua_overrides() {
     for cmd in [
-        "help", "quit", "exit", "new", "clear", "compact", "model", "provider", "config", "tools",
-        "edit", "e", "context", "stats", "usage",
+        "help", "quit", "exit", "new", "clear", "model", "provider", "config", "tools", "edit",
+        "e", "stats",
     ] {
         assert!(is_protected_builtin(cmd), "/{cmd} should be protected");
     }
 
-    assert!(!is_protected_builtin("memory"));
-    assert!(!is_protected_builtin("review"));
+    // Removed builtins and Lua-provided commands are overridable.
+    for cmd in ["compact", "context", "usage", "memory", "review"] {
+        assert!(!is_protected_builtin(cmd), "/{cmd} should not be protected");
+    }
 }
 
 // ── Tool Handler (concurrency ordering) ─────────────────────────────────────

@@ -4,9 +4,9 @@
 //! Stage 02: Lua tool registration and execution.
 //! Stage 03: Lua command registration and dispatch.
 
+pub mod color;
 pub mod ctx;
 mod engine;
-pub mod event;
 mod loader;
 pub mod lua_tool;
 pub mod ops_commands;
@@ -16,7 +16,7 @@ pub mod ops_tools;
 pub mod snapshots;
 pub mod types;
 
-pub use types::{BootResult, ExtensionManager};
+pub use types::{BootResult, BootedTools, EventDispatchResult, ExtensionManager};
 
 include!(concat!(env!("OUT_DIR"), "/default_lua_tools.rs"));
 include!(concat!(env!("OUT_DIR"), "/default_lua_commands.rs"));
@@ -32,6 +32,65 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
     loader::boot(config_dir, cwd)
 }
 
+/// Full boot sequence: load tools, boot extensions, register Lua tools,
+/// optionally sync the registry into `custom` (persisted), and build a
+/// configured `ToolHandler`.
+pub fn boot_with_tools(
+    config_dir: &Path,
+    cwd: &Path,
+    custom: &mut super::config::custom::CustomConfigs,
+    sync: bool,
+) -> BootedTools {
+    let BootResult {
+        manager: extensions,
+        tools: lua_tools,
+    } = boot(config_dir, cwd);
+
+    let mut loaded = super::tools::load_tools();
+    super::tools::register_lua_tools(&mut loaded, lua_tools);
+
+    let all_tool_names: Vec<String> = loaded
+        .registry
+        .definitions()
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+
+    let enabled = if sync {
+        custom.sync_tools_from_registry(&all_tool_names);
+        let names = custom.enabled_tool_names();
+        if names.is_empty() {
+            all_tool_names
+        } else {
+            names
+        }
+    } else {
+        all_tool_names
+    };
+
+    let tools = super::tools::registry::ToolHandler::with_enabled_safety_and_display(
+        loaded.registry,
+        &enabled,
+        loaded.dynamic_display,
+        loaded.dynamic_safety,
+    );
+
+    if sync {
+        // Sync lua command names into the skills page.
+        let all_command_names: Vec<String> = extensions
+            .commands()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        custom.sync_skills_from_list(&all_command_names);
+    }
+
+    BootedTools {
+        manager: extensions,
+        tools,
+    }
+}
+
 /// Seed bundled default Lua tools into the config directory.
 /// Existing files are never overwritten.
 pub fn seed_default_lua_tools(dir: &Path) {
@@ -41,48 +100,29 @@ pub fn seed_default_lua_tools(dir: &Path) {
     }
     for (name, content) in DEFAULT_LUA_TOOLS {
         let path = dir.join(name);
-        if !path.exists() {
-            if let Err(e) = std::fs::write(&path, content) {
-                eprintln!("bone: warning: could not write {}: {e}", path.display());
-            }
+        if !path.exists()
+            && let Err(e) = std::fs::write(&path, content)
+        {
+            eprintln!("bone: warning: could not write {}: {e}", path.display());
         }
     }
 }
 
-/// Return the config directory for Lua tools.
-pub fn lua_tools_dir() -> std::path::PathBuf {
-    crate::config::bone_dir().join("lua/tools")
-}
-
 /// Seed bundled default Lua commands into the config directory.
 /// Existing files are never overwritten.
-pub fn seed_default_lua_commands(dir: &Path) {
+fn seed_default_lua_commands(dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("bone: warning: could not create {}: {e}", dir.display());
         return;
     }
     for (name, content) in DEFAULT_LUA_COMMANDS {
         let path = dir.join(name);
-        if !path.exists() {
-            if let Err(e) = std::fs::write(&path, content) {
-                eprintln!("bone: warning: could not write {}: {e}", path.display());
-            }
+        if !path.exists()
+            && let Err(e) = std::fs::write(&path, content)
+        {
+            eprintln!("bone: warning: could not write {}: {e}", path.display());
         }
     }
-}
-
-/// Lightweight Lua boot for headless/run mode.
-/// Returns (lua_state, is_loaded) — same engine setup as `boot` but
-/// without collecting tools or building the full ExtensionManager.
-pub fn boot_lua(config_dir: &std::path::Path) -> Result<(mlua::Lua, bool), String> {
-    let version = env!("CARGO_PKG_VERSION");
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let lua = engine::create_engine(&version, &std::path::PathBuf::from(&cwd), config_dir)?;
-
-    let loaded = engine::run_init(&lua, config_dir)?;
-    Ok((lua, loaded))
 }
 
 /// Execute all Lua files from a directory.
@@ -110,10 +150,4 @@ pub fn run_lua_files(lua: &mlua::Lua, dir: &std::path::Path) -> Result<(), Strin
     }
 
     Ok(())
-}
-
-/// Execute all command files from the commands directory.
-/// Each file is expected to call `bone.register_command()` to register itself.
-pub fn run_default_commands(lua: &mlua::Lua, config_dir: &std::path::Path) -> Result<(), String> {
-    run_lua_files(lua, &config_dir.join("lua/commands"))
 }

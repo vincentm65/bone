@@ -14,24 +14,26 @@ pub enum CommandResult {
     OpenEditor,
 }
 
+/// Built-in slash commands as (name, description) pairs.
+/// Single source of truth for autocomplete, /help, and override protection.
+pub const BUILTINS: &[(&str, &str)] = &[
+    ("clear", "clear chat history"),
+    ("config", "change application settings"),
+    ("edit", "open system editor for input"),
+    ("e", "open system editor for input"),
+    ("exit", "exit bone"),
+    ("help", "show this message"),
+    ("model", "set or show model (/model <name>)"),
+    ("new", "clear chat history (alias for /clear)"),
+    ("provider", "pick or switch provider (/provider <name>)"),
+    ("quit", "exit bone"),
+    ("stats", "open full-screen token stats dashboard"),
+    ("tools", "enable or disable tools, /tools reload to rescan"),
+];
+
 /// Built-in slash commands that Lua commands cannot override.
 pub fn is_protected_builtin(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "help"
-            | "quit"
-            | "exit"
-            | "new"
-            | "clear"
-            | "compact"
-            | "model"
-            | "provider"
-            | "config"
-            | "tools"
-            | "edit"
-            | "e"
-            | "stats"
-    )
+    BUILTINS.iter().any(|(name, _)| *name == cmd)
 }
 
 /// Dispatch a slash command. Returns a reply string or a quit signal.
@@ -107,39 +109,31 @@ fn clear(
 fn help() -> String {
     let bold = "\x1b[1m";
     let reset = "\x1b[0m";
-    vec![
-        format!("{bold}Commands{reset}"),
-        "  /clear      — clear chat history".to_string(),
-        "  /config     — change application settings".to_string(),
-        "  /edit, /e   — open system editor for input".to_string(),
-        "  /help       — show this message".to_string(),
-        "  /model      — set or show model (/model <name>)".to_string(),
-        "  /new        — clear chat history (alias for /clear)".to_string(),
-        "  /provider   — pick or switch provider (/provider <name>)".to_string(),
-        "  /stats      — open full-screen token stats dashboard".to_string(),
-        "  /tools      — enable or disable tools, /tools reload to rescan".to_string(),
-        "  /quit, /exit— exit bone".to_string(),
-        "  :           — run a shell command inline (: <command>)".to_string(),
-        String::new(),
-        format!("{bold}Input shortcuts{reset}"),
-        "  Ctrl+A       — move cursor to start of line".to_string(),
-        "  Ctrl+E       — move cursor to end of line".to_string(),
-        "  Ctrl+W       — delete word backward".to_string(),
-        "  Ctrl+U       — clear line before cursor".to_string(),
-        "  Ctrl+K       — clear line after cursor".to_string(),
-        "  Ctrl+X       — open system editor".to_string(),
-        "  Ctrl+D       — clear message queue".to_string(),
-        "  Ctrl+C       — cancel streaming (double-tap to quit)".to_string(),
-        "  Esc          — clear input buffer".to_string(),
-        String::new(),
-        format!("{bold}Pane navigation{reset}"),
-        "  Ctrl+T       — toggle pane visibility".to_string(),
-        "  Tab          — cycle active pane (when panes visible)".to_string(),
-        "  Shift+Tab    — cycle approval mode".to_string(),
-        "  PageUp/Down  — scroll active pane".to_string(),
-        "  Ctrl+Up/Down — scroll active pane by one line".to_string(),
-    ]
-    .join("\n")
+    let mut lines: Vec<String> = BUILTINS
+        .iter()
+        .map(|(name, desc)| format!("  /{name:10} — {desc}"))
+        .collect();
+    lines.insert(0, format!("{bold}Commands{reset}"));
+    lines.push("  :           — run a shell command inline (: <command>)".to_string());
+    lines.push(String::new());
+    lines.push(format!("{bold}Input shortcuts{reset}"));
+    lines.push("  Ctrl+A       — move cursor to start of line".to_string());
+    lines.push("  Ctrl+E       — move cursor to end of line".to_string());
+    lines.push("  Ctrl+W       — delete word backward".to_string());
+    lines.push("  Ctrl+U       — clear line before cursor".to_string());
+    lines.push("  Ctrl+K       — clear line after cursor".to_string());
+    lines.push("  Ctrl+X       — open system editor".to_string());
+    lines.push("  Ctrl+D       — clear message queue".to_string());
+    lines.push("  Ctrl+C       — cancel streaming (double-tap to quit)".to_string());
+    lines.push("  Esc          — clear input buffer".to_string());
+    lines.push(String::new());
+    lines.push(format!("{bold}Pane navigation{reset}"));
+    lines.push("  Ctrl+T       — toggle pane visibility".to_string());
+    lines.push("  Tab          — cycle active pane (when panes visible)".to_string());
+    lines.push("  Shift+Tab    — cycle approval mode".to_string());
+    lines.push("  PageUp/Down  — scroll active pane".to_string());
+    lines.push("  Ctrl+Up/Down — scroll active pane by one line".to_string());
+    lines.join("\n")
 }
 fn model_switch(
     arg: &str,

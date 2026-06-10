@@ -209,6 +209,17 @@ impl CustomConfigs {
         self.enabled_names("tools")
     }
 
+    /// Ensure the "skills" page has a bool field for every name in the list.
+    /// New entries are added as enabled (true). Returns true if fields were added.
+    pub fn sync_skills_from_list(&mut self, skill_names: &[String]) -> bool {
+        self.sync_from_registry("skills", skill_names)
+    }
+
+    /// Get all enabled skill names from the "skills" page.
+    pub fn enabled_skill_names(&self) -> Vec<String> {
+        self.enabled_names("skills")
+    }
+
     /// Get the display value for a field, falling back to the default.
     pub fn get_value(&self, namespace: &str, key: &str) -> String {
         let Some(page) = self.page_ref(namespace) else {

@@ -6,8 +6,7 @@ bone.register_command("memory", {
     local state_file = bone_dir .. "/memory.last_run"
 
     -- Check if database exists
-    local db_fd = io.open(db, "r")
-    if not db_fd then
+    if not ctx.fs.is_file(db) then
       return [=[You are a memory builder running in "dream" mode — processing conversations that happened since your last run.
 
 ## Context
@@ -33,16 +32,14 @@ No conversation database found. Nothing to process.
 - If no meaningful changes are needed, leave memory.md as-is and say "No changes."
 - Output a brief summary of what you added, changed, or removed (or "No changes.").]=]
     end
-    db_fd:close()
 
     -- Read last run timestamp or default to epoch
-    local state_fd = io.open(state_file, "r")
-    local since
-    if state_fd then
-      since = state_fd:read("*a"):gsub("%s+", "")
-      state_fd:close()
-    else
-      since = "1970-01-01T00:00:00Z"
+    local since = "1970-01-01T00:00:00Z"
+    if ctx.fs.is_file(state_file) then
+      local ok, state_content = pcall(ctx.read_file, state_file)
+      if ok and state_content then
+        since = state_content:gsub("%s+", "")
+      end
     end
 
     -- Get conversation IDs since last run

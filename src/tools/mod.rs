@@ -14,7 +14,6 @@ use crate::ext::lua_tool::LuaTool;
 pub use command_policy::CommandSafety;
 pub use shell::{ScriptOutput, ScriptRequest, run_script, truncate_output};
 use std::collections::HashMap;
-include!(concat!(env!("OUT_DIR"), "/default_lua_tools.rs"));
 pub use types::{Tool, ToolCall, ToolDefinition, ToolResult};
 
 /// Result of loading all tools (builtins + Lua) in a single pass.
@@ -54,10 +53,6 @@ pub fn builtin_tools() -> ToolRegistry {
         .register(write_file::WriteFileTool)
         .register(edit_file::EditFileTool)
         .register(shell::ShellTool)
-}
-
-pub fn seed_default_lua_tools(dir: &std::path::Path) {
-    crate::ext::seed_default_lua_tools(dir);
 }
 
 // ── ApprovalMode ────────────────────────────────────────────────────────────

@@ -29,17 +29,14 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
             return BootResult {
                 manager: ExtensionManager::from_arc(
                     Arc::new(Mutex::new(mlua::Lua::new())),
-                    false,
+                    false, // engine_ok
+                    false, // loaded
                     Vec::new(),
                     super::snapshots::LuaConfigSnapshot::default(),
                     super::snapshots::LuaThemeSnapshot::default(),
                     super::snapshots::LuaKeymapSnapshot::default(),
                 ),
                 tools: Vec::new(),
-                commands: Vec::new(),
-                config_snapshot: super::snapshots::LuaConfigSnapshot::default(),
-                theme_snapshot: super::snapshots::LuaThemeSnapshot::default(),
-                keymap_snapshot: super::snapshots::LuaKeymapSnapshot::default(),
             };
         }
     };
@@ -82,20 +79,20 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
 
     let manager = ExtensionManager::from_arc(
         lua_arc,
+        true,  // engine_ok
         loaded,
-        commands.clone(),
-        config_snapshot.clone(),
-        theme_snapshot.clone(),
-        keymap_snapshot.clone(),
-    );
-    BootResult {
-        manager,
-        tools,
         commands,
         config_snapshot,
         theme_snapshot,
         keymap_snapshot,
-    }
+    );
+    BootResult { manager, tools }
+}
+
+/// Get the `bone` global table from the Lua VM.
+/// Returns None if the bone table doesn't exist.
+fn get_bone(lua: &mlua::Lua) -> Option<mlua::Table> {
+    lua.globals().get("bone").ok()
 }
 
 /// Iterate `bone._tools` and build `LuaTool` instances.
@@ -112,9 +109,9 @@ fn collect_tools(
         }
     };
 
-    let bone_table = match lua.globals().get::<mlua::Table>("bone") {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
+    let bone_table = match get_bone(&lua) {
+        Some(t) => t,
+        None => return Vec::new(),
     };
 
     let tools_table = match bone_table.get::<mlua::Table>("_tools") {
@@ -156,9 +153,9 @@ fn collect_commands(
         }
     };
 
-    let bone_table = match lua.globals().get::<mlua::Table>("bone") {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
+    let bone_table = match get_bone(&lua) {
+        Some(t) => t,
+        None => return Vec::new(),
     };
 
     let commands_table = match bone_table.get::<mlua::Table>("_commands") {
@@ -213,9 +210,9 @@ fn collect_config_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots:
         }
     };
 
-    let bone_table = match lua.globals().get::<mlua::Table>("bone") {
-        Ok(t) => t,
-        Err(_) => return super::snapshots::LuaConfigSnapshot::default(),
+    let bone_table = match get_bone(&lua) {
+        Some(t) => t,
+        None => return super::snapshots::LuaConfigSnapshot::default(),
     };
 
     match bone_table.get::<Option<mlua::Table>>("config") {
@@ -240,9 +237,9 @@ fn collect_theme_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::
         }
     };
 
-    let bone_table = match lua.globals().get::<mlua::Table>("bone") {
-        Ok(t) => t,
-        Err(_) => return super::snapshots::LuaThemeSnapshot::default(),
+    let bone_table = match get_bone(&lua) {
+        Some(t) => t,
+        None => return super::snapshots::LuaThemeSnapshot::default(),
     };
 
     match bone_table.get::<Option<mlua::Table>>("theme") {
@@ -267,9 +264,9 @@ fn collect_keymap_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots:
         }
     };
 
-    let bone_table = match lua.globals().get::<mlua::Table>("bone") {
-        Ok(t) => t,
-        Err(_) => return super::snapshots::LuaKeymapSnapshot::default(),
+    let bone_table = match get_bone(&lua) {
+        Some(t) => t,
+        None => return super::snapshots::LuaKeymapSnapshot::default(),
     };
 
     match bone_table.get::<Option<mlua::Table>>("keymap") {

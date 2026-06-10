@@ -5,8 +5,8 @@ use crate::llm::{
     token_tracker::CHARS_PER_TOKEN,
 };
 use crate::session_db::{SessionDb, db_path};
+use crate::tools::ApprovalMode;
 use crate::tools::registry::ToolHandler;
-use crate::tools::{ApprovalMode, load_tools};
 use futures_util::StreamExt;
 use std::path::PathBuf;
 
@@ -303,7 +303,7 @@ struct AgentSetup {
 /// blocking thread pool so concurrent headless agents don't starve the tokio
 /// runtime.
 fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
-    let custom = CustomConfigs::load();
+    let mut custom = CustomConfigs::load();
     let _user_config = UserConfig::from_custom_configs(&custom);
     let mut providers_config = load_providers();
 
@@ -333,41 +333,15 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     let llm =
         create_provider_with_config(&provider_id, &providers_config).map_err(|e| e.to_string())?;
 
-    // Boot Lua extension system first so Lua tools can be registered.
-    let crate::ext::BootResult {
-        manager: extensions,
-        tools: lua_tools,
-        commands: _,
-        config_snapshot: _,
-        theme_snapshot: _,
-        keymap_snapshot: _,
-    } = crate::ext::boot(
+    // Boot Lua extension system and build tool handler.
+    let booted = crate::ext::boot_with_tools(
         &crate::config::bone_dir(),
         &std::env::current_dir().unwrap_or_default(),
+        &mut custom,
+        true,
     );
-
-    let mut loaded = load_tools();
-    crate::tools::register_lua_tools(&mut loaded, lua_tools);
-    let all_tool_names: Vec<String> = loaded
-        .registry
-        .definitions()
-        .iter()
-        .map(|d| d.name.clone())
-        .collect();
-    let mut synced_custom = custom;
-    synced_custom.sync_tools_from_registry(&all_tool_names);
-    let enabled = synced_custom.enabled_tool_names();
-    let enabled = if enabled.is_empty() {
-        all_tool_names
-    } else {
-        enabled
-    };
-    let tools = ToolHandler::with_enabled_safety_and_display(
-        loaded.registry,
-        &enabled,
-        loaded.dynamic_display,
-        loaded.dynamic_safety,
-    );
+    let extensions = booted.manager;
+    let tools = booted.tools;
 
     let transcript = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
     extensions.dispatch_simple(
@@ -699,7 +673,7 @@ async fn execute_tool_calls(
             crate::tools::command_policy::CommandSafety::Danger => "danger",
         };
         match extensions.dispatch_tool_call(&call.name, &call.id, &call.arguments, safety_str) {
-            crate::ext::event::EventDispatchResult::Blocked { reason } => {
+            crate::ext::EventDispatchResult::Blocked { reason } => {
                 out.push((
                     i,
                     crate::tools::ToolResult {
@@ -713,7 +687,7 @@ async fn execute_tool_calls(
                 ));
                 continue;
             }
-            crate::ext::event::EventDispatchResult::Continue => {}
+            crate::ext::EventDispatchResult::Continue => {}
         }
 
         if tools.allows_call(mode, &call) {

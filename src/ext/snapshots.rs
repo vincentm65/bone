@@ -10,19 +10,10 @@ use ratatui::style::Color;
 // ── Config snapshot ─────────────────────────────────────────────────────────
 
 /// Subset of `bone.config` captured after init.lua.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LuaConfigSnapshot {
     pub approval_mode: Option<String>,
     pub status_show: HashMap<String, bool>,
-}
-
-impl Default for LuaConfigSnapshot {
-    fn default() -> Self {
-        Self {
-            approval_mode: None,
-            status_show: HashMap::new(),
-        }
-    }
 }
 
 impl LuaConfigSnapshot {
@@ -55,7 +46,7 @@ impl LuaConfigSnapshot {
 // ── Theme snapshot ──────────────────────────────────────────────────────────
 
 /// Subset of `bone.theme` captured after init.lua.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LuaThemeSnapshot {
     pub user_msg: Option<Color>,
     pub user_msg_bg: Option<Color>,
@@ -72,33 +63,13 @@ pub struct LuaThemeSnapshot {
     pub tab_active: Option<Color>,
 }
 
-impl Default for LuaThemeSnapshot {
-    fn default() -> Self {
-        Self {
-            user_msg: None,
-            user_msg_bg: None,
-            status_text: None,
-            input_border: None,
-            system_msg: None,
-            approval_safe: None,
-            approval_danger: None,
-            tool_call: None,
-            tool_error: None,
-            diff_removed: None,
-            diff_added: None,
-            thinking: None,
-            tab_active: None,
-        }
-    }
-}
-
 impl LuaThemeSnapshot {
     /// Build a snapshot from the `bone.theme` Lua table (or nil).
     pub fn from_lua_table(_lua: &mlua::Lua, table: &mlua::Table) -> Result<Self, String> {
         let parse_color = |key: &str| -> Result<Option<Color>, String> {
             let hex: Option<String> = table.get(key).ok().flatten();
             match hex {
-                Some(h) => Ok(Some(parse_hex_color(&h).ok_or_else(|| {
+                Some(h) => Ok(Some(super::color::parse_color(&h).ok_or_else(|| {
                     format!("bone-lua warn: invalid theme color for {key}: #{h}")
                 })?)),
                 None => Ok(None),
@@ -145,40 +116,6 @@ impl LuaThemeSnapshot {
         apply!(thinking);
         apply!(tab_active);
     }
-}
-
-/// Parse a hex color string like "#RRGGBB" or "RRGGBB" into a ratatui Color.
-fn parse_hex_color(s: &str) -> Option<Color> {
-    let s = s.trim();
-    let s = s.strip_prefix('#').unwrap_or(s);
-    let s = s.to_ascii_uppercase();
-    // Named colors
-    match s.as_str() {
-        "WHITE" => return Some(Color::White),
-        "BLACK" => return Some(Color::Black),
-        "RED" => return Some(Color::Red),
-        "GREEN" => return Some(Color::Green),
-        "YELLOW" => return Some(Color::Yellow),
-        "BLUE" => return Some(Color::Blue),
-        "MAGENTA" => return Some(Color::Magenta),
-        "CYAN" => return Some(Color::Cyan),
-        "GRAY" | "DARKGRAY" => return Some(Color::DarkGray),
-        "LIGHTRED" => return Some(Color::LightRed),
-        "LIGHTGREEN" => return Some(Color::LightGreen),
-        "LIGHTYELLOW" => return Some(Color::LightYellow),
-        "LIGHTBLUE" => return Some(Color::LightBlue),
-        "LIGHTMAGENTA" => return Some(Color::LightMagenta),
-        "LIGHTCYAN" => return Some(Color::LightCyan),
-        _ => {}
-    }
-    // Hex colors: #RRGGBB or RRGGBB
-    if s.len() == 6 {
-        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        return Some(Color::Rgb(r, g, b));
-    }
-    None
 }
 
 // ── Keymap snapshot ─────────────────────────────────────────────────────────
