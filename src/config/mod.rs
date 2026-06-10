@@ -42,10 +42,7 @@ pub fn command_policy_path() -> PathBuf {
 pub struct UserConfig {
     pub approval_mode: ApprovalMode,
     pub enabled_tools: Vec<String>,
-    pub auto_compact_tokens: Option<u64>,
-    pub auto_compact_keep_messages: Option<usize>,
     pub status_show: std::collections::HashMap<String, bool>,
-
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
@@ -60,10 +57,7 @@ impl Default for UserConfig {
         Self {
             approval_mode: ApprovalMode::default(),
             enabled_tools: default_enabled_tools(),
-            auto_compact_tokens: None,
-            auto_compact_keep_messages: None,
             status_show: Self::default_status_show(),
-
         }
     }
 }
@@ -72,14 +66,13 @@ fn bool_config(custom: &custom::CustomConfigs, key: &str) -> bool {
     custom.get_value("general", key).parse().unwrap_or(true)
 }
 impl UserConfig {
-    const STATUS_TOGGLE_KEYS: [&'static str; 10] = [
+    const STATUS_TOGGLE_KEYS: [&'static str; 9] = [
         "status_show_model",
         "status_show_approval",
         "status_show_tokens_curr",
         "status_show_tokens_in",
         "status_show_tokens_out",
         "status_show_tokens_total",
-        "status_show_tps",
         "status_show_queue",
         "status_show_spinner",
         "status_show_timer",
@@ -115,14 +108,6 @@ impl UserConfig {
         if self.enabled_tools.is_empty() {
             self.enabled_tools = default_enabled_tools();
         }
-        self.auto_compact_tokens = {
-            let v = custom.get_value("general", "auto_compact_tokens");
-            if v.is_empty() { None } else { v.parse().ok() }
-        };
-        self.auto_compact_keep_messages = {
-            let v = custom.get_value("general", "auto_compact_keep_messages");
-            if v.is_empty() { None } else { v.parse().ok() }
-        };
 
         // Status bar toggles
         for key in Self::STATUS_TOGGLE_KEYS {
@@ -130,11 +115,8 @@ impl UserConfig {
                 *val = bool_config(custom, key);
             }
         }
-
     }
 }
-
-
 
 const EXAMPLE_PROVIDERS: &str = include_str!("../../defaults/providers.yaml");
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");

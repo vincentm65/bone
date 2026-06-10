@@ -37,10 +37,6 @@ fields:
     label: "Status: tokens total (in+out)"
     type: bool
     default: true
-  - key: status_show_tps
-    label: "Status: tokens/sec"
-    type: bool
-    default: true
   - key: status_show_queue
     label: "Status: queue length"
     type: bool

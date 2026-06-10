@@ -17,7 +17,6 @@ fn status_info() -> StatusInfo {
         "status_show_tokens_in",
         "status_show_tokens_out",
         "status_show_tokens_total",
-        "status_show_tps",
         "status_show_queue",
         "status_show_spinner",
         "status_show_timer",
@@ -31,7 +30,6 @@ fn status_info() -> StatusInfo {
         streaming: false,
         approval_mode: ApprovalMode::Safe,
         queue_len: 0,
-        tokens_per_sec: None,
         status_show,
         elapsed: None,
     }

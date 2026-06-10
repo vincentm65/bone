@@ -30,8 +30,6 @@ pub fn is_protected_builtin(cmd: &str) -> bool {
             | "tools"
             | "edit"
             | "e"
-            | "context"
-            | "recall"
             | "stats"
             | "usage"
     )
@@ -63,7 +61,6 @@ pub async fn handle(
             provider_label,
             model_label,
         )?,
-        "context" => context(transcript),
         "model" => model_switch(arg, llm, provider_label, model_label, providers_config),
         "provider" => {
             provider_switch(arg, llm, provider_label, model_label, providers_config).await
@@ -108,34 +105,22 @@ fn clear(
     renderer.render_banner(term, provider_label, model_label)?;
     Ok("Chat cleared.".to_string())
 }
-const CHARS_PER_TOKEN: usize = 4;
-
-fn context(messages: &[ChatMessage]) -> String {
-    let used: usize = messages
-        .iter()
-        .map(|m| m.content.len().div_ceil(CHARS_PER_TOKEN))
-        .sum();
-    format!("Context: ~{used} tokens in transcript. No local token cap is applied.")
-}
 fn help() -> String {
     let bold = "\x1b[1m";
     let reset = "\x1b[0m";
     vec![
         format!("{bold}Commands{reset}"),
         "  /clear      — clear chat history".to_string(),
-        "  /compact    — compact chat history".to_string(),
         "  /config     — change application settings".to_string(),
-        "  /context    — show context token count".to_string(),
         "  /edit, /e   — open system editor for input".to_string(),
         "  /help       — show this message".to_string(),
         "  /model      — set or show model (/model <name>)".to_string(),
         "  /new        — clear chat history (alias for /clear)".to_string(),
         "  /provider   — pick or switch provider (/provider <name>)".to_string(),
-        "  /recall     — search past conversations (/recall <query>)".to_string(),
         "  /stats      — open full-screen token stats dashboard".to_string(),
         "  /tools      — enable or disable tools, /tools reload to rescan".to_string(),
         "  /usage      — show token usage for current conversation".to_string(),
-        "  /quit       — exit bone".to_string(),
+        "  /quit, /exit— exit bone".to_string(),
         "  :           — run a shell command inline (: <command>)".to_string(),
         String::new(),
         format!("{bold}Input shortcuts{reset}"),

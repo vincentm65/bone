@@ -37,8 +37,6 @@ pub struct StatusInfo {
     pub token_stats: TokenStats,
     /// Live cumulative output-token estimate during streaming.
     pub streaming_completion_tokens: Option<u64>,
-    /// Output tokens per second during streaming.
-    pub tokens_per_sec: Option<f64>,
     pub streaming: bool,
     pub approval_mode: ApprovalMode,
     pub queue_len: usize,

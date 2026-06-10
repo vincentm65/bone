@@ -31,22 +31,3 @@ Config:
 - After editing providers.yaml or command-policy.yaml, tell the user to restart.
 
 ";
-
-/// System prompt for the compaction summary LLM call.
-/// Sent along with the older messages that are about to be discarded,
-/// instructing the LLM to produce a concise but information-preserving summary.
-pub fn compact_summary_prompt() -> &'static str {
-    COMPACT_SUMMARY_PROMPT
-}
-
-static COMPACT_SUMMARY_PROMPT: &str = "\
-Summarize the following conversation between a user and an AI coding assistant. \
-Preserve all information the assistant would need to continue helping effectively:\n\n\
-- Key facts, decisions, and outcomes discussed\n\
-- Files and directories that were read, created, or modified (include paths)\n\
-- Commands that were run and their results (include relevant output)\n\
-- Current state of any in-progress tasks\n\
-- Unresolved issues or open questions\n\
-- Any preferences or context the user has expressed\n\n\
-Be thorough and specific. Preserve file paths, command outputs, and technical details.\n\
-Do not add commentary. Output only the summary.\n";

@@ -779,15 +779,6 @@ impl super::Renderer {
                 );
             }
             status_spans.extend(metric_parts);
-            if status_info.show("status_show_tps")
-                && let Some(tps) = status_info.tokens_per_sec
-            {
-                status_spans.push(sep());
-                status_spans.push(Span::styled(
-                    format!("{:.0} tok/s", tps),
-                    Style::default().fg(self.theme.status_text),
-                ));
-            }
             status_spans.push(sep());
         }
 

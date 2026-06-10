@@ -13,8 +13,6 @@ use ratatui::style::Color;
 #[derive(Debug, Clone)]
 pub struct LuaConfigSnapshot {
     pub approval_mode: Option<String>,
-    pub auto_compact_tokens: Option<u64>,
-    pub auto_compact_keep_messages: Option<usize>,
     pub status_show: HashMap<String, bool>,
 }
 
@@ -22,8 +20,6 @@ impl Default for LuaConfigSnapshot {
     fn default() -> Self {
         Self {
             approval_mode: None,
-            auto_compact_tokens: None,
-            auto_compact_keep_messages: None,
             status_show: HashMap::new(),
         }
     }
@@ -33,9 +29,6 @@ impl LuaConfigSnapshot {
     /// Build a snapshot from the `bone.config` Lua table (or nil).
     pub fn from_lua_table(_lua: &mlua::Lua, table: &mlua::Table) -> Result<Self, String> {
         let approval_mode: Option<String> = table.get("approval_mode").ok().flatten();
-        let auto_compact_tokens: Option<u64> = table.get("auto_compact_tokens").ok().flatten();
-        let auto_compact_keep_messages: Option<usize> =
-            table.get("auto_compact_keep_messages").ok().flatten();
 
         let status_show = table
             .get::<Option<mlua::Table>>("status_show")
@@ -54,8 +47,6 @@ impl LuaConfigSnapshot {
 
         Ok(Self {
             approval_mode,
-            auto_compact_tokens,
-            auto_compact_keep_messages,
             status_show,
         })
     }

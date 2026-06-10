@@ -19,65 +19,6 @@ pub fn build_chat_history(
     out
 }
 
-/// Compute the compact boundary index for `messages` given `keep` count.
-/// Returns `None` if the transcript is short enough that no compaction is needed.
-pub fn find_compact_boundary(messages: &[ChatMessage], keep: usize) -> Option<usize> {
-    let keep = keep.max(1);
-    if messages.len() <= keep {
-        return None;
-    }
-    let boundary = compact_boundary(messages, messages.len() - keep);
-    if boundary == 0 { None } else { Some(boundary) }
-}
-
-/// Notice inserted when older messages are compacted.
-pub const COMPACT_NOTICE: &str = "Compacted older messages.";
-
-/// Default number of recent messages to keep during compaction.
-pub const DEFAULT_KEEP_MESSAGES: usize = 12;
-
-/// Build the messages to send to the LLM for a compaction summary.
-/// Takes the older messages that will be discarded and wraps them with
-/// a summary instruction system prompt.
-pub fn build_summary_messages(old_messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    let mut out = Vec::with_capacity(old_messages.len() + 1);
-    out.push(ChatMessage::new(
-        ChatRole::System,
-        crate::llm::prompts::compact_summary_prompt().to_string(),
-    ));
-    out.extend(old_messages.iter().cloned());
-    out
-}
-
-fn compact_boundary(messages: &[ChatMessage], requested: usize) -> usize {
-    let mut boundary = requested;
-
-    // Walk backward until we find a safe cut point:
-    //   - boundary must not point at a tool result (needs its assistant call)
-    //   - message before boundary must not be a tool result (would orphan it)
-    while boundary > 0 {
-        if boundary < messages.len() && messages[boundary].role == ChatRole::Tool {
-            boundary -= 1;
-            continue;
-        }
-        if messages[boundary - 1].role == ChatRole::Tool {
-            boundary -= 1;
-            continue;
-        }
-        break;
-    }
-
-    // Include the assistant call that initiated a retained tool chain
-    if boundary > 0
-        && messages[boundary - 1].role == ChatRole::Assistant
-        && !messages[boundary - 1].tool_calls.is_empty()
-    {
-        boundary -= 1;
-    }
-
-    boundary
-}
-
 // ── Message ─────────────────────────────────────────────────────────────────
 
 /// Display metadata for compact tool rows shown in chat.

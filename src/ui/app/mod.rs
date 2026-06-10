@@ -1,18 +1,14 @@
 pub mod stream;
 
-use crate::chat::{
-    COMPACT_NOTICE, DEFAULT_KEEP_MESSAGES, Message, build_chat_history, build_summary_messages,
-    find_compact_boundary,
-};
+use crate::chat::Message;
 use crate::config::{self, ProvidersConfig, UserConfig};
-use crate::llm::{ChatEvent, ChatMessage, LlmProvider, TokenStats, format_tokens, providers};
+use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
 use crate::session_db::SessionDb;
 
 use crate::ext::ExtensionManager;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalMode, ToolCall};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use futures_util::StreamExt;
 use mlua::Value as LuaValue;
 use std::collections::VecDeque;
 use std::io;
@@ -67,8 +63,6 @@ pub struct App {
     conversation_id: Option<i64>,
     /// Message sequence counter for DB ordering.
     session_seq: i64,
-    /// Last measured output tokens/sec from the most recent stream.
-    last_tokens_per_sec: Option<f64>,
     /// Wall-clock start of the current agent turn (set when streaming begins).
     turn_start: Option<Instant>,
     /// Accumulated time spent paused for user approvals during this turn.
@@ -172,7 +166,6 @@ impl App {
             session_db: None,
             conversation_id: None,
             session_seq: 0,
-            last_tokens_per_sec: None,
             turn_start: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
@@ -449,20 +442,15 @@ impl App {
     }
 
     pub(crate) fn status_info(&self) -> StatusInfo {
-        self.stream_status_info_with_tokens(None, self.last_tokens_per_sec)
+        self.stream_status_info_with_tokens(None)
     }
 
     /// Build a [`StatusInfo`] for the streaming spinner wait, with an optional
     /// live cumulative output-token estimate.
-    fn stream_status_info_with_tokens(
-        &self,
-        estimated_tokens: Option<u64>,
-        tokens_per_sec: Option<f64>,
-    ) -> StatusInfo {
+    fn stream_status_info_with_tokens(&self, estimated_tokens: Option<u64>) -> StatusInfo {
         let elapsed = self.timer_elapsed();
         stream_status_info_with_token_stats(
             estimated_tokens,
-            tokens_per_sec,
             &self.model,
             &self.token_stats,
             self.streaming,
@@ -533,7 +521,6 @@ impl App {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_status_info_with_token_stats(
     streaming_completion_tokens: Option<u64>,
-    tokens_per_sec: Option<f64>,
     model: &str,
     token_stats: &crate::llm::TokenStats,
     streaming: bool,
@@ -546,7 +533,6 @@ pub(crate) fn stream_status_info_with_token_stats(
         model: model.to_string(),
         token_stats: token_stats.clone(),
         streaming_completion_tokens,
-        tokens_per_sec,
         streaming,
         approval_mode,
         queue_len,
@@ -997,10 +983,6 @@ impl App {
             return self.config_picker(term, None).await;
         }
 
-        if cmd == "compact" {
-            return self.compact_chat(term).await;
-        }
-
         // Protected built-ins always win over Lua commands.
         if !commands::is_protected_builtin(cmd.as_str()) && self.extensions.is_available() {
             // Check Lua commands.
@@ -1063,35 +1045,6 @@ impl App {
                     }
                 }
             }
-            return self.show_reply(reply, term);
-        }
-
-        if cmd == "recall" {
-            let query = arg.trim();
-            if query.is_empty() {
-                return self.show_reply("Usage: /recall <query>", term);
-            }
-            let reply = if let Some(ref db) = self.session_db {
-                match db.search(query, 5) {
-                    Ok(hits) => {
-                        if hits.is_empty() {
-                            format!("No results for \"{query}\".")
-                        } else {
-                            let mut lines = vec![format!("Recall results for \"{query}\"")];
-                            for hit in &hits {
-                                lines.push(format!(
-                                    "  {} {}: {}",
-                                    hit.created_at, hit.role, hit.snippet
-                                ));
-                            }
-                            lines.join("\n")
-                        }
-                    }
-                    Err(err) => format!("Search error: {err}"),
-                }
-            } else {
-                "Session database not available.".to_string()
-            };
             return self.show_reply(reply, term);
         }
 
@@ -1212,7 +1165,11 @@ impl App {
             let reply = match result {
                 Ok(LuaValue::String(s)) => {
                     let output = s.to_str().map(|s| s.to_string()).unwrap_or_default();
-                    if output.is_empty() { None } else { Some(output) }
+                    if output.is_empty() {
+                        None
+                    } else {
+                        Some(output)
+                    }
                 }
                 Ok(LuaValue::Nil) => None,
                 Ok(v) => Some(format!("{v:?}")),
@@ -1258,7 +1215,14 @@ impl App {
             if reply.starts_with("Lua command error:") {
                 self.show_reply(reply, term).ok();
             } else {
-                let display = format!("/{cmd}{}", if arg.is_empty() { "".to_string() } else { format!(" {arg}") });
+                let display = format!(
+                    "/{cmd}{}",
+                    if arg.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" {arg}")
+                    }
+                );
                 self.submit_user_turn(reply, Some(display), term).await.ok();
             }
         } else {
@@ -1292,179 +1256,6 @@ impl App {
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)
-    }
-
-    /// Collect all text from a streaming LLM response, showing a spinner while waiting.
-    async fn collect_summary_stream(
-        &mut self,
-        old_messages: &[ChatMessage],
-        term: &mut BoneTerminal,
-    ) -> io::Result<Option<String>> {
-        let summary_messages = build_summary_messages(old_messages);
-        let stream_result = self.llm.chat_stream(summary_messages, vec![]).await;
-
-        let mut stream = match stream_result {
-            Ok(s) => s,
-            Err(err) => {
-                eprintln!("bone: warning: compaction summary stream failed to start: {err}");
-                return Ok(None);
-            }
-        };
-
-        let mut summary = String::new();
-        let mut spinner = time::interval(Duration::from_millis(90));
-
-        loop {
-            tokio::select! {
-                chunk = stream.next() => match chunk {
-                    Some(Ok(ChatEvent::TextDelta(text))) => summary.push_str(&text),
-                    Some(Ok(_)) => {}
-                    Some(Err(err)) => {
-                        eprintln!("bone: warning: compaction summary stream error: {err}");
-                        break
-                    }
-                    None => break,
-                },
-                _ = spinner.tick() => {
-                    self.renderer.spinner_tick = self.renderer.spinner_tick.wrapping_add(1);
-                    let visible_pages = if self.panes_visible {
-                        self.pages.as_slice()
-                    } else {
-                        &[]
-                    };
-                    self.renderer.tick_spinner(term, &PaneDraw {
-                        input: &self.input,
-                        status_info: &self.status_info(),
-                        pages: visible_pages,
-                        active_page: self.active_page,
-                        pane_toggle_hint: None,
-                        autocomplete: None,
-                    })?;
-                }
-            }
-        }
-
-        if summary.trim().is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(summary))
-        }
-    }
-
-    pub(crate) async fn compact_transcript_state(
-        &mut self,
-        term: &mut BoneTerminal,
-    ) -> (bool, u64) {
-        let keep = self
-            .user_config
-            .auto_compact_keep_messages
-            .unwrap_or(DEFAULT_KEEP_MESSAGES);
-        let before = self.token_stats.context_length;
-
-        let Some(boundary) = find_compact_boundary(&self.transcript, keep) else {
-            return (false, 0);
-        };
-
-        // Try to get an LLM summary of the old messages.
-        let old_messages: Vec<ChatMessage> = self.transcript[..boundary].to_vec();
-        let summary = self
-            .collect_summary_stream(&old_messages, term)
-            .await
-            .ok()
-            .flatten();
-
-        let mut new_transcript = Vec::with_capacity(self.transcript.len() - boundary + 1);
-        match summary {
-            Some(text) => {
-                new_transcript.push(ChatMessage::new(
-                    crate::llm::ChatRole::System,
-                    format!("[Conversation summary]\n{text}"),
-                ));
-            }
-            None => {
-                new_transcript.push(ChatMessage::new(
-                    crate::llm::ChatRole::System,
-                    COMPACT_NOTICE.to_string(),
-                ));
-            }
-        }
-        new_transcript.extend(self.transcript[boundary..].iter().cloned());
-        self.transcript = new_transcript;
-
-        let history = build_chat_history(&self.transcript, None);
-        let tools = self.tools.definitions();
-        let prompt_chars = Self::estimate_context_chars(&history, &tools);
-        self.token_stats.set_context_estimate(prompt_chars);
-        let after = self.token_stats.context_length;
-        (true, before.saturating_sub(after))
-    }
-
-    fn compacted_message(&self, prefix: &str, saved: u64) -> String {
-        if saved > 0 {
-            format!(
-                "{prefix}. Saved ~{} tokens (was ~{}, now {}).",
-                format_tokens(saved),
-                format_tokens(saved + self.token_stats.context_length),
-                format_tokens(self.token_stats.context_length)
-            )
-        } else {
-            COMPACT_NOTICE.to_string()
-        }
-    }
-
-    /// Show a placeholder message, run compaction, then append the result message.
-    async fn run_compact_with_placeholder(
-        &mut self,
-        term: &mut BoneTerminal,
-        compacted_prefix: &str,
-        no_compact_msg: &str,
-    ) -> io::Result<()> {
-        self.messages
-            .push(Message::system("Summarizing conversation..."));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
-        self.redraw(term)?;
-
-        let (compacted, saved) = self.compact_transcript_state(term).await;
-        let result = if compacted {
-            self.compacted_message(compacted_prefix, saved)
-        } else {
-            no_compact_msg.to_string()
-        };
-        self.messages.push(Message::system(&result));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
-        self.redraw(term)
-    }
-
-    pub(crate) async fn compact_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        self.run_compact_with_placeholder(
-            term,
-            "Compacted older messages",
-            "Chat history is already compact.",
-        )
-        .await
-    }
-
-    /// Auto-compact transcript if the token threshold is exceeded.
-    pub(crate) async fn auto_compact_if_needed(
-        &mut self,
-        term: &mut BoneTerminal,
-    ) -> io::Result<()> {
-        let should_compact = self
-            .user_config
-            .auto_compact_tokens
-            .is_some_and(|limit| limit > 0 && self.token_stats.context_length >= limit);
-
-        if should_compact {
-            self.run_compact_with_placeholder(
-                term,
-                "Auto-compacted",
-                "Chat history is already compact.",
-            )
-            .await?;
-        }
-        Ok(())
     }
 
     fn mask_secret(value: &str) -> String {
@@ -2049,7 +1840,6 @@ impl App {
         // No longer handles any sources.
         None
     }
-
 }
 
 fn shell_quote(s: &str) -> String {
@@ -2126,13 +1916,6 @@ fn apply_lua_config_snapshot(
             "danger" => crate::tools::ApprovalMode::Danger,
             _ => crate::tools::ApprovalMode::Safe,
         };
-    }
-
-    if let Some(v) = snapshot.auto_compact_tokens {
-        cfg.auto_compact_tokens = Some(v);
-    }
-    if let Some(v) = snapshot.auto_compact_keep_messages {
-        cfg.auto_compact_keep_messages = Some(v);
     }
 
     // Merge status_show — Lua values override, missing keys keep defaults.
