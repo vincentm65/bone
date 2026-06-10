@@ -22,7 +22,6 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("quit", "exit bone"),
     ("stats", "open full-screen token stats dashboard"),
     ("tools", "enable or disable tools"),
-    ("usage", "show token usage for current conversation"),
 ];
 
 #[derive(Debug, Clone)]

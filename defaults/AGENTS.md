@@ -323,9 +323,10 @@ end)
 |---|---|
 | `nil` | Command handled, no prompt submitted |
 | string | Injected as user prompt/output |
+| table with `display`/`reply`/`content` and `submit = false` | Show message in UI without submitting a prompt |
 | error | Show error in UI |
 
-Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/compact`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/context`, `/recall`, `/stats`, `/usage`) cannot be overridden.
+Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/compact`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/stats`) cannot be overridden.
 
 ## Event Hooks
 

@@ -658,7 +658,10 @@ impl SessionDb {
 
     /// Full-text search across all conversations.
     /// List recent conversations, most recent first.
-    pub(crate) fn list_conversations(&self, limit: usize) -> rusqlite::Result<Vec<ConversationSummary>> {
+    pub(crate) fn list_conversations(
+        &self,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<ConversationSummary>> {
         let limit = limit.clamp(1, 100);
         let mut stmt = self.conn.prepare(
             "SELECT id, provider, model, started_at, ended_at \

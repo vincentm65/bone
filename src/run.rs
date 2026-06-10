@@ -97,7 +97,8 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         request.provider.clone(),
         request.model.clone(),
     )
-    .await {
+    .await
+    {
         return agent::run_agent(AgentRequest {
             prompt,
             approval_mode: request.approval_mode,
@@ -185,14 +186,10 @@ async fn expand_lua_command(
         };
 
         // Create ctx table.
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
         let config_dir_str = config_dir_owned.to_string_lossy().to_string();
         let shared_state: crate::ext::ctx::SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let ctx_cfg = crate::ext::ctx::CtxConfig {
-            cwd,
             config_dir: config_dir_str,
             shared_state,
             pane_sender: None,
@@ -205,6 +202,7 @@ async fn expand_lua_command(
             model,
             agent_depth: 0,
             cancelled: None,
+            usage: None,
         };
         let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 

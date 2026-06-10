@@ -584,8 +584,14 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             });
         }
 
-        let results =
-            execute_tool_calls(&tools, request.approval_mode, tool_calls, &extensions, request.agent_depth).await;
+        let results = execute_tool_calls(
+            &tools,
+            request.approval_mode,
+            tool_calls,
+            &extensions,
+            request.agent_depth,
+        )
+        .await;
 
         // Store session state (e.g. task_list state) into tool handler so
         // stateful tools persist across rounds in headless mode.

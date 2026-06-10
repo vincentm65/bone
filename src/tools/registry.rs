@@ -241,7 +241,9 @@ impl ToolHandler {
             .count()
             > 1
         {
-            return self.execute_all_serial(calls, events, agent_depth, tool_call_depth).await;
+            return self
+                .execute_all_serial(calls, events, agent_depth, tool_call_depth)
+                .await;
         }
 
         join_all(calls.into_iter().map(|call| {
@@ -251,8 +253,15 @@ impl ToolHandler {
             let agent_depth = agent_depth;
             let tool_call_depth = tool_call_depth;
             async move {
-                self.execute_one_live(call, events, session_state, owner, agent_depth, tool_call_depth)
-                    .await
+                self.execute_one_live(
+                    call,
+                    events,
+                    session_state,
+                    owner,
+                    agent_depth,
+                    tool_call_depth,
+                )
+                .await
             }
         }))
         .await
@@ -310,7 +319,16 @@ impl ToolHandler {
     ) -> ToolResult {
         if self.is_enabled(&call.name) {
             self.registry
-                .execute_live(call, events, session_state, owner, self.cancel_token.clone(), agent_depth, tool_call_depth, Some(self.clone()))
+                .execute_live(
+                    call,
+                    events,
+                    session_state,
+                    owner,
+                    self.cancel_token.clone(),
+                    agent_depth,
+                    tool_call_depth,
+                    Some(self.clone()),
+                )
                 .await
         } else {
             ToolResult {

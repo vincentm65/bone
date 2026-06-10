@@ -997,56 +997,6 @@ impl App {
         if cmd == "stats" {
             return self.open_stats_dashboard(term);
         }
-        if cmd == "usage" {
-            let mut reply = self.token_stats.summary();
-            // Tool schema token estimate
-            let defs = self.tools.definitions();
-            let schema_json = serde_json::to_string(&defs).unwrap_or_default();
-            let schema_chars = schema_json.len();
-            let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
-            reply.push_str(&format!(
-                "\n  Tools:     {} tools, ~{} tokens ({} chars)",
-                defs.len(),
-                crate::llm::format_tokens(schema_tokens),
-                crate::llm::format_tokens(schema_chars as u64)
-            ));
-
-            // System prompt token estimate
-            let sys = crate::llm::prompts::system_prompt();
-            let sys_chars = sys.len();
-            let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
-            reply.push_str(&format!(
-                "\n  Sys prompt: ~{} tokens ({} chars)",
-                crate::llm::format_tokens(sys_tokens),
-                crate::llm::format_tokens(sys_chars as u64)
-            ));
-            if let Some(ref db) = self.session_db
-                && let Some(conv_id) = self.conversation_id
-                && let Ok(by_provider) = db.usage_by_provider(conv_id)
-                && by_provider.len() > 1
-            {
-                reply.push_str("\n\nBy provider/model");
-                for p in &by_provider {
-                    reply.push_str(&format!(
-                        "\n  {} / {}\t{} in / {} out",
-                        p.provider,
-                        p.model,
-                        crate::llm::format_tokens(p.prompt_tokens as u64),
-                        crate::llm::format_tokens(p.completion_tokens as u64),
-                    ));
-                    if p.cached_tokens > 0 {
-                        reply.push_str(&format!(
-                            " / {} cached",
-                            crate::llm::format_tokens(p.cached_tokens as u64)
-                        ));
-                    }
-                    if p.cost > 0.0 {
-                        reply.push_str(&format!(" / ${:.4}", p.cost));
-                    }
-                }
-            }
-            return self.show_reply(reply, term);
-        }
 
         let prev_provider = self.llm.id().to_string();
         let prev_model = self.llm.model().to_string();
@@ -1108,6 +1058,43 @@ impl App {
         let model = self.llm.model().to_string();
         let approval_mode = self.approval_mode;
         let tools = self.tools.clone();
+        let defs = self.tools.definitions();
+        let schema_json = serde_json::to_string(&defs).unwrap_or_default();
+        let schema_chars = schema_json.len() as u64;
+        let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
+        let sys = crate::llm::prompts::system_prompt();
+        let sys_chars = sys.len() as u64;
+        let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
+        let by_provider = self
+            .session_db
+            .as_ref()
+            .and_then(|db| session_id.and_then(|id| db.usage_by_provider(id).ok()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| crate::ext::ctx::UsageProviderContext {
+                provider: p.provider,
+                model: p.model,
+                prompt_tokens: p.prompt_tokens.max(0) as u64,
+                completion_tokens: p.completion_tokens.max(0) as u64,
+                cached_tokens: p.cached_tokens.max(0) as u64,
+                cost: p.cost,
+                request_count: p.request_count.max(0) as u64,
+            })
+            .collect();
+        let usage = crate::ext::ctx::UsageContext {
+            request_count: self.token_stats.request_count,
+            sent: self.token_stats.sent,
+            received: self.token_stats.received,
+            cached: self.token_stats.cached,
+            cost: self.token_stats.cost,
+            context_length: self.token_stats.context_length,
+            tool_count: defs.len() as u64,
+            tool_schema_chars: schema_chars,
+            tool_schema_tokens: schema_tokens,
+            system_prompt_chars: sys_chars,
+            system_prompt_tokens: sys_tokens,
+            by_provider,
+        };
 
         let mut task = tokio::task::spawn_blocking(move || {
             let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
@@ -1138,14 +1125,10 @@ impl App {
                 }
             };
 
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
             let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
             let shared_state: crate::ext::ctx::SharedState =
                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             let ctx_cfg = crate::ext::ctx::CtxConfig {
-                cwd,
                 config_dir,
                 shared_state,
                 pane_sender: None,
@@ -1158,6 +1141,7 @@ impl App {
                 model: Some(model),
                 agent_depth: 0,
                 cancelled: None,
+                usage: Some(usage),
             };
             let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
             let result = handler.call::<LuaValue>((arg_owned, ctx_table));
@@ -1168,14 +1152,33 @@ impl App {
                     if output.is_empty() {
                         None
                     } else {
-                        Some(output)
+                        Some((output, true))
+                    }
+                }
+                Ok(LuaValue::Table(t)) => {
+                    let output = t
+                        .get::<Option<String>>("display")
+                        .ok()
+                        .flatten()
+                        .or_else(|| t.get::<Option<String>>("reply").ok().flatten())
+                        .or_else(|| t.get::<Option<String>>("content").ok().flatten())
+                        .unwrap_or_default();
+                    if output.is_empty() {
+                        None
+                    } else {
+                        let submit = t
+                            .get::<Option<bool>>("submit")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(true);
+                        Some((output, submit))
                     }
                 }
                 Ok(LuaValue::Nil) => None,
-                Ok(v) => Some(format!("{v:?}")),
+                Ok(v) => Some((format!("{v:?}"), true)),
                 Err(e) => {
                     eprintln!("bone-lua error: command '{cmd_owned}': {e}");
-                    Some(format!("Lua command error: {e}"))
+                    Some((format!("Lua command error: {e}"), false))
                 }
             };
             Some(reply)
@@ -1211,10 +1214,8 @@ impl App {
             }
         };
 
-        if let Some(Some(reply)) = reply {
-            if reply.starts_with("Lua command error:") {
-                self.show_reply(reply, term).ok();
-            } else {
+        if let Some(Some((reply, submit))) = reply {
+            if submit {
                 let display = format!(
                     "/{cmd}{}",
                     if arg.is_empty() {
@@ -1224,6 +1225,8 @@ impl App {
                     }
                 );
                 self.submit_user_turn(reply, Some(display), term).await.ok();
+            } else {
+                self.show_reply(reply, term).ok();
             }
         } else {
             self.redraw(term).ok();

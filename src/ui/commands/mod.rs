@@ -31,7 +31,6 @@ pub fn is_protected_builtin(cmd: &str) -> bool {
             | "edit"
             | "e"
             | "stats"
-            | "usage"
     )
 }
 
@@ -119,7 +118,6 @@ fn help() -> String {
         "  /provider   — pick or switch provider (/provider <name>)".to_string(),
         "  /stats      — open full-screen token stats dashboard".to_string(),
         "  /tools      — enable or disable tools, /tools reload to rescan".to_string(),
-        "  /usage      — show token usage for current conversation".to_string(),
         "  /quit, /exit— exit bone".to_string(),
         "  :           — run a shell command inline (: <command>)".to_string(),
         String::new(),

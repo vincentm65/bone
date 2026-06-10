@@ -26,7 +26,6 @@ pub struct LuaTool {
     display: ToolDisplayConfig,
     lua: Arc<Mutex<Lua>>,
     registry_key: Arc<mlua::RegistryKey>,
-    cwd: String,
     config_dir: String,
     shared_state: SharedState,
     safety: CommandSafety,
@@ -40,7 +39,6 @@ impl LuaTool {
         lua: &Lua,
         entry: &mlua::Table,
         lua_arc: Arc<Mutex<Lua>>,
-        cwd: String,
         config_dir: String,
         shared_state: SharedState,
     ) -> Result<Self, String> {
@@ -111,7 +109,6 @@ impl LuaTool {
             display,
             lua: lua_arc,
             registry_key: Arc::new(registry_key),
-            cwd,
             safety,
             config_dir,
             shared_state,
@@ -158,7 +155,6 @@ impl Tool for LuaTool {
 
         // execute (non-live)
         let ctx_cfg = CtxConfig {
-            cwd: self.cwd.clone(),
             config_dir: self.config_dir.clone(),
             shared_state: self.shared_state.clone(),
             pane_sender: None,
@@ -171,6 +167,7 @@ impl Tool for LuaTool {
             model: None,
             agent_depth: 0,
             cancelled: None,
+            usage: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
             .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
@@ -208,7 +205,6 @@ impl Tool for LuaTool {
             .to_value(&arguments)
             .map_err(|e| format!("lua tool '{}': failed to convert arguments: {e}", self.name))?;
         let ctx_cfg = CtxConfig {
-            cwd: self.cwd.clone(),
             config_dir: self.config_dir.clone(),
             shared_state: self.shared_state.clone(),
             pane_sender: None,
@@ -221,6 +217,7 @@ impl Tool for LuaTool {
             model: None,
             agent_depth: 0,
             cancelled: None,
+            usage: None,
         };
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
             .map_err(|e| format!("lua tool '{}': failed to create ctx: {e}", self.name))?;
@@ -250,8 +247,7 @@ impl Tool for LuaTool {
         let lua_arc = self.lua.clone();
         let registry_key = self.registry_key.clone();
         let name = self.name.clone();
-        let cwd = self.cwd.clone();
-        let config_dir = self.config_dir.clone();
+       let config_dir = self.config_dir.clone();
         let shared_state = self.shared_state.clone();
         let call_id = context.call_id.clone();
         let call_id_for_ctx = call_id.clone();
@@ -279,7 +275,6 @@ impl Tool for LuaTool {
                 .map_err(|e| format!("lua tool '{name}': failed to convert arguments: {e}"))?;
 
             let ctx_cfg = CtxConfig {
-                cwd,
                 config_dir,
                 shared_state,
                 pane_sender: events,
@@ -292,6 +287,7 @@ impl Tool for LuaTool {
                 model: None,
                 agent_depth,
                 cancelled,
+                usage: None,
             };
             let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
                 .map_err(|e| format!("lua tool '{name}': failed to create ctx: {e}"))?;
@@ -320,10 +316,7 @@ impl Tool for LuaTool {
     }
 }
 
-fn lua_value_to_execution(
-    name: &str,
-    value: mlua::Value,
-) -> Result<LuaExecution, String> {
+fn lua_value_to_execution(name: &str, value: mlua::Value) -> Result<LuaExecution, String> {
     match value {
         mlua::Value::Table(table) => {
             let op: Option<String> = table

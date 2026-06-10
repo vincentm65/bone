@@ -20,7 +20,6 @@ use super::types::{BootResult, ExtensionManager};
 /// the app continues without Lua support.
 pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
     let version = env!("CARGO_PKG_VERSION");
-    let cwd_str = cwd.to_string_lossy().to_string();
     let config_dir_str = config_dir.to_string_lossy().to_string();
 
     let lua = match engine::create_engine(version, cwd, config_dir) {
@@ -72,7 +71,7 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
     let lua_arc = Arc::new(Mutex::new(lua));
 
     // Collect registered tools from bone._tools.
-    let tools = collect_tools(&lua_arc, &cwd_str, &config_dir_str, &shared_state);
+    let tools = collect_tools(&lua_arc, &config_dir_str, &shared_state);
 
     let commands = collect_commands(&lua_arc);
 
@@ -102,7 +101,6 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
 /// Iterate `bone._tools` and build `LuaTool` instances.
 fn collect_tools(
     lua_arc: &Arc<Mutex<mlua::Lua>>,
-    cwd: &str,
     config_dir: &str,
     shared_state: &SharedState,
 ) -> Vec<LuaTool> {
@@ -135,7 +133,6 @@ fn collect_tools(
             &lua,
             &entry,
             Arc::clone(lua_arc),
-            cwd.to_string(),
             config_dir.to_string(),
             shared_state.clone(),
         ) {

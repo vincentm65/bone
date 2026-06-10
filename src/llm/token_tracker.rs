@@ -70,38 +70,6 @@ impl TokenStats {
         self.context_length = (prompt_chars as f64 / chars_per_token).ceil() as u64;
     }
 
-    /// Multi-line summary for `/usage` command.
-    pub fn summary(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push("Conversation stats".to_string());
-        lines.push(format!(
-            "  Requests:  {}",
-            format_tokens(self.request_count)
-        ));
-        lines.push(format!("  Tokens in: {}", format_tokens(self.sent)));
-        lines.push(format!("  Tokens out: {}", format_tokens(self.received)));
-        if self.cached > 0 {
-            lines.push(format!("  Cached:    {}", format_tokens(self.cached)));
-        }
-        lines.push(format!(
-            "  Context:   {} (current)",
-            format_tokens(self.context_length)
-        ));
-        if self.cost > 0.0 {
-            lines.push(format!("  Cost:      ${:.4}", self.cost));
-        }
-        if let Some(avg_in) = self.sent.checked_div(self.request_count)
-            && let Some(avg_out) = self.received.checked_div(self.request_count)
-        {
-            lines.push(format!(
-                "  Avg/req:   {} in / {} out",
-                format_tokens(avg_in),
-                format_tokens(avg_out)
-            ));
-        }
-        lines.join("\n")
-    }
-
     /// Single-line summary for `/clear` display.
     pub fn one_liner(&self) -> String {
         let mut parts = vec![
