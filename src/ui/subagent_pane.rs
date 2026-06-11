@@ -58,7 +58,10 @@ fn latest_job_for<'a>(agent: &str, jobs: &'a [Job]) -> Option<&'a Job> {
 
 /// Extract the numeric suffix of a `job-N` id (0 when malformed).
 fn job_id_number(id: &str) -> u64 {
-    id.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+    id.rsplit('-')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Build `(icon, status-text)` for the latest job of an agent.

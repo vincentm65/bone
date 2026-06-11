@@ -24,13 +24,10 @@ pub fn subagent_system_prompt(persona: Option<&str>) -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let bone = bone_dir().display().to_string();
-    let persona = persona
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .unwrap_or(
-            "You are a sub-agent of bone, a coding assistant running in the user's terminal. \
+    let persona = persona.map(str::trim).filter(|p| !p.is_empty()).unwrap_or(
+        "You are a sub-agent of bone, a coding assistant running in the user's terminal. \
              Complete the delegated task; do nothing beyond it.",
-        );
+    );
     format!(
         "{persona}\n\n\
          Rules:\n\

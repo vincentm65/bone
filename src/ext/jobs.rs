@@ -1,8 +1,8 @@
 //! Job registry — background sub-agent task management.
 //!
 //! Jobs are created by `ctx.agent.spawn`, run as detached tokio tasks, and
-//! their results are queryable via `ctx.agent.jobs` or consumed via
-//! `take_finished_unconsumed` (for auto-injection).
+//! their results are queryable via `ctx.agent.jobs` or delivered via the
+//! `peek_finished_unconsumed` / `mark_consumed` auto-injection flow.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -247,7 +247,9 @@ impl JobRegistry {
                 .filter(|j| j.status == JobStatus::Running && ids.contains(&j.id))
                 .map(|j| j.id.clone())
                 .collect();
-            let was_cancelled = cancelled.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false);
+            let was_cancelled = cancelled
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(false);
             let deadline_hit = Instant::now() >= deadline;
 
             if pending.is_empty() || was_cancelled || deadline_hit {

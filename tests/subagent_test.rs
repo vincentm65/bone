@@ -20,12 +20,14 @@ bone.register_subagent({
     name = "researcher",
     description = "Searches the web and summarizes findings",
     system_prompt = "You are a researcher.",
+    timeout_ms = 1000,
 })
 
 bone.register_subagent({
     name = "coder",
     description = "Writes and fixes code",
     system_prompt = "You are a coder.",
+    timeout_ms = 1000,
 })
 "#;
 
@@ -36,7 +38,13 @@ fn two_agents_registered_and_listed_in_tool() {
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
 
     // The subagent tool should be registered.
     let defs = booted.tools.definitions();
@@ -68,7 +76,13 @@ fn no_agents_registered_no_tool() {
     let config_dir = common::temp_dir("subagent-no-agents");
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
 
     let defs = booted.tools.definitions();
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
@@ -89,7 +103,13 @@ fn spawn_lifecycle_no_provider() {
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -97,13 +117,15 @@ fn spawn_lifecycle_no_provider() {
         .build()
         .unwrap();
 
+    let task_marker = "unique-task-spawn-lifecycle-no-provider";
+
     // Dispatch a task via the subagent tool.
     let call = ToolCall {
         id: "call-lifecycle".into(),
         name: "subagent".into(),
         arguments: serde_json::json!({
             "action": "dispatch",
-            "tasks": [{ "agent": "researcher", "task": "Find information about Rust" }],
+            "tasks": [{ "agent": "researcher", "task": task_marker }],
         }),
     };
 
@@ -114,7 +136,6 @@ fn spawn_lifecycle_no_provider() {
         )
         .await
     });
-    rt.shutdown_timeout(Duration::from_secs(1));
 
     let results = results.expect("subagent dispatch timed out");
     assert_eq!(results.len(), 1);
@@ -136,7 +157,9 @@ fn spawn_lifecycle_no_provider() {
         let snap = registry.snapshot();
         if let Some(arr) = snap.as_array() {
             for job in arr {
-                if job["status"].as_str() == Some("error") {
+                if job["task"].as_str() == Some(task_marker)
+                    && job["status"].as_str() != Some("running")
+                {
                     job_id = Some(job["id"].as_str().unwrap().to_string());
                     break;
                 }
@@ -154,23 +177,26 @@ fn spawn_lifecycle_no_provider() {
     let id = job_id.unwrap();
     assert!(id.starts_with("job-"));
 
-    // take_finished_unconsumed should return at least this job.
+    // Finished jobs are first peeked, then explicitly marked consumed after
+    // delivery.
     // (Registry is process-global, so other unconsumed jobs may exist from prior tests.)
-    let taken = registry.take_finished_unconsumed();
+    let taken = registry.peek_finished_unconsumed();
     let my_job = taken.iter().find(|j| j.id == id);
     assert!(
         my_job.is_some(),
-        "take_finished_unconsumed should include job-{}; got jobs: {:?}",
+        "peek_finished_unconsumed should include {}; got jobs: {:?}",
         id,
         taken,
     );
     assert_eq!(my_job.unwrap().status, bone::ext::jobs::JobStatus::Error);
     assert!(!my_job.unwrap().result.as_ref().unwrap().is_empty());
+    registry.mark_consumed(std::slice::from_ref(&id));
 
-    // Second take: no more unconsumed jobs (all taken above).
-    let taken2 = registry.take_finished_unconsumed();
-    assert!(taken2.is_empty());
+    // Second peek: this job is no longer unconsumed.
+    let taken2 = registry.peek_finished_unconsumed();
+    assert!(!taken2.iter().any(|j| j.id == id));
 
+    rt.shutdown_timeout(Duration::from_secs(1));
     std::fs::remove_dir_all(&config_dir).ok();
 }
 
@@ -189,12 +215,19 @@ fn dispatch_with_wait_returns_results_inline() {
             name = "waiter-inline",
             description = "test agent",
             system_prompt = "You are a test agent.",
+            timeout_ms = 1000,
         })"#,
     )
     .unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -256,7 +289,13 @@ fn wait_action_collects_dispatched_job() {
     .unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -264,38 +303,16 @@ fn wait_action_collects_dispatched_job() {
         .build()
         .unwrap();
 
-    let task_marker = "unique-task-wait-action-collect";
-    let dispatch = ToolCall {
-        id: "call-wait-dispatch".into(),
-        name: "subagent".into(),
-        arguments: serde_json::json!({
-            "action": "dispatch",
-            "tasks": [{ "agent": "waiter-collect", "task": task_marker }],
-        }),
-    };
-
-    let dispatch_results = rt
-        .block_on(async {
-            tokio::time::timeout(
-                Duration::from_secs(15),
-                booted.tools.execute_all(vec![dispatch], 0),
-            )
-            .await
-        })
-        .expect("dispatch timed out");
-    assert!(dispatch_results[0].content.contains("Dispatched 1"));
-
-    // Find the job id by its unique task text.
+    // Create a known finished job directly so this test only exercises the
+    // subagent wait action and does not race another real background run.
     let registry = bone::ext::jobs::registry();
-    let snap = registry.snapshot();
-    let job_id = snap
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|j| j["task"].as_str() == Some(task_marker))
-        .and_then(|j| j["id"].as_str())
-        .expect("dispatched job not found in registry")
-        .to_string();
+    let job_id = registry
+        .create(
+            "waiter-collect".into(),
+            "unique-task-wait-action-collect".into(),
+        )
+        .expect("wait-action job should be created");
+    registry.complete(&job_id, Ok("collected job result".into()));
 
     // Wait on it via the tool.
     let wait = ToolCall {
@@ -324,7 +341,7 @@ fn wait_action_collects_dispatched_job() {
     );
 
     // Consumed: not delivered again via auto-injection.
-    let taken = registry.take_finished_unconsumed();
+    let taken = registry.peek_finished_unconsumed();
     assert!(
         !taken.iter().any(|j| j.id == job_id),
         "waited job must be consumed and not auto-injected",
@@ -360,7 +377,13 @@ fn depth_guard_rejects_spawn_at_depth_1() {
     std::fs::write(tools_dir.join("depth_guard.lua"), SPAWN_AT_DEPTH).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
 
     // Verify the tool is registered.
     let defs = booted.tools.definitions();
@@ -414,44 +437,43 @@ fn depth_guard_rejects_spawn_at_depth_1() {
 // ── 4. Render path ──────────────────────────────────────────────────────────
 
 #[test]
-fn render_subagent_pane_returns_valid_panepage() {
+fn rust_subagent_pane_returns_valid_panepage() {
     let config_dir = common::temp_dir("subagent-render");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
 
     // Create some fake jobs in the registry.
     let registry = bone::ext::jobs::registry();
-    let id1 = registry.create("researcher".into(), "search query".into());
-    let id2 = registry.create("coder".into(), "fix bug in module".into());
+    let id1 = registry
+        .create("researcher".into(), "search query".into())
+        .expect("researcher job should be created");
+    let id2 = registry
+        .create("coder".into(), "fix bug in module".into())
+        .expect("coder job should be created");
     registry.complete(&id1, Ok("found 3 relevant papers".into()));
     registry.complete(&id2, Err("timeout".into()));
 
-    let snap = registry.snapshot();
-
-    // Call render_subagent_pane through the extension manager.
-    let pane = booted.manager.render_subagent_pane(&snap);
+    // Call the Rust-side pane renderer directly.
+    let pane =
+        bone::ui::subagent_pane::render(booted.manager.subagent_names(), &registry.all_jobs());
     assert!(
         pane.is_some(),
-        "render_subagent_pane should return Some; got None",
+        "subagent pane renderer should return Some; got None",
     );
 
     let pane = pane.unwrap();
-
-    // Convert to PanePage to verify it's valid.
-    let page = bone::ui::pane_page::PanePage::from_json(&pane);
-    assert!(
-        page.is_ok(),
-        "rendered pane should parse as PanePage; got error: {}",
-        page.unwrap_err(),
-    );
-
-    let page = page.unwrap();
-    assert_eq!(page.source, "subagents");
-    assert!(page.title.contains("Agents"));
-    assert_eq!(page.content.len(), 2); // one line per agent
+    assert_eq!(pane.source, "subagents");
+    assert!(pane.title.contains("Agents"));
+    assert_eq!(pane.content.len(), 2); // one line per agent
 
     std::fs::remove_dir_all(&config_dir).ok();
 }

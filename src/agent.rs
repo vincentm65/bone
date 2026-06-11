@@ -741,7 +741,7 @@ async fn execute_tool_calls(
                 call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: format!(
-                    "[exit_code=1] Tool not executed. Approval mode {mode_label} does not allow {safety:?}."
+                    "[exit_code=1] Tool skipped. Approval mode {mode_label} does not allow {safety:?}; continue using allowed read-only tools or report the limitation."
                 ),
                 is_error: true,
                 pane_page: None,

@@ -943,13 +943,19 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let inherited_model_s = cfg.model.clone();
     let agent_depth_s = cfg.agent_depth;
     let cancelled_flag_s = cfg.cancelled.clone();
-    let run_stream_fn = lua.create_function(
-        move |lua, (prompt, opts): (String, Option<Table>)| {
+    let run_stream_fn =
+        lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
             if agent_depth_s >= MAX_AGENT_DEPTH {
                 return agent_depth_exceeded(lua);
             }
 
-            let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(&opts, inherited_approval_s, &inherited_provider_s, &inherited_model_s, RUN_STREAM_OPT_KEYS) {
+            let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(
+                &opts,
+                inherited_approval_s,
+                &inherited_provider_s,
+                &inherited_model_s,
+                RUN_STREAM_OPT_KEYS,
+            ) {
                 Ok(v) => v,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -969,7 +975,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             let on_finished = opts_cb(&opts, "on_finished");
             let on_failed = opts_cb(&opts, "on_failed");
 
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
             let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
             let request = crate::agent::AgentRequest {
                 prompt,
@@ -1054,13 +1061,12 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             });
 
             agent_result_to_lua(lua, response)
-        },
-    )?;
+        })?;
     agent_table.set("run_stream", run_stream_fn)?;
 
     // --- ctx.agent.spawn(prompt, opts?) ---
     // Dispatch a non-blocking background agent run. Results are queryable
-    // via ctx.agent.jobs() or taken via take_finished_unconsumed() by the TUI.
+    // via ctx.agent.jobs() or delivered through the TUI peek/mark flow.
     let spawn_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         // Sub-agents (depth > 0) cannot spawn background jobs — their results
         // would inject into the wrong conversation. They can still use blocking
@@ -1213,8 +1219,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 cancelled_flag_w.as_deref(),
             );
 
-            let finished_json = serde_json::to_value(&outcome.finished)
-                .unwrap_or_else(|_| serde_json::json!([]));
+            let finished_json =
+                serde_json::to_value(&outcome.finished).unwrap_or_else(|_| serde_json::json!([]));
             result.set("jobs", lua.to_value(&finished_json)?)?;
             result.set("pending", outcome.pending)?;
             result.set("timed_out", outcome.timed_out)?;
@@ -1238,7 +1244,13 @@ fn agent_depth_exceeded(lua: &Lua) -> Result<Value, mlua::Error> {
 }
 
 /// Known option keys per `ctx.agent` call, used to warn on typos.
-const RUN_OPT_KEYS: &[&str] = &["approval", "provider", "model", "system_prompt", "timeout_ms"];
+const RUN_OPT_KEYS: &[&str] = &[
+    "approval",
+    "provider",
+    "model",
+    "system_prompt",
+    "timeout_ms",
+];
 const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "approval",
     "provider",

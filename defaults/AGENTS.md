@@ -35,6 +35,8 @@ Errors in `init.lua` are logged as warnings; bone continues without Lua support.
 bone.version        -- string: app version
 bone.cwd            -- string: startup CWD
 bone.config_dir     -- string: config directory path
+bone.agent_depth    -- integer: 0 for the main agent, >0 inside a sub-agent
+bone.headless       -- boolean: true outside the interactive TUI
 
 -- Logging (outputs to stderr)
 bone.log.info("message")
@@ -184,10 +186,15 @@ bone.register_subagent({
     provider = "openai",
     model = "gpt-4o",
     approval = "safe",
+    timeout_ms = 300000,
 })
 ```
 
-Fields: `name` (required, unique), `description` (required), `system_prompt`, `provider`, `model`, `approval`. Duplicates are skipped with a warning.
+Fields: `name` (required, unique), `description` (required), `system_prompt`, `provider`, `model`, `approval`, `timeout_ms`. Duplicates are skipped with a warning.
+
+Sub-agents cannot spawn nested sub-agents. When `bone.agent_depth > 0`, the default `subagent` delegation tool is not registered, and Rust also rejects attempts to spawn another agent from inside a sub-agent.
+
+`bone.headless` is true in non-TUI flows. In headless mode, the default `subagent` tool waits for dispatched work because there is no interactive pane or auto-injection loop to deliver background results later.
 
 #### `ctx.agent.run` / `ctx.agent.run_stream`
 
@@ -202,7 +209,7 @@ if result.ok then
     ctx.log.info(result.content)
 end
 ```
-Opts: `{ approval, provider, model, system_prompt, timeout_ms }`. Default timeout: 300s, max 900s. Max nesting depth: 3 levels.
+Opts: `{ approval, provider, model, system_prompt, timeout_ms }`. Default timeout: 300s, max 900s. Agent requests use an inactivity timeout: an active sub-agent is not stopped merely because a hard wall-clock duration elapsed while it is still streaming output or tool results.
 
 `run_stream` accepts additional callback opts: `on_started`, `on_status`, `on_tool_call`, `on_tool_result`, `on_token_usage`, `on_finished`, `on_failed`. Each callback receives a table with event-specific fields.
 
@@ -219,12 +226,13 @@ local result = ctx.agent.spawn("Research Rust async runtimes", {
 -- result: { ok = true, id = "job-1", error = nil }
 ```
 
-Opts: `{ agent, approval, provider, model, system_prompt, timeout_ms }`. Sub-agents (`agent_depth > 0`) cannot spawn or wait on background jobs — use blocking `ctx.agent.run` instead.
+Opts: `{ agent, approval, provider, model, system_prompt, timeout_ms }`. Sub-agents (`agent_depth > 0`) cannot spawn or wait on background jobs.
 
 Query all jobs:
 ```lua
 local jobs = ctx.agent.jobs()
--- jobs: array of { id, agent, task, status, result, started_at, finished_at, consumed }
+-- jobs: array of { id, agent, task, status, result, started_at, finished_at,
+--                  consumed, token_sent, token_received, result_file }
 ```
 
 Block until jobs finish:
@@ -236,9 +244,15 @@ local outcome = ctx.agent.wait({ "job-1", "job-2" }, { timeout_ms = 300000 })
 
 `ids` is optional — `ctx.agent.wait(nil)` waits on all currently running jobs. Default timeout 300s, max 900s. Jobs returned by `wait` are marked consumed so they are not auto-injected again. Esc cancels the wait (`cancelled = true`); the jobs themselves keep running and their results auto-inject later. Jobs still running at timeout are listed in `pending` and also auto-inject on completion.
 
-**Auto-injection**: when a background job finishes unconsumed and the TUI is idle, results are injected as a new turn. The agent wakes up automatically — no polling needed. Results are truncated to 16k chars at injection time.
+**Auto-injection**: when a background job finishes unconsumed and the TUI is idle, results are injected as a new turn. The agent wakes up automatically — no polling needed. Results are truncated to 16k chars at injection time. Full results are spilled under the system temp directory as `bone-jobs/job-N.txt`; the job's `result_file` field points to that path when present.
+
+**Sub-agent pane**: the interactive TUI pane is rendered by Rust from the job registry, so it keeps updating even while Lua is blocked in a wait. The old Lua hook `bone._subagents_render` is no longer used.
+
+**Quit guard**: if background sub-agent jobs are still running, the first quit request warns instead of exiting. Quit again to exit anyway; running jobs are terminated with the process.
 
 **The `subagent` tool** (auto-created when agents are registered) exposes this to the main agent as three actions: `dispatch` (with optional `wait=true` for dependent work), `wait` (collect pending results), and `status` (non-blocking snapshot). The intended workflow: batch independent tasks into one dispatch; wait when the next step depends on results; otherwise end the turn and let results auto-inject.
+
+Existing user config files are not overwritten when default Lua tools are seeded. Users with an older `lua/tools/subagent.lua` may still have JSON-shaped return strings or the removed `bone._subagents_render` hook; copy the current bundled tool if they want the Rust-rendered pane and updated dispatch behavior.
 
 #### Usage Snapshot
 
