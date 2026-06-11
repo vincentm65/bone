@@ -115,6 +115,25 @@ pub struct AgentRequest {
     pub event_sender: Option<tokio::sync::mpsc::UnboundedSender<AgentRunEvent>>,
     pub agent_depth: usize,
     pub on_token_usage: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    /// Last-activity timestamp (epoch ms), updated whenever the agent makes
+    /// observable progress (stream chunks, tool results). Used by callers to
+    /// implement inactivity-based timeouts instead of hard cutoffs.
+    pub activity: Option<Arc<std::sync::atomic::AtomicU64>>,
+}
+
+/// Current time in epoch milliseconds.
+pub fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Record agent activity on the shared timestamp, if present.
+fn touch_activity(activity: &Option<Arc<std::sync::atomic::AtomicU64>>) {
+    if let Some(a) = activity {
+        a.store(now_epoch_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub struct AgentResponse {
@@ -342,6 +361,10 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         &std::env::current_dir().unwrap_or_default(),
         &mut custom,
         true,
+        crate::ext::BootOptions {
+            agent_depth: request.agent_depth,
+            headless: true,
+        },
     );
     let extensions = booted.manager;
     let tools = booted.tools;
@@ -351,7 +374,15 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         "message",
         serde_json::json!({ "role": "user", "content": &request.prompt }),
     );
-    let history = build_chat_history(&transcript, request.system_prompt.as_deref());
+    // Sub-agents get the fixed environment/tool scaffold composed with their
+    // (optional) persona; a top-level custom prompt replaces the default.
+    let history = if request.agent_depth > 0 {
+        let composed =
+            crate::llm::prompts::subagent_system_prompt(request.system_prompt.as_deref());
+        build_chat_history(&transcript, Some(&composed))
+    } else {
+        build_chat_history(&transcript, request.system_prompt.as_deref())
+    };
 
     let session = open_headless_session(llm.id(), llm.model());
 
@@ -374,6 +405,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let setup = tokio::task::spawn_blocking(move || agent_setup(&request_clone))
         .await
         .map_err(|e| format!("agent setup panicked: {e}"))??;
+    touch_activity(&request.activity);
 
     let AgentSetup {
         llm,
@@ -443,6 +475,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         let mut had_usage = false;
 
         while let Some(chunk) = stream.next().await {
+            touch_activity(&request.activity);
             match chunk {
                 Ok(ChatEvent::TextDelta(text)) => {
                     assistant_text.push_str(&text);
@@ -575,6 +608,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             request.agent_depth,
         )
         .await;
+        touch_activity(&request.activity);
 
         // Store session state (e.g. task_list state) into tool handler so
         // stateful tools persist across rounds in headless mode.
@@ -832,5 +866,6 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
         event_sender: None,
         agent_depth: 0,
         on_token_usage: None,
+        activity: None,
     })
 }

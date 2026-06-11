@@ -270,7 +270,8 @@ fn page_visible_rows(page: &PanePage) -> usize {
         .min(requested)
 }
 
-/// Compute extra height needed for the page region (separators + content + tab indicator).
+/// Compute extra height needed for the page region (separators + content +
+/// tab indicator).
 fn page_extra_height(pages: &[PanePage], active_page: usize) -> u16 {
     PageLayout::compute(pages, active_page, u16::MAX).total_height
 }

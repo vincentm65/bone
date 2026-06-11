@@ -79,6 +79,11 @@ pub struct App {
     shown_tool_rows: std::collections::HashSet<String>,
     /// Last-seen subagent job-registry version (forces first-tick render).
     subagent_seen_version: u64,
+    /// Last wall-clock subagent pane refresh (drives the ~1s live ticker).
+    subagent_last_refresh: std::time::Instant,
+    /// Set after the user was warned that quitting kills running sub-agent
+    /// jobs; the next quit request goes through.
+    quit_despite_jobs: bool,
 }
 
 impl App {
@@ -97,6 +102,7 @@ impl App {
             &std::env::current_dir().unwrap_or_default(),
             &mut custom_configs,
             true,
+            crate::ext::BootOptions::default(),
         );
         let extensions = booted.manager;
         let tools = booted.tools;
@@ -151,6 +157,8 @@ impl App {
             lua_keymap,
             shown_tool_rows: std::collections::HashSet::new(),
             subagent_seen_version: u64::MAX,
+            subagent_last_refresh: std::time::Instant::now(),
+            quit_despite_jobs: false,
         })
     }
     /// Dispatch a `session_end` event to Lua handlers.
@@ -239,6 +247,7 @@ impl App {
         self.pages.clear();
         self.active_page = 0;
         self.tools.state_map.clear();
+        self.subagent_seen_version = u64::MAX;
 
         let summary = if self.token_stats.request_count > 0 {
             format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
@@ -497,63 +506,71 @@ impl App {
         }
     }
 
-    /// Tick subagent job status: refresh pane if version changed, auto-inject
+    /// Tick subagent job status: refresh pane if needed, auto-inject
     /// finished results when the TUI is idle.
     async fn tick_subagents(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        // 1. Pane refresh: check version, update pane if changed.
-        let current_version = crate::ext::jobs::registry().version();
-        if current_version != self.subagent_seen_version {
-            self.refresh_subagent_pane();
-            self.subagent_seen_version = current_version;
+        // 1. Pane refresh: version change, or ~1s ticker while jobs run.
+        if self.maybe_refresh_subagent_pane() {
             self.redraw(term)?;
         }
 
-        // 2. Auto-injection: only when idle.
-        if self.active_prompt.is_none()
-            && !self.streaming
-            && self.queue.is_empty()
-            && let Some((text, display)) = Self::format_subagent_results(
-                &crate::ext::jobs::registry().take_finished_unconsumed(),
-            )
-        {
-            let draft = std::mem::take(&mut self.input.buffer);
-            let draft_cursor = self.input.cursor_pos;
-            self.submit_user_turn(text, Some(display), term).await?;
-            if !draft.is_empty() {
-                self.input.buffer = draft;
-                self.input.cursor_pos = draft_cursor.min(self.input.buffer.chars().count());
-                self.redraw(term)?;
-            }
-            // Drain any queued messages left after injection.
-            while let Some(queued) = self.queue.pop_front() {
-                self.input.buffer = queued;
-                self.input.cursor_pos = self.input.buffer.chars().count();
-                self.send_message(term).await?;
+        // 2. Auto-injection: only when idle. Peek first; mark the jobs
+        //    consumed only after the injection actually went through.
+        if self.active_prompt.is_none() && !self.streaming && self.queue.is_empty() {
+            let finished = crate::ext::jobs::registry().peek_finished_unconsumed();
+            if let Some((text, display)) = Self::format_subagent_results(&finished) {
+                let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
+                let draft = std::mem::take(&mut self.input.buffer);
+                let draft_cursor = self.input.cursor_pos;
+                self.submit_user_turn(text, Some(display), term).await?;
+                crate::ext::jobs::registry().mark_consumed(&ids);
+                if !draft.is_empty() {
+                    self.input.buffer = draft;
+                    self.input.cursor_pos = draft_cursor.min(self.input.buffer.chars().count());
+                    self.redraw(term)?;
+                }
+                // Drain any queued messages left after injection.
+                while let Some(queued) = self.queue.pop_front() {
+                    self.input.buffer = queued;
+                    self.input.cursor_pos = self.input.buffer.chars().count();
+                    self.send_message(term).await?;
+                }
             }
         }
 
         Ok(())
     }
 
+    /// Refresh the subagent pane when the registry version changed or, while
+    /// jobs are running, at least once per second so elapsed time and token
+    /// counters stay live. Returns `true` when the pane was refreshed.
+    pub(crate) fn maybe_refresh_subagent_pane(&mut self) -> bool {
+        let registry = crate::ext::jobs::registry();
+        let version = registry.version();
+        let periodic = self.subagent_last_refresh.elapsed() >= std::time::Duration::from_secs(1)
+            && !registry.running_ids().is_empty();
+        if version == self.subagent_seen_version && !periodic {
+            return false;
+        }
+        self.refresh_subagent_pane();
+        self.subagent_seen_version = version;
+        self.subagent_last_refresh = std::time::Instant::now();
+        true
+    }
+
     /// Refresh the subagent live-pane from the job registry.
+    ///
+    /// Rendered natively in Rust (no Lua) so the pane stays live even while
+    /// a Lua tool blocks the VM (e.g. a long `ctx.agent.wait`).
     fn refresh_subagent_pane(&mut self) {
-        let snap = crate::ext::jobs::registry().snapshot();
-        if let Some(pane_val) = self.extensions.render_subagent_pane(&snap) {
-            match PanePage::from_json(&pane_val) {
-                Ok(page) => {
-                    if page.content.is_empty() {
-                        self.active_page =
-                            PanePage::remove(&mut self.pages, &page.source, self.active_page);
-                    } else {
-                        let (_, new_active) =
-                            PanePage::upsert(&mut self.pages, self.active_page, page);
-                        self.active_page = new_active;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("bone-lua warn: subagent pane parse error: {e}");
-                }
-            }
+        let agents = self.extensions.subagent_names();
+        if agents.is_empty() {
+            return;
+        }
+        let jobs = crate::ext::jobs::registry().all_jobs();
+        if let Some(page) = crate::ui::subagent_pane::render(agents, &jobs) {
+            let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+            self.active_page = new_active;
         }
     }
 
@@ -570,17 +587,33 @@ impl App {
                 crate::ext::jobs::JobStatus::Error => "✗",
                 crate::ext::jobs::JobStatus::Running => "◐",
             };
-            let truncated = crate::ext::jobs::truncate_for_injection(
+            let mut truncated = crate::ext::jobs::truncate_for_injection(
                 job.result.as_deref().unwrap_or(""),
                 crate::ext::jobs::MAX_INJECT_CHARS,
             );
+            if let Some(file) = &job.result_file {
+                truncated.push_str(&format!("\n[full output saved to: {file}]"));
+            }
             lines.push(format!(
                 "## {} ({}) — {}\n{}",
                 job.agent, job.id, status_sym, truncated
             ));
         }
+        let still_running = crate::ext::jobs::registry().running_jobs();
+        if !still_running.is_empty() {
+            let names: Vec<String> = still_running
+                .iter()
+                .map(|j| format!("{} ({})", j.agent, j.id))
+                .collect();
+            lines.push(format!(
+                "Note: still running: {}. Their results will arrive automatically in a later message — do not assume their outcome.",
+                names.join(", ")
+            ));
+        }
         let turn_text = format!(
-            "[automated message] Background sub-agent results are ready. Review and continue.\n\n{}",
+            "[automated message] Results from background sub-agent jobs you dispatched earlier are now ready. \
+             Review them and continue the task they were dispatched for; if nothing remains to be done, \
+             summarize the outcomes for the user.\n\n{}",
             lines.join("\n\n")
         );
         let display: String = jobs
@@ -876,6 +909,33 @@ impl App {
         Ok(true)
     }
 
+    /// Request app exit. When sub-agent jobs are still running, the first
+    /// request is blocked and returns a warning notice; a repeated request
+    /// quits anyway (jobs are detached tasks and die with the process).
+    fn request_quit(&mut self) -> Option<String> {
+        let running = crate::ext::jobs::registry().running_jobs();
+        if !running.is_empty() && !self.quit_despite_jobs {
+            self.quit_despite_jobs = true;
+            let names: Vec<String> = running
+                .iter()
+                .map(|j| format!("{} ({})", j.agent, j.id))
+                .collect();
+            return Some(format!(
+                "{} sub-agent job(s) still running: {}. Quit again to exit anyway (they will be terminated).",
+                running.len(),
+                names.join(", ")
+            ));
+        }
+        // Best-effort end conversation in DB
+        if let Some(ref db) = self.session_db
+            && let Some(conv_id) = self.conversation_id
+        {
+            db.end_conversation(conv_id).ok();
+        }
+        self.should_quit = true;
+        None
+    }
+
     /// Handle Ctrl+C: cancel streaming response, or quit on double-tap.
     fn handle_ctrl_c(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let now = Instant::now();
@@ -884,13 +944,13 @@ impl App {
             .is_some_and(|prev| now.duration_since(prev) < Duration::from_secs(1));
 
         if double_tap {
-            // Best-effort end conversation in DB
-            if let Some(ref db) = self.session_db
-                && let Some(conv_id) = self.conversation_id
-            {
-                db.end_conversation(conv_id).ok();
+            if let Some(notice) = self.request_quit() {
+                self.messages.push(Message::system(notice));
+                self.renderer
+                    .flush_new_to_scrollback(&self.messages, term)?;
+                self.last_ctrl_c = Some(now);
+                return self.redraw(term);
             }
-            self.should_quit = true;
             return Ok(());
         }
 
@@ -1123,13 +1183,12 @@ impl App {
 
         match result {
             commands::CommandResult::Quit => {
-                // Best-effort end conversation in DB
-                if let Some(ref db) = self.session_db
-                    && let Some(conv_id) = self.conversation_id
-                {
-                    db.end_conversation(conv_id).ok();
+                if let Some(notice) = self.request_quit() {
+                    self.messages.push(Message::system(notice));
+                    self.renderer
+                        .flush_new_to_scrollback(&self.messages, term)?;
+                    self.redraw(term)?;
                 }
-                self.should_quit = true;
             }
             commands::CommandResult::Continue { reply } => {
                 self.messages.push(Message::system(reply));
@@ -1229,7 +1288,7 @@ impl App {
                     if output.is_empty() {
                         None
                     } else {
-                        Some((output, true))
+                        Some((output, false))
                     }
                 }
                 Ok(LuaValue::Table(t)) => {
@@ -1489,8 +1548,13 @@ impl App {
                 // Full reload: re-boot extensions and rebuild tool handler.
                 let config_dir = crate::config::bone_dir();
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let booted =
-                    crate::ext::boot_with_tools(&config_dir, &cwd, &mut self.custom_configs, true);
+                let booted = crate::ext::boot_with_tools(
+                    &config_dir,
+                    &cwd,
+                    &mut self.custom_configs,
+                    true,
+                    crate::ext::BootOptions::default(),
+                );
                 self.extensions = booted.manager;
                 self.tools = booted.tools;
 

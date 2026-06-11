@@ -6,6 +6,20 @@ use mlua::{Lua, LuaSerdeExt};
 
 use super::snapshots::{LuaConfigSnapshot, LuaKeymapSnapshot, LuaThemeSnapshot};
 
+/// Options controlling the Lua boot context.
+///
+/// Exposed to Lua as `bone.agent_depth` and `bone.headless` before
+/// `init.lua` and tool/command files execute, so scripts can adapt
+/// (e.g. the subagent tool refuses to register inside sub-agent VMs).
+#[derive(Clone, Copy, Default)]
+pub struct BootOptions {
+    /// Nesting depth of the agent owning this VM (0 = top-level).
+    pub agent_depth: usize,
+    /// True when running without the TUI (CLI/headless agent). Background
+    /// job auto-injection is unavailable, so tools must block for results.
+    pub headless: bool,
+}
+
 /// Result of dispatching an event through all Lua handlers.
 #[derive(Debug, Clone)]
 pub enum EventDispatchResult {
@@ -31,6 +45,8 @@ pub struct ExtensionManager {
     theme_snapshot: LuaThemeSnapshot,
     /// Snapshot of `bone.keymap` captured after init.lua.
     keymap_snapshot: LuaKeymapSnapshot,
+    /// Names of sub-agents registered via `bone.register_subagent()`.
+    subagents: Vec<String>,
 }
 
 impl ExtensionManager {
@@ -43,6 +59,7 @@ impl ExtensionManager {
         config_snapshot: LuaConfigSnapshot,
         theme_snapshot: LuaThemeSnapshot,
         keymap_snapshot: LuaKeymapSnapshot,
+        subagents: Vec<String>,
     ) -> Self {
         Self {
             lua,
@@ -52,6 +69,7 @@ impl ExtensionManager {
             config_snapshot,
             theme_snapshot,
             keymap_snapshot,
+            subagents,
         }
     }
 
@@ -91,6 +109,11 @@ impl ExtensionManager {
     /// Get the Lua keymap snapshot captured at boot.
     pub fn keymap_snapshot(&self) -> &LuaKeymapSnapshot {
         &self.keymap_snapshot
+    }
+
+    /// Names of sub-agents registered at boot (empty when none).
+    pub fn subagent_names(&self) -> &[String] {
+        &self.subagents
     }
 
     /// Dispatch a simple (non-blockable) event with a JSON-serializable
@@ -147,30 +170,6 @@ impl ExtensionManager {
             "is_error": is_error,
         });
         dispatch_event_inner(&lua, "tool_result", payload, false);
-    }
-
-    /// Render the subagent live-pane by calling `bone._subagents_render(jobs)`.
-    /// Returns `Some(serde_json::Value)` when the Lua hook exists and returns
-    /// a table, `None` otherwise.
-    pub fn render_subagent_pane(&self, jobs: &serde_json::Value) -> Option<serde_json::Value> {
-        if !self.loaded {
-            return None;
-        }
-        let lua = guard_with_bone(&self.lua)?;
-        let bone = lua.globals().get::<mlua::Table>("bone").ok()?;
-        let hook: mlua::Value = bone.get("_subagents_render").ok()?;
-        let fn_ref = match hook {
-            mlua::Value::Function(f) => f,
-            _ => return None,
-        };
-        let jobs_lua = lua.to_value(jobs).ok()?;
-        match fn_ref.call::<mlua::Value>(jobs_lua) {
-            Ok(mlua::Value::Table(t)) => {
-                // Convert Lua table back to serde_json::Value.
-                lua.from_value(mlua::Value::Table(t)).ok()
-            }
-            _ => None,
-        }
     }
 }
 

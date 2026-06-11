@@ -2,39 +2,56 @@
 --
 -- Only active when sub-agents are registered via bone.register_subagent in
 -- init.lua.  When no agents are registered, this file is a no-op (zero
--- overhead) — the tool and pane are never created.
+-- overhead) — the tool is never created.
+--
+-- The live status pane is rendered natively in Rust (src/ui/subagent_pane.rs)
+-- so it stays responsive even while this tool blocks the Lua VM.
 
 -- cjson is a global injected by Rust (encode/decode via serde_json)
 
 -- ---------------------------------------------------------------------------
--- Early exit: no registered agents → no tool, no pane.
+-- Early exits
 -- ---------------------------------------------------------------------------
+
+-- Sub-agents must not spawn nested sub-agents: never register the tool
+-- inside a sub-agent VM.
+if bone.agent_depth and bone.agent_depth > 0 then
+    return
+end
 
 local subagents = bone._subagents
 if not subagents or #subagents == 0 then
     return
 end
 
+-- Headless mode (CLI): background job auto-injection is unavailable, so
+-- dispatch must always block for results.
+local headless = bone.headless and true or false
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
+
+--- Numeric part of a "job-N" id (0 when malformed).
+local function job_id_number(id)
+    return tonumber((id or ""):match("(%d+)$")) or 0
+end
 
 --- Build a human-readable status string for a single job.
 local function job_status(job)
     if not job then
         return "○ idle"
     end
-    local elapsed = os.time() - job.started_at
-    local elapsed_s = string.format("%ds", elapsed)
 
     if job.status == "running" then
+        local elapsed = os.time() - job.started_at
         local task = job.task or ""
         if #task > 40 then
             task = task:sub(1, 37) .. "..."
         end
         local sent = job.token_sent or 0
         local received = job.token_received or 0
-        return string.format("◑ running %s (%s) %s/%s in/out", task, elapsed_s, sent, received)
+        return string.format("◑ running %s (%ds) %s/%s in/out", task, elapsed, sent, received)
     end
     -- done → treat as idle
     if job.status == "done" then
@@ -49,12 +66,12 @@ local function job_status(job)
     return "✗ error"
 end
 
---- Build a status summary string for one agent (latest job).
-local function agent_status(agents, jobs)
+--- Build a status summary string for one agent (latest job by id).
+local function agent_status(agent, jobs)
     local latest = nil
     for _, j in ipairs(jobs) do
-        if j.agent == agents.name then
-            if not latest or j.started_at > (latest.started_at or 0) then
+        if j.agent == agent.name then
+            if not latest or job_id_number(j.id) > job_id_number(latest.id) then
                 latest = j
             end
         end
@@ -63,69 +80,106 @@ local function agent_status(agents, jobs)
 end
 
 -- ---------------------------------------------------------------------------
--- render_pane(jobs) → pane table
--- ---------------------------------------------------------------------------
-
-local function render_pane(jobs)
-    local lines = {}
-    local agent_count = #subagents
-
-    for i, agent in ipairs(subagents) do
-        local status = agent_status(agent, jobs)
-        local icon
-        if status:find("^○") then
-            icon = "○"
-        elseif status:find("^◑") then
-            icon = "◑"
-        else
-            icon = "✗"
-        end
-        local name = agent.name
-        local line = {
-            spans = {
-                { text = string.format(" %s ", icon), fg = "white", modifiers = { "bold" } },
-                { text = name, fg = "white" },
-                { text = " ", fg = "dark_gray" },
-                { text = status:gsub("^[✗◑○] ", ""), fg = "dark_gray" },
-            },
-        }
-        table.insert(lines, line)
-    end
-
-    return {
-        source = "subagents",
-        title = string.format("Agents (%d)", agent_count),
-        visible_rows = 8,
-        scroll = 0,
-        lines = lines,
-    }
-end
-
--- ---------------------------------------------------------------------------
--- Export hook for Rust: bone._subagents_render(jobs) → pane table
--- ---------------------------------------------------------------------------
-
-bone._subagents_render = function(jobs)
-    return render_pane(jobs)
-end
-
--- ---------------------------------------------------------------------------
 -- Build dynamic tool description
 -- ---------------------------------------------------------------------------
 
 local function build_description()
     local parts = {
-        "Dispatch tasks to registered sub-agents for parallel work — research, multi-step edits, long plans, etc. Returns immediately; results are injected automatically when the agent is idle. Use it to split tasks across agents. Never poll or wait for results.",
+        "Delegate tasks to registered sub-agents. Each agent runs in its own isolated context and only sees the task text you give it — write self-contained tasks (include file paths, goals, constraints, and the expected output format).",
         "",
         "Registered agents:",
     }
     for _, agent in ipairs(subagents) do
-        parts[#parts + 1] = string.format("  - %s: %s", agent.name, agent.description)
+        local extras = {}
+        if agent.approval then
+            extras[#extras + 1] = "approval: " .. agent.approval
+        end
+        local suffix = #extras > 0 and (" [" .. table.concat(extras, ", ") .. "]") or ""
+        parts[#parts + 1] = string.format("  - %s: %s%s", agent.name, agent.description, suffix)
     end
     parts[#parts + 1] = ""
-    parts[#parts + 1] = "Results arrive automatically in a later turn (auto-injected)."
-    parts[#parts + 1] = "Never poll or wait for results."
+    if headless then
+        parts[#parts + 1] = table.concat({
+            "Actions:",
+            '- dispatch: start one or more tasks (one tasks[] entry each, run in parallel). Blocks until all dispatched tasks finish and returns their results.',
+            '- wait: block until previously dispatched jobs finish. Waits on the given ids[] (or all running jobs when omitted) and returns their results.',
+            '- status: non-blocking snapshot of job progress. Use sparingly; never call status in a loop.',
+            "",
+            "Rules:",
+            "- Batch independent tasks into a single dispatch call to maximize parallelism.",
+            "- Each agent runs one job at a time; dispatching to a busy agent is rejected.",
+        }, "\n")
+    else
+        parts[#parts + 1] = table.concat({
+            "Actions:",
+            '- dispatch: start one or more tasks (one tasks[] entry each, run in parallel).',
+            '  - If your next step DEPENDS on the results, set wait=true: the call blocks and returns the results directly. Prefer this for fan-out/fan-in work.',
+            '  - If the work is independent of what you do next, omit wait: dispatch returns immediately and you keep working. Finished results are delivered to you automatically in a later message — do NOT poll for them, and NEVER fabricate or assume results you have not received.',
+            '- wait: block until previously dispatched jobs finish. Waits on the given ids[] (or all running jobs when omitted) and returns their results. Use when you reach a point where you need pending results before continuing.',
+            '- status: non-blocking snapshot of job progress. Use sparingly; never call status in a loop.',
+            "",
+            "Rules:",
+            "- Batch independent tasks into a single dispatch call to maximize parallelism.",
+            "- Each agent runs one job at a time; dispatching to a busy agent is rejected.",
+            "- After a non-waiting dispatch, finish your current work and end your turn; results arrive as an automated message.",
+        }, "\n")
+    end
     return table.concat(parts, "\n")
+end
+
+-- ---------------------------------------------------------------------------
+-- Result formatting helpers
+-- ---------------------------------------------------------------------------
+
+-- Per-job character budget for results returned by wait (mirrors the Rust
+-- auto-injection limit).
+local MAX_RESULT_CHARS = 16000
+
+--- Truncate to a byte budget without splitting a UTF-8 sequence.
+local function truncate_result(s, max)
+    if #s <= max then
+        return s
+    end
+    local cut = max
+    while cut > 0 do
+        local b = s:byte(cut + 1)
+        if not b or b < 0x80 or b >= 0xC0 then
+            break
+        end
+        cut = cut - 1
+    end
+    return s:sub(1, cut) .. "\n[... truncated]"
+end
+
+--- Format a ctx.agent.wait outcome into a report for the model.
+local function format_wait_outcome(outcome)
+    local parts = {}
+    for _, job in ipairs(outcome.jobs or {}) do
+        local sym = job.status == "done" and "done" or "ERROR"
+        local body = truncate_result(job.result or "", MAX_RESULT_CHARS)
+        if job.result_file then
+            body = body .. string.format("\n[full output saved to: %s]", job.result_file)
+        end
+        parts[#parts + 1] = string.format(
+            "## %s (%s) — %s\n%s",
+            job.agent ~= "" and job.agent or "agent",
+            job.id,
+            sym,
+            body
+        )
+    end
+    if outcome.cancelled then
+        parts[#parts + 1] = "Wait cancelled by user; jobs keep running and their results will arrive automatically."
+    elseif outcome.timed_out then
+        parts[#parts + 1] = string.format(
+            "Wait timed out with jobs still running: %s. Their results will arrive automatically in a later message — do not assume their outcome.",
+            table.concat(outcome.pending or {}, ", ")
+        )
+    end
+    if #parts == 0 then
+        parts[#parts + 1] = "No jobs to wait on."
+    end
+    return table.concat(parts, "\n\n")
 end
 
 -- ---------------------------------------------------------------------------
@@ -142,6 +196,7 @@ local function execute(params, ctx)
         end
 
         local results = {}
+        local dispatched_ids = {}
         local ok_count = 0
         local err_count = 0
 
@@ -158,94 +213,79 @@ local function execute(params, ctx)
                 end
             end
 
-            if not agent_def then
+            if agent_def then
+                -- Build spawn opts from the agent definition.
+                -- Busy agents are rejected atomically by the Rust registry.
+                local opts = {
+                    agent = agent_name,
+                    system_prompt = agent_def.system_prompt,
+                    provider = agent_def.provider,
+                    model = agent_def.model,
+                    approval = agent_def.approval,
+                    timeout_ms = agent_def.timeout_ms,
+                }
+
+                local result = ctx.agent.spawn(task_desc, opts)
+                if result.ok then
+                    results[#results + 1] = string.format(
+                        "dispatched %s → %s", result.id, agent_name
+                    )
+                    dispatched_ids[#dispatched_ids + 1] = result.id
+                    ok_count = ok_count + 1
+                else
+                    results[#results + 1] = string.format(
+                        "REJECTED: %s — %s", agent_name, result.error or "unknown"
+                    )
+                    err_count = err_count + 1
+                end
+            else
                 results[#results + 1] = string.format(
                     "REJECTED: unknown agent '%s'", agent_name
                 )
                 err_count = err_count + 1
-                goto continue
             end
-
-            -- Check if agent is already running
-            local jobs = ctx.agent.jobs()
-            local running = false
-            for _, j in ipairs(jobs) do
-                if j.agent == agent_name and j.status == "running" then
-                    results[#results + 1] = string.format(
-                        "REJECTED: agent '%s' already running", agent_name
-                    )
-                    running = true
-                    err_count = err_count + 1
-                    break
-                end
-            end
-            if running then
-                goto continue
-            end
-
-            -- Build spawn opts from the agent definition
-            local opts = {
-                agent = agent_name,
-            }
-            if agent_def.system_prompt then
-                opts.system_prompt = agent_def.system_prompt
-            end
-            if agent_def.provider then
-                opts.provider = agent_def.provider
-            end
-            if agent_def.model then
-                opts.model = agent_def.model
-            end
-            if agent_def.approval then
-                opts.approval = agent_def.approval
-            end
-
-            local result = ctx.agent.spawn(task_desc, opts)
-            if result.ok then
-                results[#results + 1] = string.format(
-                    "dispatched %s → %s", result.id, agent_name
-                )
-                ok_count = ok_count + 1
-            else
-                results[#results + 1] = string.format(
-                    "ERROR: %s — %s", agent_name, result.error or "unknown"
-                )
-                err_count = err_count + 1
-            end
-
-            ::continue::
         end
 
         local summary = string.format(
             "Dispatched %d, rejected %d", ok_count, err_count
         )
-        local jobs = ctx.agent.jobs()
-        local pane = render_pane(jobs)
+        if err_count > 0 then
+            summary = summary .. "\n" .. table.concat(results, "\n")
+        end
 
-        return cjson.encode({
-            content = summary,
-            pane = pane,
-        })
+        -- Blocking dispatch: wait for the dispatched jobs and return results.
+        -- Headless mode always blocks (no background auto-injection there).
+        local should_wait = params.wait or headless
+        if should_wait and #dispatched_ids > 0 then
+            local outcome = ctx.agent.wait(dispatched_ids, { timeout_ms = params.timeout_ms })
+            if outcome.ok then
+                summary = summary .. "\n\n" .. format_wait_outcome(outcome)
+            else
+                summary = summary .. "\n\nERROR waiting: " .. (outcome.error or "unknown")
+            end
+        end
+
+        return summary
+    end
+
+    if action == "wait" then
+        local outcome = ctx.agent.wait(params.ids, { timeout_ms = params.timeout_ms })
+        if not outcome.ok then
+            return "ERROR: " .. (outcome.error or "unknown")
+        end
+        return format_wait_outcome(outcome)
     end
 
     if action == "status" then
         local jobs = ctx.agent.jobs()
-        local pane = render_pane(jobs)
-
-        -- Build a summary
         local parts = { "Sub-agent status:" }
         for _, agent in ipairs(subagents) do
             parts[#parts + 1] = string.format("  %s: %s", agent.name, agent_status(agent, jobs))
         end
-        local summary = table.concat(parts, "\n")
-
-        return cjson.encode({
-            content = summary,
-            pane = pane,
-        })
+        return table.concat(parts, "\n")
     end
 
-    return "ERROR: Action must be 'dispatch' or 'status'."
+    return "ERROR: Action must be 'dispatch', 'wait' or 'status'."
 end
 
 -- ---------------------------------------------------------------------------
@@ -261,11 +301,12 @@ bone.register_tool({
         properties = {
             action = {
                 type = "string",
-                description = "dispatch or status",
+                enum = { "dispatch", "wait", "status" },
+                description = "dispatch (start tasks), wait (block for results), or status (non-blocking snapshot)",
             },
             tasks = {
                 type = "array",
-                description = "List of tasks to dispatch. Each item: {agent: string, task: string}",
+                description = "dispatch only: list of tasks to start in parallel. Each item: {agent: string, task: string}",
                 items = {
                     type = "object",
                     properties = {
@@ -275,12 +316,25 @@ bone.register_tool({
                         },
                         task = {
                             type = "string",
-                            description = "Task description for the agent",
+                            description = "Self-contained task description for the agent (it sees nothing else)",
                         },
                     },
                     required = { "agent", "task" },
                     additionalProperties = false,
                 },
+            },
+            wait = {
+                type = "boolean",
+                description = "dispatch only: block until the dispatched tasks finish and return their results. Use when your next step depends on them.",
+            },
+            ids = {
+                type = "array",
+                items = { type = "string" },
+                description = "wait only: job ids to wait for (omit to wait for all running jobs)",
+            },
+            timeout_ms = {
+                type = "integer",
+                description = "dispatch(wait=true)/wait: max time to block in milliseconds (default 300000)",
             },
         },
         required = { "action" },
@@ -289,7 +343,7 @@ bone.register_tool({
     display = {
         show = true,
         show_result = false,
-        args = { "action", "tasks" },
+        args = { "action", "tasks", "wait", "ids" },
     },
     execute = execute,
 })

@@ -443,11 +443,8 @@ impl App {
                         self.mark_cancelled(assistant_idx);
                         break;
                     }
-                    // Refresh subagent pane if version changed.
-                    if crate::ext::jobs::registry().version() != self.subagent_seen_version {
-                        self.refresh_subagent_pane();
-                        self.subagent_seen_version = crate::ext::jobs::registry().version();
-                    }
+                    // Refresh subagent pane on registry change or ~1s ticker.
+                    self.maybe_refresh_subagent_pane();
                     self.renderer.tick_spinner(term, &PaneDraw {
                         input: &self.input,
                         status_info: &self.stream_status_info_with_tokens(Some(stream_estimated_received)),

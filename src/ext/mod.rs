@@ -17,7 +17,7 @@ pub mod ops_tools;
 pub mod snapshots;
 pub mod types;
 
-pub use types::{BootResult, BootedTools, EventDispatchResult, ExtensionManager};
+pub use types::{BootOptions, BootResult, BootedTools, EventDispatchResult, ExtensionManager};
 
 include!(concat!(env!("OUT_DIR"), "/default_lua_tools.rs"));
 include!(concat!(env!("OUT_DIR"), "/default_lua_commands.rs"));
@@ -29,8 +29,8 @@ use std::path::Path;
 /// Creates the VM, populates the `bone` global table, executes
 /// `~/.bone-rust/init.lua` if it exists, and collects registered tools.
 /// Failures are logged but never crash the app.
-pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
-    loader::boot(config_dir, cwd)
+pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions) -> BootResult {
+    loader::boot(config_dir, cwd, opts)
 }
 
 /// Full boot sequence: load tools, boot extensions, register Lua tools,
@@ -41,11 +41,12 @@ pub fn boot_with_tools(
     cwd: &Path,
     custom: &mut super::config::custom::CustomConfigs,
     sync: bool,
+    opts: BootOptions,
 ) -> BootedTools {
     let BootResult {
         manager: extensions,
         tools: lua_tools,
-    } = boot(config_dir, cwd);
+    } = boot(config_dir, cwd, opts);
 
     let mut loaded = super::tools::load_tools();
     super::tools::register_lua_tools(&mut loaded, lua_tools);

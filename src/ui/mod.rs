@@ -6,5 +6,6 @@ pub mod pane_page;
 pub mod prompt;
 pub mod render;
 pub mod stats;
+pub mod subagent_pane;
 pub mod theme;
 pub mod tool_display;

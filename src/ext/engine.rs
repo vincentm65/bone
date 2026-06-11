@@ -5,8 +5,15 @@ use std::path::Path;
 
 use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table};
 
+use super::types::BootOptions;
+
 /// Build a ready-to-use Lua state with the `bone` table populated.
-pub(crate) fn create_engine(version: &str, cwd: &Path, config_dir: &Path) -> Result<Lua, String> {
+pub(crate) fn create_engine(
+    version: &str,
+    cwd: &Path,
+    config_dir: &Path,
+    opts: BootOptions,
+) -> Result<Lua, String> {
     let lua = Lua::new();
 
     let globals = lua.globals();
@@ -23,6 +30,13 @@ pub(crate) fn create_engine(version: &str, cwd: &Path, config_dir: &Path) -> Res
         .map_err(|e| e.to_string())?;
 
     bone.set("config_dir", config_dir.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Boot context: scripts can adapt to nesting depth and headless mode
+    // (e.g. the subagent tool refuses to register inside sub-agent VMs).
+    bone.set("agent_depth", opts.agent_depth)
+        .map_err(|e| e.to_string())?;
+    bone.set("headless", opts.headless)
         .map_err(|e| e.to_string())?;
 
     // bone.log table

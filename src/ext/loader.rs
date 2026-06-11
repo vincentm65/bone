@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use super::ctx::SharedState;
 use super::engine;
 use super::lua_tool::LuaTool;
-use super::types::{BootResult, ExtensionManager};
+use super::types::{BootOptions, BootResult, ExtensionManager};
 
 /// Boot the Lua extension system.
 ///
@@ -18,11 +18,11 @@ use super::types::{BootResult, ExtensionManager};
 ///
 /// Errors during Lua construction or init.lua execution are logged and
 /// the app continues without Lua support.
-pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
+pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions) -> BootResult {
     let version = env!("CARGO_PKG_VERSION");
     let config_dir_str = config_dir.to_string_lossy().to_string();
 
-    let lua = match engine::create_engine(version, cwd, config_dir) {
+    let lua = match engine::create_engine(version, cwd, config_dir, opts) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("bone: warning: Lua engine creation failed: {e}");
@@ -35,6 +35,7 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
                     super::snapshots::LuaConfigSnapshot::default(),
                     super::snapshots::LuaThemeSnapshot::default(),
                     super::snapshots::LuaKeymapSnapshot::default(),
+                    Vec::new(),
                 ),
                 tools: Vec::new(),
             };
@@ -77,6 +78,9 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
     let theme_snapshot = collect_theme_snapshot(&lua_arc);
     let keymap_snapshot = collect_keymap_snapshot(&lua_arc);
 
+    // Collect registered sub-agent names (for the Rust-side live pane).
+    let subagents = collect_subagent_names(&lua_arc);
+
     let manager = ExtensionManager::from_arc(
         lua_arc,
         true, // engine_ok
@@ -85,8 +89,42 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
         config_snapshot,
         theme_snapshot,
         keymap_snapshot,
+        subagents,
     );
     BootResult { manager, tools }
+}
+
+/// Iterate `bone._subagents` and collect agent names.
+fn collect_subagent_names(lua_arc: &Arc<Mutex<mlua::Lua>>) -> Vec<String> {
+    let lua = match lua_arc.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("bone: warning: Lua mutex poisoned: {e}");
+            return Vec::new();
+        }
+    };
+
+    let bone_table = match get_bone(&lua) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let subagents_table = match bone_table.get::<Option<mlua::Table>>("_subagents") {
+        Ok(Some(t)) => t,
+        _ => return Vec::new(),
+    };
+
+    let mut names = Vec::new();
+    for entry in subagents_table.sequence_values::<mlua::Table>() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if let Ok(Some(name)) = entry.get::<Option<String>>("name") {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Get the `bone` global table from the Lua VM.

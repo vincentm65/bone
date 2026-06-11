@@ -839,13 +839,32 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     Ok(ctx)
 }
 
-/// Maximum nesting depth for subagent calls.
-const MAX_AGENT_DEPTH: usize = 3;
+/// Maximum nesting depth for subagent calls. Sub-agents cannot spawn
+/// further sub-agents: only the top-level agent (depth 0) may delegate.
+const MAX_AGENT_DEPTH: usize = 1;
 /// Maximum nesting depth for tool calls from Lua.
 const MAX_TOOL_CALL_DEPTH: usize = 4;
-/// Default and max timeout for subagent calls.
+/// Default and max *inactivity* timeout for subagent calls. An agent only
+/// times out when it has produced no observable progress (stream chunks,
+/// tool results) for this long — not after a hard wall-clock cutoff.
 const DEFAULT_AGENT_TIMEOUT_MS: u64 = 300_000;
 const MAX_AGENT_TIMEOUT_MS: u64 = 900_000;
+
+/// Resolves once the shared activity timestamp has been stale for
+/// `timeout_ms` milliseconds. Used as an inactivity watchdog alongside
+/// `run_agent` in a `select!`.
+async fn inactivity_elapsed(activity: Arc<AtomicU64>, timeout_ms: u64) {
+    loop {
+        let last = activity.load(Ordering::Relaxed);
+        let now = crate::agent::now_epoch_ms();
+        let idle = now.saturating_sub(last);
+        if idle >= timeout_ms {
+            return;
+        }
+        let remaining = timeout_ms - idle;
+        tokio::time::sleep(std::time::Duration::from_millis(remaining.min(1_000))).await;
+    }
+}
 
 /// Create the `ctx.agent` table with `run` and `run_stream` functions.
 fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
@@ -874,6 +893,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             inherited_approval,
             &inherited_provider,
             &inherited_model,
+            RUN_OPT_KEYS,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -885,6 +905,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             }
         };
 
+        let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
         let request = crate::agent::AgentRequest {
             prompt,
             approval_mode: approval,
@@ -895,22 +916,23 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             event_sender: None,
             agent_depth: agent_depth + 1,
             on_token_usage: None,
+            activity: Some(activity.clone()),
         };
 
         let cancelled = cancelled_flag.clone();
         let response = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
-                    tokio::select! {
-                        result = crate::agent::run_agent(request) => result,
-                        _ = await_cancelled(&cancelled) => Err("cancelled".to_string()),
+                tokio::select! {
+                    result = crate::agent::run_agent(request) => result,
+                    _ = await_cancelled(&cancelled) => Err("cancelled".to_string()),
+                    _ = inactivity_elapsed(activity, timeout_ms) => {
+                        Err(inactivity_message(timeout_ms))
                     }
-                })
-                .await
+                }
             })
         });
 
-        agent_result_to_lua(lua, response, timeout_ms)
+        agent_result_to_lua(lua, response)
     })?;
     agent_table.set("run", run_fn)?;
 
@@ -927,7 +949,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 return agent_depth_exceeded(lua);
             }
 
-            let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(&opts, inherited_approval_s, &inherited_provider_s, &inherited_model_s) {
+            let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(&opts, inherited_approval_s, &inherited_provider_s, &inherited_model_s, RUN_STREAM_OPT_KEYS) {
                 Ok(v) => v,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -948,6 +970,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             let on_failed = opts_cb(&opts, "on_failed");
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
+            let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
             let request = crate::agent::AgentRequest {
                 prompt,
                 approval_mode: approval,
@@ -958,81 +981,79 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 event_sender: Some(tx),
                 agent_depth: agent_depth_s + 1,
                 on_token_usage: None,
+                activity: Some(activity.clone()),
             };
 
             let cancelled = cancelled_flag_s.clone();
             let response = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    tokio::time::timeout(
-                        std::time::Duration::from_millis(timeout_ms),
-                        async {
-                            let agent_future = crate::agent::run_agent(request);
-                            tokio::pin!(agent_future);
+                    let agent_future = crate::agent::run_agent(request);
+                    tokio::pin!(agent_future);
 
-                            // Process events and agent result concurrently.
-                            let agent_result = loop {
-                                tokio::select! {
-                                    result = &mut agent_future => {
-                                        // Drain remaining events.
-                                        let mut drain_err: Option<String> = None;
-                                        loop {
-                                            match rx.try_recv() {
-                                                Ok(event) => {
-                                                    if let Err(e) = dispatch_event(lua, &event,
-                                                        &on_started, &on_status, &on_tool_call,
-                                                        &on_tool_result, &on_token_usage,
-                                                        &on_finished, &on_failed) {
-                                                        drain_err = Some(format!("callback error: {e}"));
-                                                        break;
-                                                    }
-                                                }
-                                                Err(_) => break,
+                    // Process events and agent result concurrently.
+                    loop {
+                        tokio::select! {
+                            result = &mut agent_future => {
+                                // Drain remaining events.
+                                let mut drain_err: Option<String> = None;
+                                loop {
+                                    match rx.try_recv() {
+                                        Ok(event) => {
+                                            if let Err(e) = dispatch_event(lua, &event,
+                                                &on_started, &on_status, &on_tool_call,
+                                                &on_tool_result, &on_token_usage,
+                                                &on_finished, &on_failed) {
+                                                drain_err = Some(format!("callback error: {e}"));
+                                                break;
                                             }
                                         }
-                                        if let Some(e) = drain_err {
-                                            break Err(e);
-                                        }
-                                        break result;
-                                    }
-                                    Some(event) = rx.recv() => {
-                                        if let Err(e) = dispatch_event(lua, &event,
-                                            &on_started, &on_status, &on_tool_call,
-                                            &on_tool_result, &on_token_usage,
-                                            &on_finished, &on_failed) {
-                                            break Err(format!("callback error: {e}"));
-                                        }
-                                    }
-                                    _ = await_cancelled(&cancelled) => {
-                                        // Drain remaining events.
-                                        let mut drain_err: Option<String> = None;
-                                        loop {
-                                            match rx.try_recv() {
-                                                Ok(event) => {
-                                                    if let Err(e) = dispatch_event(lua, &event,
-                                                        &on_started, &on_status, &on_tool_call,
-                                                        &on_tool_result, &on_token_usage,
-                                                        &on_finished, &on_failed) {
-                                                        drain_err = Some(format!("callback error: {e}"));
-                                                        break;
-                                                    }
-                                                }
-                                                Err(_) => break,
-                                            }
-                                        }
-                                        if let Some(e) = drain_err {
-                                            break Err(e);
-                                        }
-                                        break Err("cancelled".to_string());
+                                        Err(_) => break,
                                     }
                                 }
-                            };
-                            agent_result
-                        },
-                    ).await
+                                if let Some(e) = drain_err {
+                                    break Err(e);
+                                }
+                                break result;
+                            }
+                            Some(event) = rx.recv() => {
+                                if let Err(e) = dispatch_event(lua, &event,
+                                    &on_started, &on_status, &on_tool_call,
+                                    &on_tool_result, &on_token_usage,
+                                    &on_finished, &on_failed) {
+                                    break Err(format!("callback error: {e}"));
+                                }
+                            }
+                            _ = await_cancelled(&cancelled) => {
+                                // Drain remaining events.
+                                let mut drain_err: Option<String> = None;
+                                loop {
+                                    match rx.try_recv() {
+                                        Ok(event) => {
+                                            if let Err(e) = dispatch_event(lua, &event,
+                                                &on_started, &on_status, &on_tool_call,
+                                                &on_tool_result, &on_token_usage,
+                                                &on_finished, &on_failed) {
+                                                drain_err = Some(format!("callback error: {e}"));
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                if let Some(e) = drain_err {
+                                    break Err(e);
+                                }
+                                break Err("cancelled".to_string());
+                            }
+                            _ = inactivity_elapsed(activity.clone(), timeout_ms) => {
+                                break Err(inactivity_message(timeout_ms));
+                            }
+                        }
+                    }
                 })
             });
 
-            agent_result_to_lua(lua, response, timeout_ms)
+            agent_result_to_lua(lua, response)
         },
     )?;
     agent_table.set("run_stream", run_stream_fn)?;
@@ -1056,6 +1077,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             inherited_approval_j,
             &inherited_provider_j,
             &inherited_model_j,
+            SPAWN_OPT_KEYS,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1075,7 +1097,16 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|e| mlua::Error::external(format!("spawn requires a tokio runtime: {e}")))?;
 
-        let id = crate::ext::jobs::registry().create(agent_name.clone(), prompt.clone());
+        // Atomic busy check: rejects when this agent already has a running job.
+        let id = match crate::ext::jobs::registry().create(agent_name.clone(), prompt.clone()) {
+            Ok(id) => id,
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("error", e)?;
+                return Ok(Value::Table(result));
+            }
+        };
         let id_for_task = id.clone();
         let id_for_spawn = id.clone();
 
@@ -1085,6 +1116,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         let token_sent_clone = token_sent.clone();
         let token_received_clone = token_received.clone();
 
+        let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
         let request = crate::agent::AgentRequest {
             prompt,
             approval_mode: approval,
@@ -1099,16 +1131,18 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 token_received_clone.store(received, Ordering::Relaxed);
                 crate::ext::jobs::registry().update_tokens(&id_for_task, sent, received);
             })),
+            activity: Some(activity.clone()),
         };
 
-        let timeout_duration = std::time::Duration::from_millis(timeout_ms);
         handle.spawn(async move {
-            let outcome = tokio::time::timeout(timeout_duration, async {
-                crate::agent::run_agent(request).await
-            })
-            .await
-            .map_err(|_| format!("job {id_for_spawn} timed out after {timeout_ms}ms"))
-            .and_then(|r| r.map(|resp| resp.content).map_err(|e| e.to_string()));
+            let outcome = tokio::select! {
+                result = crate::agent::run_agent(request) => {
+                    result.map(|resp| resp.content)
+                }
+                _ = inactivity_elapsed(activity, timeout_ms) => {
+                    Err(format!("{id_for_spawn}: {}", inactivity_message(timeout_ms)))
+                }
+            };
             let ts = token_sent.load(Ordering::Relaxed);
             let tr = token_received.load(Ordering::Relaxed);
             crate::ext::jobs::registry().complete_with_tokens(&id_for_spawn, outcome, ts, tr);
@@ -1130,6 +1164,66 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     })?;
     agent_table.set("jobs", jobs_fn)?;
 
+    // --- ctx.agent.wait(ids?, opts?) ---
+    // Block until the given background jobs finish (or all running jobs when
+    // ids is nil/empty). Finished jobs are returned and marked consumed so
+    // they are not auto-injected again. Esc (cancellation) aborts the wait;
+    // the jobs themselves keep running and auto-inject later.
+    let agent_depth_w = cfg.agent_depth;
+    let cancelled_flag_w = cfg.cancelled.clone();
+    let wait_fn = lua.create_function(
+        move |lua, (ids, opts): (Option<Vec<String>>, Option<Table>)| {
+            // Background jobs belong to the main conversation; sub-agents
+            // can neither spawn nor wait on them.
+            if agent_depth_w > 0 {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("error", "sub-agents cannot wait on background jobs")?;
+                return Ok(Value::Table(result));
+            }
+
+            let timeout_ms = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
+                .unwrap_or(DEFAULT_AGENT_TIMEOUT_MS)
+                .clamp(1_000, MAX_AGENT_TIMEOUT_MS);
+
+            let registry = crate::ext::jobs::registry();
+            let ids = match ids {
+                Some(v) if !v.is_empty() => v,
+                _ => registry.running_ids(),
+            };
+
+            let result = lua.create_table()?;
+            result.set("ok", true)?;
+            if ids.is_empty() {
+                result.set("jobs", lua.create_table()?)?;
+                result.set("pending", lua.create_table()?)?;
+                result.set("timed_out", false)?;
+                result.set("cancelled", false)?;
+                return Ok(Value::Table(result));
+            }
+
+            // Blocking is safe here: top-level Lua tools run on a
+            // spawn_blocking thread, and background jobs run on the tokio
+            // runtime with their own Lua VMs (no lock shared with this one).
+            let outcome = registry.wait_for(
+                &ids,
+                std::time::Duration::from_millis(timeout_ms),
+                cancelled_flag_w.as_deref(),
+            );
+
+            let finished_json = serde_json::to_value(&outcome.finished)
+                .unwrap_or_else(|_| serde_json::json!([]));
+            result.set("jobs", lua.to_value(&finished_json)?)?;
+            result.set("pending", outcome.pending)?;
+            result.set("timed_out", outcome.timed_out)?;
+            result.set("cancelled", outcome.cancelled)?;
+            Ok(Value::Table(result))
+        },
+    )?;
+    agent_table.set("wait", wait_fn)?;
+
     ctx.set("agent", agent_table)?;
     Ok(())
 }
@@ -1143,12 +1237,65 @@ fn agent_depth_exceeded(lua: &Lua) -> Result<Value, mlua::Error> {
     Ok(Value::Table(result))
 }
 
-/// Parse common opts for both `run` and `run_stream`.
+/// Known option keys per `ctx.agent` call, used to warn on typos.
+const RUN_OPT_KEYS: &[&str] = &["approval", "provider", "model", "system_prompt", "timeout_ms"];
+const RUN_STREAM_OPT_KEYS: &[&str] = &[
+    "approval",
+    "provider",
+    "model",
+    "system_prompt",
+    "timeout_ms",
+    "on_started",
+    "on_status",
+    "on_tool_call",
+    "on_tool_result",
+    "on_token_usage",
+    "on_finished",
+    "on_failed",
+];
+const SPAWN_OPT_KEYS: &[&str] = &[
+    "approval",
+    "provider",
+    "model",
+    "system_prompt",
+    "timeout_ms",
+    "agent",
+];
+
+/// Human-readable inactivity timeout message.
+fn inactivity_message(timeout_ms: u64) -> String {
+    format!(
+        "agent timed out after {}s of inactivity (no stream or tool progress)",
+        timeout_ms / 1000
+    )
+}
+
+/// Warn (stderr) about unrecognized option keys so typos don't silently
+/// fall back to defaults.
+fn warn_unknown_opts(opts: &Option<Table>, allowed: &[&str]) {
+    let Some(table) = opts else { return };
+    for pair in table.clone().pairs::<Value, Value>() {
+        let Ok((key, _)) = pair else { continue };
+        if let Value::String(s) = key
+            && let Ok(k) = s.to_str()
+            && !allowed.contains(&k.as_ref())
+        {
+            eprintln!(
+                "bone-lua warn: unknown agent option '{}' (known: {})",
+                k.as_ref(),
+                allowed.join(", ")
+            );
+        }
+    }
+}
+
+/// Parse common opts for `run`, `run_stream`, and `spawn`.
 fn parse_agent_opts(
     opts: &Option<Table>,
     inherited_approval: crate::tools::ApprovalMode,
     inherited_provider: &Option<String>,
     inherited_model: &Option<String>,
+    allowed_keys: &[&str],
 ) -> Result<
     (
         crate::tools::ApprovalMode,
@@ -1159,6 +1306,8 @@ fn parse_agent_opts(
     ),
     String,
 > {
+    warn_unknown_opts(opts, allowed_keys);
+
     let approval = match opts
         .as_ref()
         .and_then(|t| t.get::<Option<String>>("approval").ok().flatten())
@@ -1269,28 +1418,22 @@ fn dispatch_event(
     Ok(())
 }
 
-/// Convert the timeout-wrapped agent result into a Lua return table.
+/// Convert the agent result into a Lua return table.
 fn agent_result_to_lua(
     lua: &Lua,
-    response: Result<Result<crate::agent::AgentResponse, String>, tokio::time::error::Elapsed>,
-    timeout_ms: u64,
+    response: Result<crate::agent::AgentResponse, String>,
 ) -> Result<Value, mlua::Error> {
     let result = lua.create_table()?;
     match response {
-        Ok(Ok(resp)) => {
+        Ok(resp) => {
             result.set("ok", true)?;
             result.set("content", resp.content)?;
             result.set("error", Value::Nil)?;
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             result.set("ok", false)?;
             result.set("content", "")?;
             result.set("error", e)?;
-        }
-        Err(_) => {
-            result.set("ok", false)?;
-            result.set("content", "")?;
-            result.set("error", format!("agent timed out after {timeout_ms}ms"))?;
         }
     }
     Ok(Value::Table(result))

@@ -109,6 +109,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             event_sender: None,
             agent_depth: 0,
             on_token_usage: None,
+            activity: None,
         })
         .await;
     }
@@ -125,6 +126,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         event_sender: None,
         agent_depth: 0,
         on_token_usage: None,
+        activity: None,
     })
     .await
 }
@@ -160,6 +162,10 @@ async fn expand_lua_command(
             &std::env::current_dir().unwrap_or_default(),
             &mut crate::config::custom::CustomConfigs::default(),
             false,
+            ext::BootOptions {
+                agent_depth: 0,
+                headless: true,
+            },
         );
         let lua = booted.manager.lua_handle();
         let lua = lua.lock().unwrap_or_else(|e| e.into_inner());

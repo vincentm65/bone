@@ -59,7 +59,7 @@ fn sandbox_blocks_dangerous_apis() {
     std::fs::write(tools_dir.join("probe.lua"), SANDBOX_PROBE_TOOL).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -123,7 +123,7 @@ fn sandbox_blocks_dangerous_apis() {
 fn default_tools_boot_cleanly() {
     let config_dir = common::temp_dir("defaults-boot");
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true, bone::ext::BootOptions::default());
 
     // The boot itself should succeed. ExtensionManager should report available.
     assert!(
@@ -190,7 +190,7 @@ fn tools_call_depth_limit_enforced() {
     std::fs::write(tools_dir.join("depth.lua"), DEPTH_COUNTER_TOOL).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -264,7 +264,7 @@ fn agent_run_depth_limit_enforced() {
     std::fs::write(tools_dir.join("agent_depth.lua"), AGENT_DEPTH_TOOL).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -349,7 +349,7 @@ fn event_ctx_has_ui_notify_but_not_tools_agent_shell() {
     std::fs::write(config_dir.join("init.lua"), EVENT_CTX_PROBE_V2).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     // Dispatch a session_start event.
     booted
@@ -405,7 +405,7 @@ fn reload_picks_up_new_tools_and_commands() {
 
     // Boot once — no custom tools.
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted1 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true);
+    let booted1 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true, bone::ext::BootOptions::default());
     let names1: Vec<String> = booted1
         .tools
         .definitions()
@@ -445,7 +445,7 @@ bone.register_command("reload_test_cmd", {
     .unwrap();
 
     // Simulate /tools reload: boot a fresh VM.
-    let booted2 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true);
+    let booted2 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true, bone::ext::BootOptions::default());
     let names2: Vec<String> = booted2
         .tools
         .definitions()
@@ -510,7 +510,7 @@ fn reload_snapshots_come_from_same_fresh_vm() {
 
     // Boot without any theme config.
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted1 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true);
+    let booted1 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true, bone::ext::BootOptions::default());
     assert!(
         booted1.manager.theme_snapshot().user_msg.is_none(),
         "no theme should be set on first boot",
@@ -527,7 +527,7 @@ bone.theme.user_msg = "#ff0000"
     .unwrap();
 
     // Reboot — snapshots should reflect the new theme.
-    let booted2 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true);
+    let booted2 = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, true, bone::ext::BootOptions::default());
     assert!(
         booted2.manager.theme_snapshot().user_msg.is_some(),
         "theme snapshot should have user_msg after reload",

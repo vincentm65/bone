@@ -36,7 +36,7 @@ fn two_agents_registered_and_listed_in_tool() {
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     // The subagent tool should be registered.
     let defs = booted.tools.definitions();
@@ -68,7 +68,7 @@ fn no_agents_registered_no_tool() {
     let config_dir = common::temp_dir("subagent-no-agents");
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     let defs = booted.tools.definitions();
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
@@ -89,7 +89,7 @@ fn spawn_lifecycle_no_provider() {
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -174,6 +174,165 @@ fn spawn_lifecycle_no_provider() {
     std::fs::remove_dir_all(&config_dir).ok();
 }
 
+// ── 2b. Wait paths ──────────────────────────────────────────────────────────
+
+/// dispatch with wait=true blocks and returns the job results inline.
+#[test]
+fn dispatch_with_wait_returns_results_inline() {
+    let config_dir = common::temp_dir("subagent-dispatch-wait");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    // Unique agent name: the busy-agent check is global by name, so avoid
+    // colliding with other tests dispatching in parallel.
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"bone.register_subagent({
+            name = "waiter-inline",
+            description = "test agent",
+            system_prompt = "You are a test agent.",
+        })"#,
+    )
+    .unwrap();
+
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let call = ToolCall {
+        id: "call-dispatch-wait".into(),
+        name: "subagent".into(),
+        arguments: serde_json::json!({
+            "action": "dispatch",
+            "wait": true,
+            "tasks": [{ "agent": "waiter-inline", "task": "unique-task-dispatch-wait-inline" }],
+        }),
+    };
+
+    let results = rt.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            booted.tools.execute_all(vec![call], 0),
+        )
+        .await
+    });
+    rt.shutdown_timeout(Duration::from_secs(1));
+
+    let results = results.expect("dispatch with wait timed out");
+    let content = &results[0].content;
+
+    // The dispatch report and the inline job result (no provider → ERROR).
+    assert!(
+        content.contains("Dispatched 1"),
+        "expected dispatch report; got: {content}",
+    );
+    // The job finished (done or error, depending on provider availability)
+    // and its result was returned inline by the same tool call.
+    assert!(
+        content.contains("## waiter-inline (job-"),
+        "expected inline job result section; got: {content}",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+/// The standalone wait action returns results for previously dispatched jobs
+/// and marks them consumed (no later auto-injection).
+#[test]
+fn wait_action_collects_dispatched_job() {
+    let config_dir = common::temp_dir("subagent-wait-action");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"bone.register_subagent({
+            name = "waiter-collect",
+            description = "test agent",
+            system_prompt = "You are a test agent.",
+        })"#,
+    )
+    .unwrap();
+
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let task_marker = "unique-task-wait-action-collect";
+    let dispatch = ToolCall {
+        id: "call-wait-dispatch".into(),
+        name: "subagent".into(),
+        arguments: serde_json::json!({
+            "action": "dispatch",
+            "tasks": [{ "agent": "waiter-collect", "task": task_marker }],
+        }),
+    };
+
+    let dispatch_results = rt
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                booted.tools.execute_all(vec![dispatch], 0),
+            )
+            .await
+        })
+        .expect("dispatch timed out");
+    assert!(dispatch_results[0].content.contains("Dispatched 1"));
+
+    // Find the job id by its unique task text.
+    let registry = bone::ext::jobs::registry();
+    let snap = registry.snapshot();
+    let job_id = snap
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["task"].as_str() == Some(task_marker))
+        .and_then(|j| j["id"].as_str())
+        .expect("dispatched job not found in registry")
+        .to_string();
+
+    // Wait on it via the tool.
+    let wait = ToolCall {
+        id: "call-wait".into(),
+        name: "subagent".into(),
+        arguments: serde_json::json!({
+            "action": "wait",
+            "ids": [job_id.clone()],
+        }),
+    };
+    let wait_results = rt
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                booted.tools.execute_all(vec![wait], 0),
+            )
+            .await
+        })
+        .expect("wait timed out");
+    rt.shutdown_timeout(Duration::from_secs(1));
+
+    let content = &wait_results[0].content;
+    assert!(
+        content.contains(&job_id),
+        "wait result should reference the job id; got: {content}",
+    );
+
+    // Consumed: not delivered again via auto-injection.
+    let taken = registry.take_finished_unconsumed();
+    assert!(
+        !taken.iter().any(|j| j.id == job_id),
+        "waited job must be consumed and not auto-injected",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
 // ── 3. Depth guard ──────────────────────────────────────────────────────────
 
 /// A tool that tries to spawn a sub-agent job.
@@ -201,7 +360,7 @@ fn depth_guard_rejects_spawn_at_depth_1() {
     std::fs::write(tools_dir.join("depth_guard.lua"), SPAWN_AT_DEPTH).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     // Verify the tool is registered.
     let defs = booted.tools.definitions();
@@ -261,7 +420,7 @@ fn render_subagent_pane_returns_valid_panepage() {
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
 
     // Create some fake jobs in the registry.
     let registry = bone::ext::jobs::registry();

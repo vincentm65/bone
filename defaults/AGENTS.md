@@ -116,6 +116,7 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.agent.run_stream(prompt, opts?)` | `table` | Same with event callbacks |
 | `ctx.agent.spawn(prompt, opts?)` | `table` | `{ok, id, error}` — non-blocking background job |
 | `ctx.agent.jobs()` | `array` | Snapshot of all jobs (`{id, agent, task, status, result, started_at}`) |
+| `ctx.agent.wait(ids?, opts?)` | `table` | `{ok, jobs, pending, timed_out, cancelled}` — block until jobs finish |
 | **`ctx.config.*`** | | Read-only config access |
 | `ctx.config.dir` | `string` | Same as `ctx.config_dir` |
 | `ctx.config.get(section, key)` | `value\|nil` | Read a value from `config/<section>.yaml` |
@@ -205,9 +206,9 @@ Opts: `{ approval, provider, model, system_prompt, timeout_ms }`. Default timeou
 
 `run_stream` accepts additional callback opts: `on_started`, `on_status`, `on_tool_call`, `on_tool_result`, `on_token_usage`, `on_finished`, `on_failed`. Each callback receives a table with event-specific fields.
 
-#### `ctx.agent.spawn` / `ctx.agent.jobs`
+#### `ctx.agent.spawn` / `ctx.agent.jobs` / `ctx.agent.wait`
 
-Dispatch a non-blocking background job. Results are auto-injected into the conversation when the main agent is idle and the job completes.
+Dispatch a non-blocking background job. Results are delivered in one of two ways: blocking on `ctx.agent.wait` (when the caller needs them now), or auto-injection into the conversation when the main agent goes idle.
 
 ```lua
 local result = ctx.agent.spawn("Research Rust async runtimes", {
@@ -218,7 +219,7 @@ local result = ctx.agent.spawn("Research Rust async runtimes", {
 -- result: { ok = true, id = "job-1", error = nil }
 ```
 
-Opts: `{ agent, approval, provider, model, system_prompt, timeout_ms }`. Sub-agents (`agent_depth > 0`) cannot spawn background jobs — use blocking `ctx.agent.run` instead.
+Opts: `{ agent, approval, provider, model, system_prompt, timeout_ms }`. Sub-agents (`agent_depth > 0`) cannot spawn or wait on background jobs — use blocking `ctx.agent.run` instead.
 
 Query all jobs:
 ```lua
@@ -226,7 +227,18 @@ local jobs = ctx.agent.jobs()
 -- jobs: array of { id, agent, task, status, result, started_at, finished_at, consumed }
 ```
 
-**Auto-injection**: when a background job finishes and the TUI is idle, results are injected as a new turn. The agent wakes up automatically — no polling needed. Results are truncated to 16k chars at injection time.
+Block until jobs finish:
+```lua
+local outcome = ctx.agent.wait({ "job-1", "job-2" }, { timeout_ms = 300000 })
+-- outcome: { ok = true, jobs = {...finished jobs...}, pending = {"job-2"},
+--            timed_out = false, cancelled = false }
+```
+
+`ids` is optional — `ctx.agent.wait(nil)` waits on all currently running jobs. Default timeout 300s, max 900s. Jobs returned by `wait` are marked consumed so they are not auto-injected again. Esc cancels the wait (`cancelled = true`); the jobs themselves keep running and their results auto-inject later. Jobs still running at timeout are listed in `pending` and also auto-inject on completion.
+
+**Auto-injection**: when a background job finishes unconsumed and the TUI is idle, results are injected as a new turn. The agent wakes up automatically — no polling needed. Results are truncated to 16k chars at injection time.
+
+**The `subagent` tool** (auto-created when agents are registered) exposes this to the main agent as three actions: `dispatch` (with optional `wait=true` for dependent work), `wait` (collect pending results), and `status` (non-blocking snapshot). The intended workflow: batch independent tasks into one dispatch; wait when the next step depends on results; otherwise end the turn and let results auto-inject.
 
 #### Usage Snapshot
 

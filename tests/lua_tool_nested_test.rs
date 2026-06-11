@@ -50,7 +50,7 @@ fn nested_lua_tool_call_does_not_deadlock() {
     std::fs::write(tools_dir.join("inner.lua"), INNER_TOOL).unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false);
+    let booted = bone::ext::boot_with_tools(&config_dir, &config_dir, &mut custom, false, bone::ext::BootOptions::default());
     let tools = booted.tools;
 
     // ctx.tools.call uses block_in_place, which requires a multi-thread runtime.

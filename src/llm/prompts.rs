@@ -16,6 +16,33 @@ pub fn system_prompt() -> String {
     )
 }
 
+/// System prompt for sub-agents: a fixed environment/tool scaffold composed
+/// with an optional custom persona. The persona replaces only the identity
+/// line — environment facts and non-interactive rules are always included.
+pub fn subagent_system_prompt(persona: Option<&str>) -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let bone = bone_dir().display().to_string();
+    let persona = persona
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or(
+            "You are a sub-agent of bone, a coding assistant running in the user's terminal. \
+             Complete the delegated task; do nothing beyond it.",
+        );
+    format!(
+        "{persona}\n\n\
+         Rules:\n\
+         - Use tools for all file and system operations.\n\
+         - Be concise. No emoji, no filler, no preamble.\n\
+         - You run non-interactively: never ask questions; make reasonable assumptions and state them.\n\
+         - Your final message is returned verbatim to the agent that dispatched you. Make it a complete, self-contained answer to the task (include file paths and key findings).\n\n\
+         Resolved config directory: {bone}\n\
+         Current working directory: {cwd}\n"
+    )
+}
+
 static SYSTEM_PROMPT: &str = "\
 You are bone, a coding assistant running in the user's terminal.
 

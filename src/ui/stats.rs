@@ -415,13 +415,14 @@ fn hourly_chart_lines(data: &UsageStatsSnapshot, mode: ViewMode) -> (Vec<Line<'s
         }
     }
     let max_hour = by_hour.iter().copied().max().unwrap_or(1).max(1);
-    let mut heat = vec![Line::from(Span::styled(
-        "  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3",
-        dim(),
-    ))];
+    let hour_labels = (0..24)
+        .map(|hour| format!("{hour:02}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut heat = vec![Line::from(Span::styled(format!("  {hour_labels}"), dim()))];
     let mut spans = vec![Span::raw("  ")];
     for v in by_hour {
-        let block = if v > 0 { "█ " } else { "· " };
+        let block = if v > 0 { "█  " } else { "·  " };
         spans.push(Span::styled(block, heat_style(v, max_hour)));
     }
     heat.push(Line::from(spans));
@@ -477,16 +478,15 @@ fn draw_daily_activity(frame: &mut ratatui::Frame, area: Rect, data: &UsageStats
         .saturating_sub(usize::from(inner_height >= 9) + usize::from(inner_height >= 8))
         .min(7);
     let capacity = grid_cols.saturating_mul(7).max(1);
-    let start = data.daily_activity.len().saturating_sub(capacity);
-    let mut activity = &data.daily_activity[start..];
-    let leading = activity
-        .first()
+    let trailing = data
+        .daily_activity
+        .last()
         .and_then(|b| weekday_index(&b.label))
+        .map(|idx| 6usize.saturating_sub(idx))
         .unwrap_or(0);
-    let overflow = (leading + activity.len()).saturating_sub(capacity);
-    if overflow > 0 {
-        activity = &activity[overflow..];
-    }
+    let visible_days = capacity.saturating_sub(trailing).max(1);
+    let start = data.daily_activity.len().saturating_sub(visible_days);
+    let activity = &data.daily_activity[start..];
 
     let max_tokens = activity.iter().map(bucket_tokens).max().unwrap_or(1).max(1);
     let total_tokens: i64 = activity.iter().map(bucket_tokens).sum();
