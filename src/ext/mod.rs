@@ -7,6 +7,7 @@
 pub mod color;
 pub mod ctx;
 mod engine;
+pub mod jobs;
 mod loader;
 pub mod lua_tool;
 pub mod ops_commands;

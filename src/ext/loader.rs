@@ -79,7 +79,7 @@ pub fn boot(config_dir: &Path, cwd: &Path) -> BootResult {
 
     let manager = ExtensionManager::from_arc(
         lua_arc,
-        true,  // engine_ok
+        true, // engine_ok
         loaded,
         commands,
         config_snapshot,

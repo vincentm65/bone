@@ -443,6 +443,11 @@ impl App {
                         self.mark_cancelled(assistant_idx);
                         break;
                     }
+                    // Refresh subagent pane if version changed.
+                    if crate::ext::jobs::registry().version() != self.subagent_seen_version {
+                        self.refresh_subagent_pane();
+                        self.subagent_seen_version = crate::ext::jobs::registry().version();
+                    }
                     self.renderer.tick_spinner(term, &PaneDraw {
                         input: &self.input,
                         status_info: &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
@@ -626,6 +631,7 @@ impl App {
                     },
                     display,
                 ));
+                self.shown_tool_rows.insert(call.id.clone());
             }
         }
         self.renderer

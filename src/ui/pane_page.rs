@@ -61,8 +61,7 @@ impl PanePage {
                                             let mut style = Style::default();
                                             if let Some(fg) =
                                                 span_obj.get("fg").and_then(|v| v.as_str())
-                                                && let Some(c) =
-                                                    crate::ext::color::parse_color(fg)
+                                                && let Some(c) = crate::ext::color::parse_color(fg)
                                             {
                                                 style = style.fg(c);
                                             }

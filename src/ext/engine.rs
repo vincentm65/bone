@@ -55,6 +55,7 @@ pub(crate) fn create_engine(version: &str, cwd: &Path, config_dir: &Path) -> Res
     // bone.register_tool + bone._tools array
     let bone = &globals.get::<Table>("bone").map_err(|e| e.to_string())?;
     super::ops_tools::setup_register_tool(&lua, bone)?;
+    super::ops_tools::setup_register_subagent(&lua, bone)?;
     super::ops_commands::setup_register_command(&lua, bone)?;
     super::ops_events::setup_on(&lua, bone)?;
     super::ops_plugins::setup_plugin(&lua, bone)?;
@@ -121,7 +122,10 @@ fn sandbox_globals(lua: &Lua, globals: &Table) -> Result<(), String> {
         sandbox_table(
             lua,
             &io,
-            &["open", "popen", "tmpfile", "input", "lines", "output", "read", "write", "flush", "close"],
+            &[
+                "open", "popen", "tmpfile", "input", "lines", "output", "read", "write", "flush",
+                "close",
+            ],
         )?;
     }
 

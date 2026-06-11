@@ -77,6 +77,8 @@ pub struct App {
     lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
     /// Call IDs that already have a tool row in chat (to avoid duplicates).
     shown_tool_rows: std::collections::HashSet<String>,
+    /// Last-seen subagent job-registry version (forces first-tick render).
+    subagent_seen_version: u64,
 }
 
 impl App {
@@ -148,6 +150,7 @@ impl App {
             extensions,
             lua_keymap,
             shown_tool_rows: std::collections::HashSet::new(),
+            subagent_seen_version: u64::MAX,
         })
     }
     /// Dispatch a `session_end` event to Lua handlers.
@@ -320,6 +323,9 @@ impl App {
             {
                 self.force_redraw(&mut terminal)?;
             }
+
+            // Tick subagent jobs: refresh pane + auto-inject finished results.
+            self.tick_subagents(&mut terminal).await?;
         }
 
         // Finalize any in-progress streaming message before clearing the
@@ -489,6 +495,108 @@ impl App {
                 self.redraw(term)
             }
         }
+    }
+
+    /// Tick subagent job status: refresh pane if version changed, auto-inject
+    /// finished results when the TUI is idle.
+    async fn tick_subagents(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        // 1. Pane refresh: check version, update pane if changed.
+        let current_version = crate::ext::jobs::registry().version();
+        if current_version != self.subagent_seen_version {
+            self.refresh_subagent_pane();
+            self.subagent_seen_version = current_version;
+            self.redraw(term)?;
+        }
+
+        // 2. Auto-injection: only when idle.
+        if self.active_prompt.is_none()
+            && !self.streaming
+            && self.queue.is_empty()
+            && let Some((text, display)) = Self::format_subagent_results(
+                &crate::ext::jobs::registry().take_finished_unconsumed(),
+            )
+        {
+            let draft = std::mem::take(&mut self.input.buffer);
+            let draft_cursor = self.input.cursor_pos;
+            self.submit_user_turn(text, Some(display), term).await?;
+            if !draft.is_empty() {
+                self.input.buffer = draft;
+                self.input.cursor_pos = draft_cursor.min(self.input.buffer.chars().count());
+                self.redraw(term)?;
+            }
+            // Drain any queued messages left after injection.
+            while let Some(queued) = self.queue.pop_front() {
+                self.input.buffer = queued;
+                self.input.cursor_pos = self.input.buffer.chars().count();
+                self.send_message(term).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Refresh the subagent live-pane from the job registry.
+    fn refresh_subagent_pane(&mut self) {
+        let snap = crate::ext::jobs::registry().snapshot();
+        if let Some(pane_val) = self.extensions.render_subagent_pane(&snap) {
+            match PanePage::from_json(&pane_val) {
+                Ok(page) => {
+                    if page.content.is_empty() {
+                        self.active_page =
+                            PanePage::remove(&mut self.pages, &page.source, self.active_page);
+                    } else {
+                        let (_, new_active) =
+                            PanePage::upsert(&mut self.pages, self.active_page, page);
+                        self.active_page = new_active;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("bone-lua warn: subagent pane parse error: {e}");
+                }
+            }
+        }
+    }
+
+    /// Format subagent results for auto-injection.
+    /// Returns `(turn_text, display_text)` or `None` when no finished jobs.
+    fn format_subagent_results(jobs: &[crate::ext::jobs::Job]) -> Option<(String, String)> {
+        if jobs.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let status_sym = match job.status {
+                crate::ext::jobs::JobStatus::Done => "✓",
+                crate::ext::jobs::JobStatus::Error => "✗",
+                crate::ext::jobs::JobStatus::Running => "◐",
+            };
+            let truncated = crate::ext::jobs::truncate_for_injection(
+                job.result.as_deref().unwrap_or(""),
+                crate::ext::jobs::MAX_INJECT_CHARS,
+            );
+            lines.push(format!(
+                "## {} ({}) — {}\n{}",
+                job.agent, job.id, status_sym, truncated
+            ));
+        }
+        let turn_text = format!(
+            "[automated message] Background sub-agent results are ready. Review and continue.\n\n{}",
+            lines.join("\n\n")
+        );
+        let display: String = jobs
+            .iter()
+            .map(|j| {
+                let sym = match j.status {
+                    crate::ext::jobs::JobStatus::Done => "✓",
+                    crate::ext::jobs::JobStatus::Error => "✗",
+                    crate::ext::jobs::JobStatus::Running => "◐",
+                };
+                format!("{} {}", j.agent, sym)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let display_text = format!("[subagent results: {}]", display);
+        Some((turn_text, display_text))
     }
 }
 

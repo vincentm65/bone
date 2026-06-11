@@ -44,6 +44,9 @@ bone.log.error("message")
 -- Tool registration
 bone.register_tool({ ... })
 
+-- Sub-agent registration
+bone.register_subagent({ name = "...", description = "...", system_prompt = "...", provider = "...", model = "...", approval = "..." })
+
 -- Command registration
 bone.register_command("name", { description = "...", handler = function(args, ctx) ... end })
 bone.register_command("name", function(args, ctx) ... end)  -- short form
@@ -111,6 +114,8 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | **`ctx.agent.*`** | | Spawn subagents |
 | `ctx.agent.run(prompt, opts?)` | `table` | `{ok, content, error}` |
 | `ctx.agent.run_stream(prompt, opts?)` | `table` | Same with event callbacks |
+| `ctx.agent.spawn(prompt, opts?)` | `table` | `{ok, id, error}` — non-blocking background job |
+| `ctx.agent.jobs()` | `array` | Snapshot of all jobs (`{id, agent, task, status, result, started_at}`) |
 | **`ctx.config.*`** | | Read-only config access |
 | `ctx.config.dir` | `string` | Same as `ctx.config_dir` |
 | `ctx.config.get(section, key)` | `value\|nil` | Read a value from `config/<section>.yaml` |
@@ -166,6 +171,23 @@ end
 ```
 Opts: `{ approval = "safe" | "read_only" | "danger" }`. Max nesting depth: 4 levels of tool calls from Lua.
 
+#### `bone.register_subagent`
+
+Declare a named sub-agent in `init.lua`. The `subagent` tool (auto-created when agents are registered) uses these definitions to dispatch tasks.
+
+```lua
+bone.register_subagent({
+    name = "researcher",
+    description = "Searches the web and summarizes findings",
+    system_prompt = "You are a researcher.",
+    provider = "openai",
+    model = "gpt-4o",
+    approval = "safe",
+})
+```
+
+Fields: `name` (required, unique), `description` (required), `system_prompt`, `provider`, `model`, `approval`. Duplicates are skipped with a warning.
+
 #### `ctx.agent.run` / `ctx.agent.run_stream`
 
 Spawn a subagent:
@@ -182,6 +204,29 @@ end
 Opts: `{ approval, provider, model, system_prompt, timeout_ms }`. Default timeout: 300s, max 900s. Max nesting depth: 3 levels.
 
 `run_stream` accepts additional callback opts: `on_started`, `on_status`, `on_tool_call`, `on_tool_result`, `on_token_usage`, `on_finished`, `on_failed`. Each callback receives a table with event-specific fields.
+
+#### `ctx.agent.spawn` / `ctx.agent.jobs`
+
+Dispatch a non-blocking background job. Results are auto-injected into the conversation when the main agent is idle and the job completes.
+
+```lua
+local result = ctx.agent.spawn("Research Rust async runtimes", {
+    agent = "researcher",
+    system_prompt = "You are a researcher.",
+    timeout_ms = 300000,
+})
+-- result: { ok = true, id = "job-1", error = nil }
+```
+
+Opts: `{ agent, approval, provider, model, system_prompt, timeout_ms }`. Sub-agents (`agent_depth > 0`) cannot spawn background jobs — use blocking `ctx.agent.run` instead.
+
+Query all jobs:
+```lua
+local jobs = ctx.agent.jobs()
+-- jobs: array of { id, agent, task, status, result, started_at, finished_at, consumed }
+```
+
+**Auto-injection**: when a background job finishes and the TUI is idle, results are injected as a new turn. The agent wakes up automatically — no polling needed. Results are truncated to 16k chars at injection time.
 
 #### Usage Snapshot
 

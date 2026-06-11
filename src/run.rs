@@ -108,6 +108,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             events: request.events,
             event_sender: None,
             agent_depth: 0,
+            on_token_usage: None,
         })
         .await;
     }
@@ -123,6 +124,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         events: request.events,
         event_sender: None,
         agent_depth: 0,
+        on_token_usage: None,
     })
     .await
 }

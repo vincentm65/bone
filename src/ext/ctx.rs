@@ -858,6 +858,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let agent_depth = cfg.agent_depth;
     let cancelled_flag = cfg.cancelled.clone();
 
+    // Extra clones for spawn_fn (run_fn and run_stream_fn each move their own copies).
+    let inherited_approval_j = inherited_approval;
+    let inherited_provider_j = inherited_provider.clone();
+    let inherited_model_j = inherited_model.clone();
+
     // --- ctx.agent.run(prompt, opts?) ---
     let run_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         if agent_depth >= MAX_AGENT_DEPTH {
@@ -889,6 +894,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             events: false,
             event_sender: None,
             agent_depth: agent_depth + 1,
+            on_token_usage: None,
         };
 
         let cancelled = cancelled_flag.clone();
@@ -951,6 +957,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 events: false,
                 event_sender: Some(tx),
                 agent_depth: agent_depth_s + 1,
+                on_token_usage: None,
             };
 
             let cancelled = cancelled_flag_s.clone();
@@ -1029,6 +1036,99 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         },
     )?;
     agent_table.set("run_stream", run_stream_fn)?;
+
+    // --- ctx.agent.spawn(prompt, opts?) ---
+    // Dispatch a non-blocking background agent run. Results are queryable
+    // via ctx.agent.jobs() or taken via take_finished_unconsumed() by the TUI.
+    let spawn_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
+        // Sub-agents (depth > 0) cannot spawn background jobs — their results
+        // would inject into the wrong conversation. They can still use blocking
+        // ctx.agent.run.
+        if agent_depth > 0 {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", "sub-agents cannot spawn background jobs")?;
+            return Ok(Value::Table(result));
+        }
+
+        let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(
+            &opts,
+            inherited_approval_j,
+            &inherited_provider_j,
+            &inherited_model_j,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("ok", false)?;
+                result.set("error", e)?;
+                return Ok(Value::Table(result));
+            }
+        };
+
+        // Read agent name from opts (registered sub-agent name, default "").
+        let agent_name: String = opts
+            .as_ref()
+            .and_then(|t| t.get::<Option<String>>("agent").ok().flatten())
+            .unwrap_or_default();
+
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|e| mlua::Error::external(format!("spawn requires a tokio runtime: {e}")))?;
+
+        let id = crate::ext::jobs::registry().create(agent_name.clone(), prompt.clone());
+        let id_for_task = id.clone();
+        let id_for_spawn = id.clone();
+
+        // Token tracking: shared counters updated by run_agent callback.
+        let token_sent = Arc::new(AtomicU64::new(0));
+        let token_received = Arc::new(AtomicU64::new(0));
+        let token_sent_clone = token_sent.clone();
+        let token_received_clone = token_received.clone();
+
+        let request = crate::agent::AgentRequest {
+            prompt,
+            approval_mode: approval,
+            provider,
+            model,
+            system_prompt,
+            events: false,
+            event_sender: None,
+            agent_depth: agent_depth + 1,
+            on_token_usage: Some(Arc::new(move |sent: u64, received: u64| {
+                token_sent_clone.store(sent, Ordering::Relaxed);
+                token_received_clone.store(received, Ordering::Relaxed);
+                crate::ext::jobs::registry().update_tokens(&id_for_task, sent, received);
+            })),
+        };
+
+        let timeout_duration = std::time::Duration::from_millis(timeout_ms);
+        handle.spawn(async move {
+            let outcome = tokio::time::timeout(timeout_duration, async {
+                crate::agent::run_agent(request).await
+            })
+            .await
+            .map_err(|_| format!("job {id_for_spawn} timed out after {timeout_ms}ms"))
+            .and_then(|r| r.map(|resp| resp.content).map_err(|e| e.to_string()));
+            let ts = token_sent.load(Ordering::Relaxed);
+            let tr = token_received.load(Ordering::Relaxed);
+            crate::ext::jobs::registry().complete_with_tokens(&id_for_spawn, outcome, ts, tr);
+        });
+
+        let result = lua.create_table()?;
+        result.set("ok", true)?;
+        result.set("id", id.as_str())?;
+        result.set("error", Value::Nil)?;
+        Ok(Value::Table(result))
+    })?;
+    agent_table.set("spawn", spawn_fn)?;
+
+    // --- ctx.agent.jobs() ---
+    // Return a JSON array of all jobs (snapshot).
+    let jobs_fn = lua.create_function(|lua, _: ()| {
+        let snap = crate::ext::jobs::registry().snapshot();
+        lua.to_value(&snap)
+    })?;
+    agent_table.set("jobs", jobs_fn)?;
 
     ctx.set("agent", agent_table)?;
     Ok(())

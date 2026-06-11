@@ -148,6 +148,30 @@ impl ExtensionManager {
         });
         dispatch_event_inner(&lua, "tool_result", payload, false);
     }
+
+    /// Render the subagent live-pane by calling `bone._subagents_render(jobs)`.
+    /// Returns `Some(serde_json::Value)` when the Lua hook exists and returns
+    /// a table, `None` otherwise.
+    pub fn render_subagent_pane(&self, jobs: &serde_json::Value) -> Option<serde_json::Value> {
+        if !self.loaded {
+            return None;
+        }
+        let lua = guard_with_bone(&self.lua)?;
+        let bone = lua.globals().get::<mlua::Table>("bone").ok()?;
+        let hook: mlua::Value = bone.get("_subagents_render").ok()?;
+        let fn_ref = match hook {
+            mlua::Value::Function(f) => f,
+            _ => return None,
+        };
+        let jobs_lua = lua.to_value(jobs).ok()?;
+        match fn_ref.call::<mlua::Value>(jobs_lua) {
+            Ok(mlua::Value::Table(t)) => {
+                // Convert Lua table back to serde_json::Value.
+                lua.from_value(mlua::Value::Table(t)).ok()
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Result of booting the Lua extension system.

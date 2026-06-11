@@ -74,7 +74,11 @@ fn sandbox_blocks_dangerous_apis() {
     };
 
     let results = rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(10), booted.tools.execute_all(vec![call], 0)).await
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            booted.tools.execute_all(vec![call], 0),
+        )
+        .await
     });
     rt.shutdown_timeout(Duration::from_secs(1));
 
@@ -139,7 +143,12 @@ fn default_tools_boot_cleanly() {
     }
 
     // Commands should also be present.
-    let cmd_names: Vec<&str> = booted.manager.commands().iter().map(|c| c.name.as_str()).collect();
+    let cmd_names: Vec<&str> = booted
+        .manager
+        .commands()
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
     assert!(
         cmd_names.contains(&"usage"),
         "default command 'usage' not found; commands: {cmd_names:?}",
@@ -196,7 +205,11 @@ fn tools_call_depth_limit_enforced() {
     };
 
     let results = rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(30), booted.tools.execute_all(vec![call], 0)).await
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            booted.tools.execute_all(vec![call], 0),
+        )
+        .await
     });
     rt.shutdown_timeout(Duration::from_secs(1));
 
@@ -367,7 +380,12 @@ fn event_ctx_has_ui_notify_but_not_tools_agent_shell() {
     );
 
     // Event ctx should NOT have tools, agent, shell, or fs.
-    for forbidden in &["ctx.tools=yes", "ctx.agent=yes", "ctx.shell=yes", "ctx.fs=yes"] {
+    for forbidden in &[
+        "ctx.tools=yes",
+        "ctx.agent=yes",
+        "ctx.shell=yes",
+        "ctx.fs=yes",
+    ] {
         assert!(
             !result.contains(forbidden),
             "event ctx should not have {forbidden}, got: {result}",
@@ -474,7 +492,11 @@ bone.register_command("reload_test_cmd", {
 
     let results = results.expect("reload tool timed out");
     assert_eq!(results.len(), 1);
-    assert!(!results[0].is_error, "reload tool errored: {}", results[0].content);
+    assert!(
+        !results[0].is_error,
+        "reload tool errored: {}",
+        results[0].content
+    );
     assert_eq!(results[0].content, "reloaded");
 
     std::fs::remove_dir_all(&config_dir).ok();

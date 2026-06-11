@@ -9,6 +9,7 @@ use crate::tools::ApprovalMode;
 use crate::tools::registry::ToolHandler;
 use futures_util::StreamExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Thin wrapper around the optional session DB. It stores only Send data so
 /// headless agent futures can run concurrently on the async runtime.
@@ -113,6 +114,7 @@ pub struct AgentRequest {
     pub events: bool,
     pub event_sender: Option<tokio::sync::mpsc::UnboundedSender<AgentRunEvent>>,
     pub agent_depth: usize,
+    pub on_token_usage: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 }
 
 pub struct AgentResponse {
@@ -314,7 +316,8 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         .ok_or_else(|| "no provider configured".to_string())?;
 
     // Persist last_provider before any model override (don't want to save the override).
-    if request.provider.is_some() {
+    // Only persist when running as top-level agent, not as a subagent.
+    if request.provider.is_some() && request.agent_depth == 0 {
         providers_config.last_provider = provider_id.clone();
         save_providers(&providers_config);
     }
@@ -475,6 +478,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                         cost,
                         false,
                     );
+                    if let Some(cb) = &request.on_token_usage {
+                        cb(token_stats.sent, token_stats.received);
+                    }
                     emit(&AgentEvent::TokenUsage {
                         sent: token_stats.sent,
                         received: token_stats.received,
@@ -509,6 +515,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 None,
                 true,
             );
+            if let Some(cb) = &request.on_token_usage {
+                cb(token_stats.sent, token_stats.received);
+            }
             emit(&AgentEvent::TokenUsage {
                 sent: token_stats.sent,
                 received: token_stats.received,
@@ -822,5 +831,6 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
         events,
         event_sender: None,
         agent_depth: 0,
+        on_token_usage: None,
     })
 }
