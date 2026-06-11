@@ -29,6 +29,13 @@ pub enum EventDispatchResult {
     Blocked { reason: String },
 }
 
+/// Generic action returned by a Lua command or hook.
+#[derive(Debug, Clone, Default)]
+pub struct LuaReturnAction {
+    /// When set, replace the active conversation transcript with these messages.
+    pub conversation_replace: Option<Vec<crate::llm::ChatMessage>>,
+}
+
 /// Owning manager for the Lua VM and all registered extension data.
 pub struct ExtensionManager {
     /// The Lua state, shared so LuaTool can also hold a reference.
@@ -171,6 +178,76 @@ impl ExtensionManager {
         });
         dispatch_event_inner(&lua, "tool_result", payload, false);
     }
+
+    /// Dispatch the `before_turn` event with a full ctx (including conversation
+    /// history). Collects and returns actions from all handlers in registration
+    /// order.
+    pub(crate) fn dispatch_before_turn(
+        &self,
+        ctx_cfg: &crate::ext::ctx::CtxConfig,
+    ) -> Vec<LuaReturnAction> {
+        if !self.loaded {
+            return Vec::new();
+        }
+        let lua = match guard_with_bone(&self.lua) {
+            Some(g) => g,
+            None => return Vec::new(),
+        };
+
+        let bone = match lua.globals().get::<Option<mlua::Table>>("bone") {
+            Ok(Some(t)) => t,
+            _ => return Vec::new(),
+        };
+
+        let handlers = match bone.get::<Option<mlua::Table>>("_handlers") {
+            Ok(Some(t)) => t,
+            _ => return Vec::new(),
+        };
+
+        let event_handlers = match handlers.get::<Option<mlua::Table>>("before_turn") {
+            Ok(Some(t)) => t,
+            _ => return Vec::new(),
+        };
+
+        let ctx_table = match crate::ext::ctx::create_ctx_table(&lua, ctx_cfg) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("bone-lua warn: before_turn ctx creation failed: {e}");
+                return Vec::new();
+            }
+        };
+
+        // Event payload: minimal (the handler has ctx for everything).
+        let event_table = match lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("bone-lua warn: before_turn event table failed: {e}");
+                return Vec::new();
+            }
+        };
+
+        let mut actions = Vec::new();
+        for handler in event_handlers.sequence_values::<mlua::Function>() {
+            let handler = match handler {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+
+            match handler.call::<mlua::Value>((event_table.clone(), ctx_table.clone())) {
+                Ok(mlua::Value::Table(ret)) => {
+                    if let Some(action) = parse_lua_return_action(&ret) {
+                        actions.push(action);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("bone-lua warn: before_turn handler error: {e}");
+                }
+            }
+        }
+
+        actions
+    }
 }
 
 /// Result of booting the Lua extension system.
@@ -189,6 +266,73 @@ pub struct BootedTools {
     pub tools: crate::tools::registry::ToolHandler,
 }
 
+/// Parse a `LuaReturnAction` from a Lua table returned by a handler.
+/// Returns `None` when no recognized action key is present.
+pub(crate) fn parse_lua_return_action(
+    table: &mlua::Table,
+) -> Option<LuaReturnAction> {
+    let action_name: Option<String> = table
+        .get::<Option<String>>("action")
+        .ok()
+        .flatten();
+
+    match action_name.as_deref() {
+        Some("conversation.replace") => {
+            let messages_table = match table.get::<Option<mlua::Table>>("messages") {
+                Ok(Some(t)) => t,
+                _ => {
+                    eprintln!("bone-lua warn: conversation.replace missing messages; ignoring");
+                    return None;
+                }
+            };
+
+            let mut messages = Vec::new();
+            for entry in messages_table.sequence_values::<mlua::Table>() {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let role_str: String = match entry.get::<Option<String>>("role") {
+                    Ok(Some(s)) => s,
+                    _ => continue,
+                };
+                let content: String = entry
+                    .get::<Option<String>>("content")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let role = match role_str.as_str() {
+                    "user" => crate::llm::ChatRole::User,
+                    "assistant" => crate::llm::ChatRole::Assistant,
+                    "tool" => crate::llm::ChatRole::Tool,
+                    _ => continue,
+                };
+                let name: Option<String> = entry.get::<Option<String>>("name").ok().flatten();
+                let tool_call_id: Option<String> =
+                    entry.get::<Option<String>>("tool_call_id").ok().flatten();
+                let mut msg = crate::llm::ChatMessage::new(role, content.clone());
+                msg.name = name;
+                msg.tool_call_id = tool_call_id;
+                msg.content = content;
+                messages.push(msg);
+            }
+
+            if messages.is_empty() {
+                eprintln!("bone-lua warn: conversation.replace has no valid messages; ignoring");
+                return None;
+            }
+
+            Some(LuaReturnAction {
+                conversation_replace: Some(messages),
+            })
+        }
+        Some(other) => {
+            eprintln!("bone-lua warn: unknown action '{other}'; ignoring");
+            None
+        }
+        None => None,
+    }
+}
 // ── Private helpers ─────────────────────────────────────────────────────────
 
 /// Lock the Lua state and check that the `bone` global table exists.

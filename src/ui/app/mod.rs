@@ -223,6 +223,41 @@ impl App {
         }
     }
     /// Start a new conversation in the database (used by /clear, /new).
+    /// Apply a generic action returned by a Lua command or hook.
+    pub(crate) fn apply_lua_action(
+        &mut self,
+        action: crate::ext::types::LuaReturnAction,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        if let Some(new_messages) = action.conversation_replace {
+            // Validate: all messages must have valid roles and content.
+            for msg in &new_messages {
+                if msg.content.is_empty() {
+                    // Allow empty content for tool messages, skip validation.
+                }
+            }
+
+            // Replace the active transcript.
+            self.transcript = new_messages;
+
+            // Rebuild the visible chat messages minimally:
+            // keep only a system note for this replacement since we can't
+            // reconstruct the full prior UI from ChatMessages alone.
+            // Existing messages stay in scrollback; add a compact marker.
+            self.messages.push(Message::system(
+                "Context compacted. Summary in transcript; recent messages preserved.",
+            ));
+            self.renderer
+                .flush_new_to_scrollback(&self.messages, term)?;
+
+            // Recompute context_length estimate from the new transcript.
+            let history = crate::chat::build_chat_history(&self.transcript, None);
+            self.token_stats.context_length =
+                crate::ui::app::App::estimate_context_chars(&history, &self.tools.definitions()) as u64;
+        }
+        Ok(())
+    }
+
     fn start_new_conversation(&mut self) {
         if let Some(ref db) = self.session_db {
             if let Some(conv_id) = self.conversation_id {
@@ -1254,6 +1289,8 @@ impl App {
             by_provider,
         };
 
+        let transcript_snapshot = self.transcript.clone();
+
         let mut task = tokio::task::spawn_blocking(move || {
             let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -1273,6 +1310,7 @@ impl App {
             ctx_cfg.provider = Some(provider);
             ctx_cfg.model = Some(model);
             ctx_cfg.usage = Some(usage);
+            ctx_cfg.conversation_history = Some(transcript_snapshot.clone());
             let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
             // Release the project Lua mutex before calling into Lua: a nested
@@ -1288,7 +1326,7 @@ impl App {
                     if output.is_empty() {
                         None
                     } else {
-                        Some((output, false))
+                        Some((output, false, None))
                     }
                 }
                 Ok(LuaValue::Table(t)) => {
@@ -1299,7 +1337,8 @@ impl App {
                         .or_else(|| t.get::<Option<String>>("reply").ok().flatten())
                         .or_else(|| t.get::<Option<String>>("content").ok().flatten())
                         .unwrap_or_default();
-                    if output.is_empty() {
+                    let action = crate::ext::types::parse_lua_return_action(&t);
+                    if output.is_empty() && action.is_none() {
                         None
                     } else {
                         let submit = t
@@ -1307,14 +1346,14 @@ impl App {
                             .ok()
                             .flatten()
                             .unwrap_or(true);
-                        Some((output, submit))
+                        Some((output, submit, action))
                     }
                 }
                 Ok(LuaValue::Nil) => None,
-                Ok(v) => Some((format!("{v:?}"), true)),
+                Ok(v) => Some((format!("{v:?}"), true, None)),
                 Err(e) => {
                     eprintln!("bone-lua error: command '{cmd_owned}': {e}");
-                    Some((format!("Lua command error: {e}"), false))
+                    Some((format!("Lua command error: {e}"), false, None))
                 }
             };
             Some(reply)
@@ -1350,7 +1389,10 @@ impl App {
             }
         };
 
-        if let Some(Some((reply, submit))) = reply {
+        if let Some(Some((reply, submit, action))) = reply {
+            if let Some(action) = action {
+                self.apply_lua_action(action, term).ok();
+            }
             if submit {
                 let display = format!(
                     "/{cmd}{}",

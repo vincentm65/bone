@@ -127,6 +127,9 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.session.current()` | `table\|nil` | `{id, provider, model}` for current session |
 | `ctx.session.list(opts?)` | `array` | Recent conversations (default limit 20, max 100) |
 | `ctx.session.messages(id, opts?)` | `array` | Messages for a conversation (default limit 200, max 1000) |
+| **`ctx.conversation.*`** | | Active conversation transcript (not SQLite) |
+| `ctx.conversation.current()` | `table\|nil` | `{id, provider, model}` for the active conversation |
+| `ctx.conversation.history()` | `array` | In-memory transcript: `{role, content, name?, tool_call_id?}` |
 
 #### Context Availability
 
@@ -149,9 +152,29 @@ Not all `ctx` fields are available in every handler type:
 | `agent` | yes | yes | — |
 | `config` | yes | yes | `config.dir` only |
 | `session` | yes | yes | — |
+| `conversation` | yes | yes | — |
 | `call_id` | yes | — | — |
 
 Event handlers receive a minimal `ctx` with only `config_dir`, `ui.notify`, and `config.dir`. They cannot execute shell commands, read files, or call tools. This is intentional — event handlers run inline during the event loop and must not block.
+
+**Exception:** `before_turn` handlers receive a **full** `ctx` — the same as tool `execute` and command `handler`. See [before_turn](#before_turn) below.
+
+#### `ctx.conversation`
+
+Provides a snapshot of the active in-memory conversation transcript (not the SQLite history). Available in tool `execute` and command `handler` contexts.
+
+```lua
+-- Get the active conversation metadata
+local conv = ctx.conversation.current()
+-- conv.id, conv.provider, conv.model  (all nil when no active conversation)
+
+-- Get the current transcript messages
+local messages = ctx.conversation.history()
+-- array of { role = "user"|"assistant"|"tool", content = string, name?, tool_call_id? }
+-- The system prompt is NOT included.
+```
+
+The transcript returned by `history()` is the live in-memory history used for the next provider request. It can be modified via return actions (see [Return Actions](#command-return-semantics)).
 
 #### Shell Options
 
@@ -384,6 +407,28 @@ bone.register_tool({
 
 ## Pre-Seeded Commands
 
+### /compact
+
+Manual context compaction via summarization. Summarizes older conversation messages and replaces the transcript with a compact version, keeping recent messages verbatim.
+
+```
+/compact
+```
+
+- Requires `ctx.conversation.history()` — shows an error if unavailable.
+- Skips when there are fewer user+assistant messages than the keep threshold.
+- Uses `ctx.agent.run()` to generate a summary of older messages.
+- Returns a `conversation.replace` action (see [Return Actions](#command-return-semantics)).
+- The default file `lua/commands/compact.lua` also registers a `before_turn` handler for automatic compaction.
+
+Configuration (set in `init.lua` via `bone.config`):
+- `auto_compact_tokens = 8000` — token threshold for auto-compact.
+- `auto_compact_keep_messages = 12` — messages to preserve after compaction.
+
+**Disable:** remove `lua/commands/compact.lua` from the config directory. Both manual `/compact` and auto-compaction stop.
+
+**Implementation:** entirely in Lua. Rust provides only the generic APIs (`ctx.conversation`, `before_turn`, `conversation.replace` action).
+
 ### /memory
 Incremental memory builder. Processes all conversations since last run and updates `memory.md`. If `memory.md` exists in the config directory, its contents are loaded into every conversation's system prompt.
 
@@ -506,7 +551,34 @@ end)
 | `nil` | Command handled, no prompt submitted |
 | string | Injected as user prompt/output |
 | table with `display`/`reply`/`content` and `submit = false` | Show message in UI without submitting a prompt |
+| table with `action` field | Apply a state-mutating action (see below) |
 | error | Show error in UI |
+
+#### Return Actions
+
+Commands and `before_turn` hooks can return a table with an `action` field to mutate conversation state:
+
+```lua
+return {
+    action = "conversation.replace",
+    messages = {
+        { role = "user", content = "Summary of earlier context" },
+        { role = "assistant", content = "I understand the summary." },
+    },
+    display = "Context compacted.",  -- optional UI message
+    submit = false,                    -- optional, defaults to true
+}
+```
+
+**`conversation.replace`** — Replaces the active in-memory transcript with the given `messages` array. Each message must have `role` ("user", "assistant", or "tool") and `content`. Optional fields: `name`, `tool_call_id`. Rust validates all messages before applying; invalid messages produce a visible error and leave the transcript unchanged. The SQLite session history is never altered.
+
+When `conversation.replace` is applied:
+- The transcript is replaced with the validated messages.
+- The context length estimate is recomputed.
+- Cumulative token/cost/request counts are unchanged.
+- A system message is added to the scrollback noting the replacement.
+
+Multiple return actions from `before_turn` handlers apply in registration order.
 
 Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/stats`) cannot be overridden.
 
@@ -532,16 +604,45 @@ end)
 
 ### Events
 
-| Event | When | Blockable |
-|---|---|---|
-| `session_start` | New session starts | no |
-| `session_end` | Session ends | no |
-| `message` | LLM/user message observed | no |
-| `tool_call` | Before tool execution | **yes** |
-| `tool_result` | After tool execution | no |
-| `mode_change` | Approval mode changes | no |
+| Event | When | Blockable | Full ctx |
+|---|---|---|---|
+| `session_start` | New session starts | no | no |
+| `session_end` | Session ends | no | no |
+| `message` | LLM/user message observed | no | no |
+| `tool_call` | Before tool execution | **yes** | no |
+| `tool_result` | After tool execution | no | no |
+| `mode_change` | Approval mode changes | no | no |
+| `before_turn` | After user message, before provider request | no | **yes** |
 
 Handlers run in registration order. First `block` stops the chain. Handler runtime errors do not block (fail-open).
+
+#### `before_turn`
+
+The `before_turn` event fires after the user message is appended to the transcript and before the provider request is built. It receives a **full ctx** (same as tool `execute` and command `handler`) including `usage`, `state`, `agent`, `tools`, `config`, `session`, and `conversation`.
+
+```lua
+bone.on("before_turn", function(event, ctx)
+    local snapshot = ctx.usage.snapshot()
+    if snapshot and snapshot.context_length >= 8000 then
+        -- Summarize older messages and replace the transcript.
+        local history = ctx.conversation.history()
+        -- ... build summary via ctx.agent.run() ...
+        return {
+            action = "conversation.replace",
+            messages = new_messages,
+        }
+    end
+    -- Return nil to do nothing.
+end)
+```
+
+Key differences from other events:
+- **Full ctx** — Access to `ctx.agent.run()`, `ctx.tools`, `ctx.usage`, `ctx.conversation`, etc.
+- **Return actions** — Can return `action = "conversation.replace"` to mutate the transcript before the provider sees it.
+- **Not blockable** — Unlike `tool_call`, `before_turn` cannot block the turn (only mutate it).
+- **Multiple handlers** — All handlers run; return actions apply in registration order.
+
+This is the mechanism behind automatic context compaction. The default `lua/commands/compact.lua` registers a `before_turn` handler that summarizes older messages when context exceeds a threshold.
 
 ## Config, Theme, and Keymaps
 

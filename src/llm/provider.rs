@@ -18,6 +18,18 @@ pub enum ChatRole {
     Tool,
 }
 
+impl ChatRole {
+    /// Return the role as a lowercase string ("system", "user", "assistant", "tool").
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatRole::System => "system",
+            ChatRole::User => "user",
+            ChatRole::Assistant => "assistant",
+            ChatRole::Tool => "tool",
+        }
+    }
+}
+
 /// Provider-neutral chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {

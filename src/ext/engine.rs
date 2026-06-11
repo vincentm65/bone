@@ -79,9 +79,12 @@ pub(crate) fn create_engine(
 
 /// Load and execute `init.lua`. Returns `Ok(true)` if the file existed and
 /// ran without errors. Returns `Ok(false)` if the file is missing.
+/// If `init.lua` does not exist, a blank one is created automatically.
 pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
     let init_path = config_dir.join("init.lua");
     if !init_path.exists() {
+        std::fs::write(&init_path, "")
+            .map_err(|e| format!("failed to create init.lua: {e}"))?;
         return Ok(false);
     }
 

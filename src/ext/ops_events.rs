@@ -1,7 +1,7 @@
 /// `bone.on(event_name, handler)` — registers an event handler.
 ///
 /// Valid event names: session_start, session_end, message, tool_call,
-/// tool_result, mode_change. Handlers are stored in `bone._handlers[name]`
+/// tool_result, mode_change, before_turn. Handlers are stored in `bone._handlers[name]`
 /// as an ordered array and called in registration order.
 use mlua::{Lua, Table};
 
@@ -12,6 +12,7 @@ const EVENT_NAMES: &[&str] = &[
     "tool_call",
     "tool_result",
     "mode_change",
+    "before_turn",
 ];
 
 /// Create the `bone.on` function and the `bone._handlers` storage table.

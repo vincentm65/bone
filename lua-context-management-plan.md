@@ -114,6 +114,33 @@ Add generic Lua APIs, with no Rust-side compaction naming:
   - No new Rust command named `compact`.
   - No Rust compaction policy or Rust compaction config is introduced.
 
+## Implementation Status
+
+### ✅ Completed
+
+- [x] `ctx.conversation.current()` and `ctx.conversation.history()` — added to `CtxConfig` and `create_ctx_table` in `src/ext/ctx.rs`
+- [x] `ChatRole::as_str()` — added to `src/llm/provider.rs`
+- [x] `"before_turn"` event — added to `EVENT_NAMES` in `src/ext/ops_events.rs`
+- [x] `LuaReturnAction` struct with `conversation_replace` — added to `src/ext/types.rs`
+- [x] `parse_lua_return_action()` — parses `action="conversation.replace"` + `messages` from Lua tables
+- [x] `dispatch_before_turn()` — new method on `ExtensionManager`, creates full ctx, calls handlers, collects actions
+- [x] `apply_lua_action()` — method on `App`, applies `conversation.replace` to transcript + recomputes context_length
+- [x] `submit_user_turn` integration — calls `dispatch_before_turn` after user message persistence, before `build_chat_history`
+- [x] `run_lua_command` updated — now parses action tables from command returns, passes conversation_history in ctx
+- [x] Default `defaults/lua/commands/compact.lua` — created with `/compact` command + `before_turn` auto handler
+- [x] Code compiles clean (`cargo check`)
+
+### ⬜ Remaining
+
+- [ ] Update `AGENTS.md` docs for `ctx.conversation`, command/hook return actions, `before_turn`
+- [ ] Tests: Lua API tests (`ctx.conversation.history()`, etc.)
+- [ ] Tests: Command action tests (`action="conversation.replace"`)
+- [ ] Tests: Hook tests (`before_turn` dispatch)
+- [ ] Tests: Default Lua behavior tests (`/compact`, auto threshold)
+- [ ] Regression: verify `/compact` is not a protected builtin name
+- [ ] Manual TUI test: `/compact` command
+- [ ] Manual TUI test: auto-compaction triggers above threshold
+
 ## Assumptions
 
 - "Rust should have no mention of compaction" means no new compaction-specific Rust behavior or symbols. Existing unrelated uses of words like `compact_number` in stats code are left alone.

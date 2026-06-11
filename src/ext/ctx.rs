@@ -64,6 +64,7 @@ pub(crate) struct CtxConfig {
     pub agent_depth: usize,
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
+    pub conversation_history: Option<Vec<crate::llm::ChatMessage>>,
 }
 
 impl CtxConfig {
@@ -88,6 +89,7 @@ impl CtxConfig {
             agent_depth: 0,
             cancelled: None,
             usage: None,
+            conversation_history: None,
         }
     }
 }
@@ -445,6 +447,56 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         usage_table.set("snapshot", snapshot_fn)?;
     }
     ctx.set("usage", usage_table)?;
+
+    // ctx.conversation — active conversation snapshot.
+    // ctx.conversation.current() → table or nil
+    // ctx.conversation.history() → array of {role, content, name?, tool_call_id?}
+    let conversation_table = lua.create_table()?;
+    if let Some(ref history) = cfg.conversation_history {
+        let session_id = cfg.session_id;
+        let provider = cfg.provider.clone();
+        let model = cfg.model.clone();
+
+        let current_fn = lua.create_function(move |lua, _: ()| match session_id {
+            Some(id) => {
+                let t = lua.create_table()?;
+                t.set("id", id)?;
+                if let Some(ref p) = provider {
+                    t.set("provider", p.as_str())?;
+                }
+                if let Some(ref m) = model {
+                    t.set("model", m.as_str())?;
+                }
+                Ok(Value::Table(t))
+            }
+            None => Ok(Value::Nil),
+        })?;
+        conversation_table.set("current", current_fn)?;
+
+        let history_clone = history.clone();
+        let history_fn = lua.create_function(move |lua, _: ()| {
+            let tbl = lua.create_table()?;
+            for msg in &history_clone {
+                let entry = lua.create_table()?;
+                entry.set("role", msg.role.as_str())?;
+                entry.set("content", msg.content.as_str())?;
+                if let Some(ref name) = msg.name {
+                    entry.set("name", name.as_str())?;
+                }
+                if let Some(ref tci) = msg.tool_call_id {
+                    entry.set("tool_call_id", tci.as_str())?;
+                }
+                tbl.push(entry)?;
+            }
+            Ok(Value::Table(tbl))
+        })?;
+        conversation_table.set("history", history_fn)?;
+    } else {
+        let nil_fn = lua.create_function(|_, _: ()| Ok(Value::Nil))?;
+        conversation_table.set("current", nil_fn.clone())?;
+        conversation_table.set("history", nil_fn)?;
+    }
+    ctx.set("conversation", conversation_table)?;
 
     // ctx.state.get(key) → string or nil
     // ctx.state.set(key, value) → true
