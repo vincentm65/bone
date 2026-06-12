@@ -851,6 +851,13 @@ impl App {
                     // pane stays live while a tool blocks (e.g. subagent wait=true).
                     self.maybe_refresh_subagent_pane();
                     let visible_pages = if self.panes_visible {
+                    // Drain any pane events sent during drain_keys (e.g. a
+                    // multi-question ask_user replacing one question with the
+                    // next). Avoids a one-frame flash of the dead pane.
+                    while let Ok(event) = rx.try_recv() {
+                        Self::track_live_state(&mut active_live_state, &event);
+                        self.apply_tool_live_event(event);
+                    }
                         self.pages.as_slice()
                     } else {
                         &[]
@@ -1148,6 +1155,21 @@ impl App {
                             _ => {}
                         }
                     }
+                    // ── Interactive pane key handling ────────────────────
+                    if *panes_visible {
+                        let active_idx = (*active_page).min(pages.len().saturating_sub(1));
+                        if let Some(page) = pages.get(active_idx) {
+                            if let Some(ref interaction) = page.interaction {
+                                if interaction.is_active() {
+                                    if interaction.handle_key(
+                                        key.code, key.modifiers,
+                                    ) {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     match input.apply_key(key.code, key.modifiers) {
                         InputAction::Cancel => {
                             *cancel = true;
@@ -1178,3 +1200,5 @@ impl App {
         mode_changed
     }
 }
+
+

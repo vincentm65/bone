@@ -765,6 +765,45 @@ impl App {
         modifiers: KeyModifiers,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
+        // ── Interactive pane key interception ─────────────────────────
+        // After handling, if the interaction became inactive (submit/cancel),
+        // remove the pane from self.pages so it doesn't linger.
+        if self.panes_visible {
+            let active_idx = self.active_page.min(self.pages.len().saturating_sub(1));
+            let (handled_key, cleanup_source) = self.pages.get(active_idx).and_then(|page| {
+                let interaction = page.interaction.as_ref()?;
+                if !interaction.is_active() {
+                    return None;
+                }
+                let handled = interaction.handle_key(code, modifiers);
+                if handled {
+                    if !interaction.is_active() {
+                        // Submit/cancel made the interaction inactive.
+                        // For "interact" source (ask_user tool), don't remove —
+                        // the next question will upsert over it, avoiding a
+                        // shrink-then-grow flash.
+                        if page.source == "interact" {
+                            Some((true, None))
+                        } else {
+                            Some((true, Some(page.source.clone())))
+                        }
+                    } else {
+                        // Handled but still active (e.g. arrow keys, text input)
+                        Some((true, None))
+                    }
+                } else {
+                    None
+                }
+            }).unwrap_or((false, None));
+
+            if handled_key {
+                if let Some(source) = cleanup_source {
+                    self.active_page = PanePage::remove(&mut self.pages, &source, self.active_page);
+                }
+                return self.redraw(term);
+            }
+        }
+
         // Handle page keybindings before input processing
         if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
             self.panes_visible = !self.panes_visible;
@@ -941,6 +980,7 @@ impl App {
         self.redraw(term)?;
         Ok(true)
     }
+
 
     /// Request app exit. When sub-agent jobs are still running, the first
     /// request is blocked and returns a warning notice; a repeated request

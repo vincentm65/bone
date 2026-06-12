@@ -13,7 +13,7 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use crate::tools::shell::{ScriptRequest, run_script};
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
-use crate::ui::pane_page::PanePage;
+use crate::ui::pane_page::{InteractionMode, PaneInteraction, PanePage};
 
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -405,6 +405,94 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         let pane_unavailable_fn =
             lua.create_function(|_, _: ()| Ok((false, "pane unavailable")))?;
         ui_table.set("pane", pane_unavailable_fn)?;
+    }
+
+    // ctx.ui.interact(opts) → table result
+    // Creates an interactive pane and blocks until the user responds.
+    // opts: { question, type, options?, default?, allow_custom? }
+    if let Some(sender) = cfg.pane_sender.clone() {
+        // Shared mutex serializes concurrent interact calls (e.g. multiple
+        // ask_user tools dispatched in one batch) so they share the same page
+        // instead of clobbering each other.
+        static INTERACT_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let interact_fn = lua.create_function(move |lua, opts: mlua::Table| {
+            let question: String = opts.get("question").map_err(|e| mlua::Error::external(format!("interact missing question: {e}")))?;
+            let type_str: String = opts.get::<Option<String>>("type")?.unwrap_or_else(|| "single_select".to_string());
+            let options: Vec<String> = opts.get::<Option<Vec<String>>>("options")?.unwrap_or_default();
+            let default: Option<usize> = opts.get::<Option<usize>>("default")?;
+            let allow_custom: bool = opts.get::<Option<bool>>("allow_custom")?.unwrap_or(false);
+
+            let mode = match type_str.as_str() {
+                "single_select" | "single" => InteractionMode::SingleSelect,
+                "multi_select" | "multi" => InteractionMode::MultiSelect,
+                "text_input" | "text" => InteractionMode::TextInput,
+                other => return Err(mlua::Error::external(format!("interact: unknown type '{other}'. Valid: single_select, multi_select, text_input"))),
+            };
+
+            // Validate: MultiSelect and SingleSelect need options.
+            if !matches!(mode, InteractionMode::TextInput) && options.is_empty() {
+                return Err(mlua::Error::external("interact: options required for single_select and multi_select"));
+            }
+
+            // Build question content lines
+            let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                question.clone(),
+                ratatui::style::Style::default().fg(ratatui::style::Color::White),
+            )));
+            lines.push(ratatui::text::Line::from(""));
+
+            // Compute visible_rows
+            let opt_rows = if matches!(mode, InteractionMode::TextInput) { 1 } else { options.len() };
+            let custom_row = u16::from(allow_custom);
+            let visible_rows = (lines.len() + opt_rows + custom_row as usize).min(24).max(3);
+
+            // Build the pane
+            let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+            let default_selected = default.map(|d| d.saturating_sub(1)).unwrap_or(0);
+            let interaction = PaneInteraction::new(
+                mode,
+                options,
+                allow_custom,
+                default_selected,
+                tx,
+            );
+
+            // Use a fixed source so all questions share one page (upsert
+            // replaces any previous interact page).
+            let source = "interact".to_string();
+            // Acquire the serialization lock, send the pane, then drop the
+            // lock *before* blocking so a panic doesn't poison it.
+            {
+                let _lock = INTERACT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+                let page = PanePage {
+                    source,
+                    title: format!("Question — {}", type_str),
+                    content: lines,
+                    visible_rows,
+                    scroll: 0,
+                    interaction: Some(interaction),
+                };
+
+                sender
+                    .send(crate::tools::types::ToolLiveEvent::Pane(page))
+                    .map_err(|e| mlua::Error::external(format!("interact pane send failed: {e}")))?;
+            }
+
+            // Block until the user responds (outside the lock).
+            let result: serde_json::Value = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(rx)
+            }).map_err(|e| mlua::Error::external(format!("interact cancelled: {e}")))?;
+
+            let lua_result = lua.to_value(&result)
+                .map_err(|e| mlua::Error::external(format!("interact result conversion: {e}")))?;
+            Ok(lua_result)
+        })?;
+        ui_table.set("interact", interact_fn)?;
+    } else {
+        let interact_unavailable_fn =
+            lua.create_function(|_, _: ()| Ok((false, "interact unavailable")))?;
+        ui_table.set("interact", interact_unavailable_fn)?;
     }
 
     ctx.set("ui", ui_table)?;

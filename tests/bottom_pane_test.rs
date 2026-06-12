@@ -220,6 +220,7 @@ fn pane_page_adds_height_to_viewport() {
         ],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
+        interaction: None,
     }];
 
     // Without pages: top_sep(1) + input(1) + bottom_sep(1) + status(1) = 4
@@ -243,6 +244,7 @@ fn pane_page_honors_visible_rows() {
             .collect(),
         visible_rows: 12,
         scroll: 0,
+        interaction: None,
     }];
 
     // base(4) + page_sep(1) + tool-requested content rows(12)
@@ -262,6 +264,7 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
             content: vec![ratatui::text::Line::raw("task 1")],
             visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
             scroll: 0,
+            interaction: None,
         },
         PanePage {
             source: "notes".to_string(),
@@ -269,6 +272,7 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
             content: vec![ratatui::text::Line::raw("note 1")],
             visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
             scroll: 0,
+            interaction: None,
         },
     ];
 
@@ -292,6 +296,7 @@ fn pane_page_does_not_panic_with_tiny_viewport() {
             .collect(),
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
+        interaction: None,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
 
@@ -320,6 +325,7 @@ fn pane_page_renders_content_between_input_and_status() {
         content: vec![ratatui::text::Line::raw("hello pane")],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
+        interaction: None,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
 
@@ -354,6 +360,7 @@ fn single_pane_page_has_only_the_fixed_bottom_separator() {
         content: vec![ratatui::text::Line::raw("hello pane")],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
+        interaction: None,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
 
@@ -383,6 +390,7 @@ fn bottom_separator_can_show_pane_toggle_hint() {
         content: vec![ratatui::text::Line::raw("hello pane")],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
+        interaction: None,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
 
@@ -420,6 +428,7 @@ fn bottom_separator_hint_uses_display_width_for_unicode_shortcuts() {
         content: vec![ratatui::text::Line::raw("hello pane")],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
+        interaction: None,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
 
