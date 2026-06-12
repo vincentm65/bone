@@ -1,4 +1,4 @@
-use bone::config::{UserConfig, custom::CustomConfigs, load_providers, save_providers};
+use bone::config::{UserConfig, custom::CustomConfigs};
 use bone::llm::providers;
 use bone::run;
 use bone::ui::app::App;
@@ -310,29 +310,35 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Normal TUI mode
-    let custom = CustomConfigs::load();
+    let mut custom = CustomConfigs::load();
     let cfg = UserConfig::from_custom_configs(&custom);
-    let mut providers_config = load_providers();
+    let mut providers_config = custom.derive_providers_config();
 
     let cli_options = parse_cli_options(&args).map_err(std::io::Error::other)?;
     let provider_id = cli_options.provider.unwrap_or_else(|| {
-        if providers_config.last_provider.is_empty() {
+        if custom.get_last_provider().is_empty() {
             "local".to_string()
         } else {
-            providers_config.last_provider.clone()
+            custom.get_last_provider()
         }
     });
 
     if let Some(model) = cli_options.model.as_ref() {
-        let entry = providers_config
-            .providers
-            .get_mut(&provider_id)
-            .ok_or_else(|| std::io::Error::other(format!("unknown provider `{provider_id}`")))?;
-        entry.model = model.clone();
+        if let Some(entry) = custom.get_provider_entry("providers", &provider_id) {
+            let mut entry = entry;
+            entry.model = model.clone();
+            custom.set_provider_entry("providers", &provider_id, &entry);
+            // Update the derived config too
+            providers_config = custom.derive_providers_config();
+        } else {
+            return Err(std::io::Error::other(format!(
+                "unknown provider `{provider_id}`"
+            )));
+        }
     }
     if cli_options.changed {
+        custom.set_last_provider(&provider_id);
         providers_config.last_provider = provider_id.clone();
-        save_providers(&providers_config);
     }
     bone::config::warn_if_no_api_key_for(&provider_id, &providers_config);
 
@@ -340,7 +346,7 @@ async fn main() -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
     provider.validate().await.map_err(std::io::Error::other)?;
 
-    let mut app = App::new(provider, providers_config, cfg, custom)?;
+    let mut app = App::new(provider, cfg, custom)?;
     app.run().await?;
     Ok(())
 }

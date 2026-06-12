@@ -78,13 +78,13 @@ pub fn boot_with_tools(
     );
 
     if sync {
-        // Sync lua command names into the skills page.
+        // Sync lua command names into the commands page.
         let all_command_names: Vec<String> = extensions
             .commands()
             .iter()
             .map(|c| c.name.clone())
             .collect();
-        custom.sync_skills_from_list(&all_command_names);
+        custom.sync_commands_from_list(&all_command_names);
     }
 
     BootedTools {

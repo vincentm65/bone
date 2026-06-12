@@ -15,7 +15,6 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, pin_mut};
 use std::collections::VecDeque;
 use std::io;
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
@@ -161,79 +160,78 @@ impl App {
             .flush_new_to_scrollback(&self.messages, term)?;
         self.input.reset();
         self.redraw(term)?;
-        // Dispatch before_turn hook with full ctx so Lua can compact or
-        // otherwise transform the conversation before the provider request.
-        {
-            let defs = self.tools.definitions();
-            let schema_json = serde_json::to_string(&defs).unwrap_or_default();
-            let schema_chars = schema_json.len() as u64;
-            let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
-            let sys = crate::llm::prompts::system_prompt();
-            let sys_chars = sys.len() as u64;
-            let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
-            let by_provider = self
-                .session_db
-                .as_ref()
-                .and_then(|db| {
-                    self.conversation_id
-                        .and_then(|id| db.usage_by_provider(id).ok())
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .map(|p| crate::ext::ctx::UsageProviderContext {
-                    provider: p.provider,
-                    model: p.model,
-                    prompt_tokens: p.prompt_tokens.max(0) as u64,
-                    completion_tokens: p.completion_tokens.max(0) as u64,
-                    cached_tokens: p.cached_tokens.max(0) as u64,
-                    cost: p.cost,
-                    request_count: p.request_count.max(0) as u64,
-                })
-                .collect();
-            let usage = crate::ext::ctx::UsageContext {
-                request_count: self.token_stats.request_count,
-                sent: self.token_stats.sent,
-                received: self.token_stats.received,
-                cached: self.token_stats.cached,
-                cost: self.token_stats.cost,
-                context_length: self.token_stats.context_length,
-                tool_count: defs.len() as u64,
-                tool_schema_chars: schema_chars,
-                tool_schema_tokens: schema_tokens,
-                system_prompt_chars: sys_chars,
-                system_prompt_tokens: sys_tokens,
-                by_provider,
-            };
-
-            let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
-            let shared_state: crate::ext::ctx::SharedState =
-                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-            let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
-            ctx_cfg.tool_handler = Some(self.tools.clone());
-            ctx_cfg.approval_mode = self.approval_mode;
-            ctx_cfg.session_id = self.conversation_id;
-            ctx_cfg.provider = Some(self.llm.id().to_string());
-            ctx_cfg.model = Some(self.llm.model().to_string());
-            ctx_cfg.usage = Some(usage);
-            ctx_cfg.conversation_history = Some(self.transcript.clone());
-
-            let actions = self.extensions.dispatch_before_turn(&ctx_cfg);
-            for action in actions {
-                self.apply_lua_action(action, term)?;
-            }
-        }
-
-        let mut history = build_chat_history(&self.transcript, None);
 
         self.streaming = true;
-        self.turn_start = Some(Instant::now());
+        self.shown_tool_rows.clear();
+        self.turn_start = Some(std::time::Instant::now());
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_pause_start = None;
-        self.shown_tool_rows.clear();
-        self.redraw(term)?;
 
         let final_assistant_idx;
         loop {
+            // Dispatch before_turn hook so Lua can compact or otherwise
+            // transform the conversation before each provider request.
+            {
+                let defs = self.tools.definitions();
+                let schema_json = serde_json::to_string(&defs).unwrap_or_default();
+                let schema_chars = schema_json.len() as u64;
+                let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
+                let sys = crate::llm::prompts::system_prompt();
+                let sys_chars = sys.len() as u64;
+                let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
+
+                let by_provider = self
+                    .session_db
+                    .as_ref()
+                    .and_then(|db| {
+                        self.conversation_id
+                            .and_then(|id| db.usage_by_provider(id).ok())
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| crate::ext::ctx::UsageProviderContext {
+                        provider: p.provider,
+                        model: p.model,
+                        prompt_tokens: p.prompt_tokens.max(0) as u64,
+                        completion_tokens: p.completion_tokens.max(0) as u64,
+                        cached_tokens: p.cached_tokens.max(0) as u64,
+                        cost: p.cost,
+                        request_count: p.request_count.max(0) as u64,
+                    })
+                    .collect();
+
+                let mut ctx_cfg = crate::ext::ctx::new_before_turn_ctx(
+                    crate::config::bone_dir().to_string_lossy().to_string(),
+                    by_provider,
+                );
+                ctx_cfg.tool_handler = Some(self.tools.clone());
+                ctx_cfg.approval_mode = self.approval_mode;
+                ctx_cfg.session_id = self.conversation_id;
+                ctx_cfg.provider = Some(self.llm.id().to_string());
+                ctx_cfg.model = Some(self.llm.model().to_string());
+                if let Some(ref mut usage) = ctx_cfg.usage {
+                    usage.request_count = self.token_stats.request_count;
+                    usage.sent = self.token_stats.sent;
+                    usage.received = self.token_stats.received;
+                    usage.cached = self.token_stats.cached;
+                    usage.cost = self.token_stats.cost;
+                    usage.context_length = self.token_stats.context_length;
+                    usage.tool_count = defs.len() as u64;
+                    usage.tool_schema_chars = schema_chars;
+                    usage.tool_schema_tokens = schema_tokens;
+                    usage.system_prompt_chars = sys_chars;
+                    usage.system_prompt_tokens = sys_tokens;
+                }
+                ctx_cfg.conversation_history = Some(self.transcript.clone());
+
+                let actions = self.extensions.dispatch_before_turn(&ctx_cfg);
+                for action in actions {
+                    self.apply_lua_action(action, term)?;
+                }
+            }
+
+            // (Re)build history from the (possibly compacted) transcript.
+            let mut history = build_chat_history(&self.transcript, None);
             self.messages.push(Message::assistant(String::new()));
             self.renderer.streaming_source_flushed = 0;
             self.renderer.streaming_lines_flushed = 0;
@@ -849,6 +847,9 @@ impl App {
                         return Ok(results);
                     }
 
+                    // Refresh subagent pane on registry change or ~1s ticker, so the
+                    // pane stays live while a tool blocks (e.g. subagent wait=true).
+                    self.maybe_refresh_subagent_pane();
                     let visible_pages = if self.panes_visible {
                         self.pages.as_slice()
                     } else {

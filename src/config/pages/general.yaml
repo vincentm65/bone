@@ -13,39 +13,4 @@ fields:
     label: auto_compact_keep_messages
     type: string
     default: ""
-  - key: status_show_model
-    label: "Status: model name"
-    type: bool
-    default: true
-  - key: status_show_approval
-    label: "Status: approval mode"
-    type: bool
-    default: true
-  - key: status_show_tokens_curr
-    label: "Status: tokens curr (context)"
-    type: bool
-    default: true
-  - key: status_show_tokens_in
-    label: "Status: tokens in"
-    type: bool
-    default: true
-  - key: status_show_tokens_out
-    label: "Status: tokens out"
-    type: bool
-    default: true
-  - key: status_show_tokens_total
-    label: "Status: tokens total (in+out)"
-    type: bool
-    default: true
-  - key: status_show_queue
-    label: "Status: queue length"
-    type: bool
-    default: true
-  - key: status_show_spinner
-    label: "Status: thinking spinner"
-    type: bool
-    default: true
-  - key: status_show_timer
-    label: "Status: elapsed timer"
-    type: bool
-    default: true
+

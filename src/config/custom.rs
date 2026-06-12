@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{bone_dir, load_yaml, seed_file_if_missing};
+use super::{UserConfig, bone_dir, load_yaml, seed_file_if_missing};
 
 // ── Schema types ────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ pub struct ConfigField {
 }
 
 /// Supported field types for custom config values.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ConfigFieldType {
     #[default]
@@ -37,6 +37,9 @@ pub enum ConfigFieldType {
     Number,
     Bool,
     Enum,
+    /// A provider entry (label, base_url, model, api_key, endpoint, handler).
+    /// Stored as a nested YAML map in `value`; use `get_provider_entry()` to read it.
+    Provider,
 }
 
 /// A parsed custom config page (from one YAML file).
@@ -63,6 +66,9 @@ pub fn config_dir() -> PathBuf {
 
 const GENERAL_YAML: &str = include_str!("pages/general.yaml");
 const TOOLS_YAML: &str = include_str!("pages/tools.yaml");
+const PROVIDERS_YAML: &str = include_str!("pages/providers.yaml");
+const STATUS_YAML: &str = include_str!("pages/status.yaml");
+const COMMANDS_YAML: &str = include_str!("pages/commands.yaml");
 
 /// Seed built-in config pages into `~/.bone-rust/config/` if missing.
 pub fn seed_builtin_pages() {
@@ -70,6 +76,9 @@ pub fn seed_builtin_pages() {
     let _ = std::fs::create_dir_all(&dir);
     seed_file_if_missing(&dir.join("general.yaml"), GENERAL_YAML);
     seed_file_if_missing(&dir.join("tools.yaml"), TOOLS_YAML);
+    seed_file_if_missing(&dir.join("status.yaml"), STATUS_YAML);
+    seed_file_if_missing(&dir.join("providers.yaml"), PROVIDERS_YAML);
+    seed_file_if_missing(&dir.join("commands.yaml"), COMMANDS_YAML);
 }
 
 // ── Load / save ─────────────────────────────────────────────────────────────
@@ -78,6 +87,8 @@ impl CustomConfigs {
     /// Scan `~/.bone-rust/config/` for `*.yaml` files and load them.
     pub fn load() -> Self {
         migrate_old_values_file();
+        migrate_status_values_from_general();
+        migrate_providers_file();
 
         let dir = config_dir();
         let mut configs = CustomConfigs::default();
@@ -101,7 +112,7 @@ impl CustomConfigs {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            if stem.is_empty() || stem == "providers" {
+            if stem.is_empty() {
                 continue;
             }
             match load_yaml::<CustomConfigPage>(&path) {
@@ -209,15 +220,15 @@ impl CustomConfigs {
         self.enabled_names("tools")
     }
 
-    /// Ensure the "skills" page has a bool field for every name in the list.
+    /// Ensure the "commands" page has a bool field for every name in the list.
     /// New entries are added as enabled (true). Returns true if fields were added.
-    pub fn sync_skills_from_list(&mut self, skill_names: &[String]) -> bool {
-        self.sync_from_registry("skills", skill_names)
+    pub fn sync_commands_from_list(&mut self, command_names: &[String]) -> bool {
+        self.sync_from_registry("commands", command_names)
     }
 
-    /// Get all enabled skill names from the "skills" page.
-    pub fn enabled_skill_names(&self) -> Vec<String> {
-        self.enabled_names("skills")
+    /// Get all enabled command names from the "commands" page.
+    pub fn enabled_command_names(&self) -> Vec<String> {
+        self.enabled_names("commands")
     }
 
     /// Get the display value for a field, falling back to the default.
@@ -261,7 +272,13 @@ impl CustomConfigs {
             _ => serde_yaml::Value::String(value),
         };
         field.value = Some(yaml_val);
-        self.save_page(namespace);
+        // Only persist if the page file actually exists on disk.
+        // Pages that exist only in memory (e.g. test fixtures) must not
+        // leak to the user's config directory.
+        let page_path = config_dir().join(format!("{namespace}.yaml"));
+        if page_path.exists() {
+            self.save_page(namespace);
+        }
     }
 
     /// Find a field definition by namespace and key.
@@ -294,9 +311,134 @@ impl CustomConfigs {
             _ => None,
         }
     }
+
+    // ── Provider helpers ────────────────────────────────────────────────────
+
+    /// Get a provider entry from a provider field's value.
+    pub fn get_provider_entry(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Option<crate::config::ProviderEntry> {
+        let field = self.find_field(namespace, key)?;
+        let val = field.value.as_ref()?;
+        crate::config::ProviderEntry::from_nested(val)
+    }
+
+    /// Set a provider entry as a nested YAML map in the field's value.
+    pub fn set_provider_entry(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        entry: &crate::config::ProviderEntry,
+    ) {
+        let Some(page) = self.page_mut(namespace) else {
+            return;
+        };
+        let Some(field) = page.fields.iter_mut().find(|f| f.key == key) else {
+            return;
+        };
+        if let Ok(nested) = serde_yaml::to_value(entry) {
+            field.value = Some(nested);
+        }
+        let page_path = config_dir().join(format!("{namespace}.yaml"));
+        if page_path.exists() {
+            self.save_page(namespace);
+        }
+    }
+
+    /// Derive a ProvidersConfig from the providers page fields.
+    pub fn derive_providers_config(&self) -> crate::config::ProvidersConfig {
+        let mut cfg = crate::config::ProvidersConfig::default();
+        let Some(page) = self.page_ref("providers") else {
+            return cfg;
+        };
+        for field in &page.fields {
+            if field.key == "_last_provider" {
+                cfg.last_provider = self.get_value("providers", &field.key);
+                continue;
+            }
+            if let Some(entry) = self.get_provider_entry("providers", &field.key) {
+                cfg.providers.insert(field.key.clone(), entry);
+            }
+        }
+        cfg
+    }
+
+    /// Get the last used provider ID.
+    pub fn get_last_provider(&self) -> String {
+        self.get_value("providers", "_last_provider")
+    }
+
+    /// Set the last used provider ID.
+    pub fn set_last_provider(&mut self, id: &str) {
+        self.set_value("providers", "_last_provider", id.to_string());
+    }
+
+    /// Get all provider field keys (provider IDs).
+    pub fn provider_ids(&self) -> Vec<String> {
+        let Some(page) = self.page_ref("providers") else {
+            return Vec::new();
+        };
+        page.fields
+            .iter()
+            .filter(|f| f.field_type == ConfigFieldType::Provider)
+            .map(|f| f.key.clone())
+            .collect()
+    }
 }
 
 // ── Migration ───────────────────────────────────────────────────────────────
+
+/// Migrate old `providers.yaml` (flat map format) to CustomConfigPage format.
+fn migrate_providers_file() {
+    let old_path = bone_dir().join("config/providers.yaml");
+    let new_path = bone_dir().join("config/providers.yaml");
+    // Check if old file exists and new page doesn't exist yet
+    if !old_path.exists() {
+        return;
+    }
+    // If the file already parses as a CustomConfigPage, no migration needed
+    if load_yaml::<CustomConfigPage>(&old_path).is_some() {
+        return;
+    }
+    // Parse as old ProvidersConfig format
+    let old_config = load_yaml::<crate::config::ProvidersConfig>(&old_path);
+    let old_config = match old_config {
+        Some(c) => c,
+        None => return,
+    };
+
+    let mut fields: Vec<ConfigField> = Vec::new();
+    for (id, entry) in &old_config.providers {
+        let label = entry.label.clone();
+        let nested = serde_yaml::to_value(entry).unwrap_or(serde_yaml::Value::Null);
+        fields.push(ConfigField {
+            key: id.clone(),
+            label: Some(label),
+            field_type: ConfigFieldType::Provider,
+            options: Vec::new(),
+            default: None,
+            value: Some(nested),
+        });
+    }
+    fields.push(ConfigField {
+        key: "_last_provider".to_string(),
+        label: None,
+        field_type: ConfigFieldType::String,
+        options: Vec::new(),
+        default: None,
+        value: Some(serde_yaml::Value::String(old_config.last_provider)),
+    });
+
+    let page = CustomConfigPage {
+        title: "Providers".to_string(),
+        fields,
+    };
+    if let Ok(yaml) = serde_yaml::to_string(&page) {
+        let _ = std::fs::write(&new_path, yaml);
+    }
+}
 
 /// Migrate the old `config-values.yaml` into individual page files, then remove it.
 fn migrate_old_values_file() {
@@ -336,5 +478,159 @@ fn migrate_old_values_file() {
         }
     }
 
+    if let Some(kv) = values.get("general") {
+        let page_path = dir.join("status.yaml");
+        if page_path.exists()
+            && let Some(mut page) = load_yaml::<CustomConfigPage>(&page_path)
+        {
+            let mut changed = false;
+            for field in &mut page.fields {
+                if is_status_toggle_key(&field.key)
+                    && field.value.is_none()
+                    && let Some(val) = kv.get(&field.key)
+                {
+                    field.value = Some(value_for_field(field, val.clone()));
+                    changed = true;
+                }
+            }
+            if changed && let Ok(yaml) = serde_yaml::to_string(&page) {
+                let _ = std::fs::write(&page_path, yaml);
+            }
+        }
+    }
+
     let _ = std::fs::remove_file(&values_path);
+}
+
+/// Move status toggles that were previously stored on `general.yaml` into
+/// `status.yaml`. This covers users who already migrated from config-values.
+fn migrate_status_values_from_general() {
+    let dir = config_dir();
+    let general_path = dir.join("general.yaml");
+    let status_path = dir.join("status.yaml");
+    if !general_path.exists() || !status_path.exists() {
+        return;
+    }
+
+    let Some(general) = load_yaml::<CustomConfigPage>(&general_path) else {
+        return;
+    };
+    let Some(mut status) = load_yaml::<CustomConfigPage>(&status_path) else {
+        return;
+    };
+
+    let mut changed = false;
+    for status_field in &mut status.fields {
+        if !is_status_toggle_key(&status_field.key) || status_field.value.is_some() {
+            continue;
+        }
+        let Some(general_field) = general
+            .fields
+            .iter()
+            .find(|field| field.key == status_field.key)
+        else {
+            continue;
+        };
+        let Some(value) = general_field.value.clone() else {
+            continue;
+        };
+        status_field.value = Some(value);
+        changed = true;
+    }
+
+    if changed && let Ok(yaml) = serde_yaml::to_string(&status) {
+        let _ = std::fs::write(status_path, yaml);
+    }
+}
+
+fn is_status_toggle_key(key: &str) -> bool {
+    UserConfig::STATUS_TOGGLE_KEYS.contains(&key)
+}
+
+fn value_for_field(field: &ConfigField, value: String) -> serde_yaml::Value {
+    match field.field_type {
+        ConfigFieldType::Bool => match value.as_str() {
+            "true" => serde_yaml::Value::Bool(true),
+            "false" => serde_yaml::Value::Bool(false),
+            _ => serde_yaml::Value::String(value),
+        },
+        ConfigFieldType::Number => value
+            .parse::<serde_yaml::Number>()
+            .map(serde_yaml::Value::Number)
+            .unwrap_or_else(|_| serde_yaml::Value::String(value.clone())),
+        _ => serde_yaml::Value::String(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_temp_config_home(test: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("bone-config-migration-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
+        }
+        test();
+        unsafe {
+            match old_xdg {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn old_values_file_general_status_toggles_migrate_to_status_page() {
+        with_temp_config_home(|| {
+            seed_builtin_pages();
+            let values_path = bone_dir().join("config-values.yaml");
+            std::fs::write(
+                &values_path,
+                "general:\n  status_show_timer: \"false\"\n  approval_mode: danger\n",
+            )
+            .unwrap();
+
+            let configs = CustomConfigs::load();
+
+            assert_eq!(configs.get_value("status", "status_show_timer"), "false");
+            assert_eq!(configs.get_value("general", "approval_mode"), "danger");
+            assert!(!values_path.exists());
+        });
+    }
+
+    #[test]
+    fn general_page_status_toggles_migrate_to_status_page() {
+        with_temp_config_home(|| {
+            seed_builtin_pages();
+            let general_path = config_dir().join("general.yaml");
+            let mut general = load_yaml::<CustomConfigPage>(&general_path).unwrap();
+            general.fields.push(ConfigField {
+                key: "status_show_spinner".to_string(),
+                label: Some("Spinner".to_string()),
+                field_type: ConfigFieldType::Bool,
+                options: Vec::new(),
+                default: Some(serde_yaml::Value::Bool(true)),
+                value: Some(serde_yaml::Value::Bool(false)),
+            });
+            std::fs::write(&general_path, serde_yaml::to_string(&general).unwrap()).unwrap();
+
+            let configs = CustomConfigs::load();
+
+            assert_eq!(configs.get_value("status", "status_show_spinner"), "false");
+        });
+    }
 }

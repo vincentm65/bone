@@ -51,9 +51,10 @@ impl LuaTool {
         let params_val: mlua::Value = entry
             .get("parameters")
             .map_err(|e| format!("tool '{}' missing parameters: {e}", name))?;
-        let parameters: Value = lua
+        let mut parameters: Value = lua
             .from_value(params_val)
             .map_err(|e| format!("tool '{}' invalid parameters schema: {e}", name))?;
+        normalize_json_schema(&mut parameters);
 
         // Extract display config if present.
         let display = match entry.get::<mlua::Value>("display") {
@@ -181,6 +182,25 @@ impl LuaTool {
         };
 
         parse_tool_output(&text)
+    }
+}
+
+fn normalize_json_schema(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if matches!(map.get("required"), Some(Value::Bool(_))) {
+                map.remove("required");
+            }
+            for child in map.values_mut() {
+                normalize_json_schema(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                normalize_json_schema(child);
+            }
+        }
+        _ => {}
     }
 }
 

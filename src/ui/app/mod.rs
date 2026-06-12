@@ -1,7 +1,7 @@
 pub mod stream;
 
 use crate::chat::Message;
-use crate::config::{self, ProvidersConfig, UserConfig};
+use crate::config::{self, UserConfig};
 use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
 use crate::session_db::SessionDb;
 
@@ -9,7 +9,6 @@ use crate::ext::ExtensionManager;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalMode, ToolCall};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use mlua::Value as LuaValue;
 use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
@@ -35,7 +34,6 @@ pub struct App {
     pub llm: Box<dyn LlmProvider>,
     pub should_quit: bool,
     pub renderer: Renderer,
-    pub providers_config: ProvidersConfig,
     pub user_config: UserConfig,
     pub custom_configs: config::custom::CustomConfigs,
     pub queue: VecDeque<String>,
@@ -89,7 +87,6 @@ pub struct App {
 impl App {
     pub fn new(
         llm: Box<dyn LlmProvider>,
-        providers_config: ProvidersConfig,
         mut user_config: UserConfig,
         mut custom_configs: config::custom::CustomConfigs,
     ) -> io::Result<Self> {
@@ -131,7 +128,6 @@ impl App {
             llm,
             should_quit: false,
             renderer,
-            providers_config,
             user_config,
             custom_configs,
             queue: VecDeque::new(),
@@ -253,7 +249,8 @@ impl App {
             // Recompute context_length estimate from the new transcript.
             let history = crate::chat::build_chat_history(&self.transcript, None);
             self.token_stats.context_length =
-                crate::ui::app::App::estimate_context_chars(&history, &self.tools.definitions()) as u64;
+                crate::ui::app::App::estimate_context_chars(&history, &self.tools.definitions())
+                    as u64;
         }
         Ok(())
     }
@@ -337,6 +334,7 @@ impl App {
             .flush_new_to_scrollback(&self.messages, &mut terminal)?;
         self.renderer
             .render_banner(&mut terminal, &self.provider, &self.model)?;
+        self.refresh_subagent_pane();
         self.force_redraw(&mut terminal)?;
 
         while !self.should_quit {
@@ -1163,8 +1161,8 @@ impl App {
 
         // Protected built-ins always win over Lua commands.
         if !commands::is_protected_builtin(cmd.as_str()) && self.extensions.is_available() {
-            // Check if the lua command is enabled in skills config.
-            // If the skills page is absent or empty, treat all registered commands as enabled
+            // Check if the lua command is enabled in commands config.
+            // If the commands page is absent or empty, treat all registered commands as enabled
             // (same fallback semantics as tools).
             let all_command_names: Vec<String> = self
                 .extensions
@@ -1172,11 +1170,11 @@ impl App {
                 .iter()
                 .map(|c| c.name.clone())
                 .collect();
-            let enabled_skills = self.custom_configs.enabled_skill_names();
-            let enabled = if enabled_skills.is_empty() {
+            let enabled_commands = self.custom_configs.enabled_command_names();
+            let enabled = if enabled_commands.is_empty() {
                 all_command_names
             } else {
-                enabled_skills
+                enabled_commands
             };
             if enabled.contains(&cmd) {
                 if let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
@@ -1206,7 +1204,7 @@ impl App {
             &mut self.llm,
             &mut self.provider,
             &mut self.model,
-            &mut self.providers_config,
+            &mut self.custom_configs,
         )
         .await?;
 
@@ -1318,39 +1316,11 @@ impl App {
             // and must re-acquire it (std::sync::Mutex is not reentrant).
             drop(lua);
 
-            let result = handler.call::<LuaValue>((arg_owned, ctx_table));
+            let result = handler.call::<mlua::Value>((arg_owned, ctx_table));
 
             let reply = match result {
-                Ok(LuaValue::String(s)) => {
-                    let output = s.to_str().map(|s| s.to_string()).unwrap_or_default();
-                    if output.is_empty() {
-                        None
-                    } else {
-                        Some((output, false, None))
-                    }
-                }
-                Ok(LuaValue::Table(t)) => {
-                    let output = t
-                        .get::<Option<String>>("display")
-                        .ok()
-                        .flatten()
-                        .or_else(|| t.get::<Option<String>>("reply").ok().flatten())
-                        .or_else(|| t.get::<Option<String>>("content").ok().flatten())
-                        .unwrap_or_default();
-                    let action = crate::ext::types::parse_lua_return_action(&t);
-                    if output.is_empty() && action.is_none() {
-                        None
-                    } else {
-                        let submit = t
-                            .get::<Option<bool>>("submit")
-                            .ok()
-                            .flatten()
-                            .unwrap_or(true);
-                        Some((output, submit, action))
-                    }
-                }
-                Ok(LuaValue::Nil) => None,
-                Ok(v) => Some((format!("{v:?}"), true, None)),
+                Ok(value) => crate::ext::types::parse_lua_command_return(value)
+                    .map(|ret| (ret.output, ret.submit, ret.action)),
                 Err(e) => {
                     eprintln!("bone-lua error: command '{cmd_owned}': {e}");
                     Some((format!("Lua command error: {e}"), false, None))
@@ -1494,7 +1464,11 @@ impl App {
     }
 
     fn provider_editor(&mut self, id: String, term: &mut BoneTerminal) -> io::Result<()> {
-        let mut entry = self.providers_config.providers[&id].clone();
+        let entry = self
+            .custom_configs
+            .get_provider_entry("providers", &id)
+            .ok_or_else(|| io::Error::other(format!("unknown provider `{id}`")))?;
+        let mut entry = entry;
         let mut selected = 0usize;
         loop {
             let options = vec![
@@ -1523,29 +1497,54 @@ impl App {
                 KeyCode::Esc => return Ok(()),
                 KeyCode::Enter => {
                     let selected = self.active_prompt.as_ref().unwrap().selected;
-                    let edited = match selected {
-                        0 => self.edit_value("label", &entry.label, false, term)?,
-                        1 => self.edit_value("model", &entry.model, false, term)?,
-                        2 => self.edit_value("base_url", &entry.base_url, false, term)?,
-                        3 => self.edit_value("endpoint", &entry.endpoint, false, term)?,
+                    match selected {
+                        0 => {
+                            if let Some(value) =
+                                self.edit_value("label", &entry.label, false, term)?
+                            {
+                                entry.label = value;
+                            }
+                        }
+                        1 => {
+                            if let Some(value) =
+                                self.edit_value("model", &entry.model, false, term)?
+                            {
+                                entry.model = value;
+                            }
+                        }
+                        2 => {
+                            if let Some(value) =
+                                self.edit_value("base_url", &entry.base_url, false, term)?
+                            {
+                                entry.base_url = value;
+                            }
+                        }
+                        3 => {
+                            if let Some(value) =
+                                self.edit_value("endpoint", &entry.endpoint, false, term)?
+                            {
+                                entry.endpoint = value;
+                            }
+                        }
                         4 => {
                             entry.handler = if entry.handler == "codex" {
                                 "openai".to_string()
                             } else {
                                 "codex".to_string()
                             };
-                            None
                         }
-                        5 => self.edit_value("api_key", "", true, term)?,
+                        5 => {
+                            if let Some(value) = self.edit_value("api_key", "", true, term)? {
+                                entry.api_key = value;
+                            }
+                        }
                         6 => {
-                            self.providers_config
-                                .providers
-                                .insert(id.clone(), entry.clone());
-                            config::save_providers(&self.providers_config);
+                            self.custom_configs
+                                .set_provider_entry("providers", &id, &entry);
                             let reply = if self.llm.id() == id {
                                 match providers::create_provider_with_config(
                                     &id,
-                                    &self.providers_config,
+                                    &self.custom_configs.derive_providers_config(),
                                 ) {
                                     Ok(provider) => {
                                         self.provider =
@@ -1564,17 +1563,7 @@ impl App {
                             self.show_reply(reply, term)?;
                             return Ok(());
                         }
-                        _ => None,
-                    };
-                    if let Some(value) = edited {
-                        match selected {
-                            0 => entry.label = value,
-                            1 => entry.model = value,
-                            2 => entry.base_url = value,
-                            3 => entry.endpoint = value,
-                            5 => entry.api_key = value,
-                            _ => {}
-                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -1611,78 +1600,6 @@ impl App {
         }
     }
 
-    fn provider_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.providers_config.providers.keys().cloned().collect();
-        ids.sort();
-        ids
-    }
-
-    /// Submenu for status bar toggles.
-    fn status_bar_submenu(
-        &mut self,
-        custom: &mut config::custom::CustomConfigs,
-        term: &mut BoneTerminal,
-    ) -> io::Result<()> {
-        let mut selected = 0usize;
-        let status_fields: Vec<(String, String)> = custom
-            .pages
-            .iter()
-            .find(|(ns, _)| ns == "general")
-            .map(|(_, page)| {
-                page.fields
-                    .iter()
-                    .filter(|f| f.key.starts_with("status_show_"))
-                    .map(|f| (f.key.clone(), f.label.clone().unwrap_or_default()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if status_fields.is_empty() {
-            return Ok(());
-        }
-
-        loop {
-            let options: Vec<String> = status_fields
-                .iter()
-                .map(|(key, label)| {
-                    let val = custom.get_value("general", key);
-                    let icon = if val == "true" { "●" } else { "○" };
-                    format!("{icon} {label}")
-                })
-                .collect();
-
-            let mut prompt = Prompt::new("Status bar".to_string(), options);
-            prompt.set_selected(selected);
-            prompt.hint = Some("Enter toggle  Esc back".to_string());
-            self.active_prompt = Some(prompt);
-            self.redraw(term)?;
-
-            let (code, modifiers) = self.panel_key(term)?;
-            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                return self.close_panel(term);
-            }
-            if self.navigate_prompt(code, false, term)? {
-                selected = self.active_prompt.as_ref().unwrap().selected;
-                continue;
-            }
-
-            match code {
-                KeyCode::Esc => {
-                    // Go back to parent config picker
-                    return Ok(());
-                }
-                KeyCode::Enter => {
-                    let (key, _) = &status_fields[selected];
-                    let current = custom.get_value("general", key);
-                    if let Some(next) = custom.cycle_field("general", key, &current) {
-                        custom.set_value("general", key, next);
-                        self.apply_custom_configs_to_runtime(custom.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     async fn config_picker(
         &mut self,
         term: &mut BoneTerminal,
@@ -1692,11 +1609,8 @@ impl App {
 
         let mut tabs: Vec<String> = Vec::new();
         let mut namespaces: Vec<String> = Vec::new();
-        for ns in ["general", "__providers__", "tools"] {
-            if ns == "__providers__" {
-                tabs.push("Providers".to_string());
-                namespaces.push(ns.to_string());
-            } else if let Some((_, page)) = custom.pages.iter().find(|(page_ns, _)| page_ns == ns) {
+        for ns in ["general", "providers", "tools"] {
+            if let Some((_, page)) = custom.pages.iter().find(|(page_ns, _)| page_ns == ns) {
                 tabs.push(page.title.clone());
                 namespaces.push(ns.to_string());
             }
@@ -1710,7 +1624,7 @@ impl App {
         }
         let providers_tab_idx = namespaces
             .iter()
-            .position(|ns| ns == "__providers__")
+            .position(|ns| ns == "providers")
             .unwrap_or(0);
         let num_tabs = tabs.len();
 
@@ -1728,10 +1642,12 @@ impl App {
         loop {
             let options = if active == providers_tab_idx {
                 // Providers tab: list providers like the old provider_picker
-                let ids = self.provider_ids();
+                let providers_config = custom.derive_providers_config();
+                let mut ids: Vec<String> = providers_config.providers.keys().cloned().collect();
+                ids.sort();
                 ids.iter()
                     .map(|id| {
-                        let entry = &self.providers_config.providers[id];
+                        let entry = &providers_config.providers[id];
                         let active_marker = if id == self.llm.id() { "●" } else { "○" };
                         let kind = if entry.handler.is_empty() {
                             "openai"
@@ -1754,7 +1670,6 @@ impl App {
                 let page = &custom.pages[page_idx].1;
                 page.fields
                     .iter()
-                    .filter(|field| !field.key.starts_with("status_show_"))
                     .map(|field| {
                         let label = field.label.as_deref().unwrap_or(&field.key);
                         let value = custom.get_value(ns, &field.key);
@@ -1773,13 +1688,6 @@ impl App {
                         } else {
                             format!("{:<30} {}", label, display)
                         }
-                    })
-                    .chain({
-                        let mut items: Vec<String> = Vec::new();
-                        if ns == "general" {
-                            items.push("  Status bar  →".to_string());
-                        }
-                        items
                     })
                     .collect()
             } else {
@@ -1827,30 +1735,34 @@ impl App {
                 KeyCode::Enter => {
                     if active == providers_tab_idx {
                         // Providers tab: select provider
-                        let ids = self.provider_ids();
+                        let providers_config = custom.derive_providers_config();
+                        let mut ids: Vec<String> =
+                            providers_config.providers.keys().cloned().collect();
+                        ids.sort();
                         let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected)
                         else {
                             continue;
                         };
                         let id = id.clone();
-                        let reply = match providers::create_provider_with_config(
-                            &id,
-                            &self.providers_config,
-                        ) {
-                            Ok(new_provider) => match new_provider.validate().await {
-                                Ok(()) => {
-                                    self.provider =
-                                        format!("{} ({})", new_provider.name(), new_provider.id());
-                                    self.model = new_provider.model().to_string();
-                                    self.llm = new_provider;
-                                    self.providers_config.last_provider = id.clone();
-                                    config::save_providers(&self.providers_config);
-                                    format!("Switched to {} ({})", self.model, self.provider)
-                                }
-                                Err(err) => format!("Provider validation failed: {err}"),
-                            },
-                            Err(err) => err.to_string(),
-                        };
+                        let reply =
+                            match providers::create_provider_with_config(&id, &providers_config) {
+                                Ok(new_provider) => match new_provider.validate().await {
+                                    Ok(()) => {
+                                        self.provider = format!(
+                                            "{} ({})",
+                                            new_provider.name(),
+                                            new_provider.id()
+                                        );
+                                        self.model = new_provider.model().to_string();
+                                        self.llm = new_provider;
+                                        custom.set_last_provider(&id);
+                                        self.custom_configs = custom.clone();
+                                        format!("Switched to {} ({})", self.model, self.provider)
+                                    }
+                                    Err(err) => format!("Provider validation failed: {err}"),
+                                },
+                                Err(err) => err.to_string(),
+                            };
                         self.close_panel(term)?;
                         return self.show_reply(reply, term);
                     }
@@ -1866,37 +1778,10 @@ impl App {
                     let page = &custom.pages[page_idx].1;
                     let idx = self.active_prompt.as_ref().unwrap().selected;
 
-                    // Check if "Status bar" submenu was selected (general only)
-                    if ns == "general" {
-                        let non_status_count = page
-                            .fields
-                            .iter()
-                            .filter(|f| !f.key.starts_with("status_show_"))
-                            .count();
-                        if idx == non_status_count {
-                            // Status bar submenu
-                            self.status_bar_submenu(&mut custom, term)?;
-                            continue;
-                        }
-                    }
-
                     if idx >= page.fields.len() {
                         continue;
                     }
-                    // Map visible idx back to actual field index
-                    let mut field_actual_idx = 0;
-                    let mut visible_idx = 0;
-                    for (i, f) in page.fields.iter().enumerate() {
-                        if visible_idx == idx {
-                            field_actual_idx = i;
-                            break;
-                        }
-                        if !f.key.starts_with("status_show_") {
-                            visible_idx += 1;
-                        }
-                        field_actual_idx = i;
-                    }
-                    let field = page.fields[field_actual_idx].clone();
+                    let field = page.fields[idx].clone();
                     let current = custom.get_value(&ns, &field.key);
                     match field.field_type {
                         config::custom::ConfigFieldType::Bool
@@ -1919,9 +1804,12 @@ impl App {
                     }
                 }
                 KeyCode::Char('e') | KeyCode::Char('E') if active == providers_tab_idx => {
-                    let ids = self.provider_ids();
+                    let providers_config = custom.derive_providers_config();
+                    let mut ids: Vec<String> = providers_config.providers.keys().cloned().collect();
+                    ids.sort();
                     if let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) {
                         self.provider_editor(id.clone(), term)?;
+                        custom = config::custom::CustomConfigs::load();
                     }
                 }
                 _ => {}

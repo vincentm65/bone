@@ -1,5 +1,5 @@
 use crate::chat::build_chat_history;
-use crate::config::{UserConfig, custom::CustomConfigs, load_providers, save_providers};
+use crate::config::{UserConfig, custom::CustomConfigs};
 use crate::llm::{
     ChatEvent, ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
     token_tracker::CHARS_PER_TOKEN,
@@ -19,6 +19,10 @@ struct SessionWriter {
 }
 
 impl SessionWriter {
+    fn conv_id(&self) -> Option<i64> {
+        self.conv_id
+    }
+
     fn append_message(
         &mut self,
         role: &str,
@@ -326,29 +330,29 @@ struct AgentSetup {
 fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     let mut custom = CustomConfigs::load();
     let _user_config = UserConfig::from_custom_configs(&custom);
-    let mut providers_config = load_providers();
+    let mut providers_config = custom.derive_providers_config();
 
     let provider_id = request
         .provider
         .clone()
-        .or_else(|| non_empty(providers_config.last_provider.as_str()).map(str::to_string))
+        .or_else(|| non_empty(custom.get_last_provider().as_str()).map(str::to_string))
         .ok_or_else(|| "no provider configured".to_string())?;
 
     // Persist last_provider before any model override (don't want to save the override).
     // Only persist when running as top-level agent, not as a subagent.
     if request.provider.is_some() && request.agent_depth == 0 {
+        custom.set_last_provider(&provider_id);
         providers_config.last_provider = provider_id.clone();
-        save_providers(&providers_config);
     }
 
     // Apply model override session-only (never persisted).
     let selected_model = request.model.as_deref();
     if let Some(model) = selected_model {
-        let entry = providers_config
-            .providers
-            .get_mut(&provider_id)
-            .ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
-        entry.model = model.to_string();
+        if let Some(entry) = providers_config.providers.get_mut(&provider_id) {
+            entry.model = model.to_string();
+        } else {
+            return Err(format!("unknown provider `{provider_id}`"));
+        }
     }
     crate::config::warn_if_no_api_key_for(&provider_id, &providers_config);
 
@@ -443,6 +447,53 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
     let mut consecutive_errors = 0u32;
     let final_content = loop {
+        // Dispatch before_turn hook so Lua can compact the conversation
+        // before each provider request (same as the TUI agent loop).
+        {
+            let defs = tools.definitions();
+            let schema_json = serde_json::to_string(&defs).unwrap_or_default();
+            let schema_chars = schema_json.len() as u64;
+            let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
+            let sys = crate::llm::prompts::system_prompt();
+            let sys_chars = sys.len() as u64;
+            let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
+
+            let mut ctx_cfg = crate::ext::ctx::new_before_turn_ctx(
+                crate::config::bone_dir().to_string_lossy().to_string(),
+                Vec::new(),
+            );
+            ctx_cfg.tool_handler = Some(tools.clone());
+            ctx_cfg.approval_mode = request.approval_mode;
+            ctx_cfg.session_id = session.conv_id();
+            ctx_cfg.provider = Some(llm.id().to_string());
+            ctx_cfg.model = Some(llm.model().to_string());
+            if let Some(ref mut usage) = ctx_cfg.usage {
+                usage.request_count = token_stats.request_count;
+                usage.sent = token_stats.sent;
+                usage.received = token_stats.received;
+                usage.cached = token_stats.cached;
+                usage.cost = token_stats.cost;
+                usage.context_length = token_stats.context_length;
+                usage.tool_count = defs.len() as u64;
+                usage.tool_schema_chars = schema_chars;
+                usage.tool_schema_tokens = schema_tokens;
+                usage.system_prompt_chars = sys_chars;
+                usage.system_prompt_tokens = sys_tokens;
+            }
+            ctx_cfg.conversation_history = Some(transcript.clone());
+
+            let actions = extensions.dispatch_before_turn(&ctx_cfg);
+            for action in actions {
+                if let Some(new_messages) = action.conversation_replace {
+                    transcript = new_messages;
+                    history = build_chat_history(&transcript, None);
+                    let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
+                    token_stats.context_length =
+                        (prompt_chars as f64 / CHARS_PER_TOKEN).ceil() as u64;
+                }
+            }
+        }
+
         // Request stream with retry
         let mut stream = None;
         for attempt in 1..=3 {
@@ -470,6 +521,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         // Consume stream
         let mut assistant_text = String::new();
+        let mut reasoning_content = String::new();
         let mut tool_calls = Vec::new();
         let mut stream_error = false;
         let mut had_usage = false;
@@ -480,7 +532,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Ok(ChatEvent::TextDelta(text)) => {
                     assistant_text.push_str(&text);
                 }
-                Ok(ChatEvent::ReasoningDelta(_)) => {}
+                Ok(ChatEvent::ReasoningDelta(text)) => {
+                    reasoning_content.push_str(&text);
+                }
                 Ok(ChatEvent::ToolCall(call)) => {
                     let summary = format!("{}: {}", call.name, summarize_call_args(&call));
                     emit(&AgentEvent::ToolCall {
@@ -532,6 +586,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         if !had_usage && !stream_error {
             let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
             let completion_chars = assistant_text.chars().count()
+                + reasoning_content.chars().count()
                 + tool_calls
                     .iter()
                     .map(|call| call.arguments.to_string().chars().count())
@@ -579,7 +634,10 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         }
 
         // Push assistant message with tool calls into history
-        let assistant = ChatMessage::assistant_with_tools(&assistant_text, tool_calls.clone());
+        let mut assistant = ChatMessage::assistant_with_tools(&assistant_text, tool_calls.clone());
+        if !reasoning_content.is_empty() {
+            assistant.reasoning_content = Some(std::mem::take(&mut reasoning_content));
+        }
         history.push(assistant.clone());
         transcript.push(assistant);
         session_seq += 1;

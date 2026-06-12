@@ -74,6 +74,40 @@ fn default_handler() -> String {
     "openai".to_string()
 }
 
+impl ProviderEntry {
+    /// Deserialize a ProviderEntry from a nested YAML map value
+    /// (as stored in a CustomConfigPage field).
+    pub fn from_nested(val: &serde_yaml::Value) -> Option<Self> {
+        let map = val.as_mapping()?;
+        let get = |key: &str| -> String {
+            map.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let get_with_default = |key: &str, fallback: &str| -> String {
+            map.get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    if s.is_empty() {
+                        fallback.to_string()
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        Some(ProviderEntry {
+            label: get("label"),
+            base_url: get("base_url"),
+            model: get("model"),
+            api_key: get("api_key"),
+            endpoint: get_with_default("endpoint", &default_endpoint()),
+            handler: get_with_default("handler", &default_handler()),
+        })
+    }
+}
+
 /// The providers file is a flat map of provider id → config.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProvidersConfig {
@@ -83,23 +117,4 @@ pub struct ProvidersConfig {
 
     #[serde(flatten)]
     pub providers: std::collections::HashMap<String, ProviderEntry>,
-}
-
-pub fn load_providers() -> ProvidersConfig {
-    let path = super::providers_path();
-    if !path.exists() {
-        return ProvidersConfig::default();
-    }
-    super::load_yaml(&path).unwrap_or_else(|| {
-        eprintln!("bone: warning: failed to parse {}", path.display());
-        ProvidersConfig::default()
-    })
-}
-
-/// Persist config back to disk (used to save last_provider).
-pub fn save_providers(config: &ProvidersConfig) {
-    let path = super::providers_path();
-    if let Ok(yaml) = serde_yaml::to_string(config) {
-        let _ = std::fs::write(&path, yaml);
-    }
 }

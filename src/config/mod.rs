@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ext;
 use crate::tools::ApprovalMode;
-pub use providers_config::{ProviderEntry, ProvidersConfig, load_providers, save_providers};
+pub use providers_config::{ProviderEntry, ProvidersConfig};
 
 pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let raw = std::fs::read_to_string(path).ok()?;
@@ -62,10 +62,10 @@ impl Default for UserConfig {
 }
 
 fn bool_config(custom: &custom::CustomConfigs, key: &str) -> bool {
-    custom.get_value("general", key).parse().unwrap_or(true)
+    custom.get_value("status", key).parse().unwrap_or(true)
 }
 impl UserConfig {
-    const STATUS_TOGGLE_KEYS: [&'static str; 9] = [
+    pub(crate) const STATUS_TOGGLE_KEYS: [&'static str; 9] = [
         "status_show_model",
         "status_show_approval",
         "status_show_tokens_curr",
@@ -117,13 +117,8 @@ impl UserConfig {
     }
 }
 
-const EXAMPLE_PROVIDERS: &str = include_str!("../../defaults/providers.yaml");
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
 const DEFAULT_AGENTS_MD: &str = include_str!("../../defaults/AGENTS.md");
-
-pub fn seed_providers_if_missing() {
-    seed_file_if_missing(&providers_path(), EXAMPLE_PROVIDERS);
-}
 
 pub fn seed_command_policy_if_missing() {
     let path = command_policy_path();
@@ -152,7 +147,6 @@ pub fn seed_file_if_missing(path: &Path, content: &str) {
 /// Seed all file-based config if missing. Should be called once at startup
 /// from every entry point (TUI, run, agent).
 pub fn seed_all() {
-    seed_providers_if_missing();
     seed_command_policy_if_missing();
     seed_agents_md_if_missing();
     custom::seed_builtin_pages();

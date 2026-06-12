@@ -311,9 +311,16 @@ impl LlmProvider for OpenAiCompatProvider {
         let response = req.send().await?;
         let status = response.status();
         if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            let details = error_body.trim();
+            let message = if details.is_empty() {
+                format!("HTTP {} from {}", status, self.chat_url())
+            } else {
+                format!("HTTP {} from {}: {}", status, self.chat_url(), details)
+            };
             return Err(LlmError::new_with_kind(
                 http_status_to_error_kind(status),
-                format!("HTTP {} from {}", status, self.chat_url()),
+                message,
             ));
         }
 

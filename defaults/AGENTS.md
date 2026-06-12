@@ -129,7 +129,7 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.session.messages(id, opts?)` | `array` | Messages for a conversation (default limit 200, max 1000) |
 | **`ctx.conversation.*`** | | Active conversation transcript (not SQLite) |
 | `ctx.conversation.current()` | `table\|nil` | `{id, provider, model}` for the active conversation |
-| `ctx.conversation.history()` | `array` | In-memory transcript: `{role, content, name?, tool_call_id?}` |
+| `ctx.conversation.history()` | `array` | In-memory transcript: `{role, content, tool_calls?, name?, tool_call_id?}` |
 
 #### Context Availability
 
@@ -170,7 +170,7 @@ local conv = ctx.conversation.current()
 
 -- Get the current transcript messages
 local messages = ctx.conversation.history()
--- array of { role = "user"|"assistant"|"tool", content = string, name?, tool_call_id? }
+-- array of { role = "user"|"assistant"|"tool", content = string, tool_calls?, name?, tool_call_id? }
 -- The system prompt is NOT included.
 ```
 
@@ -421,11 +421,15 @@ Manual context compaction via summarization. Summarizes older conversation messa
 - Returns a `conversation.replace` action (see [Return Actions](#command-return-semantics)).
 - The default file `lua/commands/compact.lua` also registers a `before_turn` handler for automatic compaction.
 
-Configuration (set in `init.lua` via `bone.config`):
-- `auto_compact_tokens = 8000` — token threshold for auto-compact.
-- `auto_compact_keep_messages = 12` — messages to preserve after compaction.
+Configuration:
+- `auto_compact_tokens` — token threshold for auto-compact. Blank/unset disables auto-compact.
+- `auto_compact_keep_messages` — recent user/assistant message count to preserve after compaction. Blank/unset disables manual and automatic compaction.
 
-**Disable:** remove `lua/commands/compact.lua` from the config directory. Both manual `/compact` and auto-compaction stop.
+Auto-compaction runs after a user message is appended and before the provider request is built. It triggers only when both config values are positive integers and the current context estimate is at or above `auto_compact_tokens`.
+
+**Known limitation:** compaction preserves only complete tool-call chains. If the keep boundary would leave a `tool` result without its matching assistant `tool_calls`, or an assistant `tool_calls` entry without its matching result, that incomplete chain is dropped from the compacted transcript to keep provider history valid.
+
+**Disable:** clear `auto_compact_tokens`, clear `auto_compact_keep_messages`, or remove `lua/commands/compact.lua` from the config directory. Removing the file stops both manual `/compact` and auto-compaction.
 
 **Implementation:** entirely in Lua. Rust provides only the generic APIs (`ctx.conversation`, `before_turn`, `conversation.replace` action).
 
@@ -570,7 +574,7 @@ return {
 }
 ```
 
-**`conversation.replace`** — Replaces the active in-memory transcript with the given `messages` array. Each message must have `role` ("user", "assistant", or "tool") and `content`. Optional fields: `name`, `tool_call_id`. Rust validates all messages before applying; invalid messages produce a visible error and leave the transcript unchanged. The SQLite session history is never altered.
+**`conversation.replace`** — Replaces the active in-memory transcript with the given `messages` array. Each message must have `role` (`"user"`, `"assistant"`, or `"tool"`) and `content`. Optional fields: `tool_calls`, `name`, `tool_call_id`. Invalid/unknown roles are skipped; if no valid messages remain, the action is ignored. The SQLite session history is never altered.
 
 When `conversation.replace` is applied:
 - The transcript is replaced with the validated messages.
@@ -642,7 +646,7 @@ Key differences from other events:
 - **Not blockable** — Unlike `tool_call`, `before_turn` cannot block the turn (only mutate it).
 - **Multiple handlers** — All handlers run; return actions apply in registration order.
 
-This is the mechanism behind automatic context compaction. The default `lua/commands/compact.lua` registers a `before_turn` handler that summarizes older messages when context exceeds a threshold.
+This is the mechanism behind automatic context compaction. The default `lua/commands/compact.lua` registers a `before_turn` handler that summarizes older messages when context exceeds a threshold. It preserves complete tool-call chains and drops incomplete chains at the compaction boundary so provider history stays valid.
 
 ## Config, Theme, and Keymaps
 

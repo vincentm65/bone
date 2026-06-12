@@ -13,6 +13,7 @@ mod common;
 use std::time::Duration;
 
 use bone::tools::types::ToolCall;
+use serde_json::Value;
 
 // ── 8a. Sandbox blocks dangerous APIs ───────────────────────────────────────
 
@@ -47,6 +48,29 @@ bone.register_tool({
     probe("package.loadlib", function() package.loadlib("x","y") end)
 
     return table.concat(results, ",")
+  end,
+})
+"#;
+
+const LEGACY_REQUIRED_TOOL: &str = r#"
+bone.register_tool({
+  name = "legacy_required",
+  description = "schema with stale boolean required",
+  safety = "read_only",
+  parameters = {
+    type = "object",
+    properties = {
+      action = {
+        type = "string",
+        required = true,
+        description = "Action"
+      }
+    },
+    required = { "action" },
+    additionalProperties = false
+  },
+  execute = function(args, ctx)
+    return "ok"
   end,
 })
 "#;
@@ -154,6 +178,10 @@ fn default_tools_boot_cleanly() {
         );
     }
 
+    for def in &defs {
+        assert_no_boolean_required(&def.input_schema, &format!("tool schema for {}", def.name));
+    }
+
     // Commands should also be present.
     let cmd_names: Vec<&str> = booted
         .manager
@@ -167,6 +195,53 @@ fn default_tools_boot_cleanly() {
     );
 
     std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[test]
+fn lua_tool_schemas_strip_legacy_boolean_required() {
+    let config_dir = common::temp_dir("legacy-required-tool");
+    let tools_dir = config_dir.join("lua/tools");
+    std::fs::create_dir_all(&tools_dir).unwrap();
+    std::fs::write(tools_dir.join("legacy_required.lua"), LEGACY_REQUIRED_TOOL).unwrap();
+
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
+
+    let def = booted
+        .tools
+        .definitions()
+        .into_iter()
+        .find(|def| def.name == "legacy_required")
+        .expect("legacy_required tool should be registered");
+
+    assert_no_boolean_required(&def.input_schema, "legacy_required schema");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+fn assert_no_boolean_required(value: &Value, path: &str) {
+    match value {
+        Value::Object(map) => {
+            if matches!(map.get("required"), Some(Value::Bool(_))) {
+                panic!("{path} has boolean `required`; use the parent object's required array");
+            }
+            for (key, child) in map {
+                assert_no_boolean_required(child, &format!("{path}.{key}"));
+            }
+        }
+        Value::Array(items) => {
+            for (idx, child) in items.iter().enumerate() {
+                assert_no_boolean_required(child, &format!("{path}[{idx}]"));
+            }
+        }
+        _ => {}
+    }
 }
 
 // ── 8c. ctx.tools.call depth limit ──────────────────────────────────────────

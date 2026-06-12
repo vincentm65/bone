@@ -7,12 +7,38 @@
 --           action = "conversation.replace", bone.on("before_turn", ...)
 
 -- ---------------------------------------------------------------------------
--- Default configuration (overridable via bone.config in init.lua)
+-- Configuration — read from config/general.yaml.
 -- ---------------------------------------------------------------------------
 
-local AUTO_TOKENS       = 8000   -- trigger auto-compact when context_length >= this
-local KEEP_MESSAGES     = 12     -- preserve the last N user/assistant messages
-local SUMMARY_TARGET    = 1200   -- target token budget for the summary
+local function config_int(ctx, key)
+    if not ctx.config or not ctx.config.get then
+        return nil
+    end
+
+    local value = ctx.config.get("general", key)
+    if value == nil then
+        return nil
+    end
+    if type(value) == "string" then
+        value = value:gsub("^%s+", ""):gsub("%s+$", "")
+        if value == "" then
+            return nil
+        end
+    end
+
+    local number = tonumber(value)
+    if not number or number < 1 or number ~= math.floor(number) then
+        return nil
+    end
+    return number
+end
+
+local function compact_config(ctx)
+    return {
+        auto_tokens = config_int(ctx, "auto_compact_tokens"),
+        keep_messages = config_int(ctx, "auto_compact_keep_messages"),
+    }
+end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -26,8 +52,7 @@ local function summarization_prompt(older, recent_count)
         "Instructions:",
         "- Capture key facts, decisions, and user preferences.",
         "- Include file paths, code changes, and errors when relevant.",
-        "- Keep the summary under " .. SUMMARY_TARGET .. " tokens.",
-        "- Write in plain prose, no markdown headings.",
+        "- Write a concise summary in plain prose, no markdown headings.",
         "",
         "The last " .. recent_count .. " messages are preserved verbatim and will follow this summary.",
         "",
@@ -55,9 +80,61 @@ end
 -- Core compaction logic
 -- ---------------------------------------------------------------------------
 
+local function sanitize_tool_chains(messages)
+    -- Pass 1: collect tool_call_ids that have results.
+    local result_ids = {}
+    for _, msg in ipairs(messages) do
+        if msg.role == "tool" and msg.tool_call_id then
+            result_ids[msg.tool_call_id] = true
+        end
+    end
+
+    -- Pass 2: filter assistant tool_calls; collect which ids are kept.
+    local kept_call_ids = {}
+    local filtered = {}
+    for _, msg in ipairs(messages) do
+        if msg.role == "assistant" and msg.tool_calls then
+            local calls = {}
+            for _, call in ipairs(msg.tool_calls) do
+                if call.id and result_ids[call.id] then
+                    calls[#calls + 1] = call
+                    kept_call_ids[call.id] = true
+                end
+            end
+            if #calls > 0 then
+                local copy = {}
+                for k, v in pairs(msg) do copy[k] = v end
+                copy.tool_calls = calls
+                filtered[#filtered + 1] = copy
+            elseif msg.content and msg.content ~= "" then
+                local copy = {}
+                for k, v in pairs(msg) do copy[k] = v end
+                copy.tool_calls = nil
+                filtered[#filtered + 1] = copy
+            end
+        else
+            filtered[#filtered + 1] = msg
+        end
+    end
+
+    -- Pass 3: filter tool results to only those whose call id was kept.
+    local result = {}
+    for _, msg in ipairs(filtered) do
+        if msg.role == "tool" then
+            if msg.tool_call_id and kept_call_ids[msg.tool_call_id] then
+                result[#result + 1] = msg
+            end
+        else
+            result[#result + 1] = msg
+        end
+    end
+
+    return result
+end
+
 --- Run compaction on the current transcript. Returns the replacement messages
 --- table, or nil on failure / when history is already small enough.
-local function compact(history, ctx)
+local function compact(history, ctx, keep_messages)
     if not history or #history == 0 then
         return nil
     end
@@ -67,20 +144,39 @@ local function compact(history, ctx)
     -- from the replacement and let the model see only user/assistant.
     local keep = {}
     local older = {}
-    local kept = 0
 
-    -- Walk backward to find the KEEP_MESSAGES most recent user/assistant.
+    -- Pass 1: walk backward to find which user/assistant messages are in the
+    -- keep window, and collect tool_call_ids from kept assistants so we can
+    -- correctly route tool results (a tool result should be kept only if its
+    -- matching assistant is in keep).
+    local keep_indices = {}
+    local kept_call_ids = {}
+    local kept = 0
     for i = #history, 1, -1 do
         local msg = history[i]
         if msg.role == "user" or msg.role == "assistant" then
             kept = kept + 1
-            if kept <= KEEP_MESSAGES then
-                keep[#keep + 1] = msg
-            else
-                older[#older + 1] = msg
+            if kept <= keep_messages then
+                keep_indices[i] = true
+                if msg.tool_calls then
+                    for _, call in ipairs(msg.tool_calls) do
+                        if call.id then
+                            kept_call_ids[call.id] = true
+                        end
+                    end
+                end
             end
-        elseif kept > 0 and kept <= KEEP_MESSAGES then
-            -- Tool messages within the keep window: preserve them too.
+        end
+    end
+
+    -- Pass 2: assign messages to keep or older using the collected data.
+    for i = #history, 1, -1 do
+        local msg = history[i]
+        if keep_indices[i] then
+            keep[#keep + 1] = msg
+        elseif msg.role == "tool" and msg.tool_call_id and kept_call_ids[msg.tool_call_id] then
+            -- This tool result belongs to an assistant in keep. Keep it
+            -- regardless of its position (it may trail the last kept user msg).
             keep[#keep + 1] = msg
         else
             older[#older + 1] = msg
@@ -93,7 +189,7 @@ local function compact(history, ctx)
     end
 
     -- Build the summary via ctx.agent.run().
-    local prompt = summarization_prompt(older, KEEP_MESSAGES)
+    local prompt = summarization_prompt(older, keep_messages)
     local run_result = ctx.agent.run(prompt, { timeout_ms = 120000 })
     if not run_result.ok then
         ctx.ui.notify("compact: summarization failed: " .. (run_result.error or "unknown"), "warn")
@@ -117,7 +213,7 @@ local function compact(history, ctx)
         messages[#messages + 1] = keep[i]
     end
 
-    return messages
+    return sanitize_tool_chains(messages)
 end
 
 -- ---------------------------------------------------------------------------
@@ -126,12 +222,23 @@ end
 
 local last_auto_context = 0
 
-bone.on("before_turn", function(_, ctx)
+bone.on("before_turn", function(event, ctx)
     -- Safety: skip if usage or conversation APIs are unavailable.
     if not ctx.usage or not ctx.usage.snapshot then
         return nil
     end
     if not ctx.conversation or not ctx.conversation.history then
+        return nil
+    end
+
+    -- Check that the compact command is enabled (respects /config toggle).
+    local compact_enabled = ctx.config.get("commands", "compact")
+    if compact_enabled ~= true then
+        return nil
+    end
+
+    local config = compact_config(ctx)
+    if not config.auto_tokens or not config.keep_messages then
         return nil
     end
 
@@ -141,7 +248,7 @@ bone.on("before_turn", function(_, ctx)
     end
 
     local context_length = snapshot.context_length or 0
-    if context_length < AUTO_TOKENS then
+    if context_length < config.auto_tokens then
         return nil
     end
 
@@ -156,7 +263,7 @@ bone.on("before_turn", function(_, ctx)
         return nil
     end
 
-    local messages = compact(history, ctx)
+    local messages = compact(history, ctx, config.keep_messages)
     if not messages then
         return nil
     end
@@ -189,29 +296,37 @@ bone.register_command("compact", {
             }
         end
 
+        local config = compact_config(ctx)
+        if not config.keep_messages then
+            return {
+                display = "Compaction requires auto_compact_keep_messages in general config.",
+                submit = false,
+            }
+        end
+
         local history = ctx.conversation.history()
         if not history or #history == 0 then
             return { display = "Nothing to compact.", submit = false }
         end
 
-        -- Check if there's enough to compact: need more than KEEP_MESSAGES messages.
+        -- Check if there's enough to compact: need more than configured keep messages.
         local user_assistant_count = 0
         for _, msg in ipairs(history) do
             if msg.role == "user" or msg.role == "assistant" then
                 user_assistant_count = user_assistant_count + 1
             end
         end
-        if user_assistant_count <= KEEP_MESSAGES then
+        if user_assistant_count <= config.keep_messages then
             return {
                 display = string.format(
                     "History is already small (%d user+assistant messages; threshold: %d).",
-                    user_assistant_count, KEEP_MESSAGES
+                    user_assistant_count, config.keep_messages
                 ),
                 submit = false,
             }
         end
 
-        local messages = compact(history, ctx)
+        local messages = compact(history, ctx, config.keep_messages)
         if not messages then
             return { display = "Compaction produced no changes.", submit = false }
         end

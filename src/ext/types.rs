@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use mlua::{Lua, LuaSerdeExt};
 
 use super::snapshots::{LuaConfigSnapshot, LuaKeymapSnapshot, LuaThemeSnapshot};
+use crate::tools::ToolCall;
 
 /// Options controlling the Lua boot context.
 ///
@@ -34,6 +35,14 @@ pub enum EventDispatchResult {
 pub struct LuaReturnAction {
     /// When set, replace the active conversation transcript with these messages.
     pub conversation_replace: Option<Vec<crate::llm::ChatMessage>>,
+}
+
+/// Normalized result from a Lua command handler.
+#[derive(Debug, Clone)]
+pub struct LuaCommandReturn {
+    pub output: String,
+    pub submit: bool,
+    pub action: Option<LuaReturnAction>,
 }
 
 /// Owning manager for the Lua VM and all registered extension data.
@@ -266,15 +275,116 @@ pub struct BootedTools {
     pub tools: crate::tools::registry::ToolHandler,
 }
 
+/// Normalize a value returned by a Lua command handler.
+///
+/// String returns are prompts to submit into the agent loop. Table returns can
+/// override that with `submit = false` for display-only command output.
+pub fn parse_lua_command_return(value: mlua::Value) -> Option<LuaCommandReturn> {
+    match value {
+        mlua::Value::String(s) => {
+            let output = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+            if output.is_empty() {
+                None
+            } else {
+                Some(LuaCommandReturn {
+                    output,
+                    submit: true,
+                    action: None,
+                })
+            }
+        }
+        mlua::Value::Table(t) => {
+            let output = t
+                .get::<Option<String>>("display")
+                .ok()
+                .flatten()
+                .or_else(|| t.get::<Option<String>>("reply").ok().flatten())
+                .or_else(|| t.get::<Option<String>>("content").ok().flatten())
+                .unwrap_or_default();
+            let action = parse_lua_return_action(&t);
+            if output.is_empty() && action.is_none() {
+                None
+            } else {
+                let submit = t
+                    .get::<Option<bool>>("submit")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(true);
+                Some(LuaCommandReturn {
+                    output,
+                    submit,
+                    action,
+                })
+            }
+        }
+        mlua::Value::Nil => None,
+        other => Some(LuaCommandReturn {
+            output: format!("{other:?}"),
+            submit: true,
+            action: None,
+        }),
+    }
+}
+
+fn lua_value_to_json(value: mlua::Value) -> mlua::Result<serde_json::Value> {
+    Ok(match value {
+        mlua::Value::Nil => serde_json::Value::Null,
+        mlua::Value::Boolean(b) => serde_json::Value::Bool(b),
+        mlua::Value::Integer(n) => serde_json::Value::Number(n.into()),
+        mlua::Value::Number(n) => serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        mlua::Value::String(s) => serde_json::Value::String(s.to_str()?.to_string()),
+        mlua::Value::Table(t) => {
+            let mut array_items: Vec<(usize, serde_json::Value)> = Vec::new();
+            let mut object = serde_json::Map::new();
+            let mut array_only = true;
+
+            for pair in t.pairs::<mlua::Value, mlua::Value>() {
+                let (key, value) = pair?;
+                let value = lua_value_to_json(value)?;
+                match key {
+                    mlua::Value::Integer(i) if i >= 1 => array_items.push((i as usize, value)),
+                    mlua::Value::String(s) => {
+                        array_only = false;
+                        object.insert(s.to_str()?.to_string(), value);
+                    }
+                    other => {
+                        array_only = false;
+                        object.insert(format!("{other:?}"), value);
+                    }
+                }
+            }
+
+            if array_only {
+                array_items.sort_by_key(|(i, _)| *i);
+                if array_items
+                    .iter()
+                    .enumerate()
+                    .all(|(idx, (i, _))| *i == idx + 1)
+                {
+                    serde_json::Value::Array(array_items.into_iter().map(|(_, v)| v).collect())
+                } else {
+                    for (i, v) in array_items {
+                        object.insert(i.to_string(), v);
+                    }
+                    serde_json::Value::Object(object)
+                }
+            } else {
+                for (i, v) in array_items {
+                    object.insert(i.to_string(), v);
+                }
+                serde_json::Value::Object(object)
+            }
+        }
+        _ => serde_json::Value::Null,
+    })
+}
+
 /// Parse a `LuaReturnAction` from a Lua table returned by a handler.
 /// Returns `None` when no recognized action key is present.
-pub(crate) fn parse_lua_return_action(
-    table: &mlua::Table,
-) -> Option<LuaReturnAction> {
-    let action_name: Option<String> = table
-        .get::<Option<String>>("action")
-        .ok()
-        .flatten();
+pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAction> {
+    let action_name: Option<String> = table.get::<Option<String>>("action").ok().flatten();
 
     match action_name.as_deref() {
         Some("conversation.replace") => {
@@ -311,9 +421,43 @@ pub(crate) fn parse_lua_return_action(
                 let tool_call_id: Option<String> =
                     entry.get::<Option<String>>("tool_call_id").ok().flatten();
                 let mut msg = crate::llm::ChatMessage::new(role, content.clone());
+                if let Some(calls_table) = entry
+                    .get::<Option<mlua::Table>>("tool_calls")
+                    .ok()
+                    .flatten()
+                {
+                    for call in calls_table.sequence_values::<mlua::Table>() {
+                        let call = match call {
+                            Ok(call) => call,
+                            Err(_) => continue,
+                        };
+                        let id: String = call
+                            .get::<Option<String>>("id")
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        let name: String = call
+                            .get::<Option<String>>("name")
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        if id.is_empty() || name.is_empty() {
+                            continue;
+                        }
+                        let arguments = call
+                            .get::<mlua::Value>("arguments")
+                            .ok()
+                            .and_then(|v| lua_value_to_json(v).ok())
+                            .unwrap_or(serde_json::Value::Null);
+                        msg.tool_calls.push(ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        });
+                    }
+                }
                 msg.name = name;
                 msg.tool_call_id = tool_call_id;
-                msg.content = content;
                 messages.push(msg);
             }
 

@@ -218,7 +218,6 @@ bone.register_tool({
         properties = {
             action = {
                 type = "string",
-                required = true,
                 description = "Action: add, list, remove, logs, or help.",
             },
             name = {

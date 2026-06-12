@@ -368,17 +368,16 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     })?;
     ctx.set("write_file", write_fn)?;
 
-    // ctx.ui.notify(message, level?) — show a notification in the UI
-    // level: "info" (default), "warn", "error"
+    // ctx.ui.notify(message, level?) — write a notification-style stderr line
+    // for warnings/errors. Info notifications are intentionally quiet so
+    // background hooks do not corrupt the TUI.
     let ui_table = lua.create_table()?;
     let notify_fn = lua.create_function(|_, (msg, level): (String, Option<String>)| {
-        let level = level.unwrap_or_else(|| "info".to_string());
-        let prefixed = match level.as_str() {
-            "warn" => format!("[warn] {msg}"),
-            "error" => format!("[error] {msg}"),
-            _ => format!("[info] {msg}"),
-        };
-        eprintln!("bone-lua: {prefixed}");
+        match level.as_deref() {
+            Some("warn") | Some("warning") => eprintln!("bone-lua warn: {msg}"),
+            Some("error") => eprintln!("bone-lua error: {msg}"),
+            _ => {}
+        }
         Ok(())
     })?;
     ui_table.set("notify", notify_fn)?;
@@ -480,6 +479,17 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                 let entry = lua.create_table()?;
                 entry.set("role", msg.role.as_str())?;
                 entry.set("content", msg.content.as_str())?;
+                if !msg.tool_calls.is_empty() {
+                    let calls = lua.create_table()?;
+                    for call in &msg.tool_calls {
+                        let call_entry = lua.create_table()?;
+                        call_entry.set("id", call.id.as_str())?;
+                        call_entry.set("name", call.name.as_str())?;
+                        call_entry.set("arguments", lua.to_value(&call.arguments)?)?;
+                        calls.push(call_entry)?;
+                    }
+                    entry.set("tool_calls", calls)?;
+                }
                 if let Some(ref name) = msg.name {
                     entry.set("name", name.as_str())?;
                 }
@@ -1383,15 +1393,27 @@ fn parse_agent_opts(
         None => inherited_approval,
     };
 
-    let provider = opts
+    let explicit_provider = opts
         .as_ref()
         .and_then(|t| t.get::<Option<String>>("provider").ok().flatten())
+        .filter(|s| !s.is_empty());
+
+    let provider = explicit_provider
+        .clone()
         .or_else(|| inherited_provider.clone());
 
-    let model = opts
+    let explicit_model = opts
         .as_ref()
         .and_then(|t| t.get::<Option<String>>("model").ok().flatten())
-        .or_else(|| inherited_model.clone());
+        .filter(|s| !s.is_empty());
+
+    let model = explicit_model.or_else(|| {
+        if explicit_provider.is_none() {
+            inherited_model.clone()
+        } else {
+            None
+        }
+    });
 
     let system_prompt: Option<String> = opts
         .as_ref()
@@ -1552,5 +1574,93 @@ fn yaml_to_lua(lua: &Lua, val: &serde_yaml::Value) -> Result<Value, mlua::Error>
             Ok(Value::Table(t))
         }
         serde_yaml::Value::Tagged(tagged) => yaml_to_lua(lua, &tagged.value),
+    }
+}
+
+/// Build a CtxConfig for before_turn dispatch.
+///
+/// The caller is responsible for setting `tool_handler`, `approval_mode`,
+/// `session_id`, `provider`, `model`, `usage`, and `conversation_history`
+/// on the returned config.  This helper only fills the boilerplate fields
+/// that are identical across callers.
+pub(crate) fn new_before_turn_ctx(config_dir: String, by_provider: Vec<UsageProviderContext>) -> CtxConfig {
+    let shared_state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    let mut cfg = CtxConfig::new(config_dir, shared_state);
+    cfg.usage = Some(UsageContext {
+        request_count: 0,
+        sent: 0,
+        received: 0,
+        cached: 0,
+        cost: 0.0,
+        context_length: 0,
+        tool_count: 0,
+        tool_schema_chars: 0,
+        tool_schema_tokens: 0,
+        system_prompt_chars: 0,
+        system_prompt_tokens: 0,
+        by_provider,
+    });
+    cfg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_opts_do_not_inherit_model_when_provider_changes() {
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("provider", "openrouter").unwrap();
+
+        let (_, provider, model, _, _) = parse_agent_opts(
+            &Some(opts),
+            crate::tools::ApprovalMode::Safe,
+            &Some("local".to_string()),
+            &Some("local".to_string()),
+            &["provider", "model"],
+        )
+        .unwrap();
+
+        assert_eq!(provider.as_deref(), Some("openrouter"));
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn agent_opts_inherit_model_when_provider_is_inherited() {
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+
+        let (_, provider, model, _, _) = parse_agent_opts(
+            &Some(opts),
+            crate::tools::ApprovalMode::Safe,
+            &Some("local".to_string()),
+            &Some("local".to_string()),
+            &["provider", "model"],
+        )
+        .unwrap();
+
+        assert_eq!(provider.as_deref(), Some("local"));
+        assert_eq!(model.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn agent_opts_use_explicit_model_when_provider_changes() {
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("provider", "openrouter").unwrap();
+        opts.set("model", "google/gemini-3.1-flash-lite").unwrap();
+
+        let (_, provider, model, _, _) = parse_agent_opts(
+            &Some(opts),
+            crate::tools::ApprovalMode::Safe,
+            &Some("local".to_string()),
+            &Some("local".to_string()),
+            &["provider", "model"],
+        )
+        .unwrap();
+
+        assert_eq!(provider.as_deref(), Some("openrouter"));
+        assert_eq!(model.as_deref(), Some("google/gemini-3.1-flash-lite"));
     }
 }

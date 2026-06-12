@@ -258,7 +258,10 @@ fn conversation_api_available_in_commands() {
     assert!(!raw.is_empty(), "probe did not set _CONV_API_PROBE_RESULT");
 
     let results: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(results["conv_table"], "yes", "ctx.conversation should exist");
+    assert_eq!(
+        results["conv_table"], "yes",
+        "ctx.conversation should exist"
+    );
     assert_eq!(
         results["current_fn"], "yes",
         "ctx.conversation.current should be a function"
@@ -267,10 +270,7 @@ fn conversation_api_available_in_commands() {
         results["history_fn"], "yes",
         "ctx.conversation.history should be a function"
     );
-    assert_eq!(
-        results["history_len"], "1",
-        "history should have 1 message"
-    );
+    assert_eq!(results["history_len"], "1", "history should have 1 message");
     assert_eq!(
         results["first_role"], "user",
         "first message should have role=user"
@@ -295,6 +295,14 @@ bone.register_command("actiontest", {
                 messages = {
                     { role = "user", content = "summary of prior context" },
                     { role = "assistant", content = "acknowledged" },
+                    {
+                        role = "assistant",
+                        content = "",
+                        tool_calls = {
+                            { id = "call_1", name = "read_file", arguments = { path = "Cargo.toml" } },
+                        },
+                    },
+                    { role = "tool", content = "contents", name = "read_file", tool_call_id = "call_1" },
                 },
                 display = "replaced",
                 submit = false,
@@ -386,17 +394,29 @@ fn conversation_replace_action_parses() {
     assert_eq!(action, "conversation.replace");
 
     let messages: mlua::Table = t.get("messages").unwrap();
-    let msgs: Vec<mlua::Table> = messages
-        .sequence_values()
-        .filter_map(|v| v.ok())
-        .collect();
-    assert_eq!(msgs.len(), 2);
+    let msgs: Vec<mlua::Table> = messages.sequence_values().filter_map(|v| v.ok()).collect();
+    assert_eq!(msgs.len(), 4);
     let role0: String = msgs[0].get("role").unwrap();
     assert_eq!(role0, "user");
     let content0: String = msgs[0].get("content").unwrap();
     assert_eq!(content0, "summary of prior context");
     let role1: String = msgs[1].get("role").unwrap();
     assert_eq!(role1, "assistant");
+    let role2: String = msgs[2].get("role").unwrap();
+    assert_eq!(role2, "assistant");
+    let tool_calls: mlua::Table = msgs[2].get("tool_calls").unwrap();
+    let calls: Vec<mlua::Table> = tool_calls
+        .sequence_values()
+        .filter_map(|v| v.ok())
+        .collect();
+    assert_eq!(calls.len(), 1);
+    let call_id: String = calls[0].get("id").unwrap();
+    assert_eq!(call_id, "call_1");
+    let args: mlua::Table = calls[0].get("arguments").unwrap();
+    let path: String = args.get("path").unwrap();
+    assert_eq!(path, "Cargo.toml");
+    let role3: String = msgs[3].get("role").unwrap();
+    assert_eq!(role3, "tool");
 
     let display: String = t.get("display").unwrap_or_default();
     assert_eq!(display, "replaced");
@@ -412,27 +432,77 @@ fn conversation_replace_action_parses() {
     // Test 3: bad action name → should not crash, just return the table
     let t = call_handler("bad_action").expect("should return a table");
     let action: String = t.get("action").unwrap_or_default();
-    assert_eq!(action, "unknown.action", "unknown action preserved in table");
+    assert_eq!(
+        action, "unknown.action",
+        "unknown action preserved in table"
+    );
 
     // Test 4: missing messages should still return the table (warning on stderr)
     let t = call_handler("no_messages").expect("should return a table");
     let action: String = t.get("action").unwrap_or_default();
     assert_eq!(action, "conversation.replace");
     let messages: Option<mlua::Table> = t.get("messages").ok();
-    assert!(messages.is_none(), "no_messages: messages key should be absent");
+    assert!(
+        messages.is_none(),
+        "no_messages: messages key should be absent"
+    );
 
     // Test 5: invalid roles preserved in the table (validation happens in Rust)
     let t = call_handler("invalid_role").expect("should return a table");
     let messages: mlua::Table = t.get("messages").unwrap();
-    let msgs: Vec<mlua::Table> = messages
-        .sequence_values()
-        .filter_map(|v| v.ok())
-        .collect();
+    let msgs: Vec<mlua::Table> = messages.sequence_values().filter_map(|v| v.ok()).collect();
     assert_eq!(msgs.len(), 1);
     let role0: String = msgs[0].get("role").unwrap();
-    assert_eq!(role0, "system", "invalid role preserved for Rust-side validation");
+    assert_eq!(
+        role0, "system",
+        "invalid role preserved for Rust-side validation"
+    );
 
     std::fs::remove_dir_all(&config_dir).ok();
+}
+
+// ── 5. Lua command return semantics ────────────────────────────────────────
+
+#[test]
+fn lua_command_string_return_submits_to_agent_loop() {
+    let lua = mlua::Lua::new();
+    let value = mlua::Value::String(lua.create_string("expanded prompt").unwrap());
+
+    let parsed = bone::ext::types::parse_lua_command_return(value)
+        .expect("string command return should be handled");
+
+    assert_eq!(parsed.output, "expanded prompt");
+    assert!(parsed.submit, "string returns should submit a user turn");
+    assert!(parsed.action.is_none());
+}
+
+#[test]
+fn lua_command_table_return_can_be_display_only() {
+    let lua = mlua::Lua::new();
+    let table = lua.create_table().unwrap();
+    table.set("display", "shown only").unwrap();
+    table.set("submit", false).unwrap();
+
+    let parsed = bone::ext::types::parse_lua_command_return(mlua::Value::Table(table))
+        .expect("table command return should be handled");
+
+    assert_eq!(parsed.output, "shown only");
+    assert!(!parsed.submit);
+    assert!(parsed.action.is_none());
+}
+
+#[test]
+fn lua_command_table_return_defaults_to_submit() {
+    let lua = mlua::Lua::new();
+    let table = lua.create_table().unwrap();
+    table.set("content", "prompt from table").unwrap();
+
+    let parsed = bone::ext::types::parse_lua_command_return(mlua::Value::Table(table))
+        .expect("table command return should be handled");
+
+    assert_eq!(parsed.output, "prompt from table");
+    assert!(parsed.submit);
+    assert!(parsed.action.is_none());
 }
 
 // ── 5. Default compact.lua internal logic ──────────────────────────────────
@@ -479,6 +549,133 @@ fn compact_logic_on_small_history_is_noop() {
     assert!(
         bt_count >= 1,
         "before_turn handlers should have at least 1 entry, got {bt_count}",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[test]
+fn compact_preserves_tool_call_chains() {
+    let config_dir = common::temp_dir("compact-tool-calls");
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(r#"
+        local handler = bone._handlers.before_turn[1]
+        local ctx = {
+            config = { get = function(section, key)
+                if section == "commands" and key == "compact" then return true end
+                if key == "auto_compact_tokens" then return "1" end
+                if key == "auto_compact_keep_messages" then return "3" end
+            end },
+            usage = { snapshot = function() return { context_length = 100 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "older" },
+                { role = "assistant", content = "older answer" },
+                { role = "user", content = "read it" },
+                { role = "assistant", content = "", tool_calls = {
+                    { id = "call_1", name = "read_file", arguments = { path = "Cargo.toml" } },
+                } },
+                { role = "tool", content = "contents", name = "read_file", tool_call_id = "call_1" },
+                { role = "user", content = "continue" },
+            } end },
+            agent = { run = function() return { ok = true, content = "summary" } end },
+            ui = { notify = function() end },
+        }
+        local ret = handler({}, ctx)
+        _COMPACT_TOOL_RET = cjson.encode(ret.messages)
+    "#)
+    .exec()
+    .unwrap();
+
+    let raw: String = lua.globals().get("_COMPACT_TOOL_RET").unwrap();
+    let messages: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        messages.as_array().unwrap().iter().any(|m| {
+            m["role"] == "assistant"
+                && m["tool_calls"]
+                    .as_array()
+                    .is_some_and(|calls| calls[0]["id"] == "call_1")
+        }),
+        "assistant tool call should be preserved: {raw}"
+    );
+    assert!(
+        messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| { m["role"] == "tool" && m["tool_call_id"] == "call_1" }),
+        "matching tool result should be preserved: {raw}"
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[test]
+fn compact_drops_orphan_tool_results() {
+    let config_dir = common::temp_dir("compact-orphan-tool");
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(r#"
+        local handler = bone._handlers.before_turn[1]
+        local ctx = {
+            config = { get = function(section, key)
+                if section == "commands" and key == "compact" then return true end
+                if key == "auto_compact_tokens" then return "1" end
+                if key == "auto_compact_keep_messages" then return "2" end
+            end },
+            usage = { snapshot = function() return { context_length = 200 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "read it" },
+                { role = "assistant", content = "", tool_calls = {
+                    { id = "call_1", name = "read_file", arguments = { path = "Cargo.toml" } },
+                } },
+                { role = "tool", content = "contents", name = "read_file", tool_call_id = "call_1" },
+                { role = "user", content = "continue" },
+                { role = "assistant", content = "ok" },
+            } end },
+            agent = { run = function() return { ok = true, content = "summary" } end },
+            ui = { notify = function() end },
+        }
+        local ret = handler({}, ctx)
+        _COMPACT_ORPHAN_RET = cjson.encode(ret.messages)
+    "#)
+    .exec()
+    .unwrap();
+
+    let raw: String = lua.globals().get("_COMPACT_ORPHAN_RET").unwrap();
+    let messages: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["role"] != "tool"),
+        "orphan tool result should be dropped: {raw}"
+    );
+    assert!(
+        messages.as_array().unwrap().iter().all(|m| m
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .is_none_or(|a| a.is_empty())),
+        "assistant tool call without result should be dropped: {raw}"
     );
 
     std::fs::remove_dir_all(&config_dir).ok();
@@ -535,8 +732,8 @@ fn compact_is_not_a_protected_builtin() {
     // The builtin list is in src/ui/commands/mod.rs BUILTINS.
     // Verify /compact is NOT in it (it's Lua-defined).
     let builtins = &[
-        "clear", "config", "edit", "e", "exit", "help", "model", "new",
-        "provider", "quit", "stats", "tools",
+        "clear", "config", "edit", "e", "exit", "help", "model", "new", "provider", "quit",
+        "stats", "tools",
     ];
     assert!(
         !builtins.contains(&"compact"),
