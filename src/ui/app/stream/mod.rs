@@ -1089,7 +1089,7 @@ impl App {
         mode: &mut ApprovalMode,
         cancel: &mut bool,
         panes_visible: &mut bool,
-        pages: &mut [PanePage],
+        pages: &mut Vec<PanePage>,
         active_page: &mut usize,
     ) -> bool {
         let mut mode_changed = false;
@@ -1109,6 +1109,38 @@ impl App {
                         *panes_visible = !*panes_visible;
                         continue;
                     }
+                    // ── Interactive pane key handling (before navigation) ───
+                    if *panes_visible {
+                        let active_idx = (*active_page).min(pages.len().saturating_sub(1));
+                        let mut cleanup_source: Option<String> = None;
+                        let handled = if let Some(page) = pages.get(active_idx) {
+                            if let Some(ref interaction) = page.interaction {
+                                if interaction.is_active() {
+                                    if interaction.handle_key(key.code, key.modifiers) {
+                                        if !interaction.is_active() && page.source != "interact" {
+                                            cleanup_source = Some(page.source.clone());
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if let Some(source) = cleanup_source {
+                            *active_page = PanePage::remove(pages, &source, *active_page);
+                        }
+                        if handled {
+                            continue;
+                        }
+                    }
+                    // ── Page navigation (Tab/BackTab/PageUp/PageDown) ─────
                     if *panes_visible && !pages.is_empty() {
                         *active_page = (*active_page).min(pages.len() - 1);
                         match (key.code, key.modifiers) {
@@ -1153,21 +1185,6 @@ impl App {
                                 continue;
                             }
                             _ => {}
-                        }
-                    }
-                    // ── Interactive pane key handling ────────────────────
-                    if *panes_visible {
-                        let active_idx = (*active_page).min(pages.len().saturating_sub(1));
-                        if let Some(page) = pages.get(active_idx) {
-                            if let Some(ref interaction) = page.interaction {
-                                if interaction.is_active() {
-                                    if interaction.handle_key(
-                                        key.code, key.modifiers,
-                                    ) {
-                                        continue;
-                                    }
-                                }
-                            }
                         }
                     }
                     match input.apply_key(key.code, key.modifiers) {

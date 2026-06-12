@@ -864,7 +864,6 @@ fn render_interactive_overlay(
 ) -> u16 {
     let mut y = start_y;
     let options = interaction.options();
-    let _num_options = options.len();
     let sel = interaction.selected();
     let mode = interaction.mode();
     let allow_custom = interaction.allow_custom();
@@ -911,7 +910,7 @@ fn render_interactive_overlay(
                 let checkbox = if checked { "[x]" } else { "[ ]" };
                 let check_style = if checked { checkbox_on_style } else { muted_style };
                 let marker = if is_selected { "›" } else { " " };
-                let opt_style = if is_selected { selected_style } else { selected_style.fg(ratatui::style::Color::White) };
+                let opt_style = if is_selected { selected_style } else { normal_style };
                 let marker_style = if is_selected { cursor_style } else { normal_style };
                 ratatui::text::Line::from(vec![
                     ratatui::text::Span::styled(format!("  {marker} "), marker_style),

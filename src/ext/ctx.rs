@@ -461,25 +461,24 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             // Use a fixed source so all questions share one page (upsert
             // replaces any previous interact page).
             let source = "interact".to_string();
-            // Acquire the serialization lock, send the pane, then drop the
-            // lock *before* blocking so a panic doesn't poison it.
-            {
-                let _lock = INTERACT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-                let page = PanePage {
-                    source,
-                    title: format!("Question — {}", type_str),
-                    content: lines,
-                    visible_rows,
-                    scroll: 0,
-                    interaction: Some(interaction),
-                };
+            // Acquire the serialization lock, send the pane, then block
+            // for the user response — the lock is held for the entire
+            // send+wait cycle so concurrent calls are serialized.
+            let _lock = INTERACT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let page = PanePage {
+                source,
+                title: format!("Question — {}", type_str),
+                content: lines,
+                visible_rows,
+                scroll: 0,
+                interaction: Some(interaction),
+            };
 
-                sender
-                    .send(crate::tools::types::ToolLiveEvent::Pane(page))
-                    .map_err(|e| mlua::Error::external(format!("interact pane send failed: {e}")))?;
-            }
+            sender
+                .send(crate::tools::types::ToolLiveEvent::Pane(page))
+                .map_err(|e| mlua::Error::external(format!("interact pane send failed: {e}")))?;
 
-            // Block until the user responds (outside the lock).
+            // Block until the user responds (lock still held, serializing concurrent calls).
             let result: serde_json::Value = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(rx)
             }).map_err(|e| mlua::Error::external(format!("interact cancelled: {e}")))?;

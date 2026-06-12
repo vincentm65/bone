@@ -66,7 +66,7 @@ impl PaneInteraction {
         let has_options = !matches!(mode, InteractionMode::TextInput);
         Self {
             inner: Arc::new(Mutex::new(InteractionInner {
-                selected: default_selected,
+                selected: if has_options { default_selected.min(options.len().saturating_sub(1)) } else { 0 },
                 checked: std::iter::repeat(false).take(if has_options { options.len() } else { 0 }).collect(),
                 input_buffer: String::new(),
                 cursor_pos: 0,

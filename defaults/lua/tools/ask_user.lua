@@ -9,10 +9,8 @@
 --   2. Multi-question:  { questions = { {question, options, allow_custom, type, default}, ... } }
 --      Asks each question sequentially, collecting all answers.
 
+
 local function format_answer(result)
-    if result.cancelled then
-        return nil, "cancelled"
-    end
     if result.values then
         local parts = {}
         for _, v in ipairs(result.values) do
@@ -70,6 +68,10 @@ local function ask_one(params, ctx)
 end
 
 local function execute(params, ctx)
+    if not params.question and not (params.questions and #params.questions > 0) then
+        return "error: provide either 'question' or 'questions' parameter"
+    end
+
     -- Multi-question mode
     if params.questions and #params.questions > 0 then
         local answers = {}
