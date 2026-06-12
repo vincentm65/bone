@@ -7,8 +7,8 @@
 -- Two calling modes:
 --   1. Single question: { question, options, allow_custom, type, default }
 --   2. Multi-question:  { questions = { {question, options, allow_custom, type, default}, ... } }
---      Asks each question sequentially, collecting all answers.
-
+--      Asks each question sequentially with backtracking navigation.
+--      After answering, user can go back to previous questions or proceed.
 
 local function format_answer(result)
     if result.values then
@@ -30,13 +30,11 @@ local function format_answer(result)
     return "(no response)"
 end
 
-local function ask_one(params, ctx)
-    local question = params.question
-    local options = params.options or {}
-    local allow_custom = params.allow_custom or false
-
-    local qtype = params.type
+local function get_qtype(q)
+    local qtype = q.type
     if not qtype then
+        local options = q.options or {}
+        local allow_custom = q.allow_custom or false
         if #options > 0 then
             if allow_custom or #options > 5 then
                 qtype = "multi_select"
@@ -47,12 +45,20 @@ local function ask_one(params, ctx)
             qtype = "text_input"
         end
     end
+    return qtype
+end
+
+local function ask_one(q, ctx)
+    local question = q.question
+    local options = q.options or {}
+    local allow_custom = q.allow_custom or false
+    local qtype = get_qtype(q)
 
     local ok, result = pcall(ctx.ui.interact, {
         question = question,
         type = qtype,
         options = options,
-        default = params.default,
+        default = q.default,
         allow_custom = allow_custom,
     })
 
@@ -67,6 +73,120 @@ local function ask_one(params, ctx)
     return format_answer(result)
 end
 
+-- Build navigation options after answering a question in multi-question mode
+-- Returns: list of option strings for the nav interact call
+local function build_nav_options(questions, answers, current_idx)
+    local opts = {}
+
+    -- Show summary of answered questions as pickable options to revise
+    for i = 1, #questions do
+        local short_q = questions[i].question
+        if #short_q > 50 then
+            short_q = short_q:sub(1, 47) .. "..."
+        end
+        if answers[i] then
+            local short_a = answers[i]
+            if #short_a > 40 then
+                short_a = short_a:sub(1, 37) .. "..."
+            end
+            table.insert(opts, string.format("Q%d: %s → %s", i, short_q, short_a))
+        else
+            table.insert(opts, string.format("Q%d: %s (unanswered)", i, short_q))
+        end
+    end
+
+    table.insert(opts, "✓ Submit all answers")
+
+    return opts
+end
+
+-- Parse what the user picked from navigation
+-- Returns: "submit", or a number (question index to jump to)
+local function parse_nav_choice(result, num_questions)
+    if result.custom then
+        local val = tonumber(result.value)
+        if val and val >= 1 and val <= num_questions then
+            return val
+        end
+        return "submit" -- fallback
+    end
+
+    local selected = result.value
+    if not selected then return "submit" end
+
+    if selected == "✓ Submit all answers" then
+        return "submit"
+    end
+
+    -- Extract question number from "Q%d: ..."
+    local qnum = selected:match("^Q(%d+):")
+    if qnum then
+        return tonumber(qnum)
+    end
+
+    return "submit"
+end
+
+local function ask_multi_with_backtrack(questions, ctx)
+    local answers = {}
+    local total = #questions
+
+    -- Fill answers table with nils
+    for _ = 1, total do table.insert(answers, nil) end
+
+    -- Start from first unanswered question
+    local function find_first_unanswered(start)
+        for i = start, total do
+            if not answers[i] then return i end
+        end
+        return nil
+    end
+
+    -- Main loop: ask questions, then show nav, repeat until submit
+    local ask_from = 1
+    while true do
+        -- Ask all unanswered questions from ask_from forward
+        local idx = find_first_unanswered(ask_from)
+        while idx do
+            local answer, err = ask_one(questions[idx], ctx)
+            if err == "cancelled" then
+                -- Treat cancellation as skip (nil answer)
+                answers[idx] = nil
+            elseif err then
+                answers[idx] = "error: " .. err
+            else
+                answers[idx] = answer
+            end
+            idx = find_first_unanswered(idx + 1)
+        end
+
+        -- Show navigation pane with summary
+        local nav_opts = build_nav_options(questions, answers, nil)
+        local ok, result = pcall(ctx.ui.interact, {
+            question = "Review your answers. Pick a question to revise, or submit.",
+            type = "single_select",
+            options = nav_opts,
+            allow_custom = false,
+        })
+
+        if not ok or (result and result.cancelled) then
+            -- Submit on cancel/escape
+            break
+        end
+
+        local choice = parse_nav_choice(result, total)
+        if choice == "submit" then
+            break
+        else
+            -- Jump back to revise that question
+            answers[choice] = nil
+            ask_from = choice
+        end
+    end
+
+    return answers
+end
+
 local function execute(params, ctx)
     if not params.question and not (params.questions and #params.questions > 0) then
         return "error: provide either 'question' or 'questions' parameter"
@@ -74,20 +194,19 @@ local function execute(params, ctx)
 
     -- Multi-question mode
     if params.questions and #params.questions > 0 then
-        local answers = {}
-        for i, q in ipairs(params.questions) do
-            local answer, err = ask_one(q, ctx)
-            if err == "cancelled" then
-                table.insert(answers, (i == 1 and "" or "\n") .. "Q" .. i .. ": [cancelled]")
-                -- Continue asking remaining questions even if one is cancelled
-            elseif err then
-                table.insert(answers, (i == 1 and "" or "\n") .. "Q" .. i .. ": error: " .. err)
+        local answers = ask_multi_with_backtrack(params.questions, ctx)
+
+        local parts = {}
+        for i, answer in ipairs(answers) do
+            if answer then
+                table.insert(parts, "Q" .. i .. ": " .. answer)
             else
-                table.insert(answers, (i == 1 and "" or "\n") .. "Q" .. i .. ": " .. answer)
+                table.insert(parts, "Q" .. i .. ": [skipped]")
             end
         end
-        local result = table.concat(answers, "")
-        -- Clear pane after all questions are done (not between each)
+
+        local result = table.concat(parts, "\n")
+        -- Clear pane after all questions are done
         pcall(ctx.ui.pane, { source = "interact", title = "", lines = {} })
         ctx.ui.notify(result, "info")
         return result
@@ -132,7 +251,7 @@ bone.register_tool({
             },
             questions = {
                 type = "array",
-                description = "Multiple questions to ask sequentially. Each item is an object with {question, options, allow_custom, type, default}. Use this instead of top-level question+options to batch several prompts into one call.",
+                description = "Multiple questions to ask sequentially with backtracking. After answering all, you can revise any question. Each item is an object with {question, options, allow_custom, type, default}.",
                 items = {
                     type = "object",
                     properties = {

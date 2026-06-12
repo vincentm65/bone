@@ -1189,6 +1189,23 @@ impl App {
                     }
                     match input.apply_key(key.code, key.modifiers) {
                         InputAction::Cancel => {
+                            // If an interactive pane is active, cancel it instead of cancelling the stream.
+                            if *panes_visible {
+                                let active_idx = (*active_page).min(pages.len().saturating_sub(1));
+                                let cancelled = pages.get(active_idx).is_some_and(|page| {
+                                    page.interaction.as_ref().is_some_and(|i| {
+                                        if i.is_active() {
+                                            i.cancel();
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    })
+                                });
+                                if cancelled {
+                                    continue;
+                                }
+                            }
                             *cancel = true;
                             queue.clear();
                             return mode_changed;

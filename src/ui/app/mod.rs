@@ -1009,8 +1009,32 @@ impl App {
         None
     }
 
+    /// Cancel any active interaction on the current pane.
+    /// Returns true if an interaction was cancelled.
+    fn cancel_active_interaction(&mut self) -> bool {
+        if !self.panes_visible {
+            return false;
+        }
+        let active_idx = self.active_page.min(self.pages.len().saturating_sub(1));
+        self.pages.get(active_idx).is_some_and(|page| {
+            page.interaction.as_ref().is_some_and(|i| {
+                if i.is_active() {
+                    i.cancel();
+                    true
+                } else {
+                    false
+                }
+            })
+        })
+    }
+
     /// Handle Ctrl+C: cancel streaming response, or quit on double-tap.
     fn handle_ctrl_c(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        // If an interactive pane is active, cancel it instead of quitting.
+        if self.cancel_active_interaction() {
+            return self.redraw(term);
+        }
+
         let now = Instant::now();
         let double_tap = self
             .last_ctrl_c

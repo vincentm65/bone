@@ -281,11 +281,16 @@ impl PaneInteraction {
 
         match code {
             KeyCode::Up if modifiers.is_empty() => {
-                let sel = self.selected();
-                if sel > 0 {
-                    self.set_selected(sel - 1);
-                } else if self.allow_custom() && !custom_focused {
-                    self.set_custom_focused(true);
+                if custom_focused {
+                    self.set_custom_focused(false);
+                    self.set_selected(num_options.saturating_sub(1));
+                } else {
+                    let sel = self.selected();
+                    if sel > 0 {
+                        self.set_selected(sel - 1);
+                    } else if self.allow_custom() {
+                        self.set_custom_focused(true);
+                    }
                 }
                 return true;
             }
@@ -295,11 +300,14 @@ impl PaneInteraction {
                     self.set_selected(0);
                 } else {
                     let sel = self.selected();
-                    let max = if self.allow_custom() { num_options } else { num_options.saturating_sub(1) };
-                    if sel < max {
-                        self.set_selected(sel + 1);
-                    } else if self.allow_custom() && sel >= num_options.saturating_sub(1) {
+                    let last_idx = num_options.saturating_sub(1);
+                    if self.allow_custom() && sel >= last_idx {
                         self.set_custom_focused(true);
+                    } else {
+                        let max = if self.allow_custom() { num_options } else { last_idx };
+                        if sel < max {
+                            self.set_selected(sel + 1);
+                        }
                     }
                 }
                 return true;

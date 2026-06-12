@@ -434,6 +434,9 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                 return Err(mlua::Error::external("interact: options required for single_select and multi_select"));
             }
 
+            // Custom input is always available for selection modes.
+            let allow_custom = allow_custom || !matches!(mode, InteractionMode::TextInput);
+
             // Build question content lines
             let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
             lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
