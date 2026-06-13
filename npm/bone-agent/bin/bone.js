@@ -8,7 +8,7 @@ const packages = {
   'linux-arm64': 'bone-agent-linux-arm64',
   'darwin-x64': 'bone-agent-darwin-x64',
   'darwin-arm64': 'bone-agent-darwin-arm64',
-  'win32-x64': 'bone-agent-win32-x64'
+  'win32-x64': 'bone-agent-windows-x64'
 };
 
 const key = `${process.platform}-${process.arch}`;

@@ -7,6 +7,10 @@ on:
         description: npm version to publish
         required: true
         default: 2.0.0
+      tag:
+        description: npm dist-tag
+        required: true
+        default: latest
 
 jobs:
   build:
@@ -103,11 +107,11 @@ jobs:
       - name: publish platform packages
         run: |
           for dir in npm/dist/*; do
-            npm publish "$dir" --access public
+            npm publish "$dir" --access public --tag ${{ inputs.tag }}
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: publish main package
-        run: npm publish npm/bone-agent --access public
+        run: npm publish npm/bone-agent --access public --tag ${{ inputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

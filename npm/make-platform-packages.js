@@ -4,11 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const targets = [
-  ['linux', 'x64', 'x86_64-unknown-linux-gnu', 'bone'],
-  ['linux', 'arm64', 'aarch64-unknown-linux-gnu', 'bone'],
-  ['darwin', 'x64', 'x86_64-apple-darwin', 'bone'],
-  ['darwin', 'arm64', 'aarch64-apple-darwin', 'bone'],
-  ['win32', 'x64', 'x86_64-pc-windows-msvc', 'bone.exe']
+  ['linux', 'x64', 'x86_64-unknown-linux-gnu', 'bone', 'linux-x64'],
+  ['linux', 'arm64', 'aarch64-unknown-linux-gnu', 'bone', 'linux-arm64'],
+  ['darwin', 'x64', 'x86_64-apple-darwin', 'bone', 'darwin-x64'],
+  ['darwin', 'arm64', 'aarch64-apple-darwin', 'bone', 'darwin-arm64'],
+  ['win32', 'x64', 'x86_64-pc-windows-msvc', 'bone.exe', 'windows-x64']
 ];
 
 const version = process.argv[2] || process.env.npm_package_version;
@@ -22,8 +22,8 @@ const dist = path.join(root, 'npm', 'dist');
 fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(dist, { recursive: true });
 
-for (const [os, cpu, triple, exe] of targets) {
-  const name = `bone-agent-${os}-${cpu}`;
+for (const [os, cpu, triple, exe, packageTarget] of targets) {
+  const name = `bone-agent-${packageTarget}`;
   const dir = path.join(dist, name);
   const binDir = path.join(dir, 'bin');
   const source = path.join(root, 'target', triple, 'release', exe);
