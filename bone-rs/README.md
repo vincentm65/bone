@@ -1,11 +1,11 @@
-# bone-rs
+# bone-agent
 
 A Rust+Lua terminal AI coding assistant.
 
 ## Install
 
 ```bash
-npm install -g bone-rs
+npm install -g bone-agent
 ```
 
 ## Usage
