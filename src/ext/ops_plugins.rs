@@ -108,7 +108,11 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                 } else {
                     src.to_path_buf()
                 };
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(&abs, &dest)
+                    .map_err(|e| mlua::Error::external(format!("symlink failed: {e}")))?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_dir(&abs, &dest)
                     .map_err(|e| mlua::Error::external(format!("symlink failed: {e}")))?;
                 Ok(name)
             } else {
