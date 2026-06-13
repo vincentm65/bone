@@ -318,3 +318,7 @@ fn collect_keymap_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots:
         _ => super::snapshots::LuaKeymapSnapshot::default(),
     }
 }
+
+#[cfg(test)]
+#[path = "loader_tests.rs"]
+mod loader_tests;

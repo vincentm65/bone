@@ -21,7 +21,7 @@ static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Shared mutable state accessible via ctx.state.
 pub(crate) type SharedState = Arc<Mutex<HashMap<String, String>>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct UsageProviderContext {
     pub provider: String,
     pub model: String,
@@ -32,7 +32,7 @@ pub(crate) struct UsageProviderContext {
     pub request_count: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct UsageContext {
     pub request_count: u64,
     pub sent: u64,
@@ -1693,64 +1693,7 @@ pub(crate) fn new_before_turn_ctx(config_dir: String, by_provider: Vec<UsageProv
     cfg
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn agent_opts_do_not_inherit_model_when_provider_changes() {
-        let lua = Lua::new();
-        let opts = lua.create_table().unwrap();
-        opts.set("provider", "openrouter").unwrap();
-
-        let (_, provider, model, _, _) = parse_agent_opts(
-            &Some(opts),
-            crate::tools::ApprovalMode::Safe,
-            &Some("local".to_string()),
-            &Some("local".to_string()),
-            &["provider", "model"],
-        )
-        .unwrap();
-
-        assert_eq!(provider.as_deref(), Some("openrouter"));
-        assert_eq!(model, None);
-    }
-
-    #[test]
-    fn agent_opts_inherit_model_when_provider_is_inherited() {
-        let lua = Lua::new();
-        let opts = lua.create_table().unwrap();
-
-        let (_, provider, model, _, _) = parse_agent_opts(
-            &Some(opts),
-            crate::tools::ApprovalMode::Safe,
-            &Some("local".to_string()),
-            &Some("local".to_string()),
-            &["provider", "model"],
-        )
-        .unwrap();
-
-        assert_eq!(provider.as_deref(), Some("local"));
-        assert_eq!(model.as_deref(), Some("local"));
-    }
-
-    #[test]
-    fn agent_opts_use_explicit_model_when_provider_changes() {
-        let lua = Lua::new();
-        let opts = lua.create_table().unwrap();
-        opts.set("provider", "openrouter").unwrap();
-        opts.set("model", "google/gemini-3.1-flash-lite").unwrap();
-
-        let (_, provider, model, _, _) = parse_agent_opts(
-            &Some(opts),
-            crate::tools::ApprovalMode::Safe,
-            &Some("local".to_string()),
-            &Some("local".to_string()),
-            &["provider", "model"],
-        )
-        .unwrap();
-
-        assert_eq!(provider.as_deref(), Some("openrouter"));
-        assert_eq!(model.as_deref(), Some("google/gemini-3.1-flash-lite"));
-    }
-}
+#[path = "ctx_tests.rs"]
+mod ctx_tests;

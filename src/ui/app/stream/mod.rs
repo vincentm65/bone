@@ -224,7 +224,13 @@ impl App {
                 }
                 ctx_cfg.conversation_history = Some(self.transcript.clone());
 
-                let actions = self.extensions.dispatch_before_turn(&ctx_cfg);
+                // Run `before_turn` off the UI thread. Handlers may make
+                // blocking LLM calls (e.g. auto-compaction via ctx.agent.run);
+                // keeping them on the event-loop thread would freeze the whole
+                // app for the duration. Dispatch on a blocking thread and pump
+                // the spinner/input meanwhile so the user still sees progress
+                // and can cancel with Esc.
+                let actions = self.dispatch_before_turn_responsive(ctx_cfg, term).await?;
                 for action in actions {
                     self.apply_lua_action(action, term)?;
                 }
@@ -693,6 +699,74 @@ impl App {
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)
+    }
+
+    /// Dispatch the `before_turn` hook on a blocking thread while keeping the
+    /// UI responsive (spinner animation, input draining, Esc-to-cancel).
+    ///
+    /// Handlers may block on LLM calls (e.g. auto-compaction via
+    /// `ctx.agent.run`), so running them on the event-loop thread would freeze
+    /// the whole app for the duration. A cancel flag is threaded into the ctx
+    /// so pressing Esc aborts an in-flight compaction promptly.
+    async fn dispatch_before_turn_responsive(
+        &mut self,
+        mut ctx_cfg: crate::ext::ctx::CtxConfig,
+        term: &mut BoneTerminal,
+    ) -> io::Result<Vec<crate::ext::types::LuaReturnAction>> {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ctx_cfg.cancelled = Some(cancel.clone());
+
+        let ext = self.extensions.clone();
+        let dispatch = tokio::task::spawn_blocking(move || ext.dispatch_before_turn(&ctx_cfg));
+        pin_mut!(dispatch);
+
+        let mut spinner = time::interval(Duration::from_millis(90));
+        loop {
+            tokio::select! {
+                joined = &mut dispatch => {
+                    // On a join error (handler panic) fail open with no actions,
+                    // matching the previous fail-open dispatch behaviour.
+                    return Ok(joined.unwrap_or_default());
+                }
+                _ = spinner.tick() => {
+                    if Self::drain_keys(
+                        &mut self.input,
+                        &mut self.queue,
+                        &mut self.approval_mode,
+                        &mut self.cancel_streaming,
+                        &mut self.panes_visible,
+                        &mut self.pages,
+                        &mut self.active_page,
+                    ) {
+                        self.user_config.approval_mode = self.approval_mode;
+                        self.persist_runtime_config();
+                    }
+                    if self.cancel_streaming {
+                        // Signal the in-flight handler to abort; its
+                        // ctx.agent.run select polls this flag (~50ms).
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    self.maybe_refresh_subagent_pane();
+                    let visible_pages = if self.panes_visible {
+                        self.pages.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
+                    self.renderer.tick_spinner(
+                        term,
+                        &PaneDraw {
+                            input: &self.input,
+                            status_info: &self.status_info(),
+                            pages: visible_pages,
+                            active_page: self.active_page,
+                            pane_toggle_hint: hint,
+                            autocomplete: None,
+                        },
+                    )?;
+                }
+            }
+        }
     }
 
     async fn execute_tools_responsive(

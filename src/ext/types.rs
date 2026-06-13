@@ -46,6 +46,12 @@ pub struct LuaCommandReturn {
 }
 
 /// Owning manager for the Lua VM and all registered extension data.
+///
+/// `Clone` is cheap: the Lua VM is shared via `Arc<Mutex<Lua>>` and the
+/// remaining fields are small snapshots/vecs. Cloning lets callers hand an
+/// owned manager to `spawn_blocking` (e.g. to run `before_turn` off the UI
+/// thread) without giving up their own copy.
+#[derive(Clone)]
 pub struct ExtensionManager {
     /// The Lua state, shared so LuaTool can also hold a reference.
     lua: Arc<Mutex<Lua>>,
