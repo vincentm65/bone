@@ -36,7 +36,8 @@ fn make_session_current(
     model: Option<String>,
 ) -> mlua::Result<mlua::Function> {
     let has_session = id.is_some();
-    let id_val = id.map(|i| mlua::Value::Integer(i as i64))
+    let id_val = id
+        .map(|i| mlua::Value::Integer(i as i64))
         .unwrap_or(mlua::Value::Nil);
     let provider_clone = provider.clone();
     let model_clone = model.clone();
@@ -124,7 +125,10 @@ fn opt_get_correct_type_returns_some() {
     let opts1 = lua.create_table().unwrap();
     opts1.set("str", "hello").unwrap();
     opts1.set("num", 42u64).unwrap();
-    assert_eq!(opt_get::<String>(&Some(opts1), "str"), Some("hello".to_string()));
+    assert_eq!(
+        opt_get::<String>(&Some(opts1), "str"),
+        Some("hello".to_string())
+    );
 
     let opts2 = lua.create_table().unwrap();
     opts2.set("num", 42u64).unwrap();
@@ -148,7 +152,14 @@ fn opt_get_wrong_type_returns_none() {
 #[test]
 fn tool_call_result_produces_correct_shape() {
     let lua = Lua::new();
-    let result = tool_call_result(&lua, true, Some("ls".into()), Some("call-1".into()), "output").unwrap();
+    let result = tool_call_result(
+        &lua,
+        true,
+        Some("ls".into()),
+        Some("call-1".into()),
+        "output",
+    )
+    .unwrap();
     let tbl: serde_json::Value = lua.from_value(result).unwrap();
     assert_eq!(tbl["ok"], true);
     assert_eq!(tbl["is_error"], false);
@@ -178,7 +189,13 @@ fn tool_call_result_nil_name_serialises_to_nil() {
 #[test]
 fn make_session_current_with_session() {
     let lua = Lua::new();
-    let fn_ = make_session_current(&lua, Some(42), Some("openrouter".into()), Some("gemini".into())).unwrap();
+    let fn_ = make_session_current(
+        &lua,
+        Some(42),
+        Some("openrouter".into()),
+        Some("gemini".into()),
+    )
+    .unwrap();
     let result: Value = fn_.call(()).unwrap();
     let tbl: serde_json::Value = lua.from_value(result).unwrap();
     assert_eq!(tbl["id"], 42);
@@ -249,17 +266,15 @@ fn usage_context_serializes_with_correct_keys() {
         tool_schema_tokens: 64,
         system_prompt_chars: 128,
         system_prompt_tokens: 32,
-        by_provider: vec![
-            UsageProviderContext {
-                provider: "openrouter".into(),
-                model: "gemini".into(),
-                prompt_tokens: 100,
-                completion_tokens: 50,
-                cached_tokens: 20,
-                cost: 0.005,
-                request_count: 2,
-            },
-        ],
+        by_provider: vec![UsageProviderContext {
+            provider: "openrouter".into(),
+            model: "gemini".into(),
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            cached_tokens: 20,
+            cost: 0.005,
+            request_count: 2,
+        }],
     };
     let lua = Lua::new();
     let result = lua.to_value(&usage).unwrap();

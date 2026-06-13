@@ -41,10 +41,21 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Reasoning/thinking content from DeepSeek V4 thinking mode.
-    /// Must be passed back when the assistant turn involved tool calls.
+    /// Reasoning/thinking content produced during the turn. Some providers
+    /// require it be echoed back when the turn involved tool calls; the wire
+    /// field to round-trip it under is carried opaquely in [`Reasoning`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<String>,
+    pub reasoning: Option<Reasoning>,
+}
+
+/// Provider-neutral reasoning/thinking content captured during a turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reasoning {
+    pub text: String,
+    /// Wire field this must be echoed back under on the next request, if the
+    /// provider requires round-tripping it (else `None`). Opaque to the core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo_field: Option<String>,
 }
 
 impl ChatMessage {
@@ -55,7 +66,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
-            reasoning_content: None,
+            reasoning: None,
         }
     }
 
@@ -73,7 +84,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: Some(result.call_id),
             name: Some(result.name),
-            reasoning_content: None,
+            reasoning: None,
         }
     }
 }
@@ -81,8 +92,12 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
     TextDelta(String),
-    /// Reasoning/thinking token from DeepSeek V4 thinking mode.
-    ReasoningDelta(String),
+    /// Reasoning/thinking token. `echo_field` names the wire field it must be
+    /// round-tripped under on the next request, if the provider requires it.
+    ReasoningDelta {
+        text: String,
+        echo_field: Option<String>,
+    },
     ToolCall(ToolCall),
     /// Token usage from the provider's response (real counts, not estimates).
     TokenUsage {

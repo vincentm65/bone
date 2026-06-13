@@ -297,4 +297,3 @@ fn multiple_jobs_ordered_in_snapshot() {
     assert_eq!(snap[0]["agent"], "a");
     assert_eq!(snap[1]["agent"], "b");
 }
-

@@ -27,14 +27,22 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
     for agent in agents {
         let latest = latest_job_for(agent, jobs);
         let (icon, status) = job_status(latest, now);
+        let is_idle = icon == "○" && status.starts_with("idle");
+
+        let (icon_fg, name_fg) = if is_idle {
+            (Color::DarkGray, Color::DarkGray)
+        } else {
+            (Color::White, Color::White)
+        };
+
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {icon} "),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(icon_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(agent.clone(), Style::default().fg(Color::White)),
+            Span::styled(agent.clone(), Style::default().fg(name_fg)),
             Span::styled(" ", Style::default().fg(Color::DarkGray)),
             Span::styled(status, Style::default().fg(Color::DarkGray)),
         ]));
@@ -109,78 +117,5 @@ fn current_unix_seconds() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn job(id: &str, agent: &str, status: JobStatus) -> Job {
-        Job {
-            id: id.to_string(),
-            agent: agent.to_string(),
-            task: "do something".to_string(),
-            status,
-            result: None,
-            started_at: current_unix_seconds(),
-            finished_at: None,
-            consumed: false,
-            token_sent: 0,
-            token_received: 0,
-            result_file: None,
-        }
-    }
-
-    #[test]
-    fn render_returns_none_without_agents() {
-        assert!(render(&[], &[]).is_none());
-    }
-
-    #[test]
-    fn render_lists_all_agents() {
-        let agents = vec!["researcher".to_string(), "coder".to_string()];
-        let pane = render(&agents, &[]).unwrap();
-        assert_eq!(pane.source, PANE_SOURCE);
-        assert_eq!(pane.title, "Agents (2)");
-        assert_eq!(pane.content.len(), 2);
-        // Idle agents show the idle marker.
-        let first: String = pane.content[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(first.contains("○"), "expected idle icon: {first}");
-        assert!(first.contains("researcher"));
-        assert!(first.contains("idle"));
-    }
-
-    #[test]
-    fn render_shows_running_status() {
-        let agents = vec!["researcher".to_string()];
-        let jobs = vec![job("job-1", "researcher", JobStatus::Running)];
-        let pane = render(&agents, &jobs).unwrap();
-        let line: String = pane.content[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(line.contains("◑"), "expected running icon: {line}");
-        assert!(line.contains("running"));
-        assert!(line.contains("do something"));
-    }
-
-    #[test]
-    fn latest_job_wins() {
-        let agents = vec!["researcher".to_string()];
-        let jobs = vec![
-            job("job-2", "researcher", JobStatus::Error),
-            job("job-10", "researcher", JobStatus::Done),
-        ];
-        let pane = render(&agents, &jobs).unwrap();
-        let line: String = pane.content[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        // job-10 (done) is newer than job-2 (error) by numeric id.
-        assert!(line.contains("idle"), "expected idle from job-10: {line}");
-        assert!(!line.contains("error"));
-    }
-}
+#[path = "subagent_pane_tests.rs"]
+mod subagent_pane_tests;

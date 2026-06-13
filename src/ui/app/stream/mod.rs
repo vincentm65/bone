@@ -1,6 +1,8 @@
 use crate::chat::{Message, build_chat_history};
 use crate::ext::EventDispatchResult;
-use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream};
+use crate::llm::{
+    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, Reasoning, ResponseStream,
+};
 use crate::tools::command_policy::CommandSafety;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
@@ -43,16 +45,14 @@ pub fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
 pub fn assistant_message(
     content: String,
     tool_calls: Vec<ToolCall>,
-    reasoning: String,
+    reasoning: Option<Reasoning>,
 ) -> ChatMessage {
     let mut message = if tool_calls.is_empty() {
         ChatMessage::new(ChatRole::Assistant, content)
     } else {
         ChatMessage::assistant_with_tools(content, tool_calls)
     };
-    if !reasoning.is_empty() {
-        message.reasoning_content = Some(reasoning);
-    }
+    message.reasoning = reasoning;
     message
 }
 
@@ -101,16 +101,6 @@ pub fn timeout_message(prefix: &str, detail: &str, retried: bool) -> String {
         format!("[{prefix}: {detail} within 90s; retried once]")
     } else {
         format!("[{prefix}: {detail} within 90s]")
-    }
-}
-
-pub fn pane_toggle_hint(panes_visible: bool, has_pages: bool) -> Option<&'static str> {
-    if !has_pages {
-        None
-    } else if panes_visible {
-        Some("Ctrl+T hide panel")
-    } else {
-        Some("Ctrl+T show panel")
     }
 }
 
@@ -309,7 +299,7 @@ impl App {
                 break;
             }
 
-            let Some((tool_calls, reasoning_content)) = stream_output else {
+            let Some((tool_calls, reasoning)) = stream_output else {
                 if let Some(failure) = last_failure {
                     self.messages[assistant_idx].content =
                         failure.display_message(MAX_PROVIDER_ATTEMPTS > 1);
@@ -322,7 +312,7 @@ impl App {
                 let msg = assistant_message(
                     self.messages[assistant_idx].content.clone(),
                     Vec::new(),
-                    reasoning_content,
+                    reasoning,
                 );
                 self.transcript.push(msg);
                 let content = self.messages[assistant_idx].content.clone();
@@ -334,7 +324,7 @@ impl App {
             let assistant = assistant_message(
                 self.messages[assistant_idx].content.clone(),
                 tool_calls.clone(),
-                reasoning_content,
+                reasoning,
             );
             history.push(assistant.clone());
             self.transcript.push(assistant);
@@ -438,12 +428,13 @@ impl App {
         assistant_idx: usize,
         history: &[ChatMessage],
         term: &mut BoneTerminal,
-    ) -> io::Result<Result<(Vec<ToolCall>, String), StreamFailure>> {
+    ) -> io::Result<Result<(Vec<ToolCall>, Option<Reasoning>), StreamFailure>> {
         let mut spinner = time::interval(Duration::from_millis(90));
         let idle = time::sleep(STREAM_IDLE_TIMEOUT);
         let mut had_usage = false;
         let mut tool_calls = Vec::new();
-        let mut reasoning_content = String::new();
+        let mut reasoning_text = String::new();
+        let mut reasoning_echo_field: Option<String> = None;
         let mut stream_estimated_received = self.token_stats.received;
         let received_baseline = self.token_stats.received;
         let mut stream_chars: u64 = 0;
@@ -464,9 +455,12 @@ impl App {
                         stream_estimated_received = received_baseline + ((stream_chars as f64 / 4.0) as u64);
                         self.redraw_streaming_tokens(assistant_idx, stream_estimated_received, term)?;
                     }
-                    Some(Ok(ChatEvent::ReasoningDelta(text))) => {
+                    Some(Ok(ChatEvent::ReasoningDelta { text, echo_field })) => {
                         idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
-                        reasoning_content.push_str(&text);
+                        reasoning_text.push_str(&text);
+                        if reasoning_echo_field.is_none() {
+                            reasoning_echo_field = echo_field;
+                        }
                     }
                     Some(Ok(ChatEvent::ToolCall(call))) => {
                         idle.as_mut().reset(time::Instant::now() + STREAM_IDLE_TIMEOUT);
@@ -515,7 +509,6 @@ impl App {
                         status_info: &self.stream_status_info_with_tokens(Some(stream_estimated_received)),
                         pages: if self.panes_visible { &self.pages } else { &[] },
                         active_page: self.active_page,
-                        pane_toggle_hint: pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
                         autocomplete: None,
                     })?;
                 }
@@ -528,7 +521,11 @@ impl App {
             self.token_stats
                 .record_estimate(prompt_chars, completion_chars);
         }
-        Ok(Ok((tool_calls, reasoning_content)))
+        let reasoning = (!reasoning_text.is_empty()).then_some(Reasoning {
+            text: reasoning_text,
+            echo_field: reasoning_echo_field,
+        });
+        Ok(Ok((tool_calls, reasoning)))
     }
 
     fn redraw_streaming_tokens(
@@ -545,7 +542,6 @@ impl App {
                 status_info: &self.stream_status_info_with_tokens(Some(tokens)),
                 pages: if self.panes_visible { &self.pages } else { &[] },
                 active_page: self.active_page,
-                pane_toggle_hint: pane_toggle_hint(self.panes_visible, !self.pages.is_empty()),
                 autocomplete: None,
             },
         )
@@ -752,7 +748,6 @@ impl App {
                     } else {
                         &[]
                     };
-                    let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
                     self.renderer.tick_spinner(
                         term,
                         &PaneDraw {
@@ -760,7 +755,6 @@ impl App {
                             status_info: &self.status_info(),
                             pages: visible_pages,
                             active_page: self.active_page,
-                            pane_toggle_hint: hint,
                             autocomplete: None,
                         },
                     )?;
@@ -927,7 +921,7 @@ impl App {
                     let visible_pages = if self.panes_visible {
                     // Drain any pane events sent during drain_keys (e.g. a
                     // multi-question ask_user replacing one question with the
-                    // next). Avoids a one-frame flash of the dead pane.
+                  // Avoids a one-frame flash of the dead pane.
                     while let Ok(event) = rx.try_recv() {
                         Self::track_live_state(&mut active_live_state, &event);
                         self.apply_tool_live_event(event);
@@ -936,7 +930,6 @@ impl App {
                     } else {
                         &[]
                     };
-                    let hint = pane_toggle_hint(self.panes_visible, !self.pages.is_empty());
                     self.renderer.tick_spinner(
                         term,
                         &PaneDraw {
@@ -944,11 +937,9 @@ impl App {
                             status_info: &self.status_info(),
                             pages: visible_pages,
                             active_page: self.active_page,
-                            pane_toggle_hint: hint,
                             autocomplete: None,
                         },
-                    )?;
-                }
+                    )?;                }
             }
         }
     }
@@ -1040,11 +1031,9 @@ impl App {
             .map(|message| {
                 message.content.chars().count()
                     + message
-                        .reasoning_content
-                        .as_deref()
-                        .map(str::chars)
-                        .map(Iterator::count)
-                        .unwrap_or(0)
+                        .reasoning
+                        .as_ref()
+                        .map_or(0, |r| r.text.chars().count())
                     + serde_json::to_string(&message.tool_calls)
                         .map(|json| json.chars().count())
                         .unwrap_or(0)
@@ -1127,7 +1116,6 @@ impl App {
                         let s = e.as_secs();
                         format!("{}:{:02}", s / 60, s % 60)
                     });                    let visible_pages = if *panes_visible { pages.as_slice() } else { &[] };
-                    let hint = pane_toggle_hint(*panes_visible, !pages.is_empty());
                     renderer
                         .ensure_viewport_height(term, input, None, visible_pages, *active_page, None)
                         .ok();
@@ -1146,7 +1134,6 @@ impl App {
                             },
                             pages: visible_pages,
                             active_page: *active_page,
-                            pane_toggle_hint: hint,
                             autocomplete: None,
                         }, renderer.spinner_tick, None);
                     }).ok();
@@ -1308,5 +1295,3 @@ impl App {
         mode_changed
     }
 }
-
-

@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use bone::llm::ChatEvent;
 use bone::llm::providers::openai_compat::{
-    PartialToolCall, flush_partial_tool_calls, process_sse_chunk,
+    PartialToolCall, ThinkParser, delta_has_reasoning_field, flush_partial_tool_calls,
+    process_sse_chunk,
 };
 use serde_json::Value;
 
@@ -336,4 +337,83 @@ fn test_empty_chunk_is_noop() {
 
     let events = process_sse_chunk(&empty, &mut partials, &mut last_usage).unwrap();
     assert!(events.is_empty());
+}
+
+/// Replicates the exact event-pipeline from `OpenAiCompatProvider::chat_stream`:
+/// `process_sse_chunk` → for each event, feed `TextDelta`s through `ThinkParser`
+/// and re-emit as `ReasoningDelta` with `echo_field = "thoughts"`. When the
+/// SSE chunk also carries a dedicated reasoning field (`reasoning_content`
+/// or `thoughts`), the inline `ThinkParser` is bypassed for that chunk so
+/// the same thought text isn't published twice. This is the wiring that
+/// lives in `chat_stream`; the unit test exercises it in isolation.
+fn run_stream_pipeline(data: &str) -> Vec<ChatEvent> {
+    let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
+    let mut last_usage: Option<Value> = None;
+    let mut think = ThinkParser::new();
+    let mut out = Vec::new();
+    // Mirrors the per-delta flag in `chat_stream`: when the chunk already
+    // carries a dedicated reasoning field, the inline `ThinkParser` is not
+    // the source of truth and must be skipped.
+    let reasoning_via_field = delta_has_reasoning_field(data);
+
+    for event in process_sse_chunk(data, &mut partials, &mut last_usage).unwrap() {
+        match event {
+            ChatEvent::TextDelta(content) => {
+                eprintln!("pipeline: TextDelta({content:?})");
+                let (text, thoughts) = if reasoning_via_field {
+                    (content, String::new())
+                } else {
+                    think.feed(&content)
+                };
+                eprintln!("pipeline:   -> text={text:?}, thoughts={thoughts:?}");
+                if !text.is_empty() {
+                    out.push(ChatEvent::TextDelta(text));
+                }
+                if !thoughts.is_empty() {
+                    out.push(ChatEvent::ReasoningDelta {
+                        text: thoughts,
+                        echo_field: Some("thoughts".to_string()),
+                    });
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[test]
+fn think_parser_and_reasoning_field_do_not_double_publish() {
+    // A delta that carries the SAME reasoning text BOTH as a dedicated field
+    // (`reasoning_content`) and inline as `<think>…</think>` tags. The
+    // pipeline must not publish the same thought text twice.
+    let thought = "deep thoughts";
+    let think_open = String::from_utf8(vec![b'<', b't', b'h', b'i', b'n', b'k']).unwrap() + ">";
+    let think_close = String::from_utf8(vec![b'<', b'/']).unwrap() + "think>";
+    let content = format!("{think_open}{thought}{think_close}answer");
+    let data = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "content": content,
+                "reasoning_content": thought
+            }
+        }]
+    })
+    .to_string();
+    eprintln!("raw json: {data}");
+
+    let events = run_stream_pipeline(&data);
+    eprintln!("events: {events:#?}");
+    let reasoning: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::ReasoningDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasoning,
+        vec!["deep thoughts"],
+        "thought must appear exactly once, got: {reasoning:?}"
+    );
 }

@@ -19,7 +19,6 @@ pub struct PaneDraw<'a> {
     pub status_info: &'a StatusInfo,
     pub pages: &'a [PanePage],
     pub active_page: usize,
-    pub pane_toggle_hint: Option<&'a str>,
     pub autocomplete: Option<&'a AutocompleteState>,
 }
 fn build_tab_bar(
@@ -122,21 +121,6 @@ fn shell_command_preview_lines(command: &str, width: usize) -> Vec<String> {
         .into_iter()
         .flat_map(|line| wrap::wrap_text_with_prefix(&line, "  ", "  ", width))
         .collect()
-}
-
-fn separator_with_hint(width: u16, hint: Option<&str>) -> String {
-    let width = width as usize;
-    let Some(hint) = hint else {
-        return "─".repeat(width);
-    };
-    let label = format!(" {hint} ");
-    let label_width = UnicodeWidthStr::width(label.as_str());
-    if label_width >= width {
-        return "─".repeat(width);
-    }
-    let remaining = width - label_width;
-    let left = remaining.saturating_sub(2);
-    format!("{}{label}──", "─".repeat(left))
 }
 
 fn prompt_option_line(
@@ -343,12 +327,10 @@ impl super::Renderer {
         let status_info = args.status_info;
         let pages = args.pages;
         let active_page = args.active_page;
-        let pane_toggle_hint = args.pane_toggle_hint;
         let ac = args.autocomplete;
         let area = frame.area();
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
-        let bottom_sep = separator_with_hint(area.width, pane_toggle_hint);
 
         // Reserve rows from the bottom: status bar (1) + bottom sep (1) + page region
         let page_height = page_extra_height(pages, active_page);
@@ -632,7 +614,7 @@ impl super::Renderer {
             if available > 0 {
                 let page_idx = active_page.min(pages.len() - 1);
 
-                let page_sep = separator_with_hint(area.width, None);
+                let page_sep = "─".repeat(area.width as usize);
                 frame.render_widget(
                     Paragraph::new(page_sep).style(Style::default().fg(self.theme.input_border)),
                     Rect {
@@ -717,10 +699,19 @@ impl super::Renderer {
             }
         }
 
-        // ── Bottom separator ─────────────────────────────────────────────
+        // ── Input field bottom border ────────────────────────────────────
+        // With panes visible the page region's top separator already draws
+        // the border directly below the input, so this row is just the blank
+        // gap above the status bar. With panes hidden there is no page region,
+        // so render the separator here to keep the input's bottom border.
         if area.height >= 2 {
+            let line = if pages.is_empty() {
+                "─".repeat(area.width as usize)
+            } else {
+                " ".repeat(area.width as usize)
+            };
             frame.render_widget(
-                Paragraph::new(bottom_sep).style(Style::default().fg(self.theme.input_border)),
+                Paragraph::new(line).style(Style::default().fg(self.theme.input_border)),
                 Rect {
                     y: area.bottom() - 2,
                     height: 1,

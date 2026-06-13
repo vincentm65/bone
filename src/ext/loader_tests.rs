@@ -1,6 +1,6 @@
 use super::*;
-use std::sync::{Arc, Mutex};
 use mlua::Lua;
+use std::sync::{Arc, Mutex};
 
 fn make_lua_arc(lua: Lua) -> Arc<Mutex<Lua>> {
     Arc::new(Mutex::new(lua))
@@ -39,5 +39,3 @@ fn collect_subagent_names_empty_list_returns_empty() {
     let names = collect_subagent_names(&arc);
     assert!(names.is_empty());
 }
-
-

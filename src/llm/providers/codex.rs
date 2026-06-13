@@ -356,9 +356,23 @@ impl LlmProvider for CodexProvider {
         let response = req.send().await?;
         let status = response.status();
         if !status.is_success() {
+            let url = self.chat_url();
+            // Surface the backend's error body — it explains *why* (e.g. an
+            // unmatched/missing reasoning item or an input-size error), which a
+            // bare status line hides. Safe to consume `response` here: this
+            // branch never reaches the streaming path below.
+            let body = response.text().await.unwrap_or_default();
+            let detail = body.trim();
+            let detail = if detail.is_empty() {
+                String::new()
+            } else {
+                // Cap so a huge HTML/JSON error page doesn't flood the UI.
+                let capped: String = detail.chars().take(2000).collect();
+                format!(": {capped}")
+            };
             return Err(LlmError::new_with_kind(
                 http_status_to_error_kind(status),
-                format!("HTTP {} from {}", status, self.chat_url()),
+                format!("HTTP {status} from {url}{detail}"),
             ));
         }
 

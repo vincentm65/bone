@@ -1673,7 +1673,10 @@ fn yaml_to_lua(lua: &Lua, val: &serde_yaml::Value) -> Result<Value, mlua::Error>
 /// `session_id`, `provider`, `model`, `usage`, and `conversation_history`
 /// on the returned config.  This helper only fills the boilerplate fields
 /// that are identical across callers.
-pub(crate) fn new_before_turn_ctx(config_dir: String, by_provider: Vec<UsageProviderContext>) -> CtxConfig {
+pub(crate) fn new_before_turn_ctx(
+    config_dir: String,
+    by_provider: Vec<UsageProviderContext>,
+) -> CtxConfig {
     let shared_state: SharedState = Arc::new(Mutex::new(HashMap::new()));
     let mut cfg = CtxConfig::new(config_dir, shared_state);
     cfg.usage = Some(UsageContext {
@@ -1692,7 +1695,6 @@ pub(crate) fn new_before_turn_ctx(config_dir: String, by_provider: Vec<UsageProv
     });
     cfg
 }
-
 
 #[cfg(test)]
 #[path = "ctx_tests.rs"]

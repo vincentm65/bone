@@ -80,9 +80,11 @@ struct OpenAiMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    /// DeepSeek V4: pass back when assistant turn involved tool calls, or 400.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
+    /// Reasoning echoed back under its provider-specific wire key (e.g.
+    /// DeepSeek's `reasoning_content`, MiniMax's `thoughts`). Some providers
+    /// 400 if it is dropped when the turn involved tool calls.
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    reasoning: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -162,7 +164,13 @@ fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 .collect(),
             tool_call_id: message.tool_call_id,
             name: message.name,
-            reasoning_content: message.reasoning_content,
+            reasoning: match message.reasoning {
+                Some(crate::llm::Reasoning {
+                    text,
+                    echo_field: Some(key),
+                }) => BTreeMap::from([(key, text)]),
+                _ => BTreeMap::new(),
+            },
         })
         .collect()
 }
@@ -186,6 +194,115 @@ pub fn flush_partial_tool_calls(
         }));
     }
     events
+}
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// Length of the longest suffix of `text` that equals a prefix of `tag`
+/// (1..tag.len()). Zero when there is no partial match. Used to hold back
+/// bytes that might be the start of a `<think>`/`</think>` tag split across
+/// streaming chunks.
+fn partial_tag_suffix_len(text: &str, tag: &str) -> usize {
+    (1..tag.len())
+        .rev()
+        .find(|&n| text.ends_with(&tag[..n]))
+        .unwrap_or(0)
+}
+
+/// Advance past any `\n`/`\r` bytes at `pos`. Providers commonly emit
+/// `<think>\n…` and `…</think>\n\n`; the newlines immediately adjacent to a
+/// tag are never meaningful content, so strip them so neither the reasoning
+/// nor the answer starts with a blank line.
+fn skip_tag_newlines(s: &str, pos: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut p = pos;
+    while p < bytes.len() && (bytes[p] == b'\n' || bytes[p] == b'\r') {
+        p += 1;
+    }
+    p
+}
+
+/// Streaming parser that strips `<think>…</think>` blocks from assistant
+/// `content` deltas, regardless of provider (MiniMax-M2, Qwen, etc. emit
+/// reasoning inline this way). Inner text is returned as thoughts; everything
+/// outside the tags is returned as normal text. Tag boundaries and their
+/// adjacent newlines may be split arbitrarily across [`ThinkParser::feed`]
+/// calls.
+#[derive(Default)]
+pub struct ThinkParser {
+    in_think: bool,
+    /// Set right after a tag is consumed with nothing following it yet, so
+    /// newlines tag-adjacent but arriving in a later chunk are still dropped.
+    strip_lead: bool,
+    tail: String,
+}
+
+impl ThinkParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed a `content` delta. Returns `(text, thoughts)` to emit; either may
+    /// be empty. Bytes that could form a split tag are buffered internally.
+    pub fn feed(&mut self, chunk: &str) -> (String, String) {
+        self.tail.push_str(chunk);
+        let mut text = String::new();
+        let mut thoughts = String::new();
+
+        // Drop newlines tag-adjacent to a tag consumed in a previous call.
+        if self.strip_lead {
+            let s = skip_tag_newlines(&self.tail, 0);
+            self.tail.drain(..s);
+            self.strip_lead = self.tail.is_empty();
+        }
+
+        loop {
+            let (tag, out): (&str, &mut String) = if self.in_think {
+                (THINK_CLOSE, &mut thoughts)
+            } else {
+                (THINK_OPEN, &mut text)
+            };
+
+            if let Some(p) = self.tail.find(tag) {
+                out.push_str(&self.tail[..p]);
+                let rest = skip_tag_newlines(&self.tail, p + tag.len());
+                self.tail.drain(..rest);
+                self.in_think = !self.in_think;
+                self.strip_lead = self.tail.is_empty();
+                continue;
+            }
+
+            let keep = partial_tag_suffix_len(&self.tail, tag);
+            let flush_to = self.tail.len() - keep;
+            out.push_str(&self.tail[..flush_to]);
+            self.tail.drain(..flush_to);
+            break;
+        }
+
+        (text, thoughts)
+    }
+}
+
+/// Returns true when the SSE chunk's `delta` carries reasoning text in a
+/// provider-specific dedicated field (e.g. DeepSeek's `reasoning_content`,
+/// MiniMax's `thoughts`). Used to skip the inline `<think>…</think>`
+/// pathway in the same delta so the same thought text isn't published
+/// twice.
+pub fn delta_has_reasoning_field(data: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
+    let Some(delta) = value
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("delta"))
+    else {
+        return false;
+    };
+    ["reasoning_content", "thoughts"]
+        .iter()
+        .any(|key| delta.get(*key).and_then(|v| v.as_str()).is_some())
 }
 
 /// Process a single non-empty SSE data line (excluding `[DONE]` and comments).
@@ -219,10 +336,17 @@ pub fn process_sse_chunk(
         events.push(ChatEvent::TextDelta(content.to_string()));
     }
 
-    // DeepSeek V4 sends reasoning_content in the delta. Must be passed
-    // back in subsequent requests when tool calls are involved.
-    if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
-        events.push(ChatEvent::ReasoningDelta(reasoning.to_string()));
+    // Providers carry reasoning in a provider-specific field (DeepSeek:
+    // `reasoning_content`, MiniMax: `thoughts`). It must be echoed back under
+    // that same field on later requests when tool calls are involved, so tag
+    // the event with the wire key.
+    for key in ["reasoning_content", "thoughts"] {
+        if let Some(reasoning) = delta.get(key).and_then(|r| r.as_str()) {
+            events.push(ChatEvent::ReasoningDelta {
+                text: reasoning.to_string(),
+                echo_field: Some(key.to_string()),
+            });
+        }
     }
 
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|calls| calls.as_array()) {
@@ -330,6 +454,7 @@ impl LlmProvider for OpenAiCompatProvider {
             futures_util::pin_mut!(events);
             let mut partial_tool_calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
             let mut last_usage: Option<serde_json::Value> = None;
+            let mut think = ThinkParser::new();
 
             while let Some(event) = events.try_next().await.map_err(|err| {
                 LlmError::new_with_kind(LlmErrorKind::Connection, err.to_string())
@@ -366,8 +491,33 @@ impl LlmProvider for OpenAiCompatProvider {
                     continue;
                 }
 
+                // If the delta already carries reasoning via a dedicated
+                // field (DeepSeek's `reasoning_content`, etc.), the inline
+                // `<think>…</think>` pathway is not the source of truth
+                // for this delta — skip it to avoid publishing the same
+                // thought text twice.
+                let reasoning_via_field = delta_has_reasoning_field(data);
                 for event in process_sse_chunk(data, &mut partial_tool_calls, &mut last_usage)? {
-                    yield event;
+                    match event {
+                        ChatEvent::TextDelta(content) => {
+                            let (text, thoughts) = if reasoning_via_field {
+                                (content, String::new())
+                            } else {
+                                think.feed(&content)
+                            };
+                            if !text.is_empty() {
+                                yield ChatEvent::TextDelta(text);
+                            }
+                            if !thoughts.is_empty() {
+                                yield ChatEvent::ReasoningDelta {
+                                    text: thoughts,
+                                    echo_field: Some("thoughts".to_string()),
+                                };
+                            }
+                        }
+                        ChatEvent::ReasoningDelta { .. } => yield event,
+                        other => yield other,
+                    }
                 }
             }
 

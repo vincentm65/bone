@@ -699,7 +699,6 @@ impl App {
                 status_info: &self.status_info(),
                 pages: self.visible_pages(),
                 active_page: self.active_page,
-                pane_toggle_hint: self.pane_toggle_hint(),
                 autocomplete: self.autocomplete.as_ref(),
             },
             self.active_prompt.as_ref(),
@@ -708,16 +707,6 @@ impl App {
 
     fn visible_pages(&self) -> &[PanePage] {
         if self.panes_visible { &self.pages } else { &[] }
-    }
-
-    fn pane_toggle_hint(&self) -> Option<&'static str> {
-        if self.pages.is_empty() {
-            None
-        } else if self.panes_visible {
-            Some("Ctrl+T hide panel  ──  Ctrl+↑↓")
-        } else {
-            Some("Ctrl+T show panel  ──  Ctrl+↑↓")
-        }
     }
 
     /// Update autocomplete state based on current input buffer.
@@ -770,31 +759,35 @@ impl App {
         // remove the pane from self.pages so it doesn't linger.
         if self.panes_visible {
             let active_idx = self.active_page.min(self.pages.len().saturating_sub(1));
-            let (handled_key, cleanup_source) = self.pages.get(active_idx).and_then(|page| {
-                let interaction = page.interaction.as_ref()?;
-                if !interaction.is_active() {
-                    return None;
-                }
-                let handled = interaction.handle_key(code, modifiers);
-                if handled {
+            let (handled_key, cleanup_source) = self
+                .pages
+                .get(active_idx)
+                .and_then(|page| {
+                    let interaction = page.interaction.as_ref()?;
                     if !interaction.is_active() {
-                        // Submit/cancel made the interaction inactive.
-                        // For "interact" source (ask_user tool), don't remove —
-                        // the next question will upsert over it, avoiding a
-                        // shrink-then-grow flash.
-                        if page.source == "interact" {
-                            Some((true, None))
+                        return None;
+                    }
+                    let handled = interaction.handle_key(code, modifiers);
+                    if handled {
+                        if !interaction.is_active() {
+                            // Submit/cancel made the interaction inactive.
+                            // For "interact" source (ask_user tool), don't remove —
+                            // the next question will upsert over it, avoiding a
+                            // shrink-then-grow flash.
+                            if page.source == "interact" {
+                                Some((true, None))
+                            } else {
+                                Some((true, Some(page.source.clone())))
+                            }
                         } else {
-                            Some((true, Some(page.source.clone())))
+                            // Handled but still active (e.g. arrow keys, text input)
+                            Some((true, None))
                         }
                     } else {
-                        // Handled but still active (e.g. arrow keys, text input)
-                        Some((true, None))
+                        None
                     }
-                } else {
-                    None
-                }
-            }).unwrap_or((false, None));
+                })
+                .unwrap_or((false, None));
 
             if handled_key {
                 if let Some(source) = cleanup_source {
@@ -980,7 +973,6 @@ impl App {
         self.redraw(term)?;
         Ok(true)
     }
-
 
     /// Request app exit. When sub-agent jobs are still running, the first
     /// request is blocked and returns a warning notice; a repeated request
@@ -1410,13 +1402,11 @@ impl App {
                 _ = spinner.tick() => {
                     let status_info = self.status_info();
                     let pages: &[PanePage] = if self.panes_visible { &self.pages } else { &[] };
-                    let pane_toggle_hint = self.pane_toggle_hint();
                     self.renderer.tick_spinner(term, &PaneDraw {
                         input: &self.input,
                         status_info: &status_info,
                         pages,
                         active_page: self.active_page,
-                        pane_toggle_hint,
                         autocomplete: None,
                     }).ok();
                 }

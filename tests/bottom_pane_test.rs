@@ -40,7 +40,6 @@ fn pane_args<'a>(
     status_info: &'a StatusInfo,
     pages: &'a [PanePage],
     active_page: usize,
-    pane_toggle_hint: Option<&'a str>,
     autocomplete: Option<&'a AutocompleteState>,
 ) -> PaneDraw<'a> {
     PaneDraw {
@@ -48,7 +47,6 @@ fn pane_args<'a>(
         status_info,
         pages,
         active_page,
-        pane_toggle_hint,
         autocomplete,
     }
 }
@@ -78,7 +76,7 @@ fn expanded_command_preview_is_clipped_to_a_short_frame() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &[], 0, None, None),
+                &pane_args(&input, &status_info(), &[], 0, None),
                 Some(&prompt),
             )
         })
@@ -100,7 +98,7 @@ fn multiline_input_is_clipped_to_a_short_frame() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &[], 0, None, None),
+                &pane_args(&input, &status_info(), &[], 0, None),
                 None,
             )
         })
@@ -119,7 +117,7 @@ fn multiline_input_renders_hard_newlines_on_separate_rows() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &[], 0, None, None),
+                &pane_args(&input, &status_info(), &[], 0, None),
                 None,
             )
         })
@@ -138,7 +136,7 @@ fn newline_cursor_marker_is_included_in_input_height() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 6);
+    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 5);
 }
 
 #[test]
@@ -147,7 +145,7 @@ fn composer_reserves_terminal_final_column_like_submitted_user_text() {
     input.buffer = "a".repeat(17);
     input.cursor_pos = input.buffer.chars().count();
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 5);
+    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 4);
 }
 
 #[test]
@@ -158,7 +156,7 @@ fn composer_height_uses_the_same_word_wrapping_as_rendering() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0, None), 6);
+    assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0, None), 5);
 }
 
 #[test]
@@ -203,7 +201,7 @@ fn long_prompt_uses_a_bounded_viewport_height() {
 
     assert_eq!(
         Renderer::desired_height(&input, Some(&prompt), 80, &[], 0, None),
-        14
+        13
     );
 }
 
@@ -223,13 +221,13 @@ fn pane_page_adds_height_to_viewport() {
         interaction: None,
     }];
 
-    // Without pages: top_sep(1) + input(1) + bottom_sep(1) + status(1) = 4
-    assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0, None), 4);
+    // Without pages: top_sep(1) + input(1) + status(1) = 3
+    assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0, None), 3);
 
-    // With 3-line page: base(4) + page_sep(1) + content(3) = 8
+    // With 3-line page: base(3) + page_sep(1) + content(3) = 7
     assert_eq!(
         Renderer::desired_height(&input, None, 80, &pages, 0, None),
-        8
+        7
     );
 }
 
@@ -247,10 +245,10 @@ fn pane_page_honors_visible_rows() {
         interaction: None,
     }];
 
-    // base(4) + page_sep(1) + tool-requested content rows(12)
+    // base(3) + page_sep(1) + tool-requested content rows(12)
     assert_eq!(
         Renderer::desired_height(&input, None, 80, &pages, 0, None),
-        17
+        16
     );
 }
 
@@ -276,10 +274,10 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
         },
     ];
 
-    // base(4) + page_sep(1) + content(1) + page_sep(1) + tab_indicator(1) = 8
+    // base(3) + page_sep(1) + content(1) + page_sep(1) + tab_indicator(1) = 7
     assert_eq!(
         Renderer::desired_height(&input, None, 80, &pages, 0, None),
-        8
+        7
     );
 }
 
@@ -305,7 +303,7 @@ fn pane_page_does_not_panic_with_tiny_viewport() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &pages, 0, None, None),
+                &pane_args(&input, &status_info(), &pages, 0, None),
                 None,
             )
         })
@@ -333,125 +331,24 @@ fn pane_page_renders_content_between_input_and_status() {
         .draw(|frame| {
             renderer.draw_bottom_pane(
                 frame,
-                &pane_args(&input, &status_info(), &pages, 0, None, None),
+                &pane_args(&input, &status_info(), &pages, 0, None),
                 None,
             )
         })
         .unwrap();
 
-    // Row layout (6 rows total):
+    // Row layout (5 rows total):
     // 0: top sep
     // 1: input "> "
     // 2: page sep
     // 3: "hello pane"
-    // 4: bottom sep
-    // 5: status bar
+    // 4: status bar
     assert!(row_text(&terminal, 3, 40).contains("hello pane"));
-    assert!(row_text(&terminal, 5, 40).contains("test-model"));
+    assert!(row_text(&terminal, 4, 40).contains("test-model"));
 }
 
-#[test]
-fn single_pane_page_has_only_the_fixed_bottom_separator() {
-    let renderer = Renderer::new();
-    let input = InputState::default();
-    let pages = vec![PanePage {
-        source: "test".to_string(),
-        title: "test".to_string(),
-        content: vec![ratatui::text::Line::raw("hello pane")],
-        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
-        scroll: 0,
-        interaction: None,
-    }];
-    let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
 
-    terminal
-        .draw(|frame| {
-            renderer.draw_bottom_pane(
-                frame,
-                &pane_args(&input, &status_info(), &pages, 0, None, None),
-                None,
-            )
-        })
-        .unwrap();
 
-    assert!(row_text(&terminal, 2, 40).chars().all(|c| c == '─'));
-    assert!(row_text(&terminal, 3, 40).contains("hello pane"));
-    assert!(row_text(&terminal, 4, 40).chars().all(|c| c == '─'));
-    assert!(row_text(&terminal, 5, 40).contains("test-model"));
-}
 
-#[test]
-fn bottom_separator_can_show_pane_toggle_hint() {
-    let renderer = Renderer::new();
-    let input = InputState::default();
-    let pages = vec![PanePage {
-        source: "test".to_string(),
-        title: "test".to_string(),
-        content: vec![ratatui::text::Line::raw("hello pane")],
-        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
-        scroll: 0,
-        interaction: None,
-    }];
-    let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
 
-    terminal
-        .draw(|frame| {
-            renderer.draw_bottom_pane(
-                frame,
-                &pane_args(
-                    &input,
-                    &status_info(),
-                    &pages,
-                    0,
-                    Some("Ctrl+T hide tasks"),
-                    None,
-                ),
-                None,
-            )
-        })
-        .unwrap();
 
-    let separator = row_text(&terminal, 4, 40);
-    assert_eq!(
-        separator,
-        format!("{} Ctrl+T hide tasks ──", "─".repeat(19))
-    );
-}
-
-#[test]
-fn bottom_separator_hint_uses_display_width_for_unicode_shortcuts() {
-    let renderer = Renderer::new();
-    let input = InputState::default();
-    let pages = vec![PanePage {
-        source: "test".to_string(),
-        title: "test".to_string(),
-        content: vec![ratatui::text::Line::raw("hello pane")],
-        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
-        scroll: 0,
-        interaction: None,
-    }];
-    let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
-
-    terminal
-        .draw(|frame| {
-            renderer.draw_bottom_pane(
-                frame,
-                &pane_args(
-                    &input,
-                    &status_info(),
-                    &pages,
-                    0,
-                    Some("Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓"),
-                    None,
-                ),
-                None,
-            )
-        })
-        .unwrap();
-
-    let separator = row_text(&terminal, 4, 40);
-    assert_eq!(
-        separator,
-        format!("{} Ctrl+T hide panel  ──  Ctrl+↑↓/↑↓ ──", "─".repeat(3))
-    );
-}

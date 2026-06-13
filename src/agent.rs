@@ -521,7 +521,8 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         // Consume stream
         let mut assistant_text = String::new();
-        let mut reasoning_content = String::new();
+        let mut reasoning_text = String::new();
+        let mut reasoning_echo_field: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut stream_error = false;
         let mut had_usage = false;
@@ -532,8 +533,11 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Ok(ChatEvent::TextDelta(text)) => {
                     assistant_text.push_str(&text);
                 }
-                Ok(ChatEvent::ReasoningDelta(text)) => {
-                    reasoning_content.push_str(&text);
+                Ok(ChatEvent::ReasoningDelta { text, echo_field }) => {
+                    reasoning_text.push_str(&text);
+                    if reasoning_echo_field.is_none() {
+                        reasoning_echo_field = echo_field;
+                    }
                 }
                 Ok(ChatEvent::ToolCall(call)) => {
                     let summary = format!("{}: {}", call.name, summarize_call_args(&call));
@@ -586,7 +590,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         if !had_usage && !stream_error {
             let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
             let completion_chars = assistant_text.chars().count()
-                + reasoning_content.chars().count()
+                + reasoning_text.chars().count()
                 + tool_calls
                     .iter()
                     .map(|call| call.arguments.to_string().chars().count())
@@ -635,8 +639,11 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
 
         // Push assistant message with tool calls into history
         let mut assistant = ChatMessage::assistant_with_tools(&assistant_text, tool_calls.clone());
-        if !reasoning_content.is_empty() {
-            assistant.reasoning_content = Some(std::mem::take(&mut reasoning_content));
+        if !reasoning_text.is_empty() {
+            assistant.reasoning = Some(crate::llm::Reasoning {
+                text: std::mem::take(&mut reasoning_text),
+                echo_field: reasoning_echo_field.take(),
+            });
         }
         history.push(assistant.clone());
         transcript.push(assistant);
@@ -730,7 +737,7 @@ fn estimate_context_chars(history: &[ChatMessage], tool_defs_json_chars: usize) 
         .iter()
         .map(|msg| {
             msg.content.chars().count()
-                + opt_str_chars(msg.reasoning_content.as_deref())
+                + msg.reasoning.as_ref().map_or(0, |r| r.text.chars().count())
                 + serde_json::to_string(&msg.tool_calls)
                     .map(|json| json.chars().count())
                     .unwrap_or(0)

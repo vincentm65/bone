@@ -113,15 +113,16 @@ local function build_description()
         parts[#parts + 1] = table.concat({
             "Actions:",
             '- dispatch: start one or more tasks (one tasks[] entry each, run in parallel).',
-            '  - If your next step DEPENDS on the results, set wait=true: the call blocks and returns the results directly. Prefer this for fan-out/fan-in work.',
-            '  - If the work is independent of what you do next, omit wait: dispatch returns immediately and you keep working. Finished results are delivered to you automatically in a later message — do NOT poll for them, and NEVER fabricate or assume results you have not received.',
+            '  - If you need the results to continue, or you have nothing else productive to do, set wait=true: the call blocks and returns the results directly. This is the right choice for fan-out/fan-in work (e.g. dispatching research and then synthesizing it).',
+            '  - Omit wait ONLY when you have separate, independent work to do that does NOT overlap the dispatched tasks: dispatch returns immediately and you continue on that other work. Finished results are delivered automatically in a later message — do NOT poll for them, and NEVER fabricate or assume results you have not received.',
             '- wait: block until previously dispatched jobs finish. Waits on the given ids[] (or all running jobs when omitted) and returns their results. Use when you reach a point where you need pending results before continuing.',
             '- status: non-blocking snapshot of job progress. Use sparingly; never call status in a loop.',
             "",
             "Rules:",
             "- Batch independent tasks into a single dispatch call to maximize parallelism.",
             "- Each agent runs one job at a time; dispatching to a busy agent is rejected.",
-            "- After a non-waiting dispatch, finish your current work and end your turn; results arrive as an automated message.",
+            "- NEVER duplicate the work you delegated. Once a task is dispatched, do not read the same files, run the same searches, or research the same questions yourself — that wastes context and defeats the purpose of delegating. Let the sub-agent do it.",
+            "- After a non-waiting dispatch, do only your separate independent work, then end your turn; the results arrive as an automated message. If you have no such independent work, you should have used wait=true instead.",
         }, "\n")
     end
     return table.concat(parts, "\n")

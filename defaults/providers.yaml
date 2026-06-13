@@ -64,18 +64,18 @@ kimi:
   handler: openai
 minimax:
   label: MiniMax
-  base_url: https://api.minimax.io/anthropic/v1
+  base_url: https://api.minimax.io/v1
   model: MiniMax-M2.7
   api_key: ''
   endpoint: /chat/completions
-  handler: anthropic
+  handler: openai
 minimax_plan:
   label: MiniMax Plan
-  base_url: https://api.minimax.io/anthropic/v1
+  base_url: https://api.minimax.io/v1
   model: MiniMax-M2.7
   api_key: ''
   endpoint: /chat/completions
-  handler: anthropic
+  handler: openai
 codex:
   label: Codex
   base_url: https://chatgpt.com/backend-api/codex

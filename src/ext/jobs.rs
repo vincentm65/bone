@@ -391,7 +391,6 @@ pub fn truncate_for_injection(s: &str, max_chars: usize) -> String {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-
 #[cfg(test)]
 #[path = "jobs_tests.rs"]
 mod jobs_tests;
