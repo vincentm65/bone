@@ -4,13 +4,23 @@
 //! Installing does not auto-load; the user must call `bone.plugin.load("name")`
 //! from `init.lua`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mlua::{Lua, Table, Value};
 
 /// Plugin directory relative to config dir.
 fn plugins_dir(config_dir: &str) -> PathBuf {
     PathBuf::from(config_dir).join("lua/plugins")
+}
+
+#[cfg(unix)]
+fn symlink_plugin_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dest)
+}
+
+#[cfg(windows)]
+fn symlink_plugin_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(src, dest)
 }
 
 /// Set up the `bone.plugin` table on the Lua state.
@@ -108,11 +118,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                 } else {
                     src.to_path_buf()
                 };
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&abs, &dest)
-                    .map_err(|e| mlua::Error::external(format!("symlink failed: {e}")))?;
-                #[cfg(windows)]
-                std::os::windows::fs::symlink_dir(&abs, &dest)
+                symlink_plugin_dir(&abs, &dest)
                     .map_err(|e| mlua::Error::external(format!("symlink failed: {e}")))?;
                 Ok(name)
             } else {
