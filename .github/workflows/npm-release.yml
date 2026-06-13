@@ -1,6 +1,9 @@
 name: npm-release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
@@ -69,9 +72,22 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - name: release vars
+        id: rel
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            tag="${{ inputs.tag }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" == *-* ]]; then tag="next"; else tag="latest"; fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: set package versions
         run: |
-          npm version --prefix npm/bone-agent ${{ inputs.version }} --no-git-tag-version
+          npm version --prefix npm/bone-agent ${{ steps.rel.outputs.version }} --no-git-tag-version
           node - <<'NODE'
           const fs = require('fs');
           const file = 'npm/bone-agent/package.json';
@@ -81,7 +97,7 @@ jobs:
           fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
           NODE
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.rel.outputs.version }}
       - uses: actions/download-artifact@v4
         with:
           name: bone-linux-x64
@@ -103,25 +119,25 @@ jobs:
           name: bone-win32-x64
           path: target/x86_64-pc-windows-msvc/release
       - name: create platform packages
-        run: node npm/make-platform-packages.js ${{ inputs.version }}
+        run: node npm/make-platform-packages.js ${{ steps.rel.outputs.version }}
       - name: publish platform packages
         run: |
           for dir in npm/dist/*; do
             name=$(node -p "require('./' + process.argv[1] + '/package.json').name" "$dir")
-            if npm view "$name@${{ inputs.version }}" version >/dev/null 2>&1; then
-              echo "skip existing $name@${{ inputs.version }}"
+            if npm view "$name@${{ steps.rel.outputs.version }}" version >/dev/null 2>&1; then
+              echo "skip existing $name@${{ steps.rel.outputs.version }}"
             else
-              npm publish "$dir" --access public --tag ${{ inputs.tag }}
+              npm publish "$dir" --access public --tag ${{ steps.rel.outputs.tag }}
             fi
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: publish main package
         run: |
-          if npm view "bone-agent@${{ inputs.version }}" version >/dev/null 2>&1; then
-            echo "skip existing bone-agent@${{ inputs.version }}"
+          if npm view "bone-agent@${{ steps.rel.outputs.version }}" version >/dev/null 2>&1; then
+            echo "skip existing bone-agent@${{ steps.rel.outputs.version }}"
           else
-            npm publish ./npm/bone-agent --access public --tag ${{ inputs.tag }}
+            npm publish ./npm/bone-agent --access public --tag ${{ steps.rel.outputs.tag }}
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

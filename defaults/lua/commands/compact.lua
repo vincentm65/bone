@@ -281,13 +281,20 @@ bone.on("before_turn", function(event, ctx)
         return nil
     end
 
-    local compacted_tokens = estimate_tokens(cjson.encode(messages))
-    last_auto_context[context_key] = compacted_tokens
+    -- The replacement transcript is only part of the context window; the
+    -- system prompt and tool schemas are fixed overhead that survives
+    -- compaction. Estimate that overhead so the reported new context length
+    -- reflects what the user will actually see, not just the transcript size.
+    local transcript_tokens = estimate_tokens(cjson.encode(messages))
+    local history_tokens = estimate_tokens(cjson.encode(history))
+    local overhead = math.max(0, context_length - history_tokens)
+    local new_context = overhead + transcript_tokens
+    last_auto_context[context_key] = new_context
 
     ctx.ui.notify(
         string.format(
-            "compacting: %d messages → %d (context: %d → ~%d tokens)",
-            #history, #messages, context_length, compacted_tokens
+            "compacting: %d messages → %d (context: ~%d → ~%d tokens)",
+            #history, #messages, context_length, new_context
         ),
         "info"
     )
@@ -347,11 +354,27 @@ bone.register_command("compact", {
             return { display = "Compaction produced no changes.", submit = false }
         end
 
-        return {
+        -- Report the resulting context length (transcript + fixed overhead such
+        -- as the system prompt and tool schemas), not just the transcript size.
+        local transcript_tokens = estimate_tokens(cjson.encode(messages))
+        local display
+        local snapshot = ctx.usage and ctx.usage.snapshot and ctx.usage.snapshot()
+        if snapshot and snapshot.context_length then
+            local history_tokens = estimate_tokens(cjson.encode(history))
+            local overhead = math.max(0, snapshot.context_length - history_tokens)
             display = string.format(
-                "Compacted: %d messages → %d (~%d tokens).",
-                #history, #messages, estimate_tokens(cjson.encode(messages))
-            ),
+                "Compacted: %d messages → %d (context: ~%d → ~%d tokens).",
+                #history, #messages, snapshot.context_length, overhead + transcript_tokens
+            )
+        else
+            display = string.format(
+                "Compacted: %d messages → %d (summarized transcript ~%d tokens).",
+                #history, #messages, transcript_tokens
+            )
+        end
+
+        return {
+            display = display,
             action = "conversation.replace",
             messages = messages,
             submit = false,

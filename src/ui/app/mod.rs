@@ -831,11 +831,16 @@ impl App {
 
         // Autocomplete key interception (before input.apply_key)
         if let Some(ref mut ac) = self.autocomplete {
+            // Windows Console reports arrow keys with extra modifier/state bits,
+            // so an exact `modifiers.is_empty()` check fails there and menu
+            // navigation goes dead. Only CTRL/ALT should disqualify plain
+            // navigation; SHIFT and enhanced-key state are benign.
+            let nav_mods = !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
             match code {
                 // Arrow Up/Down: if buffer is a complete command (exact match),
                 // dismiss autocomplete and fall through to history navigation.
                 // Otherwise scroll the suggestion list.
-                KeyCode::Up | KeyCode::Down if modifiers.is_empty() => {
+                KeyCode::Up | KeyCode::Down if nav_mods => {
                     let buf = &self.input.buffer;
                     let complete = buf.starts_with('/')
                         && ac
@@ -855,7 +860,7 @@ impl App {
                         return Ok(());
                     }
                 }
-                KeyCode::Tab | KeyCode::Enter if modifiers.is_empty() => {
+                KeyCode::Tab | KeyCode::Enter if nav_mods => {
                     if let Some(cmd) = ac.selected_command() {
                         self.input.buffer = format!("/{}", cmd);
                         self.input.cursor_pos = self.input.buffer.chars().count();

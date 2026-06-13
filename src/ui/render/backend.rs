@@ -126,22 +126,6 @@ impl<W: Write> Backend for BoneBackend<W> {
     fn flush(&mut self) -> io::Result<()> {
         Backend::flush(&mut self.inner)
     }
-
-    fn scroll_region_up(
-        &mut self,
-        region: std::ops::Range<u16>,
-        line_count: u16,
-    ) -> io::Result<()> {
-        self.inner.scroll_region_up(region, line_count)
-    }
-
-    fn scroll_region_down(
-        &mut self,
-        region: std::ops::Range<u16>,
-        line_count: u16,
-    ) -> io::Result<()> {
-        self.inner.scroll_region_down(region, line_count)
-    }
 }
 
 fn background_suffix_start(row: &[(u16, u16, &Cell)], width: u16) -> Option<usize> {
