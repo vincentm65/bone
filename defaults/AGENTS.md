@@ -99,7 +99,8 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | **`ctx.ui.*`** | | UI output |
 | `ctx.ui.notify(msg, level?)` | | Show notification (`"info"`, `"warn"`, `"error"`) |
 | `ctx.ui.status(msg)` | | Write status line to stderr |
-| `ctx.ui.pane(table)` | `true\|(false, string)` | Emit a live pane update (tools only) |
+| `ctx.ui.pane(table)` | `true\|(false, string)` | Upsert/clear a live pane (tools only) — see [Live Panes](#live-panes) |
+| `ctx.ui.interact(table)` | `table` | Show an interactive pane and block for the user's answer — see [Live Panes](#live-panes) |
 | **Live events** | | During `execute_output_live` only |
 | `ctx.emit_pane(table)` | `true` | Same as `ctx.ui.pane` |
 | **`ctx.usage.*`** | | Token usage |
@@ -508,6 +509,67 @@ bone.register_tool({
   return cjson.encode(output)
   ```
   Pane span fields: `text` (required), `fg` (optional), `bg` (optional), `modifiers` (optional array: `"bold"`, `"dim"`, `"italic"`, `"underline"`, `"strike"`). Colors: `"white"`, `"dark_gray"`, `"green"`, `"red"`, `"yellow"`, `"blue"`, `"cyan"`, `"magenta"`.
+
+### Live Panes
+
+The bottom of the TUI hosts a tab-switchable region of panes. Every pane is
+identified by a stable `source` string and carries `{ title, lines, visible_rows?, scroll? }`.
+The `lines` format is the same as the return-envelope `pane` above (plain
+strings or `{ spans = {...} }`).
+
+There are two ways to show a pane:
+
+- **Return-envelope `pane`** (above) — a single snapshot shown *after* `execute`
+  returns. Good for static results.
+- **`ctx.ui.pane{}`** — emitted *while* the tool runs, as many times as you
+  like. This is how you stream progress. (`ctx.emit_pane{}` is an alias.) Only
+  available during tool execution.
+
+Re-emitting the same `source` **replaces** that pane in place (upsert); emitting
+it with empty `lines` **removes** it:
+
+```lua
+for i = 1, n do
+    ctx.ui.pane{ source = "scan", title = ("Scanning (%d/%d)"):format(i, n),
+                 lines = { ("checked %d files"):format(i) } }
+    -- ...do work...
+end
+ctx.ui.pane{ source = "scan", title = "", lines = {} }   -- clear when done
+```
+
+#### Interactive panes — `ctx.ui.interact{}`
+
+Shows a pane the user can drive with the keyboard and **blocks** until they
+answer (Up/Down to move, Space to toggle in multi-select, Tab for the custom
+field, Enter to submit, Esc to cancel):
+
+```lua
+local result = ctx.ui.interact{
+    question = "Which branch?",
+    type = "single_select",     -- "single_select" | "multi_select" | "text_input"
+    options = { "main", "dev" }, -- required for select types
+    default = 1,                 -- 1-based initial selection (optional)
+    allow_custom = true,         -- offer a free-text "Custom:" row (optional)
+}
+-- single_select → { value = "main" }  or  { value = "...", custom = true }
+-- multi_select  → { values = { "main", "dev" }, custom? = "..." }
+-- text_input    → { value = "typed text" }
+-- cancelled     → { cancelled = true }
+```
+
+The bundled `ask_user` tool (`lua/tools/ask_user.lua`) is built entirely on
+`ctx.ui.interact`; read it for a worked example of multi-question flows.
+
+#### Lifecycle & cancellation
+
+- Clean up panes you create by emitting empty `lines` when done.
+- Pressing **Esc** on an interactive pane cancels just that interaction (returns
+  `{ cancelled = true }`), not the whole turn — so your cleanup code still runs.
+- If the user **hard-cancels** the turn (Ctrl+C) while your tool is mid-run, its
+  execution is dropped before cleanup can run; the host automatically removes any
+  panes the tool emitted, so nothing lingers.
+- The **sub-agent pane** (`source = "subagents"`) is rendered by Rust from the
+  job registry, not via `ctx.ui.pane`. Don't use that `source` for your own panes.
 
 ### Session State
 
