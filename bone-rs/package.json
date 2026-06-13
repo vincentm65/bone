@@ -8,6 +8,7 @@
   "files": [
     "bin/",
     "defaults/",
+    "install.js",
     "LICENSE",
     "README.md",
     "package.json"
