@@ -1,0 +1,7 @@
+.git/
+.gitignore
+target/
+Cargo.lock
+*.md
+!README.md
+bone-rs/
