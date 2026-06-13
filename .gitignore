@@ -20,4 +20,3 @@ test_edits.txt
 
 # npm generated artifacts
 *.tgz
-bone-rs/bin/bone-*
