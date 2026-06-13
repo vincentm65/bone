@@ -5,10 +5,13 @@ pub mod markdown;
 pub mod messages;
 pub mod wrap;
 
+#[cfg(not(windows))]
 use messages::wrapped_line_count;
+#[cfg(not(windows))]
 use ratatui::layout::Rect;
 
 use ratatui::text::Line;
+#[cfg(not(windows))]
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, Viewport};
 use std::io::{self, Stdout, Write};
@@ -120,6 +123,10 @@ impl Renderer {
         // Clear the current viewport before swapping.
         term.clear()?;
         // Replace with a fresh terminal at the new height.
+        Self::replace_terminal(term, new_height)
+    }
+
+    fn replace_terminal(term: &mut BoneTerminal, new_height: u16) -> io::Result<()> {
         let backend = BoneBackend::new(io::stdout());
         let new_term = Terminal::with_options(
             backend,
@@ -129,6 +136,69 @@ impl Renderer {
         )?;
         *term = new_term;
         Ok(())
+    }
+
+    fn insert_lines_to_scrollback(
+        &mut self,
+        term: &mut BoneTerminal,
+        lines: &[Line<'static>],
+    ) -> io::Result<()> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+
+        #[cfg(windows)]
+        {
+            self.append_lines_windows(term, lines)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let row_count = logical_lines_row_count(lines, term.size()?.width.max(1));
+            term.insert_before(row_count, |buf| {
+                let mut row = 0u16;
+                for line in lines {
+                    let height = wrapped_line_count(line, buf.area.width.max(1));
+                    let area = Rect {
+                        x: 0,
+                        y: row,
+                        width: buf.area.width,
+                        height,
+                    };
+                    Paragraph::new(line.clone())
+                        .wrap(Wrap { trim: false })
+                        .render(area, buf);
+                    row = row.saturating_add(height);
+                }
+            })
+        }
+    }
+
+    #[cfg(windows)]
+    fn append_lines_windows(
+        &mut self,
+        term: &mut BoneTerminal,
+        lines: &[Line<'static>],
+    ) -> io::Result<()> {
+        use crossterm::cursor::MoveTo;
+        use crossterm::style::Print;
+
+        let size = term.size()?;
+        let rows = plain_scrollback_rows(lines, size.width);
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        term.clear()?;
+        crossterm::queue!(
+            term.backend_mut(),
+            MoveTo(0, size.height.saturating_sub(1))
+        )?;
+        for row in rows {
+            crossterm::queue!(term.backend_mut(), Print(row), Print("\r\n"))?;
+        }
+        Write::flush(term.backend_mut())?;
+        Self::replace_terminal(term, self.viewport_height)
     }
 
     /// Ensure the inline viewport height matches the content currently drawn
@@ -203,36 +273,45 @@ impl Renderer {
         let terminal_width = term.size()?.width;
         let rendered: Vec<Line<'static>> =
             messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width);
-        let line_count = logical_lines_row_count(&rendered, terminal_width);
         let user_background = self.theme.user_msg_bg;
 
-        term.insert_before(line_count, |buf| {
-            let mut row = 0u16;
-            for line in &rendered {
-                let height = wrapped_line_count(line, buf.area.width.max(1));
-                let msg_area = Rect {
-                    x: 0,
-                    y: row,
-                    width: buf.area.width,
-                    height,
-                };
-                if line
-                    .spans
-                    .iter()
-                    .any(|span| span.style.bg == Some(user_background))
-                {
-                    buf.set_style(
-                        msg_area,
-                        ratatui::style::Style::default().bg(user_background),
-                    );
-                }
-                Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .render(msg_area, buf);
-                row = row.saturating_add(height);
-            }
-        })?;
+        #[cfg(windows)]
+        let result = {
+            let _ = user_background;
+            self.insert_lines_to_scrollback(term, &rendered)
+        };
 
+        #[cfg(not(windows))]
+        let result = {
+            term.insert_before(logical_lines_row_count(&rendered, terminal_width), |buf| {
+                let mut row = 0u16;
+                for line in &rendered {
+                    let height = wrapped_line_count(line, buf.area.width.max(1));
+                    let msg_area = Rect {
+                        x: 0,
+                        y: row,
+                        width: buf.area.width,
+                        height,
+                    };
+                    if line
+                        .spans
+                        .iter()
+                        .any(|span| span.style.bg == Some(user_background))
+                    {
+                        buf.set_style(
+                            msg_area,
+                            ratatui::style::Style::default().bg(user_background),
+                        );
+                    }
+                    Paragraph::new(line.clone())
+                        .wrap(Wrap { trim: false })
+                        .render(msg_area, buf);
+                    row = row.saturating_add(height);
+                }
+            })
+        };
+
+        result?;
         self.scrollback_cursor = messages.len();
         Ok(())
     }
@@ -252,7 +331,10 @@ impl Renderer {
             let width = term.size()?.width.max(1);
             let rendered = messages::assistant_markdown_to_lines(&content[..safe_end], width);
             if self.streaming_lines_flushed < rendered.len() {
-                messages::insert_lines(term, &rendered[self.streaming_lines_flushed..])?;
+                self.insert_lines_to_scrollback(
+                    term,
+                    &rendered[self.streaming_lines_flushed..],
+                )?;
                 self.streaming_lines_flushed = rendered.len();
             }
             self.streaming_source_flushed = safe_end;
@@ -275,13 +357,13 @@ impl Renderer {
         let width = term.size()?.width.max(1);
         let rendered = messages::assistant_markdown_to_lines(content, width);
         if self.streaming_lines_flushed < rendered.len() {
-            messages::insert_lines(term, &rendered[self.streaming_lines_flushed..])?;
+            self.insert_lines_to_scrollback(term, &rendered[self.streaming_lines_flushed..])?;
         }
         self.streaming_source_flushed = content.len();
         self.streaming_lines_flushed = rendered.len();
 
         if !content.is_empty() || self.streaming_source_flushed > 0 {
-            messages::insert_lines(term, &[ratatui::text::Line::raw("")])?;
+            self.insert_lines_to_scrollback(term, &[ratatui::text::Line::raw("")])?;
         }
         Ok(())
     }
@@ -295,11 +377,32 @@ impl Renderer {
     }
 }
 
+#[cfg(not(windows))]
 fn logical_lines_row_count(lines: &[Line<'static>], width: u16) -> u16 {
     lines
         .iter()
         .map(|line| wrapped_line_count(line, width))
         .sum()
+}
+
+#[cfg(windows)]
+fn plain_scrollback_rows(lines: &[Line<'static>], width: u16) -> Vec<String> {
+    let wrap_width = width.saturating_sub(1).max(1) as usize;
+    let mut rows = Vec::new();
+    for line in lines {
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let text = text.trim_end_matches(' ');
+        if text.is_empty() {
+            rows.push(String::new());
+        } else {
+            rows.extend(wrap::wrap_text(text, wrap_width));
+        }
+    }
+    rows
 }
 
 pub fn safe_markdown_prefix_end(content: &str) -> usize {
