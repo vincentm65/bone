@@ -190,10 +190,7 @@ impl Renderer {
         }
 
         term.clear()?;
-        crossterm::queue!(
-            term.backend_mut(),
-            MoveTo(0, size.height.saturating_sub(1))
-        )?;
+        crossterm::queue!(term.backend_mut(), MoveTo(0, size.height.saturating_sub(1)))?;
         for row in rows {
             crossterm::queue!(term.backend_mut(), Print(row), Print("\r\n"))?;
         }
@@ -326,24 +323,39 @@ impl Renderer {
         args: &PaneDraw<'_>,
     ) -> io::Result<()> {
         self.ensure_viewport_height(term, args.input, None, args.pages, args.active_page, None)?; // autocomplete not active during streaming
-        let safe_end = safe_markdown_prefix_end(content);
-        if safe_end > self.streaming_source_flushed {
-            let width = term.size()?.width.max(1);
-            let rendered = messages::assistant_markdown_to_lines(&content[..safe_end], width);
-            if self.streaming_lines_flushed < rendered.len() {
-                self.insert_lines_to_scrollback(
-                    term,
-                    &rendered[self.streaming_lines_flushed..],
-                )?;
-                self.streaming_lines_flushed = rendered.len();
-            }
-            self.streaming_source_flushed = safe_end;
+
+        // Windows terminal hosts do not reliably retain rows inserted above
+        // the inline viewport. The fallback commits rows by clearing and
+        // recreating the viewport, which is too visually noisy for incremental
+        // streaming. Defer assistant output until finalization on Windows.
+        #[cfg(windows)]
+        {
+            let _ = content;
+            term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
+            return Ok(());
         }
 
-        // Redraw only composer/status UI. Incomplete assistant output is never
-        // shown in the input viewport; it is inserted once markdown is stable.
-        term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
-        Ok(())
+        #[cfg(not(windows))]
+        {
+            let safe_end = safe_markdown_prefix_end(content);
+            if safe_end > self.streaming_source_flushed {
+                let width = term.size()?.width.max(1);
+                let rendered = messages::assistant_markdown_to_lines(&content[..safe_end], width);
+                if self.streaming_lines_flushed < rendered.len() {
+                    self.insert_lines_to_scrollback(
+                        term,
+                        &rendered[self.streaming_lines_flushed..],
+                    )?;
+                    self.streaming_lines_flushed = rendered.len();
+                }
+                self.streaming_source_flushed = safe_end;
+            }
+
+            // Redraw only composer/status UI. Incomplete assistant output is never
+            // shown in the input viewport; it is inserted once markdown is stable.
+            term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
+            Ok(())
+        }
     }
 
     /// Flush all remaining lines from the streaming message, including

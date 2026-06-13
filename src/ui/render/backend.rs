@@ -1,13 +1,17 @@
 use std::io::{self, Write};
 
+#[cfg(not(windows))]
 use crossterm::cursor::MoveTo;
+#[cfg(not(windows))]
 use crossterm::style::{
     Attribute, Color as CrosstermColor, ResetColor, SetAttribute, SetBackgroundColor,
 };
+#[cfg(not(windows))]
 use crossterm::terminal::{Clear, ClearType as CrosstermClearType};
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
+#[cfg(not(windows))]
 use ratatui::style::{Color, Modifier};
 
 /// Crossterm backend that paints trailing background fill using EL instead of spaces.
@@ -26,6 +30,7 @@ impl<W: Write> BoneBackend<W> {
         }
     }
 
+    #[cfg(not(windows))]
     fn clear_background_suffix(&mut self, x: u16, y: u16, bg: Color) -> io::Result<()> {
         crossterm::queue!(
             self.inner.writer_mut(),
@@ -54,37 +59,46 @@ impl<W: Write> Backend for BoneBackend<W> {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        let cells = content.collect::<Vec<_>>();
-        let mut pending_start = 0;
-        let mut row_start = 0;
+        #[cfg(windows)]
+        {
+            self.inner.draw(content)?;
+            return Ok(());
+        }
 
-        while row_start < cells.len() {
-            let y = cells[row_start].1;
-            let mut row_end = row_start + 1;
-            while row_end < cells.len() && cells[row_end].1 == y {
-                row_end += 1;
-            }
+        #[cfg(not(windows))]
+        {
+            let cells = content.collect::<Vec<_>>();
+            let mut pending_start = 0;
+            let mut row_start = 0;
 
-            if let Some(fill_start) =
-                background_suffix_start(&cells[row_start..row_end], self.size()?.width)
-            {
-                let fill_start = row_start + fill_start;
-                if pending_start < fill_start {
-                    self.inner
-                        .draw(cells[pending_start..fill_start].iter().copied())?;
+            while row_start < cells.len() {
+                let y = cells[row_start].1;
+                let mut row_end = row_start + 1;
+                while row_end < cells.len() && cells[row_end].1 == y {
+                    row_end += 1;
                 }
-                let (x, y, cell) = cells[fill_start];
-                self.clear_background_suffix(x, y, cell.bg)?;
-                pending_start = row_end;
+
+                if let Some(fill_start) =
+                    background_suffix_start(&cells[row_start..row_end], self.size()?.width)
+                {
+                    let fill_start = row_start + fill_start;
+                    if pending_start < fill_start {
+                        self.inner
+                            .draw(cells[pending_start..fill_start].iter().copied())?;
+                    }
+                    let (x, y, cell) = cells[fill_start];
+                    self.clear_background_suffix(x, y, cell.bg)?;
+                    pending_start = row_end;
+                }
+
+                row_start = row_end;
             }
 
-            row_start = row_end;
+            if pending_start < cells.len() {
+                self.inner.draw(cells[pending_start..].iter().copied())?;
+            }
+            Ok(())
         }
-
-        if pending_start < cells.len() {
-            self.inner.draw(cells[pending_start..].iter().copied())?;
-        }
-        Ok(())
     }
 
     fn append_lines(&mut self, n: u16) -> io::Result<()> {
@@ -128,6 +142,7 @@ impl<W: Write> Backend for BoneBackend<W> {
     }
 }
 
+#[cfg(not(windows))]
 fn background_suffix_start(row: &[(u16, u16, &Cell)], width: u16) -> Option<usize> {
     let (last_x, _, last) = row.last()?;
     if last_x + 1 != width || !is_background_fill(last) {
@@ -146,6 +161,7 @@ fn background_suffix_start(row: &[(u16, u16, &Cell)], width: u16) -> Option<usiz
     Some(start)
 }
 
+#[cfg(not(windows))]
 fn is_background_fill(cell: &Cell) -> bool {
     cell.symbol() == " "
         && cell.fg == Color::Reset
@@ -153,6 +169,7 @@ fn is_background_fill(cell: &Cell) -> bool {
         && cell.modifier == Modifier::empty()
 }
 
+#[cfg(not(windows))]
 fn to_crossterm_color(color: Color) -> CrosstermColor {
     match color {
         Color::Reset => CrosstermColor::Reset,
