@@ -321,6 +321,7 @@ struct AgentSetup {
     session: SessionWriter,
     token_stats: TokenStats,
     transcript: Vec<ChatMessage>,
+    system_prompt_override: Option<String>,
 }
 
 /// Perform the synchronous setup for a headless agent (config loading,
@@ -378,15 +379,14 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         "message",
         serde_json::json!({ "role": "user", "content": &request.prompt }),
     );
-    // Sub-agents get the fixed environment/tool scaffold composed with their
-    // (optional) persona; a top-level custom prompt replaces the default.
-    let history = if request.agent_depth > 0 {
-        let composed =
-            crate::llm::prompts::subagent_system_prompt(request.system_prompt.as_deref());
-        build_chat_history(&transcript, Some(&composed))
+    let system_prompt_override = if request.agent_depth > 0 {
+        Some(crate::llm::prompts::subagent_system_prompt(
+            request.system_prompt.as_deref(),
+        ))
     } else {
-        build_chat_history(&transcript, request.system_prompt.as_deref())
+        request.system_prompt.clone()
     };
+    let history = build_chat_history(&transcript, system_prompt_override.as_deref());
 
     let session = open_headless_session(llm.id(), llm.model());
 
@@ -398,6 +398,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         session,
         token_stats: TokenStats::new(),
         transcript,
+        system_prompt_override,
     })
 }
 
@@ -419,6 +420,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         mut session,
         mut token_stats,
         mut transcript,
+        system_prompt_override,
     } = setup;
 
     let tool_defs = tools.definitions();
@@ -486,7 +488,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             for action in actions {
                 if let Some(new_messages) = action.conversation_replace {
                     transcript = new_messages;
-                    history = build_chat_history(&transcript, None);
+                    history = build_chat_history(&transcript, system_prompt_override.as_deref());
                     let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
                     token_stats.context_length =
                         (prompt_chars as f64 / CHARS_PER_TOKEN).ceil() as u64;

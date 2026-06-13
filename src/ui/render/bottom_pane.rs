@@ -10,8 +10,8 @@ use super::{InputState, Prompt, SPINNER, StatusInfo};
 use crate::tools::ApprovalMode;
 use crate::ui::autocomplete::{AutocompleteState, MAX_VISIBLE};
 use crate::ui::pane_page::PanePage;
-use crate::ui::tool_display;
 use crate::ui::pane_page::{InteractionMode, PaneInteraction};
+use crate::ui::tool_display;
 
 /// Arguments shared by pane-drawing methods.
 pub struct PaneDraw<'a> {
@@ -652,12 +652,20 @@ impl super::Renderer {
                     // Start overlay AFTER the page content lines so the question
                     // text (separator, question, blank line) is visible above.
                     let content_start_y = page_start + 1;
-                    let overlay_start_y = content_start_y + layout.content_rows.min(page.content.len() as u16);
+                    let overlay_start_y =
+                        content_start_y + layout.content_rows.min(page.content.len() as u16);
                     if let Some(ref interaction) = page.interaction {
                         if interaction.is_active() {
                             let _extra = Self::render_interactive_overlay(
-                                frame, &page, interaction, overlay_start_y,
-                                Rect { y: overlay_start_y, height: area.bottom().saturating_sub(overlay_start_y), ..area },
+                                frame,
+                                &page,
+                                interaction,
+                                overlay_start_y,
+                                Rect {
+                                    y: overlay_start_y,
+                                    height: area.bottom().saturating_sub(overlay_start_y),
+                                    ..area
+                                },
                                 &self.theme,
                             );
                         }
@@ -842,144 +850,194 @@ impl super::Renderer {
         }
     }
 
-/// Render interactive elements (cursor, checkboxes, input field) overlaid on
-/// a page that has an interactive PaneInteraction. Returns the number of
-/// extra rows consumed beyond the page content.
-fn render_interactive_overlay(
-    frame: &mut ratatui::Frame,
-    _page: &PanePage,
-    interaction: &PaneInteraction,
-    start_y: u16,
-    area: ratatui::layout::Rect,
-    theme: &crate::ui::theme::Theme,
-) -> u16 {
-    let mut y = start_y;
-    let options = interaction.options();
-    let sel = interaction.selected();
-    let mode = interaction.mode();
-    let allow_custom = interaction.allow_custom();
-    let custom_focused = interaction.custom_focused();
-    let input_buf = interaction.input_buffer();
-    let cursor_pos = interaction.cursor_pos();
+    /// Render interactive elements (cursor, checkboxes, input field) overlaid on
+    /// a page that has an interactive PaneInteraction. Returns the number of
+    /// extra rows consumed beyond the page content.
+    fn render_interactive_overlay(
+        frame: &mut ratatui::Frame,
+        _page: &PanePage,
+        interaction: &PaneInteraction,
+        start_y: u16,
+        area: ratatui::layout::Rect,
+        theme: &crate::ui::theme::Theme,
+    ) -> u16 {
+        let mut y = start_y;
+        let options = interaction.options();
+        let sel = interaction.selected();
+        let mode = interaction.mode();
+        let allow_custom = interaction.allow_custom();
+        let custom_focused = interaction.custom_focused();
+        let input_buf = interaction.input_buffer();
+        let cursor_pos = interaction.cursor_pos();
 
-    let cursor_style = ratatui::style::Style::default()
-        .fg(theme.thinking)
-        .add_modifier(ratatui::style::Modifier::BOLD);
-    let selected_style = ratatui::style::Style::default()
-        .fg(ratatui::style::Color::White)
-        .add_modifier(ratatui::style::Modifier::BOLD);
-    let normal_style = ratatui::style::Style::default()
-        .fg(ratatui::style::Color::DarkGray);
-    let muted_style = ratatui::style::Style::default()
-        .fg(ratatui::style::Color::DarkGray);
-    let checkbox_on_style = ratatui::style::Style::default()
-        .fg(theme.approval_safe)
-        .add_modifier(ratatui::style::Modifier::BOLD);
+        let cursor_style = ratatui::style::Style::default()
+            .fg(theme.thinking)
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        let selected_style = ratatui::style::Style::default()
+            .fg(ratatui::style::Color::White)
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        let normal_style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
+        let muted_style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
+        let checkbox_on_style = ratatui::style::Style::default()
+            .fg(theme.approval_safe)
+            .add_modifier(ratatui::style::Modifier::BOLD);
 
-    if matches!(mode, InteractionMode::TextInput) {
-        // Render just an input field
-        if y < area.bottom() {
-            let line = Self::format_text_input_line(&input_buf, cursor_pos, cursor_style, selected_style);
+        if matches!(mode, InteractionMode::TextInput) {
+            // Render just an input field
+            if y < area.bottom() {
+                let line = Self::format_text_input_line(
+                    &input_buf,
+                    cursor_pos,
+                    cursor_style,
+                    selected_style,
+                );
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(line),
+                    ratatui::layout::Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
+            }
+            return y - start_y;
+        }
+
+        // Render options
+        for (i, opt) in options.iter().enumerate() {
+            if y >= area.bottom() {
+                break;
+            }
+            let is_selected = i == sel && !custom_focused;
+            let line = match mode {
+                InteractionMode::MultiSelect => {
+                    let checked = interaction.checked(i);
+                    let checkbox = if checked { "[x]" } else { "[ ]" };
+                    let check_style = if checked {
+                        checkbox_on_style
+                    } else {
+                        muted_style
+                    };
+                    let marker = if is_selected { "›" } else { " " };
+                    let opt_style = if is_selected {
+                        selected_style
+                    } else {
+                        normal_style
+                    };
+                    let marker_style = if is_selected {
+                        cursor_style
+                    } else {
+                        normal_style
+                    };
+                    ratatui::text::Line::from(vec![
+                        ratatui::text::Span::styled(format!("  {marker} "), marker_style),
+                        ratatui::text::Span::styled(checkbox.to_string(), check_style),
+                        ratatui::text::Span::styled(format!(" {opt}"), opt_style),
+                    ])
+                }
+                _ => {
+                    let marker = if is_selected { "›" } else { " " };
+                    let marker_style = if is_selected {
+                        cursor_style
+                    } else {
+                        normal_style
+                    };
+                    let opt_style = if is_selected {
+                        selected_style
+                    } else {
+                        normal_style
+                    };
+                    ratatui::text::Line::from(vec![
+                        ratatui::text::Span::styled(format!("  {marker} "), marker_style),
+                        ratatui::text::Span::styled(opt.clone(), opt_style),
+                    ])
+                }
+            };
             frame.render_widget(
                 ratatui::widgets::Paragraph::new(line),
-                ratatui::layout::Rect { y, height: 1, ..area },
+                ratatui::layout::Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
             );
             y += 1;
         }
-        return y - start_y;
-    }
 
-    // Render options
-    for (i, opt) in options.iter().enumerate() {
-        if y >= area.bottom() {
-            break;
+        // Render "Custom:" row if allow_custom
+        if allow_custom && y < area.bottom() {
+            let is_custom_focused = custom_focused;
+            let marker = if is_custom_focused { "›" } else { " " };
+            let marker_style = if is_custom_focused {
+                cursor_style
+            } else {
+                normal_style
+            };
+            let label_style = if is_custom_focused {
+                selected_style
+            } else {
+                normal_style
+            };
+
+            // Build the custom input line: "  › Custom: text█"
+            let custom_text = if is_custom_focused {
+                Self::format_text_input_line(&input_buf, cursor_pos, cursor_style, selected_style)
+            } else if input_buf.is_empty() {
+                ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(format!("  {marker} "), marker_style),
+                    ratatui::text::Span::styled("Custom:", muted_style),
+                ])
+            } else {
+                ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(format!("  {marker} "), marker_style),
+                    ratatui::text::Span::styled(format!("Custom: {input_buf}"), label_style),
+                ])
+            };
+
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(custom_text),
+                ratatui::layout::Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
+            );
+            y += 1;
         }
-        let is_selected = i == sel && !custom_focused;
-        let line = match mode {
-            InteractionMode::MultiSelect => {
-                let checked = interaction.checked(i);
-                let checkbox = if checked { "[x]" } else { "[ ]" };
-                let check_style = if checked { checkbox_on_style } else { muted_style };
-                let marker = if is_selected { "›" } else { " " };
-                let opt_style = if is_selected { selected_style } else { normal_style };
-                let marker_style = if is_selected { cursor_style } else { normal_style };
-                ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                    ratatui::text::Span::styled(checkbox.to_string(), check_style),
-                    ratatui::text::Span::styled(format!(" {opt}"), opt_style),
-                ])
-            }
-            _ => {
-                let marker = if is_selected { "›" } else { " " };
-                let marker_style = if is_selected { cursor_style } else { normal_style };
-                let opt_style = if is_selected { selected_style } else { normal_style };
-                ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                    ratatui::text::Span::styled(opt.clone(), opt_style),
-                ])
-            }
-        };
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(line),
-            ratatui::layout::Rect { y, height: 1, ..area },
-        );
-        y += 1;
+
+        y - start_y
     }
 
-    // Render "Custom:" row if allow_custom
-    if allow_custom && y < area.bottom() {
-        let is_custom_focused = custom_focused;
-        let marker = if is_custom_focused { "›" } else { " " };
-        let marker_style = if is_custom_focused { cursor_style } else { normal_style };
-        let label_style = if is_custom_focused { selected_style } else { normal_style };
+    /// Build a single-line text input field with a cursor.
+    fn format_text_input_line(
+        input: &str,
+        cursor_pos: usize,
+        cursor_style: ratatui::style::Style,
+        text_style: ratatui::style::Style,
+    ) -> ratatui::text::Line<'static> {
+        let chars: Vec<char> = input.chars().collect();
+        let pos = cursor_pos.min(chars.len());
+        let before: String = chars[..pos].iter().collect();
+        let at_cursor = chars.get(pos).copied().unwrap_or(' ');
+        let after: String = chars
+            .get(pos + 1..)
+            .map(|s| s.iter().collect())
+            .unwrap_or_default();
 
-        // Build the custom input line: "  › Custom: text█"
-        let custom_text = if is_custom_focused {
-            Self::format_text_input_line(&input_buf, cursor_pos, cursor_style, selected_style)
-        } else if input_buf.is_empty() {
-            ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                ratatui::text::Span::styled("Custom:", muted_style),
-            ])
+        let cursor_char = if at_cursor == ' ' {
+            "\u{00a0}"
         } else {
-            ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                ratatui::text::Span::styled(format!("Custom: {input_buf}"), label_style),
-            ])
+            &at_cursor.to_string()
         };
 
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(custom_text),
-            ratatui::layout::Rect { y, height: 1, ..area },
-        );
-        y += 1;
+        ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(format!("> {before}"), text_style),
+            ratatui::text::Span::styled(
+                cursor_char.to_string(),
+                cursor_style.add_modifier(ratatui::style::Modifier::REVERSED),
+            ),
+            ratatui::text::Span::styled(after, text_style),
+        ])
     }
-
-    y - start_y
-}
-
-/// Build a single-line text input field with a cursor.
-fn format_text_input_line(
-    input: &str,
-    cursor_pos: usize,
-    cursor_style: ratatui::style::Style,
-    text_style: ratatui::style::Style,
-) -> ratatui::text::Line<'static> {
-    let chars: Vec<char> = input.chars().collect();
-    let pos = cursor_pos.min(chars.len());
-    let before: String = chars[..pos].iter().collect();
-    let at_cursor = chars.get(pos).copied().unwrap_or(' ');
-    let after: String = chars.get(pos + 1..).map(|s| s.iter().collect()).unwrap_or_default();
-
-    let cursor_char = if at_cursor == ' ' { "\u{00a0}" } else { &at_cursor.to_string() };
-
-    ratatui::text::Line::from(vec![
-        ratatui::text::Span::styled(format!("> {before}"), text_style),
-        ratatui::text::Span::styled(
-            cursor_char.to_string(),
-            cursor_style.add_modifier(ratatui::style::Modifier::REVERSED),
-        ),
-        ratatui::text::Span::styled(after, text_style),
-    ])
-}
 }

@@ -1,7 +1,6 @@
 use bone::tools::types::ToolCall;
 use bone::ui::app::stream::{
-    assistant_message, call_row_shown_during_prepare, show_immediate_tool_row,
-    tool_error,
+    assistant_message, call_row_shown_during_prepare, show_immediate_tool_row, tool_error,
 };
 use serde_json::json;
 

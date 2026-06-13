@@ -346,9 +346,3 @@ fn pane_page_renders_content_between_input_and_status() {
     assert!(row_text(&terminal, 3, 40).contains("hello pane"));
     assert!(row_text(&terminal, 4, 40).contains("test-model"));
 }
-
-
-
-
-
-

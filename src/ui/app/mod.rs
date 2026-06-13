@@ -248,9 +248,9 @@ impl App {
 
             // Recompute context_length estimate from the new transcript.
             let history = crate::chat::build_chat_history(&self.transcript, None);
-            self.token_stats.context_length =
-                crate::ui::app::App::estimate_context_chars(&history, &self.tools.definitions())
-                    as u64;
+            let prompt_chars =
+                crate::ui::app::App::estimate_context_chars(&history, &self.tools.definitions());
+            self.token_stats.set_context_estimate(prompt_chars);
         }
         Ok(())
     }

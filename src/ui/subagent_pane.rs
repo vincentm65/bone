@@ -38,9 +38,7 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {icon} "),
-                Style::default()
-                    .fg(icon_fg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(icon_fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(agent.clone(), Style::default().fg(name_fg)),
             Span::styled(" ", Style::default().fg(Color::DarkGray)),

@@ -66,8 +66,14 @@ impl PaneInteraction {
         let has_options = !matches!(mode, InteractionMode::TextInput);
         Self {
             inner: Arc::new(Mutex::new(InteractionInner {
-                selected: if has_options { default_selected.min(options.len().saturating_sub(1)) } else { 0 },
-                checked: std::iter::repeat(false).take(if has_options { options.len() } else { 0 }).collect(),
+                selected: if has_options {
+                    default_selected.min(options.len().saturating_sub(1))
+                } else {
+                    0
+                },
+                checked: std::iter::repeat(false)
+                    .take(if has_options { options.len() } else { 0 })
+                    .collect(),
                 input_buffer: String::new(),
                 cursor_pos: 0,
                 allow_custom,
@@ -90,12 +96,22 @@ impl PaneInteraction {
 
     pub fn set_selected(&self, val: usize) {
         let mut inner = self.inner.lock().unwrap();
-        let max = if inner.custom_focused { inner.checked.len() } else { inner.checked.len().saturating_sub(1) };
+        let max = if inner.custom_focused {
+            inner.checked.len()
+        } else {
+            inner.checked.len().saturating_sub(1)
+        };
         inner.selected = val.min(max);
     }
 
     pub fn checked(&self, idx: usize) -> bool {
-        self.inner.lock().unwrap().checked.get(idx).copied().unwrap_or(false)
+        self.inner
+            .lock()
+            .unwrap()
+            .checked
+            .get(idx)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn set_checked(&self, idx: usize, val: bool) {
@@ -118,7 +134,8 @@ impl PaneInteraction {
     /// Append a char to the input buffer at cursor position.
     pub fn input_insert_char(&self, c: char) {
         let mut inner = self.inner.lock().unwrap();
-        let bp = inner.input_buffer
+        let bp = inner
+            .input_buffer
             .char_indices()
             .nth(inner.cursor_pos)
             .map(|(i, _)| i)
@@ -134,11 +151,14 @@ impl PaneInteraction {
             return;
         }
         let prev_idx = inner.cursor_pos - 1;
-        let (start_byte, ch) = inner.input_buffer
+        let (start_byte, ch) = inner
+            .input_buffer
             .char_indices()
             .nth(prev_idx)
             .unwrap_or((0, '\0'));
-        inner.input_buffer.replace_range(start_byte..start_byte + ch.len_utf8(), "");
+        inner
+            .input_buffer
+            .replace_range(start_byte..start_byte + ch.len_utf8(), "");
         inner.cursor_pos = prev_idx;
     }
 
@@ -196,7 +216,10 @@ impl PaneInteraction {
                     }
                 }
                 InteractionMode::MultiSelect => {
-                    let selected: Vec<String> = inner.checked.iter().enumerate()
+                    let selected: Vec<String> = inner
+                        .checked
+                        .iter()
+                        .enumerate()
                         .filter(|(_, c)| **c)
                         .map(|(i, _)| inner.options[i].clone())
                         .collect();
@@ -212,8 +235,6 @@ impl PaneInteraction {
             false
         }
     }
-
-
 
     /// User pressed Esc: cancel the interaction.
     pub fn cancel(&self) -> bool {
@@ -304,7 +325,11 @@ impl PaneInteraction {
                     if self.allow_custom() && sel >= last_idx {
                         self.set_custom_focused(true);
                     } else {
-                        let max = if self.allow_custom() { num_options } else { last_idx };
+                        let max = if self.allow_custom() {
+                            num_options
+                        } else {
+                            last_idx
+                        };
                         if sel < max {
                             self.set_selected(sel + 1);
                         }
@@ -312,7 +337,9 @@ impl PaneInteraction {
                 }
                 return true;
             }
-            KeyCode::Char(' ') if modifiers.is_empty() && matches!(mode, InteractionMode::MultiSelect) => {
+            KeyCode::Char(' ')
+                if modifiers.is_empty() && matches!(mode, InteractionMode::MultiSelect) =>
+            {
                 if !custom_focused {
                     self.toggle_checked(self.selected());
                 }
@@ -486,8 +513,8 @@ impl PanePage {
         if !interaction.is_active() || !interaction.handle_key(code, modifiers) {
             return false;
         }
-        let cleanup_source = (!interaction.is_active() && page.source != "interact")
-            .then(|| page.source.clone());
+        let cleanup_source =
+            (!interaction.is_active() && page.source != "interact").then(|| page.source.clone());
         if let Some(source) = cleanup_source {
             *active_page = PanePage::remove(pages, &source, *active_page);
         }

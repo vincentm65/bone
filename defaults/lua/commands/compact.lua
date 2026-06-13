@@ -44,6 +44,20 @@ end
 -- Helpers
 -- ---------------------------------------------------------------------------
 
+local function truncate_utf8(s, max_bytes)
+    if #s <= max_bytes then
+        return s
+    end
+    for cut = max_bytes, math.max(max_bytes - 4, 1), -1 do
+        local chunk = s:sub(1, cut)
+        local ok, len = pcall(utf8.len, chunk)
+        if ok and len then
+            return chunk .. "..."
+        end
+    end
+    return "..."
+end
+
 --- Build a summary prompt for the model to condense older messages.
 local function summarization_prompt(older, recent_count)
     local parts = {
@@ -54,17 +68,14 @@ local function summarization_prompt(older, recent_count)
         "- Include file paths, code changes, and errors when relevant.",
         "- Write a concise summary in plain prose, no markdown headings.",
         "",
-        "The last " .. recent_count .. " messages are preserved verbatim and will follow this summary.",
+        "The last " .. recent_count .. " user/assistant messages, plus any matching tool results, are preserved verbatim and will follow this summary.",
         "",
         "--- Conversation to summarize ---",
     }
 
     for _, msg in ipairs(older) do
         local role = msg.role or "unknown"
-        local content = msg.content or ""
-        if #content > 2000 then
-            content = content:sub(1, 1997) .. "..."
-        end
+        local content = truncate_utf8(msg.content or "", 1997)
         parts[#parts + 1] = string.format("[%s] %s", role, content)
     end
 
@@ -179,7 +190,7 @@ local function compact(history, ctx, keep_messages)
             -- regardless of its position (it may trail the last kept user msg).
             keep[#keep + 1] = msg
         else
-            older[#older + 1] = msg
+            table.insert(older, 1, msg)
         end
     end
 
@@ -220,7 +231,7 @@ end
 -- Auto-compaction: before_turn hook
 -- ---------------------------------------------------------------------------
 
-local last_auto_context = 0
+local last_auto_context = {}
 
 bone.on("before_turn", function(event, ctx)
     -- Safety: skip if usage or conversation APIs are unavailable.
@@ -252,11 +263,13 @@ bone.on("before_turn", function(event, ctx)
         return nil
     end
 
+    local conv = ctx.conversation.current and ctx.conversation.current() or nil
+    local context_key = conv and conv.id or "default"
+    local previous_context = last_auto_context[context_key]
     -- Avoid repeated runs when context_length hasn't changed meaningfully.
-    if math.abs(context_length - last_auto_context) < 50 then
+    if previous_context and math.abs(context_length - previous_context) < 50 then
         return nil
     end
-    last_auto_context = context_length
 
     local history = ctx.conversation.history()
     if not history then
@@ -268,10 +281,13 @@ bone.on("before_turn", function(event, ctx)
         return nil
     end
 
+    local compacted_tokens = estimate_tokens(cjson.encode(messages))
+    last_auto_context[context_key] = compacted_tokens
+
     ctx.ui.notify(
         string.format(
             "compacting: %d messages → %d (context: %d → ~%d tokens)",
-            #history, #messages, context_length, estimate_tokens(cjson.encode(messages))
+            #history, #messages, context_length, compacted_tokens
         ),
         "info"
     )
