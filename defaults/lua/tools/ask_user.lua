@@ -48,9 +48,24 @@ local function get_qtype(q)
     return qtype
 end
 
+-- Flatten object-form options ({label, description}) to plain strings.
+-- ctx.ui.interact only accepts Vec<String>; rich entries are reduced to
+-- their label so the model still sees the original text as the answer.
+local function flatten_options(options)
+    local flat = {}
+    for i, opt in ipairs(options) do
+        if type(opt) == "table" then
+            flat[i] = opt.label or tostring(opt)
+        else
+            flat[i] = opt
+        end
+    end
+    return flat
+end
+
 local function ask_one(q, ctx)
     local question = q.question
-    local options = q.options or {}
+    local options = flatten_options(q.options or {})
     local allow_custom = q.allow_custom or false
     local qtype = get_qtype(q)
 
