@@ -75,18 +75,8 @@ pub struct ToolExecutionContext {
 
 #[derive(Debug, Clone)]
 pub enum ToolLiveEvent {
+    /// Upsert a pane page (or remove it when `content` is empty).
     Pane(PanePage),
-    /// Store or update state for a (source, sub_key) pair.
-    StateUpdate {
-        source: String,
-        sub_key: String,
-        state: String,
-    },
-    /// Remove state for a (source, sub_key) pair.
-    StateRemove {
-        source: String,
-        sub_key: String,
-    },
 }
 
 impl ToolOutput {

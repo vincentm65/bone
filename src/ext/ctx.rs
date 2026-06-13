@@ -957,37 +957,6 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         ctx.set("emit_pane", emit_pane_fn)?;
     }
 
-    // ctx.emit_state(source, sub_key, state_json) — send a StateUpdate live event.
-    // ctx.emit_state_remove(source, sub_key) — send a StateRemove live event.
-    // Only works when called from execute_output_live (sender is Some).
-    if let Some(sender) = cfg.pane_sender.clone() {
-        let sender_clone = sender.clone();
-        let emit_state_fn = lua.create_function(
-            move |_, (source, sub_key, state): (String, String, String)| {
-                sender_clone
-                    .send(crate::tools::types::ToolLiveEvent::StateUpdate {
-                        source,
-                        sub_key,
-                        state,
-                    })
-                    .map_err(|e| mlua::Error::external(format!("emit_state send failed: {e}")))?;
-                Ok(true)
-            },
-        )?;
-        ctx.set("emit_state", emit_state_fn)?;
-
-        let emit_state_remove_fn =
-            lua.create_function(move |_, (source, sub_key): (String, String)| {
-                sender
-                    .send(crate::tools::types::ToolLiveEvent::StateRemove { source, sub_key })
-                    .map_err(|e| {
-                        mlua::Error::external(format!("emit_state_remove send failed: {e}"))
-                    })?;
-                Ok(true)
-            })?;
-        ctx.set("emit_state_remove", emit_state_remove_fn)?;
-    }
-
     Ok(ctx)
 }
 

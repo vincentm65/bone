@@ -630,20 +630,8 @@ impl App {
             if let Some(page) = &result.pane_page {
                 if page.content.is_empty() {
                     self.tools.state_map.remove(&page.source, "default");
-                    // Rebuild merged pane instead of blindly removing the whole
-                    // source page — other sub_key entries may still be active.
-                    let merged = self.rebuild_merged_pane(&page.source);
-                    match merged {
-                        Some(merged_page) => {
-                            let (_, new_active) =
-                                PanePage::upsert(&mut self.pages, self.active_page, merged_page);
-                            self.active_page = new_active;
-                        }
-                        None => {
-                            self.active_page =
-                                PanePage::remove(&mut self.pages, &page.source, self.active_page);
-                        }
-                    }
+                    self.active_page =
+                        PanePage::remove(&mut self.pages, &page.source, self.active_page);
                 } else {
                     let (_, new_active) =
                         PanePage::upsert(&mut self.pages, self.active_page, page.clone());
@@ -786,25 +774,6 @@ impl App {
         .await
     }
 
-    /// Track live-state entries in a local set so synthetic StateRemove
-    /// events can be emitted for stale entries on cancellation.
-    fn track_live_state(
-        active: &mut std::collections::HashSet<(String, String)>,
-        event: &ToolLiveEvent,
-    ) {
-        match event {
-            ToolLiveEvent::StateUpdate {
-                source, sub_key, ..
-            } => {
-                active.insert((source.clone(), sub_key.clone()));
-            }
-            ToolLiveEvent::StateRemove { source, sub_key } => {
-                active.remove(&(source.clone(), sub_key.clone()));
-            }
-            ToolLiveEvent::Pane(_) => {}
-        }
-    }
-
     fn apply_tool_live_event(&mut self, event: ToolLiveEvent) {
         match event {
             ToolLiveEvent::Pane(page) => {
@@ -816,33 +785,26 @@ impl App {
                     self.active_page = active;
                 }
             }
-            ToolLiveEvent::StateUpdate {
-                source,
-                sub_key,
-                state,
-            } => {
-                self.tools.state_map.set(&source, &sub_key, state);
-                let merged = self.rebuild_merged_pane(&source);
-                if let Some(page) = merged {
-                    let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
-                    self.active_page = active;
-                }
-            }
-            ToolLiveEvent::StateRemove { source, sub_key } => {
-                self.tools.state_map.remove(&source, &sub_key);
-                let merged = self.rebuild_merged_pane(&source);
-                match merged {
-                    Some(page) => {
-                        let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
-                        self.active_page = active;
-                    }
-                    None => {
-                        self.active_page =
-                            PanePage::remove(&mut self.pages, &source, self.active_page);
-                    }
-                }
-            }
         }
+    }
+
+    /// Apply a live event and record which pane sources are currently shown by
+    /// the running tool, so they can be cleaned up if the tool is cancelled
+    /// before it emits its own removal (empty-content) event. Pane sources
+    /// managed outside this flow (e.g. the Rust subagent pane) never pass
+    /// through here and so are never tracked or removed.
+    fn apply_and_track(
+        &mut self,
+        event: ToolLiveEvent,
+        live_sources: &mut std::collections::HashSet<String>,
+    ) {
+        let ToolLiveEvent::Pane(page) = &event;
+        if page.content.is_empty() {
+            live_sources.remove(&page.source);
+        } else {
+            live_sources.insert(page.source.clone());
+        }
+        self.apply_tool_live_event(event);
     }
 
     async fn wait_for_tool_future_live<F, Fut>(
@@ -860,22 +822,21 @@ impl App {
         let (tx, mut rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
         let future = make_future(tx);
         pin_mut!(future);
-        // Track active live-state entries locally so we can emit synthetic
-        // StateRemove events on cancellation.
-        let mut active_live_state = std::collections::HashSet::<(String, String)>::new();
+        // Pane sources currently shown by the running tool. Used only to clean
+        // up lingering panes if the tool is cancelled before emitting its own
+        // removal event.
+        let mut live_sources = std::collections::HashSet::<String>::new();
 
         loop {
             tokio::select! {
                 results = &mut future => {
                     while let Ok(event) = rx.try_recv() {
-                        Self::track_live_state(&mut active_live_state, &event);
-                        self.apply_tool_live_event(event);
+                        self.apply_and_track(event, &mut live_sources);
                     }
                     return Ok(results);
                 }
                 Some(event) = rx.recv() => {
-                    Self::track_live_state(&mut active_live_state, &event);
-                    self.apply_tool_live_event(event);
+                    self.apply_and_track(event, &mut live_sources);
                 }
                 _ = spinner.tick() => {
                     if Self::drain_keys(
@@ -894,19 +855,15 @@ impl App {
                         // Signal cancellation to any running subagents.
                         cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
                         // Drain remaining live events before returning so that
-                        // any pending StateRemove events are processed.
+                        // any pending pane updates are processed.
                         while let Ok(event) = rx.try_recv() {
-                            Self::track_live_state(&mut active_live_state, &event);
-                            self.apply_tool_live_event(event);
+                            self.apply_and_track(event, &mut live_sources);
                         }
-                        // Clean up any stale live state entries for cancelled
-                        // tools. The child process may have been killed before
-                        // it could emit its own StateRemove events.
-                        for (source, sub_key) in active_live_state {
-                            self.apply_tool_live_event(ToolLiveEvent::StateRemove {
-                                source,
-                                sub_key,
-                            });
+                        // Remove any panes the cancelled tool left behind — its
+                        // future was dropped, so it can't emit its own removal.
+                        for source in live_sources.drain() {
+                            self.active_page =
+                                PanePage::remove(&mut self.pages, &source, self.active_page);
                         }
                         let results = cancel_calls
                             .iter()
@@ -921,10 +878,9 @@ impl App {
                     let visible_pages = if self.panes_visible {
                     // Drain any pane events sent during drain_keys (e.g. a
                     // multi-question ask_user replacing one question with the
-                  // Avoids a one-frame flash of the dead pane.
+                    // next). Avoids a one-frame flash of the dead pane.
                     while let Ok(event) = rx.try_recv() {
-                        Self::track_live_state(&mut active_live_state, &event);
-                        self.apply_tool_live_event(event);
+                        self.apply_and_track(event, &mut live_sources);
                     }
                         self.pages.as_slice()
                     } else {
@@ -1171,35 +1127,15 @@ impl App {
                         continue;
                     }
                     // ── Interactive pane key handling (before navigation) ───
-                    if *panes_visible {
-                        let active_idx = (*active_page).min(pages.len().saturating_sub(1));
-                        let mut cleanup_source: Option<String> = None;
-                        let handled = if let Some(page) = pages.get(active_idx) {
-                            if let Some(ref interaction) = page.interaction {
-                                if interaction.is_active() {
-                                    if interaction.handle_key(key.code, key.modifiers) {
-                                        if !interaction.is_active() && page.source != "interact" {
-                                            cleanup_source = Some(page.source.clone());
-                                        }
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-                        if let Some(source) = cleanup_source {
-                            *active_page = PanePage::remove(pages, &source, *active_page);
-                        }
-                        if handled {
-                            continue;
-                        }
+                    if *panes_visible
+                        && PanePage::dispatch_interaction_key(
+                            pages,
+                            active_page,
+                            key.code,
+                            key.modifiers,
+                        )
+                    {
+                        continue;
                     }
                     // ── Page navigation (Tab/BackTab/PageUp/PageDown) ─────
                     if *panes_visible && !pages.is_empty() {

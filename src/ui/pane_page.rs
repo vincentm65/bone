@@ -461,6 +461,39 @@ impl PanePage {
         }
     }
 
+    /// Dispatch a key to the active page's interaction, if any.
+    ///
+    /// Returns `true` when the key was consumed. When a submit/cancel makes the
+    /// interaction inactive, the page is removed — except the shared "interact"
+    /// page (ask_user), which is left in place so the next question upserts over
+    /// it without a shrink-then-grow flash.
+    ///
+    /// Single source of truth shared by the idle event loop and the streaming
+    /// drain loop.
+    pub fn dispatch_interaction_key(
+        pages: &mut Vec<PanePage>,
+        active_page: &mut usize,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        let active_idx = (*active_page).min(pages.len().saturating_sub(1));
+        let Some(page) = pages.get(active_idx) else {
+            return false;
+        };
+        let Some(interaction) = page.interaction.as_ref() else {
+            return false;
+        };
+        if !interaction.is_active() || !interaction.handle_key(code, modifiers) {
+            return false;
+        }
+        let cleanup_source = (!interaction.is_active() && page.source != "interact")
+            .then(|| page.source.clone());
+        if let Some(source) = cleanup_source {
+            *active_page = PanePage::remove(pages, &source, *active_page);
+        }
+        true
+    }
+
     /// Upsert a page. If a page with the same source exists, replace it.
     /// Returns the index of the page and the new active_page.
     pub fn upsert(pages: &mut Vec<PanePage>, active_page: usize, page: PanePage) -> (usize, usize) {

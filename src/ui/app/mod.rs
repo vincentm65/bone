@@ -755,46 +755,18 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         // ── Interactive pane key interception ─────────────────────────
-        // After handling, if the interaction became inactive (submit/cancel),
-        // remove the pane from self.pages so it doesn't linger.
-        if self.panes_visible {
-            let active_idx = self.active_page.min(self.pages.len().saturating_sub(1));
-            let (handled_key, cleanup_source) = self
-                .pages
-                .get(active_idx)
-                .and_then(|page| {
-                    let interaction = page.interaction.as_ref()?;
-                    if !interaction.is_active() {
-                        return None;
-                    }
-                    let handled = interaction.handle_key(code, modifiers);
-                    if handled {
-                        if !interaction.is_active() {
-                            // Submit/cancel made the interaction inactive.
-                            // For "interact" source (ask_user tool), don't remove —
-                            // the next question will upsert over it, avoiding a
-                            // shrink-then-grow flash.
-                            if page.source == "interact" {
-                                Some((true, None))
-                            } else {
-                                Some((true, Some(page.source.clone())))
-                            }
-                        } else {
-                            // Handled but still active (e.g. arrow keys, text input)
-                            Some((true, None))
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or((false, None));
-
-            if handled_key {
-                if let Some(source) = cleanup_source {
-                    self.active_page = PanePage::remove(&mut self.pages, &source, self.active_page);
-                }
-                return self.redraw(term);
-            }
+        // dispatch_interaction_key handles submit/cancel cleanup (removing the
+        // pane when the interaction goes inactive, except the shared "interact"
+        // page).
+        if self.panes_visible
+            && PanePage::dispatch_interaction_key(
+                &mut self.pages,
+                &mut self.active_page,
+                code,
+                modifiers,
+            )
+        {
+            return self.redraw(term);
         }
 
         // Handle page keybindings before input processing
@@ -1941,12 +1913,6 @@ impl App {
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.force_redraw(term)
-    }
-
-    /// Rebuild a merged pane page from all state entries for a given source.
-    fn rebuild_merged_pane(&self, _source: &str) -> Option<PanePage> {
-        // No longer handles any sources.
-        None
     }
 }
 

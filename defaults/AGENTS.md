@@ -102,8 +102,6 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.ui.pane(table)` | `true\|(false, string)` | Emit a live pane update (tools only) |
 | **Live events** | | During `execute_output_live` only |
 | `ctx.emit_pane(table)` | `true` | Same as `ctx.ui.pane` |
-| `ctx.emit_state(src, key, json)` | `true` | Emit StateUpdate live event |
-| `ctx.emit_state_remove(src, key)` | `true` | Emit StateRemove live event |
 | **`ctx.usage.*`** | | Token usage |
 | `ctx.usage.snapshot()` | `table\|nil` | See [Usage Snapshot](#usage-snapshot) below |
 | **`ctx.state.*`** | | Session-scoped key-value store |
@@ -145,7 +143,7 @@ Not all `ctx` fields are available in every handler type:
 | `read_file` / `write_file` | yes | yes | — |
 | `ui.notify` | yes | yes | yes |
 | `ui.status` / `ui.pane` | yes | yes | — |
-| `emit_pane` / `emit_state` | yes | — | — |
+| `emit_pane` | yes | — | — |
 | `usage` | yes | yes | — |
 | `state` | yes | yes | — |
 | `tools` | yes | yes | — |
