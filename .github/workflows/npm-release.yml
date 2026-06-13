@@ -107,11 +107,21 @@ jobs:
       - name: publish platform packages
         run: |
           for dir in npm/dist/*; do
-            npm publish "$dir" --access public --tag ${{ inputs.tag }}
+            name=$(node -p "require('./' + process.argv[1] + '/package.json').name" "$dir")
+            if npm view "$name@${{ inputs.version }}" version >/dev/null 2>&1; then
+              echo "skip existing $name@${{ inputs.version }}"
+            else
+              npm publish "$dir" --access public --tag ${{ inputs.tag }}
+            fi
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: publish main package
-        run: npm publish npm/bone-agent --access public --tag ${{ inputs.tag }}
+        run: |
+          if npm view "bone-agent@${{ inputs.version }}" version >/dev/null 2>&1; then
+            echo "skip existing bone-agent@${{ inputs.version }}"
+          else
+            npm publish ./npm/bone-agent --access public --tag ${{ inputs.tag }}
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
