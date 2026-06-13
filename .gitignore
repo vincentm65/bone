@@ -17,3 +17,7 @@
 # Scratch / dev notes
 refactor-dynamic-tools.md
 test_edits.txt
+
+# npm generated artifacts
+*.tgz
+bone-rs/bin/bone-*
