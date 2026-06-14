@@ -375,6 +375,8 @@ impl App {
         self.active_page = 0;
         self.tools.state_map.clear();
         self.subagent_seen_version = u64::MAX;
+        self.queue.clear();
+        self.active_prompt = None;
 
         // Adopt the loaded conversation id so new messages append to it. End the
         // previous conversation we're leaving (if different), and clear the
@@ -463,6 +465,8 @@ impl App {
         self.active_page = 0;
         self.tools.state_map.clear();
         self.subagent_seen_version = u64::MAX;
+        self.queue.clear();
+        self.active_prompt = None;
 
         let summary = if self.token_stats.request_count > 0 {
             format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
@@ -1501,6 +1505,15 @@ impl App {
         let prev_provider = self.llm.id().to_string();
         let prev_model = self.llm.model().to_string();
 
+        let lua_cmds: Vec<(String, String)> = if self.extensions.is_available() {
+            self.extensions.commands()
+                .iter()
+                .map(|c| (c.name.clone(), c.description.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let result = commands::handle(
             &cmd,
             &arg,
@@ -1513,6 +1526,7 @@ impl App {
             &mut self.provider,
             &mut self.model,
             &mut self.custom_configs,
+            &lua_cmds,
         )
         .await?;
 

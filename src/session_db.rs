@@ -31,6 +31,7 @@ pub(crate) struct StoredMessage {
     pub content: String,
     pub tool_name: Option<String>,
     pub tool_call_id: Option<String>,
+    pub tool_calls: Option<String>,
 }
 
 pub struct SearchHit {
@@ -306,7 +307,7 @@ impl SessionDb {
     }
 
     fn setup_schema(&self) -> rusqlite::Result<()> {
-        const SCHEMA_VERSION: u32 = 3;
+        const SCHEMA_VERSION: u32 = 4;
 
         let current_version: u32 = self
             .conn
@@ -774,7 +775,7 @@ impl SessionDb {
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let limit = limit.clamp(1, 1000);
         let mut stmt = self.conn.prepare(
-            "SELECT seq, role, content, tool_name, tool_call_id \
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls \
              FROM messages WHERE conversation_id = ?1 \
              ORDER BY seq ASC LIMIT ?2",
         )?;
@@ -785,6 +786,7 @@ impl SessionDb {
                 content: row.get(2)?,
                 tool_name: row.get(3)?,
                 tool_call_id: row.get(4)?,
+                tool_calls: row.get(5)?,
             })
         })?;
         rows.collect()

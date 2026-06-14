@@ -404,6 +404,19 @@ bone.register_tool({
 })
 ```
 
+### conversation_history (Lua, interaction)
+Open an interactive live-pane selector for recent SQLite conversation history. The user chooses with arrow keys; the selected transcript is returned to the agent as JSON for use as context. Compaction/summary messages are filtered out of the picker and previews.
+```lua
+bone.register_tool({
+    name = "conversation_history",
+    description = "Open an interactive live-pane selector for recent SQLite conversation history. User chooses with arrow keys; returns the selected conversation transcript.",
+    parameters = { type = "object", properties = {}, additionalProperties = false },
+    safety = "read_only",
+    display = { show = false, show_result = false },
+})
+```
+Requires `ctx.session.list`, `ctx.session.messages`, and `ctx.ui.interact`. No parameters.
+
 ## Pre-Seeded Commands
 
 ### /compact

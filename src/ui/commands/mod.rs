@@ -49,9 +49,10 @@ pub async fn handle(
     provider_label: &mut String,
     model_label: &mut String,
     custom: &mut config::custom::CustomConfigs,
+    lua_commands: &[(String, String)],
 ) -> std::io::Result<CommandResult> {
     let reply = match cmd {
-        "help" => help(),
+        "help" => help(lua_commands),
 
         "model" => model_switch(arg, llm, provider_label, model_label, custom),
         "provider" => provider_switch(arg, llm, provider_label, model_label, custom).await,
@@ -67,7 +68,7 @@ pub async fn handle(
     Ok(CommandResult::Continue { reply })
 }
 
-fn help() -> String {
+fn help(lua_commands: &[(String, String)]) -> String {
     let bold = "\x1b[1m";
     let reset = "\x1b[0m";
     let mut lines: Vec<String> = BUILTINS
@@ -76,6 +77,19 @@ fn help() -> String {
         .collect();
     lines.insert(0, format!("{bold}Commands{reset}"));
     lines.push("  :           — run a shell command inline (: <command>)".to_string());
+    if !lua_commands.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{bold}Lua commands{reset}"));
+        let max_name = lua_commands
+            .iter()
+            .map(|(n, _)| n.len())
+            .max()
+            .unwrap_or(0)
+            .max(10);
+        for (name, desc) in lua_commands {
+            lines.push(format!("  /{name:<max_name$} — {desc}"));
+        }
+    }
     lines.push(String::new());
     lines.push(format!("{bold}Input shortcuts{reset}"));
     lines.push("  Ctrl+A       — move cursor to start of line".to_string());

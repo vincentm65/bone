@@ -997,6 +997,25 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                 if let Some(tci) = msg.tool_call_id {
                     t.set("tool_call_id", tci)?;
                 }
+                if let Some(ref tc_json) = msg.tool_calls {
+                    if let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json) {
+                        let tc_table = lua.create_table()?;
+                        for tc_val in tc_vec {
+                            let tc = lua.create_table()?;
+                            if let Some(id) = tc_val.get("id") {
+                                tc.set("id", lua.to_value(id)?)?;
+                            }
+                            if let Some(name) = tc_val.get("name") {
+                                tc.set("name", lua.to_value(name)?)?;
+                            }
+                            if let Some(args) = tc_val.get("arguments") {
+                                tc.set("arguments", lua.to_value(args)?)?;
+                            }
+                            tc_table.push(tc)?;
+                        }
+                        t.set("tool_calls", tc_table)?;
+                    }
+                }
                 result.push(t)?;
             }
             Ok(Value::Table(result))

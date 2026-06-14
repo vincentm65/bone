@@ -181,3 +181,23 @@ fn current_era_date_formats_as_valid_iso_date() {
     assert_eq!(iso_from_unix_secs(1_780_745_545), "2026-06-06T11:32:25Z");
     assert_eq!(civil_from_days(20_610), (2026, 6, 6));
 }
+
+/// Assistant message with tool_calls JSON is returned by list_messages.
+#[test]
+fn tool_calls_roundtrip() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+
+    let tc_json = r#"[{"id":"call_1","name":"shell","arguments":"{\"command\":\"ls\",\"env\":[],\"timeout_ms\":120000}"}]"#;
+    db.append_message(
+        conv, "assistant", "Let me check.", None, None, Some(tc_json), 1
+    ).unwrap();
+
+    let msgs = db.list_messages(conv, 100).unwrap();
+    assert_eq!(msgs.len(), 1);
+    let msg = &msgs[0];
+    assert_eq!(msg.content, "Let me check.");
+    assert_eq!(msg.tool_calls, Some(tc_json.to_string()));
+}
