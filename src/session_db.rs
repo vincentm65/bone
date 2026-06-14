@@ -201,6 +201,91 @@ impl UsageStatsSnapshot {
     }
 }
 
+/// Full schema at the latest version, used to initialize a fresh database.
+/// Existing databases are migrated forward incrementally in `setup_schema`;
+/// any column or index added here must also have a corresponding ALTER step.
+const FULL_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS conversations (
+        id         INTEGER PRIMARY KEY,
+        started_at TEXT NOT NULL,
+        ended_at   TEXT,
+        provider   TEXT NOT NULL,
+        model      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+        id              INTEGER PRIMARY KEY,
+        conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+        role            TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        tool_name       TEXT,
+        tool_call_id    TEXT,
+        tool_calls      TEXT,
+        seq             INTEGER NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS usage_events (
+        id                INTEGER PRIMARY KEY,
+        conversation_id   INTEGER NOT NULL REFERENCES conversations(id),
+        provider          TEXT NOT NULL,
+        model             TEXT NOT NULL,
+        prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens     INTEGER NOT NULL DEFAULT 0,
+        cost              REAL    NOT NULL DEFAULT 0.0,
+        is_estimated      INTEGER NOT NULL DEFAULT 0,
+        created_at        TEXT NOT NULL
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content,
+        role UNINDEXED,
+        conversation_id UNINDEXED,
+        tokenize='unicode61'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_usage_events_conversation
+        ON usage_events(conversation_id);
+
+    CREATE INDEX IF NOT EXISTS idx_usage_events_created_at
+        ON usage_events(created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
+        ON messages(conversation_id, seq);
+";
+
+/// A time range applied to `usage_events.created_at` (interpreted in local time).
+#[derive(Clone, Copy)]
+enum TimeWindow {
+    /// The current local calendar day.
+    Today,
+    /// The last `n` days inclusive of today.
+    SinceDaysAgo(u32),
+    /// No time restriction.
+    AllTime,
+}
+
+impl TimeWindow {
+    /// Returns the SQL `WHERE` clause (with a leading space, or empty) and the
+    /// single bound parameter it requires, if any. The clause never
+    /// interpolates a value — the only variable part (the day offset) is passed
+    /// as a bound parameter, so there is no SQL-injection surface.
+    fn clause(self) -> (&'static str, Option<String>) {
+        match self {
+            TimeWindow::Today => (
+                " WHERE date(created_at, 'localtime') = date('now', 'localtime')",
+                None,
+            ),
+            TimeWindow::SinceDaysAgo(n) => (
+                " WHERE date(created_at, 'localtime') >= date('now', 'localtime', ?1)",
+                Some(format!("-{n} days")),
+            ),
+            TimeWindow::AllTime => ("", None),
+        }
+    }
+}
+
 /// SQLite-backed conversation and usage storage.
 pub struct SessionDb {
     conn: Connection,
@@ -231,66 +316,68 @@ impl SessionDb {
             return Ok(());
         }
 
-        // Schema mismatch or fresh database: drop everything and recreate.
-        self.conn.execute_batch(
-            "
-            DROP TABLE IF EXISTS messages_fts;
-            DROP TABLE IF EXISTS messages;
-            DROP TABLE IF EXISTS usage_events;
-            DROP TABLE IF EXISTS conversations;
+        // Data-preserving migration chain. A fresh database (user_version 0)
+        // gets the full latest schema; existing databases step forward one
+        // version at a time via ALTER. A database newer than this binary
+        // (current_version > SCHEMA_VERSION) is left untouched rather than
+        // destroyed. The whole chain runs in one transaction so a failure
+        // never leaves a half-migrated database.
+        let tx = self.conn.unchecked_transaction()?;
+        let mut version = current_version;
 
-            CREATE TABLE conversations (
-                id         INTEGER PRIMARY KEY,
-                started_at TEXT NOT NULL,
-                ended_at   TEXT,
-                provider   TEXT NOT NULL,
-                model      TEXT NOT NULL
-            );
+        if version == 0 {
+            // user_version defaults to 0 for BOTH a brand-new database and a
+            // pre-versioning legacy database. Distinguish them by checking
+            // whether our tables already exist. A truly empty database gets the
+            // latest schema; a populated unversioned database is left entirely
+            // untouched and the user is asked to recreate it — we never silently
+            // stamp it current (which would skip the is_estimated column) and we
+            // never drop their data.
+            let has_app_tables: bool = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'table' AND name = 'conversations'
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_app_tables {
+                // Refuse to proceed; the transaction rolls back on drop, so the
+                // database is left exactly as it was.
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    std::io::Error::other(
+                        "session database predates schema versioning (user_version = 0) \
+                         and cannot be migrated automatically. Back up and remove the \
+                         database file so a fresh one can be created.",
+                    ),
+                )));
+            }
+            tx.execute_batch(FULL_SCHEMA)?;
+            version = SCHEMA_VERSION;
+        }
 
-            CREATE TABLE messages (
-                id              INTEGER PRIMARY KEY,
-                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
-                role            TEXT NOT NULL,
-                content         TEXT NOT NULL,
-                tool_name       TEXT,
-                tool_call_id    TEXT,
-                tool_calls      TEXT,
-                seq             INTEGER NOT NULL,
-                created_at      TEXT NOT NULL
-            );
+        if version == 1 {
+            // v1 -> v2: track whether usage was estimated vs. provider-reported.
+            tx.execute_batch(
+                "ALTER TABLE usage_events
+                     ADD COLUMN is_estimated INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            version = 2;
+        }
 
-            CREATE TABLE usage_events (
-                id                INTEGER PRIMARY KEY,
-                conversation_id   INTEGER NOT NULL REFERENCES conversations(id),
-                provider          TEXT NOT NULL,
-                model             TEXT NOT NULL,
-                prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-                completion_tokens INTEGER NOT NULL DEFAULT 0,
-                cached_tokens     INTEGER NOT NULL DEFAULT 0,
-                cost              REAL    NOT NULL DEFAULT 0.0,
-                is_estimated      INTEGER NOT NULL DEFAULT 0,
-                created_at        TEXT NOT NULL
-            );
+        if version == 2 {
+            // v2 -> v3: index usage_events by created_at for time-range queries.
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_usage_events_created_at
+                     ON usage_events(created_at);",
+            )?;
+            version = 3;
+        }
 
-            CREATE VIRTUAL TABLE messages_fts USING fts5(
-                content,
-                role UNINDEXED,
-                conversation_id UNINDEXED,
-                tokenize='unicode61'
-            );
-
-            CREATE INDEX idx_usage_events_conversation
-                ON usage_events(conversation_id);
-
-            CREATE INDEX idx_usage_events_created_at
-                ON usage_events(created_at);
-
-            CREATE INDEX idx_messages_conversation_seq
-                ON messages(conversation_id, seq);
-            ",
-        )?;
-        self.conn
-            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        if version != current_version {
+            tx.pragma_update(None, "user_version", version)?;
+        }
+        tx.commit()?;
 
         Ok(())
     }
@@ -418,21 +505,18 @@ impl SessionDb {
             },
         )?;
 
-        let by_model_today = self.usage_by_model_since(Some("= date('now', 'localtime')"))?;
-        let by_model_7d =
-            self.usage_by_model_since(Some(">= date('now', 'localtime', '-6 days')"))?;
-        let by_model_4w =
-            self.usage_by_model_since(Some(">= date('now', 'localtime', '-27 days')"))?;
-        let by_model_all = self.usage_by_model_since(None)?;
+        let by_model_today = self.usage_by_model_since(TimeWindow::Today)?;
+        let by_model_7d = self.usage_by_model_since(TimeWindow::SinceDaysAgo(6))?;
+        let by_model_4w = self.usage_by_model_since(TimeWindow::SinceDaysAgo(27))?;
+        let by_model_all = self.usage_by_model_since(TimeWindow::AllTime)?;
         let daily = self.usage_today_by_hour()?;
         let weekly = self.usage_recent_days(7)?;
         let monthly = self.usage_recent_weeks(4)?;
         let all_time = self.usage_buckets(36)?;
-        let hourly_today = self.usage_by_hour_since(Some("= date('now', 'localtime')"))?;
-        let hourly_7d = self.usage_by_hour_since(Some(">= date('now', 'localtime', '-6 days')"))?;
-        let hourly_4w =
-            self.usage_by_hour_since(Some(">= date('now', 'localtime', '-27 days')"))?;
-        let hourly_all = self.usage_by_hour_since(None)?;
+        let hourly_today = self.usage_by_hour_since(TimeWindow::Today)?;
+        let hourly_7d = self.usage_by_hour_since(TimeWindow::SinceDaysAgo(6))?;
+        let hourly_4w = self.usage_by_hour_since(TimeWindow::SinceDaysAgo(27))?;
+        let hourly_all = self.usage_by_hour_since(TimeWindow::AllTime)?;
         let daily_activity = self.usage_recent_days(730)?;
 
         Ok(UsageStatsSnapshot {
@@ -455,30 +539,19 @@ impl SessionDb {
         })
     }
 
-    fn usage_by_model_since(
-        &self,
-        date_filter: Option<&str>,
-    ) -> rusqlite::Result<Vec<ProviderUsage>> {
-        let sql = match date_filter {
-            Some(filter) => format!(
-                "SELECT provider, model, \
-                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-                 COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
-                 FROM usage_events WHERE date(created_at, 'localtime') {} \
-                 GROUP BY provider, model \
-                 ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC",
-                filter
-            ),
-            None =>
-                "SELECT provider, model, \
-                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-                 COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
-                 FROM usage_events GROUP BY provider, model \
-                 ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC"
-                    .to_string(),
-        };
+    fn usage_by_model_since(&self, window: TimeWindow) -> rusqlite::Result<Vec<ProviderUsage>> {
+        let (where_clause, param) = window.clause();
+        let sql = format!(
+            "SELECT provider, model, \
+             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+             COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
+             FROM usage_events{where_clause} \
+             GROUP BY provider, model \
+             ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC"
+        );
+        let params: Vec<String> = param.into_iter().collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(rusqlite::params_from_iter(&params), |row| {
             Ok(ProviderUsage {
                 provider: row.get(0)?,
                 model: row.get(1)?,
@@ -628,23 +701,17 @@ impl SessionDb {
         )
     }
 
-    fn usage_by_hour_since(&self, date_filter: Option<&str>) -> rusqlite::Result<Vec<HourUsage>> {
-        let sql = match date_filter {
-            Some(filter) => format!(
-                "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
-                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-                 COALESCE(SUM(cached_tokens),0), COUNT(*) \
-                 FROM usage_events WHERE date(created_at, 'localtime') {} GROUP BY 1 ORDER BY 1",
-                filter
-            ),
-            None => "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
-                 COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-                 COALESCE(SUM(cached_tokens),0), COUNT(*) \
-                 FROM usage_events GROUP BY 1 ORDER BY 1"
-                .to_string(),
-        };
+    fn usage_by_hour_since(&self, window: TimeWindow) -> rusqlite::Result<Vec<HourUsage>> {
+        let (where_clause, param) = window.clause();
+        let sql = format!(
+            "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
+             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+             COALESCE(SUM(cached_tokens),0), COUNT(*) \
+             FROM usage_events{where_clause} GROUP BY 1 ORDER BY 1"
+        );
+        let params: Vec<String> = param.into_iter().collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(rusqlite::params_from_iter(&params), |row| {
             Ok(HourUsage {
                 hour: row.get(0)?,
                 prompt_tokens: row.get(1)?,

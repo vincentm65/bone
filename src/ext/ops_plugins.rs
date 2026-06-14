@@ -199,7 +199,9 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                 return Ok(result);
             }
             let mut entries: Vec<_> = std::fs::read_dir(&dir)
-                .unwrap_or_else(|e| panic!("failed to read plugins dir: {e}"))
+                .map_err(|e| {
+                    mlua::Error::external(format!("failed to read plugins dir {dir:?}: {e}"))
+                })?
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| p.is_dir())

@@ -1,4 +1,154 @@
-use super::{civil_from_days, iso_from_unix_secs};
+use super::{SessionDb, civil_from_days, iso_from_unix_secs};
+use rusqlite::Connection;
+
+/// The original v1 schema, before `is_estimated` and the created_at index.
+const V1_SCHEMA: &str = "
+    CREATE TABLE conversations (
+        id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
+        provider TEXT NOT NULL, model TEXT NOT NULL
+    );
+    CREATE TABLE messages (
+        id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL,
+        role TEXT NOT NULL, content TEXT NOT NULL, tool_name TEXT,
+        tool_call_id TEXT, tool_calls TEXT, seq INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE usage_events (
+        id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL,
+        provider TEXT NOT NULL, model TEXT NOT NULL,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens INTEGER NOT NULL DEFAULT 0,
+        cost REAL NOT NULL DEFAULT 0.0, created_at TEXT NOT NULL
+    );
+    CREATE VIRTUAL TABLE messages_fts USING fts5(
+        content, role UNINDEXED, conversation_id UNINDEXED, tokenize='unicode61'
+    );
+    CREATE INDEX idx_usage_events_conversation ON usage_events(conversation_id);
+    CREATE INDEX idx_messages_conversation_seq ON messages(conversation_id, seq);
+";
+
+/// Migrating a populated v1 database must preserve all rows (no drop-recreate)
+/// and bring the schema fully up to date.
+#[test]
+fn migrate_v1_preserves_user_data() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(V1_SCHEMA).unwrap();
+    conn.execute_batch(
+        "INSERT INTO conversations (id, started_at, provider, model)
+             VALUES (1, '2026-01-01T00:00:00Z', 'openai', 'gpt-4');
+         INSERT INTO messages (id, conversation_id, role, content, seq, created_at)
+             VALUES (1, 1, 'user', 'hello', 0, '2026-01-01T00:00:00Z');
+         INSERT INTO usage_events
+             (id, conversation_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, created_at)
+             VALUES (1, 1, 'openai', 'gpt-4', 100, 50, 0, 0.01, '2026-01-01T00:00:00Z');",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 1u32).unwrap();
+
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let version: u32 = db
+        .conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3, "schema should be migrated to latest version");
+
+    // Pre-existing rows survive the migration.
+    let conversations: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .unwrap();
+    let messages: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!((conversations, messages), (1, 1));
+
+    // The v1->v2 column exists and defaults to 0 for the legacy row.
+    let is_estimated: i64 = db
+        .conn
+        .query_row("SELECT is_estimated FROM usage_events WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(is_estimated, 0);
+
+    // The v2->v3 index exists.
+    let index_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_usage_events_created_at'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 1);
+}
+
+/// A non-empty database left at the pre-versioning default (user_version 0)
+/// must NOT be silently stamped current — that would skip the is_estimated
+/// column. It must error without touching version, data, or schema.
+#[test]
+fn legacy_unversioned_database_is_not_stamped_current() {
+    let conn = Connection::open_in_memory().unwrap();
+    // V1_SCHEMA has no is_estimated column; leaving user_version at 0 simulates
+    // a database created before schema versioning existed.
+    conn.execute_batch(V1_SCHEMA).unwrap();
+    conn.execute_batch(
+        "INSERT INTO conversations (id, started_at, provider, model)
+             VALUES (1, '2026-01-01T00:00:00Z', 'openai', 'gpt-4');",
+    )
+    .unwrap();
+
+    let db = SessionDb { conn };
+    let result = db.setup_schema();
+    assert!(result.is_err(), "legacy v0 DB must not migrate silently");
+
+    // Version untouched.
+    let version: u32 = db
+        .conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 0);
+
+    // Data untouched.
+    let count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+
+    // Schema untouched: is_estimated was NOT added.
+    let has_is_estimated: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = 'is_estimated'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_is_estimated, 0);
+}
+
+/// A fresh database initializes straight to the latest schema.
+#[test]
+fn fresh_database_initializes_at_latest_version() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let version: u32 = db
+        .conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+
+    // record_usage relies on the is_estimated column being present.
+    db.create_conversation("openai", "gpt-4").unwrap();
+}
 
 #[test]
 fn unix_epoch_formats_as_valid_iso_date() {
