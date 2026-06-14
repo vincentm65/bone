@@ -385,6 +385,13 @@ impl PaneInteraction {
 }
 
 impl PanePage {
+    /// Maximum scroll offset: rows of content beyond what fits in the pane.
+    pub fn max_scroll(&self) -> usize {
+        self.content
+            .len()
+            .saturating_sub(crate::ui::render::clamped_pane_visible_rows(self.visible_rows))
+    }
+
     /// Parse a pane definition from a serde_json::Value.
     pub fn from_json(val: &serde_json::Value) -> Result<Self, String> {
         let pane = val.as_object().ok_or("pane must be an object")?;

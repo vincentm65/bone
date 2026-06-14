@@ -1025,6 +1025,62 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
 
     ctx.set("session", session_table)?;
 
+    // ctx.db.query(sql, params?) — raw SQL query, returns array of row tables.
+    let db_query_fn = lua.create_function(|lua, (sql, params): (String, Option<Vec<Value>>)| {
+        let db_path = crate::session_db::db_path();
+        let db = crate::session_db::SessionDb::open(&db_path)
+            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+
+        // Read-only: only allow SELECT statements.
+        let sql_trimmed = sql.trim();
+        if !sql_trimmed.to_lowercase().starts_with("select") {
+            return Err(mlua::Error::external("ctx.db.query only allows SELECT statements"));
+        }
+
+        // Build bound parameters.
+        let params: Vec<rusqlite::types::Value> = match &params {
+            Some(p) => p
+                .iter()
+                .map(|v| match v {
+                    Value::Integer(i) => rusqlite::types::Value::Integer(*i),
+                    Value::Number(n) => rusqlite::types::Value::Real(*n),
+                    Value::String(s) => rusqlite::types::Value::Text(s.to_str().ok().and_then(|b| Some(b.to_string())).unwrap_or_default()),
+                    Value::Nil => rusqlite::types::Value::Null,
+                    Value::Boolean(b) => rusqlite::types::Value::Integer(*b as i64),
+                    _ => rusqlite::types::Value::Text(tostring_lua_value(v)),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let mut stmt = db.conn_ref().prepare(&sql)
+            .map_err(|e| mlua::Error::external(format!("SQL error: {e}")))?;
+
+        let columns: Vec<String> = stmt
+            .column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(&params))
+            .map_err(|e| mlua::Error::external(format!("query error: {e}")))?;
+
+        let result = lua.create_table()?;
+        while let Some(row) = rows.next().map_err(|e| mlua::Error::external(format!("row error: {e}")))? {
+            let row_map = lua.create_table()?;
+            for (i, col_name) in columns.iter().enumerate() {
+                let val = row_to_lua_value(lua, row, i)?;
+                row_map.set(col_name.as_str(), val)?;
+            }
+            result.push(row_map)?;
+        }
+        Ok(Value::Table(result))
+    })?;
+    let db_table = lua.create_table()?;
+    db_table.set("query", db_query_fn)?;
+    ctx.set("db", db_table)?;
+
     // ctx.call_id — the tool call's unique ID (available during execute_output_live).
     if let Some(cid) = &cfg.call_id {
         ctx.set("call_id", cid.as_str())?;
@@ -1809,6 +1865,53 @@ pub(crate) fn build_before_turn_config(state: &AppCtxState) -> CtxConfig {
     );
     state.apply_to(&mut cfg);
     cfg
+}
+
+/// Convert a Lua Value to a String for SQL parameter binding fallback.
+fn tostring_lua_value(v: &Value) -> String {
+    match v {
+        Value::Integer(i) => i.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.to_str().ok().and_then(|b| Some(b.to_string())).unwrap_or_default(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Nil => "null".to_string(),
+        _ => "<unsupported>".to_string(),
+    }
+}
+
+/// Convert a rusqlite row column to a Lua Value.
+fn row_to_lua_value(lua: &Lua, row: &rusqlite::Row, idx: usize) -> mlua::Result<Value> {
+    if let Ok(v) = row.get::<usize, i64>(idx) {
+        return Ok(Value::Integer(v));
+    }
+    if let Ok(v) = row.get::<usize, f64>(idx) {
+        return Ok(Value::Number(v));
+    }
+    if let Ok(v) = row.get::<usize, String>(idx) {
+        return Ok(Value::String(lua.create_string(&v)?));
+    }
+    if let Ok(v) = row.get::<usize, Option<i64>>(idx) {
+        return match v {
+            Some(n) => Ok(Value::Integer(n)),
+            None => Ok(Value::Nil),
+        };
+    }
+    if let Ok(v) = row.get::<usize, Option<f64>>(idx) {
+        return match v {
+            Some(n) => Ok(Value::Number(n)),
+            None => Ok(Value::Nil),
+        };
+    }
+    if let Ok(v) = row.get::<usize, Option<String>>(idx) {
+        return match v {
+            Some(s) => Ok(Value::String(lua.create_string(&s)?)),
+            None => Ok(Value::Nil),
+        };
+    }
+    if let Ok(v) = row.get::<usize, Option<Vec<u8>>>(idx) {
+        return lua.to_value(&v);
+    }
+    Ok(Value::Nil)
 }
 
 #[cfg(test)]

@@ -1,4 +1,13 @@
+mod config_picker;
+mod editor;
+mod keymap;
+mod paste;
 pub mod stream;
+
+use paste::{
+    apply_input_key_with_paste_burst, collect_non_bracketed_paste_burst, is_paste_burst,
+    plain_char,
+};
 
 use crate::chat::Message;
 use crate::config::{self, UserConfig};
@@ -8,10 +17,9 @@ use crate::session_db::SessionDb;
 use crate::ext::ExtensionManager;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalMode, ToolCall};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
 use std::io;
-use std::path::Path;
 use std::time::Instant;
 use tokio::time::Duration;
 
@@ -20,118 +28,7 @@ use super::commands;
 use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
-use super::render::{
-    BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, PaneDraw, Renderer, StatusInfo,
-    clamped_pane_visible_rows,
-};
-
-struct PasteKeyResult {
-    action: InputAction,
-    trailing: Option<Event>,
-}
-
-struct PasteBurst {
-    text: String,
-    trailing: Option<Event>,
-}
-
-fn non_bracketed_paste_quiet_timeout() -> std::time::Duration {
-    #[cfg(windows)]
-    {
-        std::time::Duration::from_millis(12)
-    }
-    #[cfg(not(windows))]
-    {
-        std::time::Duration::from_millis(0)
-    }
-}
-
-fn plain_char(key: &KeyEvent) -> Option<char> {
-    if key.kind == KeyEventKind::Press
-        && !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        && let KeyCode::Char(c) = key.code
-    {
-        Some(c)
-    } else {
-        None
-    }
-}
-
-fn is_paste_burst(text: &str) -> bool {
-    text.chars().nth(1).is_some()
-}
-
-fn collect_non_bracketed_paste_burst(first: char) -> io::Result<PasteBurst> {
-    let mut batch = String::new();
-    batch.push(first);
-    let quiet = non_bracketed_paste_quiet_timeout();
-    let trailing = loop {
-        if !event::poll(quiet)? {
-            break None;
-        }
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let plain = !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-                match key.code {
-                    KeyCode::Char(c) if plain => batch.push(c),
-                    KeyCode::Enter if plain => {
-                        // Treat Enter as an interior newline only if more pasted
-                        // input follows within the quiet window. Otherwise leave
-                        // it as the trailing submit key.
-                        if event::poll(quiet)? {
-                            batch.push('\n');
-                        } else {
-                            break Some(Event::Key(key));
-                        }
-                    }
-                    _ => break Some(Event::Key(key)),
-                }
-            }
-            Event::Key(_) => {}
-            Event::Paste(text) => {
-                let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-                batch.push_str(&normalized);
-            }
-            other => break Some(other),
-        }
-    };
-    Ok(PasteBurst {
-        text: batch,
-        trailing,
-    })
-}
-
-fn apply_input_key_with_paste_burst(
-    input: &mut InputState,
-    key: KeyEvent,
-) -> io::Result<PasteKeyResult> {
-    if let Some(c) = plain_char(&key) {
-        let burst = collect_non_bracketed_paste_burst(c)?;
-        if is_paste_burst(&burst.text) {
-            input.history_index = None;
-            input.insert_paste(&burst.text);
-            return Ok(PasteKeyResult {
-                action: InputAction::Redraw,
-                trailing: burst.trailing,
-            });
-        }
-        input.paste_mode = false;
-        return Ok(PasteKeyResult {
-            action: input.apply_key(key.code, key.modifiers),
-            trailing: burst.trailing,
-        });
-    }
-
-    input.paste_mode = event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
-    Ok(PasteKeyResult {
-        action: input.apply_key(key.code, key.modifiers),
-        trailing: None,
-    })
-}
+use super::render::{BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, PaneDraw, Renderer, StatusInfo};
 
 pub struct App {
     pub messages: Vec<Message>,
@@ -657,17 +554,12 @@ impl App {
     /// Compute the active elapsed time for the current turn, formatted as M:SS.
     pub(crate) fn timer_elapsed(&self) -> Option<String> {
         let start = self.turn_start?;
-        let mut elapsed = start.elapsed();
-        // If currently paused, don't add the ongoing pause
-        // If NOT currently paused, subtract accumulated pause time
-        if self.turn_pause_start.is_none() {
-            elapsed = elapsed.saturating_sub(self.turn_paused_duration);
-        } else {
-            // Currently paused: subtract accumulated + current pause so far
-            // But we don't add to turn_paused_duration until resume,
-            // so just subtract what we've accumulated so far
-            elapsed = elapsed.saturating_sub(self.turn_paused_duration);
-        }
+        // Subtract pause time accumulated so far. While currently paused, the
+        // ongoing pause isn't added to `turn_paused_duration` until resume, so
+        // the same subtraction is correct in both states.
+        let elapsed = start
+            .elapsed()
+            .saturating_sub(self.turn_paused_duration);
         let total_secs = elapsed.as_secs();
         let mins = total_secs / 60;
         let secs = total_secs % 60;
@@ -710,60 +602,6 @@ impl App {
             .any(|p| p.interaction.as_ref().is_some_and(|i| i.is_active()))
     }
 
-    /// Look up a keymap binding for the given key combo.
-    /// Returns the action name if found in the current mode.
-    fn lookup_keymap(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<String> {
-        let mode = if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
-            "n"
-        } else {
-            "i"
-        };
-
-        let bindings = match mode {
-            "n" => &self.lua_keymap.normal,
-            "i" => &self.lua_keymap.insert,
-            _ => return None,
-        };
-
-        for binding in bindings {
-            if key_matches(&binding.key, code, modifiers) {
-                return Some(binding.action.clone());
-            }
-        }
-        None
-    }
-
-    /// Execute a keymap action.
-    async fn handle_keymap_action(
-        &mut self,
-        action: String,
-        term: &mut BoneTerminal,
-    ) -> io::Result<()> {
-        match action.as_str() {
-            "toggle_panes" => {
-                self.panes_visible = !self.panes_visible;
-                self.redraw(term)
-            }
-            "cycle_approval_mode" => {
-                self.approval_mode = self.approval_mode.cycle();
-                self.user_config.approval_mode = self.approval_mode;
-                self.persist_runtime_config();
-                self.redraw(term)
-            }
-            "cursor_to_start" => {
-                self.input.cursor_to_start();
-                self.redraw(term)
-            }
-            "cursor_to_end" => {
-                self.input.cursor_to_end();
-                self.redraw(term)
-            }
-            other => {
-                eprintln!("bone-lua warn: unknown keymap action '{other}'; ignoring");
-                self.redraw(term)
-            }
-        }
-    }
 
     /// Tick subagent job status: refresh pane if needed, auto-inject
     /// finished results when the TUI is idle.
@@ -841,11 +679,7 @@ impl App {
         }
         let mut lines = Vec::with_capacity(jobs.len());
         for job in jobs {
-            let status_sym = match job.status {
-                crate::ext::jobs::JobStatus::Done => "✓",
-                crate::ext::jobs::JobStatus::Error => "✗",
-                crate::ext::jobs::JobStatus::Running => "◐",
-            };
+            let status_sym = job_status_sym(job.status);
             let mut truncated = crate::ext::jobs::truncate_for_injection(
                 job.result.as_deref().unwrap_or(""),
                 crate::ext::jobs::MAX_INJECT_CHARS,
@@ -877,18 +711,20 @@ impl App {
         );
         let display: String = jobs
             .iter()
-            .map(|j| {
-                let sym = match j.status {
-                    crate::ext::jobs::JobStatus::Done => "✓",
-                    crate::ext::jobs::JobStatus::Error => "✗",
-                    crate::ext::jobs::JobStatus::Running => "◐",
-                };
-                format!("{} {}", j.agent, sym)
-            })
+            .map(|j| format!("{} {}", j.agent, job_status_sym(j.status)))
             .collect::<Vec<_>>()
             .join(", ");
         let display_text = format!("[subagent results: {}]", display);
         Some((turn_text, display_text))
+    }
+}
+
+/// Status glyph for a subagent job (done / error / running).
+fn job_status_sym(status: crate::ext::jobs::JobStatus) -> &'static str {
+    match status {
+        crate::ext::jobs::JobStatus::Done => "✓",
+        crate::ext::jobs::JobStatus::Error => "✗",
+        crate::ext::jobs::JobStatus::Running => "◐",
     }
 }
 
@@ -1041,11 +877,7 @@ impl App {
                 }
                 KeyCode::PageDown => {
                     let page = &mut self.pages[self.active_page];
-                    let max_scroll = page
-                        .content
-                        .len()
-                        .saturating_sub(clamped_pane_visible_rows(page.visible_rows));
-                    page.scroll = (page.scroll + MAX_PANE_ROWS).min(max_scroll);
+                    page.scroll = (page.scroll + MAX_PANE_ROWS).min(page.max_scroll());
                     return self.redraw(term);
                 }
                 _ => {}
@@ -1061,11 +893,7 @@ impl App {
             }
             if matches!(code, KeyCode::Down) && modifiers.contains(KeyModifiers::CONTROL) {
                 let page = &mut self.pages[self.active_page];
-                let max_scroll = page
-                    .content
-                    .len()
-                    .saturating_sub(clamped_pane_visible_rows(page.visible_rows));
-                page.scroll = (page.scroll + 1).min(max_scroll);
+                page.scroll = (page.scroll + 1).min(page.max_scroll());
                 return self.redraw(term);
             }
         }
@@ -1346,8 +1174,9 @@ impl App {
             _ => call.name.clone(),
         };
 
-        let mut prompt = if call.name == "shell" {
-            let title = call.arguments["display_label"]
+        let is_shell = call.name == "shell";
+        let title = if is_shell {
+            call.arguments["display_label"]
                 .as_str()
                 .map(String::from)
                 .unwrap_or_else(|| {
@@ -1360,18 +1189,15 @@ impl App {
                         .chars()
                         .take(80)
                         .collect::<String>()
-                });
-            Prompt::new(
-                format!("{} — {}", call.name, title),
-                vec!["Accept", "Advise", "Cancel"],
-            )
+                })
         } else {
-            Prompt::new(
-                format!("{} — {}", call.name, summary),
-                vec!["Accept", "Advise", "Cancel"],
-            )
+            summary
         };
-        prompt.full_command = if call.name == "shell" {
+        let mut prompt = Prompt::new(
+            format!("{} — {}", call.name, title),
+            vec!["Accept", "Advise", "Cancel"],
+        );
+        prompt.full_command = if is_shell {
             call.arguments["command"].as_str().map(String::from)
         } else {
             None
@@ -1684,455 +1510,11 @@ impl App {
         Some(())
     }
 
-    fn panel_key(&mut self, term: &mut BoneTerminal) -> io::Result<(KeyCode, KeyModifiers)> {
-        loop {
-            if event::poll(std::time::Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        return Ok((key.code, key.modifiers));
-                    }
-                    Event::Resize(_, _) => self.force_redraw(term)?,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn close_panel(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        self.active_prompt = None;
-        self.redraw(term)
-    }
-
     fn show_reply(&mut self, reply: impl Into<String>, term: &mut BoneTerminal) -> io::Result<()> {
         self.messages.push(Message::system(reply.into()));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)
-    }
-
-    fn mask_secret(value: &str) -> String {
-        if value.is_empty() {
-            "(empty)".to_string()
-        } else {
-            "*".repeat(value.chars().count().clamp(4, 12))
-        }
-    }
-
-    fn edit_value(
-        &mut self,
-        label: &str,
-        initial: &str,
-        secret: bool,
-        term: &mut BoneTerminal,
-    ) -> io::Result<Option<String>> {
-        self.input.buffer = if secret {
-            String::new()
-        } else {
-            initial.to_string()
-        };
-        self.input.cursor_pos = self.input.buffer.chars().count();
-        loop {
-            let value = if secret {
-                Self::mask_secret(&self.input.buffer)
-            } else {
-                self.input.buffer.clone()
-            };
-            let mut prompt =
-                Prompt::new(format!("Edit {label}"), vec![format!("{label}: {value}")]);
-            prompt.hint = Some("Enter save value  Esc cancel".to_string());
-            self.active_prompt = Some(prompt);
-            self.redraw(term)?;
-            let mut next = Some(event::read()?);
-            while let Some(event) = next {
-                next = None;
-                match event {
-                    Event::Paste(text) => self.input.insert_paste(&text),
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if key.code == KeyCode::Esc
-                            || (key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL))
-                        {
-                            self.input.clear_buffer();
-                            return Ok(None);
-                        }
-                        let result = apply_input_key_with_paste_burst(&mut self.input, key)?;
-                        next = result.trailing;
-                        match result.action {
-                            InputAction::Submit => {
-                                let value = self.input.expanded();
-                                self.input.clear_buffer();
-                                return Ok(Some(value));
-                            }
-                            InputAction::None if key.code == KeyCode::Enter => {
-                                let value = self.input.expanded();
-                                self.input.clear_buffer();
-                                return Ok(Some(value));
-                            }
-                            InputAction::Cancel | InputAction::Escape => {
-                                self.input.clear_buffer();
-                                return Ok(None);
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn provider_editor(&mut self, id: String, term: &mut BoneTerminal) -> io::Result<()> {
-        let entry = self
-            .custom_configs
-            .get_provider_entry("providers", &id)
-            .ok_or_else(|| io::Error::other(format!("unknown provider `{id}`")))?;
-        let mut entry = entry;
-        let mut selected = 0usize;
-        loop {
-            let options = vec![
-                format!("label · {}", entry.label),
-                format!("model · {}", entry.model),
-                format!("base_url · {}", entry.base_url),
-                format!("endpoint · {}", entry.endpoint),
-                format!("handler · {}", entry.handler),
-                format!("api_key · {}", Self::mask_secret(&entry.api_key)),
-                "Save changes".to_string(),
-            ];
-            let mut prompt = Prompt::new(format!("Edit provider: {id}"), options);
-            prompt.set_selected(selected);
-            prompt.hint = Some("Enter edit/select  Esc back".to_string());
-            self.active_prompt = Some(prompt);
-            self.redraw(term)?;
-            let (code, modifiers) = self.panel_key(term)?;
-            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                return Ok(());
-            }
-            if self.navigate_prompt(code, false, term)? {
-                selected = self.active_prompt.as_ref().unwrap().selected;
-                continue;
-            }
-            match code {
-                KeyCode::Esc => return Ok(()),
-                KeyCode::Enter => {
-                    let selected = self.active_prompt.as_ref().unwrap().selected;
-                    match selected {
-                        0 => {
-                            if let Some(value) =
-                                self.edit_value("label", &entry.label, false, term)?
-                            {
-                                entry.label = value;
-                            }
-                        }
-                        1 => {
-                            if let Some(value) =
-                                self.edit_value("model", &entry.model, false, term)?
-                            {
-                                entry.model = value;
-                            }
-                        }
-                        2 => {
-                            if let Some(value) =
-                                self.edit_value("base_url", &entry.base_url, false, term)?
-                            {
-                                entry.base_url = value;
-                            }
-                        }
-                        3 => {
-                            if let Some(value) =
-                                self.edit_value("endpoint", &entry.endpoint, false, term)?
-                            {
-                                entry.endpoint = value;
-                            }
-                        }
-                        4 => {
-                            entry.handler = if entry.handler == "codex" {
-                                "openai".to_string()
-                            } else {
-                                "codex".to_string()
-                            };
-                        }
-                        5 => {
-                            if let Some(value) = self.edit_value("api_key", "", true, term)? {
-                                entry.api_key = value;
-                            }
-                        }
-                        6 => {
-                            self.custom_configs
-                                .set_provider_entry("providers", &id, &entry);
-                            let reply = if self.llm.id() == id {
-                                match providers::create_provider_with_config(
-                                    &id,
-                                    &self.custom_configs.derive_providers_config(),
-                                ) {
-                                    Ok(provider) => {
-                                        self.provider =
-                                            format!("{} ({})", provider.name(), provider.id());
-                                        self.model = provider.model().to_string();
-                                        self.llm = provider;
-                                        format!("Saved and reloaded provider {id}.")
-                                    }
-                                    Err(err) => format!(
-                                        "Saved provider {id}, but active reload failed: {err}"
-                                    ),
-                                }
-                            } else {
-                                format!("Saved provider {id}.")
-                            };
-                            self.show_reply(reply, term)?;
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    async fn handle_tools_command(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
-        let mut parts = arg.split_whitespace();
-        let action = parts.next().unwrap_or("");
-        match action {
-            "reload" => {
-                // Full reload: re-boot extensions and rebuild tool handler.
-                let config_dir = crate::config::bone_dir();
-                let cwd = std::env::current_dir().unwrap_or_default();
-                let booted = crate::ext::boot_with_tools(
-                    &config_dir,
-                    &cwd,
-                    &mut self.custom_configs,
-                    true,
-                    crate::ext::BootOptions::default(),
-                );
-                self.extensions = booted.manager;
-                self.tools = booted.tools;
-
-                self.user_config.enabled_tools = self.tools.enabled_names();
-                let count = self.tools.definitions().len();
-                self.show_reply(
-                    format!("Tools and Lua extensions reloaded. {count} tools enabled."),
-                    term,
-                )
-            }
-            _ => self.config_picker(term, Some("tools")).await,
-        }
-    }
-
-    async fn config_picker(
-        &mut self,
-        term: &mut BoneTerminal,
-        start_tab: Option<&str>,
-    ) -> io::Result<()> {
-        let mut custom = config::custom::CustomConfigs::load();
-
-        let mut tabs: Vec<String> = Vec::new();
-        let mut namespaces: Vec<String> = Vec::new();
-        for ns in ["general", "providers", "tools"] {
-            if let Some((_, page)) = custom.pages.iter().find(|(page_ns, _)| page_ns == ns) {
-                tabs.push(page.title.clone());
-                namespaces.push(ns.to_string());
-            }
-        }
-        for (ns, page) in &custom.pages {
-            if namespaces.iter().any(|existing| existing == ns) {
-                continue;
-            }
-            tabs.push(page.title.clone());
-            namespaces.push(ns.clone());
-        }
-        let providers_tab_idx = namespaces
-            .iter()
-            .position(|ns| ns == "providers")
-            .unwrap_or(0);
-        let num_tabs = tabs.len();
-
-        let mut active = if let Some(tab) = start_tab {
-            if tab == "providers" {
-                providers_tab_idx
-            } else {
-                namespaces.iter().position(|ns| ns == tab).unwrap_or(0)
-            }
-        } else {
-            0
-        };
-        let mut selected = 0usize;
-
-        loop {
-            let options = if active == providers_tab_idx {
-                // Providers tab: list providers like the old provider_picker
-                let providers_config = custom.derive_providers_config();
-                let mut ids: Vec<String> = providers_config.providers.keys().cloned().collect();
-                ids.sort();
-                ids.iter()
-                    .map(|id| {
-                        let entry = &providers_config.providers[id];
-                        let active_marker = if id == self.llm.id() { "●" } else { "○" };
-                        let kind = if entry.handler.is_empty() {
-                            "openai"
-                        } else {
-                            entry.handler.as_str()
-                        };
-                        format!(
-                            "{active_marker} {id} · {} · {} · {kind}",
-                            entry.model, entry.label
-                        )
-                    })
-                    .collect()
-            } else if active < namespaces.len() {
-                let ns = &namespaces[active];
-                let page_idx = custom
-                    .pages
-                    .iter()
-                    .position(|(page_ns, _)| page_ns == ns)
-                    .unwrap();
-                let page = &custom.pages[page_idx].1;
-                page.fields
-                    .iter()
-                    .map(|field| {
-                        let label = field.label.as_deref().unwrap_or(&field.key);
-                        let value = custom.get_value(ns, &field.key);
-                        let display = match field.field_type {
-                            config::custom::ConfigFieldType::Bool => {
-                                if value == "true" {
-                                    "●".to_string()
-                                } else {
-                                    "○".to_string()
-                                }
-                            }
-                            _ => value,
-                        };
-                        if matches!(field.field_type, config::custom::ConfigFieldType::Bool) {
-                            format!("{display} {label}")
-                        } else {
-                            format!("{:<30} {}", label, display)
-                        }
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
-
-            let mut prompt = Prompt::new(tabs[active].clone(), options);
-            prompt.set_selected(selected);
-            prompt.tabs = tabs.clone();
-            prompt.active_tab = active;
-            let hint = if active == providers_tab_idx {
-                "Enter select  e edit  Esc close".to_string()
-            } else {
-                "Tab switch  Enter edit/cycle  Esc close".to_string()
-            };
-            prompt.hint = Some(hint);
-            self.active_prompt = Some(prompt);
-            self.redraw(term)?;
-
-            let (code, modifiers) = self.panel_key(term)?;
-            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                return self.close_panel(term);
-            }
-            if self.navigate_prompt(code, false, term)? {
-                selected = self.active_prompt.as_ref().unwrap().selected;
-                continue;
-            }
-
-            match code {
-                KeyCode::Esc => return self.close_panel(term),
-                KeyCode::Tab => {
-                    active = (active + 1) % num_tabs;
-                    selected = 0;
-                    continue;
-                }
-                KeyCode::BackTab => {
-                    active = if active == 0 {
-                        num_tabs - 1
-                    } else {
-                        active - 1
-                    };
-                    selected = 0;
-                    continue;
-                }
-                KeyCode::Enter => {
-                    if active == providers_tab_idx {
-                        // Providers tab: select provider
-                        let providers_config = custom.derive_providers_config();
-                        let mut ids: Vec<String> =
-                            providers_config.providers.keys().cloned().collect();
-                        ids.sort();
-                        let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected)
-                        else {
-                            continue;
-                        };
-                        let id = id.clone();
-                        let reply =
-                            match providers::create_provider_with_config(&id, &providers_config) {
-                                Ok(new_provider) => match new_provider.validate().await {
-                                    Ok(()) => {
-                                        self.provider = format!(
-                                            "{} ({})",
-                                            new_provider.name(),
-                                            new_provider.id()
-                                        );
-                                        self.model = new_provider.model().to_string();
-                                        self.llm = new_provider;
-                                        custom.set_last_provider(&id);
-                                        self.custom_configs = custom.clone();
-                                        format!("Switched to {} ({})", self.model, self.provider)
-                                    }
-                                    Err(err) => format!("Provider validation failed: {err}"),
-                                },
-                                Err(err) => err.to_string(),
-                            };
-                        self.close_panel(term)?;
-                        return self.show_reply(reply, term);
-                    }
-                    if active >= namespaces.len() {
-                        continue;
-                    }
-                    let ns = namespaces[active].clone();
-                    let page_idx = custom
-                        .pages
-                        .iter()
-                        .position(|(page_ns, _)| page_ns == &ns)
-                        .unwrap();
-                    let page = &custom.pages[page_idx].1;
-                    let idx = self.active_prompt.as_ref().unwrap().selected;
-
-                    if idx >= page.fields.len() {
-                        continue;
-                    }
-                    let field = page.fields[idx].clone();
-                    let current = custom.get_value(&ns, &field.key);
-                    match field.field_type {
-                        config::custom::ConfigFieldType::Bool
-                        | config::custom::ConfigFieldType::Enum => {
-                            if let Some(next) = custom.cycle_field(&ns, &field.key, &current) {
-                                custom.set_value(&ns, &field.key, next.clone());
-                                self.apply_custom_configs_to_runtime(custom.clone());
-                                if ns == "tools" {
-                                    self.tools.set_enabled(&field.key, next == "true");
-                                }
-                            }
-                        }
-                        _ => {
-                            let label = field.label.as_deref().unwrap_or(&field.key).to_string();
-                            if let Some(val) = self.edit_value(&label, &current, false, term)? {
-                                custom.set_value(&ns, &field.key, val.trim().to_string());
-                                self.apply_custom_configs_to_runtime(custom.clone());
-                            }
-                        }
-                    }
-                }
-                KeyCode::Char('e') | KeyCode::Char('E') if active == providers_tab_idx => {
-                    let providers_config = custom.derive_providers_config();
-                    let mut ids: Vec<String> = providers_config.providers.keys().cloned().collect();
-                    ids.sort();
-                    if let Some(id) = ids.get(self.active_prompt.as_ref().unwrap().selected) {
-                        self.provider_editor(id.clone(), term)?;
-                        custom = config::custom::CustomConfigs::load();
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
@@ -2178,206 +1560,10 @@ impl App {
         }
         Ok(())
     }
-
-    async fn open_editor(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let tmp = std::env::temp_dir().join("bone-edit.txt");
-        std::fs::write(&tmp, "")?;
-        let editor = editor_command();
-
-        Renderer::prepare_exit(term)?;
-        Renderer::shutdown_terminal()?;
-
-        let editor_result = run_editor(&editor, &tmp).await;
-        let text_result = if editor_result.as_ref().is_ok_and(|status| status.success()) {
-            Some(std::fs::read_to_string(&tmp))
-        } else {
-            None
-        };
-        std::fs::remove_file(&tmp).ok();
-
-        *term = Renderer::init_terminal(MIN_ROWS)?;
-        self.renderer.viewport_height = MIN_ROWS;
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
-
-        match editor_result {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                return self.show_reply(format!("Editor exited with status: {status}"), term);
-            }
-            Err(err) => {
-                return self.show_reply(
-                    format!("Editor failed: {err}. Set VISUAL or EDITOR to an installed editor."),
-                    term,
-                );
-            }
-        }
-
-        let text = match text_result {
-            Some(Ok(text)) => text,
-            Some(Err(err)) => {
-                return self.show_reply(format!("Could not read editor input: {err}"), term);
-            }
-            None => String::new(),
-        };
-        let text = text.trim_end_matches(['\r', '\n']).to_string();
-        if !text.trim().is_empty() {
-            self.input.buffer = text;
-            self.input.cursor_pos = self.input.buffer.chars().count();
-        }
-
-        self.force_redraw(term)
-    }
-}
-
-async fn run_editor(editor: &[String], path: &Path) -> io::Result<std::process::ExitStatus> {
-    let Some(program) = editor.first() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "editor command is empty",
-        ));
-    };
-
-    tokio::process::Command::new(program)
-        .args(&editor[1..])
-        .arg(path)
-        .spawn()
-        .map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!("could not launch `{}`: {err}", editor.join(" ")),
-            )
-        })?
-        .wait()
-        .await
-}
-
-fn editor_command() -> Vec<String> {
-    std::env::var("VISUAL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("EDITOR")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .map(|value| split_editor_command(&value))
-        .filter(|parts| !parts.is_empty())
-        .unwrap_or_else(|| vec![default_editor().to_string()])
-}
-
-fn default_editor() -> &'static str {
-    if cfg!(windows) { "notepad" } else { "nano" }
-}
-
-fn split_editor_command(command: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-
-    for ch in command.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            continue;
-        }
-
-        if !cfg!(windows) && ch == '\\' {
-            escaped = true;
-            continue;
-        }
-
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            } else {
-                current.push(ch);
-            }
-            continue;
-        }
-
-        match ch {
-            '"' | '\'' => quote = Some(ch),
-            ch if ch.is_whitespace() => {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if escaped {
-        current.push('\\');
-    }
-    if !current.is_empty() {
-        parts.push(current);
-    }
-    parts
 }
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Match a Lua key string (e.g. "<C-p>", "<S-Tab>") against a KeyCode + modifiers.
-fn key_matches(key_str: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    let key_str = key_str.trim();
-    let mut expected_mods = KeyModifiers::NONE;
-    let mut key_part = key_str;
-
-    if key_str.starts_with('<') && key_str.ends_with('>') {
-        key_part = &key_str[1..key_str.len() - 1];
-        let parts: Vec<&str> = key_part.split('-').collect();
-        for part in &parts {
-            match *part {
-                "C" | "Ctrl" => expected_mods |= KeyModifiers::CONTROL,
-                "S" | "Shift" => expected_mods |= KeyModifiers::SHIFT,
-                "A" | "Alt" => expected_mods |= KeyModifiers::ALT,
-                _ => {}
-            }
-        }
-        key_part = parts.last().copied().unwrap_or(&key_part);
-    }
-
-    if modifiers != expected_mods {
-        return false;
-    }
-
-    match key_part {
-        "Tab" => code == KeyCode::Tab,
-        "BackTab" | "Backtab" => code == KeyCode::BackTab,
-        "Enter" => code == KeyCode::Enter,
-        "Esc" | "Escape" => code == KeyCode::Esc,
-        "Space" => code == KeyCode::Char(' '),
-        "Backspace" => code == KeyCode::Backspace,
-        "Delete" => code == KeyCode::Delete,
-        "Insert" => code == KeyCode::Insert,
-        "Home" => code == KeyCode::Home,
-        "End" => code == KeyCode::End,
-        "PageUp" => code == KeyCode::PageUp,
-        "PageDown" => code == KeyCode::PageDown,
-        "Up" => code == KeyCode::Up,
-        "Down" => code == KeyCode::Down,
-        "Left" => code == KeyCode::Left,
-        "Right" => code == KeyCode::Right,
-        "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12" => {
-            if let Some(n) = key_part[1..].parse::<u8>().ok() {
-                code == KeyCode::F(n)
-            } else {
-                false
-            }
-        }
-        _ if key_part.len() == 1 => {
-            if let Some(ch) = key_part.chars().next() {
-                code == KeyCode::Char(ch)
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
 }
 
 /// Apply a Lua config snapshot to the Rust `UserConfig`.
@@ -2401,29 +1587,3 @@ fn apply_lua_config_snapshot(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_editor_command_keeps_args() {
-        assert_eq!(split_editor_command("code -w"), vec!["code", "-w"]);
-    }
-
-    #[test]
-    fn split_editor_command_respects_quotes() {
-        assert_eq!(
-            split_editor_command("\"/opt/Editor With Spaces/editor\" --wait"),
-            vec!["/opt/Editor With Spaces/editor", "--wait"]
-        );
-    }
-
-    #[test]
-    fn default_editor_is_platform_specific() {
-        if cfg!(windows) {
-            assert_eq!(default_editor(), "notepad");
-        } else {
-            assert_eq!(default_editor(), "nano");
-        }
-    }
-}

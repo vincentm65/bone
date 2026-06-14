@@ -293,6 +293,11 @@ pub struct SessionDb {
 }
 
 impl SessionDb {
+    /// Borrow the inner connection for raw queries.
+    pub fn conn_ref(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Open (or create) the database at the given path and run schema setup.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
