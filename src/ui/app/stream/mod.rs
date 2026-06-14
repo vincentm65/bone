@@ -20,7 +20,7 @@ use std::io;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
-use super::App;
+use super::{App, apply_input_key_with_paste_burst};
 
 const INITIAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(90);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -1192,49 +1192,64 @@ impl App {
                             _ => {}
                         }
                     }
-                    input.paste_mode =
-                        event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
-                    match input.apply_key(key.code, key.modifiers) {
-                        InputAction::Cancel => {
-                            // If an interactive pane is active, cancel it instead of cancelling the stream.
-                            if *panes_visible {
-                                let active_idx = (*active_page).min(pages.len().saturating_sub(1));
-                                let cancelled = pages.get(active_idx).is_some_and(|page| {
-                                    page.interaction.as_ref().is_some_and(|i| {
-                                        if i.is_active() {
-                                            i.cancel();
-                                            true
-                                        } else {
-                                            false
+                    let mut next = Some(Event::Key(key));
+                    while let Some(event) = next {
+                        next = None;
+                        match event {
+                            Event::Paste(text) => input.insert_paste(&text),
+                            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                                let result = match apply_input_key_with_paste_burst(input, key) {
+                                    Ok(result) => result,
+                                    Err(_) => return mode_changed,
+                                };
+                                next = result.trailing;
+                                match result.action {
+                                    InputAction::Cancel => {
+                                        // If an interactive pane is active, cancel it instead of cancelling the stream.
+                                        if *panes_visible {
+                                            let active_idx =
+                                                (*active_page).min(pages.len().saturating_sub(1));
+                                            let cancelled =
+                                                pages.get(active_idx).is_some_and(|page| {
+                                                    page.interaction.as_ref().is_some_and(|i| {
+                                                        if i.is_active() {
+                                                            i.cancel();
+                                                            true
+                                                        } else {
+                                                            false
+                                                        }
+                                                    })
+                                                });
+                                            if cancelled {
+                                                continue;
+                                            }
                                         }
-                                    })
-                                });
-                                if cancelled {
-                                    continue;
+                                        *cancel = true;
+                                        queue.clear();
+                                        return mode_changed;
+                                    }
+                                    InputAction::Submit => {
+                                        // Expand placeholders now; the queued string is fed
+                                        // back through send_message later with no blobs.
+                                        let text = input.expanded().trim().to_string();
+                                        if !text.is_empty() {
+                                            queue.push_back(text);
+                                            input.reset();
+                                        }
+                                    }
+                                    InputAction::ClearQueue => queue.clear(),
+                                    InputAction::CycleMode => {
+                                        *mode = mode.cycle();
+                                        mode_changed = true;
+                                    }
+                                    InputAction::Redraw
+                                    | InputAction::Escape
+                                    | InputAction::OpenEditor
+                                    | InputAction::None => {}
                                 }
                             }
-                            *cancel = true;
-                            queue.clear();
-                            return mode_changed;
+                            _ => {}
                         }
-                        InputAction::Submit => {
-                            // Expand placeholders now; the queued string is fed
-                            // back through send_message later with no blobs.
-                            let text = input.expanded().trim().to_string();
-                            if !text.is_empty() {
-                                queue.push_back(text);
-                                input.reset();
-                            }
-                        }
-                        InputAction::ClearQueue => queue.clear(),
-                        InputAction::CycleMode => {
-                            *mode = mode.cycle();
-                            mode_changed = true;
-                        }
-                        InputAction::Redraw
-                        | InputAction::Escape
-                        | InputAction::OpenEditor
-                        | InputAction::None => {}
                     }
                 }
                 _ => {}
