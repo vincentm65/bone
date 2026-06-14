@@ -375,6 +375,14 @@ impl SessionDb {
             version = 3;
         }
 
+        if version == 3 {
+            // v3 -> v4: add tool_calls column (JSON array of tool call objects).
+            tx.execute_batch(
+                "ALTER TABLE messages ADD COLUMN tool_calls TEXT;",
+            )?;
+            version = 4;
+        }
+
         if version != current_version {
             tx.pragma_update(None, "user_version", version)?;
         }

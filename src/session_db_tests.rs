@@ -10,7 +10,7 @@ const V1_SCHEMA: &str = "
     CREATE TABLE messages (
         id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL,
         role TEXT NOT NULL, content TEXT NOT NULL, tool_name TEXT,
-        tool_call_id TEXT, tool_calls TEXT, seq INTEGER NOT NULL,
+        tool_call_id TEXT, seq INTEGER NOT NULL,
         created_at TEXT NOT NULL
     );
     CREATE TABLE usage_events (
@@ -53,7 +53,7 @@ fn migrate_v1_preserves_user_data() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3, "schema should be migrated to latest version");
+    assert_eq!(version, 4, "schema should be migrated to latest version");
 
     // Pre-existing rows survive the migration.
     let conversations: i64 = db
@@ -86,6 +86,17 @@ fn migrate_v1_preserves_user_data() {
         )
         .unwrap();
     assert_eq!(index_count, 1);
+
+    // The v3->v4 tool_calls column exists.
+    let has_tool_calls: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'tool_calls'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_tool_calls, 1);
 }
 
 /// A non-empty database left at the pre-versioning default (user_version 0)
@@ -144,7 +155,7 @@ fn fresh_database_initializes_at_latest_version() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 
     // record_usage relies on the is_estimated column being present.
     db.create_conversation("openai", "gpt-4").unwrap();
