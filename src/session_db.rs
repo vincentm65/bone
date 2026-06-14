@@ -307,6 +307,20 @@ impl SessionDb {
     }
 
     fn setup_schema(&self) -> rusqlite::Result<()> {
+        /// Return true if `table` already has a column named `column`.
+        fn column_exists(
+            conn: &Connection,
+            table: &str,
+            column: &str,
+        ) -> rusqlite::Result<bool> {
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, column],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+        }
+
         const SCHEMA_VERSION: u32 = 4;
 
         let current_version: u32 = self
@@ -377,9 +391,12 @@ impl SessionDb {
 
         if version == 3 {
             // v3 -> v4: add tool_calls column (JSON array of tool call objects).
-            tx.execute_batch(
-                "ALTER TABLE messages ADD COLUMN tool_calls TEXT;",
-            )?;
+            // Guard the ALTER: some pre-versioning dev databases already carry
+            // this column while still reporting user_version = 3, and an
+            // unconditional ADD COLUMN fails with "duplicate column name".
+            if !column_exists(&tx, "messages", "tool_calls")? {
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN tool_calls TEXT;")?;
+            }
             version = 4;
         }
 
