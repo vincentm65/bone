@@ -34,7 +34,20 @@ pub enum EventDispatchResult {
 #[derive(Debug, Clone, Default)]
 pub struct LuaReturnAction {
     /// When set, replace the active conversation transcript with these messages.
+    /// Used by compaction: swaps the transcript but keeps the rendered scrollback
+    /// and the current conversation id.
     pub conversation_replace: Option<Vec<crate::llm::ChatMessage>>,
+    /// When set, load a past conversation as the active chat: clears the current
+    /// scrollback/transcript and resumes the given conversation in place.
+    pub conversation_load: Option<ConversationLoad>,
+}
+
+/// Payload for the `conversation.load` action (`/history`).
+#[derive(Debug, Clone)]
+pub struct ConversationLoad {
+    pub messages: Vec<crate::llm::ChatMessage>,
+    /// Conversation id to resume; future messages append here.
+    pub conversation_id: Option<i64>,
 }
 
 /// Normalized result from a Lua command handler.
@@ -394,86 +407,42 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
 
     match action_name.as_deref() {
         Some("conversation.replace") => {
-            let messages_table = match table.get::<Option<mlua::Table>>("messages") {
-                Ok(Some(t)) => t,
+            let messages = match table.get::<Option<mlua::Table>>("messages") {
+                Ok(Some(t)) => parse_messages_table(&t),
                 _ => {
                     eprintln!("bone-lua warn: conversation.replace missing messages; ignoring");
                     return None;
                 }
             };
-
-            let mut messages = Vec::new();
-            for entry in messages_table.sequence_values::<mlua::Table>() {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                let role_str: String = match entry.get::<Option<String>>("role") {
-                    Ok(Some(s)) => s,
-                    _ => continue,
-                };
-                let content: String = entry
-                    .get::<Option<String>>("content")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                let role = match role_str.as_str() {
-                    "user" => crate::llm::ChatRole::User,
-                    "assistant" => crate::llm::ChatRole::Assistant,
-                    "tool" => crate::llm::ChatRole::Tool,
-                    _ => continue,
-                };
-                let name: Option<String> = entry.get::<Option<String>>("name").ok().flatten();
-                let tool_call_id: Option<String> =
-                    entry.get::<Option<String>>("tool_call_id").ok().flatten();
-                let mut msg = crate::llm::ChatMessage::new(role, content.clone());
-                if let Some(calls_table) = entry
-                    .get::<Option<mlua::Table>>("tool_calls")
-                    .ok()
-                    .flatten()
-                {
-                    for call in calls_table.sequence_values::<mlua::Table>() {
-                        let call = match call {
-                            Ok(call) => call,
-                            Err(_) => continue,
-                        };
-                        let id: String = call
-                            .get::<Option<String>>("id")
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        let name: String = call
-                            .get::<Option<String>>("name")
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        if id.is_empty() || name.is_empty() {
-                            continue;
-                        }
-                        let arguments = call
-                            .get::<mlua::Value>("arguments")
-                            .ok()
-                            .and_then(|v| lua_value_to_json(v).ok())
-                            .unwrap_or(serde_json::Value::Null);
-                        msg.tool_calls.push(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        });
-                    }
-                }
-                msg.name = name;
-                msg.tool_call_id = tool_call_id;
-                messages.push(msg);
-            }
-
             if messages.is_empty() {
                 eprintln!("bone-lua warn: conversation.replace has no valid messages; ignoring");
                 return None;
             }
-
             Some(LuaReturnAction {
                 conversation_replace: Some(messages),
+                ..Default::default()
+            })
+        }
+        Some("conversation.load") => {
+            let messages = match table.get::<Option<mlua::Table>>("messages") {
+                Ok(Some(t)) => parse_messages_table(&t),
+                _ => {
+                    eprintln!("bone-lua warn: conversation.load missing messages; ignoring");
+                    return None;
+                }
+            };
+            if messages.is_empty() {
+                eprintln!("bone-lua warn: conversation.load has no valid messages; ignoring");
+                return None;
+            }
+            let conversation_id: Option<i64> =
+                table.get::<Option<i64>>("conversation_id").ok().flatten();
+            Some(LuaReturnAction {
+                conversation_load: Some(ConversationLoad {
+                    messages,
+                    conversation_id,
+                }),
+                ..Default::default()
             })
         }
         Some(other) => {
@@ -482,6 +451,77 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
         }
         None => None,
     }
+}
+
+/// Parse a Lua array of message tables into `ChatMessage`s. Entries with an
+/// unrecognized role are skipped. Shared by `conversation.replace` and
+/// `conversation.load`.
+fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::llm::ChatMessage> {
+    let mut messages = Vec::new();
+    for entry in messages_table.sequence_values::<mlua::Table>() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let role_str: String = match entry.get::<Option<String>>("role") {
+            Ok(Some(s)) => s,
+            _ => continue,
+        };
+        let content: String = entry
+            .get::<Option<String>>("content")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let role = match role_str.as_str() {
+            "user" => crate::llm::ChatRole::User,
+            "assistant" => crate::llm::ChatRole::Assistant,
+            "tool" => crate::llm::ChatRole::Tool,
+            _ => continue,
+        };
+        let name: Option<String> = entry.get::<Option<String>>("name").ok().flatten();
+        let tool_call_id: Option<String> =
+            entry.get::<Option<String>>("tool_call_id").ok().flatten();
+        let mut msg = crate::llm::ChatMessage::new(role, content.clone());
+        if let Some(calls_table) = entry
+            .get::<Option<mlua::Table>>("tool_calls")
+            .ok()
+            .flatten()
+        {
+            for call in calls_table.sequence_values::<mlua::Table>() {
+                let call = match call {
+                    Ok(call) => call,
+                    Err(_) => continue,
+                };
+                let id: String = call
+                    .get::<Option<String>>("id")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let name: String = call
+                    .get::<Option<String>>("name")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if id.is_empty() || name.is_empty() {
+                    continue;
+                }
+                let arguments = call
+                    .get::<mlua::Value>("arguments")
+                    .ok()
+                    .and_then(|v| lua_value_to_json(v).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                msg.tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+        }
+        msg.name = name;
+        msg.tool_call_id = tool_call_id;
+        messages.push(msg);
+    }
+    messages
 }
 // ── Private helpers ─────────────────────────────────────────────────────────
 
@@ -586,4 +626,63 @@ fn create_event_ctx(lua: &mlua::Lua) -> Result<mlua::Table, mlua::Error> {
 
     ctx.set("ui", ui)?;
     Ok(ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg_table(lua: &Lua, role: &str, content: &str) -> mlua::Table {
+        let t = lua.create_table().unwrap();
+        t.set("role", role).unwrap();
+        t.set("content", content).unwrap();
+        t
+    }
+
+    #[test]
+    fn parses_conversation_load_with_id() {
+        let lua = Lua::new();
+        let messages = lua.create_table().unwrap();
+        messages.push(msg_table(&lua, "user", "hi")).unwrap();
+        messages.push(msg_table(&lua, "assistant", "hello")).unwrap();
+        let action = lua.create_table().unwrap();
+        action.set("action", "conversation.load").unwrap();
+        action.set("messages", messages).unwrap();
+        action.set("conversation_id", 7i64).unwrap();
+
+        let parsed = parse_lua_return_action(&action).expect("action parsed");
+        assert!(parsed.conversation_replace.is_none());
+        let load = parsed.conversation_load.expect("load payload");
+        assert_eq!(load.conversation_id, Some(7));
+        assert_eq!(load.messages.len(), 2);
+        assert_eq!(load.messages[0].content, "hi");
+    }
+
+    #[test]
+    fn conversation_replace_still_parses() {
+        let lua = Lua::new();
+        let messages = lua.create_table().unwrap();
+        messages.push(msg_table(&lua, "user", "hi")).unwrap();
+        let action = lua.create_table().unwrap();
+        action.set("action", "conversation.replace").unwrap();
+        action.set("messages", messages).unwrap();
+
+        let parsed = parse_lua_return_action(&action).expect("action parsed");
+        assert!(parsed.conversation_load.is_none());
+        assert_eq!(parsed.conversation_replace.expect("replace").len(), 1);
+    }
+
+    #[test]
+    fn conversation_load_without_id_is_none_id() {
+        let lua = Lua::new();
+        let messages = lua.create_table().unwrap();
+        messages.push(msg_table(&lua, "user", "hi")).unwrap();
+        let action = lua.create_table().unwrap();
+        action.set("action", "conversation.load").unwrap();
+        action.set("messages", messages).unwrap();
+
+        let parsed = parse_lua_return_action(&action).expect("action parsed");
+        let load = parsed.conversation_load.expect("load payload");
+        assert_eq!(load.conversation_id, None);
+    }
 }

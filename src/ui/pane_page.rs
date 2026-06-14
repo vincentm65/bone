@@ -337,6 +337,24 @@ impl PaneInteraction {
                 }
                 return true;
             }
+            KeyCode::PageDown if modifiers.is_empty() => {
+                self.set_custom_focused(false);
+                self.set_selected(self.selected().saturating_add(10));
+                return true;
+            }
+            KeyCode::PageUp if modifiers.is_empty() => {
+                self.set_custom_focused(false);
+                self.set_selected(self.selected().saturating_sub(10));
+                return true;
+            }
+            KeyCode::Home if modifiers.is_empty() && !custom_focused => {
+                self.set_selected(0);
+                return true;
+            }
+            KeyCode::End if modifiers.is_empty() && !custom_focused => {
+                self.set_selected(num_options.saturating_sub(1));
+                return true;
+            }
             KeyCode::Char(' ')
                 if modifiers.is_empty() && matches!(mode, InteractionMode::MultiSelect) =>
             {

@@ -94,6 +94,65 @@ impl CtxConfig {
     }
 }
 
+/// A snapshot of the app-derived `ctx` fields shared by every Lua entry point
+/// (slash commands, model-invoked tools, and the `before_turn` hook). Building
+/// this in one place is the single source of truth for the fields that depend
+/// on the running conversation, so commands and tools end up with an identical
+/// `ctx`. Per-call fields (`pane_sender`, `call_id`, depths, `cancelled`) are
+/// layered on by the caller, not stored here.
+#[derive(Clone, Debug)]
+pub(crate) struct AppCtxState {
+    pub session_id: Option<i64>,
+    pub provider: String,
+    pub model: String,
+    pub approval_mode: crate::tools::ApprovalMode,
+    // Boxed to break the `ToolHandler` -> `AppCtxState` -> `ToolHandler` type
+    // cycle (ToolHandler carries an `Option<AppCtxState>` snapshot).
+    pub tool_handler: Box<crate::tools::registry::ToolHandler>,
+    pub usage: UsageContext,
+    pub conversation_history: Vec<crate::llm::ChatMessage>,
+}
+
+impl AppCtxState {
+    /// Build a snapshot from the raw conversation pieces. Used both by the TUI
+    /// (`App::app_ctx_state`) and the headless agent, so neither needs to know
+    /// how the usage context is assembled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tools: &crate::tools::registry::ToolHandler,
+        stats: &crate::llm::TokenStats,
+        approval_mode: crate::tools::ApprovalMode,
+        session_id: Option<i64>,
+        provider: &str,
+        model: &str,
+        by_provider: Vec<UsageProviderContext>,
+        history: Vec<crate::llm::ChatMessage>,
+    ) -> Self {
+        let est = estimate_prompt_tokens(tools);
+        Self {
+            session_id,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            approval_mode,
+            tool_handler: Box::new(tools.clone()),
+            usage: build_usage_context(stats, &est, by_provider),
+            conversation_history: history,
+        }
+    }
+
+    /// Stamp the app-derived fields onto a `CtxConfig`. This is the one place
+    /// that knows the field mapping; every entry point routes through it.
+    pub fn apply_to(&self, cfg: &mut CtxConfig) {
+        cfg.session_id = self.session_id;
+        cfg.provider = Some(self.provider.clone());
+        cfg.model = Some(self.model.clone());
+        cfg.approval_mode = self.approval_mode;
+        cfg.tool_handler = Some((*self.tool_handler).clone());
+        cfg.usage = Some(self.usage.clone());
+        cfg.conversation_history = Some(self.conversation_history.clone());
+    }
+}
+
 /// Create the `ctx` table for a single tool invocation.
 pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let ctx = lua.create_table()?;
@@ -445,8 +504,16 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             )));
             lines.push(ratatui::text::Line::from(""));
 
-            // Compute visible_rows
-            let opt_rows = if matches!(mode, InteractionMode::TextInput) { 1 } else { options.len() };
+            // Compute visible_rows. Cap the visible option window so long lists
+            // (e.g. /history's 50 conversations) show ~10 at a time and scroll
+            // rather than filling the whole pane. The overlay renderer windows
+            // the full option list around the selection.
+            const MAX_VISIBLE_OPTIONS: usize = 10;
+            let opt_rows = if matches!(mode, InteractionMode::TextInput) {
+                1
+            } else {
+                options.len().min(MAX_VISIBLE_OPTIONS)
+            };
             let custom_row = u16::from(allow_custom);
             let visible_rows = (lines.len() + opt_rows + custom_row as usize).min(24).max(3);
 
@@ -1713,32 +1780,15 @@ pub(crate) fn build_usage_context(
 }
 
 /// Build the `CtxConfig` passed to the `before_turn` hook before each provider
-/// request. Centralizes the usage bookkeeping shared by the headless agent and
-/// the TUI loop.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_before_turn_config(
-    tools: &crate::tools::registry::ToolHandler,
-    stats: &crate::llm::TokenStats,
-    approval_mode: crate::tools::ApprovalMode,
-    session_id: Option<i64>,
-    provider: &str,
-    model: &str,
-    by_provider: Vec<UsageProviderContext>,
-    history: Vec<crate::llm::ChatMessage>,
-) -> CtxConfig {
-    let est = estimate_prompt_tokens(tools);
+/// request, from a shared app-state snapshot. The snapshot is the single source
+/// of truth for app-derived fields ([`AppCtxState::apply_to`]).
+pub(crate) fn build_before_turn_config(state: &AppCtxState) -> CtxConfig {
     let shared_state: SharedState = Arc::new(Mutex::new(HashMap::new()));
     let mut cfg = CtxConfig::new(
         crate::config::bone_dir().to_string_lossy().to_string(),
         shared_state,
     );
-    cfg.tool_handler = Some(tools.clone());
-    cfg.approval_mode = approval_mode;
-    cfg.session_id = session_id;
-    cfg.provider = Some(provider.to_string());
-    cfg.model = Some(model.to_string());
-    cfg.usage = Some(build_usage_context(stats, &est, by_provider));
-    cfg.conversation_history = Some(history);
+    state.apply_to(&mut cfg);
     cfg
 }
 

@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
 use std::time::Instant;
-use tokio::time::{self, Duration};
+use tokio::time::Duration;
 
 use super::autocomplete::AutocompleteState;
 use super::commands;
@@ -354,7 +354,88 @@ impl App {
                 crate::ui::app::App::estimate_context_chars(&history, &self.tools.definitions());
             self.token_stats.set_context_estimate(prompt_chars);
         }
+
+        if let Some(load) = action.conversation_load {
+            self.load_conversation(load, term)?;
+        }
         Ok(())
+    }
+
+    /// Load a past conversation as the active chat (the `conversation.load`
+    /// action, used by `/history`). Clears the current scrollback/transcript and
+    /// resumes the selected conversation in place so future messages append to
+    /// it rather than doubling up on the previous conversation.
+    fn load_conversation(
+        &mut self,
+        load: crate::ext::types::ConversationLoad,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        self.cancel_streaming = true;
+        self.pages.clear();
+        self.active_page = 0;
+        self.tools.state_map.clear();
+        self.subagent_seen_version = u64::MAX;
+
+        // Adopt the loaded conversation id so new messages append to it. End the
+        // previous conversation we're leaving (if different), and clear the
+        // target's `ended_at` so it's no longer marked closed.
+        if let (Some(db), Some(target)) = (&self.session_db, load.conversation_id) {
+            if let Some(old_id) = self.conversation_id
+                && old_id != target
+            {
+                db.end_conversation(old_id).ok();
+            }
+            db.reopen_conversation(target).ok();
+            self.session_seq = db.max_message_seq(target).unwrap_or(0);
+            self.conversation_id = Some(target);
+        }
+
+        // Swap in the loaded transcript and rebuild the rendered scrollback from
+        // it (clearing the previous conversation's messages).
+        self.transcript = load.messages;
+        self.messages.clear();
+        self.messages
+            .extend(Self::rebuild_scrollback_from_transcript(&self.transcript));
+        self.renderer.scrollback_cursor = 0;
+
+        // Update token counts: reset cumulative stats and estimate context from
+        // the loaded transcript.
+        self.token_stats.reset();
+        let history = crate::chat::build_chat_history(&self.transcript, None);
+        let prompt_chars = Self::estimate_context_chars(&history, &self.tools.definitions());
+        self.token_stats.set_context_estimate(prompt_chars);
+
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.cancel_streaming = false;
+        self.redraw(term)?;
+        Ok(())
+    }
+
+    /// Convert a loaded transcript into rendered scrollback rows. Tool-call-only
+    /// assistant messages (empty content) are skipped; tool results render as a
+    /// compact tool row.
+    fn rebuild_scrollback_from_transcript(
+        transcript: &[crate::llm::ChatMessage],
+    ) -> Vec<Message> {
+        use crate::llm::ChatRole;
+        let mut rows = Vec::new();
+        for msg in transcript {
+            match msg.role {
+                ChatRole::User => rows.push(Message::user(msg.content.clone())),
+                ChatRole::Assistant => {
+                    if !msg.content.trim().is_empty() {
+                        rows.push(Message::assistant(msg.content.clone()));
+                    }
+                }
+                ChatRole::Tool => {
+                    let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
+                    rows.push(Message::tool_row(label, false));
+                }
+                ChatRole::System => {}
+            }
+        }
+        rows
     }
 
     fn start_new_conversation(&mut self) {
@@ -596,17 +677,33 @@ impl App {
     /// Build a [`StatusInfo`] for the streaming spinner wait, with an optional
     /// live cumulative output-token estimate.
     fn stream_status_info_with_tokens(&self, estimated_tokens: Option<u64>) -> StatusInfo {
-        let elapsed = self.timer_elapsed();
+        // Don't show the "thinking" spinner / timer while an interactive pane
+        // (e.g. the /history picker or ask_user) is waiting on the user —
+        // nothing is running, so a spinner is misleading.
+        let interacting = self.has_active_interaction();
+        let spinner_active = self.streaming && !interacting;
+        let elapsed = if interacting {
+            None
+        } else {
+            self.timer_elapsed()
+        };
         stream_status_info_with_token_stats(
             estimated_tokens,
             &self.model,
             &self.token_stats,
-            self.streaming,
+            spinner_active,
             self.approval_mode,
             self.queue.len(),
             &self.user_config,
             elapsed,
         )
+    }
+
+    /// True when a pane is showing an active interactive prompt awaiting input.
+    fn has_active_interaction(&self) -> bool {
+        self.pages
+            .iter()
+            .any(|p| p.interaction.as_ref().is_some_and(|i| i.is_active()))
     }
 
     /// Look up a keymap binding for the given key combo.
@@ -1446,6 +1543,26 @@ impl App {
     }
 
     /// Run a Lua-registered command. Returns `Some(())` if the command was found and handled.
+    /// Snapshot the app-derived `ctx` fields for the current conversation.
+    /// Shared by the command runner, the tool dispatch path, and `before_turn`
+    /// so every Lua entry point sees an identical `ctx`.
+    pub(super) fn app_ctx_state(&self) -> crate::ext::ctx::AppCtxState {
+        let by_provider = crate::ext::ctx::usage_by_provider_context(
+            self.session_db.as_ref(),
+            self.conversation_id,
+        );
+        crate::ext::ctx::AppCtxState::new(
+            &self.tools,
+            &self.token_stats,
+            self.approval_mode,
+            self.conversation_id,
+            self.llm.id(),
+            self.llm.model(),
+            by_provider,
+            self.transcript.clone(),
+        )
+    }
+
     async fn run_lua_command(
         &mut self,
         cmd: &str,
@@ -1455,57 +1572,10 @@ impl App {
         let lua = self.extensions.lua_handle();
         let cmd_owned = cmd.to_string();
         let arg_owned = arg.to_string();
-        let session_id = self.conversation_id;
-        let provider = self.llm.id().to_string();
-        let model = self.llm.model().to_string();
-        let approval_mode = self.approval_mode;
-        let tools = self.tools.clone();
-        let est = crate::ext::ctx::estimate_prompt_tokens(&self.tools);
-        let by_provider =
-            crate::ext::ctx::usage_by_provider_context(self.session_db.as_ref(), session_id);
-        let usage = crate::ext::ctx::build_usage_context(&self.token_stats, &est, by_provider);
-
-        let transcript_snapshot = self.transcript.clone();
-
-        let mut task = tokio::task::spawn_blocking(move || {
-            let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
-
-            // Find the command handler using the shared lookup.
-            let handler = match crate::ext::ops_commands::find_handler(&lua, &cmd_owned) {
-                Some(f) => f,
-                None => return Some(None),
-            };
-
-            let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
-            let shared_state: crate::ext::ctx::SharedState =
-                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-            let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
-            ctx_cfg.tool_handler = Some(tools);
-            ctx_cfg.approval_mode = approval_mode;
-            ctx_cfg.session_id = session_id;
-            ctx_cfg.provider = Some(provider);
-            ctx_cfg.model = Some(model);
-            ctx_cfg.usage = Some(usage);
-            ctx_cfg.conversation_history = Some(transcript_snapshot.clone());
-            let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
-
-            // Release the project Lua mutex before calling into Lua: a nested
-            // LuaTool invocation via ctx.tools.call runs inline on this thread
-            // and must re-acquire it (std::sync::Mutex is not reentrant).
-            drop(lua);
-
-            let result = handler.call::<mlua::Value>((arg_owned, ctx_table));
-
-            let reply = match result {
-                Ok(value) => crate::ext::types::parse_lua_command_return(value)
-                    .map(|ret| (ret.output, ret.submit, ret.action)),
-                Err(e) => {
-                    eprintln!("bone-lua error: command '{cmd_owned}': {e}");
-                    Some((format!("Lua command error: {e}"), false, None))
-                }
-            };
-            Some(reply)
-        });
+        let app_state = self.app_ctx_state();
+        // Shared cancel flag: wired into the command's ctx (so Lua can observe
+        // cancellation) and flipped by `drive_live` when the user hits Esc.
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         self.streaming = true;
         self.turn_start = Some(Instant::now());
@@ -1513,27 +1583,68 @@ impl App {
         self.turn_pause_start = None;
         self.redraw(term).ok();
 
-        let mut spinner = time::interval(Duration::from_millis(90));
-        let reply = loop {
-            tokio::select! {
-                result = &mut task => {
-                    self.streaming = false;
-                    self.turn_start = None;
-                    break result.ok().flatten();
-                }
-                _ = spinner.tick() => {
-                    let status_info = self.status_info();
-                    let pages: &[PanePage] = if self.panes_visible { &self.pages } else { &[] };
-                    self.renderer.tick_spinner(term, &PaneDraw {
-                        input: &self.input,
-                        status_info: &status_info,
-                        pages,
-                        active_page: self.active_page,
-                        autocomplete: None,
-                    }).ok();
-                }
-            }
-        };
+        // Run the command through the shared live-driver loop so it gets the
+        // same capabilities as tools — including `ctx.ui.interact`, which needs
+        // the loop to pump pane events and drain keystrokes into the pane.
+        let cancel_for_ctx = cancel.clone();
+        let reply = self
+            .drive_live(
+                move |events| async move {
+                    tokio::task::spawn_blocking(move || {
+                        let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
+
+                        // Find the command handler using the shared lookup.
+                        let handler =
+                            match crate::ext::ops_commands::find_handler(&lua, &cmd_owned) {
+                                Some(f) => f,
+                                None => return Some(None),
+                            };
+
+                        let config_dir =
+                            crate::config::bone_dir().to_string_lossy().to_string();
+                        let shared_state: crate::ext::ctx::SharedState = std::sync::Arc::new(
+                            std::sync::Mutex::new(std::collections::HashMap::new()),
+                        );
+                        let mut ctx_cfg =
+                            crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
+                        app_state.apply_to(&mut ctx_cfg);
+                        ctx_cfg.pane_sender = Some(events);
+                        ctx_cfg.cancelled = Some(cancel_for_ctx);
+                        let ctx_table =
+                            crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
+
+                        // Release the project Lua mutex before calling into Lua: a
+                        // nested LuaTool invocation via ctx.tools.call runs inline on
+                        // this thread and must re-acquire it (std::sync::Mutex is not
+                        // reentrant).
+                        drop(lua);
+
+                        let result = handler.call::<mlua::Value>((arg_owned, ctx_table));
+
+                        let reply = match result {
+                            Ok(value) => crate::ext::types::parse_lua_command_return(value)
+                                .map(|ret| (ret.output, ret.submit, ret.action)),
+                            Err(e) => {
+                                eprintln!("bone-lua error: command '{cmd_owned}': {e}");
+                                Some((format!("Lua command error: {e}"), false, None))
+                            }
+                        };
+                        Some(reply)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                },
+                term,
+                cancel.clone(),
+                || None,
+            )
+            .await
+            .ok()
+            .flatten();
+
+        self.streaming = false;
+        self.turn_start = None;
 
         if let Some(Some((reply, submit, action))) = reply {
             if let Some(action) = action {

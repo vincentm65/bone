@@ -32,7 +32,7 @@ impl ToolRegistry {
         self.tools.values().map(|tool| tool.definition()).collect()
     }
 
-    pub async fn execute_live(
+    pub(crate) async fn execute_live(
         &self,
         call: ToolCall,
         events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
@@ -42,6 +42,7 @@ impl ToolRegistry {
         agent_depth: usize,
         tool_call_depth: usize,
         tool_handler: Option<ToolHandler>,
+        app_state: Option<crate::ext::ctx::AppCtxState>,
     ) -> ToolResult {
         let name = call.name.clone();
         let call_id = call.id.clone();
@@ -58,6 +59,7 @@ impl ToolRegistry {
                         agent_depth,
                         tool_call_depth,
                         tool_handler,
+                        app_state,
                     },
                 )
                 .await
@@ -107,6 +109,10 @@ pub struct ToolHandler {
     dynamic_safety: HashMap<String, CommandSafety>,
     /// Cancellation token set by TUI when user cancels streaming.
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// App-derived ctx snapshot, refreshed per turn by the TUI before dispatch.
+    /// Propagated to nested/subagent calls via the recursive `self.clone()` in
+    /// `execute_one_live`, so tools see the same `ctx` as slash commands.
+    pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
 }
 
 impl ToolHandler {
@@ -142,6 +148,7 @@ impl ToolHandler {
             owner: String::new(),
             dynamic_safety: HashMap::new(),
             cancel_token: None,
+            app_state: None,
         }
     }
 
@@ -159,6 +166,7 @@ impl ToolHandler {
             state_map: ToolStateMap::default(),
             owner: String::new(),
             cancel_token: None,
+            app_state: None,
         }
     }
 
@@ -328,6 +336,7 @@ impl ToolHandler {
                     agent_depth,
                     tool_call_depth,
                     Some(self.clone()),
+                    self.app_state.clone(),
                 )
                 .await
         } else {

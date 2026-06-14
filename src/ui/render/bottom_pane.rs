@@ -25,7 +25,6 @@ fn build_tab_bar(
     items: &[String],
     active_idx: usize,
     separator: &str,
-    suffix: Option<&str>,
 ) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, label) in items.iter().enumerate() {
@@ -44,12 +43,6 @@ fn build_tab_bar(
             } else {
                 Style::default().fg(ratatui::style::Color::DarkGray)
             },
-        ));
-    }
-    if let Some(s) = suffix {
-        spans.push(Span::styled(
-            format!("  {s}"),
-            Style::default().fg(ratatui::style::Color::DarkGray),
         ));
     }
     Line::from(spans)
@@ -362,7 +355,7 @@ impl super::Renderer {
         {
             let tab_y = y;
             if tab_y < content_bottom {
-                let tab_bar = build_tab_bar(&prompt.tabs, prompt.active_tab, "│", None);
+                let tab_bar = build_tab_bar(&prompt.tabs, prompt.active_tab, "│");
                 frame.render_widget(
                     Paragraph::new(tab_bar),
                     Rect {
@@ -654,6 +647,9 @@ impl super::Renderer {
                     let content_start_y = page_start + 1;
                     let overlay_start_y =
                         content_start_y + layout.content_rows.min(page.content.len() as u16);
+                    // Overlay must not overrun the page's own bottom separator /
+                    // tab indicator (multi) — stop at the content region's end.
+                    let overlay_bottom_y = content_start_y + layout.content_rows;
                     if let Some(ref interaction) = page.interaction {
                         if interaction.is_active() {
                             let _extra = Self::render_interactive_overlay(
@@ -663,7 +659,7 @@ impl super::Renderer {
                                 overlay_start_y,
                                 Rect {
                                     y: overlay_start_y,
-                                    height: area.bottom().saturating_sub(overlay_start_y),
+                                    height: overlay_bottom_y.saturating_sub(overlay_start_y),
                                     ..area
                                 },
                                 &self.theme,
@@ -690,12 +686,11 @@ impl super::Renderer {
                     // Tab indicator
                     let tab_y = bot_sep_y + 1;
                     if tab_y < status_row {
-                        let page_titles: Vec<String> =
-                            pages.iter().map(|p| p.title.clone()).collect();
-                        let tab_bar =
-                            build_tab_bar(&page_titles, page_idx, "|", Some("Tab to switch"));
                         frame.render_widget(
-                            Paragraph::new(tab_bar),
+                            Paragraph::new(Span::styled(
+                                "Tab to switch",
+                                Style::default().fg(ratatui::style::Color::DarkGray),
+                            )),
                             Rect {
                                 y: tab_y,
                                 height: 1,
@@ -904,8 +899,44 @@ impl super::Renderer {
             return y - start_y;
         }
 
-        // Render options
-        for (i, opt) in options.iter().enumerate() {
+        // Render options, windowed around the selection so long lists scroll
+        // instead of overflowing the pane. Reserve one row for the custom field
+        // (if present) and, when overflowing, one row each for the more-above /
+        // more-below indicators. `view` is the number of option rows shown.
+        let total = options.len();
+        let avail = area.bottom().saturating_sub(y) as usize;
+        let capacity = avail.saturating_sub(usize::from(allow_custom)).max(1);
+        let (start, end) = if total <= capacity {
+            (0, total)
+        } else {
+            // Overflow: reserve up to two indicator rows, center the selection
+            // in the remaining window, then reclaim any indicator row not needed
+            // at the list edges.
+            let mut view = capacity.saturating_sub(2).max(1);
+            let mut s = sel.saturating_sub(view / 2).min(total - view);
+            let reclaim = usize::from(s == 0) + usize::from(s + view >= total);
+            if reclaim > 0 {
+                view = (view + reclaim).min(total);
+                s = sel.saturating_sub(view / 2).min(total - view);
+            }
+            (s, s + view)
+        };
+
+        if start > 0 && y < area.bottom() {
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                    ratatui::text::Span::styled(format!("    ↑ {start} more"), muted_style),
+                )),
+                ratatui::layout::Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
+            );
+            y += 1;
+        }
+
+        for (i, opt) in options.iter().enumerate().take(end).skip(start) {
             if y >= area.bottom() {
                 break;
             }
@@ -956,6 +987,20 @@ impl super::Renderer {
             };
             frame.render_widget(
                 ratatui::widgets::Paragraph::new(line),
+                ratatui::layout::Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
+            );
+            y += 1;
+        }
+
+        if end < total && y < area.bottom() {
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                    ratatui::text::Span::styled(format!("    ↓ {} more", total - end), muted_style),
+                )),
                 ratatui::layout::Rect {
                     y,
                     height: 1,

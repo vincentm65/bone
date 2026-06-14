@@ -452,7 +452,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         // Dispatch before_turn hook so Lua can compact the conversation
         // before each provider request (same as the TUI agent loop).
         {
-            let ctx_cfg = crate::ext::ctx::build_before_turn_config(
+            let state = crate::ext::ctx::AppCtxState::new(
                 &tools,
                 &token_stats,
                 request.approval_mode,
@@ -462,6 +462,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 Vec::new(),
                 transcript.clone(),
             );
+            let ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
 
             let actions = extensions.dispatch_before_turn(&ctx_cfg);
             for action in actions {

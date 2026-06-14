@@ -156,10 +156,17 @@ impl LuaTool {
             .map_err(|e| format!("lua tool '{name}': failed to convert arguments: {e}"))?;
 
         let mut ctx_cfg = CtxConfig::new(config_dir, shared_state);
+        // App-derived fields (session/provider/model/usage/history/approval_mode)
+        // so tools see the same `ctx` as slash commands. `None` for non-live
+        // calls, which keeps the previous all-default behavior.
+        if let Some(state) = &context.app_state {
+            state.apply_to(&mut ctx_cfg);
+        }
         ctx_cfg.pane_sender = events;
         ctx_cfg.call_id = Some(context.call_id.clone());
+        // tool_handler comes from the per-call context (may differ from the
+        // snapshot's handler for nested delegation), so set it after apply_to.
         ctx_cfg.tool_handler = context.tool_handler.clone();
-        ctx_cfg.approval_mode = crate::tools::ApprovalMode::Safe;
         ctx_cfg.tool_call_depth = context.tool_call_depth;
         ctx_cfg.agent_depth = context.agent_depth;
         ctx_cfg.cancelled = context.cancelled.clone();

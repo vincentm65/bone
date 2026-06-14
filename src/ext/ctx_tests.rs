@@ -364,6 +364,82 @@ fn tool_definition_array_serializes_correctly() {
     assert_eq!(tbl.as_array().unwrap().len(), 2);
 }
 
+// ── AppCtxState parity (commands ⇆ tools share one ctx) ─────────────────────
+
+fn sample_app_state() -> AppCtxState {
+    let tools =
+        crate::tools::registry::ToolHandler::new(crate::tools::registry::ToolRegistry::default());
+    let stats = crate::llm::TokenStats {
+        sent: 1234,
+        ..Default::default()
+    };
+    let history = vec![
+        crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "hello"),
+        crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "hi there"),
+    ];
+    AppCtxState::new(
+        &tools,
+        &stats,
+        crate::tools::ApprovalMode::Danger,
+        Some(42),
+        "openrouter",
+        "gemini",
+        Vec::new(),
+        history,
+    )
+}
+
+fn cfg_from(state: &AppCtxState) -> CtxConfig {
+    let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
+    state.apply_to(&mut cfg);
+    cfg
+}
+
+// The single mapping (`apply_to`) populates every app-derived field. Both the
+// command runner and the tool path route through it, so this is the parity
+// guarantee at the CtxConfig level.
+#[test]
+fn app_ctx_state_apply_to_populates_all_app_fields() {
+    let cfg = cfg_from(&sample_app_state());
+
+    assert_eq!(cfg.session_id, Some(42));
+    assert_eq!(cfg.provider.as_deref(), Some("openrouter"));
+    assert_eq!(cfg.model.as_deref(), Some("gemini"));
+    assert_eq!(cfg.approval_mode, crate::tools::ApprovalMode::Danger);
+    assert!(cfg.tool_handler.is_some());
+    assert_eq!(cfg.usage.as_ref().unwrap().sent, 1234);
+    assert_eq!(cfg.conversation_history.as_ref().unwrap().len(), 2);
+}
+
+// The same fields are visible on the Lua `ctx` surface (what a command/tool
+// handler actually reads).
+#[test]
+fn app_ctx_state_exposes_app_fields_through_lua_ctx() {
+    let cfg = cfg_from(&sample_app_state());
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let current: Value = lua
+        .load("return ctx.conversation.current()")
+        .eval()
+        .unwrap();
+    let current: serde_json::Value = lua.from_value(current).unwrap();
+    assert_eq!(current["id"], 42);
+    assert_eq!(current["provider"], "openrouter");
+    assert_eq!(current["model"], "gemini");
+
+    let hist_len: usize = lua
+        .load("return #ctx.conversation.history()")
+        .eval()
+        .unwrap();
+    assert_eq!(hist_len, 2);
+
+    let sent: u64 = lua.load("return ctx.usage.snapshot().sent").eval().unwrap();
+    assert_eq!(sent, 1234);
+}
+
 #[test]
 fn agent_opts_use_explicit_model_when_provider_changes() {
     let lua = Lua::new();

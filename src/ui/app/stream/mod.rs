@@ -170,20 +170,8 @@ impl App {
             // Dispatch before_turn hook so Lua can compact or otherwise
             // transform the conversation before each provider request.
             {
-                let by_provider = crate::ext::ctx::usage_by_provider_context(
-                    self.session_db.as_ref(),
-                    self.conversation_id,
-                );
-                let ctx_cfg = crate::ext::ctx::build_before_turn_config(
-                    &self.tools,
-                    &self.token_stats,
-                    self.approval_mode,
-                    self.conversation_id,
-                    self.llm.id(),
-                    self.llm.model(),
-                    by_provider,
-                    self.transcript.clone(),
-                );
+                let ctx_cfg =
+                    crate::ext::ctx::build_before_turn_config(&self.app_ctx_state());
 
                 // Run `before_turn` off the UI thread. Handlers may make
                 // blocking LLM calls (e.g. auto-compaction via ctx.agent.run);
@@ -735,6 +723,10 @@ impl App {
         // Create a cancellation token for this batch of tool calls.
         let cancel_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.tools.cancel_token = Some(cancel_token.clone());
+        // Snapshot app-derived ctx for this batch so tools (and any nested /
+        // subagent calls that inherit the handler) see the same `ctx` as
+        // slash commands.
+        self.tools.app_state = Some(self.app_ctx_state());
         let tools = self.tools.clone();
         self.wait_for_tool_future_live(
             |events| async move { tools.execute_all_live(approved, Some(events), 0, 0).await },
@@ -778,6 +770,8 @@ impl App {
         self.apply_tool_live_event(event);
     }
 
+    /// Thin wrapper over [`Self::drive_live`] for the tool-call path: on user
+    /// cancel, returns a `tool_error` result for each pending call.
     async fn wait_for_tool_future_live<F, Fut>(
         &mut self,
         make_future: F,
@@ -788,6 +782,34 @@ impl App {
     where
         F: FnOnce(mpsc::UnboundedSender<ToolLiveEvent>) -> Fut,
         Fut: std::future::Future<Output = Vec<ToolResult>>,
+    {
+        self.drive_live(make_future, term, cancel_token, || {
+            cancel_calls
+                .iter()
+                .map(|call| tool_error(call, "cancelled by user"))
+                .collect()
+        })
+        .await
+    }
+
+    /// Drive a blocking-Lua future to completion while keeping the UI live:
+    /// pump pane events emitted via the `ToolLiveEvent` sender, drain
+    /// keystrokes into any active interactive pane (this is what unblocks
+    /// `ctx.ui.interact`), render the spinner, and clean up panes on cancel.
+    ///
+    /// Generic over the future's output `T` so both model-invoked tools and
+    /// slash commands share one execution loop. `on_cancel` produces the
+    /// return value when the user cancels with Esc.
+    pub(super) async fn drive_live<T, F, Fut>(
+        &mut self,
+        make_future: F,
+        term: &mut BoneTerminal,
+        cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        on_cancel: impl FnOnce() -> T,
+    ) -> io::Result<T>
+    where
+        F: FnOnce(mpsc::UnboundedSender<ToolLiveEvent>) -> Fut,
+        Fut: std::future::Future<Output = T>,
     {
         let mut spinner = time::interval(Duration::from_millis(90));
         let (tx, mut rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
@@ -836,11 +858,7 @@ impl App {
                             self.active_page =
                                 PanePage::remove(&mut self.pages, &source, self.active_page);
                         }
-                        let results = cancel_calls
-                            .iter()
-                            .map(|call| tool_error(call, "cancelled by user"))
-                            .collect();
-                        return Ok(results);
+                        return Ok(on_cancel());
                     }
 
                     // Refresh subagent pane on registry change or ~1s ticker, so the

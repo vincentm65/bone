@@ -151,6 +151,27 @@ fn fresh_database_initializes_at_latest_version() {
 }
 
 #[test]
+fn max_message_seq_tracks_highest_seq() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+
+    // No messages yet → 0.
+    assert_eq!(db.max_message_seq(conv).unwrap(), 0);
+
+    db.append_message(conv, "user", "hi", None, None, None, 1)
+        .unwrap();
+    db.append_message(conv, "assistant", "hello", None, None, None, 2)
+        .unwrap();
+    assert_eq!(db.max_message_seq(conv).unwrap(), 2);
+
+    // A different conversation is unaffected.
+    let other = db.create_conversation("openai", "gpt-4").unwrap();
+    assert_eq!(db.max_message_seq(other).unwrap(), 0);
+}
+
+#[test]
 fn unix_epoch_formats_as_valid_iso_date() {
     assert_eq!(iso_from_unix_secs(0), "1970-01-01T00:00:00Z");
 }

@@ -71,6 +71,10 @@ pub struct ToolExecutionContext {
     pub tool_call_depth: usize,
     /// Tool handler for ctx.tools.* delegation (set by ToolHandler).
     pub tool_handler: Option<crate::tools::registry::ToolHandler>,
+    /// App-derived ctx snapshot (session/provider/model/usage/history), so tools
+    /// see the same `ctx` as slash commands. Set by ToolHandler; `None` for
+    /// non-live calls.
+    pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
 }
 
 #[derive(Debug, Clone)]

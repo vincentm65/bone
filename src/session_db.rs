@@ -464,6 +464,26 @@ impl SessionDb {
         Ok(())
     }
 
+    /// Clear the `ended_at` marker so a previously-ended conversation can be
+    /// resumed (e.g. when `/history` loads it as the active chat).
+    pub fn reopen_conversation(&self, conversation_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE conversations SET ended_at = NULL WHERE id = ?1",
+            params![conversation_id],
+        )?;
+        Ok(())
+    }
+
+    /// Highest `seq` stored for a conversation, or 0 if it has no messages.
+    /// Used to continue seq numbering when resuming a conversation.
+    pub(crate) fn max_message_seq(&self, conversation_id: i64) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
+            params![conversation_id],
+            |row| row.get(0),
+        )
+    }
+
     /// Get usage broken down by provider/model for a conversation.
     pub fn usage_by_provider(&self, conversation_id: i64) -> rusqlite::Result<Vec<ProviderUsage>> {
         let mut stmt = self.conn.prepare(
