@@ -1184,6 +1184,8 @@ impl App {
                             _ => {}
                         }
                     }
+                    input.paste_mode =
+                        event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
                     match input.apply_key(key.code, key.modifiers) {
                         InputAction::Cancel => {
                             // If an interactive pane is active, cancel it instead of cancelling the stream.

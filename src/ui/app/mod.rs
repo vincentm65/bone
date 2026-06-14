@@ -894,6 +894,10 @@ impl App {
             return self.handle_keymap_action(action, term).await;
         }
 
+        // Detect a non-bracketed paste flood: if more key events are already
+        // buffered behind this one, we're mid-paste (e.g. Windows conhost).
+        self.input.paste_mode =
+            event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
         match self.input.apply_key(code, modifiers) {
             InputAction::Cancel => self.handle_ctrl_c(term),
             InputAction::Submit => {
@@ -1103,6 +1107,8 @@ impl App {
                     continue;
                 }
                 if advising {
+                    self.input.paste_mode =
+                        event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
                     match self.input.apply_key(key.code, key.modifiers) {
                         InputAction::Submit => {
                             let advice = self.input.buffer.trim().to_string();
@@ -1487,6 +1493,8 @@ impl App {
                         self.input.clear_buffer();
                         return Ok(None);
                     }
+                    self.input.paste_mode =
+                        event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
                     let _ = self.input.apply_key(key.code, key.modifiers);
                 }
                 _ => {}
