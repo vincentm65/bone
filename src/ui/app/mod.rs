@@ -226,13 +226,6 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         if let Some(new_messages) = action.conversation_replace {
-            // Validate: all messages must have valid roles and content.
-            for msg in &new_messages {
-                if msg.content.is_empty() {
-                    // Allow empty content for tool messages, skip validation.
-                }
-            }
-
             // Replace the active transcript.
             self.transcript = new_messages;
 
@@ -921,6 +914,15 @@ impl App {
                 self.redraw(term)
             }
             InputAction::Redraw | InputAction::Escape => {
+                // Mid-burst (non-bracketed paste flood on Windows conhost):
+                // the buffer insert already happened in apply_key; defer the
+                // expensive autocomplete recompute + redraw until the final
+                // buffered event so a large paste costs one redraw instead of
+                // one per character. paste_mode is set iff more events are
+                // already queued behind this one.
+                if self.input.paste_mode {
+                    return Ok(());
+                }
                 self.update_autocomplete();
                 self.redraw(term)
             }
@@ -1119,6 +1121,8 @@ impl App {
                             self.input.clear_buffer();
                             break Decision::Cancel;
                         }
+                        // Skip per-char redraws mid-paste-burst (see handle_key).
+                        InputAction::Redraw if self.input.paste_mode => {}
                         InputAction::Redraw => self.redraw(term)?,
                         InputAction::None if key.code == KeyCode::Enter => {
                             break Decision::Advise(String::new());
