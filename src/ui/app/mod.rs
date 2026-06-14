@@ -334,8 +334,35 @@ impl App {
             if event::poll(std::time::Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key(key.code, key.modifiers, &mut terminal)
-                            .await?;
+                        // Coalesce a non-bracketed paste burst (Windows conhost
+                        // delivers a paste as a flood of Char events) into one
+                        // insert_paste so large pastes collapse to a placeholder
+                        // and cost a single redraw. Only a plain Char with more
+                        // events already queued behind it qualifies; everything
+                        // else uses the normal per-key path.
+                        if let KeyCode::Char(c) = key.code
+                            && !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                            && self.active_prompt.is_none()
+                            && event::poll(std::time::Duration::from_millis(0))?
+                        {
+                            if let Some(trailing) =
+                                self.handle_paste_burst(c, &mut terminal)?
+                            {
+                                match trailing {
+                                    Event::Key(k) if k.kind == KeyEventKind::Press => {
+                                        self.handle_key(k.code, k.modifiers, &mut terminal)
+                                            .await?;
+                                    }
+                                    Event::Resize(_, _) => self.force_redraw(&mut terminal)?,
+                                    _ => {}
+                                }
+                            }
+                        } else {
+                            self.handle_key(key.code, key.modifiers, &mut terminal)
+                                .await?;
+                        }
                     }
                     Event::Paste(text) => {
                         self.input.insert_paste(&text);
@@ -741,6 +768,56 @@ impl App {
         cmds
     }
 
+    /// Drain a non-bracketed paste burst, starting from an already-read first
+    /// `Char`, into a single `insert_paste`. Plain `Char` events and interior
+    /// `Enter` keys are accumulated; the burst ends at any other event (or when
+    /// the queue drains), and that terminating event is returned for the caller
+    /// to handle normally — notably a trailing `Enter`, which submits.
+    fn handle_paste_burst(
+        &mut self,
+        first: char,
+        term: &mut BoneTerminal,
+    ) -> io::Result<Option<Event>> {
+        let mut batch = String::new();
+        batch.push(first);
+        let trailing = loop {
+            if !event::poll(std::time::Duration::from_millis(0))? {
+                break None;
+            }
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    let plain = !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                    match key.code {
+                        KeyCode::Char(c) if plain => batch.push(c),
+                        KeyCode::Enter if plain => {
+                            // Interior newline if more input follows; a trailing
+                            // Enter ends the burst and submits via normal handling.
+                            if event::poll(std::time::Duration::from_millis(0))? {
+                                batch.push('\n');
+                            } else {
+                                break Some(Event::Key(key));
+                            }
+                        }
+                        _ => break Some(Event::Key(key)),
+                    }
+                }
+                Event::Key(_) => {} // key release/repeat — ignore
+                Event::Paste(text) => {
+                    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                    batch.push_str(&normalized);
+                }
+                other => break Some(other),
+            }
+        };
+        self.input.history_index = None;
+        self.input.insert_paste(&batch);
+        self.update_autocomplete();
+        self.redraw(term)?;
+        Ok(trailing)
+    }
+
     async fn handle_key(
         &mut self,
         code: KeyCode,
@@ -1113,7 +1190,7 @@ impl App {
                         event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
                     match self.input.apply_key(key.code, key.modifiers) {
                         InputAction::Submit => {
-                            let advice = self.input.buffer.trim().to_string();
+                            let advice = self.input.expanded().trim().to_string();
                             self.input.reset();
                             break Decision::Advise(advice);
                         }

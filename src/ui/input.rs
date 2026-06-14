@@ -1,4 +1,20 @@
 use crossterm::event::{KeyCode, KeyModifiers};
+
+/// Pastes longer than this many characters collapse to a short
+/// `[Pasted text #N +M chars]` placeholder in the input field instead of
+/// filling it with the whole blob. The real content is substituted back in
+/// when the message is submitted.
+pub const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
+
+/// A large pasted blob held out of the visible buffer. `token` is the short
+/// placeholder shown in the input field; `content` is the real text spliced
+/// back in on submit via [`InputState::expanded`].
+#[derive(Debug, Clone)]
+pub struct PasteBlob {
+    token: String,
+    content: String,
+}
+
 /// Result of applying a key to the input state.
 /// Callers use this to decide side-effects (queue, redraw, etc.).
 #[derive(Debug)]
@@ -37,6 +53,11 @@ pub struct InputState {
     /// support, e.g. Windows conhost). While true, `Enter` inserts a literal
     /// newline instead of submitting, so multi-line pastes survive.
     pub paste_mode: bool,
+    /// Large pastes collapsed to placeholder tokens in `buffer`. Expanded back
+    /// to real content on submit; cleared whenever the buffer is reset/cleared.
+    pub pastes: Vec<PasteBlob>,
+    /// Monotonic counter for placeholder numbering within a session.
+    pub paste_seq: usize,
 }
 
 impl InputState {
@@ -64,14 +85,82 @@ impl InputState {
     }
 
     /// Insert terminal paste contents, normalizing terminal line endings.
+    ///
+    /// Pastes above [`PASTE_PLACEHOLDER_THRESHOLD`] are not inserted verbatim;
+    /// instead a short placeholder token is inserted and the real text is kept
+    /// in `pastes` to be restored by [`expanded`](Self::expanded) on submit.
     pub fn insert_paste(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.insert_text(&normalized);
+        let char_count = normalized.chars().count();
+        if char_count > PASTE_PLACEHOLDER_THRESHOLD {
+            self.paste_seq += 1;
+            let token = format!("[Pasted text #{} +{} chars]", self.paste_seq, char_count);
+            self.insert_text(&token);
+            self.pastes.push(PasteBlob {
+                token,
+                content: normalized,
+            });
+        } else {
+            self.insert_text(&normalized);
+        }
+    }
+
+    /// The buffer with every paste placeholder substituted back to its real
+    /// content. Equal to `buffer` when no large pastes are pending.
+    pub fn expanded(&self) -> String {
+        if self.pastes.is_empty() {
+            return self.buffer.clone();
+        }
+        let mut out = self.buffer.clone();
+        for blob in &self.pastes {
+            out = out.replace(&blob.token, &blob.content);
+        }
+        out
+    }
+
+    /// Whether the buffer currently holds any collapsed paste placeholders.
+    pub fn has_pastes(&self) -> bool {
+        !self.pastes.is_empty()
+    }
+
+    /// If the cursor sits immediately after a paste placeholder, delete the
+    /// whole token (and drop the blob) as a single unit. Returns whether a
+    /// placeholder was removed.
+    fn delete_paste_backward(&mut self) -> bool {
+        let cursor = self.cursor_pos;
+        let chars: Vec<char> = self.buffer.chars().collect();
+        for i in 0..self.pastes.len() {
+            let token_len = self.pastes[i].token.chars().count();
+            if cursor < token_len {
+                continue;
+            }
+            let start = cursor - token_len;
+            let slice: String = chars[start..cursor].iter().collect();
+            if slice == self.pastes[i].token {
+                let byte_start = self
+                    .buffer
+                    .char_indices()
+                    .nth(start)
+                    .map(|(b, _)| b)
+                    .unwrap_or(0);
+                let byte_end = self.byte_pos();
+                self.buffer.replace_range(byte_start..byte_end, "");
+                self.cursor_pos = start;
+                self.pastes.remove(i);
+                return true;
+            }
+        }
+        false
     }
 
     /// Delete the character before the cursor (Backspace).
     pub fn delete_backward(&mut self) {
         if self.cursor_pos == 0 {
+            return;
+        }
+        // A placeholder is an atomic unit: backspacing right after one removes
+        // the whole token rather than mangling it into an unmatchable string.
+        if self.delete_paste_backward() {
             return;
         }
         let prev_char_idx = self.cursor_pos - 1;
@@ -180,6 +269,7 @@ impl InputState {
     pub fn clear_buffer(&mut self) {
         self.buffer.clear();
         self.cursor_pos = 0;
+        self.pastes.clear();
     }
 
     pub fn reset(&mut self) {
@@ -193,6 +283,7 @@ impl InputState {
         self.buffer.clear();
         self.cursor_pos = 0;
         self.history_index = None;
+        self.pastes.clear();
     }
 
     /// Yields the action to take (redraw, submit, etc.). Single source

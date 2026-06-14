@@ -106,7 +106,10 @@ pub fn timeout_message(prefix: &str, detail: &str, retried: bool) -> String {
 
 impl App {
     pub(crate) async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let text = self.input.buffer.trim().to_string();
+        // Expand any collapsed paste placeholders so the model and transcript
+        // receive the full pasted content, not the `[Pasted text …]` token.
+        let text = self.input.expanded();
+        let text = text.trim().to_string();
         if text.is_empty() {
             return Ok(());
         }
@@ -121,7 +124,12 @@ impl App {
             return self.handle_command(cmd, term).await;
         }
 
-        self.submit_user_turn(text, None, term).await
+        // Keep the short placeholder in scrollback while sending full content.
+        let display_text = self
+            .input
+            .has_pastes()
+            .then(|| self.input.buffer.trim().to_string());
+        self.submit_user_turn(text, display_text, term).await
     }
 
     pub(super) async fn submit_user_turn(
@@ -1210,7 +1218,9 @@ impl App {
                             return mode_changed;
                         }
                         InputAction::Submit => {
-                            let text = input.buffer.trim().to_string();
+                            // Expand placeholders now; the queued string is fed
+                            // back through send_message later with no blobs.
+                            let text = input.expanded().trim().to_string();
                             if !text.is_empty() {
                                 queue.push_back(text);
                                 input.reset();
