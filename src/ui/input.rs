@@ -1,4 +1,13 @@
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::time::{Duration, Instant};
+
+/// Max gap between consecutive key events to still be considered a single
+/// paste burst. Human typing (even key-repeat, ~30ms) is far above this;
+/// terminal-injected paste events arrive back-to-back (sub-millisecond).
+/// Only the Windows non-bracketed-paste path relies on this — on terminals
+/// that honour `[?2004h`, pastes arrive as `Event::Paste` and never
+/// touch the keymap.
+const PASTE_BURST_THRESHOLD: Duration = Duration::from_millis(3);
 
 /// Result of applying a key to the input state.
 /// Callers use this to decide side-effects (queue, redraw, etc.).
@@ -33,6 +42,10 @@ pub struct InputState {
     /// History of sent messages (up/down arrow to navigate)
     pub history: Vec<String>,
     pub history_index: Option<usize>,
+    /// Timestamp of the last `Char`/burst-`Enter` key, used to detect
+    /// non-bracketed pastes (e.g. Windows conhost) arriving as a rapid
+    /// stream of individual key events.
+    pub last_key_instant: Option<Instant>,
 }
 
 impl InputState {
@@ -240,18 +253,32 @@ impl InputState {
             };
         }
 
+        let now = Instant::now();
+        let in_burst = self
+            .last_key_instant
+            .is_some_and(|t| now.duration_since(t) < PASTE_BURST_THRESHOLD);
+
         match code {
             KeyCode::BackTab => InputAction::CycleMode,
             KeyCode::Enter => {
-                if self.buffer.trim().is_empty() {
+                if in_burst {
+                    // Part of a rapid key burst (non-bracketed paste):
+                    // treat the newline literally instead of submitting.
+                    self.history_index = None;
+                    self.insert_char('\n');
+                    self.last_key_instant = Some(now);
+                    InputAction::Redraw
+                } else if self.buffer.trim().is_empty() {
                     InputAction::None
                 } else {
+                    self.last_key_instant = None;
                     InputAction::Submit
                 }
             }
             KeyCode::Char(c) => {
                 self.history_index = None;
                 self.insert_char(c);
+                self.last_key_instant = Some(now);
                 InputAction::Redraw
             }
             KeyCode::Backspace => {
