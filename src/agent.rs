@@ -452,37 +452,16 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         // Dispatch before_turn hook so Lua can compact the conversation
         // before each provider request (same as the TUI agent loop).
         {
-            let defs = tools.definitions();
-            let schema_json = serde_json::to_string(&defs).unwrap_or_default();
-            let schema_chars = schema_json.len() as u64;
-            let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
-            let sys = crate::llm::prompts::system_prompt();
-            let sys_chars = sys.len() as u64;
-            let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
-
-            let mut ctx_cfg = crate::ext::ctx::new_before_turn_ctx(
-                crate::config::bone_dir().to_string_lossy().to_string(),
+            let ctx_cfg = crate::ext::ctx::build_before_turn_config(
+                &tools,
+                &token_stats,
+                request.approval_mode,
+                session.conv_id(),
+                llm.id(),
+                llm.model(),
                 Vec::new(),
+                transcript.clone(),
             );
-            ctx_cfg.tool_handler = Some(tools.clone());
-            ctx_cfg.approval_mode = request.approval_mode;
-            ctx_cfg.session_id = session.conv_id();
-            ctx_cfg.provider = Some(llm.id().to_string());
-            ctx_cfg.model = Some(llm.model().to_string());
-            if let Some(ref mut usage) = ctx_cfg.usage {
-                usage.request_count = token_stats.request_count;
-                usage.sent = token_stats.sent;
-                usage.received = token_stats.received;
-                usage.cached = token_stats.cached;
-                usage.cost = token_stats.cost;
-                usage.context_length = token_stats.context_length;
-                usage.tool_count = defs.len() as u64;
-                usage.tool_schema_chars = schema_chars;
-                usage.tool_schema_tokens = schema_tokens;
-                usage.system_prompt_chars = sys_chars;
-                usage.system_prompt_tokens = sys_tokens;
-            }
-            ctx_cfg.conversation_history = Some(transcript.clone());
 
             let actions = extensions.dispatch_before_turn(&ctx_cfg);
             for action in actions {

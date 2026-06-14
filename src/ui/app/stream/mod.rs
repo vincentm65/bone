@@ -170,57 +170,20 @@ impl App {
             // Dispatch before_turn hook so Lua can compact or otherwise
             // transform the conversation before each provider request.
             {
-                let defs = self.tools.definitions();
-                let schema_json = serde_json::to_string(&defs).unwrap_or_default();
-                let schema_chars = schema_json.len() as u64;
-                let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
-                let sys = crate::llm::prompts::system_prompt();
-                let sys_chars = sys.len() as u64;
-                let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
-
-                let by_provider = self
-                    .session_db
-                    .as_ref()
-                    .and_then(|db| {
-                        self.conversation_id
-                            .and_then(|id| db.usage_by_provider(id).ok())
-                    })
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|p| crate::ext::ctx::UsageProviderContext {
-                        provider: p.provider,
-                        model: p.model,
-                        prompt_tokens: p.prompt_tokens.max(0) as u64,
-                        completion_tokens: p.completion_tokens.max(0) as u64,
-                        cached_tokens: p.cached_tokens.max(0) as u64,
-                        cost: p.cost,
-                        request_count: p.request_count.max(0) as u64,
-                    })
-                    .collect();
-
-                let mut ctx_cfg = crate::ext::ctx::new_before_turn_ctx(
-                    crate::config::bone_dir().to_string_lossy().to_string(),
-                    by_provider,
+                let by_provider = crate::ext::ctx::usage_by_provider_context(
+                    self.session_db.as_ref(),
+                    self.conversation_id,
                 );
-                ctx_cfg.tool_handler = Some(self.tools.clone());
-                ctx_cfg.approval_mode = self.approval_mode;
-                ctx_cfg.session_id = self.conversation_id;
-                ctx_cfg.provider = Some(self.llm.id().to_string());
-                ctx_cfg.model = Some(self.llm.model().to_string());
-                if let Some(ref mut usage) = ctx_cfg.usage {
-                    usage.request_count = self.token_stats.request_count;
-                    usage.sent = self.token_stats.sent;
-                    usage.received = self.token_stats.received;
-                    usage.cached = self.token_stats.cached;
-                    usage.cost = self.token_stats.cost;
-                    usage.context_length = self.token_stats.context_length;
-                    usage.tool_count = defs.len() as u64;
-                    usage.tool_schema_chars = schema_chars;
-                    usage.tool_schema_tokens = schema_tokens;
-                    usage.system_prompt_chars = sys_chars;
-                    usage.system_prompt_tokens = sys_tokens;
-                }
-                ctx_cfg.conversation_history = Some(self.transcript.clone());
+                let ctx_cfg = crate::ext::ctx::build_before_turn_config(
+                    &self.tools,
+                    &self.token_stats,
+                    self.approval_mode,
+                    self.conversation_id,
+                    self.llm.id(),
+                    self.llm.model(),
+                    by_provider,
+                    self.transcript.clone(),
+                );
 
                 // Run `before_turn` off the UI thread. Handlers may make
                 // blocking LLM calls (e.g. auto-compaction via ctx.agent.run);

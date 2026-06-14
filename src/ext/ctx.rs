@@ -1636,32 +1636,109 @@ fn yaml_to_lua(lua: &Lua, val: &serde_yaml::Value) -> Result<Value, mlua::Error>
     }
 }
 
-/// Build a CtxConfig for before_turn dispatch.
-///
-/// The caller is responsible for setting `tool_handler`, `approval_mode`,
-/// `session_id`, `provider`, `model`, `usage`, and `conversation_history`
-/// on the returned config.  This helper only fills the boilerplate fields
-/// that are identical across callers.
-pub(crate) fn new_before_turn_ctx(
-    config_dir: String,
+/// Token-usage figures derived from the current tool schema and system prompt.
+/// Shared by every site that fills a `UsageContext`.
+pub(crate) struct PromptTokenEstimate {
+    pub tool_count: u64,
+    pub schema_chars: u64,
+    pub schema_tokens: u64,
+    pub sys_chars: u64,
+    pub sys_tokens: u64,
+}
+
+/// Estimate token counts for the serialized tool schema and the system prompt.
+pub(crate) fn estimate_prompt_tokens(
+    tools: &crate::tools::registry::ToolHandler,
+) -> PromptTokenEstimate {
+    let defs = tools.definitions();
+    let schema_chars = serde_json::to_string(&defs).unwrap_or_default().len() as u64;
+    let sys_chars = crate::llm::prompts::system_prompt().len() as u64;
+    PromptTokenEstimate {
+        tool_count: defs.len() as u64,
+        schema_chars,
+        schema_tokens: estimate_tokens(schema_chars),
+        sys_chars,
+        sys_tokens: estimate_tokens(sys_chars),
+    }
+}
+
+/// Char-count → token-count using the shared `CHARS_PER_TOKEN` heuristic.
+fn estimate_tokens(chars: u64) -> u64 {
+    (chars as f64 / crate::llm::token_tracker::CHARS_PER_TOKEN).ceil() as u64
+}
+
+/// Per-provider usage breakdown for the current conversation, mapped into the
+/// Lua-facing `UsageProviderContext`. Empty when there is no session DB,
+/// conversation, or the query fails.
+pub(crate) fn usage_by_provider_context(
+    db: Option<&crate::session_db::SessionDb>,
+    session_id: Option<i64>,
+) -> Vec<UsageProviderContext> {
+    db.and_then(|db| session_id.and_then(|id| db.usage_by_provider(id).ok()))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| UsageProviderContext {
+            provider: p.provider,
+            model: p.model,
+            prompt_tokens: p.prompt_tokens.max(0) as u64,
+            completion_tokens: p.completion_tokens.max(0) as u64,
+            cached_tokens: p.cached_tokens.max(0) as u64,
+            cost: p.cost,
+            request_count: p.request_count.max(0) as u64,
+        })
+        .collect()
+}
+
+/// Assemble a `UsageContext` from cumulative token stats, the prompt estimate,
+/// and the per-provider breakdown.
+pub(crate) fn build_usage_context(
+    stats: &crate::llm::TokenStats,
+    est: &PromptTokenEstimate,
     by_provider: Vec<UsageProviderContext>,
-) -> CtxConfig {
-    let shared_state: SharedState = Arc::new(Mutex::new(HashMap::new()));
-    let mut cfg = CtxConfig::new(config_dir, shared_state);
-    cfg.usage = Some(UsageContext {
-        request_count: 0,
-        sent: 0,
-        received: 0,
-        cached: 0,
-        cost: 0.0,
-        context_length: 0,
-        tool_count: 0,
-        tool_schema_chars: 0,
-        tool_schema_tokens: 0,
-        system_prompt_chars: 0,
-        system_prompt_tokens: 0,
+) -> UsageContext {
+    UsageContext {
+        request_count: stats.request_count,
+        sent: stats.sent,
+        received: stats.received,
+        cached: stats.cached,
+        cost: stats.cost,
+        context_length: stats.context_length,
+        tool_count: est.tool_count,
+        tool_schema_chars: est.schema_chars,
+        tool_schema_tokens: est.schema_tokens,
+        system_prompt_chars: est.sys_chars,
+        system_prompt_tokens: est.sys_tokens,
         by_provider,
-    });
+    }
+}
+
+/// Build the `CtxConfig` passed to the `before_turn` hook before each provider
+/// request. Centralizes the usage bookkeeping shared by the headless agent and
+/// the TUI loop.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_before_turn_config(
+    tools: &crate::tools::registry::ToolHandler,
+    stats: &crate::llm::TokenStats,
+    approval_mode: crate::tools::ApprovalMode,
+    session_id: Option<i64>,
+    provider: &str,
+    model: &str,
+    by_provider: Vec<UsageProviderContext>,
+    history: Vec<crate::llm::ChatMessage>,
+) -> CtxConfig {
+    let est = estimate_prompt_tokens(tools);
+    let shared_state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    let mut cfg = CtxConfig::new(
+        crate::config::bone_dir().to_string_lossy().to_string(),
+        shared_state,
+    );
+    cfg.tool_handler = Some(tools.clone());
+    cfg.approval_mode = approval_mode;
+    cfg.session_id = session_id;
+    cfg.provider = Some(provider.to_string());
+    cfg.model = Some(model.to_string());
+    cfg.usage = Some(build_usage_context(stats, &est, by_provider));
+    cfg.conversation_history = Some(history);
     cfg
 }
 

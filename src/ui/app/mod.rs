@@ -1460,43 +1460,10 @@ impl App {
         let model = self.llm.model().to_string();
         let approval_mode = self.approval_mode;
         let tools = self.tools.clone();
-        let defs = self.tools.definitions();
-        let schema_json = serde_json::to_string(&defs).unwrap_or_default();
-        let schema_chars = schema_json.len() as u64;
-        let schema_tokens = (schema_chars as f64 / 3.8).ceil() as u64;
-        let sys = crate::llm::prompts::system_prompt();
-        let sys_chars = sys.len() as u64;
-        let sys_tokens = (sys_chars as f64 / 3.8).ceil() as u64;
-        let by_provider = self
-            .session_db
-            .as_ref()
-            .and_then(|db| session_id.and_then(|id| db.usage_by_provider(id).ok()))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|p| crate::ext::ctx::UsageProviderContext {
-                provider: p.provider,
-                model: p.model,
-                prompt_tokens: p.prompt_tokens.max(0) as u64,
-                completion_tokens: p.completion_tokens.max(0) as u64,
-                cached_tokens: p.cached_tokens.max(0) as u64,
-                cost: p.cost,
-                request_count: p.request_count.max(0) as u64,
-            })
-            .collect();
-        let usage = crate::ext::ctx::UsageContext {
-            request_count: self.token_stats.request_count,
-            sent: self.token_stats.sent,
-            received: self.token_stats.received,
-            cached: self.token_stats.cached,
-            cost: self.token_stats.cost,
-            context_length: self.token_stats.context_length,
-            tool_count: defs.len() as u64,
-            tool_schema_chars: schema_chars,
-            tool_schema_tokens: schema_tokens,
-            system_prompt_chars: sys_chars,
-            system_prompt_tokens: sys_tokens,
-            by_provider,
-        };
+        let est = crate::ext::ctx::estimate_prompt_tokens(&self.tools);
+        let by_provider =
+            crate::ext::ctx::usage_by_provider_context(self.session_db.as_ref(), session_id);
+        let usage = crate::ext::ctx::build_usage_context(&self.token_stats, &est, by_provider);
 
         let transcript_snapshot = self.transcript.clone();
 
