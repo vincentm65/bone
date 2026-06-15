@@ -300,13 +300,13 @@ impl super::Renderer {
                 let title = u16::from(p.tabs.is_empty());
                 title + hint + options
             };
-            // top sep + tab bar + prompt region + bottom sep + status + page region
-            return 1 + tab_bar + prompt_rows + 1 + 1 + page_extra_height(pages, active_page);
+            // top sep + tab bar + prompt region + status + page region
+            return 1 + tab_bar + prompt_rows + 1 + page_extra_height(pages, active_page);
         }
         let input_rows = rendered_input_rows(input, terminal_width);
         let ac_rows = autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
-        // top sep + input_rows + autocomplete + bottom sep + status + page region
-        1 + input_rows.max(1) + ac_rows + 1 + 1 + page_extra_height(pages, active_page)
+        // top sep + input_rows + autocomplete + status + page region
+        1 + input_rows.max(1) + ac_rows + 1 + page_extra_height(pages, active_page)
     }
 
     pub fn draw_bottom_pane_with_tick(
@@ -325,10 +325,10 @@ impl super::Renderer {
         frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
 
-        // Reserve rows from the bottom: status bar (1) + bottom sep (1) + page region
+        // Reserve rows from the bottom: status bar (1) + page region
         let page_height = page_extra_height(pages, active_page);
         let ac_rows = ac.map(|a| a.visible_rows()).unwrap_or(0);
-        let content_bottom = area.bottom().saturating_sub(2 + page_height).max(area.y);
+        let content_bottom = area.bottom().saturating_sub(1 + page_height).max(area.y);
 
         let input_view = if prompt.is_some() {
             None
@@ -595,7 +595,7 @@ impl super::Renderer {
 
         // ── Page region ──────────────────────────────────────────────────
         if !pages.is_empty() {
-            let bottom_sep_row = area.bottom().saturating_sub(2);
+            let bottom_sep_row = area.bottom().saturating_sub(1);
             let status_row = area.bottom().saturating_sub(1);
             let page_start = content_bottom.max(area.y);
             let available = bottom_sep_row.saturating_sub(page_start);
@@ -700,27 +700,6 @@ impl super::Renderer {
                     }
                 }
             }
-        }
-
-        // ── Input field bottom border ────────────────────────────────────
-        // With panes visible the page region's top separator already draws
-        // the border directly below the input, so this row is just the blank
-        // gap above the status bar. With panes hidden there is no page region,
-        // so render the separator here to keep the input's bottom border.
-        if area.height >= 2 {
-            let line = if pages.is_empty() {
-                "─".repeat(area.width as usize)
-            } else {
-                " ".repeat(area.width as usize)
-            };
-            frame.render_widget(
-                Paragraph::new(line).style(Style::default().fg(self.theme.input_border)),
-                Rect {
-                    y: area.bottom() - 2,
-                    height: 1,
-                    ..area
-                },
-            );
         }
 
         // ── Status bar ───────────────────────────────────────────────────

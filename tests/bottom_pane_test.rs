@@ -82,7 +82,7 @@ fn expanded_command_preview_is_clipped_to_a_short_frame() {
         })
         .unwrap();
 
-    assert!(row_text(&terminal, 40, 87).contains("Accept"));
+    assert!(row_text(&terminal, 41, 87).contains("Accept"));
     assert!(row_text(&terminal, 44, 87).contains("test-model"));
 }
 
@@ -337,12 +337,13 @@ fn pane_page_renders_content_between_input_and_status() {
         })
         .unwrap();
 
-    // Row layout (5 rows total):
+     // Row layout (5 rows total):
     // 0: top sep
     // 1: input "> "
-    // 2: page sep
-    // 3: "hello pane"
-    // 4: status bar
-    assert!(row_text(&terminal, 3, 40).contains("hello pane"));
-    assert!(row_text(&terminal, 4, 40).contains("test-model"));
+    // 2: (blank)
+    // 3: page sep
+    // 4: "hello pane"
+    // 5: status bar
+    assert!(row_text(&terminal, 4, 40).contains("hello pane"));
+    assert!(row_text(&terminal, 5, 40).contains("test-model"));
 }
