@@ -131,7 +131,7 @@ impl ToolHandler {
         result
             .pane_page
             .as_ref()
-            .is_some_and(|page| page.source == state_key && page.content.is_empty())
+            .is_some_and(|page| page.source == state_key && page.is_empty())
     }
 
     pub fn new(registry: ToolRegistry) -> Self {

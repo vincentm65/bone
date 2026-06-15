@@ -69,16 +69,15 @@ impl Tool for PaneTool {
     }
 
     async fn execute_output(&self, _arguments: Value) -> Result<ToolOutput, String> {
-        let pane = bone::ui::pane_page::PanePage {
+        let pane = bone::pane_content::PaneContent {
             source: "test-pane".to_string(),
             title: "Test Pane".to_string(),
-            content: vec![
-                ratatui::text::Line::from("line 1"),
-                ratatui::text::Line::from("line 2"),
+            lines: vec![
+                bone::pane_content::PaneLineSpec::Plain("line 1".to_string()),
+                bone::pane_content::PaneLineSpec::Plain("line 2".to_string()),
             ],
             visible_rows: 4,
             scroll: 0,
-            interaction: None,
         };
         Ok(ToolOutput {
             content: "pane result".to_string(),

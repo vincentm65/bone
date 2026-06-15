@@ -27,16 +27,7 @@ pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions) -> BootResult {
         Err(e) => {
             eprintln!("bone: warning: Lua engine creation failed: {e}");
             return BootResult {
-                manager: ExtensionManager::from_arc(
-                    Arc::new(Mutex::new(mlua::Lua::new())),
-                    false, // engine_ok
-                    false, // loaded
-                    Vec::new(),
-                    super::snapshots::LuaConfigSnapshot::default(),
-                    super::snapshots::LuaThemeSnapshot::default(),
-                    super::snapshots::LuaKeymapSnapshot::default(),
-                    Vec::new(),
-                ),
+                manager: ExtensionManager::unloaded(),
                 tools: Vec::new(),
             };
         }

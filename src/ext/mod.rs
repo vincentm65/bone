@@ -4,7 +4,6 @@
 //! Stage 02: Lua tool registration and execution.
 //! Stage 03: Lua command registration and dispatch.
 
-pub mod color;
 pub mod ctx;
 mod engine;
 pub mod jobs;

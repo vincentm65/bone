@@ -1,4 +1,4 @@
-use crate::ui::pane_page::PanePage;
+use crate::pane_content::{InteractRequest, PaneContent};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,10 +23,10 @@ pub struct ToolResult {
     pub name: String,
     pub content: String,
     pub is_error: bool,
-    /// Optional pane page to display in the bottom pane.
+    /// Optional pane content to display in the bottom pane.
     /// Not serialized — this is a UI-only field.
     #[serde(skip)]
-    pub pane_page: Option<PanePage>,
+    pub pane_page: Option<PaneContent>,
     /// Optional session state to store in ToolStateMap (not sent to LLM).
     #[serde(skip)]
     pub state: Option<String>,
@@ -52,7 +52,7 @@ pub struct ToolDisplayConfig {
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub content: String,
-    pub pane_page: Option<PanePage>,
+    pub pane_page: Option<PaneContent>,
     /// Optional session state to store in ToolStateMap (not sent to LLM).
     pub state: Option<String>,
 }
@@ -77,10 +77,12 @@ pub struct ToolExecutionContext {
     pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ToolLiveEvent {
-    /// Upsert a pane page (or remove it when `content` is empty).
-    Pane(PanePage),
+    /// Upsert a pane page (or remove it when `PaneContent::is_empty()`).
+    Pane(PaneContent),
+    /// Request user interaction; block until `reply` resolves.
+    Interact(InteractRequest),
 }
 
 impl ToolOutput {

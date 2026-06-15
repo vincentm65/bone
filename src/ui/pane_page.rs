@@ -4,15 +4,8 @@ use ratatui::text::{Line, Span};
 use std::sync::{Arc, Mutex};
 
 /// What kind of interaction the user is performing.
-#[derive(Clone, Debug)]
-pub enum InteractionMode {
-    /// Select one option (Up/Down + Enter)
-    SingleSelect,
-    /// Select multiple options (Up/Down + Space to toggle + Enter to confirm)
-    MultiSelect,
-    /// Freeform text input only (no options list)
-    TextInput,
-}
+/// Re-exported from `crate::pane_content` — core owns this type.
+pub use crate::pane_content::InteractionMode;
 
 /// Shared, thread-safe state for an interactive pane.
 /// Cloning gives a new handle to the same inner state.
@@ -392,107 +385,113 @@ impl PanePage {
             .saturating_sub(crate::ui::render::clamped_pane_visible_rows(self.visible_rows))
     }
 
-    /// Parse a pane definition from a serde_json::Value.
-    pub fn from_json(val: &serde_json::Value) -> Result<Self, String> {
-        let pane = val.as_object().ok_or("pane must be an object")?;
-        let source = pane
-            .get("source")
-            .and_then(|v| v.as_str())
-            .ok_or("pane missing source")?
-            .to_string();
-        let title = pane
-            .get("title")
-            .and_then(|v| v.as_str())
-            .ok_or("pane missing title")?
-            .to_string();
-        let visible_rows = pane
-            .get("visible_rows")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(8) as usize;
-        let scroll = pane.get("scroll").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    /// Convert pure-data `PaneContent` into a renderable `PanePage`.
+    ///
+    /// This is the ratatui conversion that used to live inline in `from_json`.
+    /// Same logic, same output, just called at the render boundary instead of
+    /// parse time.
+    pub fn from_content(content: &crate::pane_content::PaneContent) -> Self {
+        use crate::pane_content::PaneLineSpec;
 
-        let lines: Vec<Line<'static>> = pane
-            .get("lines")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|line_val| {
-                        if let Some(text) = line_val.as_str() {
-                            Some(Line::from(text.to_string()))
-                        } else if let Some(obj) = line_val.as_object() {
-                            let spans: Vec<Span<'static>> = obj
-                                .get("spans")
-                                .and_then(|v| v.as_array())
-                                .map(|spans_arr| {
-                                    spans_arr
-                                        .iter()
-                                        .filter_map(|span_val| {
-                                            let span_obj = span_val.as_object()?;
-                                            let text = span_obj
-                                                .get("text")
-                                                .and_then(|v| v.as_str())?
-                                                .to_string();
-                                            let mut style = Style::default();
-                                            if let Some(fg) =
-                                                span_obj.get("fg").and_then(|v| v.as_str())
-                                                && let Some(c) = crate::ext::color::parse_color(fg)
-                                            {
-                                                style = style.fg(c);
-                                            }
-                                            if let Some(mods) =
-                                                span_obj.get("modifiers").and_then(|v| v.as_array())
-                                            {
-                                                for m in mods {
-                                                    if let Some(s) = m.as_str() {
-                                                        match s {
-                                                            "bold" => {
-                                                                style = style
-                                                                    .add_modifier(Modifier::BOLD)
-                                                            }
-                                                            "dim" => {
-                                                                style = style
-                                                                    .add_modifier(Modifier::DIM)
-                                                            }
-                                                            "italic" => {
-                                                                style = style
-                                                                    .add_modifier(Modifier::ITALIC)
-                                                            }
-                                                            "strike" | "crossed_out" => {
-                                                                style = style.add_modifier(
-                                                                    Modifier::CROSSED_OUT,
-                                                                )
-                                                            }
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Some(Span::styled(text, style))
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            if spans.is_empty() {
-                                Some(Line::from(""))
-                            } else {
-                                Some(Line::from(spans))
+        let lines: Vec<Line<'static>> = content
+            .lines
+            .iter()
+            .map(|spec| match spec {
+                PaneLineSpec::Plain(text) => Line::from(text.clone()),
+                PaneLineSpec::Spans { spans } => {
+                    let ratatui_spans: Vec<Span<'static>> = spans
+                        .iter()
+                        .map(|s| {
+                            let mut style = Style::default();
+                            if let Some(fg) = &s.fg
+                                && let Some(c) = crate::ui::color::parse_color(fg)
+                            {
+                                style = style.fg(c);
                             }
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+                            for m in &s.modifiers {
+                                match m.as_str() {
+                                    "bold" => style = style.add_modifier(Modifier::BOLD),
+                                    "dim" => style = style.add_modifier(Modifier::DIM),
+                                    "italic" => style = style.add_modifier(Modifier::ITALIC),
+                                    "strike" | "crossed_out" => {
+                                        style = style.add_modifier(Modifier::CROSSED_OUT);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Span::styled(s.text.clone(), style)
+                        })
+                        .collect();
+                    if ratatui_spans.is_empty() {
+                        Line::from("")
+                    } else {
+                        Line::from(ratatui_spans)
+                    }
+                }
             })
-            .unwrap_or_default();
+            .collect();
 
-        Ok(PanePage {
-            source,
-            title,
+        PanePage {
+            source: content.source.clone(),
+            title: content.title.clone(),
+            content: lines,
+            visible_rows: content.visible_rows,
+            scroll: content.scroll,
+            interaction: None,
+        }
+    }
+
+    /// Build an interactive pane page from an `InteractRequest`.
+    ///
+    /// Extracted from the old `ctx.rs` interact body. Builds question text
+    /// Lines, computes visible_rows, and creates the `PaneInteraction` that
+    /// owns the reply channel.
+    pub fn from_interact(req: crate::pane_content::InteractRequest) -> Self {
+        use crate::pane_content::InteractionMode;
+
+        let allow_custom = req.allow_custom;
+
+        // Build question content lines (moved verbatim from old ctx.rs)
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            req.question.clone(),
+            Style::default().fg(ratatui::style::Color::White),
+        )));
+        lines.push(Line::from(""));
+
+        // Compute visible_rows (moved verbatim from old ctx.rs)
+        const MAX_VISIBLE_OPTIONS: usize = 10;
+        let opt_rows = if matches!(req.mode, InteractionMode::TextInput) {
+            1
+        } else {
+            req.options.len().min(MAX_VISIBLE_OPTIONS)
+        };
+        let custom_row = u16::from(allow_custom);
+        let visible_rows = (lines.len() + opt_rows + custom_row as usize)
+            .min(24)
+            .max(3);
+
+        let mode_display = match req.mode {
+            InteractionMode::SingleSelect => "single_select",
+            InteractionMode::MultiSelect => "multi_select",
+            InteractionMode::TextInput => "text_input",
+        };
+        let interaction = PaneInteraction::new(
+            req.mode,
+            req.options,
+            allow_custom,
+            req.default_selected,
+            req.reply,
+        );
+
+        PanePage {
+            source: "interact".to_string(),
+            title: format!("Question — {mode_display}"),
             content: lines,
             visible_rows,
-            scroll,
-            interaction: None,
-        })
+            scroll: 0,
+            interaction: Some(interaction),
+        }
     }
 
     /// Remove a page by source name. Returns the new active_page index.

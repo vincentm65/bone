@@ -5,6 +5,7 @@ use crate::llm::{
     token_tracker::CHARS_PER_TOKEN,
 };
 use crate::session_db::{SessionDb, db_path};
+use crate::session_sink::SessionSink;
 use crate::tools::ApprovalMode;
 use crate::tools::registry::ToolHandler;
 use futures_util::StreamExt;
@@ -24,7 +25,7 @@ impl SessionWriter {
     }
 
     fn append_message(
-        &mut self,
+        &self,
         role: &str,
         content: &str,
         tool_name: Option<&str>,
@@ -106,6 +107,51 @@ impl SessionWriter {
     }
 }
 
+impl SessionSink for SessionWriter {
+    fn conv_id(&self) -> Option<i64> {
+        SessionWriter::conv_id(self)
+    }
+
+    fn append_message(
+        &self,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
+        tool_calls: Option<&str>,
+        seq: i64,
+    ) {
+        SessionWriter::append_message(self, role, content, tool_name, tool_call_id, tool_calls, seq)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_usage(
+        &self,
+        provider: &str,
+        model: &str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cached_tokens: Option<u32>,
+        cost: Option<f64>,
+        is_estimated: bool,
+    ) {
+        SessionWriter::record_usage(
+            self,
+            provider,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cost,
+            is_estimated,
+        )
+    }
+
+    fn end(&self) {
+        SessionWriter::end(self)
+    }
+}
+
 // ── Public types ────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -123,6 +169,14 @@ pub struct AgentRequest {
     /// observable progress (stream chunks, tool results). Used by callers to
     /// implement inactivity-based timeouts instead of hard cutoffs.
     pub activity: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Injected provider. When set, `agent_setup` reuses it as-is instead of
+    /// constructing one from config (Step 0 injection seam). Lets callers
+    /// (tests, a future Driver) own and share a provider with the loop.
+    pub llm: Option<Arc<dyn crate::llm::provider::LlmProvider>>,
+    /// Injected session sink. When set, `agent_setup` reuses it as-is instead
+    /// of constructing a `SessionWriter` backed by SQLite (Step 3 injection
+    /// seam). Lets tests and a future Driver run the loop with zero DB I/O.
+    pub session_sink: Option<Arc<dyn SessionSink>>,
 }
 
 /// Current time in epoch milliseconds.
@@ -314,11 +368,11 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 
 /// Result of the synchronous setup phase for `run_agent`.
 struct AgentSetup {
-    llm: Box<dyn crate::llm::provider::LlmProvider>,
+    llm: Arc<dyn crate::llm::provider::LlmProvider>,
     extensions: crate::ext::ExtensionManager,
     tools: ToolHandler,
     history: Vec<ChatMessage>,
-    session: SessionWriter,
+    session: Arc<dyn SessionSink>,
     token_stats: TokenStats,
     transcript: Vec<ChatMessage>,
     system_prompt_override: Option<String>,
@@ -328,37 +382,49 @@ struct AgentSetup {
 /// provider creation, Lua boot, tool registry). Designed to run on the
 /// blocking thread pool so concurrent headless agents don't starve the tokio
 /// runtime.
-fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
-    let mut custom = CustomConfigs::load();
-    let _user_config = UserConfig::from_custom_configs(&custom);
-    let mut providers_config = custom.derive_providers_config();
-
+/// Resolve the LLM provider for an agent run — the Step 0 injection seam.
+///
+/// If `request.llm` is set, the injected provider is reused verbatim and no
+/// config side-effects run (no last_provider persistence, no model override,
+/// no api-key warning). Otherwise the provider is constructed from config with
+/// the same behavior as before. Lets tests and a future Driver own the provider
+/// instead of the loop constructing one internally.
+pub fn resolve_provider(
+    request: &AgentRequest,
+    custom: &mut CustomConfigs,
+    providers_config: &mut crate::config::ProvidersConfig,
+) -> Result<Arc<dyn crate::llm::provider::LlmProvider>, String> {
+    if let Some(llm) = request.llm.as_ref() {
+        return Ok(llm.clone());
+    }
     let provider_id = request
         .provider
         .clone()
         .or_else(|| non_empty(custom.get_last_provider().as_str()).map(str::to_string))
         .ok_or_else(|| "no provider configured".to_string())?;
-
-    // Persist last_provider before any model override (don't want to save the override).
-    // Only persist when running as top-level agent, not as a subagent.
     if request.provider.is_some() && request.agent_depth == 0 {
         custom.set_last_provider(&provider_id);
         providers_config.last_provider = provider_id.clone();
     }
-
-    // Apply model override session-only (never persisted).
-    let selected_model = request.model.as_deref();
-    if let Some(model) = selected_model {
+    if let Some(model) = request.model.as_deref() {
         if let Some(entry) = providers_config.providers.get_mut(&provider_id) {
             entry.model = model.to_string();
         } else {
             return Err(format!("unknown provider `{provider_id}`"));
         }
     }
-    crate::config::warn_if_no_api_key_for(&provider_id, &providers_config);
+    crate::config::warn_if_no_api_key_for(&provider_id, providers_config);
+    let boxed =
+        create_provider_with_config(&provider_id, providers_config).map_err(|e| e.to_string())?;
+    Ok(Arc::from(boxed))
+}
 
-    let llm =
-        create_provider_with_config(&provider_id, &providers_config).map_err(|e| e.to_string())?;
+fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
+    let mut custom = CustomConfigs::load();
+    let _user_config = UserConfig::from_custom_configs(&custom);
+    let mut providers_config = custom.derive_providers_config();
+
+    let llm = resolve_provider(request, &mut custom, &mut providers_config)?;
 
     // Boot Lua extension system and build tool handler.
     let booted = crate::ext::boot_with_tools(
@@ -388,7 +454,10 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     };
     let history = build_chat_history(&transcript, system_prompt_override.as_deref());
 
-    let session = open_headless_session(llm.id(), llm.model());
+    let session: Arc<dyn SessionSink> = request
+        .session_sink
+        .clone()
+        .unwrap_or_else(|| Arc::new(open_headless_session(llm.id(), llm.model())));
 
     Ok(AgentSetup {
         llm,
@@ -417,7 +486,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         extensions,
         mut tools,
         mut history,
-        mut session,
+        session,
         mut token_stats,
         mut transcript,
         system_prompt_override,
@@ -669,7 +738,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
                 tools.state_map.set(source, "default", state.clone());
             }
             if let Some(page) = &result.pane_page
-                && page.content.is_empty()
+                && page.is_empty()
             {
                 tools.state_map.remove(&page.source, "default");
             }
@@ -751,7 +820,6 @@ async fn execute_tool_calls(
     extensions: &crate::ext::ExtensionManager,
     agent_depth: usize,
 ) -> Vec<crate::tools::ToolResult> {
-    let mode_label = mode.mode_str();
     // Track original index to preserve call order in output.
     let mut out: Vec<(usize, crate::tools::ToolResult)> = Vec::with_capacity(calls.len());
     let mut approved: Vec<(usize, crate::tools::ToolCall)> = Vec::new();
@@ -762,8 +830,20 @@ async fn execute_tool_calls(
             crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
             crate::tools::command_policy::CommandSafety::Danger => "danger",
         };
-        match extensions.dispatch_tool_call(&call.name, &call.id, &call.arguments, safety_str) {
-            crate::ext::EventDispatchResult::Blocked { reason } => {
+        let blocked = match extensions.dispatch_tool_call(
+            &call.name,
+            &call.id,
+            &call.arguments,
+            safety_str,
+        ) {
+            crate::ext::EventDispatchResult::Blocked { reason } => Some(reason),
+            crate::ext::EventDispatchResult::Continue => None,
+        };
+        let allows = tools.allows_call(mode, &call);
+
+        match crate::tools::decide_call(blocked, allows) {
+            crate::tools::CallOutcome::Approve => approved.push((i, call)),
+            crate::tools::CallOutcome::Blocked(reason) => {
                 out.push((
                     i,
                     crate::tools::ToolResult {
@@ -775,25 +855,21 @@ async fn execute_tool_calls(
                         state: None,
                     },
                 ));
-                continue;
             }
-            crate::ext::EventDispatchResult::Continue => {}
-        }
-
-        if tools.allows_call(mode, &call) {
-            approved.push((i, call));
-        } else {
-            let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
-            out.push((i, crate::tools::ToolResult {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                content: format!(
-                    "[exit_code=1] Tool skipped. Approval mode {mode_label} does not allow {safety:?}; continue using allowed read-only tools or report the limitation."
-                ),
-                is_error: true,
-                pane_page: None,
-                state: None,
-            }));
+            crate::tools::CallOutcome::Denied => {
+                let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
+                out.push((
+                    i,
+                    crate::tools::ToolResult {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        content: crate::tools::denied_message(mode, safety),
+                        is_error: true,
+                        pane_page: None,
+                        state: None,
+                    },
+                ));
+            }
         }
     }
 
@@ -914,5 +990,7 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
         agent_depth: 0,
         on_token_usage: None,
         activity: None,
+        llm: None,
+        session_sink: None,
     })
 }

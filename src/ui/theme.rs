@@ -36,3 +36,36 @@ impl Default for Theme {
         }
     }
 }
+
+impl Theme {
+    /// Apply a Lua theme snapshot, overriding defaults with set values.
+    ///
+    /// This is the UI boundary where raw color strings (stored in the snapshot)
+    /// are parsed into `ratatui::style::Color` values.
+    pub fn apply_snapshot(&mut self, snap: &crate::ext::snapshots::LuaThemeSnapshot) {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(ref s) = snap.$field {
+                    if let Some(c) = crate::ui::color::parse_color(s) {
+                        self.$field = c;
+                    } else {
+                        eprintln!("bone-lua warn: invalid theme color for {}: {s}", stringify!($field));
+                    }
+                }
+            };
+        }
+        apply!(user_msg);
+        apply!(user_msg_bg);
+        apply!(status_text);
+        apply!(input_border);
+        apply!(system_msg);
+        apply!(approval_safe);
+        apply!(approval_danger);
+        apply!(tool_call);
+        apply!(tool_error);
+        apply!(diff_removed);
+        apply!(diff_added);
+        apply!(thinking);
+        apply!(tab_active);
+    }
+}

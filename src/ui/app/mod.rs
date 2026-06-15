@@ -112,7 +112,7 @@ impl App {
 
         // Create renderer with Lua theme applied over defaults.
         let mut renderer = Renderer::new();
-        extensions.theme_snapshot().apply_to(&mut renderer.theme);
+        renderer.theme.apply_snapshot(extensions.theme_snapshot());
 
         // Apply Lua config snapshot — overrides YAML config values.
         apply_lua_config_snapshot(&mut user_config, extensions.config_snapshot());
@@ -516,8 +516,9 @@ impl App {
             self.autocomplete.as_ref(),
         );
 
-        if desired != self.renderer.viewport_height {
-            Renderer::resize_viewport(terminal, desired)?;
+        let old_height = self.renderer.viewport_height;
+        if desired != old_height {
+            Renderer::resize_viewport(terminal, old_height, desired)?;
             self.renderer.viewport_height = desired;
         }
 

@@ -110,6 +110,8 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             agent_depth: 0,
             on_token_usage: None,
             activity: None,
+            llm: None,
+            session_sink: None,
         })
         .await;
     }
@@ -127,6 +129,8 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         agent_depth: 0,
         on_token_usage: None,
         activity: None,
+        llm: None,
+        session_sink: None,
     })
     .await
 }

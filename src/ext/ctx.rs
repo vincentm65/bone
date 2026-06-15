@@ -13,7 +13,7 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use crate::tools::shell::{ScriptRequest, run_script};
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
-use crate::ui::pane_page::{InteractionMode, PaneInteraction, PanePage};
+use crate::pane_content::InteractionMode;
 
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -453,7 +453,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = PanePage::from_json(&val).map_err(|e| mlua::Error::external(e))?;
+            let pane = crate::pane_content::PaneContent::from_json(&val).map_err(|e| mlua::Error::external(e))?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -496,57 +496,26 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             // Custom input is always available for selection modes.
             let allow_custom = allow_custom || !matches!(mode, InteractionMode::TextInput);
 
-            // Build question content lines
-            let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
-            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
-                question.clone(),
-                ratatui::style::Style::default().fg(ratatui::style::Color::White),
-            )));
-            lines.push(ratatui::text::Line::from(""));
-
-            // Compute visible_rows. Cap the visible option window so long lists
-            // (e.g. /history's 50 conversations) show ~10 at a time and scroll
-            // rather than filling the whole pane. The overlay renderer windows
-            // the full option list around the selection.
-            const MAX_VISIBLE_OPTIONS: usize = 10;
-            let opt_rows = if matches!(mode, InteractionMode::TextInput) {
-                1
-            } else {
-                options.len().min(MAX_VISIBLE_OPTIONS)
-            };
-            let custom_row = u16::from(allow_custom);
-            let visible_rows = (lines.len() + opt_rows + custom_row as usize).min(24).max(3);
-
-            // Build the pane
+            // Build the interaction request — the frontend constructs the
+            // pane (ratatui Lines, PaneInteraction) from this pure-data type.
             let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
             let default_selected = default.map(|d| d.saturating_sub(1)).unwrap_or(0);
-            let interaction = PaneInteraction::new(
+            let request = crate::pane_content::InteractRequest {
+                question,
                 mode,
                 options,
-                allow_custom,
                 default_selected,
-                tx,
-            );
+                allow_custom,
+                reply: tx,
+            };
 
-            // Use a fixed source so all questions share one page (upsert
-            // replaces any previous interact page).
-            let source = "interact".to_string();
-            // Acquire the serialization lock, send the pane, then block
+            // Acquire the serialization lock, send the request, then block
             // for the user response — the lock is held for the entire
             // send+wait cycle so concurrent calls are serialized.
             let _lock = INTERACT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-            let page = PanePage {
-                source,
-                title: format!("Question — {}", type_str),
-                content: lines,
-                visible_rows,
-                scroll: 0,
-                interaction: Some(interaction),
-            };
-
             sender
-                .send(crate::tools::types::ToolLiveEvent::Pane(page))
-                .map_err(|e| mlua::Error::external(format!("interact pane send failed: {e}")))?;
+                .send(crate::tools::types::ToolLiveEvent::Interact(request))
+                .map_err(|e| mlua::Error::external(format!("interact send failed: {e}")))?;
 
             // Block until the user responds (lock still held, serializing concurrent calls).
             let result: serde_json::Value = tokio::task::block_in_place(|| {
@@ -1090,7 +1059,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let emit_pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = PanePage::from_json(&val).map_err(|e| mlua::Error::external(e))?;
+            let pane = crate::pane_content::PaneContent::from_json(&val).map_err(|e| mlua::Error::external(e))?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -1180,6 +1149,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             agent_depth: agent_depth + 1,
             on_token_usage: None,
             activity: Some(activity.clone()),
+            llm: None,
+            session_sink: None,
         };
 
         let cancelled = cancelled_flag.clone();
@@ -1252,6 +1223,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 agent_depth: agent_depth_s + 1,
                 on_token_usage: None,
                 activity: Some(activity.clone()),
+                llm: None,
+                session_sink: None,
             };
 
             let cancelled = cancelled_flag_s.clone();
@@ -1401,6 +1374,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 crate::ext::jobs::registry().update_tokens(&id_for_task, sent, received);
             })),
             activity: Some(activity.clone()),
+            llm: None,
+            session_sink: None,
         };
 
         handle.spawn(async move {

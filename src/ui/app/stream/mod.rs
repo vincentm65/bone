@@ -587,13 +587,14 @@ impl App {
                 self.tools.state_map.set(source, "default", state.clone());
             }
             if let Some(page) = &result.pane_page {
-                if page.content.is_empty() {
+                if page.is_empty() {
                     self.tools.state_map.remove(&page.source, "default");
                     self.active_page =
                         PanePage::remove(&mut self.pages, &page.source, self.active_page);
                 } else {
+                    let tui_page = PanePage::from_content(page);
                     let (_, new_active) =
-                        PanePage::upsert(&mut self.pages, self.active_page, page.clone());
+                        PanePage::upsert(&mut self.pages, self.active_page, tui_page);
                     self.active_page = new_active;
                 }
             }
@@ -739,14 +740,20 @@ impl App {
 
     fn apply_tool_live_event(&mut self, event: ToolLiveEvent) {
         match event {
-            ToolLiveEvent::Pane(page) => {
-                if page.content.is_empty() {
+            ToolLiveEvent::Pane(pc) => {
+                if pc.is_empty() {
                     self.active_page =
-                        PanePage::remove(&mut self.pages, &page.source, self.active_page);
+                        PanePage::remove(&mut self.pages, &pc.source, self.active_page);
                 } else {
+                    let page = PanePage::from_content(&pc);
                     let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
                     self.active_page = active;
                 }
+            }
+            ToolLiveEvent::Interact(req) => {
+                let page = PanePage::from_interact(req);
+                let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+                self.active_page = active;
             }
         }
     }
@@ -761,11 +768,17 @@ impl App {
         event: ToolLiveEvent,
         live_sources: &mut std::collections::HashSet<String>,
     ) {
-        let ToolLiveEvent::Pane(page) = &event;
-        if page.content.is_empty() {
-            live_sources.remove(&page.source);
-        } else {
-            live_sources.insert(page.source.clone());
+        match &event {
+            ToolLiveEvent::Pane(pc) => {
+                if pc.is_empty() {
+                    live_sources.remove(&pc.source);
+                } else {
+                    live_sources.insert(pc.source.clone());
+                }
+            }
+            ToolLiveEvent::Interact(_) => {
+                live_sources.insert("interact".to_string());
+            }
         }
         self.apply_tool_live_event(event);
     }

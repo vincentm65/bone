@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::tools::types::{
     Tool, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolOutput,
 };
-use crate::ui::pane_page::PanePage;
+use crate::pane_content::PaneContent;
 
 use super::ctx::{self, CtxConfig, SharedState};
 use crate::tools::command_policy::CommandSafety;
@@ -301,7 +301,7 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                 .map(|s| s.to_string());
             let pane_page = map
                 .get("pane")
-                .and_then(|pane_val| PanePage::from_json(pane_val).ok());
+                .and_then(|pane_val| PaneContent::from_json(pane_val).ok());
             Ok(ToolOutput {
                 content,
                 pane_page,

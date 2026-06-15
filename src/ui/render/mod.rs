@@ -6,8 +6,10 @@ pub mod messages;
 pub mod wrap;
 
 use messages::wrapped_line_count;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
+use ratatui::backend::Backend;
+
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, Viewport};
 use std::io::{self, Stdout, Write};
@@ -112,13 +114,19 @@ impl Renderer {
 
     /// Recreate the terminal with a new viewport height.
     ///
-    /// Since ratatui doesn't expose `set_viewport_height()`, we clear the
-    /// old viewport, drop it, and create a fresh one. This is the same
-    /// approach Codex uses — the cost is negligible and invisible.
-    pub fn resize_viewport(term: &mut BoneTerminal, new_height: u16) -> io::Result<()> {
-        // Clear the current viewport before swapping.
-        term.clear()?;
-        // Replace with a fresh terminal at the new height.
+    /// Since ratatui doesn't expose `set_viewport_height()`, we drop the
+    /// old terminal and create a fresh one. This is the same approach
+    /// Codex uses — the cost is negligible and invisible.
+    pub fn resize_viewport(term: &mut BoneTerminal, old_height: u16, new_height: u16) -> io::Result<()> {
+        // Reposition the cursor to the top of the current viewport so
+        // `compute_inline_size` in the new terminal starts from a
+        // consistent position.  Avoid `term.clear()` — blanking the
+        // viewport causes visible flicker before the next draw fills it.
+        let size = term.size()?;
+        let viewport_top = size.height.saturating_sub(old_height);
+        term.backend_mut()
+            .set_cursor_position(Position::new(0, viewport_top))?;
+        Backend::flush(term.backend_mut())?;
         Self::replace_terminal(term, new_height)
     }
 
@@ -176,8 +184,9 @@ impl Renderer {
     ) -> io::Result<()> {
         let width = term.size()?.width;
         let desired = Self::desired_height(input, prompt, width, pages, active_page, autocomplete);
-        if desired != self.viewport_height {
-            Self::resize_viewport(term, desired)?;
+        let old = self.viewport_height;
+        if desired != old {
+            Self::resize_viewport(term, old, desired)?;
             self.viewport_height = desired;
         }
         Ok(())

@@ -5,8 +5,6 @@
 
 use std::collections::HashMap;
 
-use ratatui::style::Color;
-
 // ── Config snapshot ─────────────────────────────────────────────────────────
 
 /// Subset of `bone.config` captured after init.lua.
@@ -46,75 +44,49 @@ impl LuaConfigSnapshot {
 // ── Theme snapshot ──────────────────────────────────────────────────────────
 
 /// Subset of `bone.theme` captured after init.lua.
+///
+/// Colors are stored as raw strings; parsing into `ratatui::style::Color`
+/// happens at the UI boundary in `Theme::apply_snapshot`.
 #[derive(Debug, Clone, Default)]
 pub struct LuaThemeSnapshot {
-    pub user_msg: Option<Color>,
-    pub user_msg_bg: Option<Color>,
-    pub status_text: Option<Color>,
-    pub input_border: Option<Color>,
-    pub system_msg: Option<Color>,
-    pub approval_safe: Option<Color>,
-    pub approval_danger: Option<Color>,
-    pub tool_call: Option<Color>,
-    pub tool_error: Option<Color>,
-    pub diff_removed: Option<Color>,
-    pub diff_added: Option<Color>,
-    pub thinking: Option<Color>,
-    pub tab_active: Option<Color>,
+    pub user_msg: Option<String>,
+    pub user_msg_bg: Option<String>,
+    pub status_text: Option<String>,
+    pub input_border: Option<String>,
+    pub system_msg: Option<String>,
+    pub approval_safe: Option<String>,
+    pub approval_danger: Option<String>,
+    pub tool_call: Option<String>,
+    pub tool_error: Option<String>,
+    pub diff_removed: Option<String>,
+    pub diff_added: Option<String>,
+    pub thinking: Option<String>,
+    pub tab_active: Option<String>,
 }
 
 impl LuaThemeSnapshot {
     /// Build a snapshot from the `bone.theme` Lua table (or nil).
     pub fn from_lua_table(_lua: &mlua::Lua, table: &mlua::Table) -> Result<Self, String> {
-        let parse_color = |key: &str| -> Result<Option<Color>, String> {
+        let get_color = |key: &str| -> Option<String> {
             let hex: Option<String> = table.get(key).ok().flatten();
-            match hex {
-                Some(h) => Ok(Some(super::color::parse_color(&h).ok_or_else(|| {
-                    format!("bone-lua warn: invalid theme color for {key}: #{h}")
-                })?)),
-                None => Ok(None),
-            }
+            hex
         };
 
         Ok(Self {
-            user_msg: parse_color("user_msg")?,
-            user_msg_bg: parse_color("user_msg_bg")?,
-            status_text: parse_color("status_text")?,
-            input_border: parse_color("input_border")?,
-            system_msg: parse_color("system_msg")?,
-            approval_safe: parse_color("approval_safe")?,
-            approval_danger: parse_color("approval_danger")?,
-            tool_call: parse_color("tool_call")?,
-            tool_error: parse_color("tool_error")?,
-            diff_removed: parse_color("diff_removed")?,
-            diff_added: parse_color("diff_added")?,
-            thinking: parse_color("thinking")?,
-            tab_active: parse_color("tab_active")?,
+            user_msg: get_color("user_msg"),
+            user_msg_bg: get_color("user_msg_bg"),
+            status_text: get_color("status_text"),
+            input_border: get_color("input_border"),
+            system_msg: get_color("system_msg"),
+            approval_safe: get_color("approval_safe"),
+            approval_danger: get_color("approval_danger"),
+            tool_call: get_color("tool_call"),
+            tool_error: get_color("tool_error"),
+            diff_removed: get_color("diff_removed"),
+            diff_added: get_color("diff_added"),
+            thinking: get_color("thinking"),
+            tab_active: get_color("tab_active"),
         })
-    }
-
-    /// Apply this snapshot into a Rust `Theme`, overriding defaults with set values.
-    pub fn apply_to(&self, theme: &mut crate::ui::theme::Theme) {
-        macro_rules! apply {
-            ($field:ident) => {
-                if let Some(c) = self.$field {
-                    theme.$field = c;
-                }
-            };
-        }
-        apply!(user_msg);
-        apply!(user_msg_bg);
-        apply!(status_text);
-        apply!(input_border);
-        apply!(system_msg);
-        apply!(approval_safe);
-        apply!(approval_danger);
-        apply!(tool_call);
-        apply!(tool_error);
-        apply!(diff_removed);
-        apply!(diff_added);
-        apply!(thinking);
-        apply!(tab_active);
     }
 }
 

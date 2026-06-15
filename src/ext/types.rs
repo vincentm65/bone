@@ -108,6 +108,33 @@ impl ExtensionManager {
         }
     }
 
+    /// Construct a no-op manager with no Lua extensions loaded.
+    ///
+    /// This is the injection seam that lets the agent loop be driven and
+    /// unit-tested **without** a config directory, a booted Lua VM, or any
+    /// `init.lua`. Because every dispatch method early-returns when
+    /// `!self.loaded`, such a manager provably does nothing: no hooks fire,
+    /// `dispatch_tool_call` returns `Continue`, `dispatch_before_turn` returns
+    /// an empty action list.
+    ///
+    /// It is exactly the fallback `boot()` already built internally on engine
+    /// failure (`loader.rs`): a fresh `mlua::Lua::new()`, `engine_ok = false`,
+    /// `loaded = false`, empty commands/subagents, default snapshots. Exposing
+    /// it publicly just makes that same construction reachable from tests and
+    /// (eventually) a headless/Driver path that does not own a Lua runtime.
+    pub fn unloaded() -> Self {
+        Self {
+            lua: Arc::new(Mutex::new(Lua::new())),
+            engine_ok: false,
+            loaded: false,
+            commands: Vec::new(),
+            config_snapshot: LuaConfigSnapshot::default(),
+            theme_snapshot: LuaThemeSnapshot::default(),
+            keymap_snapshot: LuaKeymapSnapshot::default(),
+            subagents: Vec::new(),
+        }
+    }
+
     /// Returns `true` when the Lua runtime booted and `init.lua` (if present)
     /// executed without errors.
     /// Returns `true` when the Lua engine booted successfully

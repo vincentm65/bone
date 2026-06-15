@@ -1,4 +1,6 @@
-//! Shared color parsing for Lua tool output and theme snapshots.
+//! Shared color parsing for the TUI.
+//!
+//! Moved from `ext::color` to keep core free of ratatui.
 
 use ratatui::style::Color;
 
