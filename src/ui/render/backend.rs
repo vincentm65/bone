@@ -140,6 +140,14 @@ impl<W: Write> Backend for BoneBackend<W> {
     fn flush(&mut self) -> io::Result<()> {
         Backend::flush(&mut self.inner)
     }
+
+    fn scroll_region_up(&mut self, region: std::ops::Range<u16>, lines: u16) -> io::Result<()> {
+        self.inner.scroll_region_up(region, lines)
+    }
+
+    fn scroll_region_down(&mut self, region: std::ops::Range<u16>, lines: u16) -> io::Result<()> {
+        self.inner.scroll_region_down(region, lines)
+    }
 }
 
 #[cfg(not(windows))]
