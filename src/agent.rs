@@ -214,110 +214,21 @@ pub struct AgentResponse {
 
 // ── JSONL event helpers ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub enum AgentRunEvent {
-    Started {
-        approval: String,
-        task: String,
-        model: String,
-    },
-    Status {
-        message: String,
-    },
-    ToolCall {
-        name: String,
-        summary: String,
-    },
-    ToolResult {
-        name: String,
-        is_error: bool,
-    },
-    TokenUsage {
-        sent: u64,
-        received: u64,
-    },
-    Finished {
-        content: String,
-    },
-    Failed {
-        message: String,
-    },
-}
-
-pub(crate) enum AgentEvent<'a> {
-    Started {
-        approval: &'a str,
-        task: &'a str,
-        model: &'a str,
-    },
-    Status {
-        message: &'a str,
-    },
-    ToolCall {
-        name: &'a str,
-        summary: &'a str,
-    },
-    ToolResult {
-        name: &'a str,
-        is_error: bool,
-    },
-    TokenUsage {
-        sent: u64,
-        received: u64,
-    },
-    Finished {
-        content: &'a str,
-    },
-    Failed {
-        message: &'a str,
-    },
-}
+pub type AgentRunEvent = crate::runtime::RuntimeEvent;
 
 pub(crate) fn emit_event(
     events: bool,
     sender: Option<&tokio::sync::mpsc::UnboundedSender<AgentRunEvent>>,
-    event: &AgentEvent,
+    event: &crate::runtime::RuntimeEvent,
 ) {
     if let Some(sender) = sender {
-        let owned = match event {
-            AgentEvent::Started {
-                approval,
-                task,
-                model,
-            } => AgentRunEvent::Started {
-                approval: (*approval).to_string(),
-                task: (*task).to_string(),
-                model: (*model).to_string(),
-            },
-            AgentEvent::Status { message } => AgentRunEvent::Status {
-                message: (*message).to_string(),
-            },
-            AgentEvent::ToolCall { name, summary } => AgentRunEvent::ToolCall {
-                name: (*name).to_string(),
-                summary: (*summary).to_string(),
-            },
-            AgentEvent::ToolResult { name, is_error } => AgentRunEvent::ToolResult {
-                name: (*name).to_string(),
-                is_error: *is_error,
-            },
-            AgentEvent::TokenUsage { sent, received } => AgentRunEvent::TokenUsage {
-                sent: *sent,
-                received: *received,
-            },
-            AgentEvent::Finished { content } => AgentRunEvent::Finished {
-                content: (*content).to_string(),
-            },
-            AgentEvent::Failed { message } => AgentRunEvent::Failed {
-                message: (*message).to_string(),
-            },
-        };
-        let _ = sender.send(owned);
+        let _ = sender.send(event.clone());
     }
     if !events {
         return;
     }
     let json = match event {
-        AgentEvent::Started {
+        crate::runtime::RuntimeEvent::Started {
             approval,
             task,
             model,
@@ -330,10 +241,10 @@ pub(crate) fn emit_event(
                 "model": model
             })
         }
-        AgentEvent::Status { message } => {
+        crate::runtime::RuntimeEvent::Status { message } => {
             serde_json::json!({ "type": "status", "message": message })
         }
-        AgentEvent::ToolCall { name, summary } => {
+        crate::runtime::RuntimeEvent::ToolCall { name, summary, .. } => {
             let summary = truncate_str(summary, 200);
             serde_json::json!({
                 "type": "tool_call",
@@ -341,26 +252,30 @@ pub(crate) fn emit_event(
                 "summary": summary
             })
         }
-        AgentEvent::ToolResult { name, is_error } => {
+        crate::runtime::RuntimeEvent::ToolResult { name, is_error, .. } => {
             serde_json::json!({
                 "type": "tool_result",
                 "name": name,
                 "is_error": is_error
             })
         }
-        AgentEvent::TokenUsage { sent, received } => {
+        crate::runtime::RuntimeEvent::TokenUsage { sent, received } => {
             serde_json::json!({
                 "type": "token_usage",
                 "sent": sent,
                 "received": received
             })
         }
-        AgentEvent::Finished { content } => {
+        crate::runtime::RuntimeEvent::Finished { content } => {
             serde_json::json!({ "type": "finished", "content": content })
         }
-        AgentEvent::Failed { message } => {
+        crate::runtime::RuntimeEvent::Failed { message } => {
             serde_json::json!({ "type": "failed", "message": message })
         }
+        crate::runtime::RuntimeEvent::TextDelta { .. }
+        | crate::runtime::RuntimeEvent::ReasoningDelta { .. }
+        | crate::runtime::RuntimeEvent::Pane { .. }
+        | crate::runtime::RuntimeEvent::Interact { .. } => return,
     };
     println!("{json}");
 }
@@ -594,85 +509,4 @@ pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
     }
 }
 
-// ── CLI argument parsing ────────────────────────────────────────────────────
 
-pub fn parse_agent_args(args: &[String]) -> Result<AgentRequest, String> {
-    let mut prompt: Option<String> = None;
-    let mut approval: Option<String> = None;
-    let mut provider: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut system_prompt: Option<String> = None;
-    let mut events = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--prompt" => {
-                i += 1;
-                prompt = Some(args.get(i).ok_or("--prompt requires a value")?.clone());
-            }
-            "--approval" => {
-                i += 1;
-                let val = args.get(i).ok_or("--approval requires a value")?;
-                approval = Some(val.clone());
-            }
-            "--provider" => {
-                i += 1;
-                provider = Some(args.get(i).ok_or("--provider requires a value")?.clone());
-            }
-            "--model" => {
-                i += 1;
-                model = Some(args.get(i).ok_or("--model requires a value")?.clone());
-            }
-            "--events" => {
-                events = true;
-            }
-            "--system-prompt" => {
-                i += 1;
-                system_prompt = Some(
-                    args.get(i)
-                        .ok_or("--system-prompt requires a value")?
-                        .clone(),
-                );
-            }
-            other => {
-                return Err(format!("unknown argument: {other}"));
-            }
-        }
-        i += 1;
-    }
-
-    // If no --prompt, read from stdin
-    let prompt = prompt.unwrap_or_else(|| {
-        use std::io::Read;
-        let mut buf = String::new();
-        let _ = std::io::stdin().read_to_string(&mut buf);
-        buf.trim().to_string()
-    });
-
-    if prompt.is_empty() {
-        return Err("no prompt provided; use --prompt or pipe to stdin".to_string());
-    }
-
-    let approval_mode = match approval.as_deref() {
-        Some("read_only") | Some("safe") => ApprovalMode::Safe,
-        Some("danger") => ApprovalMode::Danger,
-        None => ApprovalMode::Safe,
-        Some(other) => return Err(format!("unknown approval mode: {other}")),
-    };
-
-    Ok(AgentRequest {
-        prompt,
-        approval_mode,
-        provider,
-        model,
-        system_prompt,
-        events,
-        event_sender: None,
-        agent_depth: 0,
-        on_token_usage: None,
-        activity: None,
-        llm: None,
-        session_sink: None,
-    })
-}

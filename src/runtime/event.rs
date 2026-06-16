@@ -3,9 +3,8 @@
 //!
 //! These are plain serde types so the exact same messages flow over an
 //! in-process channel today and over an RPC transport (Phase 5) tomorrow. They
-//! generalize the older `AgentRunEvent` (`agent.rs`) and `ToolLiveEvent`
-//! (`tools::types`); a `From<AgentRunEvent>` conversion bridges the headless
-//! loop's existing events onto the wire form.
+//! also serve as the headless run event type; the JSONL path prints a stable
+//! projection of these events for `bone run --events`.
 //!
 //! Interaction is the one piece that cannot be a pure value: `InteractRequest`
 //! carries a live `oneshot::Sender`. The [`ReplyRegistry`] splits that into a
@@ -20,7 +19,6 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::agent::AgentRunEvent;
 use crate::pane_content::{InteractRequest, InteractionMode, PaneContent};
 use crate::tools::{ApprovalGate, CallOutcome, ToolCall, decide_call};
 
@@ -179,7 +177,7 @@ impl ApprovalGate for ChannelApprovalGate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeEvent {
-    /// A turn started. Mirrors `AgentRunEvent::Started`.
+    /// A turn started.
     Started {
         approval: String,
         task: String,
@@ -219,40 +217,6 @@ pub enum RuntimeEvent {
     Finished { content: String },
     /// The turn failed.
     Failed { message: String },
-}
-
-impl From<AgentRunEvent> for RuntimeEvent {
-    fn from(e: AgentRunEvent) -> Self {
-        match e {
-            AgentRunEvent::Started {
-                approval,
-                task,
-                model,
-            } => RuntimeEvent::Started {
-                approval,
-                task,
-                model,
-            },
-            AgentRunEvent::Status { message } => RuntimeEvent::Status { message },
-            AgentRunEvent::ToolCall { name, summary } => RuntimeEvent::ToolCall {
-                id: String::new(),
-                name,
-                summary,
-                arguments: serde_json::Value::Null,
-            },
-            AgentRunEvent::ToolResult { name, is_error } => RuntimeEvent::ToolResult {
-                name,
-                call_id: String::new(),
-                is_error,
-                content: String::new(),
-            },
-            AgentRunEvent::TokenUsage { sent, received } => {
-                RuntimeEvent::TokenUsage { sent, received }
-            }
-            AgentRunEvent::Finished { content } => RuntimeEvent::Finished { content },
-            AgentRunEvent::Failed { message } => RuntimeEvent::Failed { message },
-        }
-    }
 }
 
 /// Frontend → core. Everything a frontend can ask the runtime to do.
@@ -398,15 +362,6 @@ mod tests {
                 "round-trip {cmd:?}"
             );
         }
-    }
-
-    #[test]
-    fn agent_run_event_maps_onto_runtime_event() {
-        let ev: RuntimeEvent = AgentRunEvent::Finished {
-            content: "ok".into(),
-        }
-        .into();
-        assert!(matches!(ev, RuntimeEvent::Finished { content } if content == "ok"));
     }
 
     #[tokio::test]

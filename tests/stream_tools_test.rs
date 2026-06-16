@@ -1,9 +1,7 @@
 use async_trait::async_trait;
-use bone::llm::{LlmError, LlmErrorKind};
 use bone::tools::ApprovalMode;
 use bone::tools::registry::{ToolHandler, ToolRegistry};
 use bone::tools::types::{Tool, ToolCall, ToolDefinition, ToolLiveEvent, ToolOutput};
-use bone::ui::app::stream::{StreamFailure, timeout_message};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -238,59 +236,6 @@ async fn tool_handler_allows_call_based_on_approval_mode() {
 
     assert!(handler.allows_call(ApprovalMode::Safe, &call));
     assert!(handler.allows_call(ApprovalMode::Danger, &call));
-}
-
-// ── Stream failure and retry logic ──────────────────────────────────────────
-
-#[test]
-fn stream_failure_retryable_cases() {
-    assert!(StreamFailure::InitialTimeout.retryable());
-    assert!(StreamFailure::IdleTimeout.retryable());
-    assert!(
-        StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Timeout, "timed out"))
-            .retryable()
-    );
-    assert!(
-        StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Connection, "refused"))
-            .retryable()
-    );
-}
-
-#[test]
-fn stream_failure_non_retryable_cases() {
-    assert!(
-        !StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Auth, "bad key"))
-            .retryable()
-    );
-    assert!(
-        !StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::RateLimit, "429"))
-            .retryable()
-    );
-    assert!(
-        !StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Parse, "bad json"))
-            .retryable()
-    );
-    // Server errors ARE retryable
-    assert!(
-        StreamFailure::Provider(LlmError::new_with_kind(LlmErrorKind::Server(500), "500"))
-            .retryable()
-    );
-}
-
-#[test]
-fn timeout_message_formats_with_and_without_retry() {
-    assert_eq!(
-        timeout_message("provider timeout", "no response", false),
-        "[provider timeout: no response within 90s]"
-    );
-    assert_eq!(
-        timeout_message("provider timeout", "no response", true),
-        "[provider timeout: no response within 90s; retried once]"
-    );
-    assert_eq!(
-        timeout_message("stream timeout", "no events", true),
-        "[stream timeout: no events within 90s; retried once]"
-    );
 }
 
 // ── ApprovalMode cycling ────────────────────────────────────────────────────

@@ -1620,10 +1620,10 @@ fn opts_cb(opts: &Option<Table>, key: &str) -> Option<mlua::Function> {
         .and_then(|t| t.get::<Option<mlua::Function>>(key).ok().flatten())
 }
 
-/// Dispatch a single AgentRunEvent to the appropriate Lua callback.
+/// Dispatch a single RuntimeEvent to the appropriate Lua callback.
 fn dispatch_event(
     lua: &Lua,
-    event: &crate::agent::AgentRunEvent,
+    event: &crate::runtime::RuntimeEvent,
     on_started: &Option<mlua::Function>,
     on_status: &Option<mlua::Function>,
     on_tool_call: &Option<mlua::Function>,
@@ -1632,9 +1632,9 @@ fn dispatch_event(
     on_finished: &Option<mlua::Function>,
     on_failed: &Option<mlua::Function>,
 ) -> Result<(), mlua::Error> {
-    use crate::agent::AgentRunEvent;
+    use crate::runtime::RuntimeEvent;
     match event {
-        AgentRunEvent::Started {
+        RuntimeEvent::Started {
             approval,
             task,
             model,
@@ -1647,12 +1647,12 @@ fn dispatch_event(
                 cb.call::<()>(Value::Table(t))?;
             }
         }
-        AgentRunEvent::Status { message } => {
+        RuntimeEvent::Status { message } => {
             if let Some(cb) = on_status {
                 cb.call::<()>(message.as_str())?;
             }
         }
-        AgentRunEvent::ToolCall { name, summary } => {
+        RuntimeEvent::ToolCall { name, summary, .. } => {
             if let Some(cb) = on_tool_call {
                 let t = lua.create_table()?;
                 t.set("name", name.as_str())?;
@@ -1660,7 +1660,7 @@ fn dispatch_event(
                 cb.call::<()>(Value::Table(t))?;
             }
         }
-        AgentRunEvent::ToolResult { name, is_error } => {
+        RuntimeEvent::ToolResult { name, is_error, .. } => {
             if let Some(cb) = on_tool_result {
                 let t = lua.create_table()?;
                 t.set("name", name.as_str())?;
@@ -1668,7 +1668,7 @@ fn dispatch_event(
                 cb.call::<()>(Value::Table(t))?;
             }
         }
-        AgentRunEvent::TokenUsage { sent, received } => {
+        RuntimeEvent::TokenUsage { sent, received } => {
             if let Some(cb) = on_token_usage {
                 let t = lua.create_table()?;
                 t.set("sent", *sent as i64)?;
@@ -1676,16 +1676,20 @@ fn dispatch_event(
                 cb.call::<()>(Value::Table(t))?;
             }
         }
-        AgentRunEvent::Finished { content } => {
+        RuntimeEvent::Finished { content } => {
             if let Some(cb) = on_finished {
                 cb.call::<()>(content.as_str())?;
             }
         }
-        AgentRunEvent::Failed { message } => {
+        RuntimeEvent::Failed { message } => {
             if let Some(cb) = on_failed {
                 cb.call::<()>(message.as_str())?;
             }
         }
+        RuntimeEvent::TextDelta { .. }
+        | RuntimeEvent::ReasoningDelta { .. }
+        | RuntimeEvent::Pane { .. }
+        | RuntimeEvent::Interact { .. } => {}
     }
     Ok(())
 }

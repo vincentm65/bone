@@ -1,43 +1,12 @@
-use std::io;
-
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::chat::{Message, ToolDisplay};
 use crate::llm::ChatRole;
-use crate::ui::render::{BoneTerminal, markdown, wrap};
+use crate::ui::render::{markdown, wrap};
 use crate::ui::theme::Theme;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget, Wrap};
-
-pub fn insert_lines(term: &mut BoneTerminal, lines: &[Line<'static>]) -> io::Result<()> {
-    if lines.is_empty() {
-        return Ok(());
-    }
-
-    let width = term.size()?.width.max(1);
-    let row_count: u16 = lines
-        .iter()
-        .map(|line| wrapped_line_count(line, width))
-        .sum();
-
-    term.insert_before(row_count, |buf| {
-        let mut row = 0u16;
-        for line in lines {
-            let height = wrapped_line_count(line, buf.area.width.max(1));
-            let area = ratatui::layout::Rect {
-                x: 0,
-                y: row,
-                width: buf.area.width,
-                height,
-            };
-            Paragraph::new(line.clone())
-                .wrap(Wrap { trim: false })
-                .render(area, buf);
-            row = row.saturating_add(height);
-        }
-    })
-}
+use ratatui::widgets::{Paragraph, Wrap};
 
 pub(crate) fn wrapped_line_count(line: &Line<'static>, width: u16) -> u16 {
     Paragraph::new(line.clone())

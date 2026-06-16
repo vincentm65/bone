@@ -12,13 +12,14 @@ use std::sync::atomic::AtomicU64;
 use futures_util::StreamExt;
 
 use crate::agent::{
-    AgentEvent, AgentResponse, AgentRunEvent, emit_event, estimate_context_chars, estimate_tokens,
+    AgentResponse, AgentRunEvent, emit_event, estimate_context_chars, estimate_tokens,
     summarize_call_args, touch_activity,
 };
 use crate::chat::build_chat_history;
 use crate::ext::ExtensionManager;
 use crate::llm::provider::LlmProvider;
 use crate::llm::{ChatEvent, ChatMessage, TokenStats, token_tracker::CHARS_PER_TOKEN};
+use crate::runtime::RuntimeEvent;
 use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult};
@@ -47,7 +48,7 @@ pub struct Driver {
     /// lifecycle, token usage, finished/failed). The interactive frontend (the
     /// TUI, or a remote client) consumes this to render a turn. `None` for the
     /// headless JSONL path, which only needs `event_sender`.
-    pub runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
+    pub runtime_events: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
     /// Routes `ctx.ui.interact` replies back to blocked tools when a frontend is
     /// attached. Required for live tool interaction; `None` headless (interact
     /// then degrades to its built-in "unavailable" path).
@@ -122,27 +123,25 @@ impl Driver {
         let mut session_seq = 0i64;
         session.append_message("user", prompt, None, None, None, session_seq);
 
-        let emit = |event: &AgentEvent| emit_event(events, event_sender.as_ref(), event);
         // Rich frontend event stream (best-effort; ignored if no consumer).
-        let remit = |event: crate::runtime::RuntimeEvent| {
+        let remit = |event: RuntimeEvent| {
             if let Some(tx) = runtime_events.as_ref() {
                 let _ = tx.send(event);
             }
         };
+        let emit_runtime = |event: RuntimeEvent| {
+            emit_event(events, event_sender.as_ref(), &event);
+            remit(event);
+        };
 
-        remit(crate::runtime::RuntimeEvent::Started {
+        emit_runtime(RuntimeEvent::Started {
             approval: approval_label.to_string(),
             task: prompt.to_string(),
             model: llm.model().to_string(),
         });
-        emit(&AgentEvent::Started {
-            approval: approval_label,
-            task: prompt,
-            model: llm.model(),
-        });
         extensions.dispatch_simple("session_start", serde_json::json!({}));
-        emit(&AgentEvent::Status {
-            message: "thinking",
+        emit_runtime(RuntimeEvent::Status {
+            message: "thinking".to_string(),
         });
 
         let mut consecutive_errors = 0u32;
@@ -187,17 +186,14 @@ impl Driver {
                         break;
                     }
                     Err(e) if attempt < 3 => {
-                        emit(&AgentEvent::Status {
-                            message: &format!("retry {attempt}/3: {e}"),
+                        emit_runtime(RuntimeEvent::Status {
+                            message: format!("retry {attempt}/3: {e}"),
                         });
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
                     Err(e) => {
-                        remit(crate::runtime::RuntimeEvent::Failed {
+                        emit_runtime(RuntimeEvent::Failed {
                             message: e.to_string(),
-                        });
-                        emit(&AgentEvent::Failed {
-                            message: &e.to_string(),
                         });
                         break 'turn Err(format!("provider error after 3 attempts: {e}"));
                     }
@@ -220,11 +216,11 @@ impl Driver {
                 }
                 match chunk {
                     Ok(ChatEvent::TextDelta(text)) => {
-                        remit(crate::runtime::RuntimeEvent::TextDelta { text: text.clone() });
+                        remit(RuntimeEvent::TextDelta { text: text.clone() });
                         assistant_text.push_str(&text);
                     }
                     Ok(ChatEvent::ReasoningDelta { text, echo_field }) => {
-                        remit(crate::runtime::RuntimeEvent::ReasoningDelta { text: text.clone() });
+                        remit(RuntimeEvent::ReasoningDelta { text: text.clone() });
                         reasoning_text.push_str(&text);
                         if reasoning_echo_field.is_none() {
                             reasoning_echo_field = echo_field;
@@ -232,15 +228,11 @@ impl Driver {
                     }
                     Ok(ChatEvent::ToolCall(call)) => {
                         let summary = format!("{}: {}", call.name, summarize_call_args(&call));
-                        remit(crate::runtime::RuntimeEvent::ToolCall {
+                        emit_runtime(RuntimeEvent::ToolCall {
                             id: call.id.clone(),
                             name: call.name.clone(),
                             summary: summary.clone(),
                             arguments: call.arguments.clone(),
-                        });
-                        emit(&AgentEvent::ToolCall {
-                            name: &call.name,
-                            summary: &summary,
                         });
                         tool_calls.push(call);
                     }
@@ -269,18 +261,14 @@ impl Driver {
                         if let Some(cb) = &on_token_usage {
                             cb(token_stats.sent, token_stats.received);
                         }
-                        remit(crate::runtime::RuntimeEvent::TokenUsage {
-                            sent: token_stats.sent,
-                            received: token_stats.received,
-                        });
-                        emit(&AgentEvent::TokenUsage {
+                        emit_runtime(RuntimeEvent::TokenUsage {
                             sent: token_stats.sent,
                             received: token_stats.received,
                         });
                     }
                     Err(e) => {
-                        emit(&AgentEvent::Status {
-                            message: &format!("stream error, will retry: {e}"),
+                        emit_runtime(RuntimeEvent::Status {
+                            message: format!("stream error, will retry: {e}"),
                         });
                         stream_error = true;
                         break;
@@ -311,11 +299,7 @@ impl Driver {
                 if let Some(cb) = &on_token_usage {
                     cb(token_stats.sent, token_stats.received);
                 }
-                remit(crate::runtime::RuntimeEvent::TokenUsage {
-                    sent: token_stats.sent,
-                    received: token_stats.received,
-                });
-                emit(&AgentEvent::TokenUsage {
+                emit_runtime(RuntimeEvent::TokenUsage {
                     sent: token_stats.sent,
                     received: token_stats.received,
                 });
@@ -324,11 +308,8 @@ impl Driver {
             if stream_error {
                 consecutive_errors += 1;
                 if consecutive_errors >= 5 {
-                    remit(crate::runtime::RuntimeEvent::Failed {
+                    emit_runtime(RuntimeEvent::Failed {
                         message: "too many stream errors".to_string(),
-                    });
-                    emit(&AgentEvent::Failed {
-                        message: "too many stream errors",
                     });
                     break Err("aborted after 5 consecutive stream errors".to_string());
                 }
@@ -347,8 +328,7 @@ impl Driver {
             // reabsorbs it for context and DB persistence, and the next turn's
             // history needs it).
             if tool_calls.is_empty() {
-                let mut assistant =
-                    ChatMessage::assistant_with_tools(&assistant_text, Vec::new());
+                let mut assistant = ChatMessage::assistant_with_tools(&assistant_text, Vec::new());
                 if !reasoning_text.is_empty() {
                     assistant.reasoning = Some(crate::llm::Reasoning {
                         text: std::mem::take(&mut reasoning_text),
@@ -385,8 +365,8 @@ impl Driver {
 
             // Execute tool calls.
             for call in &tool_calls {
-                emit(&AgentEvent::Status {
-                    message: &format!("running {}: {}", call.name, summarize_call_args(call)),
+                emit_runtime(RuntimeEvent::Status {
+                    message: format!("running {}: {}", call.name, summarize_call_args(call)),
                 });
             }
 
@@ -423,15 +403,11 @@ impl Driver {
             }
 
             for result in &results {
-                remit(crate::runtime::RuntimeEvent::ToolResult {
+                emit_runtime(RuntimeEvent::ToolResult {
                     name: result.name.clone(),
                     call_id: result.call_id.clone(),
                     is_error: result.is_error,
                     content: result.content.clone(),
-                });
-                emit(&AgentEvent::ToolResult {
-                    name: &result.name,
-                    is_error: result.is_error,
                 });
                 session_seq += 1;
                 session.append_message(
@@ -451,10 +427,9 @@ impl Driver {
         // Emit Finished only on success (Failed was already emitted at the
         // break point for error paths).
         if let Ok(content) = &result {
-            remit(crate::runtime::RuntimeEvent::Finished {
+            emit_runtime(RuntimeEvent::Finished {
                 content: content.clone(),
             });
-            emit(&AgentEvent::Finished { content });
         }
         session.end();
         extensions.dispatch_simple("session_end", serde_json::json!({}));
@@ -483,7 +458,7 @@ pub(crate) async fn execute_tool_calls(
     calls: Vec<ToolCall>,
     extensions: &ExtensionManager,
     agent_depth: usize,
-    runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
+    runtime_events: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
     reply_registry: Option<crate::runtime::ReplyRegistry>,
 ) -> Vec<ToolResult> {
     // Track original index to preserve call order in output.
@@ -554,13 +529,12 @@ pub(crate) async fn execute_tool_calls(
                 while let Some(ev) = live_rx.recv().await {
                     match ev {
                         ToolLiveEvent::Pane(pane) => {
-                            let _ = events_out.send(crate::runtime::RuntimeEvent::Pane { pane });
+                            let _ = events_out.send(RuntimeEvent::Pane { pane });
                         }
                         ToolLiveEvent::Interact(req) => {
                             if let Some(registry) = &reply_registry {
                                 let spec = registry.register(req);
-                                let _ = events_out
-                                    .send(crate::runtime::RuntimeEvent::Interact { spec });
+                                let _ = events_out.send(RuntimeEvent::Interact { spec });
                             }
                             // No registry → drop `req`; its reply oneshot closes
                             // and the Lua `ctx.ui.interact` returns its

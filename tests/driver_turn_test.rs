@@ -226,7 +226,7 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
     // skipped (error result) — proving channel approval overrides auto-allow.
     let mut tool_error: Option<bool> = None;
     while let Ok(ev) = erx.try_recv() {
-        if let AgentRunEvent::ToolResult { name, is_error } = ev {
+        if let AgentRunEvent::ToolResult { name, is_error, .. } = ev {
             if name == "read_file" {
                 tool_error = Some(is_error);
             }

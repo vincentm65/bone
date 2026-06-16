@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use super::wrap;
@@ -318,7 +318,6 @@ impl super::Renderer {
         let active_page = args.active_page;
         let ac = args.autocomplete;
         let area = frame.area();
-        frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
 
         // Reserve rows from the bottom: status bar (1) + page region

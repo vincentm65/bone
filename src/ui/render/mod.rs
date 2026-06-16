@@ -98,8 +98,7 @@ impl Renderer {
     /// whether the result ends blank. The single chokepoint that keeps message
     /// spacing to exactly one blank line.
     fn dedup_scrollback_blanks(&mut self, lines: &[Line<'static>]) -> Vec<Line<'static>> {
-        let line_is_blank =
-            |l: &Line<'static>| l.spans.iter().all(|s| s.content.trim().is_empty());
+        let line_is_blank = |l: &Line<'static>| l.spans.iter().all(|s| s.content.trim().is_empty());
         let mut out = Vec::with_capacity(lines.len());
         let mut prev_blank = self.scrollback_last_blank;
         for line in lines {
@@ -335,14 +334,11 @@ impl Renderer {
     /// During streaming: flush complete source lines as soon as they are safe
     /// to render. Fenced code blocks and pipe tables are buffered until their
     /// final rendering is known.
-    pub fn redraw_streaming_message(
+    pub fn flush_streaming_message(
         &mut self,
         content: &str,
         term: &mut BoneTerminal,
-        args: &PaneDraw<'_>,
     ) -> io::Result<()> {
-        self.ensure_viewport_height(term, args.input, None, args.pages, args.active_page, None)?; // autocomplete not active during streaming
-
         let safe_end = safe_markdown_prefix_end(content);
         if safe_end > self.streaming_source_flushed {
             let width = term.size()?.width.max(1);
@@ -353,15 +349,11 @@ impl Renderer {
             }
             self.streaming_source_flushed = safe_end;
         }
-
-        // Redraw only composer/status UI. Incomplete assistant output is never
-        // shown in the input viewport; it is inserted once markdown is stable.
-        term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
         Ok(())
     }
 
     /// Flush all remaining lines from the streaming message, including
-    /// the incomplete trailing paragraph that `redraw_streaming_message`
+    /// the incomplete trailing paragraph that `flush_streaming_message`
     /// holds back during streaming.
     pub fn finalize_streaming_message(
         &mut self,

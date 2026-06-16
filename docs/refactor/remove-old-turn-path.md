@@ -2,99 +2,68 @@
 
 ## Context
 
-The TUI now runs turns through the core `Driver` via `submit_user_turn_via_driver`,
-gated behind `BONE_DRIVER=1`. The new path has been soaked and verified at parity
-(streaming, approval accept/advise/deny, edit previews, panes, `ask_user`, cancel
-via Ctrl+C, DB persistence, `/history`, message spacing). This plan flips the
-Driver path to default and deletes the now-duplicated old loop (~500 LOC), leaving
-one turn loop in the codebase.
+The TUI now runs turns through the core `Driver` by default. The previous duplicated non-Driver TUI turn loop has been deleted, leaving one shared turn loop for TUI and headless paths.
 
-**Guiding principle:** let the compiler find dead code. After the old
-`submit_user_turn` body is gone, `cargo build` emits `never used` warnings for
-exactly the functions/types that only the old path referenced. Delete those,
-rebuild, repeat — the build breaks immediately if anything shared is touched.
+**Guiding principle:** let the compiler find dead code. After the old turn body was removed, `cargo build` surfaced the functions/types that only the old path referenced. Those were deleted in small batches and the build/test suite was kept green.
 
-## What is old-path-only vs shared (verified by call-site audit)
+## What was old-path-only and deleted
 
-**Old-path-only — safe to delete** (each called only from the old loop):
-- `submit_user_turn` old body (the loop after the `BONE_DRIVER` check)
-- `consume_stream`, `wait_for_stream`
-- `handle_tool_calls`, `execute_tools_responsive`, `prepare_tool_call`,
-  `show_immediate_tool_rows`, `wait_for_tool_future_live`
-- `dispatch_before_turn_responsive`
-- `mark_cancelled`
-- Old-only helper types/consts: `StreamFailure`, `PendingTool`,
-  `MAX_PROVIDER_ATTEMPTS` (confirm via compiler — delete only if unused).
+- Old `submit_user_turn` body and environment toggle.
+- `consume_stream`, `wait_for_stream`.
+- `handle_tool_calls`, `execute_tools_responsive`, `prepare_tool_call`, `show_immediate_tool_rows`, `wait_for_tool_future_live`.
+- `dispatch_before_turn_responsive`.
+- `mark_cancelled`.
+- Old-only helpers/types/consts: `StreamFailure`, `PendingTool`, `INITIAL_RESPONSE_TIMEOUT`, `STREAM_IDLE_TIMEOUT`, `MAX_PROVIDER_ATTEMPTS`, `call_row_shown_during_prepare`, `show_immediate_tool_row`, `timeout_message`, `assistant_message`.
 
-**Shared — MUST KEEP** (used by the new pump and/or the command path `drive_live`):
-- `drive_live` (used by `run_lua_command` for slash commands), and its live-event
-  helpers `apply_tool_live_event`, `apply_and_track`
-- `prompt_and_wait` (new pump approval branch), `drain_keys` (pump + drive_live)
-- `redraw_streaming_tokens`, `redraw_streaming_message`,
-  `finalize_streaming_message`, `flush_new_to_scrollback`, `end_turn_separator`
-- `build_tool_row`, `tool_error`, `assistant_message`, `run_inline_command`
-- all `pump_*` methods (the new path)
+## What remains shared
+
+- `drive_live` for slash commands, plus live-event helpers `apply_tool_live_event`, `apply_and_track`.
+- `prompt_and_wait`, `drain_keys`.
+- Streaming/scrollback rendering: `flush_streaming_message`, `finalize_streaming_message`, `flush_new_to_scrollback`, `flush_separator`.
+- `build_tool_row`, `tool_error`, `run_inline_command`.
+- all `pump_*` methods (the Driver-backed TUI path).
 
 ## Steps
 
-### Phase A — Make Driver the default, drop the toggle
+### Phase A — Make Driver the default, drop the toggle ✅
 `src/ui/app/stream/mod.rs`:
-- Delete the `if std::env::var_os("BONE_DRIVER")…` check **and** the entire old
-  `submit_user_turn` body below it.
-- Rename `submit_user_turn_via_driver` → `submit_user_turn` (keep the same
-  signature and the two call sites in `app/mod.rs:632,1557` unchanged).
-- `src/main.rs`: no change (no `BONE_DRIVER` reference there).
-- Decision: **no `BONE_LEGACY` escape hatch** — we're deleting the old code, so
-  there's nothing to fall back to. (If a safety net is wanted, do Phase A alone
-  first — default flip with the old body still present behind `BONE_LEGACY` — and
-  delete in a follow-up once confident. Default recommendation: delete now, since
-  it's already soaked.)
+- Deleted the environment-gated branch and the entire old `submit_user_turn` body.
+- Renamed the Driver-backed submission method to `submit_user_turn` (kept the same signature; call sites in `app/mod.rs` unchanged).
+- No legacy escape hatch.
 
-### Phase B — Compiler-driven dead-code sweep
-- `cargo build` → collect every `function/method 'X' is never used` warning.
-- Delete the flagged old-path-only items from the **KEEP-list-excluded** set
-  above. Work in small batches; rebuild after each so new warnings surface
-  (e.g. deleting `handle_tool_calls` makes `prepare_tool_call` /
-  `execute_tools_responsive` / `show_immediate_tool_rows` newly dead).
-- Delete any now-unused helper types/consts/imports the warnings point to.
-- Stop when `cargo build` is warning-clean. **Never silence a warning for a
-  KEEP-list function — that means a real wiring bug.**
+### Phase B — Compiler-driven dead-code sweep ✅
+Deleted old-path-only code (563 LOC), `stream/mod.rs` reduced from ~1699 to ~846 lines:
+- Methods: `mark_cancelled`, `consume_stream`, `redraw_streaming_tokens`, `handle_tool_calls`, `show_immediate_tool_rows`, `dispatch_before_turn_responsive`, `execute_tools_responsive`, `wait_for_tool_future_live`, `prepare_tool_call`, `wait_for_stream`.
+- Helpers: `call_row_shown_during_prepare`, `show_immediate_tool_row`, `timeout_message`, `assistant_message`.
+- Types/consts: `StreamFailure` (+impl), `PendingTool`, `INITIAL_RESPONSE_TIMEOUT`, `STREAM_IDLE_TIMEOUT`, `MAX_PROVIDER_ATTEMPTS`.
+- Imports: `EventDispatchResult`, `CommandSafety`, `LlmError`, `LlmErrorKind`, `StatusInfo`, `StreamExt`, `Decision`, `Reasoning` (kept `Tool` trait import — needed for `ShellTool.execute()`).
 
-### Phase C — Verify (no regressions)
-- `cargo build` — zero warnings.
-- `cargo test` — green (the `subagent_pane` test is a known parallel flake; re-run
-  it alone if it trips).
-- Ratatui-free core gate: `cargo check --lib --no-default-features` — green.
-- `cargo clippy --all-targets` — no new dead-code/unused findings.
-- **Interactive smoke (with the user, in the terminal):** normal turn streams;
-  tool call → approve / advise / deny; `edit_file` shows a diff preview;
-  `ask_user` picker works; Ctrl+C cancels mid-stream and mid-tool; `ctx.ui.pane`
-  panes render; single blank-line spacing holds; `/history` (save + recall),
-  `/config`, `/clear`, model/provider switch all still work.
+### Phase C — Verify ✅
+- `cargo build` — green.
+- `cargo test` — green.
+- Test files cleaned: `tests/stream_test.rs` reduced to the `tool_error` test; `tests/stream_tools_test.rs` deleted the `StreamFailure`/`timeout_message` tests and imports.
+- Ratatui-free core gate: `cargo check --lib --no-default-features` — green, with only pre-existing unrelated warnings when present.
+- `cargo clippy --all-targets` — no new findings (only pre-existing style nits when present).
+- Interactive smoke: user verified the main parity matrix; input/status flicker was found and fixed by removing the full bottom-pane clear on spinner redraw.
 
-### Phase D — Collapse the duplicate event types (separate, optional)
-Independent of A–C; can be its own commit.
-- Fold `AgentRunEvent` / `AgentEvent` / `emit_event` (`src/agent.rs`) into the one
-  `RuntimeEvent` (`src/runtime/event.rs`).
-- Caveat: the headless JSONL path (`bone run --events`, `agent.rs::emit_event`)
-  still serializes `AgentRunEvent` to stdout. Either (a) keep a thin JSONL encoder
-  over `RuntimeEvent`, or (b) leave `AgentRunEvent` solely as the JSONL DTO and
-  drop only the in-process `AgentRunEvent` channel. Pick when doing this phase.
-- Update `Driver` to emit only `RuntimeEvent`; `run_agent` maps to JSONL.
+### Phase D — Collapse duplicate event types ✅
+- `Driver` now emits `RuntimeEvent` directly into both the rich frontend stream and the headless event sender path.
+- Removed the separate in-process `AgentEvent` enum.
+- Kept `AgentRunEvent` as a compatibility type alias to `RuntimeEvent` for existing Lua/subagent/tests APIs.
+- Preserved headless `bone run --events` JSONL output shape in `agent::emit_event` by encoding the relevant `RuntimeEvent` variants to the legacy JSONL records.
+- Removed the `RuntimeEvent: From<AgentRunEvent>` bridge because the two names now refer to the same event type.
 
-### Phase E — Docs & memory cleanup
-- Remove `BONE_DRIVER` mentions from `docs/refactor/tui-driver-cutover.md`
-  (mark Step 3 complete) and any READMEs.
-- Update memory `neovim-refactor`: the TUI now consumes the `Driver`; the old loop
-  is gone; note remaining deferred items (RPC `--remote` TUI client, live
-  `bone.api.ui` into the running render, `ApiCall` over RPC, Phase 7 menu ports).
+### Phase E — Docs & memory cleanup ✅
+- Updated `docs/refactor/tui-driver-cutover.md` to mark the cutover complete and remove stale toggle instructions.
+- Updated this plan doc to describe the completed state.
+- Updated memory to note that the TUI now consumes the Driver and the old loop is gone.
 
-## Rollback
-Phases A–B are a single mechanical change on a branch. If the interactive smoke
-(Phase C) surfaces a problem, `git revert`/reset the branch — the old path returns
-intact. Do not merge to `main` until the smoke matrix passes.
+## Deferred follow-ups
+
+- Fully remove the `AgentRunEvent` compatibility alias once public Lua/subagent/test APIs are migrated to the `RuntimeEvent` name.
+- Decide whether/how to display `RuntimeEvent::ReasoningDelta` in the TUI. Reasoning is retained in Driver transcript today, but not rendered as a visible pane.
+- Continue future runtime/RPC work from `docs/refactor/tui-runtime-decoupling.md`.
 
 ## Outcome
-One turn loop (the `Driver`) shared by the TUI and headless `run_agent`; ~500 LOC
-of duplication removed; `stream/mod.rs` reduced to the pump + shared
-rendering/approval/command helpers.
+
+One turn loop (the `Driver`) shared by the TUI and headless `run_agent`; old TUI duplication removed; event plumbing consolidated around `RuntimeEvent`; text streaming remains through `RuntimeEvent::TextDelta`.
