@@ -657,6 +657,27 @@ When `conversation.replace` is applied:
 
 Multiple return actions from `before_turn` handlers apply in registration order.
 
+**Turn shaping (`before_turn` only).** Independently of `action`, a `before_turn`
+handler can return two fields that shape the upcoming provider request:
+
+```lua
+return {
+    system_prompt_append = "Plan only. Do not edit files; outline the steps.",
+    tool_filter = { "read_file", "grep", "shell" },  -- only these are exposed
+}
+```
+
+- **`system_prompt_append`** — text appended to the system prompt for this turn
+  (stacks after the base prompt; multiple handlers concatenate in order).
+- **`tool_filter`** — a per-turn allow-list of tool names. Only these tools are
+  shown to the model this turn; an empty list hides every tool. This filters
+  what the model *sees* — it does not change the approval policy. Omit (or
+  return `nil`) to expose the full toolset. When several `before_turn` handlers
+  return a filter, the last in registration order wins.
+
+Both reset every turn, so a handler that reads a flag (e.g. from `ctx.state`)
+can implement a toggled "plan mode" entirely in Lua.
+
 Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/stats`) cannot be overridden.
 
 ## Event Hooks
@@ -689,9 +710,29 @@ end)
 | `tool_call` | Before tool execution | **yes** | no |
 | `tool_result` | After tool execution | no | no |
 | `mode_change` | Approval mode changes | no | no |
+| `turn_start` | A turn begins | no | no |
+| `token_usage` | After each provider response, with token counts | no | no |
+| `turn_end` | A turn finishes (success or failure) | no | no |
 | `before_turn` | After user message, before provider request | no | **yes** |
 
 Handlers run in registration order. First `block` stops the chain. Handler runtime errors do not block (fail-open).
+
+The turn-lifecycle events carry these payloads:
+
+| Event | `event` fields |
+|---|---|
+| `turn_start` | `task` (user prompt), `model`, `approval` |
+| `token_usage` | `sent`, `received`, `context_length` |
+| `turn_end` | `ok` (bool); then `content` on success or `error` on failure |
+
+```lua
+-- Live stats: keep a status segment in sync with token usage.
+bone.on("token_usage", function(event, ctx)
+    bone.api.ui.set_statusline("stats", {
+        { text = "ctx " .. event.context_length, align = "right" },
+    })
+end)
+```
 
 #### `before_turn`
 
@@ -720,6 +761,62 @@ Key differences from other events:
 - **Multiple handlers** — All handlers run; return actions apply in registration order.
 
 This is the mechanism behind automatic context compaction. The default `lua/commands/compact.lua` registers a `before_turn` handler that summarizes older messages when context exceeds a threshold. It preserves complete tool-call chains and drops incomplete chains at the compaction boundary so provider history stays valid.
+
+## Runtime API (`bone.api`)
+
+Where `ctx.*` is handed to a tool/command only while it runs, `bone.api` is the
+always-available runtime surface — usable from `init.lua`, autocmd handlers, and
+tools alike.
+
+```lua
+bone.api.autocmd(event, handler)   -- alias of bone.on
+bone.api.emit(event, payload?)     -- fire an event's handlers synchronously
+bone.api.submit(text)              -- queue a prompt as if typed by the user
+bone.api.keymap.set/del/get(...)   -- mutate bone.keymap at runtime
+bone.api.config.set/get(...)       -- mutate bone.config at runtime
+```
+
+### `bone.api.submit(text)`
+
+Queues `text` for the frontend to submit like typed input. When the app is idle
+it submits immediately; mid-turn it waits in the input queue (shown as `Q:` in
+the status bar) and drains when the active turn ends. Works from any Lua context
+— a tool, a command, or an autocmd — so a plugin can steer the agent without a
+frontend handle. The text follows normal input rules (a leading `/` runs a
+command). This is the primitive behind a `/btw`-style steering command.
+
+### `bone.api.ui` — drawing UI from Lua
+
+Lua draws UI by emitting view updates. Floats render as panes; a status line
+appends to the native status bar; highlights recolor the live theme.
+
+```lua
+bone.api.ui.open_float({ id, title, lines, width, height, border, anchor })
+bone.api.ui.set_lines(id, lines)        -- replace a float's lines
+bone.api.ui.close(id)
+bone.api.ui.set_statusline(id, segments) -- segments: { {text, fg?, align?}, ... }
+bone.api.ui.set_highlight(name, color)   -- color string, or nil to reset
+bone.api.ui.term_width()                 -- terminal columns (80 when headless)
+```
+
+**`set_statusline(id, segments)`** — each segment is `{ text, fg?, align? }`,
+where `fg` is a color string and `align` is `"left"` (default) or `"right"`.
+Right-aligned segments are drawn at the right edge of the status row; others
+extend the native bar. Replacing the same `id` updates it; the segments persist
+until changed.
+
+**`set_highlight(name, color)`** — recolors a named highlight group live. The
+group `name` is one of the [theme](#theme) field names (`user_msg`,
+`user_msg_bg`, `input_border`, `status_text`, `approval_safe`, …); `color` is a
+hex/named string, or `nil` to reset that group to its default. This is the
+runtime counterpart to the boot-time `bone.theme` table — use it to color the
+input border, user messages, or status text in response to events.
+
+```lua
+-- Tint the input border while a turn is running.
+bone.on("turn_start", function() bone.api.ui.set_highlight("input_border", "#e0a050") end)
+bone.on("turn_end",   function() bone.api.ui.set_highlight("input_border", nil) end)
+```
 
 ## Config, Theme, and Keymaps
 

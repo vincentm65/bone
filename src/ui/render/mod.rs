@@ -42,6 +42,9 @@ pub struct StatusInfo {
     pub status_show: std::collections::HashMap<String, bool>,
     /// Formatted elapsed time string (e.g. "1:23") for the current turn.
     pub elapsed: Option<String>,
+    /// Lua-defined status segments (`bone.api.ui.set_statusline`), appended to
+    /// the native status bar. Empty when Lua has not set one.
+    pub lua_status: Vec<crate::runtime::view::StatusSegment>,
 }
 
 impl StatusInfo {

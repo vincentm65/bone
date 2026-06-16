@@ -32,6 +32,7 @@ fn status_info() -> StatusInfo {
         queue_len: 0,
         status_show,
         elapsed: None,
+        lua_status: Vec::new(),
     }
 }
 
@@ -143,7 +144,7 @@ fn newline_cursor_marker_is_included_in_input_height() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 5);
+    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 6);
 }
 
 #[test]
@@ -152,7 +153,7 @@ fn composer_reserves_terminal_final_column_like_submitted_user_text() {
     input.buffer = "a".repeat(17);
     input.cursor_pos = input.buffer.chars().count();
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 4);
+    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 5);
 }
 
 #[test]
@@ -163,7 +164,7 @@ fn composer_height_uses_the_same_word_wrapping_as_rendering() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0, None), 5);
+    assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0, None), 6);
 }
 
 #[test]
@@ -228,8 +229,8 @@ fn pane_page_adds_height_to_viewport() {
         interaction: None,
     }];
 
-    // Without pages: top_sep(1) + input(1) + status(1) = 3
-    assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0, None), 3);
+    // Without pages: top_sep(1) + input(1) + bot_sep(1) + status(1) = 4
+    assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0, None), 4);
 
     // With 3-line page: base(3) + page_sep(1) + content(3) = 7
     assert_eq!(

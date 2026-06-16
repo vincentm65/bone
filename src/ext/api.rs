@@ -89,6 +89,18 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     api.set("emit", emit).map_err(|e| e.to_string())?;
 
+    // bone.api.submit(text) — queue a prompt for the frontend to submit, like
+    // typed input. Drained between turns (or queued behind the active turn).
+    let submit = lua
+        .create_function(|_, text: String| {
+            if !text.trim().is_empty() {
+                crate::ext::inbox::push(text);
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    api.set("submit", submit).map_err(|e| e.to_string())?;
+
     // bone.api.keymap.{set,del,get}
     let keymap = lua.create_table().map_err(|e| e.to_string())?;
 

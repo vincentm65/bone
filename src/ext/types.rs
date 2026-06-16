@@ -44,6 +44,13 @@ pub struct LuaReturnAction {
     /// When set, load a past conversation as the active chat: clears the current
     /// scrollback/transcript and resumes the given conversation in place.
     pub conversation_load: Option<ConversationLoad>,
+    /// Text appended to the system prompt for this turn (e.g. a "plan mode"
+    /// instruction). Returned by `before_turn`; stacks after the base prompt.
+    pub system_prompt_append: Option<String>,
+    /// When set, only these tool names are exposed to the model for this turn
+    /// (a per-turn allow-list). Returned by `before_turn`; an empty list hides
+    /// every tool. Filters what the model *sees*, not the approval policy.
+    pub tool_filter: Option<Vec<String>>,
 }
 
 /// Payload for the `conversation.load` action (`/history`).
@@ -480,54 +487,66 @@ fn lua_value_to_json(value: mlua::Value) -> mlua::Result<serde_json::Value> {
 /// Parse a `LuaReturnAction` from a Lua table returned by a handler.
 /// Returns `None` when no recognized action key is present.
 pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAction> {
-    let action_name: Option<String> = table.get::<Option<String>>("action").ok().flatten();
+    let mut out = LuaReturnAction::default();
+    let mut any = false;
 
+    // Conversation mutation, keyed by the `action` field.
+    let action_name: Option<String> = table.get::<Option<String>>("action").ok().flatten();
     match action_name.as_deref() {
         Some("conversation.replace") => {
             let messages = match table.get::<Option<mlua::Table>>("messages") {
                 Ok(Some(t)) => parse_messages_table(&t),
-                _ => {
-                    eprintln!("bone-lua warn: conversation.replace missing messages; ignoring");
-                    return None;
-                }
+                _ => Vec::new(),
             };
             if messages.is_empty() {
                 eprintln!("bone-lua warn: conversation.replace has no valid messages; ignoring");
-                return None;
+            } else {
+                out.conversation_replace = Some(messages);
+                any = true;
             }
-            Some(LuaReturnAction {
-                conversation_replace: Some(messages),
-                ..Default::default()
-            })
         }
         Some("conversation.load") => {
             let messages = match table.get::<Option<mlua::Table>>("messages") {
                 Ok(Some(t)) => parse_messages_table(&t),
-                _ => {
-                    eprintln!("bone-lua warn: conversation.load missing messages; ignoring");
-                    return None;
-                }
+                _ => Vec::new(),
             };
             if messages.is_empty() {
                 eprintln!("bone-lua warn: conversation.load has no valid messages; ignoring");
-                return None;
-            }
-            let conversation_id: Option<i64> =
-                table.get::<Option<i64>>("conversation_id").ok().flatten();
-            Some(LuaReturnAction {
-                conversation_load: Some(ConversationLoad {
+            } else {
+                let conversation_id: Option<i64> =
+                    table.get::<Option<i64>>("conversation_id").ok().flatten();
+                out.conversation_load = Some(ConversationLoad {
                     messages,
                     conversation_id,
-                }),
-                ..Default::default()
-            })
+                });
+                any = true;
+            }
         }
-        Some(other) => {
-            eprintln!("bone-lua warn: unknown action '{other}'; ignoring");
-            None
-        }
-        None => None,
+        Some(other) => eprintln!("bone-lua warn: unknown action '{other}'; ignoring"),
+        None => {}
     }
+
+    // Turn-shaping fields, independent of `action` (so a handler can both
+    // compact the conversation and shape the turn).
+    if let Some(s) = table
+        .get::<Option<String>>("system_prompt_append")
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+    {
+        out.system_prompt_append = Some(s);
+        any = true;
+    }
+    if let Some(t) = table
+        .get::<Option<Vec<String>>>("tool_filter")
+        .ok()
+        .flatten()
+    {
+        out.tool_filter = Some(t);
+        any = true;
+    }
+
+    if any { Some(out) } else { None }
 }
 
 /// Parse a Lua array of message tables into `ChatMessage`s. Entries with an
@@ -757,6 +776,36 @@ mod tests {
         let parsed = parse_lua_return_action(&action).expect("action parsed");
         assert!(parsed.conversation_load.is_none());
         assert_eq!(parsed.conversation_replace.expect("replace").len(), 1);
+    }
+
+    #[test]
+    fn parses_turn_shaping_without_action() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        t.set("system_prompt_append", "Plan only; do not edit.")
+            .unwrap();
+        let tools = lua.create_table().unwrap();
+        tools.push("read_file").unwrap();
+        tools.push("shell").unwrap();
+        t.set("tool_filter", tools).unwrap();
+
+        let parsed = parse_lua_return_action(&t).expect("shaping parsed without action key");
+        assert_eq!(
+            parsed.system_prompt_append.as_deref(),
+            Some("Plan only; do not edit.")
+        );
+        assert_eq!(
+            parsed.tool_filter,
+            Some(vec!["read_file".to_string(), "shell".to_string()])
+        );
+        assert!(parsed.conversation_replace.is_none());
+    }
+
+    #[test]
+    fn empty_table_yields_no_action() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        assert!(parse_lua_return_action(&t).is_none());
     }
 
     #[test]

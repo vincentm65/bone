@@ -8,6 +8,7 @@ pub mod api;
 pub mod api_ui;
 pub mod ctx;
 mod engine;
+pub mod inbox;
 pub mod jobs;
 mod loader;
 pub mod lua_tool;

@@ -27,7 +27,7 @@ fn render_lists_all_agents() {
     let pane = render(&agents, &[]).unwrap();
     assert_eq!(pane.source, PANE_SOURCE);
     assert_eq!(pane.title, "Agents (2)");
-    assert_eq!(pane.content.len(), 2);
+    assert_eq!(pane.content.len(), 3); // 2 agents + separator line
     // Idle agents show the idle marker.
     let first: String = pane.content[0]
         .spans

@@ -301,8 +301,9 @@ impl super::Renderer {
         }
         let input_rows = rendered_input_rows(input, terminal_width);
         let ac_rows = autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
-        // top sep + input_rows + autocomplete + status + page region
-        1 + input_rows.max(1) + ac_rows + 1 + page_extra_height(pages, active_page)
+        // top sep + input_rows + autocomplete + bot_sep + status + page region
+        let bot_sep = u16::from(pages.is_empty());
+        1 + input_rows.max(1) + ac_rows + bot_sep + 1 + page_extra_height(pages, active_page)
     }
 
     pub fn draw_bottom_pane_with_tick(
@@ -589,6 +590,19 @@ impl super::Renderer {
             }
         }
 
+        // Input bottom border — persists even when panes are hidden (Ctrl+T).
+        // When pages are visible, the page top separator serves this role.
+        if pages.is_empty() && input_view.is_some() && y < content_bottom {
+            frame.render_widget(
+                Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
+                Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
+
         // ── Page region ──────────────────────────────────────────────────
         if !pages.is_empty() {
             let bottom_sep_row = area.bottom().saturating_sub(1);
@@ -806,15 +820,56 @@ impl super::Renderer {
             status_spans.pop();
         }
 
+        // Append Lua-defined status segments (`bone.api.ui.set_statusline`).
+        // Left/center segments extend the native bar; right segments are drawn
+        // right-aligned on the same row.
+        use crate::runtime::view::Align;
+        let seg_span = |seg: &crate::runtime::view::StatusSegment| {
+            let color = seg
+                .fg
+                .as_deref()
+                .and_then(crate::ui::color::parse_color)
+                .unwrap_or(self.theme.status_text);
+            Span::styled(seg.text.clone(), Style::default().fg(color))
+        };
+        let mut right_spans: Vec<Span> = vec![];
+        for seg in &status_info.lua_status {
+            if matches!(seg.align, Align::Right) {
+                right_spans.push(seg_span(seg));
+            } else {
+                if !status_spans.is_empty() {
+                    status_spans.push(sep());
+                }
+                status_spans.push(seg_span(seg));
+            }
+        }
+
         if area.height > 0 {
-            frame.render_widget(
-                Paragraph::new(Line::from(status_spans)),
+            let row = Rect {
+                y: area.bottom() - 1,
+                height: 1,
+                ..area
+            };
+            let right_line = Line::from(right_spans);
+            // Reserve the right-aligned segments' width so they never overwrite
+            // the left/native content on the same row.
+            let right_width = right_line.width() as u16;
+            let left_row = if right_width > 0 {
                 Rect {
-                    y: area.bottom() - 1,
-                    height: 1,
-                    ..area
-                },
-            );
+                    width: row.width.saturating_sub(right_width + 1),
+                    ..row
+                }
+            } else {
+                row
+            };
+            frame.render_widget(Paragraph::new(Line::from(status_spans)), left_row);
+            if right_width > 0 {
+                frame.render_widget(
+                    Paragraph::new(right_line)
+                        .alignment(ratatui::layout::Alignment::Right),
+                    row,
+                );
+            }
         }
     }
 

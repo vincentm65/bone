@@ -46,6 +46,8 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
         ]));
     }
 
+    lines.push(Line::raw(""));
+
     Some(PanePage {
         source: PANE_SOURCE.to_string(),
         title: format!("Agents ({})", agents.len()),

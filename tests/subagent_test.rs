@@ -492,7 +492,7 @@ fn rust_subagent_pane_returns_valid_panepage() {
     let pane = pane.unwrap();
     assert_eq!(pane.source, "subagents");
     assert!(pane.title.contains("Agents"));
-    assert_eq!(pane.content.len(), 2); // one line per agent
+    assert_eq!(pane.content.len(), 3); // one line per agent + separator
 
     std::fs::remove_dir_all(&config_dir).ok();
 }

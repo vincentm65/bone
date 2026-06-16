@@ -83,6 +83,10 @@ pub struct App {
     extensions: ExtensionManager,
     /// Lua keymap snapshot for custom bindings.
     lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
+    /// Lua status lines keyed by id (`bone.api.ui.set_statusline`), in
+    /// registration order. Each id's segments are appended to the native
+    /// status bar; re-setting the same id updates it in place.
+    lua_status: Vec<(String, Vec<crate::runtime::view::StatusSegment>)>,
     /// Call IDs that already have a tool row in chat (to avoid duplicates).
     shown_tool_rows: std::collections::HashSet<String>,
     /// Last-seen subagent job-registry version (forces first-tick render).
@@ -189,6 +193,7 @@ impl App {
             autocomplete: None,
             extensions,
             lua_keymap,
+            lua_status: Vec::new(),
             shown_tool_rows: std::collections::HashSet::new(),
             subagent_seen_version: u64::MAX,
             subagent_last_refresh: std::time::Instant::now(),
@@ -564,6 +569,9 @@ impl App {
 
             // Tick subagent jobs: refresh pane + auto-inject finished results.
             self.tick_subagents(&mut terminal).await?;
+
+            // Drain prompts queued by Lua via `bone.api.submit`.
+            self.tick_inbox(&mut terminal).await?;
         }
 
         // Finalize any in-progress streaming message before clearing the
@@ -680,7 +688,7 @@ impl App {
         } else {
             self.timer_elapsed()
         };
-        stream_status_info_with_token_stats(
+        let mut info = stream_status_info_with_token_stats(
             estimated_tokens,
             &self.model,
             &self.token_stats,
@@ -689,7 +697,12 @@ impl App {
             self.queue.len(),
             &self.user_config,
             elapsed,
-        )
+        );
+        info.lua_status = self.lua_status
+            .iter()
+            .flat_map(|(_, segs)| segs.iter().cloned())
+            .collect();
+        info
     }
 
     /// True when a pane is showing an active interactive prompt awaiting input.
@@ -734,6 +747,30 @@ impl App {
         Ok(())
     }
 
+    /// Drain prompts queued by Lua (`bone.api.submit`) and feed them through the
+    /// normal input path. When idle they submit immediately; mid-turn they wait
+    /// in `self.queue` and drain when the active turn ends (the same path typed
+    /// input uses), so the status bar's `Q:` count reflects them.
+    async fn tick_inbox(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let texts = crate::ext::inbox::drain();
+        if texts.is_empty() {
+            return Ok(());
+        }
+        for text in texts {
+            self.queue.push_back(text);
+        }
+        if self.active_prompt.is_none() && !self.streaming {
+            while let Some(queued) = self.queue.pop_front() {
+                self.input.buffer = queued;
+                self.input.cursor_pos = self.input.buffer.chars().count();
+                self.send_message(term).await?;
+            }
+        } else {
+            self.redraw(term)?;
+        }
+        Ok(())
+    }
+
     /// Refresh the subagent pane when the registry version changed or, while
     /// jobs are running, at least once per second so elapsed time and token
     /// counters stay live. Returns `true` when the pane was refreshed.
@@ -745,18 +782,22 @@ impl App {
         if version == self.subagent_seen_version && !periodic {
             return false;
         }
+        // Unhide the pane when a new subagent job starts while hidden.
+        if version != self.subagent_seen_version && !registry.running_ids().is_empty() {
+            self.panes_visible = true;
+        }
         self.refresh_subagent_pane();
         self.subagent_seen_version = version;
         self.subagent_last_refresh = std::time::Instant::now();
         true
     }
 
-    /// Drain UI diffs emitted by `bone.api.ui.*` (Lua-drawn floats) and apply
-    /// them to the pane list. Mirrors `maybe_refresh_subagent_pane`: called on
-    /// the render tick and the live ticks so Lua-created floats appear and
-    /// update. `Float` components map to panes via `Component::as_pane_content`;
-    /// other component kinds (statusline, highlights) are handled in a later UI
-    /// pass. Returns `true` when the pane list changed.
+    /// Drain UI diffs emitted by `bone.api.ui.*` and apply them. Mirrors
+    /// `maybe_refresh_subagent_pane`: called on the render tick and the live
+    /// ticks so Lua UI appears and updates. `Float` components map to panes via
+    /// `Component::as_pane_content`; `StatusLine` segments append to the native
+    /// status bar; `SetHighlight` recolors the live theme. Returns `true` when
+    /// anything changed (so the caller redraws).
     pub(crate) fn apply_view_diffs(&mut self) -> bool {
         use crate::runtime::view::{Component, ViewDiff};
         let diffs = self.extensions.drain_view_diffs();
@@ -766,11 +807,20 @@ impl App {
         let mut changed = false;
         for diff in diffs {
             match diff {
-                ViewDiff::Upsert { component } => {
-                    // Only floats render as panes today; skip statuslines etc.
-                    if !matches!(component, Component::Float { .. }) {
-                        continue;
+                // A Lua status line is appended to the native status bar.
+                ViewDiff::Upsert {
+                    component: Component::StatusLine { id, segments },
+                } => {
+                    // Key by id so multiple status lines coexist; an existing
+                    // id is updated in place, a new one is appended.
+                    match self.lua_status.iter_mut().find(|(i, _)| *i == id) {
+                        Some(slot) => slot.1 = segments,
+                        None => self.lua_status.push((id, segments)),
                     }
+                    changed = true;
+                    continue;
+                }
+                ViewDiff::Upsert { component } => {
                     if let Some(pc) = component.as_pane_content() {
                         if pc.is_empty() {
                             self.active_page =
@@ -786,11 +836,22 @@ impl App {
                     }
                 }
                 ViewDiff::Remove { id } => {
-                    self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
+                    // Removing a status-line id drops that line; otherwise drop
+                    // a page by the same id.
+                    let before = self.lua_status.len();
+                    self.lua_status.retain(|(i, _)| i != &id);
+                    if self.lua_status.len() == before {
+                        self.active_page =
+                            PanePage::remove(&mut self.pages, &id, self.active_page);
+                    }
                     changed = true;
                 }
-                // Highlights aren't pane content; applied at the theme layer later.
-                ViewDiff::SetHighlight { .. } => {}
+                // A named highlight group recolors the live theme.
+                ViewDiff::SetHighlight { name, fg } => {
+                    if self.renderer.theme.set_highlight(&name, fg.as_deref()) {
+                        changed = true;
+                    }
+                }
             }
         }
         changed
@@ -890,6 +951,7 @@ pub(crate) fn stream_status_info_with_token_stats(
         queue_len,
         status_show: cfg.status_show.clone(),
         elapsed,
+        lua_status: Vec::new(),
     }
 }
 

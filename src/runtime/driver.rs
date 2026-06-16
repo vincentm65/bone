@@ -158,6 +158,14 @@ impl Driver {
             model: llm.model().to_string(),
         });
         extensions.dispatch_simple("session_start", serde_json::json!({}));
+        extensions.dispatch_simple(
+            "turn_start",
+            serde_json::json!({
+                "task": prompt,
+                "model": llm.model(),
+                "approval": approval_label,
+            }),
+        );
         emit_runtime(RuntimeEvent::Status {
             message: "thinking".to_string(),
         });
@@ -168,7 +176,10 @@ impl Driver {
                 break Ok(String::new());
             }
             // Dispatch before_turn hook so Lua can compact the conversation
-            // before each provider request.
+            // and shape the turn (system prompt + tool visibility) before each
+            // provider request. `turn_tool_defs` defaults to the full set and is
+            // narrowed only when a handler returns a `tool_filter`.
+            let mut turn_tool_defs = tool_defs.clone();
             {
                 let state = crate::ext::ctx::AppCtxState::new(
                     &tools,
@@ -182,6 +193,8 @@ impl Driver {
                 );
                 let ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
 
+                let mut sys_appends: Vec<String> = Vec::new();
+                let mut tool_filter: Option<Vec<String>> = None;
                 let actions = extensions.dispatch_before_turn(&ctx_cfg);
                 for action in actions {
                     if let Some(new_messages) = action.conversation_replace {
@@ -192,13 +205,44 @@ impl Driver {
                         token_stats.context_length =
                             (prompt_chars as f64 / CHARS_PER_TOKEN).ceil() as u64;
                     }
+                    if let Some(s) = action.system_prompt_append {
+                        sys_appends.push(s);
+                    }
+                    if let Some(t) = action.tool_filter {
+                        tool_filter = Some(t);
+                    }
+                }
+
+                // Append to the system prompt for this turn by rebuilding history
+                // from the (possibly just-replaced) transcript.
+                if !sys_appends.is_empty() {
+                    let base = system_prompt_override
+                        .clone()
+                        .unwrap_or_else(crate::llm::prompts::system_prompt);
+                    let combined = format!("{base}\n\n{}", sys_appends.join("\n\n"));
+                    history = build_chat_history(&transcript, Some(&combined));
+                    let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
+                    token_stats.context_length =
+                        (prompt_chars as f64 / CHARS_PER_TOKEN).ceil() as u64;
+                }
+
+                // Narrow the tools the model sees for this turn. When several
+                // `before_turn` handlers return a filter, the last in
+                // registration order wins.
+                if let Some(allow) = tool_filter {
+                    turn_tool_defs.retain(|d| allow.iter().any(|n| n == &d.name));
+                    if turn_tool_defs.is_empty() {
+                        eprintln!(
+                            "bone-lua warn: before_turn tool_filter hid every tool this turn"
+                        );
+                    }
                 }
             }
 
             // Request stream with retry.
             let mut stream = None;
             for attempt in 1..=3 {
-                match llm.chat_stream(history.clone(), tool_defs.clone()).await {
+                match llm.chat_stream(history.clone(), turn_tool_defs.clone()).await {
                     Ok(s) => {
                         stream = Some(s);
                         break;
@@ -293,6 +337,14 @@ impl Driver {
                             received: token_stats.received,
                             context_length: token_stats.context_length,
                         });
+                        extensions.dispatch_simple(
+                            "token_usage",
+                            serde_json::json!({
+                                "sent": token_stats.sent,
+                                "received": token_stats.received,
+                                "context_length": token_stats.context_length,
+                            }),
+                        );
                     }
                     Err(e) => {
                         emit_runtime(RuntimeEvent::Status {
@@ -341,6 +393,14 @@ impl Driver {
                     received: token_stats.received,
                     context_length: token_stats.context_length,
                 });
+                extensions.dispatch_simple(
+                    "token_usage",
+                    serde_json::json!({
+                        "sent": token_stats.sent,
+                        "received": token_stats.received,
+                        "context_length": token_stats.context_length,
+                    }),
+                );
             }
 
             if stream_error {
@@ -469,6 +529,13 @@ impl Driver {
                 content: content.clone(),
             });
         }
+        extensions.dispatch_simple(
+            "turn_end",
+            match &result {
+                Ok(content) => serde_json::json!({ "ok": true, "content": content }),
+                Err(message) => serde_json::json!({ "ok": false, "error": message }),
+            },
+        );
         session.end();
         extensions.dispatch_simple("session_end", serde_json::json!({}));
 

@@ -17,6 +17,9 @@ const EVENT_NAMES: &[&str] = &[
     "tool_result",
     "mode_change",
     "before_turn",
+    "turn_start",
+    "turn_end",
+    "token_usage",
 ];
 
 /// Create the `bone.on` function and the `bone._handlers` storage table.

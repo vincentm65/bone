@@ -534,6 +534,7 @@ impl App {
     /// (`tick_spinner` does not call `apply_view_diffs`), so it is safe to call
     /// while a Lua tool runs lock-free.
     fn pump_tick(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.maybe_refresh_subagent_pane();
         self.renderer.tick_spinner(
             term,
             &PaneDraw {
@@ -596,12 +597,14 @@ impl App {
                     let page = PanePage::from_content(&pc);
                     let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
                     self.active_page = active;
+                    self.panes_visible = true;
                 }
             }
             ToolLiveEvent::Interact(req) => {
                 let page = PanePage::from_interact(req);
                 let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
                 self.active_page = active;
+                self.panes_visible = true;
             }
         }
     }
