@@ -382,7 +382,9 @@ impl PanePage {
     pub fn max_scroll(&self) -> usize {
         self.content
             .len()
-            .saturating_sub(crate::ui::render::clamped_pane_visible_rows(self.visible_rows))
+            .saturating_sub(crate::ui::render::clamped_pane_visible_rows(
+                self.visible_rows,
+            ))
     }
 
     /// Convert pure-data `PaneContent` into a renderable `PanePage`.

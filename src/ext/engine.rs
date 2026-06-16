@@ -73,6 +73,12 @@ pub(crate) fn create_engine(
     super::ops_commands::setup_register_command(&lua, bone)?;
     super::ops_events::setup_on(&lua, bone)?;
     super::ops_plugins::setup_plugin(&lua, bone)?;
+    // bone.api.ui.* — the minimal Lua UI API (Phase 4). Additive namespace,
+    // backed by a per-VM ViewModel in Lua app-data.
+    super::api_ui::setup_api_ui(&lua, bone)?;
+    // bone.api.{autocmd,emit,keymap,config} — the always-available runtime API
+    // (Phase 6). Must run after `setup_on` so `bone.api.autocmd` can alias it.
+    super::api::setup_api(&lua, bone)?;
 
     Ok(lua)
 }

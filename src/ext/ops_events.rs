@@ -1,8 +1,12 @@
-/// `bone.on(event_name, handler)` — registers an event handler.
+/// `bone.on(event_name, handler)` — registers an event handler (autocmd).
 ///
-/// Valid event names: session_start, session_end, message, tool_call,
-/// tool_result, mode_change, before_turn. Handlers are stored in `bone._handlers[name]`
-/// as an ordered array and called in registration order.
+/// The built-in event names below are pre-seeded, but **any** name is accepted:
+/// an unknown name creates its handler array on demand. This makes `bone.on`
+/// (and its alias `bone.api.autocmd`) a general autocmd registry — Lua plugins
+/// can define custom events and fire them with `bone.api.emit(name, payload)`,
+/// or Rust can drive them via `ExtensionManager::dispatch_simple(name, ...)`.
+/// Handlers are stored in `bone._handlers[name]` as an ordered array and called
+/// in registration order.
 use mlua::{Lua, Table};
 
 const EVENT_NAMES: &[&str] = &[
@@ -33,7 +37,10 @@ pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
                     event_handlers.push(handler)?;
                 }
                 None => {
-                    eprintln!("bone-lua warn: bone.on: unknown event '{event_name}'; ignoring");
+                    // Unknown event name → create the array on demand (autocmd).
+                    let array = lua.create_table()?;
+                    array.push(handler)?;
+                    handlers.set(&*event_name, array)?;
                 }
             }
             Ok(())

@@ -21,11 +21,7 @@ pub struct PaneDraw<'a> {
     pub active_page: usize,
     pub autocomplete: Option<&'a AutocompleteState>,
 }
-fn build_tab_bar(
-    items: &[String],
-    active_idx: usize,
-    separator: &str,
-) -> Line<'static> {
+fn build_tab_bar(items: &[String], active_idx: usize, separator: &str) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, label) in items.iter().enumerate() {
         if i > 0 {

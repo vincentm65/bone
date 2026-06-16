@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt; // for .boxed()
 use std::sync::{Arc, Mutex};
 
-use bone::llm::{
-    ChatEvent, ChatMessage, LlmError, LlmProvider, ResponseStream,
-};
+use bone::llm::{ChatEvent, ChatMessage, LlmError, LlmProvider, ResponseStream};
 use bone::tools::{ToolCall, ToolDefinition};
 
 /// A deterministic provider that replays a scripted sequence of ChatEvents
@@ -148,14 +146,13 @@ async fn mock_provider_can_emit_tool_call_event() {
 //   3. The returned provider is the SAME allocation (Arc sharing), not a
 //      reconstruction — proven by refcount, not just equality of id().
 
-use bone::agent::{resolve_provider, AgentRequest};
+use bone::agent::{AgentRequest, resolve_provider};
 use bone::config::custom::CustomConfigs;
 use bone::tools::ApprovalMode;
 
 #[test]
 fn resolve_provider_uses_injected_provider_and_shares_arc() {
-    let injected: Arc<dyn LlmProvider> =
-        Arc::new(MockProvider::new("mock", "mock-1", vec![]));
+    let injected: Arc<dyn LlmProvider> = Arc::new(MockProvider::new("mock", "mock-1", vec![]));
     assert_eq!(Arc::strong_count(&injected), 1, "baseline refcount");
 
     let request = AgentRequest {
@@ -182,15 +179,18 @@ fn resolve_provider_uses_injected_provider_and_shares_arc() {
     assert_eq!(resolved.model(), "mock-1");
     // Sharing proof: resolve_provider cloned the Arc (refcount 3), it did NOT
     // allocate a fresh provider (which would leave refcount at 2).
-    assert_eq!(Arc::strong_count(&injected), 3, "provider must be shared, not reconstructed");
+    assert_eq!(
+        Arc::strong_count(&injected),
+        3,
+        "provider must be shared, not reconstructed"
+    );
 }
 
 #[test]
 fn resolve_provider_short_circuits_without_any_config() {
     // No provider id AND no last_provider in config → the construct path would
     // return "no provider configured". Injection must bypass that entirely.
-    let injected: Arc<dyn LlmProvider> =
-        Arc::new(MockProvider::new("mock", "mock-1", vec![]));
+    let injected: Arc<dyn LlmProvider> = Arc::new(MockProvider::new("mock", "mock-1", vec![]));
     let request = AgentRequest {
         prompt: "hi".into(),
         approval_mode: ApprovalMode::Safe,

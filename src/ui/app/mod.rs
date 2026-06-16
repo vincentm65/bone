@@ -5,8 +5,7 @@ mod paste;
 pub mod stream;
 
 use paste::{
-    apply_input_key_with_paste_burst, collect_non_bracketed_paste_burst, is_paste_burst,
-    plain_char,
+    apply_input_key_with_paste_burst, collect_non_bracketed_paste_burst, is_paste_burst, plain_char,
 };
 
 use crate::chat::Message;
@@ -37,7 +36,7 @@ pub struct App {
     pub streaming: bool,
     pub provider: String,
     pub model: String,
-    pub llm: Box<dyn LlmProvider>,
+    pub llm: std::sync::Arc<dyn LlmProvider>,
     pub should_quit: bool,
     pub renderer: Renderer,
     pub user_config: UserConfig,
@@ -96,6 +95,8 @@ impl App {
         mut user_config: UserConfig,
         mut custom_configs: config::custom::CustomConfigs,
     ) -> io::Result<Self> {
+        // The provider is shared (via Arc) with the per-turn runtime Driver.
+        let llm: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(llm);
         let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
@@ -314,9 +315,7 @@ impl App {
     /// Convert a loaded transcript into rendered scrollback rows. Tool-call-only
     /// assistant messages (empty content) are skipped; tool results render as a
     /// compact tool row.
-    fn rebuild_scrollback_from_transcript(
-        transcript: &[crate::llm::ChatMessage],
-    ) -> Vec<Message> {
+    fn rebuild_scrollback_from_transcript(transcript: &[crate::llm::ChatMessage]) -> Vec<Message> {
         use crate::llm::ChatRole;
         let mut rows = Vec::new();
         for msg in transcript {
@@ -506,15 +505,24 @@ impl App {
 
     /// Ensure the viewport is the right size, then draw.
     fn ensure_viewport_and_draw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
-        let width = terminal.size()?.width;
+        // Apply any Lua-driven UI updates (bone.api.ui floats) before measuring,
+        // so a newly opened float is counted in the viewport height.
+        self.apply_view_diffs();
+        let size = terminal.size()?;
         let desired = Renderer::desired_height(
             &self.input,
             self.active_prompt.as_ref(),
-            width,
+            size.width,
             self.visible_pages(),
             self.active_page,
             self.autocomplete.as_ref(),
-        );
+        )
+        // The inline viewport can never be taller than the terminal — crossterm
+        // can't reserve more rows than exist, and an oversized inline viewport
+        // scrolls and overlaps (duplicated tab bars, status text bleeding into
+        // a tall /config menu over a subagent pane). The draw code already
+        // truncates content to its area, so clamping degrades gracefully.
+        .min(size.height.max(1));
 
         let old_height = self.renderer.viewport_height;
         if desired != old_height {
@@ -558,9 +566,7 @@ impl App {
         // Subtract pause time accumulated so far. While currently paused, the
         // ongoing pause isn't added to `turn_paused_duration` until resume, so
         // the same subtraction is correct in both states.
-        let elapsed = start
-            .elapsed()
-            .saturating_sub(self.turn_paused_duration);
+        let elapsed = start.elapsed().saturating_sub(self.turn_paused_duration);
         let total_secs = elapsed.as_secs();
         let mins = total_secs / 60;
         let secs = total_secs % 60;
@@ -602,7 +608,6 @@ impl App {
             .iter()
             .any(|p| p.interaction.as_ref().is_some_and(|i| i.is_active()))
     }
-
 
     /// Tick subagent job status: refresh pane if needed, auto-inject
     /// finished results when the TUI is idle.
@@ -654,6 +659,51 @@ impl App {
         self.subagent_seen_version = version;
         self.subagent_last_refresh = std::time::Instant::now();
         true
+    }
+
+    /// Drain UI diffs emitted by `bone.api.ui.*` (Lua-drawn floats) and apply
+    /// them to the pane list. Mirrors `maybe_refresh_subagent_pane`: called on
+    /// the render tick and the live ticks so Lua-created floats appear and
+    /// update. `Float` components map to panes via `Component::as_pane_content`;
+    /// other component kinds (statusline, highlights) are handled in a later UI
+    /// pass. Returns `true` when the pane list changed.
+    pub(crate) fn apply_view_diffs(&mut self) -> bool {
+        use crate::runtime::view::{Component, ViewDiff};
+        let diffs = self.extensions.drain_view_diffs();
+        if diffs.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for diff in diffs {
+            match diff {
+                ViewDiff::Upsert { component } => {
+                    // Only floats render as panes today; skip statuslines etc.
+                    if !matches!(component, Component::Float { .. }) {
+                        continue;
+                    }
+                    if let Some(pc) = component.as_pane_content() {
+                        if pc.is_empty() {
+                            self.active_page =
+                                PanePage::remove(&mut self.pages, &pc.source, self.active_page);
+                        } else {
+                            let page = PanePage::from_content(&pc);
+                            let (_, new_active) =
+                                PanePage::upsert(&mut self.pages, self.active_page, page);
+                            self.active_page = new_active;
+                            self.panes_visible = true;
+                        }
+                        changed = true;
+                    }
+                }
+                ViewDiff::Remove { id } => {
+                    self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
+                    changed = true;
+                }
+                // Highlights aren't pane content; applied at the theme layer later.
+                ViewDiff::SetHighlight { .. } => {}
+            }
+        }
+        changed
     }
 
     /// Refresh the subagent live-pane from the job registry.
@@ -1333,7 +1383,8 @@ impl App {
         let prev_model = self.llm.model().to_string();
 
         let lua_cmds: Vec<(String, String)> = if self.extensions.is_available() {
-            self.extensions.commands()
+            self.extensions
+                .commands()
                 .iter()
                 .map(|c| (c.name.clone(), c.description.clone()))
                 .collect()
@@ -1435,24 +1486,21 @@ impl App {
                         let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
 
                         // Find the command handler using the shared lookup.
-                        let handler =
-                            match crate::ext::ops_commands::find_handler(&lua, &cmd_owned) {
-                                Some(f) => f,
-                                None => return Some(None),
-                            };
+                        let handler = match crate::ext::ops_commands::find_handler(&lua, &cmd_owned)
+                        {
+                            Some(f) => f,
+                            None => return Some(None),
+                        };
 
-                        let config_dir =
-                            crate::config::bone_dir().to_string_lossy().to_string();
+                        let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
                         let shared_state: crate::ext::ctx::SharedState = std::sync::Arc::new(
                             std::sync::Mutex::new(std::collections::HashMap::new()),
                         );
-                        let mut ctx_cfg =
-                            crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
+                        let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
                         app_state.apply_to(&mut ctx_cfg);
                         ctx_cfg.pane_sender = Some(events);
                         ctx_cfg.cancelled = Some(cancel_for_ctx);
-                        let ctx_table =
-                            crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
+                        let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
                         // Release the project Lua mutex before calling into Lua: a
                         // nested LuaTool invocation via ctx.tools.call runs inline on
@@ -1587,4 +1635,3 @@ fn apply_lua_config_snapshot(
         }
     }
 }
-

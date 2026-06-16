@@ -23,12 +23,7 @@ fn unloaded_reports_unavailable() {
 fn unloaded_tool_call_is_not_blocked() {
     let m = ExtensionManager::unloaded();
     // No hook can veto when nothing is loaded → Continue, never Blocked.
-    let res = m.dispatch_tool_call(
-        "write_file",
-        "call_1",
-        &serde_json::json!({}),
-        "danger",
-    );
+    let res = m.dispatch_tool_call("write_file", "call_1", &serde_json::json!({}), "danger");
     assert!(matches!(res, EventDispatchResult::Continue));
 }
 

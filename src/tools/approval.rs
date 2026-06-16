@@ -53,3 +53,37 @@ pub fn denied_message(mode: ApprovalMode, safety: CommandSafety) -> String {
         safety
     )
 }
+
+/// Resolves a tool call to an outcome — the async approval seam.
+///
+/// The agent loop computes two inputs per call: `blocked` (the extension-hook
+/// verdict) and `auto_allows` (the `ApprovalMode`/policy decision from
+/// `ToolHandler::allows_call`). The gate turns those into a [`CallOutcome`].
+///
+/// The default impl reproduces the headless behavior exactly by delegating to
+/// the pure [`decide_call`] — so `AutoApprovalGate` (and any gate that doesn't
+/// override) is byte-for-byte identical to the old inline logic. An interactive
+/// frontend (the TUI, or a remote client over RPC) overrides [`decide`] to
+/// prompt the user when a call would otherwise be `Denied`, letting one loop
+/// serve both auto and interactive approval.
+///
+/// [`decide`]: ApprovalGate::decide
+#[async_trait::async_trait]
+pub trait ApprovalGate: Send + Sync {
+    async fn decide(
+        &self,
+        blocked: Option<String>,
+        auto_allows: bool,
+        call: &crate::tools::ToolCall,
+    ) -> CallOutcome {
+        let _ = call;
+        decide_call(blocked, auto_allows)
+    }
+}
+
+/// The non-interactive gate: outcome is purely `decide_call(blocked, auto_allows)`.
+/// Used by the headless agent and by tests. Behavior is identical to the
+/// pre-Driver inline approval logic.
+pub struct AutoApprovalGate;
+
+impl ApprovalGate for AutoApprovalGate {}

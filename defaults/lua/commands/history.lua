@@ -12,12 +12,37 @@ local function truncate(s, max_len)
     return s:sub(1, max_len - 3) .. "..."
 end
 
--- ISO 8601 (e.g. 2026-06-14T14:15:32...) -> compact "YYYY-MM-DD HH:MM".
+-- Stored timestamps are UTC ISO 8601 (e.g. 2026-06-14T14:15:32Z). Convert to
+-- the user's local time and render a compact "YYYY-MM-DD HH:MM".
 local function format_when(when)
     when = tostring(when or "")
-    local date, time = when:match("^(%d%d%d%d%-%d%d%-%d%d)[T ](%d%d:%d%d)")
-    if date and time then return date .. " " .. time end
-    return truncate(when, 19)
+    local y, mo, d, h, mi = when:match(
+        "^(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d)"
+    )
+    if not y then
+        -- Unrecognized format: fall back to a trimmed slice of the raw string.
+        return truncate(when, 16)
+    end
+
+    -- `os.time` interprets a broken-down table as *local* time, so this is the
+    -- UTC fields read as local — an approximation that's exact except within the
+    -- ~1h DST transition window (fine for display).
+    local approx = os.time({
+        year = tonumber(y), month = tonumber(mo), day = tonumber(d),
+        hour = tonumber(h), min = tonumber(mi), sec = 0,
+    })
+    if not approx then
+        return truncate(when, 16)
+    end
+    -- Local UTC offset at that time, e.g. "-0400". Using strftime %z reflects
+    -- DST correctly (unlike re-encoding os.date("!*t"), which loses the flag).
+    local sign, oh, om = os.date("%z", approx):match("([%+%-])(%d%d)(%d%d)")
+    local offset = 0
+    if sign then
+        offset = (tonumber(oh) * 3600 + tonumber(om) * 60)
+            * (sign == "-" and -1 or 1)
+    end
+    return os.date("%Y-%m-%d %H:%M", approx + offset)
 end
 
 -- Compaction injects synthetic messages whose content starts with this marker

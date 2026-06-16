@@ -313,11 +313,7 @@ impl SessionDb {
 
     fn setup_schema(&self) -> rusqlite::Result<()> {
         /// Return true if `table` already has a column named `column`.
-        fn column_exists(
-            conn: &Connection,
-            table: &str,
-            column: &str,
-        ) -> rusqlite::Result<bool> {
+        fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
             conn.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
                 params![table, column],

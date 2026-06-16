@@ -196,7 +196,7 @@ impl App {
                                         self.provider =
                                             format!("{} ({})", provider.name(), provider.id());
                                         self.model = provider.model().to_string();
-                                        self.llm = provider;
+                                        self.llm = std::sync::Arc::from(provider);
                                         format!("Saved and reloaded provider {id}.")
                                     }
                                     Err(err) => format!(
@@ -401,7 +401,7 @@ impl App {
                                             new_provider.id()
                                         );
                                         self.model = new_provider.model().to_string();
-                                        self.llm = new_provider;
+                                        self.llm = std::sync::Arc::from(new_provider);
                                         custom.set_last_provider(&id);
                                         self.custom_configs = custom.clone();
                                         format!("Switched to {} ({})", self.model, self.provider)

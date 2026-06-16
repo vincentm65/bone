@@ -337,7 +337,7 @@ fn pane_page_renders_content_between_input_and_status() {
         })
         .unwrap();
 
-     // Row layout (5 rows total):
+    // Row layout (5 rows total):
     // 0: top sep
     // 1: input "> "
     // 2: (blank)

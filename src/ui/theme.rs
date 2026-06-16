@@ -49,7 +49,10 @@ impl Theme {
                     if let Some(c) = crate::ui::color::parse_color(s) {
                         self.$field = c;
                     } else {
-                        eprintln!("bone-lua warn: invalid theme color for {}: {s}", stringify!($field));
+                        eprintln!(
+                            "bone-lua warn: invalid theme color for {}: {s}",
+                            stringify!($field)
+                        );
                     }
                 }
             };

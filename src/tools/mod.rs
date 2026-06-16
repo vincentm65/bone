@@ -1,5 +1,5 @@
-pub mod command_policy;
 pub mod approval;
+pub mod command_policy;
 pub mod edit_file;
 pub mod read_file;
 pub mod registry;
@@ -12,8 +12,8 @@ pub mod write_file;
 use registry::ToolRegistry;
 
 use crate::ext::lua_tool::LuaTool;
+pub use approval::{ApprovalGate, AutoApprovalGate, CallOutcome, decide_call, denied_message};
 pub use command_policy::CommandSafety;
-pub use approval::{CallOutcome, decide_call, denied_message};
 pub use shell::{ScriptOutput, ScriptRequest, run_script, truncate_output};
 use std::collections::HashMap;
 pub use types::{Tool, ToolCall, ToolDefinition, ToolResult};

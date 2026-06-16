@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use mlua::{Lua, LuaSerdeExt};
 use serde_json::Value;
 
+use crate::pane_content::PaneContent;
 use crate::tools::types::{
     Tool, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolOutput,
 };
-use crate::pane_content::PaneContent;
 
 use super::ctx::{self, CtxConfig, SharedState};
 use crate::tools::command_policy::CommandSafety;
@@ -177,6 +177,10 @@ impl LuaTool {
         drop(lua);
 
         let result = execute_fn.call::<mlua::Value>((args_lua, ctx_table));
+        drop(execute_fn);
+        let lua = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = lua.gc_collect();
+        drop(lua);
 
         let text = match result {
             Ok(mlua::Value::String(s)) => s

@@ -4,8 +4,8 @@
 use std::io;
 use std::path::Path;
 
-use super::App;
 use super::super::render::{MIN_ROWS, Renderer};
+use super::App;
 
 impl App {
     pub(super) async fn open_editor(&mut self, term: &mut super::BoneTerminal) -> io::Result<()> {

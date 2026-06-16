@@ -153,6 +153,51 @@ impl ExtensionManager {
         self.lua_handle()
     }
 
+    /// Take the pending UI diffs emitted by `bone.api.ui.*` since the last
+    /// drain. A frontend calls this each render tick and applies the diffs to
+    /// its own view (the TUI converts `Float` components to panes). Empty when
+    /// no Lua UI calls have happened.
+    ///
+    /// **Non-blocking by design.** This runs on the render tick, which can fire
+    /// while the Lua VM is busy executing a command or tool — e.g. a blocking
+    /// `ctx.ui.interact` picker (`/history`) holds the VM lock while it waits
+    /// for the user. A plain `lock()` here would deadlock the UI against the
+    /// blocked command. We `try_lock` instead and skip this tick if the VM is
+    /// busy; the diffs are still there to drain on the next free tick.
+    pub fn drain_view_diffs(&self) -> Vec<crate::runtime::view::ViewDiff> {
+        match self.lua.try_lock() {
+            Ok(lua) => super::api_ui::drain_diffs(&lua),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Snapshot the current Lua-driven `ViewModel` (full state, e.g. for a
+    /// late-joining frontend before it starts receiving diffs). Non-blocking
+    /// (see [`drain_view_diffs`](Self::drain_view_diffs)); returns the default
+    /// (empty) view if the VM is momentarily busy.
+    pub fn view_snapshot(&self) -> crate::runtime::view::ViewModel {
+        match self.lua.try_lock() {
+            Ok(lua) => super::api_ui::snapshot(&lua),
+            Err(_) => crate::runtime::view::ViewModel::default(),
+        }
+    }
+
+    /// Re-read the live `bone.keymap` table (reflects runtime
+    /// `bone.api.keymap.set/del`), not the boot-time snapshot.
+    pub fn keymap_snapshot_live(&self) -> LuaKeymapSnapshot {
+        let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
+        read_subtable_snapshot(&lua, "keymap", LuaKeymapSnapshot::from_lua_table)
+            .unwrap_or_default()
+    }
+
+    /// Re-read the live `bone.config` table (reflects runtime
+    /// `bone.api.config.set`), not the boot-time snapshot.
+    pub fn config_snapshot_live(&self) -> LuaConfigSnapshot {
+        let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
+        read_subtable_snapshot(&lua, "config", LuaConfigSnapshot::from_lua_table)
+            .unwrap_or_default()
+    }
+
     /// Get registered Lua commands.
     pub fn commands(&self) -> &[super::ops_commands::RegisteredLuaCommand] {
         &self.commands
@@ -570,6 +615,18 @@ fn guard_with_bone(lua_arc: &Arc<Mutex<Lua>>) -> Option<std::sync::MutexGuard<'_
 /// Inner dispatch logic. When `blockable` is false, always returns
 /// `EventDispatchResult::Continue`. Handler errors are logged but never
 /// block (fail-open).
+/// Read `bone.<name>` and build a snapshot `T` from it, or `None` if the table
+/// is missing. Used for live config/keymap re-reads after runtime mutation.
+fn read_subtable_snapshot<T>(
+    lua: &mlua::Lua,
+    name: &str,
+    build: impl Fn(&mlua::Lua, &mlua::Table) -> Result<T, String>,
+) -> Option<T> {
+    let bone = lua.globals().get::<Option<mlua::Table>>("bone").ok()??;
+    let table = bone.get::<Option<mlua::Table>>(name).ok()??;
+    build(lua, &table).ok()
+}
+
 fn dispatch_event_inner(
     lua: &mlua::Lua,
     event_name: &str,
@@ -671,7 +728,9 @@ mod tests {
         let lua = Lua::new();
         let messages = lua.create_table().unwrap();
         messages.push(msg_table(&lua, "user", "hi")).unwrap();
-        messages.push(msg_table(&lua, "assistant", "hello")).unwrap();
+        messages
+            .push(msg_table(&lua, "assistant", "hello"))
+            .unwrap();
         let action = lua.create_table().unwrap();
         action.set("action", "conversation.load").unwrap();
         action.set("messages", messages).unwrap();

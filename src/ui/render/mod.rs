@@ -66,6 +66,11 @@ pub struct Renderer {
     pub last_size: Option<(u16, u16)>,
     /// Current inline viewport height (resized dynamically).
     pub viewport_height: u16,
+    /// Whether the last line pushed to scrollback was blank. Used to dedup
+    /// consecutive blank lines so streamed messages (which bypass
+    /// `msg_to_lines`' surrounding blanks) and flushed messages keep a single
+    /// blank line of separation.
+    scrollback_last_blank: bool,
 }
 
 impl Default for Renderer {
@@ -84,7 +89,36 @@ impl Renderer {
             streaming_lines_flushed: 0,
             last_size: None,
             viewport_height: MIN_ROWS,
+            scrollback_last_blank: false,
         }
+    }
+
+    /// Drop blank lines that would create a run of two or more consecutive
+    /// blanks in scrollback (given the last line already there), and record
+    /// whether the result ends blank. The single chokepoint that keeps message
+    /// spacing to exactly one blank line.
+    fn dedup_scrollback_blanks(&mut self, lines: &[Line<'static>]) -> Vec<Line<'static>> {
+        let line_is_blank =
+            |l: &Line<'static>| l.spans.iter().all(|s| s.content.trim().is_empty());
+        let mut out = Vec::with_capacity(lines.len());
+        let mut prev_blank = self.scrollback_last_blank;
+        for line in lines {
+            let blank = line_is_blank(line);
+            if blank && prev_blank {
+                continue;
+            }
+            out.push(line.clone());
+            prev_blank = blank;
+        }
+        self.scrollback_last_blank = prev_blank;
+        out
+    }
+
+    /// Insert a single blank separator line after the last message in
+    /// scrollback (no-op if already separated). Called at the end of a turn so
+    /// the most recent message doesn't touch the input field.
+    pub fn end_turn_separator(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.insert_lines_to_scrollback(term, &[Line::raw("")])
     }
 
     /// Create a new terminal in inline-viewport mode.
@@ -158,6 +192,11 @@ impl Renderer {
         if lines.is_empty() {
             return Ok(());
         }
+        let lines = self.dedup_scrollback_blanks(lines);
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let lines = &lines[..];
 
         let row_count = logical_lines_row_count(lines, term.size()?.width.max(1));
         term.insert_before(row_count, |buf| {
@@ -253,8 +292,11 @@ impl Renderer {
             None
         };
         let terminal_width = term.size()?.width;
-        let rendered: Vec<Line<'static>> =
-            messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width);
+        let rendered = messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width);
+        // Collapse a leading blank against an already-blank scrollback tail so
+        // streamed messages (no trailing blank) and flushed messages keep a
+        // single blank of separation.
+        let rendered = self.dedup_scrollback_blanks(&rendered);
         let user_background = self.theme.user_msg_bg;
 
         term.insert_before(logical_lines_row_count(&rendered, terminal_width), |buf| {

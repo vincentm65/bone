@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 
+use crate::pane_content::InteractionMode;
 use crate::tools::shell::{ScriptRequest, run_script};
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
-use crate::pane_content::InteractionMode;
 
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -453,7 +453,8 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = crate::pane_content::PaneContent::from_json(&val).map_err(|e| mlua::Error::external(e))?;
+            let pane = crate::pane_content::PaneContent::from_json(&val)
+                .map_err(|e| mlua::Error::external(e))?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -1003,7 +1004,9 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         // Read-only: only allow SELECT statements.
         let sql_trimmed = sql.trim();
         if !sql_trimmed.to_lowercase().starts_with("select") {
-            return Err(mlua::Error::external("ctx.db.query only allows SELECT statements"));
+            return Err(mlua::Error::external(
+                "ctx.db.query only allows SELECT statements",
+            ));
         }
 
         // Build bound parameters.
@@ -1013,7 +1016,12 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                 .map(|v| match v {
                     Value::Integer(i) => rusqlite::types::Value::Integer(*i),
                     Value::Number(n) => rusqlite::types::Value::Real(*n),
-                    Value::String(s) => rusqlite::types::Value::Text(s.to_str().ok().and_then(|b| Some(b.to_string())).unwrap_or_default()),
+                    Value::String(s) => rusqlite::types::Value::Text(
+                        s.to_str()
+                            .ok()
+                            .and_then(|b| Some(b.to_string()))
+                            .unwrap_or_default(),
+                    ),
                     Value::Nil => rusqlite::types::Value::Null,
                     Value::Boolean(b) => rusqlite::types::Value::Integer(*b as i64),
                     _ => rusqlite::types::Value::Text(tostring_lua_value(v)),
@@ -1022,21 +1030,22 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             None => Vec::new(),
         };
 
-        let mut stmt = db.conn_ref().prepare(&sql)
+        let mut stmt = db
+            .conn_ref()
+            .prepare(&sql)
             .map_err(|e| mlua::Error::external(format!("SQL error: {e}")))?;
 
-        let columns: Vec<String> = stmt
-            .column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
         let mut rows = stmt
             .query(rusqlite::params_from_iter(&params))
             .map_err(|e| mlua::Error::external(format!("query error: {e}")))?;
 
         let result = lua.create_table()?;
-        while let Some(row) = rows.next().map_err(|e| mlua::Error::external(format!("row error: {e}")))? {
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| mlua::Error::external(format!("row error: {e}")))?
+        {
             let row_map = lua.create_table()?;
             for (i, col_name) in columns.iter().enumerate() {
                 let val = row_to_lua_value(lua, row, i)?;
@@ -1059,7 +1068,8 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let emit_pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = crate::pane_content::PaneContent::from_json(&val).map_err(|e| mlua::Error::external(e))?;
+            let pane = crate::pane_content::PaneContent::from_json(&val)
+                .map_err(|e| mlua::Error::external(e))?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -1847,7 +1857,11 @@ fn tostring_lua_value(v: &Value) -> String {
     match v {
         Value::Integer(i) => i.to_string(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => s.to_str().ok().and_then(|b| Some(b.to_string())).unwrap_or_default(),
+        Value::String(s) => s
+            .to_str()
+            .ok()
+            .and_then(|b| Some(b.to_string()))
+            .unwrap_or_default(),
         Value::Boolean(b) => b.to_string(),
         Value::Nil => "null".to_string(),
         _ => "<unsupported>".to_string(),

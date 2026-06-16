@@ -121,10 +121,8 @@ fn null_sink_is_object_safe_via_arc_dyn() {
 #[test]
 fn mixed_sink_types_unify_under_dyn() {
     // A Driver could hold a Vec of sinks of different concrete types.
-    let sinks: Vec<Arc<dyn SessionSink>> = vec![
-        shared(NullSessionSink),
-        shared(RecordingSink::new()),
-    ];
+    let sinks: Vec<Arc<dyn SessionSink>> =
+        vec![shared(NullSessionSink), shared(RecordingSink::new())];
     assert_eq!(sinks[0].conv_id(), None);
     assert_eq!(sinks[1].conv_id(), Some(42));
 }

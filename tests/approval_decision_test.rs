@@ -5,9 +5,9 @@
 //! faithful, injectable seam. They also pin the exact "Tool skipped" message
 //! so the refactor preserves behavior byte-for-byte.
 
-use bone::tools::command_policy::CommandSafety;
-use bone::tools::approval::{CallOutcome, decide_call, denied_message};
 use bone::tools::ApprovalMode;
+use bone::tools::approval::{CallOutcome, decide_call, denied_message};
+use bone::tools::command_policy::CommandSafety;
 
 #[test]
 fn approve_when_allowed_and_not_blocked() {
@@ -54,7 +54,5 @@ fn denied_message_matches_original_format_exactly() {
 #[test]
 fn denied_message_uses_mode_str() {
     let danger_mode = denied_message(ApprovalMode::Danger, CommandSafety::ReadOnly);
-    assert!(danger_mode.starts_with(
-        "[exit_code=1] Tool skipped. Approval mode danger "
-    ));
+    assert!(danger_mode.starts_with("[exit_code=1] Tool skipped. Approval mode danger "));
 }

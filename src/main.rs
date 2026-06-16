@@ -188,7 +188,97 @@ fn ensure_deps() {
 }
 
 fn usage() -> String {
-    "Usage: bone [--provider <id>] [--model <name>]\n       bone agent [--provider <id>] [--model <name>] ...".to_string()
+    "Usage: bone [--provider <id>] [--model <name>]\n       bone agent [--provider <id>] [--model <name>] ...\n       bone serve [--listen <addr>]   # run as a daemon (default 127.0.0.1:7878)\n       bone connect [--listen <addr>] # line-oriented RPC client".to_string()
+}
+
+/// Parse `--listen <addr>` from args, falling back to the default.
+fn parse_listen_addr(args: &[String]) -> String {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--listen" {
+            if let Some(v) = args.get(i + 1) {
+                return v.clone();
+            }
+        }
+        i += 1;
+    }
+    "127.0.0.1:7878".to_string()
+}
+
+/// `bone serve` — bind a socket, run the headless runtime, and fan its events
+/// out to every attached frontend. Each `SubmitPrompt` drives a full agent turn
+/// whose events stream back over the protocol.
+async fn run_serve(args: &[String]) -> std::io::Result<()> {
+    let addr = parse_listen_addr(args);
+
+    // Build the provider from config, exactly like TUI mode.
+    let custom = CustomConfigs::load();
+    let providers_config = custom.derive_providers_config();
+    let provider_id = if custom.get_last_provider().is_empty() {
+        "local".to_string()
+    } else {
+        custom.get_last_provider()
+    };
+    let provider = providers::create_provider_with_config(&provider_id, &providers_config)
+        .map_err(std::io::Error::other)?;
+    let provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider> =
+        std::sync::Arc::from(provider);
+
+    let (hub, commands_rx) = bone::rpc::Hub::new();
+    tokio::spawn(bone::rpc::run_daemon(
+        hub.clone(),
+        commands_rx,
+        Some(provider),
+        bone::tools::ApprovalMode::Safe,
+    ));
+
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        eprintln!("bone: client attached: {peer}");
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bone::rpc::serve_connection(stream, hub, Vec::new()).await {
+                eprintln!("bone: client {peer} ended: {e}");
+            }
+        });
+    }
+}
+
+/// `bone connect` — a minimal RPC frontend: each stdin line is a prompt; every
+/// `RuntimeEvent` from the daemon is printed. Proves the protocol end to end.
+async fn run_connect(args: &[String]) -> std::io::Result<()> {
+    use tokio::io::AsyncBufReadExt;
+
+    let addr = parse_listen_addr(args);
+    let stream = tokio::net::TcpStream::connect(&addr).await?;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+
+    tokio::spawn(async move {
+        let mut reader = bone::rpc::codec::MessageReader::new(read_half);
+        while let Some(result) = reader.read::<bone::runtime::RuntimeEvent>().await {
+            match result {
+                Ok(ev) => println!("{ev:?}"),
+                Err(_) => continue,
+            }
+        }
+        eprintln!("bone: server closed connection");
+    });
+
+    eprintln!("bone: connected to {addr}; type a prompt and press enter.");
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        bone::rpc::codec::write_message(
+            &mut write_half,
+            &bone::runtime::RuntimeCommand::SubmitPrompt { text: line },
+        )
+        .await?;
+    }
+    Ok(())
 }
 /// Pick a suitable install directory for the bone symlink.
 /// Prefers a user-local bin that is already on PATH; falls back to standard locations.
@@ -294,6 +384,15 @@ async fn main() -> std::io::Result<()> {
             .map_err(std::io::Error::other)?;
         println!("{}", response.content);
         return Ok(());
+    }
+    // Daemon mode: run the runtime headless and accept frontend clients over
+    // the RPC protocol (the `nvim --embed`/`--listen` model). `bone connect`
+    // is a minimal line-oriented client that exercises it.
+    if args.first().map(String::as_str) == Some("serve") {
+        return run_serve(&args[1..]).await;
+    }
+    if args.first().map(String::as_str) == Some("connect") {
+        return run_connect(&args[1..]).await;
     }
     if args.first().map(String::as_str) == Some("stats-popup") {
         let db = bone::session_db::SessionDb::open(&bone::session_db::db_path())

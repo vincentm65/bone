@@ -1,25 +1,31 @@
 use crate::chat::build_chat_history;
 use crate::config::{UserConfig, custom::CustomConfigs};
 use crate::llm::{
-    ChatEvent, ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
+    ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
     token_tracker::CHARS_PER_TOKEN,
 };
 use crate::session_db::{SessionDb, db_path};
 use crate::session_sink::SessionSink;
 use crate::tools::ApprovalMode;
 use crate::tools::registry::ToolHandler;
-use futures_util::StreamExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Thin wrapper around the optional session DB. It stores only Send data so
-/// headless agent futures can run concurrently on the async runtime.
-struct SessionWriter {
+/// headless agent futures can run concurrently on the async runtime. Public so
+/// the TUI can hand the runtime `Driver` a sink for its active conversation.
+pub struct SessionWriter {
     db_path: PathBuf,
     conv_id: Option<i64>,
 }
 
 impl SessionWriter {
+    /// Build a sink that appends to an existing conversation (`conv_id`), or a
+    /// no-op when `conv_id` is `None`.
+    pub fn new(db_path: PathBuf, conv_id: Option<i64>) -> Self {
+        Self { db_path, conv_id }
+    }
+
     fn conv_id(&self) -> Option<i64> {
         self.conv_id
     }
@@ -121,7 +127,15 @@ impl SessionSink for SessionWriter {
         tool_calls: Option<&str>,
         seq: i64,
     ) {
-        SessionWriter::append_message(self, role, content, tool_name, tool_call_id, tool_calls, seq)
+        SessionWriter::append_message(
+            self,
+            role,
+            content,
+            tool_name,
+            tool_call_id,
+            tool_calls,
+            seq,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -188,7 +202,7 @@ pub fn now_epoch_ms() -> u64 {
 }
 
 /// Record agent activity on the shared timestamp, if present.
-fn touch_activity(activity: &Option<Arc<std::sync::atomic::AtomicU64>>) {
+pub(crate) fn touch_activity(activity: &Option<Arc<std::sync::atomic::AtomicU64>>) {
     if let Some(a) = activity {
         a.store(now_epoch_ms(), std::sync::atomic::Ordering::Relaxed);
     }
@@ -230,7 +244,7 @@ pub enum AgentRunEvent {
     },
 }
 
-enum AgentEvent<'a> {
+pub(crate) enum AgentEvent<'a> {
     Started {
         approval: &'a str,
         task: &'a str,
@@ -259,7 +273,7 @@ enum AgentEvent<'a> {
     },
 }
 
-fn emit_event(
+pub(crate) fn emit_event(
     events: bool,
     sender: Option<&tokio::sync::mpsc::UnboundedSender<AgentRunEvent>>,
     event: &AgentEvent,
@@ -484,298 +498,42 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let AgentSetup {
         llm,
         extensions,
-        mut tools,
-        mut history,
+        tools,
+        history,
         session,
-        mut token_stats,
-        mut transcript,
+        token_stats,
+        transcript,
         system_prompt_override,
     } = setup;
 
-    let tool_defs = tools.definitions();
-    let tool_defs_json_chars = serde_json::to_string(&tool_defs)
-        .map(|j| j.chars().count())
-        .unwrap_or(0);
-
-    let approval_label = request.approval_mode.mode_str();
-
-    let mut session_seq = 0i64;
-    session.append_message("user", &request.prompt, None, None, None, session_seq);
-
-    let events = request.events;
-    let event_sender = request.event_sender.clone();
-    let emit = |event: &AgentEvent| emit_event(events, event_sender.as_ref(), event);
-
-    emit(&AgentEvent::Started {
-        approval: approval_label,
-        task: &request.prompt,
-        model: llm.model(),
-    });
-    extensions.dispatch_simple("session_start", serde_json::json!({}));
-    emit(&AgentEvent::Status {
-        message: "thinking",
-    });
-
-    let mut consecutive_errors = 0u32;
-    let final_content = loop {
-        // Dispatch before_turn hook so Lua can compact the conversation
-        // before each provider request (same as the TUI agent loop).
-        {
-            let state = crate::ext::ctx::AppCtxState::new(
-                &tools,
-                &token_stats,
-                request.approval_mode,
-                session.conv_id(),
-                llm.id(),
-                llm.model(),
-                Vec::new(),
-                transcript.clone(),
-            );
-            let ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
-
-            let actions = extensions.dispatch_before_turn(&ctx_cfg);
-            for action in actions {
-                if let Some(new_messages) = action.conversation_replace {
-                    transcript = new_messages;
-                    history = build_chat_history(&transcript, system_prompt_override.as_deref());
-                    let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
-                    token_stats.context_length =
-                        (prompt_chars as f64 / CHARS_PER_TOKEN).ceil() as u64;
-                }
-            }
-        }
-
-        // Request stream with retry
-        let mut stream = None;
-        for attempt in 1..=3 {
-            match llm.chat_stream(history.clone(), tool_defs.clone()).await {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(e) if attempt < 3 => {
-                    emit(&AgentEvent::Status {
-                        message: &format!("retry {attempt}/3: {e}"),
-                    });
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-                Err(e) => {
-                    emit(&AgentEvent::Failed {
-                        message: &e.to_string(),
-                    });
-                    session.end();
-                    return Err(format!("provider error after 3 attempts: {e}"));
-                }
-            }
-        }
-        let mut stream = stream.unwrap();
-
-        // Consume stream
-        let mut assistant_text = String::new();
-        let mut reasoning_text = String::new();
-        let mut reasoning_echo_field: Option<String> = None;
-        let mut tool_calls = Vec::new();
-        let mut stream_error = false;
-        let mut had_usage = false;
-
-        while let Some(chunk) = stream.next().await {
-            touch_activity(&request.activity);
-            match chunk {
-                Ok(ChatEvent::TextDelta(text)) => {
-                    assistant_text.push_str(&text);
-                }
-                Ok(ChatEvent::ReasoningDelta { text, echo_field }) => {
-                    reasoning_text.push_str(&text);
-                    if reasoning_echo_field.is_none() {
-                        reasoning_echo_field = echo_field;
-                    }
-                }
-                Ok(ChatEvent::ToolCall(call)) => {
-                    let summary = format!("{}: {}", call.name, summarize_call_args(&call));
-                    emit(&AgentEvent::ToolCall {
-                        name: &call.name,
-                        summary: &summary,
-                    });
-                    tool_calls.push(call);
-                }
-                Ok(ChatEvent::TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    cached_tokens,
-                    cost,
-                }) => {
-                    token_stats.record_request(
-                        prompt_tokens,
-                        completion_tokens,
-                        cached_tokens,
-                        cost,
-                    );
-                    had_usage = true;
-                    session.record_usage(
-                        llm.id(),
-                        llm.model(),
-                        prompt_tokens,
-                        completion_tokens,
-                        cached_tokens,
-                        cost,
-                        false,
-                    );
-                    if let Some(cb) = &request.on_token_usage {
-                        cb(token_stats.sent, token_stats.received);
-                    }
-                    emit(&AgentEvent::TokenUsage {
-                        sent: token_stats.sent,
-                        received: token_stats.received,
-                    });
-                }
-                Err(e) => {
-                    emit(&AgentEvent::Status {
-                        message: &format!("stream error, will retry: {e}"),
-                    });
-                    stream_error = true;
-                    break;
-                }
-            }
-        }
-
-        if !had_usage && !stream_error {
-            let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
-            let completion_chars = assistant_text.chars().count()
-                + reasoning_text.chars().count()
-                + tool_calls
-                    .iter()
-                    .map(|call| call.arguments.to_string().chars().count())
-                    .sum::<usize>();
-            let prompt_tokens = estimate_tokens(prompt_chars);
-            let completion_tokens = estimate_tokens(completion_chars);
-            token_stats.record_estimate(prompt_chars, completion_chars);
-            session.record_usage(
-                llm.id(),
-                llm.model(),
-                prompt_tokens,
-                completion_tokens,
-                None,
-                None,
-                true,
-            );
-            if let Some(cb) = &request.on_token_usage {
-                cb(token_stats.sent, token_stats.received);
-            }
-            emit(&AgentEvent::TokenUsage {
-                sent: token_stats.sent,
-                received: token_stats.received,
-            });
-        }
-
-        if stream_error {
-            consecutive_errors += 1;
-            if consecutive_errors >= 5 {
-                emit(&AgentEvent::Failed {
-                    message: "too many stream errors",
-                });
-                session.end();
-                return Err("aborted after 5 consecutive stream errors".to_string());
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            continue;
-        }
-        consecutive_errors = 0;
-
-        // No tool calls -> done
-        if tool_calls.is_empty() {
-            session_seq += 1;
-            session.append_message("assistant", &assistant_text, None, None, None, session_seq);
-            break assistant_text;
-        }
-
-        // Push assistant message with tool calls into history
-        let mut assistant = ChatMessage::assistant_with_tools(&assistant_text, tool_calls.clone());
-        if !reasoning_text.is_empty() {
-            assistant.reasoning = Some(crate::llm::Reasoning {
-                text: std::mem::take(&mut reasoning_text),
-                echo_field: reasoning_echo_field.take(),
-            });
-        }
-        history.push(assistant.clone());
-        transcript.push(assistant);
-        session_seq += 1;
-        let tool_calls_json = serde_json::to_string(&tool_calls).ok();
-        session.append_message(
-            "assistant",
-            &assistant_text,
-            None,
-            None,
-            tool_calls_json.as_deref(),
-            session_seq,
-        );
-
-        // Execute tool calls
-        for call in &tool_calls {
-            emit(&AgentEvent::Status {
-                message: &format!("running {}: {}", call.name, summarize_call_args(call)),
-            });
-        }
-
-        let results = execute_tool_calls(
-            &tools,
-            request.approval_mode,
-            tool_calls,
-            &extensions,
-            request.agent_depth,
-        )
-        .await;
-        touch_activity(&request.activity);
-
-        // Store session state (e.g. task_list state) into tool handler so
-        // stateful tools persist across rounds in headless mode.
-        for result in &results {
-            if let Some(ref state) = result.state {
-                let source = result
-                    .pane_page
-                    .as_ref()
-                    .map(|p| p.source.as_str())
-                    .unwrap_or(&result.name);
-                tools.state_map.set(source, "default", state.clone());
-            }
-            if let Some(page) = &result.pane_page
-                && page.is_empty()
-            {
-                tools.state_map.remove(&page.source, "default");
-            }
-        }
-
-        for result in &results {
-            emit(&AgentEvent::ToolResult {
-                name: &result.name,
-                is_error: result.is_error,
-            });
-            session_seq += 1;
-            session.append_message(
-                "tool",
-                &result.content,
-                Some(&result.name),
-                Some(&result.call_id),
-                None,
-                session_seq,
-            );
-            let message = ChatMessage::tool(result.clone());
-            history.push(message.clone());
-            transcript.push(message);
-        }
+    // The loop itself lives in the core `Driver`. Headless runs use the
+    // non-interactive `AutoApprovalGate`; interactive frontends supply their
+    // own gate. This is the single agent loop, shared with every frontend.
+    let driver = crate::runtime::Driver {
+        llm,
+        extensions,
+        tools,
+        session,
+        gate: Arc::new(crate::tools::AutoApprovalGate),
+        approval_mode: request.approval_mode,
+        agent_depth: request.agent_depth,
+        activity: request.activity.clone(),
+        on_token_usage: request.on_token_usage.clone(),
+        events: request.events,
+        event_sender: request.event_sender.clone(),
+        runtime_events: None,
+        reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats,
+        system_prompt_override,
     };
 
-    emit(&AgentEvent::Finished {
-        content: &final_content,
-    });
-    session.end();
-    extensions.dispatch_simple("session_end", serde_json::json!({}));
-
-    Ok(AgentResponse {
-        content: final_content,
-    })
+    driver.run(&request.prompt).await
 }
 
-fn estimate_tokens(chars: usize) -> u32 {
+pub(crate) fn estimate_tokens(chars: usize) -> u32 {
     (chars as f64 / CHARS_PER_TOKEN).ceil() as u32
 }
 
@@ -783,7 +541,10 @@ fn opt_str_chars(s: Option<&str>) -> usize {
     s.map(str::chars).map(Iterator::count).unwrap_or(0)
 }
 
-fn estimate_context_chars(history: &[ChatMessage], tool_defs_json_chars: usize) -> usize {
+pub(crate) fn estimate_context_chars(
+    history: &[ChatMessage],
+    tool_defs_json_chars: usize,
+) -> usize {
     let message_chars: usize = history
         .iter()
         .map(|msg| {
@@ -810,86 +571,7 @@ fn open_headless_session(provider: &str, model: &str) -> SessionWriter {
     }
 }
 
-/// Execute tool calls respecting the approval mode.
-/// Denied/blocked calls get an error result immediately;
-/// allowed calls are dispatched concurrently via `execute_all`.
-async fn execute_tool_calls(
-    tools: &ToolHandler,
-    mode: ApprovalMode,
-    calls: Vec<crate::tools::ToolCall>,
-    extensions: &crate::ext::ExtensionManager,
-    agent_depth: usize,
-) -> Vec<crate::tools::ToolResult> {
-    // Track original index to preserve call order in output.
-    let mut out: Vec<(usize, crate::tools::ToolResult)> = Vec::with_capacity(calls.len());
-    let mut approved: Vec<(usize, crate::tools::ToolCall)> = Vec::new();
-
-    for (i, call) in calls.into_iter().enumerate() {
-        // Dispatch tool_call event, check for blocking.
-        let safety_str = match crate::tools::command_policy::CommandSafety::for_call(&call) {
-            crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
-            crate::tools::command_policy::CommandSafety::Danger => "danger",
-        };
-        let blocked = match extensions.dispatch_tool_call(
-            &call.name,
-            &call.id,
-            &call.arguments,
-            safety_str,
-        ) {
-            crate::ext::EventDispatchResult::Blocked { reason } => Some(reason),
-            crate::ext::EventDispatchResult::Continue => None,
-        };
-        let allows = tools.allows_call(mode, &call);
-
-        match crate::tools::decide_call(blocked, allows) {
-            crate::tools::CallOutcome::Approve => approved.push((i, call)),
-            crate::tools::CallOutcome::Blocked(reason) => {
-                out.push((
-                    i,
-                    crate::tools::ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: reason,
-                        is_error: true,
-                        pane_page: None,
-                        state: None,
-                    },
-                ));
-            }
-            crate::tools::CallOutcome::Denied => {
-                let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
-                out.push((
-                    i,
-                    crate::tools::ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: crate::tools::denied_message(mode, safety),
-                        is_error: true,
-                        pane_page: None,
-                        state: None,
-                    },
-                ));
-            }
-        }
-    }
-
-    // Execute all approved calls concurrently.
-    if !approved.is_empty() {
-        let approved_calls: Vec<crate::tools::ToolCall> =
-            approved.iter().map(|(_, c)| c.clone()).collect();
-        let results = tools.execute_all(approved_calls, agent_depth).await;
-        for ((orig_idx, _call), result) in approved.into_iter().zip(results) {
-            extensions.dispatch_tool_result(&result.name, &result.call_id, result.is_error);
-            out.push((orig_idx, result));
-        }
-    }
-
-    // Restore original call order.
-    out.sort_by_key(|(i, _)| *i);
-    out.into_iter().map(|(_, r)| r).collect()
-}
-
-fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
+pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
     match call.name.as_str() {
         "shell" => call
             .arguments

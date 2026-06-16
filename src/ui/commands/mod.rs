@@ -45,7 +45,7 @@ pub async fn handle(
     _token_stats: &mut TokenStats,
     _renderer: &mut Renderer,
     _term: &mut BoneTerminal,
-    llm: &mut Box<dyn LlmProvider>,
+    llm: &mut std::sync::Arc<dyn LlmProvider>,
     provider_label: &mut String,
     model_label: &mut String,
     custom: &mut config::custom::CustomConfigs,
@@ -112,7 +112,7 @@ fn help(lua_commands: &[(String, String)]) -> String {
 }
 fn model_switch(
     arg: &str,
-    llm: &mut Box<dyn LlmProvider>,
+    llm: &mut std::sync::Arc<dyn LlmProvider>,
     provider_label: &mut String,
     model_label: &mut String,
     custom: &mut config::custom::CustomConfigs,
@@ -121,19 +121,28 @@ fn model_switch(
         return format!("{} ({})", model_label, provider_label);
     }
 
-    let id = llm.id();
+    let id = llm.id().to_string();
     if let Some(entry) = custom.get_provider_entry("providers", &id) {
         let mut entry = entry;
         entry.model = arg.to_string();
         custom.set_provider_entry("providers", &id, &entry);
     }
-    llm.set_model(arg.to_string());
+    // The provider is shared (Arc) with the runtime Driver. Model switches
+    // happen between turns, when the App holds the only reference, so
+    // `get_mut` succeeds; if it's momentarily shared, recreate from config.
+    if let Some(p) = std::sync::Arc::get_mut(llm) {
+        p.set_model(arg.to_string());
+    } else if let Ok(fresh) =
+        providers::create_provider_with_config(&id, &custom.derive_providers_config())
+    {
+        *llm = std::sync::Arc::from(fresh);
+    }
     *model_label = arg.to_string();
     format!("Switched to {} ({})", arg, provider_label)
 }
 async fn provider_switch(
     arg: &str,
-    llm: &mut Box<dyn LlmProvider>,
+    llm: &mut std::sync::Arc<dyn LlmProvider>,
     provider_label: &mut String,
     model_label: &mut String,
     custom: &mut config::custom::CustomConfigs,
@@ -163,7 +172,7 @@ async fn provider_switch(
                 Ok(()) => {
                     let label = format!("{} ({})", new_provider.name(), new_provider.id());
                     let model = new_provider.model().to_string();
-                    *llm = new_provider;
+                    *llm = std::sync::Arc::from(new_provider);
                     *provider_label = label.clone();
                     *model_label = model.clone();
                     custom.set_last_provider(arg);

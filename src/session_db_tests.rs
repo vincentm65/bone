@@ -69,9 +69,11 @@ fn migrate_v1_preserves_user_data() {
     // The v1->v2 column exists and defaults to 0 for the legacy row.
     let is_estimated: i64 = db
         .conn
-        .query_row("SELECT is_estimated FROM usage_events WHERE id = 1", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT is_estimated FROM usage_events WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(is_estimated, 0);
 
@@ -203,8 +205,15 @@ fn tool_calls_roundtrip() {
 
     let tc_json = r#"[{"id":"call_1","name":"shell","arguments":"{\"command\":\"ls\",\"env\":[],\"timeout_ms\":120000}"}]"#;
     db.append_message(
-        conv, "assistant", "Let me check.", None, None, Some(tc_json), 1
-    ).unwrap();
+        conv,
+        "assistant",
+        "Let me check.",
+        None,
+        None,
+        Some(tc_json),
+        1,
+    )
+    .unwrap();
 
     let msgs = db.list_messages(conv, 100).unwrap();
     assert_eq!(msgs.len(), 1);
