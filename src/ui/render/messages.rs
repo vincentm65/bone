@@ -87,7 +87,6 @@ pub fn render_tool(
     }
 
     if !content.is_empty() {
-        lines.push(Line::raw(""));
         for raw_line in content.lines() {
             for visual_line in wrap::wrap_text(raw_line, width) {
                 lines.push(Line::from(Span::styled(

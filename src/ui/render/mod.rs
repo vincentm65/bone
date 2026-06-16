@@ -6,9 +6,8 @@ pub mod messages;
 pub mod wrap;
 
 use messages::wrapped_line_count;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::Line;
-use ratatui::backend::Backend;
 
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, Viewport};
@@ -117,16 +116,25 @@ impl Renderer {
     /// Since ratatui doesn't expose `set_viewport_height()`, we drop the
     /// old terminal and create a fresh one. This is the same approach
     /// Codex uses — the cost is negligible and invisible.
-    pub fn resize_viewport(term: &mut BoneTerminal, old_height: u16, new_height: u16) -> io::Result<()> {
-        // Reposition the cursor to the top of the current viewport so
-        // `compute_inline_size` in the new terminal starts from a
-        // consistent position.  Avoid `term.clear()` — blanking the
-        // viewport causes visible flicker before the next draw fills it.
-        let size = term.size()?;
-        let viewport_top = size.height.saturating_sub(old_height);
-        term.backend_mut()
-            .set_cursor_position(Position::new(0, viewport_top))?;
-        Backend::flush(term.backend_mut())?;
+    pub fn resize_viewport(
+        term: &mut BoneTerminal,
+        _old_height: u16,
+        new_height: u16,
+    ) -> io::Result<()> {
+        // Clear the current viewport region, then recreate the terminal at the
+        // new height. Use ratatui's `term.clear()` rather than a manual
+        // cursor-move + clear: it clears the viewport's ACTUAL tracked area
+        // (not a guess derived from our own `viewport_height`, which can drift
+        // and leave stale rows that stack into duplicated frames) and leaves the
+        // cursor at the old viewport's top.
+        //
+        // Recreating an `Inline(new_height)` viewport at that position lets a
+        // taller viewport grow DOWNWARD: the terminal scrolls the chat above up
+        // into scrollback (preserving it) and the menu fills the freed space,
+        // instead of the new viewport overwriting the recent chat. Because the
+        // old region was just cleared, the scrolled rows are blank, so frames
+        // don't duplicate.
+        term.clear()?;
         Self::replace_terminal(term, new_height)
     }
 
@@ -182,8 +190,12 @@ impl Renderer {
         active_page: usize,
         autocomplete: Option<&super::autocomplete::AutocompleteState>,
     ) -> io::Result<()> {
-        let width = term.size()?.width;
-        let desired = Self::desired_height(input, prompt, width, pages, active_page, autocomplete);
+        let size = term.size()?;
+        // Clamp to the terminal height: an inline viewport taller than the
+        // terminal scrolls and leaves artifacts (see `ensure_viewport_and_draw`).
+        let desired =
+            Self::desired_height(input, prompt, size.width, pages, active_page, autocomplete)
+                .min(size.height.max(1));
         let old = self.viewport_height;
         if desired != old {
             Self::resize_viewport(term, old, desired)?;
@@ -260,7 +272,10 @@ impl Renderer {
                     .iter()
                     .any(|span| span.style.bg == Some(user_background))
                 {
-                    buf.set_style(msg_area, ratatui::style::Style::default().bg(user_background));
+                    buf.set_style(
+                        msg_area,
+                        ratatui::style::Style::default().bg(user_background),
+                    );
                 }
                 Paragraph::new(line.clone())
                     .wrap(Wrap { trim: false })
@@ -317,9 +332,6 @@ impl Renderer {
         self.streaming_source_flushed = content.len();
         self.streaming_lines_flushed = rendered.len();
 
-        if !content.is_empty() || self.streaming_source_flushed > 0 {
-            self.insert_lines_to_scrollback(term, &[ratatui::text::Line::raw("")])?;
-        }
         Ok(())
     }
 
