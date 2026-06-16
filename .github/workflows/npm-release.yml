@@ -49,7 +49,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
       - name: stage binary
         shell: bash
         run: |
