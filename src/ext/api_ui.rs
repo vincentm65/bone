@@ -204,6 +204,20 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table) -> Result<(), String> {
     ui.set("set_highlight", set_highlight)
         .map_err(|e| e.to_string())?;
 
+    // term_width() -> columns. Queries the live terminal size via ioctl on
+    // every call (defaults to 80 when not a tty). Lua is sandboxed so it can't
+    // query the kernel itself; this is the one Rust primitive that gives it.
+    let term_width = lua
+        .create_function(|_, _: ()| {
+            let w = crossterm::terminal::size()
+                .map(|(w, _)| w)
+                .unwrap_or(80);
+            Ok(w)
+        })
+        .map_err(|e| e.to_string())?;
+    ui.set("term_width", term_width)
+        .map_err(|e| e.to_string())?;
+
     api.set("ui", ui).map_err(|e| e.to_string())?;
     Ok(())
 }

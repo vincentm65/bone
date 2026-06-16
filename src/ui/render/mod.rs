@@ -1,5 +1,4 @@
 pub mod backend;
-mod banner;
 mod bottom_pane;
 pub mod markdown;
 pub mod messages;
@@ -369,15 +368,6 @@ impl Renderer {
         term.clear()?;
         crossterm::execute!(term.backend_mut(), crossterm::style::Print("\r\n"))?;
         io::stdout().flush()
-    }
-
-    pub fn render_banner(
-        &self,
-        term: &mut BoneTerminal,
-        provider: &str,
-        model: &str,
-    ) -> io::Result<()> {
-        banner::render(term, provider, model)
     }
 
     /// Push messages that haven't been flushed yet into native terminal scrollback.

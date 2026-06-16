@@ -56,6 +56,8 @@ fn nested_lua_tool_call_does_not_deadlock() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
     let tools = booted.tools;
 

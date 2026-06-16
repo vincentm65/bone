@@ -89,6 +89,8 @@ fn sandbox_blocks_dangerous_apis() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -159,6 +161,8 @@ fn default_tools_boot_cleanly() {
         &mut custom,
         true,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // The boot itself should succeed. ExtensionManager should report available.
@@ -211,6 +215,8 @@ fn lua_tool_schemas_strip_legacy_boolean_required() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let def = booted
@@ -283,6 +289,8 @@ fn tools_call_depth_limit_enforced() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -363,6 +371,8 @@ fn agent_run_depth_limit_enforced() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -454,6 +464,8 @@ fn event_ctx_has_ui_notify_but_not_tools_agent_shell() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // Dispatch a session_start event.
@@ -516,6 +528,8 @@ fn reload_picks_up_new_tools_and_commands() {
         &mut custom,
         true,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
     let names1: Vec<String> = booted1
         .tools
@@ -562,6 +576,8 @@ bone.register_command("reload_test_cmd", {
         &mut custom,
         true,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
     let names2: Vec<String> = booted2
         .tools
@@ -633,6 +649,8 @@ fn reload_snapshots_come_from_same_fresh_vm() {
         &mut custom,
         true,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
     assert!(
         booted1.manager.theme_snapshot().user_msg.is_none(),
@@ -656,6 +674,8 @@ bone.theme.user_msg = "#ff0000"
         &mut custom,
         true,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
     assert!(
         booted2.manager.theme_snapshot().user_msg.is_some(),

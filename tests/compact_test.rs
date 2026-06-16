@@ -35,6 +35,8 @@ fn compact_command_is_registered() {
         &mut custom,
         true,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let cmd_names: Vec<&str> = booted
@@ -76,6 +78,8 @@ fn before_turn_is_valid_event_name() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let registered = lua_global_string(&booted.manager, "_BEFORE_TURN_REGISTERED");
@@ -156,6 +160,8 @@ fn conversation_api_available_in_commands() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // Verify handler registered.
@@ -349,6 +355,8 @@ fn conversation_replace_action_parses() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let lua_arc = booted.manager.lua_arc();
@@ -518,6 +526,8 @@ fn compact_logic_on_small_history_is_noop() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // Load compact.lua into the VM and run a test.
@@ -564,6 +574,8 @@ fn compact_preserves_tool_call_chains() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let lua_arc = booted.manager.lua_arc();
@@ -629,6 +641,8 @@ fn compact_drops_orphan_tool_results() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let lua_arc = booted.manager.lua_arc();
@@ -693,6 +707,8 @@ fn compact_lua_loads_cleanly() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // After boot, the default compact.lua should be loaded.

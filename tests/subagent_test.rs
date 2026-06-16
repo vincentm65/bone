@@ -44,6 +44,8 @@ fn two_agents_registered_and_listed_in_tool() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // The subagent tool should be registered.
@@ -82,6 +84,8 @@ fn no_agents_registered_no_tool() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let defs = booted.tools.definitions();
@@ -109,6 +113,8 @@ fn spawn_lifecycle_no_provider() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -227,6 +233,8 @@ fn dispatch_with_wait_returns_results_inline() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -295,6 +303,8 @@ fn wait_action_collects_dispatched_job() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -383,6 +393,8 @@ fn depth_guard_rejects_spawn_at_depth_1() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // Verify the tool is registered.
@@ -454,6 +466,8 @@ fn rust_subagent_pane_returns_valid_panepage() {
         &mut custom,
         false,
         bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
     );
 
     // Create some fake jobs in the registry.

@@ -360,6 +360,8 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     let llm = resolve_provider(request, &mut custom, &mut providers_config)?;
 
     // Boot Lua extension system and build tool handler.
+    let provider = format!("{} ({})", llm.name(), llm.id());
+    let model = llm.model().to_string();
     let booted = crate::ext::boot_with_tools(
         &crate::config::bone_dir(),
         &std::env::current_dir().unwrap_or_default(),
@@ -368,7 +370,11 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         crate::ext::BootOptions {
             agent_depth: request.agent_depth,
             headless: true,
+            model: model.clone(),
+            provider: provider.clone(),
         },
+        &model,
+        &provider,
     );
     let extensions = booted.manager;
     let tools = booted.tools;

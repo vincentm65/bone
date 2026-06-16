@@ -234,7 +234,14 @@ impl App {
                     &cwd,
                     &mut self.custom_configs,
                     true,
-                    crate::ext::BootOptions::default(),
+                    crate::ext::BootOptions {
+                        agent_depth: 0,
+                        headless: false,
+                        model: self.model.clone(),
+                        provider: self.provider.clone(),
+                    },
+                    &self.model,
+                    &self.provider,
                 );
                 self.extensions = booted.manager;
                 self.tools = booted.tools;

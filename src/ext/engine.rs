@@ -7,12 +7,71 @@ use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table};
 
 use super::types::BootOptions;
 
+/// Default `init.lua` content — defines `bone.banner` for the startup/clear banner.
+const DEFAULT_INIT_LUA: &str = r#"-- Bone init.lua
+-- Customize or replace this file to change the banner and other Lua hooks.
+
+-- Default banner function. Override to change the startup/clear banner.
+-- Available globals:
+--   bone.version     — e.g. "2.1.0"
+--   bone.cwd         — current working directory
+--   bone.model       — model name (e.g. "gpt-4o")
+--   bone.provider    — provider name (e.g. "OpenAI (openai)")
+--   bone.term_width  — terminal width in columns (e.g. 120)
+--   bone.headless    — true if running without TUI
+--   bone.config_dir  — path to ~/.bone-rust
+--
+-- Return a table of strings. Each string is one banner line, rendered as
+-- plain text (no per-substring color). Rust only bolds a line that equals
+-- exactly "bone". The full-width box is drawn here so it adapts to term_width.
+local function width(s)           -- display width (codepoint count)
+    local n = 0
+    for _ in utf8.codes(s) do n = n + 1 end
+    return n
+end
+
+local function short_dir(path)    -- path -> first/.../last
+    local parts = {}
+    for seg in path:gmatch("[^/]+") do parts[#parts + 1] = seg end
+    if #parts > 2 then
+        local first = (path:sub(1, 1) == "/") and "/" or parts[1]
+        local last = parts[#parts]
+        local sep = (first:sub(-1) == "/") and "" or "/"
+        return first .. sep .. ".../" .. last
+    end
+    return path
+end
+
+bone.banner = function()
+    local w = bone.api.ui.term_width()
+    local content_w = w - 3
+
+    -- Padded row: │ left  <pad>  right │, filling w columns.
+    local function row(left, right)
+        local pad = math.max(0, content_w - width(left) - width(right))
+        local spaces = math.max(0, pad - 1)
+        return "│ " .. left .. (" "):rep(spaces) .. right .. " │"
+    end
+
+    local rule = ("─"):rep(math.max(0, w - 2))
+
+    return {
+        "╭" .. rule .. "╮",
+        row("bone", "v" .. bone.version),
+        row(bone.provider .. " · " .. bone.model, short_dir(bone.cwd)),
+        "╰" .. rule .. "╯",
+    }
+end
+"#;
+
 /// Build a ready-to-use Lua state with the `bone` table populated.
 pub(crate) fn create_engine(
     version: &str,
     cwd: &Path,
     config_dir: &Path,
     opts: BootOptions,
+    model: &str,
+    provider: &str,
 ) -> Result<Lua, String> {
     let lua = Lua::new();
 
@@ -38,6 +97,10 @@ pub(crate) fn create_engine(
         .map_err(|e| e.to_string())?;
     bone.set("headless", opts.headless)
         .map_err(|e| e.to_string())?;
+
+    // Model and provider — set before init.lua runs so banner() can read them.
+    bone.set("model", model).map_err(|e| e.to_string())?;
+    bone.set("provider", provider).map_err(|e| e.to_string())?;
 
     // bone.log table
     let log = create_log_table(&lua).map_err(|e| e.to_string())?;
@@ -89,7 +152,8 @@ pub(crate) fn create_engine(
 pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
     let init_path = config_dir.join("init.lua");
     if !init_path.exists() {
-        std::fs::write(&init_path, "").map_err(|e| format!("failed to create init.lua: {e}"))?;
+        let default_init = DEFAULT_INIT_LUA;
+        std::fs::write(&init_path, default_init).map_err(|e| format!("failed to create init.lua: {e}"))?;
         return Ok(false);
     }
 

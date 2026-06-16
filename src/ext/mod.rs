@@ -30,8 +30,8 @@ use std::path::Path;
 /// Creates the VM, populates the `bone` global table, executes
 /// `~/.bone-rust/init.lua` if it exists, and collects registered tools.
 /// Failures are logged but never crash the app.
-pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions) -> BootResult {
-    loader::boot(config_dir, cwd, opts)
+pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions, model: &str, provider: &str) -> BootResult {
+    loader::boot(config_dir, cwd, opts, model, provider)
 }
 
 /// Full boot sequence: load tools, boot extensions, register Lua tools,
@@ -43,11 +43,13 @@ pub fn boot_with_tools(
     custom: &mut super::config::custom::CustomConfigs,
     sync: bool,
     opts: BootOptions,
+    model: &str,
+    provider: &str,
 ) -> BootedTools {
     let BootResult {
         manager: extensions,
         tools: lua_tools,
-    } = boot(config_dir, cwd, opts);
+    } = boot(config_dir, cwd, opts, model, provider);
 
     let mut loaded = super::tools::load_tools();
     super::tools::register_lua_tools(&mut loaded, lua_tools);

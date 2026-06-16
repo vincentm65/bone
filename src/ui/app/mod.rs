@@ -106,15 +106,36 @@ impl App {
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
         // Boot Lua extension system and build tool handler.
+        let opts = crate::ext::BootOptions {
+            agent_depth: 0,
+            headless: false,
+            model: model.clone(),
+            provider: provider.clone(),
+        };
         let booted = crate::ext::boot_with_tools(
             &crate::config::bone_dir(),
             &std::env::current_dir().unwrap_or_default(),
             &mut custom_configs,
             true,
-            crate::ext::BootOptions::default(),
+            opts,
+            &model,
+            &provider,
         );
         let extensions = booted.manager;
         let tools = booted.tools;
+
+        // Set model/provider on the Lua table (for banner and other Lua code).
+        let lua = extensions.lua_handle();
+        let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
+        let bone = lua.globals().get::<mlua::Table>("bone").ok();
+        if let Some(bone) = bone {
+            let _ = bone.set("model", model.clone());
+            let _ = bone.set("provider", provider.clone());
+        }
+        drop(lua);
+
+        // Collect banner text from `bone.banner()` (empty if undefined).
+        let banner = Self::collect_banner(&extensions);
 
         // Create renderer with Lua theme applied over defaults.
         let mut renderer = Renderer::new();
@@ -126,9 +147,13 @@ impl App {
         // Capture keymap snapshot before `extensions` is moved into the struct.
         let lua_keymap = extensions.keymap_snapshot().clone();
 
-        let messages = vec![Message::system(
+        let mut messages = Vec::new();
+        if !banner.is_empty() {
+            messages.push(Message::system(banner));
+        }
+        messages.push(Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
-        )];
+        ));
 
         Ok(Self {
             messages,
@@ -170,6 +195,44 @@ impl App {
             quit_despite_jobs: false,
         })
     }
+    /// Collect banner text from `bone.banner()` Lua function.
+    /// Returns lines joined with newlines, or empty if undefined/nothing.
+    fn collect_banner(extensions: &crate::ext::ExtensionManager) -> String {
+        let lua = extensions.lua_handle();
+        let lua = match lua.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("bone: warning: Lua mutex poisoned: {e}");
+                return String::new();
+            }
+        };
+        let bone = match lua.globals().get::<mlua::Table>("bone") {
+            Ok(b) => b,
+            Err(_) => return String::new(),
+        };
+        let banner_fn: mlua::Function = match bone.get("banner") {
+            Ok(f) => f,
+            Err(_) => return String::new(),
+        };
+        match banner_fn.call::<mlua::Table>(()) {
+            Ok(tbl) => {
+                let mut lines = Vec::new();
+                for item in tbl.sequence_values::<mlua::String>() {
+                    if let Ok(item_str) = item {
+                        if let Ok(s) = item_str.to_str() {
+                            lines.push(s.to_string());
+                        }
+                    }
+                }
+                lines.join("\n")
+            }
+            Err(e) => {
+                eprintln!("bone: warning: banner() call failed: {e}");
+                String::new()
+            }
+        }
+    }
+
     /// Dispatch a `session_end` event to Lua handlers.
     pub fn dispatch_session_end(&self) {
         self.extensions
@@ -402,13 +465,15 @@ impl App {
 
         self.messages.clear();
         self.transcript.clear();
+        let banner = Self::collect_banner(&self.extensions);
+        if !banner.is_empty() {
+            self.messages.push(Message::system(banner));
+        }
         self.messages.push(Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
         ));
         self.messages.push(Message::system(summary));
-        self.renderer.scrollback_cursor = self.messages.len();
-        self.renderer
-            .render_banner(term, &self.provider, &self.model)?;
+        self.renderer.scrollback_cursor = 0;
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.cancel_streaming = false;
@@ -442,8 +507,6 @@ impl App {
 
         self.renderer
             .flush_new_to_scrollback(&self.messages, &mut terminal)?;
-        self.renderer
-            .render_banner(&mut terminal, &self.provider, &self.model)?;
         self.refresh_subagent_pane();
         self.force_redraw(&mut terminal)?;
 

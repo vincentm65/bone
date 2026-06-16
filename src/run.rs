@@ -169,7 +169,11 @@ async fn expand_lua_command(
             ext::BootOptions {
                 agent_depth: 0,
                 headless: true,
+                model: model.clone().unwrap_or_default(),
+                provider: provider.clone().unwrap_or_default(),
             },
+            &model.clone().unwrap_or_default(),
+            &provider.clone().unwrap_or_default(),
         );
         let lua = booted.manager.lua_handle();
         let lua = lua.lock().unwrap_or_else(|e| e.into_inner());

@@ -12,13 +12,17 @@ use crate::tools::ToolCall;
 /// Exposed to Lua as `bone.agent_depth` and `bone.headless` before
 /// `init.lua` and tool/command files execute, so scripts can adapt
 /// (e.g. the subagent tool refuses to register inside sub-agent VMs).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct BootOptions {
     /// Nesting depth of the agent owning this VM (0 = top-level).
     pub agent_depth: usize,
     /// True when running without the TUI (CLI/headless agent). Background
     /// job auto-injection is unavailable, so tools must block for results.
     pub headless: bool,
+    /// Model name for the banner (e.g. "gpt-4o").
+    pub model: String,
+    /// Provider name for the banner (e.g. "OpenAI (openai)").
+    pub provider: String,
 }
 
 /// Result of dispatching an event through all Lua handlers.
