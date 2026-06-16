@@ -81,7 +81,7 @@ fn key_matches(key_str: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
                 _ => {}
             }
         }
-        key_part = parts.last().copied().unwrap_or(&key_part);
+        key_part = parts.last().copied().unwrap_or(key_part);
     }
 
     if modifiers != expected_mods {

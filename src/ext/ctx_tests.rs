@@ -218,8 +218,8 @@ fn make_session_current_optional_fields() {
     let result: Value = fn_.call(()).unwrap();
     let tbl: serde_json::Value = lua.from_value(result).unwrap();
     assert_eq!(tbl["id"], 1);
-    assert!(tbl.get("provider").map_or(true, |v| v.is_null()));
-    assert!(tbl.get("model").map_or(true, |v| v.is_null()));
+    assert!(tbl.get("provider").is_none_or(|v| v.is_null()));
+    assert!(tbl.get("model").is_none_or(|v| v.is_null()));
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn spawn_err_omits_content_field() {
     let tbl: serde_json::Value = lua.from_value(result).unwrap();
     assert_eq!(tbl["ok"], false);
     assert_eq!(tbl["error"], "sub-agents cannot spawn");
-    assert!(tbl.get("content").map_or(true, |v| v.is_null()));
+    assert!(tbl.get("content").is_none_or(|v| v.is_null()));
 }
 
 #[test]

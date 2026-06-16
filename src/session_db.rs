@@ -503,6 +503,7 @@ impl SessionDb {
 
     /// Highest `seq` stored for a conversation, or 0 if it has no messages.
     /// Used to continue seq numbering when resuming a conversation.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
     pub(crate) fn max_message_seq(&self, conversation_id: i64) -> rusqlite::Result<i64> {
         self.conn.query_row(
             "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",

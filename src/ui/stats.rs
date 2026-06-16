@@ -39,11 +39,10 @@ impl RawModeGuard {
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        if !self.was_enabled {
-            if let Err(e) = crossterm::terminal::disable_raw_mode() {
+        if !self.was_enabled
+            && let Err(e) = crossterm::terminal::disable_raw_mode() {
                 eprintln!("bone: warning: failed to disable raw mode: {e}");
             }
-        }
     }
 }
 
@@ -295,7 +294,7 @@ fn draw_chart(
 
     let mut lines = Vec::new();
     for b in shown {
-        let tokens = bucket_tokens(*b);
+        let tokens = bucket_tokens(b);
         let filled = ((tokens as f64 / max_tokens as f64) * bar_width as f64).round() as usize;
 
         lines.push(Line::from(vec![

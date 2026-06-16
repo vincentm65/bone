@@ -149,6 +149,47 @@ async fn driver_runs_simple_turn_to_completion() {
 }
 
 #[tokio::test]
+async fn driver_outcome_carries_usage_records() {
+    // The TUI runs the Driver with a NullSessionSink and persists usage events
+    // from the returned outcome, so the outcome must surface per-request usage.
+    let (driver, prompt) = driver_with(
+        vec![
+            ChatEvent::TextDelta("hi".into()),
+            ChatEvent::TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                cached_tokens: Some(4),
+                cost: None,
+            },
+        ],
+        ApprovalMode::Safe,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.usage.len(), 1, "one provider-reported usage record");
+    let u = &outcome.usage[0];
+    assert_eq!(u.prompt_tokens, 10);
+    assert_eq!(u.completion_tokens, 2);
+    assert_eq!(u.cached_tokens, Some(4));
+    assert!(!u.is_estimated, "provider-reported usage is not estimated");
+}
+
+#[tokio::test]
+async fn driver_outcome_usage_falls_back_to_estimate() {
+    // When the provider streams no TokenUsage, the Driver estimates and still
+    // records a (flagged) usage entry in the outcome.
+    let (driver, prompt) =
+        driver_with(vec![ChatEvent::TextDelta("hi".into())], ApprovalMode::Safe);
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.usage.len(), 1, "one estimated usage record");
+    assert!(
+        outcome.usage[0].is_estimated,
+        "missing provider usage falls back to an estimate"
+    );
+}
+
+#[tokio::test]
 async fn driver_executes_tool_call_then_finishes() {
     // Turn 1: the model requests a read-only tool (allowed in Safe mode). The
     // file does not exist, so the tool returns an error result — but the point
@@ -226,11 +267,10 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
     // skipped (error result) — proving channel approval overrides auto-allow.
     let mut tool_error: Option<bool> = None;
     while let Ok(ev) = erx.try_recv() {
-        if let AgentRunEvent::ToolResult { name, is_error, .. } = ev {
-            if name == "read_file" {
+        if let AgentRunEvent::ToolResult { name, is_error, .. } = ev
+            && name == "read_file" {
                 tool_error = Some(is_error);
             }
-        }
     }
     assert_eq!(
         tool_error,
@@ -357,12 +397,11 @@ async fn driver_forwards_tool_pane_to_runtime_event() {
 
     let mut saw_pane = false;
     while let Ok(ev) = rx.try_recv() {
-        if let RuntimeEvent::Pane { pane } = ev {
-            if pane.source == "pane_tool" {
+        if let RuntimeEvent::Pane { pane } = ev
+            && pane.source == "pane_tool" {
                 assert!(matches!(&pane.lines[0], PaneLineSpec::Plain(s) if s == "hello from tool"));
                 saw_pane = true;
             }
-        }
     }
     assert!(
         saw_pane,
@@ -407,14 +446,10 @@ async fn driver_interact_reply_completes_turn() {
 
     let run = tokio::spawn(async move { driver.run(prompt).await });
     let spec = loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        if let RuntimeEvent::Interact { spec } = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("runtime event timed out")
-            .expect("runtime event")
-        {
-            RuntimeEvent::Interact { spec } => break spec,
-            _ => {}
-        }
+            .expect("runtime event") { break spec }
     };
     assert_eq!(spec.question, "pick one");
     assert!(registry.resolve(spec.id, serde_json::json!({ "value": "yes" })));

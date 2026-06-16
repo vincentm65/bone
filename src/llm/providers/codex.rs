@@ -247,6 +247,7 @@ pub fn build_instructions(messages: &[ChatMessage]) -> String {
 /// Text is NOT emitted here — it was already streamed via
 /// `response.output_text.delta` events, and re-emitting would
 /// duplicate content and confuse the LLM on subsequent rounds.
+#[allow(clippy::type_complexity)]
 fn extract_response_events(
     resp: &CodexResponse,
 ) -> (Vec<ChatEvent>, Option<(u32, u32, Option<u32>)>) {

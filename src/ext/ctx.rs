@@ -166,7 +166,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         let lvl = level.to_string();
         let log_fn = lua.create_function(move |lua, val: Value| {
             let msg: String = lua.from_value(val).unwrap_or_default();
-            let _ = eprintln!("bone-lua [{lvl}]: {msg}");
+            eprintln!("bone-lua [{lvl}]: {msg}");
             Ok(())
         })?;
         log_table.set(*level, log_fn)?;
@@ -454,7 +454,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
             let pane = crate::pane_content::PaneContent::from_json(&val)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -819,7 +819,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     ctx.set("tools", tools_table)?;
 
     // ctx.agent.run(prompt, opts?) → { ok, content, error }
-    add_agent_table(&lua, &ctx, cfg)?;
+    add_agent_table(lua, &ctx, cfg)?;
 
     // ctx.config — read-only access to configuration.
     let config_table = lua.create_table()?;
@@ -842,18 +842,18 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             return Ok(Value::Nil);
         };
         // Look in fields array for matching key, then top-level mapping.
-        if let Some(fields) = mapping.get(&serde_yaml::Value::String("fields".into()))
+        if let Some(fields) = mapping.get(serde_yaml::Value::String("fields".into()))
             && let Some(fields_arr) = fields.as_sequence()
         {
             for field in fields_arr {
                 if let Some(field_map) = field.as_mapping() {
-                    let field_key = field_map.get(&serde_yaml::Value::String("key".into()));
+                    let field_key = field_map.get(serde_yaml::Value::String("key".into()));
                     if field_key.and_then(|v| v.as_str()) == Some(&key) {
                         // Prefer "value", fall back to "default".
                         let val = field_map
-                            .get(&serde_yaml::Value::String("value".into()))
+                            .get(serde_yaml::Value::String("value".into()))
                             .or_else(|| {
-                                field_map.get(&serde_yaml::Value::String("default".into()))
+                                field_map.get(serde_yaml::Value::String("default".into()))
                             });
                         if let Some(v) = val {
                             return yaml_to_lua(lua, v);
@@ -863,7 +863,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             }
         }
         // Fall back to top-level key in the mapping.
-        if let Some(v) = mapping.get(&serde_yaml::Value::String(key.clone())) {
+        if let Some(v) = mapping.get(serde_yaml::Value::String(key.clone())) {
             return yaml_to_lua(lua, v);
         }
         Ok(Value::Nil)
@@ -967,8 +967,8 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                 if let Some(tci) = msg.tool_call_id {
                     t.set("tool_call_id", tci)?;
                 }
-                if let Some(ref tc_json) = msg.tool_calls {
-                    if let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json) {
+                if let Some(ref tc_json) = msg.tool_calls
+                    && let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json) {
                         let tc_table = lua.create_table()?;
                         for tc_val in tc_vec {
                             let tc = lua.create_table()?;
@@ -985,7 +985,6 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                         }
                         t.set("tool_calls", tc_table)?;
                     }
-                }
                 result.push(t)?;
             }
             Ok(Value::Table(result))
@@ -1018,8 +1017,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                     Value::Number(n) => rusqlite::types::Value::Real(*n),
                     Value::String(s) => rusqlite::types::Value::Text(
                         s.to_str()
-                            .ok()
-                            .and_then(|b| Some(b.to_string()))
+                            .ok().map(|b| b.to_string())
                             .unwrap_or_default(),
                     ),
                     Value::Nil => rusqlite::types::Value::Null,
@@ -1069,7 +1067,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         let emit_pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
             let pane = crate::pane_content::PaneContent::from_json(&val)
-                .map_err(|e| mlua::Error::external(e))?;
+                .map_err(mlua::Error::external)?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -1249,18 +1247,13 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                             result = &mut agent_future => {
                                 // Drain remaining events.
                                 let mut drain_err: Option<String> = None;
-                                loop {
-                                    match rx.try_recv() {
-                                        Ok(event) => {
-                                            if let Err(e) = dispatch_event(lua, &event,
-                                                &on_started, &on_status, &on_tool_call,
-                                                &on_tool_result, &on_token_usage,
-                                                &on_finished, &on_failed) {
-                                                drain_err = Some(format!("callback error: {e}"));
-                                                break;
-                                            }
-                                        }
-                                        Err(_) => break,
+                                while let Ok(event) = rx.try_recv() {
+                                    if let Err(e) = dispatch_event(lua, &event,
+                                        &on_started, &on_status, &on_tool_call,
+                                        &on_tool_result, &on_token_usage,
+                                        &on_finished, &on_failed) {
+                                        drain_err = Some(format!("callback error: {e}"));
+                                        break;
                                     }
                                 }
                                 if let Some(e) = drain_err {
@@ -1279,18 +1272,13 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                             _ = await_cancelled(&cancelled) => {
                                 // Drain remaining events.
                                 let mut drain_err: Option<String> = None;
-                                loop {
-                                    match rx.try_recv() {
-                                        Ok(event) => {
-                                            if let Err(e) = dispatch_event(lua, &event,
-                                                &on_started, &on_status, &on_tool_call,
-                                                &on_tool_result, &on_token_usage,
-                                                &on_finished, &on_failed) {
-                                                drain_err = Some(format!("callback error: {e}"));
-                                                break;
-                                            }
-                                        }
-                                        Err(_) => break,
+                                while let Ok(event) = rx.try_recv() {
+                                    if let Err(e) = dispatch_event(lua, &event,
+                                        &on_started, &on_status, &on_tool_call,
+                                        &on_tool_result, &on_token_usage,
+                                        &on_finished, &on_failed) {
+                                        drain_err = Some(format!("callback error: {e}"));
+                                        break;
                                     }
                                 }
                                 if let Some(e) = drain_err {
@@ -1550,6 +1538,7 @@ fn warn_unknown_opts(opts: &Option<Table>, allowed: &[&str]) {
 }
 
 /// Parse common opts for `run`, `run_stream`, and `spawn`.
+#[allow(clippy::type_complexity)]
 fn parse_agent_opts(
     opts: &Option<Table>,
     inherited_approval: crate::tools::ApprovalMode,
@@ -1621,6 +1610,7 @@ fn opts_cb(opts: &Option<Table>, key: &str) -> Option<mlua::Function> {
 }
 
 /// Dispatch a single RuntimeEvent to the appropriate Lua callback.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_event(
     lua: &Lua,
     event: &crate::runtime::RuntimeEvent,
@@ -1668,11 +1658,16 @@ fn dispatch_event(
                 cb.call::<()>(Value::Table(t))?;
             }
         }
-        RuntimeEvent::TokenUsage { sent, received } => {
+        RuntimeEvent::TokenUsage {
+            sent,
+            received,
+            context_length,
+        } => {
             if let Some(cb) = on_token_usage {
                 let t = lua.create_table()?;
                 t.set("sent", *sent as i64)?;
                 t.set("received", *received as i64)?;
+                t.set("context_length", *context_length as i64)?;
                 cb.call::<()>(Value::Table(t))?;
             }
         }
@@ -1801,6 +1796,7 @@ fn estimate_tokens(chars: u64) -> u64 {
 /// Per-provider usage breakdown for the current conversation, mapped into the
 /// Lua-facing `UsageProviderContext`. Empty when there is no session DB,
 /// conversation, or the query fails.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
 pub(crate) fn usage_by_provider_context(
     db: Option<&crate::session_db::SessionDb>,
     session_id: Option<i64>,
@@ -1863,8 +1859,7 @@ fn tostring_lua_value(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::String(s) => s
             .to_str()
-            .ok()
-            .and_then(|b| Some(b.to_string()))
+            .ok().map(|b| b.to_string())
             .unwrap_or_default(),
         Value::Boolean(b) => b.to_string(),
         Value::Nil => "null".to_string(),

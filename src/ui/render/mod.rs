@@ -6,6 +6,8 @@ pub mod messages;
 pub mod wrap;
 
 use messages::wrapped_line_count;
+use ratatui::backend::Backend;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
@@ -146,29 +148,16 @@ impl Renderer {
         terminal
     }
 
-    /// Recreate the terminal with a new viewport height.
-    ///
-    /// Since ratatui doesn't expose `set_viewport_height()`, we drop the
-    /// old terminal and create a fresh one. This is the same approach
-    /// Codex uses — the cost is negligible and invisible.
     pub fn resize_viewport(
         term: &mut BoneTerminal,
         _old_height: u16,
         new_height: u16,
     ) -> io::Result<()> {
         // Clear the current viewport region, then recreate the terminal at the
-        // new height. Use ratatui's `term.clear()` rather than a manual
-        // cursor-move + clear: it clears the viewport's ACTUAL tracked area
-        // (not a guess derived from our own `viewport_height`, which can drift
-        // and leave stale rows that stack into duplicated frames) and leaves the
-        // cursor at the old viewport's top.
-        //
-        // Recreating an `Inline(new_height)` viewport at that position lets a
-        // taller viewport grow DOWNWARD: the terminal scrolls the chat above up
-        // into scrollback (preserving it) and the menu fills the freed space,
-        // instead of the new viewport overwriting the recent chat. Because the
-        // old region was just cleared, the scrolled rows are blank, so frames
-        // don't duplicate.
+        // new height. Use ratatui's `term.clear()` rather than manual cursor
+        // movement: it clears the viewport's actual tracked area and positions
+        // the replacement inline viewport at the old viewport top, so UI rows
+        // do not leak into scrollback when the pane grows or shrinks.
         term.clear()?;
         Self::replace_terminal(term, new_height)
     }
@@ -199,7 +188,17 @@ impl Renderer {
         }
         let lines = &lines[..];
 
-        let row_count = logical_lines_row_count(lines, term.size()?.width.max(1));
+        let size = term.size()?;
+        let w = size.width.max(1);
+
+        // When viewport fills the screen, bypass ratatui's insert_before
+        // (which flushes per-step causing flicker) and write directly via
+        // crossterm in a single atomic flush.
+        if self.viewport_height >= size.height {
+            return self.scrollback_insert_direct(term, lines, w, None);
+        }
+
+        let row_count = logical_lines_row_count(lines, w);
         term.insert_before(row_count, |buf| {
             let mut row = 0u16;
             for line in lines {
@@ -218,6 +217,117 @@ impl Renderer {
         })
     }
 
+    /// Insert scrollback lines directly via crossterm in a single atomic flush.
+    ///
+    /// Used when the viewport fills the entire terminal screen, because
+    /// ratatui's `insert_before_scrolling_regions` flushes between draw+scroll
+    /// steps in that code path, causing visible flicker as the terminal
+    /// renders intermediate states.
+    ///
+    /// The approach mirrors what ratatui does semantically but in one write:
+    ///   1. Draw scrollback content at the top of the screen (overwriting
+    ///      viewport rows).
+    ///   2. ScrollUp to push those rows into terminal scrollback.
+    ///   3. Redraw the borrowed viewport rows at the new (now-blank) bottom.
+    #[cfg(not(windows))]
+    fn scrollback_insert_direct(
+        &mut self,
+        term: &mut BoneTerminal,
+        lines: &[Line<'static>],
+        term_width: u16,
+        user_bg: Option<ratatui::style::Color>,
+    ) -> io::Result<()> {
+        use ratatui::style::Style;
+
+        let h = term.size()?.height;
+        let n = logical_lines_row_count(lines, term_width).min(h);
+        if n == 0 {
+            return Ok(());
+        }
+
+        // 1. Render scrollback lines into a temporary buffer at (0, 0)..(w, n)
+        let mut sb_buf = Buffer::empty(Rect::new(0, 0, term_width, n));
+        {
+            let mut row: u16 = 0;
+            for line in lines {
+                let height = wrapped_line_count(line, term_width);
+                if row >= n {
+                    break;
+                }
+                let area = Rect {
+                    x: 0,
+                    y: row,
+                    width: term_width,
+                    height: (height).min(n - row),
+                };
+                if let Some(bg) = user_bg
+                    && line.spans.iter().any(|span| span.style.bg == Some(bg)) {
+                        sb_buf.set_style(area, Style::default().bg(bg));
+                    }
+                ratatui::widgets::Paragraph::new(line.clone())
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .render(area, &mut sb_buf);
+                row = row.saturating_add(height);
+            }
+        }
+
+        // 2. Snapshot the top N rows of the current viewport buffer.
+        let top_cells: Vec<(u16, u16, Cell)> = {
+            let buf = term.current_buffer_mut();
+            let area = buf.area();
+            let top_n = n.min(area.height);
+            let w = term_width.min(area.width);
+            let mut cells = Vec::with_capacity((top_n as usize) * (w as usize));
+            for y in 0..top_n {
+                for x in 0..w {
+                    cells.push((x, y, buf.cell((x, y)).cloned().unwrap_or_default()));
+                }
+            }
+            cells
+        };
+
+        // 3. Collect scrollback cells at (0, 0)..(w-1, n-1)
+        let sb_cells: Vec<(u16, u16, Cell)> = {
+            let mut cells = Vec::with_capacity((n as usize) * (term_width as usize));
+            for y in 0..n {
+                for x in 0..term_width {
+                    cells.push((x, y, sb_buf.cell((x, y)).cloned().unwrap_or_default()));
+                }
+            }
+            cells
+        };
+
+        // 4. Queue all operations: draw scrollback at top → scroll up →
+        //    redraw borrowed rows at bottom. Then flush once.
+        let backend = term.backend_mut();
+
+        // 4a. Draw scrollback cells at top of screen
+        backend.draw(sb_cells.iter().map(|(x, y, c)| (*x, *y, c)))?;
+
+        // 4b. Reset scroll region to full screen, then scroll up N.
+        //     \x1b[r resets to full screen; \x1b[{n}S scrolls up N lines.
+        {
+            let writer = backend.inner.writer_mut();
+            crossterm::queue!(
+                writer,
+                crossterm::style::Print(format!("\x1b[r\x1b[{}S", n)),
+            )?;
+        }
+
+        // 4c. Redraw the borrowed viewport rows at the new bottom
+        let new_bottom_start = h.saturating_sub(n);
+        backend.draw(
+            top_cells
+                .iter()
+                .map(|(x, y, c)| (*x, new_bottom_start + *y, c)),
+        )?;
+
+        // 4d. One flush for everything — terminal renders single atomic frame
+        Write::flush(backend)?;
+
+        Ok(())
+    }
+
     /// Ensure the inline viewport height matches the content currently drawn
     /// in it. Streaming paths call this directly because they repaint without
     /// going through `App::redraw`.
@@ -231,8 +341,6 @@ impl Renderer {
         autocomplete: Option<&super::autocomplete::AutocompleteState>,
     ) -> io::Result<()> {
         let size = term.size()?;
-        // Clamp to the terminal height: an inline viewport taller than the
-        // terminal scrolls and leaves artifacts (see `ensure_viewport_and_draw`).
         let desired =
             Self::desired_height(input, prompt, size.width, pages, active_page, autocomplete)
                 .min(size.height.max(1));
@@ -300,32 +408,39 @@ impl Renderer {
         let rendered = self.dedup_scrollback_blanks(&rendered);
         let user_background = self.theme.user_msg_bg;
 
-        term.insert_before(logical_lines_row_count(&rendered, terminal_width), |buf| {
-            let mut row = 0u16;
-            for line in &rendered {
-                let height = wrapped_line_count(line, buf.area.width.max(1));
-                let msg_area = Rect {
-                    x: 0,
-                    y: row,
-                    width: buf.area.width,
-                    height,
-                };
-                if line
-                    .spans
-                    .iter()
-                    .any(|span| span.style.bg == Some(user_background))
-                {
-                    buf.set_style(
-                        msg_area,
-                        ratatui::style::Style::default().bg(user_background),
-                    );
+        let row_count = logical_lines_row_count(&rendered, terminal_width);
+        let w = terminal_width.max(1);
+        let h = term.size()?.height;
+        if self.viewport_height >= h {
+            self.scrollback_insert_direct(term, &rendered, w, Some(user_background))?;
+        } else {
+            term.insert_before(row_count, |buf| {
+                let mut row = 0u16;
+                for line in &rendered {
+                    let height = wrapped_line_count(line, buf.area.width.max(1));
+                    let msg_area = Rect {
+                        x: 0,
+                        y: row,
+                        width: buf.area.width,
+                        height,
+                    };
+                    if line
+                        .spans
+                        .iter()
+                        .any(|span| span.style.bg == Some(user_background))
+                    {
+                        buf.set_style(
+                            msg_area,
+                            ratatui::style::Style::default().bg(user_background),
+                        );
+                    }
+                    Paragraph::new(line.clone())
+                        .wrap(Wrap { trim: false })
+                        .render(msg_area, buf);
+                    row = row.saturating_add(height);
                 }
-                Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .render(msg_area, buf);
-                row = row.saturating_add(height);
-            }
-        })?;
+            })?;
+        }
 
         self.scrollback_cursor = messages.len();
         Ok(())

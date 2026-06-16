@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use super::wrap;
@@ -318,6 +318,7 @@ impl super::Renderer {
         let active_page = args.active_page;
         let ac = args.autocomplete;
         let area = frame.area();
+        frame.render_widget(Clear, area);
         let sep = "─".repeat(area.width as usize);
 
         // Reserve rows from the bottom: status bar (1) + page region
@@ -645,11 +646,11 @@ impl super::Renderer {
                     // Overlay must not overrun the page's own bottom separator /
                     // tab indicator (multi) — stop at the content region's end.
                     let overlay_bottom_y = content_start_y + layout.content_rows;
-                    if let Some(ref interaction) = page.interaction {
-                        if interaction.is_active() {
+                    if let Some(ref interaction) = page.interaction
+                        && interaction.is_active() {
                             let _extra = Self::render_interactive_overlay(
                                 frame,
-                                &page,
+                                page,
                                 interaction,
                                 overlay_start_y,
                                 Rect {
@@ -660,7 +661,6 @@ impl super::Renderer {
                                 &self.theme,
                             );
                         }
-                    }
                 }
 
                 if layout.multi {
@@ -779,15 +779,14 @@ impl super::Renderer {
             status_spans.push(sep());
         }
 
-        if status_info.show("status_show_timer") {
-            if let Some(ref elapsed) = status_info.elapsed {
+        if status_info.show("status_show_timer")
+            && let Some(ref elapsed) = status_info.elapsed {
                 status_spans.push(Span::styled(
                     elapsed.clone(),
                     Style::default().fg(self.theme.status_text),
                 ));
                 status_spans.push(sep());
             }
-        }
 
         if status_info.show("status_show_spinner") && status_info.streaming {
             status_spans.push(Span::styled(

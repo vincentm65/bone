@@ -50,7 +50,7 @@ fn string_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    string_or_default_with(deserializer, || String::new())
+    string_or_default_with(deserializer, String::new)
 }
 
 fn string_or_default_endpoint<'de, D>(deserializer: D) -> Result<String, D::Error>

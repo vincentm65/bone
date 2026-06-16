@@ -32,6 +32,7 @@ impl ToolRegistry {
         self.tools.values().map(|tool| tool.definition()).collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_live(
         &self,
         call: ToolCall,
@@ -192,7 +193,7 @@ impl ToolHandler {
         self.registry
             .definitions()
             .into_iter()
-            .filter(|tool| self.is_enabled(&tool.name))
+            .filter(|tool| self.is_enabled(&tool.name) && !tool.name.starts_with('/'))
             .collect()
     }
 
@@ -258,8 +259,6 @@ impl ToolHandler {
             let events = events.clone();
             let session_state = self.session_state_for_call(&call);
             let owner = self.owner.clone();
-            let agent_depth = agent_depth;
-            let tool_call_depth = tool_call_depth;
             async move {
                 self.execute_one_live(
                     call,
@@ -325,7 +324,16 @@ impl ToolHandler {
         agent_depth: usize,
         tool_call_depth: usize,
     ) -> ToolResult {
-        if self.is_enabled(&call.name) {
+        if call.name.starts_with('/') {
+            ToolResult {
+                call_id: call.id,
+                name: call.name,
+                content: "Slash commands are UI commands, not tools.".to_string(),
+                is_error: true,
+                pane_page: None,
+                state: None,
+            }
+        } else if self.is_enabled(&call.name) {
             self.registry
                 .execute_live(
                     call,

@@ -25,10 +25,8 @@ impl LuaConfigSnapshot {
             .flatten()
             .map(|t| {
                 let mut map = HashMap::new();
-                for pair in t.pairs::<String, bool>() {
-                    if let Ok((k, v)) = pair {
-                        map.insert(k, v);
-                    }
+                for (k, v) in t.pairs::<String, bool>().flatten() {
+                    map.insert(k, v);
                 }
                 map
             })

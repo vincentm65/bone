@@ -6,8 +6,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-// ── Mock tool for testing the execution pipeline ────────────────────────────
-
 struct MockTool {
     name: String,
     result: Result<String, String>,
@@ -85,8 +83,6 @@ impl Tool for PaneTool {
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
 fn make_call(name: &str, id: &str) -> ToolCall {
     ToolCall {
         id: id.to_string(),
@@ -94,8 +90,6 @@ fn make_call(name: &str, id: &str) -> ToolCall {
         arguments: json!({}),
     }
 }
-
-// ── Tool execution pipeline tests ───────────────────────────────────────────
 
 #[tokio::test]
 async fn tool_handler_execute_all_returns_results_in_order() {
@@ -147,6 +141,24 @@ async fn tool_handler_execute_all_unknown_tool() {
 }
 
 #[tokio::test]
+async fn slash_named_tools_are_not_advertised_or_executed_as_commands() {
+    let handler = ToolHandler::new(ToolRegistry::new().register(MockTool {
+        name: "/history".to_string(),
+        result: Ok("should not run".to_string()),
+    }));
+
+    assert!(handler.definitions().is_empty());
+    let results = handler
+        .execute_all(vec![make_call("/history", "c1")], 0)
+        .await;
+    assert!(results[0].is_error);
+    assert_eq!(
+        results[0].content,
+        "Slash commands are UI commands, not tools."
+    );
+}
+
+#[tokio::test]
 async fn tool_handler_execute_all_disabled_tool() {
     let registry = ToolRegistry::new().register(MockTool {
         name: "disabled_tool".to_string(),
@@ -184,7 +196,6 @@ async fn tool_handler_execute_all_runs_in_parallel() {
     let elapsed = start.elapsed();
 
     assert_eq!(results.len(), 2);
-    // If run in parallel, 2x100ms should complete well under 300ms
     assert!(
         elapsed < std::time::Duration::from_millis(300),
         "execute_all should run tools concurrently, took {:?}",
@@ -237,8 +248,6 @@ async fn tool_handler_allows_call_based_on_approval_mode() {
     assert!(handler.allows_call(ApprovalMode::Safe, &call));
     assert!(handler.allows_call(ApprovalMode::Danger, &call));
 }
-
-// ── ApprovalMode cycling ────────────────────────────────────────────────────
 
 #[test]
 fn approval_mode_cycles() {

@@ -60,6 +60,7 @@ impl SessionWriter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_usage(
         &self,
         provider: &str,
@@ -184,12 +185,10 @@ pub struct AgentRequest {
     /// implement inactivity-based timeouts instead of hard cutoffs.
     pub activity: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// Injected provider. When set, `agent_setup` reuses it as-is instead of
-    /// constructing one from config (Step 0 injection seam). Lets callers
-    /// (tests, a future Driver) own and share a provider with the loop.
+    /// constructing one from config.
     pub llm: Option<Arc<dyn crate::llm::provider::LlmProvider>>,
     /// Injected session sink. When set, `agent_setup` reuses it as-is instead
-    /// of constructing a `SessionWriter` backed by SQLite (Step 3 injection
-    /// seam). Lets tests and a future Driver run the loop with zero DB I/O.
+    /// of constructing a `SessionWriter` backed by SQLite.
     pub session_sink: Option<Arc<dyn SessionSink>>,
 }
 
@@ -259,11 +258,16 @@ pub(crate) fn emit_event(
                 "is_error": is_error
             })
         }
-        crate::runtime::RuntimeEvent::TokenUsage { sent, received } => {
+        crate::runtime::RuntimeEvent::TokenUsage {
+            sent,
+            received,
+            context_length,
+        } => {
             serde_json::json!({
                 "type": "token_usage",
                 "sent": sent,
-                "received": received
+                "received": received,
+                "context_length": context_length
             })
         }
         crate::runtime::RuntimeEvent::Finished { content } => {
@@ -508,5 +512,3 @@ pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
             .unwrap_or_default(),
     }
 }
-
-

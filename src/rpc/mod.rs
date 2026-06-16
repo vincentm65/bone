@@ -133,10 +133,10 @@ where
 /// [`RuntimeCommand::SubmitPrompt`] run the agent, mapping its
 /// [`crate::agent::AgentRunEvent`]s to [`RuntimeEvent`]s broadcast to clients.
 ///
-/// Other commands are acknowledged via a `Status` event for now (approval/
-/// interaction routing lands as the interactive frontend migrates onto the
-/// `Driver`). This proves the end-to-end RPC path: a client submits a prompt
-/// over a socket and receives the streamed turn.
+/// Other commands are acknowledged via a `Status` event for now; the daemon is
+/// intentionally minimal (no interactive approval/interaction routing yet). It
+/// proves the end-to-end RPC path: a client submits a prompt over a socket and
+/// receives the streamed turn.
 pub async fn run_daemon(
     hub: Hub,
     mut commands: mpsc::UnboundedReceiver<RuntimeCommand>,
@@ -149,8 +149,10 @@ pub async fn run_daemon(
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 let hub_for_events = hub.clone();
                 let pump = tokio::spawn(async move {
+                    // `AgentRunEvent` is a type alias for `RuntimeEvent`, so the
+                    // agent's events are already in the hub's wire form.
                     while let Some(ev) = rx.recv().await {
-                        hub_for_events.publish(RuntimeEvent::from(ev));
+                        hub_for_events.publish(ev);
                     }
                 });
 

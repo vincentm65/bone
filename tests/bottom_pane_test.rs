@@ -63,6 +63,13 @@ fn row_text(terminal: &Terminal<TestBackend>, row: u16, width: u16) -> String {
         .collect()
 }
 
+fn screen_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
+    (0..height)
+        .map(|row| row_text(terminal, row, width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn expanded_command_preview_is_clipped_to_a_short_frame() {
     let renderer = Renderer::new();
@@ -346,4 +353,68 @@ fn pane_page_renders_content_between_input_and_status() {
     // 5: status bar
     assert!(row_text(&terminal, 4, 40).contains("hello pane"));
     assert!(row_text(&terminal, 5, 40).contains("test-model"));
+}
+
+#[test]
+fn redraw_clears_stale_prompt_and_pane_rows() {
+    let renderer = Renderer::new();
+    let input = InputState::default();
+    let status = status_info();
+    let pages = vec![PanePage {
+        source: "agents".to_string(),
+        title: "Agents".to_string(),
+        content: vec![
+            ratatui::text::Line::raw("deepseek-1 idle"),
+            ratatui::text::Line::raw("deepseek-2 idle"),
+        ],
+        visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
+        scroll: 0,
+        interaction: None,
+    }];
+    let mut prompt = Prompt::new(
+        "General",
+        vec![
+            "approval_mode                  danger".to_string(),
+            "auto_compact_tokens            75000".to_string(),
+            "auto_compact_keep_messages     3".to_string(),
+        ],
+    );
+    prompt.tabs = vec![
+        "General".to_string(),
+        "Providers".to_string(),
+        "Tools".to_string(),
+        "Commands".to_string(),
+        "Status".to_string(),
+    ];
+    prompt.hint = Some("Tab switch  Enter edit/cycle  Esc close".to_string());
+    let width = 80;
+    let height = 12;
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status, &pages, 0, None),
+                Some(&prompt),
+            )
+        })
+        .unwrap();
+
+    let first = screen_text(&terminal, width, height);
+    assert!(first.contains("General"));
+    assert!(first.contains("deepseek-1 idle"));
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(frame, &pane_args(&input, &status, &[], 0, None), None)
+        })
+        .unwrap();
+
+    let second = screen_text(&terminal, width, height);
+    assert!(!second.contains("General"));
+    assert!(!second.contains("approval_mode"));
+    assert!(!second.contains("deepseek-1 idle"));
+    assert!(second.contains(">"));
+    assert!(second.contains("test-model"));
 }

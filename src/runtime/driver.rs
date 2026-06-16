@@ -70,9 +70,26 @@ pub struct Driver {
 pub struct DriverOutcome {
     pub result: Result<AgentResponse, String>,
     pub tools: ToolHandler,
-    pub extensions: ExtensionManager,
     pub transcript: Vec<ChatMessage>,
     pub token_stats: TokenStats,
+    /// Per-request usage captured during the turn. The Driver also reports these
+    /// to its `session` sink, but a frontend that runs with a `NullSessionSink`
+    /// (the TUI persists with its own continuous `session_seq`) reads them from
+    /// here to write usage events itself. Empty for headless runs that discard
+    /// the outcome.
+    pub usage: Vec<UsageRecord>,
+}
+
+/// One provider-reported (or estimated) usage record captured during a turn.
+#[derive(Clone, Debug)]
+pub struct UsageRecord {
+    pub provider: String,
+    pub model: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub cached_tokens: Option<u32>,
+    pub cost: Option<f64>,
+    pub is_estimated: bool,
 }
 
 impl Driver {
@@ -121,6 +138,7 @@ impl Driver {
         let approval_label = approval_mode.mode_str();
 
         let mut session_seq = 0i64;
+        let mut usage_records: Vec<UsageRecord> = Vec::new();
         session.append_message("user", prompt, None, None, None, session_seq);
 
         // Rich frontend event stream (best-effort; ignored if no consumer).
@@ -258,12 +276,22 @@ impl Driver {
                             cost,
                             false,
                         );
+                        usage_records.push(UsageRecord {
+                            provider: llm.id().to_string(),
+                            model: llm.model().to_string(),
+                            prompt_tokens,
+                            completion_tokens,
+                            cached_tokens,
+                            cost,
+                            is_estimated: false,
+                        });
                         if let Some(cb) = &on_token_usage {
                             cb(token_stats.sent, token_stats.received);
                         }
                         emit_runtime(RuntimeEvent::TokenUsage {
                             sent: token_stats.sent,
                             received: token_stats.received,
+                            context_length: token_stats.context_length,
                         });
                     }
                     Err(e) => {
@@ -296,12 +324,22 @@ impl Driver {
                     None,
                     true,
                 );
+                usage_records.push(UsageRecord {
+                    provider: llm.id().to_string(),
+                    model: llm.model().to_string(),
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens: None,
+                    cost: None,
+                    is_estimated: true,
+                });
                 if let Some(cb) = &on_token_usage {
                     cb(token_stats.sent, token_stats.received);
                 }
                 emit_runtime(RuntimeEvent::TokenUsage {
                     sent: token_stats.sent,
                     received: token_stats.received,
+                    context_length: token_stats.context_length,
                 });
             }
 
@@ -437,9 +475,9 @@ impl Driver {
         DriverOutcome {
             result: result.map(|content| AgentResponse { content }),
             tools,
-            extensions,
             transcript,
             token_stats,
+            usage: usage_records,
         }
     }
 }

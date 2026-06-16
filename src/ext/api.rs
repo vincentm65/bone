@@ -78,12 +78,10 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
                 None => lua.create_table()?,
             };
             let ctx = lua.create_table()?;
-            for handler in arr.sequence_values::<Function>() {
-                if let Ok(h) = handler {
-                    // Swallow handler errors so one bad autocmd can't break emit.
-                    if let Err(e) = h.call::<Value>((payload.clone(), ctx.clone())) {
-                        eprintln!("bone-lua warn: autocmd '{event}' handler error: {e}");
-                    }
+            for h in arr.sequence_values::<Function>().flatten() {
+                // Swallow handler errors so one bad autocmd can't break emit.
+                if let Err(e) = h.call::<Value>((payload.clone(), ctx.clone())) {
+                    eprintln!("bone-lua warn: autocmd '{event}' handler error: {e}");
                 }
             }
             Ok(())

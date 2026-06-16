@@ -86,6 +86,7 @@ pub struct ExtensionManager {
 
 impl ExtensionManager {
     /// Wrap a pre-created `Arc<Mutex<Lua>>`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_arc(
         lua: Arc<Mutex<Lua>>,
         engine_ok: bool,
@@ -600,15 +601,11 @@ fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::llm::ChatMes
 /// Lock the Lua state and check that the `bone` global table exists.
 fn guard_with_bone(lua_arc: &Arc<Mutex<Lua>>) -> Option<std::sync::MutexGuard<'_, Lua>> {
     let guard = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
-    if guard
+    guard
         .globals()
         .get::<Option<mlua::Table>>("bone")
         .ok()
-        .flatten()
-        .is_none()
-    {
-        return None;
-    }
+        .flatten()?;
     Some(guard)
 }
 

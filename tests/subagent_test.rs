@@ -440,7 +440,12 @@ fn depth_guard_rejects_spawn_at_depth_1() {
 fn rust_subagent_pane_returns_valid_panepage() {
     let config_dir = common::temp_dir("subagent-render");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"bone.register_subagent({ name = "render-researcher", description = "test", system_prompt = "test" })
+           bone.register_subagent({ name = "render-coder", description = "test", system_prompt = "test" })"#,
+    )
+    .unwrap();
 
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
@@ -454,11 +459,11 @@ fn rust_subagent_pane_returns_valid_panepage() {
     // Create some fake jobs in the registry.
     let registry = bone::ext::jobs::registry();
     let id1 = registry
-        .create("researcher".into(), "search query".into())
-        .expect("researcher job should be created");
+        .create("render-researcher".into(), "search query".into())
+        .expect("render-researcher job should be created");
     let id2 = registry
-        .create("coder".into(), "fix bug in module".into())
-        .expect("coder job should be created");
+        .create("render-coder".into(), "fix bug in module".into())
+        .expect("render-coder job should be created");
     registry.complete(&id1, Ok("found 3 relevant papers".into()));
     registry.complete(&id2, Err("timeout".into()));
 

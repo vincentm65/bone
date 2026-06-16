@@ -64,8 +64,7 @@ impl PaneInteraction {
                 } else {
                     0
                 },
-                checked: std::iter::repeat(false)
-                    .take(if has_options { options.len() } else { 0 })
+                checked: std::iter::repeat_n(false, if has_options { options.len() } else { 0 })
                     .collect(),
                 input_buffer: String::new(),
                 cursor_pos: 0,
@@ -454,12 +453,13 @@ impl PanePage {
         let allow_custom = req.allow_custom;
 
         // Build question content lines (moved verbatim from old ctx.rs)
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from(Span::styled(
-            req.question.clone(),
-            Style::default().fg(ratatui::style::Color::White),
-        )));
-        lines.push(Line::from(""));
+        let lines: Vec<Line<'static>> = vec![
+            Line::from(Span::styled(
+                req.question.clone(),
+                Style::default().fg(ratatui::style::Color::White),
+            )),
+            Line::from(""),
+        ];
 
         // Compute visible_rows (moved verbatim from old ctx.rs)
         const MAX_VISIBLE_OPTIONS: usize = 10;
@@ -469,9 +469,7 @@ impl PanePage {
             req.options.len().min(MAX_VISIBLE_OPTIONS)
         };
         let custom_row = u16::from(allow_custom);
-        let visible_rows = (lines.len() + opt_rows + custom_row as usize)
-            .min(24)
-            .max(3);
+        let visible_rows = (lines.len() + opt_rows + custom_row as usize).clamp(3, 24);
 
         let mode_display = match req.mode {
             InteractionMode::SingleSelect => "single_select",

@@ -192,7 +192,7 @@ fn wait_for_returns_immediately_when_finished() {
     let id = reg.create("a".into(), "t".into()).unwrap();
     reg.complete(&id, Ok("result".into()));
 
-    let outcome = reg.wait_for(&[id.clone()], Duration::from_secs(5), None);
+    let outcome = reg.wait_for(std::slice::from_ref(&id), Duration::from_secs(5), None);
     assert_eq!(outcome.finished.len(), 1);
     assert_eq!(outcome.finished[0].id, id);
     assert!(outcome.pending.is_empty());
@@ -208,7 +208,7 @@ fn wait_for_times_out_on_running_job() {
     let reg = fresh_registry();
     let id = reg.create("a".into(), "t".into()).unwrap();
 
-    let outcome = reg.wait_for(&[id.clone()], Duration::from_millis(50), None);
+    let outcome = reg.wait_for(std::slice::from_ref(&id), Duration::from_millis(50), None);
     assert!(outcome.finished.is_empty());
     assert_eq!(outcome.pending, vec![id.clone()]);
     assert!(outcome.timed_out);

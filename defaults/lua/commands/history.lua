@@ -62,6 +62,29 @@ local function first_user_preview(messages)
     return "(no preview)"
 end
 
+-- A conversation is only worth showing if we actually drove it. The
+-- conversations table also accumulates noise the picker should hide:
+--   * empty placeholders — the TUI creates a row on startup/clear/new even if
+--     no message is ever sent (0 messages),
+--   * compaction-only rows — synthetic "[Context summary]" injections,
+--   * trivial rows — anything with a single message and no real user turn.
+-- Require more than one non-compaction message AND at least one real user turn
+-- (so it's a conversation we initiated, not scaffolding). Sub-agent runs can't
+-- be told apart in the DB, but most are caught by this same bar.
+local function is_relevant(messages)
+    local count = 0
+    local has_user_turn = false
+    for _, msg in ipairs(messages or {}) do
+        if not is_compaction(msg.content) then
+            count = count + 1
+            if msg.role == "user" and msg.content and msg.content ~= "" then
+                has_user_turn = true
+            end
+        end
+    end
+    return count > 1 and has_user_turn
+end
+
 local function label_for(session, preview)
     local provider = session.provider or "?"
     local model = session.model or "?"
@@ -93,7 +116,9 @@ end
 bone.register_command("history", {
     description = "Pick a recent conversation and load it as the current chat.",
     handler = function(_, ctx)
-        local ok, sessions = pcall(ctx.session.list, { limit = 50 })
+        -- Pull a wide window: most rows are empty placeholders, so we
+        -- over-fetch and filter down to the conversations actually worth showing.
+        local ok, sessions = pcall(ctx.session.list, { limit = 100 })
         if not ok then
             ctx.ui.notify("Failed to list history: " .. tostring(sessions), "error")
             return nil
@@ -106,20 +131,22 @@ bone.register_command("history", {
 
         local options = {}
         local by_label = {}
-        for i, session in ipairs(sessions) do
-            local preview = "(no preview)"
+        for _, session in ipairs(sessions) do
             local msg_ok, sample = pcall(ctx.session.messages, session.id, { limit = 20 })
-            if msg_ok then
-                preview = first_user_preview(sample)
+            if msg_ok and is_relevant(sample) then
+                local label = label_for(session, first_user_preview(sample))
+                options[#options + 1] = label
+                by_label[label] = session
             end
+        end
 
-            local label = label_for(session, preview)
-            options[i] = label
-            by_label[label] = session
+        if #options == 0 then
+            ctx.ui.notify("No conversations with messages found.", "warn")
+            return nil
         end
 
         local ask_ok, result = pcall(ctx.ui.interact, {
-            question = "Load conversation history (last 50). Use arrows/PageUp/PageDown, Enter to load, Esc to cancel.",
+            question = "Load conversation history. Use arrows/PageUp/PageDown, Enter to load, Esc to cancel.",
             type = "single_select",
             options = options,
             default = 1,

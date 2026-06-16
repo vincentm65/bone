@@ -13,7 +13,7 @@ pub mod driver;
 pub mod event;
 pub mod view;
 
-pub use driver::Driver;
+pub use driver::{Driver, UsageRecord};
 pub use event::{
     ApprovalRequest, ChannelApprovalGate, InteractSpec, ReplyRegistry, RuntimeCommand, RuntimeEvent,
 };

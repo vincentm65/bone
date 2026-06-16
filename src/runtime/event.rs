@@ -205,8 +205,13 @@ pub enum RuntimeEvent {
         #[serde(default)]
         content: String,
     },
-    /// Token accounting update.
-    TokenUsage { sent: u64, received: u64 },
+    /// Token accounting update. `context_length` is the current prompt size
+    /// (the `curr` metric) after this request — what compaction watches.
+    TokenUsage {
+        sent: u64,
+        received: u64,
+        context_length: u64,
+    },
     /// A pane upsert/remove. In Phase 4 this becomes part of a richer
     /// `ViewUpdate(ViewDiff)`; for now a pane is the unit of view change.
     Pane { pane: PaneContent },
@@ -291,6 +296,7 @@ mod tests {
             RuntimeEvent::TokenUsage {
                 sent: 10,
                 received: 2,
+                context_length: 8,
             },
             RuntimeEvent::Pane {
                 pane: PaneContent {

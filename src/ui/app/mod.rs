@@ -52,6 +52,11 @@ pub struct App {
     pub last_ctrl_c: Option<Instant>,
     /// Cumulative token usage stats.
     pub token_stats: TokenStats,
+    /// Live, running estimate of `received` (completion) tokens during a turn.
+    /// `Some` while a turn streams — ticked up on each text/tool delta and
+    /// rebaselined to the authoritative count on `TokenUsage`; `None` when idle
+    /// so the status bar shows `token_stats.received` directly.
+    pub stream_estimated_received: Option<u64>,
 
     /// Active pane pages displayed between input and status bar.
     pub pages: Vec<PanePage>,
@@ -145,6 +150,7 @@ impl App {
             cancel_streaming: false,
             last_ctrl_c: None,
             token_stats: TokenStats::new(),
+            stream_estimated_received: None,
             pages: Vec::new(),
             active_page: 0,
             panes_visible: true,
@@ -225,6 +231,27 @@ impl App {
             .ok();
         }
     }
+    /// Record a token-usage event for the active conversation. The Driver runs
+    /// with a `NullSessionSink` (the TUI owns `session_seq`), so usage events it
+    /// reports are returned in the `DriverOutcome` and written here instead.
+    pub(crate) fn record_usage_to_db(&mut self, usage: &crate::runtime::UsageRecord) {
+        if let Some(ref db) = self.session_db
+            && let Some(conv_id) = self.conversation_id
+        {
+            db.record_usage(
+                conv_id,
+                &usage.provider,
+                &usage.model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cached_tokens,
+                usage.cost,
+                usage.is_estimated,
+            )
+            .ok();
+        }
+    }
+
     /// Start a new conversation in the database (used by /clear, /new).
     /// Apply a generic action returned by a Lua command or hook.
     pub(crate) fn apply_lua_action(
@@ -574,7 +601,7 @@ impl App {
     }
 
     pub(crate) fn status_info(&self) -> StatusInfo {
-        self.stream_status_info_with_tokens(None)
+        self.stream_status_info_with_tokens(self.stream_estimated_received)
     }
 
     /// Build a [`StatusInfo`] for the streaming spinner wait, with an optional
@@ -1365,11 +1392,10 @@ impl App {
             } else {
                 enabled_commands
             };
-            if enabled.contains(&cmd) {
-                if let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
+            if enabled.contains(&cmd)
+                && let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
                     return Ok(());
                 }
-            }
         }
 
         if matches!(cmd.as_str(), "clear" | "new") {

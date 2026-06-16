@@ -253,7 +253,7 @@ mod tests {
             name: "error".into(),
             fg: None,
         });
-        assert!(vm.highlights.get("error").is_none());
+        assert!(!vm.highlights.contains_key("error"));
     }
 
     #[test]

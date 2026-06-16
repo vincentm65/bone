@@ -105,6 +105,9 @@ impl App {
         self.redraw(term)?;
         self.streaming = true;
         self.shown_tool_rows.clear();
+        // Seed the live output-token estimate from the running total so the
+        // status bar ticks up from where it left off as text/tools stream in.
+        self.stream_estimated_received = Some(self.token_stats.received);
         self.turn_start = Some(std::time::Instant::now());
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_pause_start = None;
@@ -248,6 +251,11 @@ impl App {
                     _ => {}
                 }
             }
+
+            // Persist usage events the Driver reported through its (null) sink.
+            for usage in &outcome.usage {
+                self.record_usage_to_db(usage);
+            }
         }
 
         if self.cancel_streaming {
@@ -264,6 +272,9 @@ impl App {
                 .finalize_streaming_message(&self.messages[idx].content, term)?;
         }
         self.streaming = false;
+        // Authoritative token_stats are now reabsorbed; drop the live estimate
+        // so the status bar shows the real `received` count.
+        self.stream_estimated_received = None;
         self.turn_start = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_pause_start = None;
@@ -296,6 +307,7 @@ impl App {
         match ev {
             RuntimeEvent::TextDelta { text } => {
                 let idx = self.pump_ensure_assistant(cur_idx);
+                self.bump_estimated_received(text.len());
                 self.messages[idx].content.push_str(&text);
                 self.renderer
                     .flush_streaming_message(&self.messages[idx].content, term)?;
@@ -304,12 +316,23 @@ impl App {
                 // Reasoning is retained in the Driver transcript; the current
                 // TUI has no visible reasoning pane yet.
             }
-            RuntimeEvent::TokenUsage { sent, received } => {
+            RuntimeEvent::TokenUsage {
+                sent,
+                received,
+                context_length,
+            } => {
                 // Driver returns authoritative token_stats at turn end; update
                 // the live copy so the status bar can reflect usage before the
-                // outcome is reabsorbed.
+                // outcome is reabsorbed. `context_length` (the `curr` metric)
+                // must update after every request so compaction sees the real
+                // context size mid-turn, not just at turn end.
                 self.token_stats.sent = sent;
                 self.token_stats.received = received;
+                self.token_stats.context_length = context_length;
+                // Real count arrived for this request — rebaseline the live
+                // estimate so further deltas (next request in the tool loop)
+                // tick up from the authoritative total instead of the guess.
+                self.stream_estimated_received = Some(received);
                 self.pump_tick(term)?;
             }
             RuntimeEvent::Status { .. }
@@ -326,6 +349,12 @@ impl App {
                 // user→assistant→tool transition doesn't add an extra blank
                 // line (msg_to_lines only blanks across a User boundary).
                 self.pump_ensure_assistant(cur_idx);
+                // Tool-call arguments are part of the completion the model
+                // generated, so count them toward the live estimate too.
+                let arg_len = serde_json::to_string(&arguments)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                self.bump_estimated_received(arg_len);
                 pending.insert(
                     id.clone(),
                     crate::tools::ToolCall {
@@ -491,6 +520,14 @@ impl App {
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         Ok(())
+    }
+
+    /// Advance the live output-token estimate using the shared chars-per-token
+    /// heuristic, if a turn is in progress. No-op when idle.
+    fn bump_estimated_received(&mut self, chars: usize) {
+        if let Some(est) = self.stream_estimated_received.as_mut() {
+            *est += (chars as f64 / crate::llm::token_tracker::CHARS_PER_TOKEN).round() as u64;
+        }
     }
 
     /// Redraw the bottom pane during the pump WITHOUT touching the Lua VM
