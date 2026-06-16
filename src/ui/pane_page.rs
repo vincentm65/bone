@@ -452,14 +452,12 @@ impl PanePage {
 
         let allow_custom = req.allow_custom;
 
-        // Build question content lines (moved verbatim from old ctx.rs)
-        let lines: Vec<Line<'static>> = vec![
-            Line::from(Span::styled(
-                req.question.clone(),
-                Style::default().fg(ratatui::style::Color::White),
-            )),
-            Line::from(""),
-        ];
+        // Build question content line (the option list renders as an overlay
+        // directly beneath it, with no separator row).
+        let lines: Vec<Line<'static>> = vec![Line::from(Span::styled(
+            req.question.clone(),
+            Style::default().fg(ratatui::style::Color::White),
+        ))];
 
         // Compute visible_rows (moved verbatim from old ctx.rs)
         const MAX_VISIBLE_OPTIONS: usize = 10;

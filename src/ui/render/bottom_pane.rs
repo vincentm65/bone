@@ -639,7 +639,7 @@ impl super::Renderer {
 
                     // Render interactive overlay if the page has an active interaction.
                     // Start overlay AFTER the page content lines so the question
-                    // text (separator, question, blank line) is visible above.
+                    // text is visible above the option list.
                     let content_start_y = page_start + 1;
                     let overlay_start_y =
                         content_start_y + layout.content_rows.min(page.content.len() as u16);
