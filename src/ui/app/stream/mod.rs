@@ -562,7 +562,7 @@ impl App {
             .flush_new_to_scrollback(&self.messages, term)?;
         // Single blank line between the last message and the input field. Deduped
         // against the next turn's leading blank, so spacing stays single.
-        self.renderer.end_turn_separator(term)?;
+        self.renderer.flush_separator(term)?;
         // Safe now: the turn is over, no tool is running Lua lock-free.
         self.redraw(term)?;
         Ok(())
@@ -617,6 +617,9 @@ impl App {
                 if let Some(idx) = cur_idx.take() {
                     self.renderer
                         .finalize_streaming_message(&self.messages[idx].content, term)?;
+                    // Streamed assistant text has no trailing blank; add one so
+                    // the tool row below doesn't touch it (deduped → single).
+                    self.renderer.flush_separator(term)?;
                 }
                 let result = crate::tools::ToolResult {
                     call_id: call_id.clone(),

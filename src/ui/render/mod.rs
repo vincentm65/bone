@@ -114,10 +114,12 @@ impl Renderer {
         out
     }
 
-    /// Insert a single blank separator line after the last message in
-    /// scrollback (no-op if already separated). Called at the end of a turn so
-    /// the most recent message doesn't touch the input field.
-    pub fn end_turn_separator(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    /// Insert a single blank separator line after the last scrollback content
+    /// (deduped, so it's a no-op if already separated). Used to give streamed
+    /// messages — which bypass `msg_to_lines`' surrounding blanks — a trailing
+    /// blank: after the final reply (so it doesn't touch the input) and when a
+    /// streamed assistant message is followed by a tool row.
+    pub fn flush_separator(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         self.insert_lines_to_scrollback(term, &[Line::raw("")])
     }
 
