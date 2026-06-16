@@ -5,8 +5,6 @@ pub mod messages;
 pub mod wrap;
 
 use messages::wrapped_line_count;
-use ratatui::backend::Backend;
-use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
@@ -193,6 +191,7 @@ impl Renderer {
         // When viewport fills the screen, bypass ratatui's insert_before
         // (which flushes per-step causing flicker) and write directly via
         // crossterm in a single atomic flush.
+        #[cfg(not(windows))]
         if self.viewport_height >= size.height {
             return self.scrollback_insert_direct(term, lines, w, None);
         }
@@ -236,6 +235,8 @@ impl Renderer {
         term_width: u16,
         user_bg: Option<ratatui::style::Color>,
     ) -> io::Result<()> {
+        use ratatui::backend::Backend;
+        use ratatui::buffer::{Buffer, Cell};
         use ratatui::style::Style;
 
         let h = term.size()?.height;
@@ -401,6 +402,7 @@ impl Renderer {
         let row_count = logical_lines_row_count(&rendered, terminal_width);
         let w = terminal_width.max(1);
         let h = term.size()?.height;
+        #[cfg(not(windows))]
         if self.viewport_height >= h {
             self.scrollback_insert_direct(term, &rendered, w, Some(user_background))?;
         } else {
