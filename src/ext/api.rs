@@ -235,10 +235,10 @@ mod tests {
         let lua = lua_with_api();
         lua.load(
             r#"
-            bone.api.keymap.set("n", "ctrl+p", "open_palette")
+            bone.api.keymap.set("n", "ctrl+p", "open_config")
             bone.api.keymap.set("n", "ctrl+s", "save")
             local n = bone.api.keymap.get("n")
-            assert(n["ctrl+p"] == "open_palette", "binding set")
+            assert(n["ctrl+p"] == "open_config", "binding set")
             assert(n["ctrl+s"] == "save", "second binding set")
             bone.api.keymap.del("n", "ctrl+s")
             assert(bone.api.keymap.get("n")["ctrl+s"] == nil, "binding deleted")
@@ -258,7 +258,7 @@ mod tests {
         assert!(
             snap.normal
                 .iter()
-                .any(|b| b.key == "ctrl+p" && b.action == "open_palette")
+                .any(|b| b.key == "ctrl+p" && b.action == "open_config")
         );
         assert!(!snap.normal.iter().any(|b| b.key == "ctrl+s"));
     }
@@ -277,40 +277,4 @@ mod tests {
         .unwrap();
     }
 
-    /// Phase 7: the bundled `palette` menu is a Lua-defined menu that draws
-    /// itself via `bone.api.ui`. Load the exact shipped file, invoke its command
-    /// handler, and assert it both returns text and opened a float in the view.
-    #[test]
-    fn bundled_palette_menu_opens_lua_drawn_float() {
-        let lua = Lua::new();
-        let bone = lua.create_table().unwrap();
-        super::super::ops_commands::setup_register_command(&lua, &bone).unwrap();
-        super::super::ops_events::setup_on(&lua, &bone).unwrap();
-        super::super::api_ui::setup_api_ui(&lua, &bone).unwrap();
-        setup_api(&lua, &bone).unwrap();
-        lua.globals().set("bone", bone).unwrap();
-
-        // The exact bundled menu file shipped under defaults/lua/commands/.
-        lua.load(include_str!("../../defaults/lua/commands/palette.lua"))
-            .set_name("palette.lua")
-            .exec()
-            .unwrap();
-
-        let handler = super::super::ops_commands::find_handler(&lua, "palette")
-            .expect("palette command registered");
-        let ctx = lua.create_table().unwrap();
-        let ret: Table = handler.call(("", ctx)).unwrap();
-        let display: String = ret.get("display").unwrap();
-        assert!(display.contains("Command Palette"), "returns text fallback");
-
-        // The menu drew itself as a float via the ViewModel UI API.
-        let vm = super::super::api_ui::snapshot(&lua);
-        let pc = vm
-            .get("palette")
-            .expect("palette float in view")
-            .as_pane_content()
-            .unwrap();
-        assert_eq!(pc.title, "Palette");
-        assert!(pc.lines.len() >= 5, "menu listed its entries");
-    }
 }

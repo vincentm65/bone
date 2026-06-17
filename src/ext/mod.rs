@@ -79,7 +79,6 @@ pub fn boot_with_tools(
         .collect();
 
     let enabled = if sync {
-        custom.sync_tools_from_registry(&all_tool_names);
         let names = custom.enabled_tool_names();
         if names.is_empty() {
             all_tool_names
@@ -96,16 +95,6 @@ pub fn boot_with_tools(
         loaded.dynamic_display,
         loaded.dynamic_safety,
     );
-
-    if sync {
-        // Sync lua command names into the commands page.
-        let all_command_names: Vec<String> = extensions
-            .commands()
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
-        custom.sync_commands_from_list(&all_command_names);
-    }
 
     BootedTools {
         manager: extensions,

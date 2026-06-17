@@ -123,7 +123,7 @@ fn prompt_option_line(
             .fg(ratatui::style::Color::White)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(ratatui::style::Color::White)
+        Style::default().fg(ratatui::style::Color::DarkGray)
     };
     let muted_style = Style::default().fg(theme.status_text);
     let good_style = Style::default().fg(theme.approval_safe);
@@ -140,7 +140,6 @@ fn prompt_option_line(
         text_style,
         muted_style,
         good_style,
-        selected,
     ));
     Line::from(spans)
 }
@@ -169,18 +168,15 @@ fn styled_circle_option_spans(
     text_style: Style,
     muted_style: Style,
     good_style: Style,
-    selected: bool,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if let Some(rest) = option.strip_prefix("● ") {
+        // green filled circle: value is active/true
         spans.push(Span::styled("● ", good_style));
         push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
     } else if let Some(rest) = option.strip_prefix("○ ") {
-        if selected {
-            spans.push(Span::styled("● ", good_style));
-        } else {
-            spans.push(Span::styled("○ ", muted_style));
-        }
+        // empty circle: value is inactive/false
+        spans.push(Span::styled("○ ", muted_style));
         push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
     } else {
         push_prompt_text_spans(option, text_style, muted_style, &mut spans);

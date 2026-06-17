@@ -176,24 +176,6 @@ local function edit_provider(ctx, provider)
     end
 end
 
-local function pick_provider_to_edit(ctx)
-    local labels, by_label = provider_labels(ctx)
-    if #labels == 0 then return false end
-    labels[#labels + 1] = "Back"
-    local result = ask(ctx, {
-        question = "Edit provider",
-        type = "single_select",
-        options = labels,
-        allow_custom = false,
-    })
-    if not result or result.value == "Back" then return false end
-    local provider = by_label[result.value]
-    if provider and edit_provider(ctx, provider) then
-        return true
-    end
-    return false
-end
-
 bone.register_command("config", {
     description = "edit configuration",
     handler = function(arg, ctx)
@@ -210,6 +192,7 @@ bone.register_command("config", {
 
         local active = find_page_index(pages, words[1])
         local changed = false
+        local last_selected = {}
         while true do
             pages = ctx.config.get_pages()
             local page = pages[active] or pages[1]
@@ -219,22 +202,22 @@ bone.register_command("config", {
             local by_label = {}
             if page.namespace == "providers" then
                 options, by_label = provider_labels(ctx)
-                options[#options + 1] = "Edit provider..."
             else
                 options, by_label = field_by_display(page)
             end
-            options[#options + 1] = "Close"
 
+            local is_providers = page.namespace == "providers"
             local result = ask(ctx, {
-                question = tab_bar(pages, active),
+                question = tab_bar(pages, active) .. (is_providers and "  [e] edit" or ""),
                 type = "single_select",
                 options = options,
-                default = 1,
+                default = last_selected[page.namespace] or 1,
                 allow_custom = false,
                 left_value = "__prev_tab",
                 right_value = "__next_tab",
+                action_keys = is_providers and { e = "__edit_provider" } or nil,
             })
-            if not result or result.value == "Close" then
+            if not result then
                 clear_interact(ctx)
                 if changed then
                     return { action = "config.apply", submit = false }
@@ -242,15 +225,21 @@ bone.register_command("config", {
                 return nil
             end
 
+            last_selected[page.namespace] = result.selected
+
             local choice = result.value
             if choice == "__prev_tab" then
                 active = previous_index(active, #pages)
             elseif choice == "__next_tab" then
                 active = next_index(active, #pages)
             elseif page.namespace == "providers" then
-                if choice == "Edit provider..." then
-                    if pick_provider_to_edit(ctx) then
-                        changed = true
+                if choice == "__edit_provider" then
+                    local idx = result.selected
+                    if idx and idx <= #options then
+                        local provider = by_label[options[idx]]
+                        if provider and edit_provider(ctx, provider) then
+                            changed = true
+                        end
                     end
                 else
                     local provider = by_label[choice]

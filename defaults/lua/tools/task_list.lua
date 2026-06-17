@@ -4,7 +4,7 @@ local function styled_line(text, done)
     if done then
         return {
             spans = {
-                { text = "  ✓ ", fg = "green", modifiers = { "bold" } },
+                { text = "  ✓ ", fg = "#78B373", modifiers = { "bold" } },
                 { text = text, fg = "dark_gray", modifiers = { "strike" } },
             },
         }

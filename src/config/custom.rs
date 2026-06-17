@@ -49,6 +49,18 @@ pub struct CustomConfigPage {
     pub fields: Vec<ConfigField>,
 }
 
+/// Deny-list format for tools/commands pages.
+/// The page is built dynamically from the filesystem; the YAML only stores disabled names.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct DenyListPage {
+    title: String,
+    #[serde(default)]
+    disabled: Vec<String>,
+}
+
+/// Tool names that are built-in (native Rust) and always appear on the tools page.
+const NATIVE_TOOLS: &[&str] = &["shell", "read_file", "write_file", "edit_file"];
+
 /// All loaded custom pages, keyed by filename stem.
 #[derive(Debug, Clone, Default)]
 pub struct CustomConfigs {
@@ -115,28 +127,208 @@ impl CustomConfigs {
             if stem.is_empty() {
                 continue;
             }
-            match load_yaml::<CustomConfigPage>(&path) {
-                Some(page) => {
+            // Tools and commands use deny-list format; everything else uses field format.
+            let is_denylist = stem == "tools" || stem == "commands";
+            if is_denylist {
+                if let Some(deny) = load_yaml::<DenyListPage>(&path) {
+                    configs.pages.push((
+                        stem,
+                        CustomConfigPage {
+                            title: deny.title,
+                            fields: Vec::new(),
+                        },
+                    ));
+                } else if let Some(page) = load_yaml::<CustomConfigPage>(&path) {
+                    // Old format — will be migrated by rebuild_denylist_pages().
                     configs.pages.push((stem, page));
-                }
-                None => {
+                } else {
                     eprintln!("bone: warning: failed to parse {}", path.display());
                 }
+            } else if let Some(page) = load_yaml::<CustomConfigPage>(&path) {
+                configs.pages.push((stem, page));
+            } else {
+                eprintln!("bone: warning: failed to parse {}", path.display());
             }
         }
 
         configs.pages.sort_by(|a, b| a.0.cmp(&b.0));
+        configs.rebuild_denylist_pages();
         configs
     }
 
     /// Save a single page back to its YAML file.
-    fn save_page(&self, namespace: &str) {
+    fn save_page(&self, namespace: &str) -> bool {
         if let Some(page) = self.page_ref(namespace) {
             let path = config_dir().join(format!("{namespace}.yaml"));
-            if let Ok(yaml) = serde_yaml::to_string(page) {
-                let _ = std::fs::write(path, yaml);
+            let yaml = match serde_yaml::to_string(page) {
+                Ok(y) => y,
+                Err(_) => return false,
+            };
+            return std::fs::write(path, yaml).is_ok();
+        }
+        false
+    }
+
+
+    // ── Deny-list page helpers ──────────────────────────────────────────────
+
+    /// Scan a Lua directory for .lua file stems.
+    fn scan_lua_dir(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        if !dir.is_dir() {
+            return names;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("lua") {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        names.push(stem.to_string());
+                    }
+                }
             }
         }
+        names.sort();
+        names
+    }
+
+    /// Rebuild the tools and commands pages from the filesystem + deny-list.
+    fn rebuild_denylist_pages(&mut self) {
+        let lua_tools = Self::scan_lua_dir(&bone_dir().join("lua").join("tools"));
+        let lua_commands = Self::scan_lua_dir(&bone_dir().join("lua").join("commands"));
+
+        // Rebuild tools page
+        if let Some(pos) = self.page_index("tools") {
+            let (disabled, title) = self.read_denylist("tools");
+            let mut fields: Vec<ConfigField> = Vec::new();
+            let disabled_set: std::collections::HashSet<&str> =
+                disabled.iter().map(|s| s.as_str()).collect();
+
+            // Native tools first
+            for name in NATIVE_TOOLS {
+                let is_disabled = disabled_set.contains(name);
+                fields.push(ConfigField {
+                    key: name.to_string(),
+                    label: Some(name.to_string()),
+                    field_type: ConfigFieldType::Bool,
+                    options: Vec::new(),
+                    default: Some(serde_yaml::Value::Bool(true)),
+                    value: if is_disabled {
+                        Some(serde_yaml::Value::Bool(false))
+                    } else {
+                        None
+                    },
+                });
+            }
+
+            // Lua tools
+            for name in &lua_tools {
+                if NATIVE_TOOLS.contains(&name.as_str()) {
+                    continue;
+                }
+                let is_disabled = disabled_set.contains(name.as_str());
+                fields.push(ConfigField {
+                    key: name.clone(),
+                    label: Some(name.clone()),
+                    field_type: ConfigFieldType::Bool,
+                    options: Vec::new(),
+                    default: Some(serde_yaml::Value::Bool(true)),
+                    value: if is_disabled {
+                        Some(serde_yaml::Value::Bool(false))
+                    } else {
+                        None
+                    },
+                });
+            }
+
+            self.pages[pos].1 = CustomConfigPage { title, fields };
+        }
+
+        // Rebuild commands page
+        if let Some(pos) = self.page_index("commands") {
+            let (disabled, title) = self.read_denylist("commands");
+            let mut fields: Vec<ConfigField> = Vec::new();
+            let disabled_set: std::collections::HashSet<&str> =
+                disabled.iter().map(|s| s.as_str()).collect();
+
+            for name in &lua_commands {
+                let is_disabled = disabled_set.contains(name.as_str());
+                fields.push(ConfigField {
+                    key: name.clone(),
+                    label: Some(name.clone()),
+                    field_type: ConfigFieldType::Bool,
+                    options: Vec::new(),
+                    default: Some(serde_yaml::Value::Bool(true)),
+                    value: if is_disabled {
+                        Some(serde_yaml::Value::Bool(false))
+                    } else {
+                        None
+                    },
+                });
+            }
+
+            self.pages[pos].1 = CustomConfigPage { title, fields };
+        }
+    }
+
+    /// Read the deny-list from a YAML file, migrating old format if needed.
+    fn read_denylist(&self, namespace: &str) -> (Vec<String>, String) {
+        let path = config_dir().join(format!("{namespace}.yaml"));
+        if !path.exists() {
+            return (Vec::new(), String::new());
+        }
+
+        // Try old field-based format first and migrate
+        if let Some(page) = load_yaml::<CustomConfigPage>(&path) {
+            if !page.fields.is_empty() {
+                let disabled: Vec<String> = page
+                    .fields
+                    .iter()
+                    .filter(|f| {
+                        f.value
+                            .as_ref()
+                            .map(|v| v == &serde_yaml::Value::Bool(false))
+                            .unwrap_or(false)
+                    })
+                    .map(|f| f.key.clone())
+                    .collect();
+
+                // Write new deny-list format
+                let new_page = DenyListPage {
+                    title: page.title.clone(),
+                    disabled: disabled.clone(),
+                };
+                if let Ok(yaml) = serde_yaml::to_string(&new_page) {
+                    let _ = std::fs::write(&path, yaml);
+                }
+
+                return (disabled, page.title);
+            }
+            // Empty fields — treat as new format with empty disabled
+            return (Vec::new(), page.title);
+        }
+
+        // Try new deny-list format
+        if let Some(deny) = load_yaml::<DenyListPage>(&path) {
+            return (deny.disabled, deny.title);
+        }
+
+        (Vec::new(), String::new())
+    }
+
+    /// Save the deny-list for a tools/commands page.
+    /// Returns true if the write succeeded.
+    fn save_denylist(&self, namespace: &str, disabled: &[String], title: &str) -> bool {
+        let path = config_dir().join(format!("{namespace}.yaml"));
+        let page = DenyListPage {
+            title: title.to_string(),
+            disabled: disabled.to_vec(),
+        };
+        let yaml = match serde_yaml::to_string(&page) {
+            Ok(y) => y,
+            Err(_) => return false,
+        };
+        std::fs::write(path, yaml).is_ok()
     }
 
     fn page_ref(&self, namespace: &str) -> Option<&CustomConfigPage> {
@@ -157,41 +349,6 @@ impl CustomConfigs {
         self.pages.iter().position(|(ns, _)| ns == namespace)
     }
 
-    /// Ensure a namespace page has a bool field for every name in the registry.
-    /// New entries are added as enabled (true). Returns true if fields were added.
-    fn sync_from_registry(&mut self, namespace: &str, names: &[String]) -> bool {
-        let pos = match self.page_index(namespace) {
-            Some(p) => p,
-            None => return false,
-        };
-        let existing: std::collections::HashSet<&str> = self.pages[pos]
-            .1
-            .fields
-            .iter()
-            .map(|f| f.key.as_str())
-            .collect();
-        let new_names: Vec<&String> = names
-            .iter()
-            .filter(|n| !existing.contains(n.as_str()))
-            .collect();
-        if new_names.is_empty() {
-            return false;
-        }
-        let page = &mut self.pages[pos].1;
-        for name in new_names {
-            page.fields.push(ConfigField {
-                key: name.clone(),
-                label: Some(name.clone()),
-                field_type: ConfigFieldType::Bool,
-                options: Vec::new(),
-                default: Some(serde_yaml::Value::Bool(true)),
-                value: None,
-            });
-        }
-        self.save_page(namespace);
-        true
-    }
-
     /// Get all enabled names from a namespace page.
     fn enabled_names(&self, namespace: &str) -> Vec<String> {
         let pos = match self.page_index(namespace) {
@@ -209,21 +366,9 @@ impl CustomConfigs {
             .collect()
     }
 
-    /// Ensure the "tools" page has a bool field for every tool in the registry.
-    /// New tools are added as enabled (true). Returns true if fields were added.
-    pub fn sync_tools_from_registry(&mut self, tool_names: &[String]) -> bool {
-        self.sync_from_registry("tools", tool_names)
-    }
-
     /// Get all enabled tool names from the "tools" page.
     pub fn enabled_tool_names(&self) -> Vec<String> {
         self.enabled_names("tools")
-    }
-
-    /// Ensure the "commands" page has a bool field for every name in the list.
-    /// New entries are added as enabled (true). Returns true if fields were added.
-    pub fn sync_commands_from_list(&mut self, command_names: &[String]) -> bool {
-        self.sync_from_registry("commands", command_names)
     }
 
     /// Get all enabled command names from the "commands" page.
@@ -252,6 +397,32 @@ impl CustomConfigs {
 
     /// Set a value and persist immediately to the page YAML.
     pub fn set_value(&mut self, namespace: &str, key: &str, value: String) {
+        // Deny-list pages: update the deny-list YAML directly.
+        if namespace == "tools" || namespace == "commands" {
+            let (mut disabled, title) = self.read_denylist(namespace);
+            if value == "false" {
+                if !disabled.contains(&key.to_string()) {
+                    disabled.push(key.to_string());
+                }
+            } else {
+                disabled.retain(|d| d != key);
+            }
+            if self.save_denylist(namespace, &disabled, &title) {
+                // Update in-memory field for immediate UI feedback.
+                if let Some(page) = self.page_mut(namespace) {
+                    if let Some(field) = page.fields.iter_mut().find(|f| f.key == key) {
+                        let yaml_val = match value.as_str() {
+                            "true" => serde_yaml::Value::Bool(true),
+                            "false" => serde_yaml::Value::Bool(false),
+                            _ => serde_yaml::Value::String(value),
+                        };
+                        field.value = Some(yaml_val);
+                    }
+                }
+            }
+            return;
+        }
+
         let Some(page) = self.page_mut(namespace) else {
             return;
         };
@@ -271,13 +442,21 @@ impl CustomConfigs {
                 .unwrap_or_else(|_| serde_yaml::Value::String(value.clone())),
             _ => serde_yaml::Value::String(value),
         };
+        let old_value = field.value.clone();
         field.value = Some(yaml_val);
         // Only persist if the page file actually exists on disk.
         // Pages that exist only in memory (e.g. test fixtures) must not
         // leak to the user's config directory.
         let page_path = config_dir().join(format!("{namespace}.yaml"));
         if page_path.exists() {
-            self.save_page(namespace);
+            if !self.save_page(namespace) {
+                // Revert on failure so UI doesn't show a change that wasn't persisted.
+                if let Some(page) = self.page_mut(namespace) {
+                    if let Some(field) = page.fields.iter_mut().find(|f| f.key == key) {
+                        field.value = old_value;
+                    }
+                }
+            }
         }
     }
 
@@ -338,12 +517,20 @@ impl CustomConfigs {
         let Some(field) = page.fields.iter_mut().find(|f| f.key == key) else {
             return;
         };
+        let old_value = field.value.clone();
         if let Ok(nested) = serde_yaml::to_value(entry) {
             field.value = Some(nested);
         }
         let page_path = config_dir().join(format!("{namespace}.yaml"));
         if page_path.exists() {
-            self.save_page(namespace);
+            if !self.save_page(namespace) {
+                // Revert on failure.
+                if let Some(page) = self.page_mut(namespace) {
+                    if let Some(field) = page.fields.iter_mut().find(|f| f.key == key) {
+                        field.value = old_value;
+                    }
+                }
+            }
         }
     }
 

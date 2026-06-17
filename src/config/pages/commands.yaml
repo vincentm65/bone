@@ -1,17 +1,2 @@
 title: Commands
-fields:
-  - key: review
-    label: review
-    type: bool
-  - key: compact
-    label: compact
-    type: bool
-  - key: memory
-    label: memory
-    type: bool
-  - key: history
-    label: history
-    type: bool
-  - key: shotgun
-    label: shotgun
-    type: bool
+disabled: []

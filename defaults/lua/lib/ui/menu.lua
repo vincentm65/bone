@@ -114,22 +114,25 @@ local function render_select(ctx, state)
         local opt = state.options[i]
         local selected = i == state.selected and not state.custom_focused
         local checked = state.checked and state.checked[i]
-        local marker = selected and "●" or "○"
+        local cursor = selected and ">" or " "
+        local cursor_fg = selected and "white" or "darkgray"
+        local cursor_mods = selected and { "bold" } or {}
         local check = ""
         if state.multi then check = checked and "[x] " or "[ ] " end
         local fg = selected and "white" or "darkgray"
-        local marker_fg = selected and "green" or "darkgray"
         local existing_marker, label = split_leading_circle(opt.label)
         if existing_marker and not state.multi then
-            local shown_marker = selected and "●" or existing_marker
+            local dot = existing_marker
+            local dot_fg = existing_marker == "●" and "#78B373" or "darkgray"
             lines[#lines + 1] = line(
-                span("  " .. shown_marker .. " ", selected and "green" or "darkgray", selected and { "bold" } or {}),
+                span(" " .. cursor .. " ", cursor_fg, cursor_mods),
+                span(dot .. " ", dot_fg),
                 span(label, fg, selected and { "bold" } or {})
             )
         else
             lines[#lines + 1] = line(
-                span("  " .. marker .. " ", marker_fg, selected and { "bold" } or {}),
-                span(check, checked and "green" or "darkgray", checked and { "bold" } or {}),
+                span(" " .. cursor .. " ", cursor_fg, cursor_mods),
+                span(check, checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
                 span(opt.label, fg, selected and { "bold" } or {})
             )
         end
@@ -138,10 +141,11 @@ local function render_select(ctx, state)
         lines[#lines + 1] = line(span("    ↓ " .. tostring(total - last) .. " more", "darkgray"))
     end
     if state.allow_custom then
-        local marker = state.custom_focused and "●" or "○"
+        local cursor = state.custom_focused and ">" or " "
+        local cursor_fg = state.custom_focused and "white" or "darkgray"
         local fg = state.custom_focused and "white" or "darkgray"
         lines[#lines + 1] = line(
-            span("  " .. marker .. " Custom: ", state.custom_focused and "green" or "darkgray", { "bold" }),
+            span(" " .. cursor .. " Custom: ", cursor_fg, { "bold" }),
             span(state.input .. (state.custom_focused and "█" or ""), fg, state.custom_focused and { "bold" } or {})
         )
     end
@@ -176,6 +180,7 @@ local function select_loop(ctx, spec, multi)
         left_value = spec.left_value,
         right_value = spec.right_value,
         visible_rows = spec.visible_rows,
+        action_keys = spec.action_keys or {},
         multi = multi,
         scroll = 0,
     }
@@ -191,6 +196,11 @@ local function select_loop(ctx, spec, multi)
         local code = key_name(key)
         local nav = handle_tab_nav(state, code)
         if nav then return { value = nav, navigation = true } end
+
+        local action = state.action_keys[code] or (code == "Char" and state.action_keys[key.char])
+        if action and not state.custom_focused then
+            return { value = action, selected = state.selected, action_key = true }
+        end
 
         if state.custom_focused and is_text_key(key) then
             state.input = state.input .. key.char
@@ -240,12 +250,13 @@ local function select_loop(ctx, spec, multi)
                 end
                 local result = { values = values }
                 if state.allow_custom and state.input ~= "" then result.custom = state.input end
+                result.selected = state.selected
                 return result
             end
             if state.custom_focused then
-                return { value = state.input, custom = true }
+                return { value = state.input, custom = true, selected = state.selected }
             end
-            return { value = state.options[state.selected].value }
+            return { value = state.options[state.selected].value, selected = state.selected }
         end
     end
 end
