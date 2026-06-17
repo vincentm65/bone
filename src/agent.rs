@@ -278,7 +278,7 @@ pub(crate) fn emit_event(
         }
         crate::runtime::RuntimeEvent::TextDelta { .. }
         | crate::runtime::RuntimeEvent::ReasoningDelta { .. }
-        | crate::runtime::RuntimeEvent::Pane { .. }
+        | crate::runtime::RuntimeEvent::ViewDiff { .. }
         | crate::runtime::RuntimeEvent::KeyRequest { .. } => return,
     };
     println!("{json}");

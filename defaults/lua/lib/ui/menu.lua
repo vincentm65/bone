@@ -1,25 +1,19 @@
+-- ui.menu — interactive select / multi_select / text_input panes.
+--
+-- Built on `ui.pane`: the Pane object owns the channel transport (rendering
+-- even while a tool blocks on `ctx.ui.key`), and the shared helpers (`span`,
+-- `line`, `clamp`, `wait_key`, `is_text_key`) come from there too. This module
+-- keeps only the menu-specific rendering and key-dispatch logic.
+
+local pane = require("ui.pane")
+
+local span, line, clamp = pane.span, pane.line, pane.clamp
+local wait_key, key_name, is_text_key = pane.wait_key, pane.key_name, pane.is_text_key
+
 local M = {}
 
 local SOURCE = "interact"
 local MAX_ROWS = 12
-
-local function span(text, fg, modifiers)
-    return { text = tostring(text or ""), fg = fg, modifiers = modifiers or {} }
-end
-
-local function line(...)
-    return { spans = { ... } }
-end
-
-local function clamp(n, lo, hi)
-    if n < lo then return lo end
-    if n > hi then return hi end
-    return n
-end
-
-local function clear(ctx)
-    pcall(ctx.ui.pane, { source = SOURCE, title = "", lines = {} })
-end
 
 local function normalize_options(options)
     local out = {}
@@ -52,26 +46,6 @@ local function render_tabs(lines, tabs, active)
     lines[#lines + 1] = { spans = spans }
 end
 
-local function key_name(key)
-    if type(key) ~= "table" then return nil end
-    return key.code
-end
-
-local function next_key(ctx)
-    if not ctx or not ctx.ui or type(ctx.ui.key) ~= "function" then
-        return nil
-    end
-    local ok, key = pcall(ctx.ui.key)
-    if not ok or type(key) ~= "table" then
-        return nil
-    end
-    return key
-end
-
-local function is_text_key(key)
-    return type(key) == "table" and key.code == "Char" and key.char and not key.ctrl and not key.alt
-end
-
 local function rows_for(state)
     return state.visible_rows or MAX_ROWS
 end
@@ -88,7 +62,7 @@ local function split_leading_circle(label)
     return nil, label
 end
 
-local function render_select(ctx, state)
+local function render_select(p, state)
     local lines = {}
     render_tabs(lines, state.tabs, state.active_tab)
     if state.question and state.question ~= "" then
@@ -150,7 +124,7 @@ local function render_select(ctx, state)
         )
     end
     lines[#lines + 1] = ""
-    ctx.ui.pane({ source = SOURCE, title = state.title or "Menu", lines = lines, visible_rows = math.min(24, math.max(3, #lines)) })
+    p:set_lines(lines, math.min(24, math.max(3, #lines)))
 end
 
 local function handle_tab_nav(state, key)
@@ -167,6 +141,7 @@ local function handle_tab_nav(state, key)
 end
 
 local function select_loop(ctx, spec, multi)
+    local p = pane.new(ctx, { id = SOURCE, title = spec.title or "Menu" })
     local state = {
         title = spec.title,
         question = spec.question,
@@ -190,8 +165,8 @@ local function select_loop(ctx, spec, multi)
     state.selected = clamp(state.selected, 1, math.max(1, #state.options))
 
     while true do
-        render_select(ctx, state)
-        local key = next_key(ctx)
+        render_select(p, state)
+        local key = wait_key(ctx)
         if not key then return { cancelled = true } end
         local code = key_name(key)
         local nav = handle_tab_nav(state, code)
@@ -271,6 +246,7 @@ end
 
 function M.text_input(ctx, spec)
     spec = spec or {}
+    local p = pane.new(ctx, { id = SOURCE, title = spec.title or "Input" })
     local input = tostring(spec.initial or "")
     while true do
         local lines = {
@@ -278,8 +254,8 @@ function M.text_input(ctx, spec)
             line(span("> " .. input .. "█", "white", { "bold" })),
             "",
         }
-        ctx.ui.pane({ source = SOURCE, title = spec.title or "Input", lines = lines, visible_rows = #lines })
-        local key = next_key(ctx)
+        p:set_lines(lines, #lines)
+        local key = wait_key(ctx)
         if not key then return { cancelled = true } end
         local code = key_name(key)
         if is_text_key(key) then
@@ -295,7 +271,7 @@ function M.text_input(ctx, spec)
 end
 
 function M.clear(ctx)
-    clear(ctx)
+    pane.new(ctx, { id = SOURCE }):close()
 end
 
 return M

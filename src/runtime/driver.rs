@@ -636,8 +636,8 @@ pub(crate) async fn execute_tool_calls(
                 use crate::tools::types::ToolLiveEvent;
                 while let Some(ev) = live_rx.recv().await {
                     match ev {
-                        ToolLiveEvent::Pane(pane) => {
-                            let _ = events_out.send(RuntimeEvent::Pane { pane });
+                        ToolLiveEvent::ViewDiff(diff) => {
+                            let _ = events_out.send(RuntimeEvent::ViewDiff { diff });
                         }
                         ToolLiveEvent::Key(req) => {
                             if let Some(registry) = &key_reply_registry {

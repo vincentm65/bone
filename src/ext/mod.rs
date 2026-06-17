@@ -32,8 +32,7 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         return false;
     };
     existing.contains("ctx.ui.interact")
-        || (name == "ui/menu.lua" && !existing.contains("local function next_key"))
-        || (name == "ui/menu.lua" && !existing.contains("split_leading_circle"))
+        || (name == "ui/menu.lua" && !existing.contains("require(\"ui.pane\")"))
 }
 
 /// Boot the Lua extension system.

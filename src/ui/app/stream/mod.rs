@@ -17,12 +17,102 @@ use tokio::time::{self, Duration};
 
 use super::{App, apply_input_key_with_paste_burst};
 
+/// One place that resolves a `KeyEvent` to whichever caller is blocked
+/// waiting for one. A pending key request can come from two sources:
+///   - `Direct`: a `ctx.ui.key()` call inside a blocking Lua tool, delivered
+///     via the `ToolLiveEvent` channel (the future holds a `oneshot` sender).
+///   - `Runtime`: the Driver requested a key via `RuntimeEvent::KeyRequest`,
+///     resolved by id through the `KeyReplyRegistry`.
+/// Both code paths (`drive_live`, `stream_runtime`) own a `KeySink` and pass
+/// it to `drain_keys`; a key event from the terminal is delivered here.
+pub(crate) struct KeySink {
+    pending: Option<PendingKeyReply>,
+}
+
 enum PendingKeyReply {
     Direct(tokio::sync::oneshot::Sender<crate::pane_content::KeyEvent>),
     Runtime {
         id: u64,
         registry: crate::runtime::KeyReplyRegistry,
     },
+}
+
+impl KeySink {
+    pub fn new() -> Self {
+        Self { pending: None }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Register a direct oneshot channel (from `ctx.ui.key()` via the
+    /// `ToolLiveEvent` channel transport).
+    pub fn set_direct(&mut self, tx: tokio::sync::oneshot::Sender<crate::pane_content::KeyEvent>) {
+        self.pending = Some(PendingKeyReply::Direct(tx));
+    }
+
+    /// Register a runtime key request (from `RuntimeEvent::KeyRequest`).
+    pub fn set_runtime(&mut self, id: u64, registry: crate::runtime::KeyReplyRegistry) {
+        self.pending = Some(PendingKeyReply::Runtime { id, registry });
+    }
+
+    /// Deliver `key` to the waiting caller (if any). Returns true if delivered.
+    pub fn deliver(&mut self, key: crate::pane_content::KeyEvent) -> bool {
+        match self.pending.take() {
+            Some(PendingKeyReply::Direct(tx)) => {
+                let _ = tx.send(key);
+                true
+            }
+            Some(PendingKeyReply::Runtime { id, registry }) => {
+                registry.resolve(id, key);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Tracks which pane component ids a blocking tool has opened, so they can be
+/// removed if the tool is cancelled mid-block (its future is dropped, so it
+/// can't emit its own removal `ViewDiff::Remove`). Fed by `apply_and_track`;
+/// cleaned up by `drain_for_cancel`.
+pub(crate) struct PaneOwnership {
+    sources: std::collections::HashSet<String>,
+}
+
+impl PaneOwnership {
+    pub fn new() -> Self {
+        Self {
+            sources: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Record the component id from a `ViewDiff::Upsert` or clear it on
+    /// `ViewDiff::Remove`. `SetHighlight` carries no pane ownership.
+    pub fn track(&mut self, diff: &crate::runtime::view::ViewDiff) {
+        use crate::runtime::view::ViewDiff;
+        match diff {
+            ViewDiff::Upsert { component } => {
+                self.sources.insert(component.id().to_string());
+            }
+            ViewDiff::Remove { id } => {
+                self.sources.remove(id);
+            }
+            ViewDiff::SetHighlight { .. } => {}
+        }
+    }
+
+    /// Remove every owned pane from `pages`. Called on cancel.
+    pub fn drain_for_cancel(
+        &mut self,
+        pages: &mut Vec<PanePage>,
+        active_page: &mut usize,
+    ) {
+        for source in self.sources.drain() {
+            *active_page = PanePage::remove(pages, &source, *active_page);
+        }
+    }
 }
 
 fn key_event_from_crossterm(
@@ -64,21 +154,6 @@ fn key_event_from_crossterm(
         ctrl: modifiers.contains(KeyModifiers::CONTROL),
         alt: modifiers.contains(KeyModifiers::ALT),
         shift: modifiers.contains(KeyModifiers::SHIFT),
-    }
-}
-
-fn deliver_pending_key(
-    pending: &mut Option<PendingKeyReply>,
-    key: crate::pane_content::KeyEvent,
-) {
-    match pending.take() {
-        Some(PendingKeyReply::Direct(tx)) => {
-            let _ = tx.send(key);
-        }
-        Some(PendingKeyReply::Runtime { id, registry }) => {
-            registry.resolve(id, key);
-        }
-        None => {}
     }
 }
 
@@ -210,7 +285,7 @@ impl App {
         let mut cur_idx: Option<usize> = None;
         let mut pending: std::collections::HashMap<String, crate::tools::ToolCall> =
             std::collections::HashMap::new();
-        let mut pending_key: Option<PendingKeyReply> = None;
+        let mut pending_key = KeySink::new();
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -371,7 +446,7 @@ impl App {
         cur_idx: &mut Option<usize>,
         pending: &mut std::collections::HashMap<String, crate::tools::ToolCall>,
         key_registry: &crate::runtime::KeyReplyRegistry,
-        pending_key: &mut Option<PendingKeyReply>,
+        pending_key: &mut KeySink,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         use crate::runtime::RuntimeEvent;
@@ -468,23 +543,12 @@ impl App {
                 self.renderer
                     .flush_new_to_scrollback(&self.messages, term)?;
             }
-            RuntimeEvent::Pane { pane } => {
-                if pane.is_empty() {
-                    self.active_page =
-                        PanePage::remove(&mut self.pages, &pane.source, self.active_page);
-                } else {
-                    let page = PanePage::from_content(&pane);
-                    let (_, a) = PanePage::upsert(&mut self.pages, self.active_page, page);
-                    self.active_page = a;
-                    self.panes_visible = true;
-                }
+            RuntimeEvent::ViewDiff { diff } => {
+                self.apply_view_diff(diff);
                 self.pump_tick(term)?;
             }
             RuntimeEvent::KeyRequest { id } => {
-                *pending_key = Some(PendingKeyReply::Runtime {
-                    id,
-                    registry: key_registry.clone(),
-                });
+                pending_key.set_runtime(id, key_registry.clone());
             }
         }
         Ok(())
@@ -618,16 +682,8 @@ impl App {
     /// so pressing Esc aborts an in-flight compaction promptly.
     fn apply_tool_live_event(&mut self, event: ToolLiveEvent) {
         match event {
-            ToolLiveEvent::Pane(pc) => {
-                if pc.is_empty() {
-                    self.active_page =
-                        PanePage::remove(&mut self.pages, &pc.source, self.active_page);
-                } else {
-                    let page = PanePage::from_content(&pc);
-                    let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
-                    self.active_page = active;
-                    self.panes_visible = true;
-                }
+            ToolLiveEvent::ViewDiff(diff) => {
+                self.apply_view_diff(diff);
             }
             ToolLiveEvent::Key(_) => {}
         }
@@ -641,17 +697,10 @@ impl App {
     fn apply_and_track(
         &mut self,
         event: ToolLiveEvent,
-        live_sources: &mut std::collections::HashSet<String>,
+        live_sources: &mut PaneOwnership,
     ) {
-        match &event {
-            ToolLiveEvent::Pane(pc) => {
-                if pc.is_empty() {
-                    live_sources.remove(&pc.source);
-                } else {
-                    live_sources.insert(pc.source.clone());
-                }
-            }
-            ToolLiveEvent::Key(_) => {}
+        if let ToolLiveEvent::ViewDiff(diff) = &event {
+            live_sources.track(diff);
         }
         self.apply_tool_live_event(event);
     }
@@ -682,14 +731,14 @@ impl App {
         // Pane sources currently shown by the running tool. Used only to clean
         // up lingering panes if the tool is cancelled before emitting its own
         // removal event.
-        let mut live_sources = std::collections::HashSet::<String>::new();
-        let mut pending_key: Option<PendingKeyReply> = None;
+        let mut live_sources = PaneOwnership::new();
+        let mut pending_key = KeySink::new();
 
         loop {
             tokio::select! {
                 results = &mut future => {
                     while let Ok(event) = rx.try_recv() {
-                        if let ToolLiveEvent::Pane(_) = event {
+                        if let ToolLiveEvent::ViewDiff(_) = event {
                             self.apply_and_track(event, &mut live_sources);
                         }
                     }
@@ -698,7 +747,7 @@ impl App {
                 Some(event) = rx.recv() => {
                     match event {
                         ToolLiveEvent::Key(req) => {
-                            pending_key = Some(PendingKeyReply::Direct(req.reply));
+                            pending_key.set_direct(req.reply);
                         }
                         other => self.apply_and_track(other, &mut live_sources),
                     }
@@ -723,16 +772,13 @@ impl App {
                         // Drain remaining live events before returning so that
                         // any pending pane updates are processed.
                         while let Ok(event) = rx.try_recv() {
-                            if let ToolLiveEvent::Pane(_) = event {
+                            if let ToolLiveEvent::ViewDiff(_) = event {
                                 self.apply_and_track(event, &mut live_sources);
                             }
                         }
                         // Remove any panes the cancelled tool left behind — its
                         // future was dropped, so it can't emit its own removal.
-                        for source in live_sources.drain() {
-                            self.active_page =
-                                PanePage::remove(&mut self.pages, &source, self.active_page);
-                        }
+                        live_sources.drain_for_cancel(&mut self.pages, &mut self.active_page);
                         return Ok(on_cancel());
                     }
 
@@ -746,7 +792,7 @@ impl App {
                     while let Ok(event) = rx.try_recv() {
                         match event {
                             ToolLiveEvent::Key(req) => {
-                                pending_key = Some(PendingKeyReply::Direct(req.reply));
+                                pending_key.set_direct(req.reply);
                             }
                             other => self.apply_and_track(other, &mut live_sources),
                         }
@@ -813,7 +859,7 @@ impl App {
         panes_visible: &mut bool,
         pages: &mut Vec<PanePage>,
         active_page: &mut usize,
-        pending_key: &mut Option<PendingKeyReply>,
+        pending_key: &mut KeySink,
     ) -> bool {
         let mut mode_changed = false;
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
@@ -832,14 +878,11 @@ impl App {
                         *panes_visible = !*panes_visible;
                         continue;
                     }
-                    if pending_key.is_some()
+                    if pending_key.is_pending()
                         && !(key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL))
                     {
-                        deliver_pending_key(
-                            pending_key,
-                            key_event_from_crossterm(key.code, key.modifiers),
-                        );
+                        pending_key.deliver(key_event_from_crossterm(key.code, key.modifiers));
                         continue;
                     }
                     // ── Page navigation (Tab/BackTab/PageUp/PageDown) ─────

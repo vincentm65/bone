@@ -852,6 +852,55 @@ impl App {
         true
     }
 
+    /// Apply a single `ViewDiff` to the app state. Shared by both pane
+    /// transports: the `UiState` drain (via [`apply_view_diffs`]) and the
+    /// `ToolLiveEvent` channel (via `apply_tool_live_event`). Returns `true`
+    /// when the diff caused a visible change.
+    pub(crate) fn apply_view_diff(&mut self, diff: crate::runtime::view::ViewDiff) -> bool {
+        use crate::runtime::view::{Component, ViewDiff};
+        match diff {
+            // A Lua status line is appended to the native status bar.
+            ViewDiff::Upsert {
+                component: Component::StatusLine { id, segments },
+            } => {
+                match self.lua_status.iter_mut().find(|(i, _)| *i == id) {
+                    Some(slot) => slot.1 = segments,
+                    None => self.lua_status.push((id, segments)),
+                }
+                true
+            }
+            ViewDiff::Upsert { component } => {
+                if let Some(pc) = component.as_pane_content() {
+                    if pc.is_empty() {
+                        self.active_page =
+                            PanePage::remove(&mut self.pages, &pc.source, self.active_page);
+                    } else {
+                        let page = PanePage::from_content(&pc);
+                        let (_, new_active) =
+                            PanePage::upsert(&mut self.pages, self.active_page, page);
+                        self.active_page = new_active;
+                        self.panes_visible = true;
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            ViewDiff::Remove { id } => {
+                let before = self.lua_status.len();
+                self.lua_status.retain(|(i, _)| i != &id);
+                if self.lua_status.len() == before {
+                    self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
+                }
+                true
+            }
+            ViewDiff::SetHighlight { name, fg } => self
+                .renderer
+                .theme
+                .set_highlight(&name, fg.as_deref()),
+        }
+    }
+
     /// Drain UI diffs emitted by `bone.api.ui.*` and apply them. Mirrors
     /// `maybe_refresh_subagent_pane`: called on the render tick and the live
     /// ticks so Lua UI appears and updates. `Float` components map to panes via
@@ -859,58 +908,14 @@ impl App {
     /// status bar; `SetHighlight` recolors the live theme. Returns `true` when
     /// anything changed (so the caller redraws).
     pub(crate) fn apply_view_diffs(&mut self) -> bool {
-        use crate::runtime::view::{Component, ViewDiff};
         let diffs = self.extensions.drain_view_diffs();
         if diffs.is_empty() {
             return false;
         }
         let mut changed = false;
         for diff in diffs {
-            match diff {
-                // A Lua status line is appended to the native status bar.
-                ViewDiff::Upsert {
-                    component: Component::StatusLine { id, segments },
-                } => {
-                    // Key by id so multiple status lines coexist; an existing
-                    // id is updated in place, a new one is appended.
-                    match self.lua_status.iter_mut().find(|(i, _)| *i == id) {
-                        Some(slot) => slot.1 = segments,
-                        None => self.lua_status.push((id, segments)),
-                    }
-                    changed = true;
-                    continue;
-                }
-                ViewDiff::Upsert { component } => {
-                    if let Some(pc) = component.as_pane_content() {
-                        if pc.is_empty() {
-                            self.active_page =
-                                PanePage::remove(&mut self.pages, &pc.source, self.active_page);
-                        } else {
-                            let page = PanePage::from_content(&pc);
-                            let (_, new_active) =
-                                PanePage::upsert(&mut self.pages, self.active_page, page);
-                            self.active_page = new_active;
-                            self.panes_visible = true;
-                        }
-                        changed = true;
-                    }
-                }
-                ViewDiff::Remove { id } => {
-                    // Removing a status-line id drops that line; otherwise drop
-                    // a page by the same id.
-                    let before = self.lua_status.len();
-                    self.lua_status.retain(|(i, _)| i != &id);
-                    if self.lua_status.len() == before {
-                        self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
-                    }
-                    changed = true;
-                }
-                // A named highlight group recolors the live theme.
-                ViewDiff::SetHighlight { name, fg } => {
-                    if self.renderer.theme.set_highlight(&name, fg.as_deref()) {
-                        changed = true;
-                    }
-                }
+            if self.apply_view_diff(diff) {
+                changed = true;
             }
         }
         changed

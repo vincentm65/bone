@@ -80,6 +80,8 @@ pub enum Component {
         z: i32,
         #[serde(default)]
         border: bool,
+        #[serde(default)]
+        scroll: usize,
     },
     /// A status line composed of aligned segments.
     StatusLine {
@@ -96,6 +98,27 @@ impl Component {
         }
     }
 
+    /// Build a `Component::Float` from the equivalent `PaneContent` fields.
+    /// Used by the channel transport (`ctx.ui.pane`) to emit the unified
+    /// `ViewDiff` type without a separate pane-specific variant.
+    pub fn float_from_pane_content(pc: &PaneContent) -> Component {
+        Component::Float {
+            id: pc.source.clone(),
+            title: pc.title.clone(),
+            lines: pc.lines.clone(),
+            rect: FloatRect {
+                anchor: Anchor::default(),
+                width: 0,
+                height: pc.visible_rows.max(1) as u16,
+                col: 0,
+                row: 0,
+            },
+            z: 0,
+            border: false,
+            scroll: pc.scroll,
+        }
+    }
+
     /// Render a `Float` as `PaneContent` so the TUI can display it with its
     /// existing pane machinery (`PanePage::from_content`). Non-float components
     /// return `None`.
@@ -106,15 +129,29 @@ impl Component {
                 title,
                 lines,
                 rect,
+                scroll,
                 ..
             } => Some(PaneContent {
                 source: id.clone(),
                 title: title.clone(),
                 lines: lines.clone(),
                 visible_rows: rect.height.max(1) as usize,
-                scroll: 0,
+                scroll: *scroll,
             }),
             Component::StatusLine { .. } => None,
+        }
+    }
+}
+
+/// Convert a `PaneContent` into the `ViewDiff` that carries the same meaning:
+/// empty lines signal removal (matching `PaneContent::is_empty()`), anything
+/// else is an upsert of a `Float` built from the pane content.
+pub fn view_diff_from_pane_content(pc: PaneContent) -> ViewDiff {
+    if pc.is_empty() {
+        ViewDiff::Remove { id: pc.source }
+    } else {
+        ViewDiff::Upsert {
+            component: Component::float_from_pane_content(&pc),
         }
     }
 }
@@ -202,6 +239,7 @@ mod tests {
             },
             z: 0,
             border: true,
+            scroll: 0,
         }
     }
 
@@ -305,5 +343,35 @@ mod tests {
         let pc = comp.as_pane_content().unwrap();
         assert_eq!(pc.lines.len(), 2);
         assert_eq!(pc.visible_rows, 12);
+    }
+
+    #[test]
+    fn float_scroll_round_trips_into_pane_content() {
+        let comp = Component::Float {
+            id: "scroller".into(),
+            title: "t".into(),
+            lines: vec![PaneLineSpec::Plain("x".into())],
+            rect: FloatRect {
+                anchor: Anchor::Center,
+                width: 40,
+                height: 10,
+                col: 0,
+                row: 0,
+            },
+            z: 0,
+            border: true,
+            scroll: 7,
+        };
+        let pc = comp.as_pane_content().unwrap();
+        assert_eq!(pc.scroll, 7);
+
+        // A Float omitting `scroll` (e.g. from old Lua) defaults to 0.
+        let val = json!({
+            "kind": "float",
+            "id": "default",
+            "rect": {"width": 10, "height": 4}
+        });
+        let comp: Component = serde_json::from_value(val).unwrap();
+        assert_eq!(comp.as_pane_content().unwrap().scroll, 0);
     }
 }

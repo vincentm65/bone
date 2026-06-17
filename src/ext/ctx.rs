@@ -454,8 +454,9 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
             let pane =
                 crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
+            let diff = crate::runtime::view::view_diff_from_pane_content(pane);
             sender
-                .send(crate::tools::types::ToolLiveEvent::Pane(pane))
+                .send(crate::tools::types::ToolLiveEvent::ViewDiff(diff))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
             Ok(true)
         })?;
@@ -1143,8 +1144,9 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
             let pane =
                 crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
+            let diff = crate::runtime::view::view_diff_from_pane_content(pane);
             sender
-                .send(crate::tools::types::ToolLiveEvent::Pane(pane))
+                .send(crate::tools::types::ToolLiveEvent::ViewDiff(diff))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
             Ok(true)
         })?;
@@ -1758,7 +1760,7 @@ fn dispatch_event(
         }
         RuntimeEvent::TextDelta { .. }
         | RuntimeEvent::ReasoningDelta { .. }
-        | RuntimeEvent::Pane { .. }
+        | RuntimeEvent::ViewDiff { .. }
         | RuntimeEvent::KeyRequest { .. } => {}
     }
     Ok(())

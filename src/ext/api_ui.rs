@@ -131,6 +131,7 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table) -> Result<(), String> {
                 },
                 z: o.z,
                 border: o.border,
+                scroll: 0,
             };
             lock(&shared(lua)?).apply(ViewDiff::Upsert { component });
             Ok(id)
@@ -151,6 +152,7 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table) -> Result<(), String> {
                 rect,
                 z,
                 border,
+                scroll,
                 ..
             }) = guard.view.get(&id)
             {
@@ -161,6 +163,7 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table) -> Result<(), String> {
                     rect: *rect,
                     z: *z,
                     border: *border,
+                    scroll: *scroll,
                 };
                 guard.apply(ViewDiff::Upsert { component });
                 true
