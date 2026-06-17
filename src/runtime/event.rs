@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::pane_content::{KeyEvent, KeyRequest};
-use crate::runtime::view::ViewDiff;
 use crate::tools::{ApprovalGate, CallOutcome, ToolCall, decide_call};
 
 /// Routes key replies from the frontend back to blocked callers.
@@ -174,10 +173,6 @@ pub enum RuntimeEvent {
         received: u64,
         context_length: u64,
     },
-    /// A pane upsert/remove via the unified view-diff type. Both the channel
-    /// transport (`ctx.ui.pane`) and the `UiState` transport (`bone.api.ui.*`)
-    /// produce the same `ViewDiff`, so there is one pane-mutation path.
-    ViewDiff { diff: ViewDiff },
     /// The runtime is requesting the next terminal key.
     KeyRequest { id: u64 },
     /// The turn finished with a final assistant message.
@@ -259,25 +254,6 @@ mod tests {
                 sent: 10,
                 received: 2,
                 context_length: 8,
-            },
-            RuntimeEvent::ViewDiff {
-                diff: ViewDiff::Upsert {
-                    component: crate::runtime::view::Component::Float {
-                        id: "s".into(),
-                        title: "t".into(),
-                        lines: vec![],
-                        rect: crate::runtime::view::FloatRect {
-                            anchor: crate::runtime::view::Anchor::Center,
-                            width: 40,
-                            height: 8,
-                            col: 0,
-                            row: 0,
-                        },
-                        z: 0,
-                        border: false,
-                        scroll: 0,
-                    },
-                },
             },
             RuntimeEvent::KeyRequest { id: 7 },
             RuntimeEvent::Finished {

@@ -72,6 +72,7 @@ pub(crate) fn create_engine(
     opts: BootOptions,
     model: &str,
     provider: &str,
+    shared_ui: super::api_ui::SharedUi,
 ) -> Result<Lua, String> {
     let lua = Lua::new();
 
@@ -141,7 +142,7 @@ pub(crate) fn create_engine(
     super::ops_plugins::setup_plugin(&lua, bone)?;
     // bone.api.ui.* — the minimal Lua UI API (Phase 4). Additive namespace,
     // backed by a per-VM ViewModel in Lua app-data.
-    super::api_ui::setup_api_ui(&lua, bone)?;
+    super::api_ui::setup_api_ui(&lua, bone, shared_ui)?;
     // bone.api.{autocmd,emit,keymap,config} — the always-available runtime API
     // (Phase 6). Must run after `setup_on` so `bone.api.autocmd` can alias it.
     super::api::setup_api(&lua, bone)?;

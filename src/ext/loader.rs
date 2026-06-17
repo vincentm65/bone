@@ -27,8 +27,11 @@ pub fn boot(
 ) -> BootResult {
     let version = env!("CARGO_PKG_VERSION");
     let config_dir_str = config_dir.to_string_lossy().to_string();
+    // Standalone shared UI-state handle — lives outside the Lua VM mutex so the
+    // TUI can drain diffs even while a tool blocks on ctx.ui.key().
+    let shared_ui = super::api_ui::new_shared();
 
-    let lua = match engine::create_engine(version, cwd, config_dir, opts, model, provider) {
+    let lua = match engine::create_engine(version, cwd, config_dir, opts, model, provider, shared_ui.clone()) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("bone: warning: Lua engine creation failed: {e}");
@@ -69,7 +72,7 @@ pub fn boot(
     let lua_arc = Arc::new(Mutex::new(lua));
 
     // Collect registered tools from bone._tools.
-    let tools = collect_tools(&lua_arc, &config_dir_str, &shared_state);
+    let tools = collect_tools(&lua_arc, &config_dir_str, &shared_state, &shared_ui);
 
     let commands = collect_commands(&lua_arc);
 
@@ -90,6 +93,7 @@ pub fn boot(
         theme_snapshot,
         keymap_snapshot,
         subagents,
+        shared_ui,
     );
     BootResult { manager, tools }
 }
@@ -138,6 +142,7 @@ fn collect_tools(
     lua_arc: &Arc<Mutex<mlua::Lua>>,
     config_dir: &str,
     shared_state: &SharedState,
+    shared_ui: &super::api_ui::SharedUi,
 ) -> Vec<LuaTool> {
     let lua = match lua_arc.lock() {
         Ok(guard) => guard,
@@ -170,6 +175,7 @@ fn collect_tools(
             Arc::clone(lua_arc),
             config_dir.to_string(),
             shared_state.clone(),
+            shared_ui.clone(),
         ) {
             Ok(tool) => tools.push(tool),
             Err(e) => eprintln!("bone: warning: {e}"),

@@ -27,6 +27,7 @@ pub struct LuaTool {
     config_dir: String,
     shared_state: SharedState,
     safety: CommandSafety,
+    ui: super::api_ui::SharedUi,
 }
 
 impl LuaTool {
@@ -39,6 +40,7 @@ impl LuaTool {
         lua_arc: Arc<Mutex<Lua>>,
         config_dir: String,
         shared_state: SharedState,
+        ui: super::api_ui::SharedUi,
     ) -> Result<Self, String> {
         let name: String = entry
             .get("name")
@@ -111,6 +113,7 @@ impl LuaTool {
             safety,
             config_dir,
             shared_state,
+            ui,
         })
     }
 
@@ -139,6 +142,7 @@ impl LuaTool {
         config_dir: String,
         shared_state: SharedState,
         events: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
+        ui: super::api_ui::SharedUi,
         context: &ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
         let lua = lua_arc.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,6 +167,7 @@ impl LuaTool {
             state.apply_to(&mut ctx_cfg);
         }
         ctx_cfg.pane_sender = events;
+        ctx_cfg.ui = Some(ui.clone());
         ctx_cfg.call_id = Some(context.call_id.clone());
         // tool_handler comes from the per-call context (may differ from the
         // snapshot's handler for nested delegation), so set it after apply_to.
@@ -261,6 +266,7 @@ impl Tool for LuaTool {
                 self.config_dir.clone(),
                 self.shared_state.clone(),
                 events,
+                self.ui.clone(),
                 &context,
             );
         }
@@ -271,6 +277,7 @@ impl Tool for LuaTool {
         let name = self.name.clone();
         let config_dir = self.config_dir.clone();
         let shared_state = self.shared_state.clone();
+        let ui = self.ui.clone();
 
         tokio::task::spawn_blocking(move || {
             Self::run_execute(
@@ -281,6 +288,7 @@ impl Tool for LuaTool {
                 config_dir,
                 shared_state,
                 events,
+                ui,
                 &context,
             )
         })

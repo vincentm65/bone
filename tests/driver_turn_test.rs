@@ -13,7 +13,6 @@ use bone::chat::build_chat_history;
 use bone::ext::ExtensionManager;
 use bone::llm::provider::LlmProvider;
 use bone::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, ResponseStream, TokenStats};
-use bone::pane_content::{PaneContent, PaneLineSpec};
 use bone::runtime::{ChannelApprovalGate, Driver, RuntimeEvent};
 use bone::session_sink::{NullSessionSink, SessionSink};
 use bone::tools::registry::ToolHandler;
@@ -281,42 +280,7 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
     std::fs::remove_file(&path).ok();
 }
 
-/// A tool that emits a live pane update, to prove the Driver forwards
-/// `ToolLiveEvent::Pane` to the frontend as `RuntimeEvent::Pane`.
-struct PaneTool;
-
 struct KeyTool;
-
-#[async_trait]
-impl Tool for PaneTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "pane_tool".into(),
-            description: "emits a pane".into(),
-            input_schema: serde_json::json!({ "type": "object" }),
-        }
-    }
-    async fn execute(&self, _arguments: serde_json::Value) -> Result<String, String> {
-        Ok("done".into())
-    }
-    async fn execute_output_live(
-        &self,
-        _arguments: serde_json::Value,
-        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
-        _context: ToolExecutionContext,
-    ) -> Result<ToolOutput, String> {
-        if let Some(tx) = events {
-            let _ = tx.send(ToolLiveEvent::Pane(PaneContent {
-                source: "pane_tool".into(),
-                title: "Live".into(),
-                lines: vec![PaneLineSpec::Plain("hello from tool".into())],
-                visible_rows: 3,
-                scroll: 0,
-            }));
-        }
-        Ok(ToolOutput::text("done".into()))
-    }
-}
 
 #[async_trait]
 impl Tool for KeyTool {
@@ -345,58 +309,6 @@ impl Tool for KeyTool {
         let key = rx.await.unwrap();
         Ok(ToolOutput::text(key.code))
     }
-}
-
-#[tokio::test]
-async fn driver_forwards_tool_pane_to_runtime_event() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
-    let prompt = "hi";
-    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
-    let mut driver = Driver {
-        llm: Arc::new(MockProvider::new(
-            "mock-1",
-            vec![ChatEvent::ToolCall(ToolCall {
-                id: "c1".into(),
-                name: "pane_tool".into(),
-                arguments: serde_json::json!({}),
-            })],
-        )),
-        extensions: ExtensionManager::unloaded(),
-        tools: ToolHandler::new(builtin_tools().register(PaneTool)),
-        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
-        gate: Arc::new(AutoApprovalGate),
-        approval_mode: Arc::new(ApprovalMode::Danger), // pane_tool isn't read-only
-        agent_depth: 0,
-        activity: None,
-        on_token_usage: None,
-        events: false,
-        event_sender: None,
-        runtime_events: Some(tx),
-        key_reply_registry: None,
-        cancel: None,
-        history,
-        transcript,
-        token_stats: TokenStats::new(),
-        system_prompt_override: None,
-    };
-    let _ = &mut driver;
-
-    driver.run(prompt).await.expect("driver run");
-
-    let mut saw_pane = false;
-    while let Ok(ev) = rx.try_recv() {
-        if let RuntimeEvent::Pane { pane } = ev
-            && pane.source == "pane_tool"
-        {
-            assert!(matches!(&pane.lines[0], PaneLineSpec::Plain(s) if s == "hello from tool"));
-            saw_pane = true;
-        }
-    }
-    assert!(
-        saw_pane,
-        "Driver must forward the tool's ToolLiveEvent::Pane as RuntimeEvent::Pane"
-    );
 }
 
 #[tokio::test]

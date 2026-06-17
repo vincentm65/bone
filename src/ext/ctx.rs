@@ -53,6 +53,10 @@ pub(crate) struct CtxConfig {
     pub cwd: String,
     pub shared_state: SharedState,
     pub pane_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
+    /// Standalone shared UI-state handle. When set, `ctx.ui.pane` and
+    /// `ctx.emit_pane` push `ViewDiff`s directly into this handle (no channel),
+    /// so the TUI can drain them even while the VM lock is held.
+    pub ui: Option<super::api_ui::SharedUi>,
     pub call_id: Option<String>,
     pub tool_handler: Option<crate::tools::registry::ToolHandler>,
     pub approval_mode: crate::tools::ApprovalMode,
@@ -78,6 +82,7 @@ impl CtxConfig {
                 .into_owned(),
             shared_state,
             pane_sender: None,
+            ui: None,
             call_id: None,
             tool_handler: None,
             approval_mode: crate::tools::ApprovalMode::Safe,
@@ -447,17 +452,15 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     })?;
     ui_table.set("status", status_fn)?;
 
-    // ctx.ui.pane(opts) — thin alias over emit_pane
-    // Only works when pane_sender exists; returns false, "pane unavailable" otherwise.
-    if let Some(sender) = cfg.pane_sender.clone() {
+    // ctx.ui.pane(opts) — push a ViewDiff directly into the shared UiState
+    // handle (v2: no longer goes through the channel). Works when `ui` is set.
+    if let Some(ui_state) = cfg.ui.clone() {
         let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
             let pane =
                 crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
             let diff = crate::runtime::view::view_diff_from_pane_content(pane);
-            sender
-                .send(crate::tools::types::ToolLiveEvent::ViewDiff(diff))
-                .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
+            super::api_ui::lock_shared(&ui_state).apply(diff);
             Ok(true)
         })?;
         ui_table.set("pane", pane_fn)?;
@@ -1137,17 +1140,15 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(cid) = &cfg.call_id {
         ctx.set("call_id", cid.as_str())?;
     }
-    // ctx.emit_pane(table) — send a live pane update during tool execution.
-    // Only works when called from execute_output_live (sender is Some).
-    if let Some(sender) = cfg.pane_sender.clone() {
+    // ctx.emit_pane(table) — push a live pane update into the shared UiState
+    // handle (v2: no longer goes through the channel). Works when `ui` is set.
+    if let Some(ui_state) = cfg.ui.clone() {
         let emit_pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
             let pane =
                 crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
             let diff = crate::runtime::view::view_diff_from_pane_content(pane);
-            sender
-                .send(crate::tools::types::ToolLiveEvent::ViewDiff(diff))
-                .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
+            super::api_ui::lock_shared(&ui_state).apply(diff);
             Ok(true)
         })?;
         ctx.set("emit_pane", emit_pane_fn)?;
@@ -1760,7 +1761,6 @@ fn dispatch_event(
         }
         RuntimeEvent::TextDelta { .. }
         | RuntimeEvent::ReasoningDelta { .. }
-        | RuntimeEvent::ViewDiff { .. }
         | RuntimeEvent::KeyRequest { .. } => {}
     }
     Ok(())

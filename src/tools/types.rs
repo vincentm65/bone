@@ -79,9 +79,6 @@ pub struct ToolExecutionContext {
 
 #[derive(Debug)]
 pub enum ToolLiveEvent {
-    /// Upsert/remove a pane component (or recolor a highlight) via the unified
-    /// view-diff type. Both `ctx.ui.pane` and `bone.api.ui.*` flow through this.
-    ViewDiff(crate::runtime::view::ViewDiff),
     /// Request the next terminal key; block until `reply` resolves.
     Key(KeyRequest),
 }

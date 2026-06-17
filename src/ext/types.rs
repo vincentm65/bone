@@ -103,6 +103,10 @@ pub struct ExtensionManager {
     keymap_snapshot: LuaKeymapSnapshot,
     /// Names of sub-agents registered via `bone.register_subagent()`.
     subagents: Vec<String>,
+    /// Standalone shared UI-state handle. Lives outside the Lua VM mutex so
+    /// the TUI can drain diffs even while a tool blocks on `ctx.ui.key()`.
+    /// Also cloned into every `ctx.ui.pane` / `ctx.emit_pane` closure.
+    ui: super::api_ui::SharedUi,
 }
 
 impl ExtensionManager {
@@ -117,6 +121,7 @@ impl ExtensionManager {
         theme_snapshot: LuaThemeSnapshot,
         keymap_snapshot: LuaKeymapSnapshot,
         subagents: Vec<String>,
+        ui: super::api_ui::SharedUi,
     ) -> Self {
         Self {
             lua,
@@ -127,6 +132,7 @@ impl ExtensionManager {
             theme_snapshot,
             keymap_snapshot,
             subagents,
+            ui,
         }
     }
 
@@ -154,6 +160,7 @@ impl ExtensionManager {
             theme_snapshot: LuaThemeSnapshot::default(),
             keymap_snapshot: LuaKeymapSnapshot::default(),
             subagents: Vec::new(),
+            ui: super::api_ui::new_shared(),
         }
     }
 
@@ -174,34 +181,28 @@ impl ExtensionManager {
     pub fn lua_arc(&self) -> Arc<Mutex<Lua>> {
         self.lua_handle()
     }
+    /// Clone the standalone shared UI-state handle.
+    pub fn ui_handle(&self) -> super::api_ui::SharedUi {
+        self.ui.clone()
+    }
 
-    /// Take the pending UI diffs emitted by `bone.api.ui.*` since the last
-    /// drain. A frontend calls this each render tick and applies the diffs to
-    /// its own view (the TUI converts `Float` components to panes). Empty when
-    /// no Lua UI calls have happened.
+    /// Take the pending UI diffs emitted by `bone.api.ui.*`, `ctx.ui.pane`, and
+    /// `ctx.emit_pane` since the last drain. A frontend calls this each render
+    /// tick and applies the diffs to its own view (the TUI converts `Float`
+    /// components to panes). Empty when no Lua UI calls have happened.
     ///
-    /// **Non-blocking by design.** This runs on the render tick, which can fire
-    /// while the Lua VM is busy executing a command or tool — e.g. a blocking
-    /// Lua menu waiting on `ctx.ui.key()` holds the VM lock while it waits for
-    /// the user. A plain `lock()` here would deadlock the UI against the
-    /// blocked command. We `try_lock` instead and skip this tick if the VM is
-    /// busy; the diffs are still there to drain on the next free tick.
+    /// Locks the standalone `UiState` mutex only — never the Lua VM mutex — so
+    /// this is safe to call even while a tool blocks on `ctx.ui.key()` holding
+    /// the VM lock.
     pub fn drain_view_diffs(&self) -> Vec<crate::runtime::view::ViewDiff> {
-        match self.lua.try_lock() {
-            Ok(lua) => super::api_ui::drain_diffs(&lua),
-            Err(_) => Vec::new(),
-        }
+        super::api_ui::drain_diffs(&self.ui)
     }
 
     /// Snapshot the current Lua-driven `ViewModel` (full state, e.g. for a
-    /// late-joining frontend before it starts receiving diffs). Non-blocking
-    /// (see [`drain_view_diffs`](Self::drain_view_diffs)); returns the default
-    /// (empty) view if the VM is momentarily busy.
+    /// late-joining frontend before it starts receiving diffs). Locks the
+    /// standalone `UiState` mutex only — never the Lua VM.
     pub fn view_snapshot(&self) -> crate::runtime::view::ViewModel {
-        match self.lua.try_lock() {
-            Ok(lua) => super::api_ui::snapshot(&lua),
-            Err(_) => crate::runtime::view::ViewModel::default(),
-        }
+        super::api_ui::snapshot(&self.ui)
     }
 
     /// Re-read the live `bone.keymap` table (reflects runtime

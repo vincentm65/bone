@@ -228,25 +228,27 @@ These become *easy* after v1 but are not part of it (they'd change UX):
 - **Pane lifecycle events** (`pane_open` / `pane_close` / `pane_focus`).
 - **`ctx.keymap`** (Lua driving the input buffer / submit / cancel). The
   `keymap_ctx_plan.md` design stands; v1 doesn't expose it.
-- **Collapsing to one transport** (Phase 4 below).
+- **Collapsing to one transport** — done in Phase 4 (v2).
 
 ---
 
-## Phase 4 (v2 capstone — noted, not scheduled)
+## Phase 4 (v2 capstone — complete)
 
-Collapse the two transports into one by moving `UiState` out of Lua app-data
+Collapsed the two transports into one by moving `UiState` out of Lua app-data
 into a standalone `Arc<Mutex<UiState>>`:
 
 - `ctx.ui.pane` and `bone.api.ui.*` both push `ViewDiff`s into the shared
-  handle (Rust closures capturing the `Arc`).
+  handle (`SharedUi`), captured by Rust closures (no `app_data` lookup).
 - The TUI drains it on every tick **without touching the VM mutex** (separate
   mutex), so panes render even while a tool blocks on `ctx.ui.key()`.
-- `ToolLiveEvent::Pane`/`ViewDiff` channel variant is retired; only
+- `ToolLiveEvent::ViewDiff` channel variant is retired; only
   `ToolLiveEvent::Key` remains on the channel.
+- `RuntimeEvent::ViewDiff` is retired — pane updates never round-trip through
+  the runtime event stream; they're drained straight from `SharedUi`.
 
 This removes the last wart (two transports) and makes pane updates strictly
-more responsive. It's more invasive (touches the `bone.api.ui` storage model)
-so it's deliberately split from v1. v1 is fully usable and valuable without it.
+more responsive (the old `try_lock`-on-VM skip is gone; a plain blocking lock
+on the standalone mutex always succeeds).
 
 ---
 

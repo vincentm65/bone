@@ -75,8 +75,8 @@ impl KeySink {
 
 /// Tracks which pane component ids a blocking tool has opened, so they can be
 /// removed if the tool is cancelled mid-block (its future is dropped, so it
-/// can't emit its own removal `ViewDiff::Remove`). Fed by `apply_and_track`;
-/// cleaned up by `drain_for_cancel`.
+/// can't emit its own removal `ViewDiff::Remove`). Fed by `track` from the
+/// `drain_view_diffs` loop in `drive_live`; cleaned up by `drain_for_cancel`.
 pub(crate) struct PaneOwnership {
     sources: std::collections::HashSet<String>,
 }
@@ -543,10 +543,6 @@ impl App {
                 self.renderer
                     .flush_new_to_scrollback(&self.messages, term)?;
             }
-            RuntimeEvent::ViewDiff { diff } => {
-                self.apply_view_diff(diff);
-                self.pump_tick(term)?;
-            }
             RuntimeEvent::KeyRequest { id } => {
                 pending_key.set_runtime(id, key_registry.clone());
             }
@@ -623,10 +619,11 @@ impl App {
         }
     }
 
-    /// Redraw the bottom pane during the pump WITHOUT touching the Lua VM
-    /// (`tick_spinner` does not call `apply_view_diffs`), so it is safe to call
-    /// while a Lua tool runs lock-free.
+    /// Redraw the bottom pane during the pump. Drains shared UI-state diffs
+    /// (v2: safe to call while a Lua tool blocks — the UiState mutex is
+    /// separate from the VM mutex), then renders the spinner and panes.
     fn pump_tick(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.apply_view_diffs();
         self.maybe_refresh_subagent_pane();
         self.renderer.tick_spinner(
             term,
@@ -680,35 +677,10 @@ impl App {
     /// `ctx.agent.run`), so running them on the event-loop thread would freeze
     /// the whole app for the duration. A cancel flag is threaded into the ctx
     /// so pressing Esc aborts an in-flight compaction promptly.
-    fn apply_tool_live_event(&mut self, event: ToolLiveEvent) {
-        match event {
-            ToolLiveEvent::ViewDiff(diff) => {
-                self.apply_view_diff(diff);
-            }
-            ToolLiveEvent::Key(_) => {}
-        }
-    }
-
-    /// Apply a live event and record which pane sources are currently shown by
-    /// the running tool, so they can be cleaned up if the tool is cancelled
-    /// before it emits its own removal (empty-content) event. Pane sources
-    /// managed outside this flow (e.g. the Rust subagent pane) never pass
-    /// through here and so are never tracked or removed.
-    fn apply_and_track(
-        &mut self,
-        event: ToolLiveEvent,
-        live_sources: &mut PaneOwnership,
-    ) {
-        if let ToolLiveEvent::ViewDiff(diff) = &event {
-            live_sources.track(diff);
-        }
-        self.apply_tool_live_event(event);
-    }
-
     /// Drive a blocking-Lua future to completion while keeping the UI live:
-    /// pump pane events emitted via the `ToolLiveEvent` sender, deliver
-    /// keystrokes to any pending `ctx.ui.key()` call, render the spinner, and
-    /// clean up panes on cancel.
+    /// deliver keystrokes to any pending `ctx.ui.key()` call (the channel now
+    /// carries only `Key` events — pane diffs go through the shared UiState
+    /// handle), drain UI diffs each tick, render, and clean up panes on cancel.
     ///
     /// Generic over the future's output `T` so both model-invoked tools and
     /// slash commands share one execution loop. `on_cancel` produces the
@@ -737,20 +709,14 @@ impl App {
         loop {
             tokio::select! {
                 results = &mut future => {
-                    while let Ok(event) = rx.try_recv() {
-                        if let ToolLiveEvent::ViewDiff(_) = event {
-                            self.apply_and_track(event, &mut live_sources);
-                        }
+                    // Drain trailing key requests before returning.
+                    while let Some(ToolLiveEvent::Key(req)) = rx.recv().await {
+                        pending_key.set_direct(req.reply);
                     }
                     return Ok(results);
                 }
-                Some(event) = rx.recv() => {
-                    match event {
-                        ToolLiveEvent::Key(req) => {
-                            pending_key.set_direct(req.reply);
-                        }
-                        other => self.apply_and_track(other, &mut live_sources),
-                    }
+                Some(ToolLiveEvent::Key(req)) = rx.recv() => {
+                    pending_key.set_direct(req.reply);
                 }
                 _ = spinner.tick() => {
                     if Self::drain_keys(
@@ -769,34 +735,31 @@ impl App {
                     if self.cancel_streaming {
                         // Signal cancellation to any running subagents.
                         cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
-                        // Drain remaining live events before returning so that
-                        // any pending pane updates are processed.
-                        while let Ok(event) = rx.try_recv() {
-                            if let ToolLiveEvent::ViewDiff(_) = event {
-                                self.apply_and_track(event, &mut live_sources);
-                            }
-                        }
                         // Remove any panes the cancelled tool left behind — its
                         // future was dropped, so it can't emit its own removal.
                         live_sources.drain_for_cancel(&mut self.pages, &mut self.active_page);
                         return Ok(on_cancel());
                     }
 
-                    // Refresh subagent pane on registry change or ~1s ticker, so the
-                    // pane stays live while a tool blocks (e.g. subagent wait=true).
-                    self.maybe_refresh_subagent_pane();
-                    let visible_pages = if self.panes_visible {
-                    // Drain any pane events sent during drain_keys (e.g. a
-                    // multi-question ask_user replacing one question with the
-                    // next). Avoids a one-frame flash of the dead pane.
-                    while let Ok(event) = rx.try_recv() {
-                        match event {
-                            ToolLiveEvent::Key(req) => {
-                                pending_key.set_direct(req.reply);
-                            }
-                            other => self.apply_and_track(other, &mut live_sources),
-                        }
+                    // Drain UI-state diffs (v2: safe even while the VM is
+                    // busy). Track ownership for cancel cleanup.
+                    let diffs = self.extensions.drain_view_diffs();
+                    for diff in &diffs {
+                        live_sources.track(diff);
                     }
+                    for diff in diffs {
+                        self.apply_view_diff(diff);
+                    }
+
+                    // Refresh subagent pane on registry change or ~1s ticker.
+                    self.maybe_refresh_subagent_pane();
+
+                    // Drain any key requests sent during drain_keys.
+                    while let Ok(ToolLiveEvent::Key(req)) = rx.try_recv() {
+                        pending_key.set_direct(req.reply);
+                    }
+
+                    let visible_pages = if self.panes_visible {
                         self.pages.as_slice()
                     } else {
                         &[]
@@ -810,7 +773,8 @@ impl App {
                             active_page: self.active_page,
                             autocomplete: None,
                         },
-                    )?;                }
+                    )?;
+                }
             }
         }
     }

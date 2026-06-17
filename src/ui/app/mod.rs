@@ -663,8 +663,9 @@ impl App {
 
     /// Ensure the viewport is the right size, then draw.
     fn ensure_viewport_and_draw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
-        // Apply any Lua-driven UI updates (bone.api.ui floats) before measuring,
-        // so a newly opened float is counted in the viewport height.
+        // Apply any Lua-driven UI updates (floats from bone.api.ui, ctx.ui.pane,
+        // or ctx.emit_pane) before measuring, so a newly opened float is
+        // counted in the viewport height.
         self.apply_view_diffs();
         let size = terminal.size()?;
         let desired = Renderer::desired_height(
@@ -852,10 +853,10 @@ impl App {
         true
     }
 
-    /// Apply a single `ViewDiff` to the app state. Shared by both pane
-    /// transports: the `UiState` drain (via [`apply_view_diffs`]) and the
-    /// `ToolLiveEvent` channel (via `apply_tool_live_event`). Returns `true`
-    /// when the diff caused a visible change.
+    /// Apply a single `ViewDiff` to the app state. Shared by the render-tick
+    /// drain of the standalone `UiState` handle (both `bone.api.ui.*` and
+    /// `ctx.ui.pane` push into it). Returns `true` when the diff caused a
+    /// visible change.
     pub(crate) fn apply_view_diff(&mut self, diff: crate::runtime::view::ViewDiff) -> bool {
         use crate::runtime::view::{Component, ViewDiff};
         match diff {
@@ -1672,6 +1673,7 @@ impl App {
         term: &mut BoneTerminal,
     ) -> Option<()> {
         let lua = self.extensions.lua_handle();
+        let shared_ui = self.extensions.ui_handle();
         let cmd_owned = cmd.to_string();
         let arg_owned = arg.to_string();
         let app_state = self.app_ctx_state();
@@ -1706,6 +1708,7 @@ impl App {
                         let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
                         app_state.apply_to(&mut ctx_cfg);
                         ctx_cfg.pane_sender = Some(events);
+                        ctx_cfg.ui = Some(shared_ui.clone());
                         ctx_cfg.cancelled = Some(cancel_for_ctx);
                         let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 

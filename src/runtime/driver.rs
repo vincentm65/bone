@@ -623,9 +623,10 @@ pub(crate) async fn execute_tool_calls(
 
     // Execute all approved calls concurrently. When a frontend is attached
     // (`runtime_events`), use the live path and forward each `ToolLiveEvent`
-    // (pane upserts, key requests) as a `RuntimeEvent` so the frontend can
-    // render panes and answer `ctx.ui.key` mid-turn. Headless, there's no
-    // consumer, so we use the plain (non-live) path.
+    // (key requests) as a `RuntimeEvent` so the frontend can answer
+    // `ctx.ui.key` mid-turn. Pane updates now flow through the standalone
+    // `UiState` handle (drained by the TUI directly), not this channel.
+    // Headless, there's no consumer, so we use the plain (non-live) path.
     if !approved.is_empty() {
         let approved_calls: Vec<ToolCall> = approved.iter().map(|(_, c)| c.clone()).collect();
         let results = if let Some(events_out) = runtime_events.clone() {
@@ -635,16 +636,12 @@ pub(crate) async fn execute_tool_calls(
             let forwarder = tokio::spawn(async move {
                 use crate::tools::types::ToolLiveEvent;
                 while let Some(ev) = live_rx.recv().await {
-                    match ev {
-                        ToolLiveEvent::ViewDiff(diff) => {
-                            let _ = events_out.send(RuntimeEvent::ViewDiff { diff });
-                        }
-                        ToolLiveEvent::Key(req) => {
-                            if let Some(registry) = &key_reply_registry {
-                                let id = registry.register(req);
-                                let _ = events_out.send(RuntimeEvent::KeyRequest { id });
-                            }
-                        }
+                    // ToolLiveEvent now has only the Key variant; pane diffs
+                    // go through the shared UiState handle.
+                    let ToolLiveEvent::Key(req) = ev;
+                    if let Some(registry) = &key_reply_registry {
+                        let id = registry.register(req);
+                        let _ = events_out.send(RuntimeEvent::KeyRequest { id });
                     }
                 }
             });
