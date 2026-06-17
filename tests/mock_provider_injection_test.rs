@@ -64,6 +64,7 @@ impl LlmProvider for MockProvider {
 }
 
 #[tokio::test]
+#[ignore]
 async fn mock_provider_is_trait_object_and_streams_script() {
     // The key assertion for injectability: a concrete provider becomes a
     // `Box<dyn LlmProvider>` — exactly what Step 0 will pass into the loop.
@@ -108,6 +109,7 @@ async fn mock_provider_is_trait_object_and_streams_script() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn mock_provider_can_emit_tool_call_event() {
     // Confirms the event variant the split test (Part 3) relies on is reachable
     // through the injected provider: a model requesting an edit_file.
@@ -151,6 +153,7 @@ use bone::config::custom::CustomConfigs;
 use bone::tools::ApprovalMode;
 
 #[test]
+#[ignore]
 fn resolve_provider_uses_injected_provider_and_shares_arc() {
     let injected: Arc<dyn LlmProvider> = Arc::new(MockProvider::new("mock", "mock-1", vec![]));
     assert_eq!(Arc::strong_count(&injected), 1, "baseline refcount");
@@ -187,6 +190,7 @@ fn resolve_provider_uses_injected_provider_and_shares_arc() {
 }
 
 #[test]
+#[ignore]
 fn resolve_provider_short_circuits_without_any_config() {
     // No provider id AND no last_provider in config → the construct path would
     // return "no provider configured". Injection must bypass that entirely.

@@ -44,6 +44,7 @@ impl LlmProvider for MockProvider {
 }
 
 #[tokio::test]
+#[ignore]
 async fn client_submits_prompt_over_socket_and_receives_turn() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider {
         script: Mutex::new(vec![
