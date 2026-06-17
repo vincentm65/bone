@@ -583,11 +583,15 @@ fn compact_preserves_tool_call_chains() {
     lua.load(r#"
         local handler = bone._handlers.before_turn[1]
         local ctx = {
-            config = { get = function(section, key)
-                if section == "commands" and key == "compact" then return true end
-                if key == "auto_compact_tokens" then return "1" end
-                if key == "auto_compact_keep_messages" then return "3" end
-            end },
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "1" end
+                    if key == "auto_compact_keep_messages" then return "3" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
             usage = { snapshot = function() return { context_length = 100 } end },
             conversation = { history = function() return {
                 { role = "user", content = "older" },
@@ -650,11 +654,15 @@ fn compact_drops_orphan_tool_results() {
     lua.load(r#"
         local handler = bone._handlers.before_turn[1]
         local ctx = {
-            config = { get = function(section, key)
-                if section == "commands" and key == "compact" then return true end
-                if key == "auto_compact_tokens" then return "1" end
-                if key == "auto_compact_keep_messages" then return "2" end
-            end },
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "1" end
+                    if key == "auto_compact_keep_messages" then return "2" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
             usage = { snapshot = function() return { context_length = 200 } end },
             conversation = { history = function() return {
                 { role = "user", content = "read it" },
@@ -690,6 +698,119 @@ fn compact_drops_orphan_tool_results() {
             .and_then(|v| v.as_array())
             .is_none_or(|a| a.is_empty())),
         "assistant tool call without result should be dropped: {raw}"
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+// ── 6b. auto-compact gate respects the deny-list config format ──────────────
+//
+// Regression: the `commands` namespace uses the deny-list model
+// (`{ title, disabled = [] }`), NOT the legacy field-based `{ compact = true }`.
+// The before_turn gate must treat `compact` as enabled unless it appears in the
+// `disabled` array. Previously the gate called `ctx.config.get("commands",
+// "compact")`, which always returned nil under the deny-list format and
+// silently disabled auto-compaction forever.
+
+#[test]
+fn auto_compact_enabled_under_denylist_config() {
+    let config_dir = common::temp_dir("compact-denylist-enabled");
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(r#"
+        local handler = bone._handlers.before_turn[1]
+        -- Deny-list config format: disabled is empty → compact is enabled.
+        local ctx = {
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "1" end
+                    if key == "auto_compact_keep_messages" then return "2" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
+            usage = { snapshot = function() return { context_length = 100 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "older" },
+                { role = "assistant", content = "older answer" },
+                { role = "user", content = "continue" },
+                { role = "assistant", content = "ok" },
+            } end },
+            agent = { run = function() return { ok = true, content = "summary" } end },
+            ui = { notify = function() end },
+        }
+        local ret = handler({}, ctx)
+        -- Should NOT have bailed at the gate: it ran compaction and returned
+        -- a replacement transcript (non-nil) with the summary.
+        _AUTO_COMPACT_RET = ret and "table" or "nil"
+    "#)
+    .exec()
+    .unwrap();
+
+    let result: String = lua.globals().get("_AUTO_COMPACT_RET").unwrap();
+    assert_eq!(
+        result, "table",
+        "auto-compaction should fire under the deny-list config format; got ret={result:?}",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[test]
+fn auto_compact_disabled_when_in_denylist() {
+    let config_dir = common::temp_dir("compact-denylist-disabled");
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(r#"
+        local handler = bone._handlers.before_turn[1]
+        -- compact is in the disabled array → the gate bails with nil.
+        local ctx = {
+            config = {
+                get = function(_, _) return nil end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = { "compact" } } end
+                end,
+            },
+            usage = { snapshot = function() return { context_length = 999 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "x" },
+            } end },
+            agent = { run = function() return { ok = true, content = "should not run" } end },
+            ui = { notify = function() end },
+        }
+        local ret = handler({}, ctx)
+        _AUTO_COMPACT_DISABLED_RET = ret and "table" or "nil"
+    "#)
+    .exec()
+    .unwrap();
+
+    let result: String = lua.globals().get("_AUTO_COMPACT_DISABLED_RET").unwrap();
+    assert_eq!(
+        result, "nil",
+        "auto-compaction must be skipped when compact is in the deny-list; got ret={result:?}",
     );
 
     std::fs::remove_dir_all(&config_dir).ok();

@@ -710,7 +710,7 @@ impl App {
             tokio::select! {
                 results = &mut future => {
                     // Drain trailing key requests before returning.
-                    while let Some(ToolLiveEvent::Key(req)) = rx.recv().await {
+                    while let Ok(ToolLiveEvent::Key(req)) = rx.try_recv() {
                         pending_key.set_direct(req.reply);
                     }
                     return Ok(results);

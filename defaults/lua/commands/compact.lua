@@ -243,8 +243,27 @@ bone.on("before_turn", function(event, ctx)
     end
 
     -- Check that the compact command is enabled (respects /config toggle).
-    local compact_enabled = ctx.config.get("commands", "compact")
-    if compact_enabled ~= true then
+    -- `commands` uses the deny-list config model: the YAML is
+    --   { title = "...", disabled = { ... } }
+    -- so the command is enabled unless present in the `disabled` array.
+    -- (Falls back to the legacy fields-based check for old config files.)
+    local compact_enabled = false
+    local commands_cfg = ctx.config.get_table and ctx.config.get_table("commands")
+    if type(commands_cfg) == "table" then
+        compact_enabled = true
+        if type(commands_cfg.disabled) == "table" then
+            for _, name in ipairs(commands_cfg.disabled) do
+                if name == "compact" then
+                    compact_enabled = false
+                    break
+                end
+            end
+        elseif type(commands_cfg.fields) == "table" then
+            -- Legacy field-based format: { compact = true/false }.
+            compact_enabled = commands_cfg.compact ~= false
+        end
+    end
+    if not compact_enabled then
         return nil
     end
 
