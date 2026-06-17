@@ -37,7 +37,7 @@ pub struct Driver {
     /// Resolves tool-call approval. Headless uses [`crate::tools::AutoApprovalGate`];
     /// interactive frontends supply a gate that prompts the user.
     pub gate: Arc<dyn ApprovalGate>,
-    pub approval_mode: ApprovalMode,
+    pub approval_mode: Arc<ApprovalMode>,
     pub agent_depth: usize,
     pub activity: Option<Arc<AtomicU64>>,
     pub on_token_usage: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
@@ -49,10 +49,9 @@ pub struct Driver {
     /// TUI, or a remote client) consumes this to render a turn. `None` for the
     /// headless JSONL path, which only needs `event_sender`.
     pub runtime_events: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
-    /// Routes `ctx.ui.interact` replies back to blocked tools when a frontend is
-    /// attached. Required for live tool interaction; `None` headless (interact
-    /// then degrades to its built-in "unavailable" path).
-    pub reply_registry: Option<crate::runtime::ReplyRegistry>,
+    /// Routes `ctx.ui.key` replies back to blocked tools when a frontend is
+    /// attached. Required for live tool key input; `None` headless.
+    pub key_reply_registry: Option<crate::runtime::KeyReplyRegistry>,
     /// Cooperative cancel flag. When set true mid-turn, the loop stops after the
     /// current stream chunk / tool batch and ends the turn with whatever content
     /// was produced. Also wired into `tools.cancel_token` so running tools abort.
@@ -117,7 +116,7 @@ impl Driver {
             events,
             event_sender,
             runtime_events,
-            reply_registry,
+            key_reply_registry,
             cancel,
             mut history,
             mut transcript,
@@ -136,6 +135,7 @@ impl Driver {
             .unwrap_or(0);
 
         let approval_label = approval_mode.mode_str();
+        let approval_mode = Arc::clone(&approval_mode);
 
         let mut session_seq = 0i64;
         let mut usage_records: Vec<UsageRecord> = Vec::new();
@@ -184,7 +184,7 @@ impl Driver {
                 let state = crate::ext::ctx::AppCtxState::new(
                     &tools,
                     &token_stats,
-                    approval_mode,
+                    &approval_mode,
                     session.conv_id(),
                     llm.id(),
                     llm.model(),
@@ -242,7 +242,10 @@ impl Driver {
             // Request stream with retry.
             let mut stream = None;
             for attempt in 1..=3 {
-                match llm.chat_stream(history.clone(), turn_tool_defs.clone()).await {
+                match llm
+                    .chat_stream(history.clone(), turn_tool_defs.clone())
+                    .await
+                {
                     Ok(s) => {
                         stream = Some(s);
                         break;
@@ -472,13 +475,13 @@ impl Driver {
             tools.cancel_token = cancel.clone();
             let results = execute_tool_calls(
                 &tools,
-                approval_mode,
+                &approval_mode,
                 gate.as_ref(),
                 tool_calls,
                 &extensions,
                 agent_depth,
                 runtime_events.clone(),
-                reply_registry.clone(),
+                key_reply_registry.clone(),
             )
             .await;
             touch_activity(&activity);
@@ -558,13 +561,13 @@ impl Driver {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_tool_calls(
     tools: &ToolHandler,
-    mode: ApprovalMode,
+    mode: &ApprovalMode,
     gate: &dyn ApprovalGate,
     calls: Vec<ToolCall>,
     extensions: &ExtensionManager,
     agent_depth: usize,
     runtime_events: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
-    reply_registry: Option<crate::runtime::ReplyRegistry>,
+    key_reply_registry: Option<crate::runtime::KeyReplyRegistry>,
 ) -> Vec<ToolResult> {
     // Track original index to preserve call order in output.
     let mut out: Vec<(usize, ToolResult)> = Vec::with_capacity(calls.len());
@@ -584,7 +587,7 @@ pub(crate) async fn execute_tool_calls(
             crate::ext::EventDispatchResult::Blocked { reason } => Some(reason),
             crate::ext::EventDispatchResult::Continue => None,
         };
-        let auto_allows = tools.allows_call(mode, &call);
+        let auto_allows = tools.allows_call(*mode, &call);
 
         match gate.decide(blocked, auto_allows, &call).await {
             CallOutcome::Approve => approved.push((i, call)),
@@ -608,7 +611,7 @@ pub(crate) async fn execute_tool_calls(
                     ToolResult {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        content: crate::tools::denied_message(mode, safety),
+                        content: crate::tools::denied_message(*mode, safety),
                         is_error: true,
                         pane_page: None,
                         state: None,
@@ -620,9 +623,9 @@ pub(crate) async fn execute_tool_calls(
 
     // Execute all approved calls concurrently. When a frontend is attached
     // (`runtime_events`), use the live path and forward each `ToolLiveEvent`
-    // (pane upserts, interaction requests) as a `RuntimeEvent` so the frontend
-    // can render panes and answer `ctx.ui.interact` mid-turn. Headless, there's
-    // no consumer, so we use the plain (non-live) path.
+    // (pane upserts, key requests) as a `RuntimeEvent` so the frontend can
+    // render panes and answer `ctx.ui.key` mid-turn. Headless, there's no
+    // consumer, so we use the plain (non-live) path.
     if !approved.is_empty() {
         let approved_calls: Vec<ToolCall> = approved.iter().map(|(_, c)| c.clone()).collect();
         let results = if let Some(events_out) = runtime_events.clone() {
@@ -636,14 +639,11 @@ pub(crate) async fn execute_tool_calls(
                         ToolLiveEvent::Pane(pane) => {
                             let _ = events_out.send(RuntimeEvent::Pane { pane });
                         }
-                        ToolLiveEvent::Interact(req) => {
-                            if let Some(registry) = &reply_registry {
-                                let spec = registry.register(req);
-                                let _ = events_out.send(RuntimeEvent::Interact { spec });
+                        ToolLiveEvent::Key(req) => {
+                            if let Some(registry) = &key_reply_registry {
+                                let id = registry.register(req);
+                                let _ = events_out.send(RuntimeEvent::KeyRequest { id });
                             }
-                            // No registry → drop `req`; its reply oneshot closes
-                            // and the Lua `ctx.ui.interact` returns its
-                            // "unavailable" fallback rather than hanging.
                         }
                     }
                 }
@@ -655,7 +655,7 @@ pub(crate) async fn execute_tool_calls(
             // When they finish, the channel closes and the forwarder exits.
             // Do not pass an extra clone into execute_all_live: if the root
             // future holds a sender across its own await, live_rx never closes
-            // and the Driver wedges after ctx.ui.interact replies.
+            // and the Driver wedges after ctx.ui.key replies.
             let _ = forwarder.await;
             results
         } else {

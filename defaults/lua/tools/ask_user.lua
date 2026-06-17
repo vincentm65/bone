@@ -1,4 +1,4 @@
--- ask_user — interactive question tool using ctx.ui.interact()
+-- ask_user — interactive question tool using ui.menu.
 --
 -- Supports single_select, multi_select, and text_input question types.
 -- Questions are rendered in the bottom pane with keyboard-driven
@@ -9,6 +9,8 @@
 --   2. Multi-question:  { questions = { {question, options, allow_custom, type, default}, ... } }
 --      Asks each question sequentially with backtracking navigation.
 --      After answering, user can go back to previous questions or proceed.
+
+local menu = require("ui.menu")
 
 local function format_answer(result)
     if result.values then
@@ -49,8 +51,6 @@ local function get_qtype(q)
 end
 
 -- Flatten object-form options ({label, description}) to plain strings.
--- ctx.ui.interact only accepts Vec<String>; rich entries are reduced to
--- their label so the model still sees the original text as the answer.
 local function flatten_options(options)
     local flat = {}
     for i, opt in ipairs(options) do
@@ -69,13 +69,19 @@ local function ask_one(q, ctx)
     local allow_custom = q.allow_custom or false
     local qtype = get_qtype(q)
 
-    local ok, result = pcall(ctx.ui.interact, {
+    local spec = {
         question = question,
-        type = qtype,
         options = options,
         default = q.default,
         allow_custom = allow_custom,
-    })
+    }
+    local fn = menu.text_input
+    if qtype == "single_select" or qtype == "single" then
+        fn = menu.select
+    elseif qtype == "multi_select" or qtype == "multi" then
+        fn = menu.multi_select
+    end
+    local ok, result = pcall(fn, ctx, spec)
 
     if not ok then
         return nil, "interact failed: " .. tostring(result)
@@ -177,9 +183,8 @@ local function ask_multi_with_backtrack(questions, ctx)
 
         -- Show navigation pane with summary
         local nav_opts = build_nav_options(questions, answers, nil)
-        local ok, result = pcall(ctx.ui.interact, {
+        local ok, result = pcall(menu.select, ctx, {
             question = "Review your answers. Pick a question to revise, or submit.",
-            type = "single_select",
             options = nav_opts,
             allow_custom = false,
         })
@@ -222,7 +227,7 @@ local function execute(params, ctx)
 
         local result = table.concat(parts, "\n")
         -- Clear pane after all questions are done
-        pcall(ctx.ui.pane, { source = "interact", title = "", lines = {} })
+        menu.clear(ctx)
         ctx.ui.notify(result, "info")
         return result
     end
@@ -230,7 +235,7 @@ local function execute(params, ctx)
     -- Single-question mode (backward compat)
     local answer, err = ask_one(params, ctx)
     -- Clear pane after the question is answered
-    pcall(ctx.ui.pane, { source = "interact", title = "", lines = {} })
+    menu.clear(ctx)
     if err == "cancelled" then
         return "[user cancelled]"
     elseif err then

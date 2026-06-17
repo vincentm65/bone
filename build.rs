@@ -68,10 +68,49 @@ fn generate_default_lua_commands(manifest_dir: &std::path::Path, out_dir: &std::
     fs::write(out_dir.join("default_lua_commands.rs"), generated).unwrap();
 }
 
+fn generate_default_lua_libs(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
+    let dir = manifest_dir.join("defaults/lua/lib");
+    println!("cargo:rerun-if-changed={}", dir.display());
+
+    let mut stack = vec![dir.clone()];
+    let mut entries = Vec::new();
+    while let Some(cur) = stack.pop() {
+        if !cur.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&cur)
+            .unwrap_or_else(|e| panic!("failed to read default lua lib dir {}: {e}", cur.display()))
+        {
+            let path = entry
+                .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", cur.display()))
+                .path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "lua") {
+                entries.push(path);
+            }
+        }
+    }
+    entries.sort();
+
+    let mut generated = String::from("pub const DEFAULT_LUA_LIBS: &[(&str, &str)] = &[\n");
+    for path in entries {
+        let rel = path.strip_prefix(&dir).unwrap().to_string_lossy();
+        generated.push_str(&format!(
+            "    ({rel:?}, include_str!({path:?})),\n",
+            rel = rel.as_ref(),
+            path = path.display().to_string(),
+        ));
+    }
+    generated.push_str("];\n");
+    fs::write(out_dir.join("default_lua_libs.rs"), generated).unwrap();
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     generate_default_lua_tools(&manifest_dir, &out_dir);
     generate_default_lua_commands(&manifest_dir, &out_dir);
+    generate_default_lua_libs(&manifest_dir, &out_dir);
 }

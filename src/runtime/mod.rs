@@ -15,6 +15,6 @@ pub mod view;
 
 pub use driver::{Driver, UsageRecord};
 pub use event::{
-    ApprovalRequest, ChannelApprovalGate, InteractSpec, ReplyRegistry, RuntimeCommand, RuntimeEvent,
+    ApprovalRequest, ChannelApprovalGate, KeyReplyRegistry, RuntimeCommand, RuntimeEvent,
 };
 pub use view::{Component, ViewDiff, ViewModel};

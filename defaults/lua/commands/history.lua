@@ -1,9 +1,6 @@
 -- /history — pick a recent conversation and load it as the current chat.
 --
--- Uses ctx.ui.interact() for an arrow-key picker. This works in a slash command
--- because the command runner now drives the handler through the shared
--- live-pane loop (App::drive_live), the same loop tools use — so the pane
--- renders and keystrokes reach it.
+local menu = require("ui.menu")
 
 local function truncate(s, max_len)
     s = tostring(s or "")
@@ -145,15 +142,14 @@ bone.register_command("history", {
             return nil
         end
 
-        local ask_ok, result = pcall(ctx.ui.interact, {
+        local ask_ok, result = pcall(menu.select, ctx, {
             question = "Load conversation history. Use arrows/PageUp/PageDown, Enter to load, Esc to cancel.",
-            type = "single_select",
             options = options,
             default = 1,
             allow_custom = false,
         })
 
-        pcall(ctx.ui.pane, { source = "interact", title = "", lines = {} })
+        menu.clear(ctx)
 
         if not ask_ok then
             ctx.ui.notify("History picker failed: " .. tostring(result), "error")

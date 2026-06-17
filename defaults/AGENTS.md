@@ -100,7 +100,7 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.ui.notify(msg, level?)` | | Show notification (`"info"`, `"warn"`, `"error"`) |
 | `ctx.ui.status(msg)` | | Write status line to stderr |
 | `ctx.ui.pane(table)` | `true\|(false, string)` | Upsert/clear a live pane (tools only) — see [Live Panes](#live-panes) |
-| `ctx.ui.interact(table)` | `table` | Show an interactive pane and block for the user's answer — see [Live Panes](#live-panes) |
+| `ctx.ui.key()` | `table` | Block for one key event: `{code, char, ctrl, alt, shift}` — see [Live Panes](#live-panes) |
 | **Live events** | | During `execute_output_live` only |
 | `ctx.emit_pane(table)` | `true` | Same as `ctx.ui.pane` |
 | **`ctx.usage.*`** | | Token usage |
@@ -118,10 +118,15 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.agent.spawn(prompt, opts?)` | `table` | `{ok, id, error}` — non-blocking background job |
 | `ctx.agent.jobs()` | `array` | Snapshot of all jobs (`{id, agent, task, status, result, started_at}`) |
 | `ctx.agent.wait(ids?, opts?)` | `table` | `{ok, jobs, pending, timed_out, cancelled}` — block until jobs finish |
-| **`ctx.config.*`** | | Read-only config access |
+| **`ctx.config.*`** | | Config access |
 | `ctx.config.dir` | `string` | Same as `ctx.config_dir` |
 | `ctx.config.get(section, key)` | `value\|nil` | Read a value from `config/<section>.yaml` |
 | `ctx.config.get_table(section)` | `table\|nil` | Read entire config section as table |
+| `ctx.config.get_pages()` | `array` | Read ordered custom config pages and fields |
+| `ctx.config.set_value(section, key, value)` | `true` | Persist a scalar config field |
+| `ctx.config.cycle_field(section, key, current)` | `string\|nil` | Next bool/enum value |
+| `ctx.config.list_providers()` | `array` | Provider rows with active marker |
+| `ctx.config.set_provider_entry(id, entry)` | `true` | Persist provider fields |
 | **`ctx.session.*`** | | Conversation history |
 | `ctx.session.current()` | `table\|nil` | `{id, provider, model}` for current session |
 | `ctx.session.list(opts?)` | `array` | Recent conversations (default limit 20, max 100) |
@@ -415,7 +420,7 @@ bone.register_tool({
     display = { show = false, show_result = false },
 })
 ```
-Requires `ctx.session.list`, `ctx.session.messages`, and `ctx.ui.interact`. No parameters.
+Requires `ctx.session.list`, `ctx.session.messages`, `ctx.ui.pane`, and `ctx.ui.key`. No parameters.
 
 ## Pre-Seeded Commands
 
@@ -550,34 +555,38 @@ end
 ctx.ui.pane{ source = "scan", title = "", lines = {} }   -- clear when done
 ```
 
-#### Interactive panes — `ctx.ui.interact{}`
+#### Lua menus — `ui.menu`
 
-Shows a pane the user can drive with the keyboard and **blocks** until they
-answer (Up/Down to move, Space to toggle in multi-select, Tab for the custom
-field, Enter to submit, Esc to cancel):
+Menus are Lua-rendered panes driven by raw key events. Use the bundled
+`ui.menu` module for standard select, multi-select, and text input flows:
 
 ```lua
-local result = ctx.ui.interact{
+local menu = require("ui.menu")
+
+local result = menu.select(ctx, {
     question = "Which branch?",
-    type = "single_select",     -- "single_select" | "multi_select" | "text_input"
-    options = { "main", "dev" }, -- required for select types
+    options = { "main", "dev" },
     default = 1,                 -- 1-based initial selection (optional)
     allow_custom = true,         -- offer a free-text "Custom:" row (optional)
-}
+})
 -- single_select → { value = "main" }  or  { value = "...", custom = true }
--- multi_select  → { values = { "main", "dev" }, custom? = "..." }
--- text_input    → { value = "typed text" }
+-- multi_select  → menu.multi_select(ctx, spec) returns { values = {...}, custom? = "..." }
+-- text_input    → menu.text_input(ctx, spec) returns { value = "typed text" }
 -- cancelled     → { cancelled = true }
 ```
 
-The bundled `ask_user` tool (`lua/tools/ask_user.lua`) is built entirely on
-`ctx.ui.interact`; read it for a worked example of multi-question flows.
+For lower-level input, `ctx.ui.key()` blocks until the next key and returns a
+table such as `{ code = "Up", char = nil, ctrl = false, alt = false, shift = false }`.
+Ctrl+C remains host-owned cancellation; Esc is delivered to Lua.
+
+The bundled `ask_user` tool (`lua/tools/ask_user.lua`) is built on `ui.menu`;
+read it for a worked example of multi-question flows.
 
 #### Lifecycle & cancellation
 
 - Clean up panes you create by emitting empty `lines` when done.
-- Pressing **Esc** on an interactive pane cancels just that interaction (returns
-  `{ cancelled = true }`), not the whole turn — so your cleanup code still runs.
+- Pressing **Esc** in bundled Lua menus cancels just that menu (returns
+  `{ cancelled = true }`), not the whole turn, so your cleanup code still runs.
 - If the user **hard-cancels** the turn (Ctrl+C) while your tool is mid-run, its
   execution is dropped before cleanup can run; the host automatically removes any
   panes the tool emitted, so nothing lingers.

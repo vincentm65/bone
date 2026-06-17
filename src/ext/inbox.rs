@@ -20,9 +20,7 @@ fn inbox() -> &'static Mutex<VecDeque<String>> {
 /// loop can't grow the queue without bound. The only drain is the UI event
 /// loop, so this also bounds memory in non-interactive/headless runs.
 pub fn push(text: String) {
-    let mut q = inbox()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut q = inbox().lock().unwrap_or_else(|e| e.into_inner());
     q.push_back(text);
     while q.len() > MAX_INBOX {
         q.pop_front();
@@ -68,6 +66,9 @@ mod tests {
         assert_eq!(got.len(), MAX_INBOX);
         // Oldest five were dropped; the cap's first surviving entry follows.
         assert_eq!(got.first().map(String::as_str), Some("5"));
-        assert_eq!(got.last().map(String::as_str), Some((MAX_INBOX + 4).to_string()).as_deref());
+        assert_eq!(
+            got.last().map(String::as_str),
+            Some((MAX_INBOX + 4).to_string()).as_deref()
+        );
     }
 }

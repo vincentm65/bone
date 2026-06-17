@@ -1,4 +1,4 @@
-use crate::pane_content::{InteractRequest, PaneContent};
+use crate::pane_content::{KeyRequest, PaneContent};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -81,8 +81,8 @@ pub struct ToolExecutionContext {
 pub enum ToolLiveEvent {
     /// Upsert a pane page (or remove it when `PaneContent::is_empty()`).
     Pane(PaneContent),
-    /// Request user interaction; block until `reply` resolves.
-    Interact(InteractRequest),
+    /// Request the next terminal key; block until `reply` resolves.
+    Key(KeyRequest),
 }
 
 impl ToolOutput {

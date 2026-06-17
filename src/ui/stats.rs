@@ -40,9 +40,10 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if !self.was_enabled
-            && let Err(e) = crossterm::terminal::disable_raw_mode() {
-                eprintln!("bone: warning: failed to disable raw mode: {e}");
-            }
+            && let Err(e) = crossterm::terminal::disable_raw_mode()
+        {
+            eprintln!("bone: warning: failed to disable raw mode: {e}");
+        }
     }
 }
 

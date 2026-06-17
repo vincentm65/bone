@@ -13,6 +13,7 @@ local ENTRIES = {
   { key = "/history", desc = "browse past conversations" },
   { key = "/memory",  desc = "manage memory" },
   { key = "/review",  desc = "review the working diff" },
+  { key = "/shotgun", desc = "multi-model search/blast/judge review" },
   { key = "/compact", desc = "compact the conversation" },
 }
 

@@ -18,7 +18,13 @@ use super::types::{BootOptions, BootResult, ExtensionManager};
 ///
 /// Errors during Lua construction or init.lua execution are logged and
 /// the app continues without Lua support.
-pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions, model: &str, provider: &str) -> BootResult {
+pub fn boot(
+    config_dir: &Path,
+    cwd: &Path,
+    opts: BootOptions,
+    model: &str,
+    provider: &str,
+) -> BootResult {
     let version = env!("CARGO_PKG_VERSION");
     let config_dir_str = config_dir.to_string_lossy().to_string();
 
@@ -32,6 +38,9 @@ pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions, model: &str, provi
             };
         }
     };
+
+    // Seed libraries before init.lua so user startup code can `require` them.
+    super::seed_default_lua_libs(&config_dir.join("lua/lib"));
 
     let loaded = match engine::run_init(&lua, config_dir) {
         Ok(loaded) => loaded,

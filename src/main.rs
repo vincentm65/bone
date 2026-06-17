@@ -196,9 +196,10 @@ fn parse_listen_addr(args: &[String]) -> String {
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--listen"
-            && let Some(v) = args.get(i + 1) {
-                return v.clone();
-            }
+            && let Some(v) = args.get(i + 1)
+        {
+            return v.clone();
+        }
         i += 1;
     }
     "127.0.0.1:7878".to_string()

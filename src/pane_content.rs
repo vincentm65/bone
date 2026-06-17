@@ -3,8 +3,7 @@
 //! These types flow through core data structures (`ToolResult`,
 //! `ToolLiveEvent`) without any dependency on ratatui or `crate::ui`.
 //! The TUI converts them to its internal `PanePage` (with
-//! `Vec<ratatui::text::Line>`) via `PanePage::from_content` /
-//! `PanePage::from_interact` at the render boundary.
+//! `Vec<ratatui::text::Line>`) via `PanePage::from_content` at the render boundary.
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -37,20 +36,6 @@ where
             other
         ))),
     }
-}
-
-/// What kind of interaction the user is performing.
-///
-/// Moved from `ui::pane_page` — core owns this because core constructs it
-/// from Lua opts before sending it to the frontend.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InteractionMode {
-    /// Select one option (Up/Down + Enter)
-    SingleSelect,
-    /// Select multiple options (Up/Down + Space to toggle + Enter to confirm)
-    MultiSelect,
-    /// Freeform text input only (no options list)
-    TextInput,
 }
 
 /// One span within a styled line.
@@ -136,23 +121,24 @@ impl PaneContent {
     }
 }
 
-/// A request for user interaction (single-select, multi-select, or text
-/// input).
-///
-/// Sent as a `ToolLiveEvent::Interact`. The `reply` channel carries the
-/// user's response back to the blocked Lua caller in `ctx.rs`.
-///
-/// This type is NOT `Clone` and NOT serializable — it carries a live oneshot
-/// sender. For wire protocols (Phase 3), the serializable portion is the
-/// fields minus `reply`; the protocol layer reconstructs the channel.
+/// Frontend-neutral key event delivered to Lua by `ctx.ui.key()`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyEvent {
+    pub code: String,
+    #[serde(default)]
+    pub char: Option<String>,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub shift: bool,
+}
+
+/// A blocking request for the next terminal key.
 #[derive(Debug)]
-pub struct InteractRequest {
-    pub question: String,
-    pub mode: InteractionMode,
-    pub options: Vec<String>,
-    pub default_selected: usize,
-    pub allow_custom: bool,
-    pub reply: oneshot::Sender<serde_json::Value>,
+pub struct KeyRequest {
+    pub reply: oneshot::Sender<KeyEvent>,
 }
 #[cfg(test)]
 mod tests {

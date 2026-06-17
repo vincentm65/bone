@@ -23,15 +23,31 @@ pub use types::{BootOptions, BootResult, BootedTools, EventDispatchResult, Exten
 
 include!(concat!(env!("OUT_DIR"), "/default_lua_tools.rs"));
 include!(concat!(env!("OUT_DIR"), "/default_lua_commands.rs"));
+include!(concat!(env!("OUT_DIR"), "/default_lua_libs.rs"));
 
 use std::path::Path;
+
+fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    existing.contains("ctx.ui.interact")
+        || (name == "ui/menu.lua" && !existing.contains("local function next_key"))
+        || (name == "ui/menu.lua" && !existing.contains("split_leading_circle"))
+}
 
 /// Boot the Lua extension system.
 ///
 /// Creates the VM, populates the `bone` global table, executes
 /// `~/.bone-rust/init.lua` if it exists, and collects registered tools.
 /// Failures are logged but never crash the app.
-pub fn boot(config_dir: &Path, cwd: &Path, opts: BootOptions, model: &str, provider: &str) -> BootResult {
+pub fn boot(
+    config_dir: &Path,
+    cwd: &Path,
+    opts: BootOptions,
+    model: &str,
+    provider: &str,
+) -> BootResult {
     loader::boot(config_dir, cwd, opts, model, provider)
 }
 
@@ -98,7 +114,8 @@ pub fn boot_with_tools(
 }
 
 /// Seed bundled default Lua tools into the config directory.
-/// Existing files are never overwritten.
+/// Existing files are not overwritten except for bundled files that still use
+/// the removed Rust interaction API.
 pub fn seed_default_lua_tools(dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("bone: warning: could not create {}: {e}", dir.display());
@@ -106,7 +123,31 @@ pub fn seed_default_lua_tools(dir: &Path) {
     }
     for (name, content) in DEFAULT_LUA_TOOLS {
         let path = dir.join(name);
-        if !path.exists()
+        if (!path.exists() || should_refresh_seeded_lua(&path, name))
+            && let Err(e) = std::fs::write(&path, content)
+        {
+            eprintln!("bone: warning: could not write {}: {e}", path.display());
+        }
+    }
+}
+
+/// Seed bundled default Lua libraries into the config directory.
+/// Existing files are not overwritten except for stale bundled menu modules
+/// from the Rust-to-Lua menu migration.
+pub fn seed_default_lua_libs(dir: &Path) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("bone: warning: could not create {}: {e}", dir.display());
+        return;
+    }
+    for (name, content) in DEFAULT_LUA_LIBS {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("bone: warning: could not create {}: {e}", parent.display());
+            continue;
+        }
+        if (!path.exists() || should_refresh_seeded_lua(&path, name))
             && let Err(e) = std::fs::write(&path, content)
         {
             eprintln!("bone: warning: could not write {}: {e}", path.display());
@@ -115,7 +156,8 @@ pub fn seed_default_lua_tools(dir: &Path) {
 }
 
 /// Seed bundled default Lua commands into the config directory.
-/// Existing files are never overwritten.
+/// Existing files are not overwritten except for bundled files that still use
+/// the removed Rust interaction API.
 fn seed_default_lua_commands(dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("bone: warning: could not create {}: {e}", dir.display());
@@ -123,7 +165,7 @@ fn seed_default_lua_commands(dir: &Path) {
     }
     for (name, content) in DEFAULT_LUA_COMMANDS {
         let path = dir.join(name);
-        if !path.exists()
+        if (!path.exists() || should_refresh_seeded_lua(&path, name))
             && let Err(e) = std::fs::write(&path, content)
         {
             eprintln!("bone: warning: could not write {}: {e}", path.display());

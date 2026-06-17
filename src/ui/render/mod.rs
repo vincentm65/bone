@@ -264,9 +264,10 @@ impl Renderer {
                     height: (height).min(n - row),
                 };
                 if let Some(bg) = user_bg
-                    && line.spans.iter().any(|span| span.style.bg == Some(bg)) {
-                        sb_buf.set_style(area, Style::default().bg(bg));
-                    }
+                    && line.spans.iter().any(|span| span.style.bg == Some(bg))
+                {
+                    sb_buf.set_style(area, Style::default().bg(bg));
+                }
                 ratatui::widgets::Paragraph::new(line.clone())
                     .wrap(ratatui::widgets::Wrap { trim: false })
                     .render(area, &mut sb_buf);

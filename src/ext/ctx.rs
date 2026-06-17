@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 
-use crate::pane_content::InteractionMode;
 use crate::tools::shell::{ScriptRequest, run_script};
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
@@ -121,7 +120,7 @@ impl AppCtxState {
     pub fn new(
         tools: &crate::tools::registry::ToolHandler,
         stats: &crate::llm::TokenStats,
-        approval_mode: crate::tools::ApprovalMode,
+        approval_mode: &crate::tools::ApprovalMode,
         session_id: Option<i64>,
         provider: &str,
         model: &str,
@@ -133,7 +132,7 @@ impl AppCtxState {
             session_id,
             provider: provider.to_string(),
             model: model.to_string(),
-            approval_mode,
+            approval_mode: *approval_mode,
             tool_handler: Box::new(tools.clone()),
             usage: build_usage_context(stats, &est, by_provider),
             conversation_history: history,
@@ -453,8 +452,8 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = crate::pane_content::PaneContent::from_json(&val)
-                .map_err(mlua::Error::external)?;
+            let pane =
+                crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -467,71 +466,29 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         ui_table.set("pane", pane_unavailable_fn)?;
     }
 
-    // ctx.ui.interact(opts) → table result
-    // Creates an interactive pane and blocks until the user responds.
-    // opts: { question, type, options?, default?, allow_custom? }
+    // ctx.ui.key() → table
+    // Blocks until the frontend delivers one terminal key event.
     if let Some(sender) = cfg.pane_sender.clone() {
-        // Shared mutex serializes concurrent interact calls (e.g. multiple
-        // ask_user tools dispatched in one batch) so they share the same page
-        // instead of clobbering each other.
-        static INTERACT_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let interact_fn = lua.create_function(move |lua, opts: mlua::Table| {
-            let question: String = opts.get("question").map_err(|e| mlua::Error::external(format!("interact missing question: {e}")))?;
-            let type_str: String = opts.get::<Option<String>>("type")?.unwrap_or_else(|| "single_select".to_string());
-            let options: Vec<String> = opts.get::<Option<Vec<String>>>("options")?.unwrap_or_default();
-            let default: Option<usize> = opts.get::<Option<usize>>("default")?;
-            let allow_custom: bool = opts.get::<Option<bool>>("allow_custom")?.unwrap_or(false);
-
-            let mode = match type_str.as_str() {
-                "single_select" | "single" => InteractionMode::SingleSelect,
-                "multi_select" | "multi" => InteractionMode::MultiSelect,
-                "text_input" | "text" => InteractionMode::TextInput,
-                other => return Err(mlua::Error::external(format!("interact: unknown type '{other}'. Valid: single_select, multi_select, text_input"))),
-            };
-
-            // Validate: MultiSelect and SingleSelect need options.
-            if !matches!(mode, InteractionMode::TextInput) && options.is_empty() {
-                return Err(mlua::Error::external("interact: options required for single_select and multi_select"));
-            }
-
-            // Custom input is always available for selection modes.
-            let allow_custom = allow_custom || !matches!(mode, InteractionMode::TextInput);
-
-            // Build the interaction request — the frontend constructs the
-            // pane (ratatui Lines, PaneInteraction) from this pure-data type.
-            let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-            let default_selected = default.map(|d| d.saturating_sub(1)).unwrap_or(0);
-            let request = crate::pane_content::InteractRequest {
-                question,
-                mode,
-                options,
-                default_selected,
-                allow_custom,
-                reply: tx,
-            };
-
-            // Acquire the serialization lock, send the request, then block
-            // for the user response — the lock is held for the entire
-            // send+wait cycle so concurrent calls are serialized.
-            let _lock = INTERACT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        static KEY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let key_fn = lua.create_function(move |lua, _: ()| {
+            let (tx, rx) = tokio::sync::oneshot::channel::<crate::pane_content::KeyEvent>();
+            let request = crate::pane_content::KeyRequest { reply: tx };
+            let _lock = KEY_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             sender
-                .send(crate::tools::types::ToolLiveEvent::Interact(request))
-                .map_err(|e| mlua::Error::external(format!("interact send failed: {e}")))?;
-
-            // Block until the user responds (lock still held, serializing concurrent calls).
-            let result: serde_json::Value = tokio::task::block_in_place(|| {
+                .send(crate::tools::types::ToolLiveEvent::Key(request))
+                .map_err(|e| mlua::Error::external(format!("key request send failed: {e}")))?;
+            let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(rx)
-            }).map_err(|e| mlua::Error::external(format!("interact cancelled: {e}")))?;
-
+            })
+            .map_err(|e| mlua::Error::external(format!("key request cancelled: {e}")))?;
             let lua_result = lua.to_value(&result)
-                .map_err(|e| mlua::Error::external(format!("interact result conversion: {e}")))?;
+                .map_err(|e| mlua::Error::external(format!("key result conversion: {e}")))?;
             Ok(lua_result)
         })?;
-        ui_table.set("interact", interact_fn)?;
+        ui_table.set("key", key_fn)?;
     } else {
-        let interact_unavailable_fn =
-            lua.create_function(|_, _: ()| Ok((false, "interact unavailable")))?;
-        ui_table.set("interact", interact_unavailable_fn)?;
+        let key_unavailable_fn = lua.create_function(|_, _: ()| Ok((false, "key unavailable")))?;
+        ui_table.set("key", key_unavailable_fn)?;
     }
 
     ctx.set("ui", ui_table)?;
@@ -821,7 +778,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     // ctx.agent.run(prompt, opts?) → { ok, content, error }
     add_agent_table(lua, &ctx, cfg)?;
 
-    // ctx.config — read-only access to configuration.
+    // ctx.config — access to persisted configuration.
     let config_table = lua.create_table()?;
     config_table.set("dir", cfg.config_dir.as_str())?;
 
@@ -852,9 +809,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                         // Prefer "value", fall back to "default".
                         let val = field_map
                             .get(serde_yaml::Value::String("value".into()))
-                            .or_else(|| {
-                                field_map.get(serde_yaml::Value::String("default".into()))
-                            });
+                            .or_else(|| field_map.get(serde_yaml::Value::String("default".into())));
                         if let Some(v) = val {
                             return yaml_to_lua(lua, v);
                         }
@@ -886,6 +841,127 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         yaml_to_lua(lua, &doc)
     })?;
     config_table.set("get_table", config_get_table_fn)?;
+
+    let active_provider = cfg.provider.clone().unwrap_or_default();
+
+    // ctx.config.get_pages() -> array of { namespace, title, fields = [...] }
+    let get_pages_fn = lua.create_function(|lua, _: ()| {
+        let custom = crate::config::custom::CustomConfigs::load();
+        let mut ordered: Vec<(String, crate::config::custom::CustomConfigPage)> = Vec::new();
+        for preferred in ["general", "providers", "tools"] {
+            if let Some((ns, page)) = custom.pages.iter().find(|(ns, _)| ns == preferred) {
+                ordered.push((ns.clone(), page.clone()));
+            }
+        }
+        for (ns, page) in &custom.pages {
+            if !ordered.iter().any(|(existing, _)| existing == ns) {
+                ordered.push((ns.clone(), page.clone()));
+            }
+        }
+
+        let pages = lua.create_table()?;
+        for (ns, page) in ordered {
+            let page_tbl = lua.create_table()?;
+            page_tbl.set("namespace", ns.as_str())?;
+            page_tbl.set("title", page.title)?;
+            let fields_tbl = lua.create_table()?;
+            for field in page.fields {
+                let field_tbl = lua.create_table()?;
+                field_tbl.set("key", field.key.as_str())?;
+                field_tbl.set(
+                    "label",
+                    field.label.as_deref().unwrap_or(field.key.as_str()),
+                )?;
+                field_tbl.set(
+                    "type",
+                    match field.field_type {
+                        crate::config::custom::ConfigFieldType::String => "string",
+                        crate::config::custom::ConfigFieldType::Number => "number",
+                        crate::config::custom::ConfigFieldType::Bool => "bool",
+                        crate::config::custom::ConfigFieldType::Enum => "enum",
+                        crate::config::custom::ConfigFieldType::Provider => "provider",
+                    },
+                )?;
+                field_tbl.set("value", custom.get_value(&ns, &field.key))?;
+                let options = lua.create_table()?;
+                for option in field.options {
+                    options.push(option)?;
+                }
+                field_tbl.set("options", options)?;
+                fields_tbl.push(field_tbl)?;
+            }
+            page_tbl.set("fields", fields_tbl)?;
+            pages.push(page_tbl)?;
+        }
+        Ok(Value::Table(pages))
+    })?;
+    config_table.set("get_pages", get_pages_fn)?;
+
+    // ctx.config.set_value(namespace, key, value)
+    let set_value_fn =
+        lua.create_function(|_, (namespace, key, value): (String, String, String)| {
+            let mut custom = crate::config::custom::CustomConfigs::load();
+            custom.set_value(&namespace, &key, value);
+            Ok(true)
+        })?;
+    config_table.set("set_value", set_value_fn)?;
+
+    // ctx.config.cycle_field(namespace, key, current) -> string|nil
+    let cycle_field_fn =
+        lua.create_function(|_, (namespace, key, current): (String, String, String)| {
+            let custom = crate::config::custom::CustomConfigs::load();
+            Ok(custom.cycle_field(&namespace, &key, &current))
+        })?;
+    config_table.set("cycle_field", cycle_field_fn)?;
+
+    // ctx.config.list_providers() -> sorted provider summaries.
+    let list_active_provider = active_provider.clone();
+    let list_providers_fn = lua.create_function(move |lua, _: ()| {
+        let custom = crate::config::custom::CustomConfigs::load();
+        let providers = custom.derive_providers_config();
+        let mut ids: Vec<String> = providers.providers.keys().cloned().collect();
+        ids.sort();
+        let out = lua.create_table()?;
+        for id in ids {
+            let Some(entry) = providers.providers.get(&id) else {
+                continue;
+            };
+            let row = lua.create_table()?;
+            row.set("id", id.as_str())?;
+            row.set("label", entry.label.as_str())?;
+            row.set("model", entry.model.as_str())?;
+            row.set("base_url", entry.base_url.as_str())?;
+            row.set("endpoint", entry.endpoint.as_str())?;
+            row.set("handler", entry.handler.as_str())?;
+            row.set("api_key", entry.api_key.as_str())?;
+            row.set("active", id == list_active_provider)?;
+            out.push(row)?;
+        }
+        Ok(Value::Table(out))
+    })?;
+    config_table.set("list_providers", list_providers_fn)?;
+
+    // ctx.config.set_provider_entry(id, entry)
+    let set_provider_entry_fn = lua.create_function(|_, (id, entry): (String, Table)| {
+        let provider = crate::config::ProviderEntry {
+            label: entry.get::<Option<String>>("label")?.unwrap_or_default(),
+            base_url: entry.get::<Option<String>>("base_url")?.unwrap_or_default(),
+            model: entry.get::<Option<String>>("model")?.unwrap_or_default(),
+            api_key: entry.get::<Option<String>>("api_key")?.unwrap_or_default(),
+            endpoint: entry
+                .get::<Option<String>>("endpoint")?
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/chat/completions".to_string()),
+            handler: entry
+                .get::<Option<String>>("handler")?
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "openai".to_string()),
+        };
+        let mut custom = crate::config::custom::CustomConfigs::load();
+        custom.set_provider_entry("providers", &id, &provider);
+        Ok(true)
+    })?;
+    config_table.set("set_provider_entry", set_provider_entry_fn)?;
 
     ctx.set("config", config_table)?;
 
@@ -968,23 +1044,24 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                     t.set("tool_call_id", tci)?;
                 }
                 if let Some(ref tc_json) = msg.tool_calls
-                    && let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json) {
-                        let tc_table = lua.create_table()?;
-                        for tc_val in tc_vec {
-                            let tc = lua.create_table()?;
-                            if let Some(id) = tc_val.get("id") {
-                                tc.set("id", lua.to_value(id)?)?;
-                            }
-                            if let Some(name) = tc_val.get("name") {
-                                tc.set("name", lua.to_value(name)?)?;
-                            }
-                            if let Some(args) = tc_val.get("arguments") {
-                                tc.set("arguments", lua.to_value(args)?)?;
-                            }
-                            tc_table.push(tc)?;
+                    && let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
+                {
+                    let tc_table = lua.create_table()?;
+                    for tc_val in tc_vec {
+                        let tc = lua.create_table()?;
+                        if let Some(id) = tc_val.get("id") {
+                            tc.set("id", lua.to_value(id)?)?;
                         }
-                        t.set("tool_calls", tc_table)?;
+                        if let Some(name) = tc_val.get("name") {
+                            tc.set("name", lua.to_value(name)?)?;
+                        }
+                        if let Some(args) = tc_val.get("arguments") {
+                            tc.set("arguments", lua.to_value(args)?)?;
+                        }
+                        tc_table.push(tc)?;
                     }
+                    t.set("tool_calls", tc_table)?;
+                }
                 result.push(t)?;
             }
             Ok(Value::Table(result))
@@ -1016,9 +1093,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                     Value::Integer(i) => rusqlite::types::Value::Integer(*i),
                     Value::Number(n) => rusqlite::types::Value::Real(*n),
                     Value::String(s) => rusqlite::types::Value::Text(
-                        s.to_str()
-                            .ok().map(|b| b.to_string())
-                            .unwrap_or_default(),
+                        s.to_str().ok().map(|b| b.to_string()).unwrap_or_default(),
                     ),
                     Value::Nil => rusqlite::types::Value::Null,
                     Value::Boolean(b) => rusqlite::types::Value::Integer(*b as i64),
@@ -1066,8 +1141,8 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     if let Some(sender) = cfg.pane_sender.clone() {
         let emit_pane_fn = lua.create_function(move |lua, table: mlua::Table| {
             let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane = crate::pane_content::PaneContent::from_json(&val)
-                .map_err(mlua::Error::external)?;
+            let pane =
+                crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
             sender
                 .send(crate::tools::types::ToolLiveEvent::Pane(pane))
                 .map_err(|e| mlua::Error::external(format!("emit_pane send failed: {e}")))?;
@@ -1684,7 +1759,7 @@ fn dispatch_event(
         RuntimeEvent::TextDelta { .. }
         | RuntimeEvent::ReasoningDelta { .. }
         | RuntimeEvent::Pane { .. }
-        | RuntimeEvent::Interact { .. } => {}
+        | RuntimeEvent::KeyRequest { .. } => {}
     }
     Ok(())
 }
@@ -1857,10 +1932,7 @@ fn tostring_lua_value(v: &Value) -> String {
     match v {
         Value::Integer(i) => i.to_string(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => s
-            .to_str()
-            .ok().map(|b| b.to_string())
-            .unwrap_or_default(),
+        Value::String(s) => s.to_str().ok().map(|b| b.to_string()).unwrap_or_default(),
         Value::Boolean(b) => b.to_string(),
         Value::Nil => "null".to_string(),
         _ => "<unsupported>".to_string(),

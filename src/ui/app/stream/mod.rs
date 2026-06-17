@@ -17,6 +17,71 @@ use tokio::time::{self, Duration};
 
 use super::{App, apply_input_key_with_paste_burst};
 
+enum PendingKeyReply {
+    Direct(tokio::sync::oneshot::Sender<crate::pane_content::KeyEvent>),
+    Runtime {
+        id: u64,
+        registry: crate::runtime::KeyReplyRegistry,
+    },
+}
+
+fn key_event_from_crossterm(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> crate::pane_content::KeyEvent {
+    let (name, ch) = match code {
+        KeyCode::Backspace => ("Backspace".to_string(), None),
+        KeyCode::Enter => ("Enter".to_string(), None),
+        KeyCode::Left => ("Left".to_string(), None),
+        KeyCode::Right => ("Right".to_string(), None),
+        KeyCode::Up => ("Up".to_string(), None),
+        KeyCode::Down => ("Down".to_string(), None),
+        KeyCode::Home => ("Home".to_string(), None),
+        KeyCode::End => ("End".to_string(), None),
+        KeyCode::PageUp => ("PageUp".to_string(), None),
+        KeyCode::PageDown => ("PageDown".to_string(), None),
+        KeyCode::Tab => ("Tab".to_string(), None),
+        KeyCode::BackTab => ("BackTab".to_string(), None),
+        KeyCode::Delete => ("Delete".to_string(), None),
+        KeyCode::Insert => ("Insert".to_string(), None),
+        KeyCode::Esc => ("Esc".to_string(), None),
+        KeyCode::Char(c) => ("Char".to_string(), Some(c.to_string())),
+        KeyCode::F(n) => (format!("F{n}"), None),
+        KeyCode::Null => ("Null".to_string(), None),
+        KeyCode::CapsLock => ("CapsLock".to_string(), None),
+        KeyCode::ScrollLock => ("ScrollLock".to_string(), None),
+        KeyCode::NumLock => ("NumLock".to_string(), None),
+        KeyCode::PrintScreen => ("PrintScreen".to_string(), None),
+        KeyCode::Pause => ("Pause".to_string(), None),
+        KeyCode::Menu => ("Menu".to_string(), None),
+        KeyCode::KeypadBegin => ("KeypadBegin".to_string(), None),
+        KeyCode::Media(_) => ("Media".to_string(), None),
+        KeyCode::Modifier(_) => ("Modifier".to_string(), None),
+    };
+    crate::pane_content::KeyEvent {
+        code: name,
+        char: ch,
+        ctrl: modifiers.contains(KeyModifiers::CONTROL),
+        alt: modifiers.contains(KeyModifiers::ALT),
+        shift: modifiers.contains(KeyModifiers::SHIFT),
+    }
+}
+
+fn deliver_pending_key(
+    pending: &mut Option<PendingKeyReply>,
+    key: crate::pane_content::KeyEvent,
+) {
+    match pending.take() {
+        Some(PendingKeyReply::Direct(tx)) => {
+            let _ = tx.send(key);
+        }
+        Some(PendingKeyReply::Runtime { id, registry }) => {
+            registry.resolve(id, key);
+        }
+        None => {}
+    }
+}
+
 pub fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
     ToolResult {
         call_id: call.id.clone(),
@@ -57,7 +122,7 @@ impl App {
     }
 
     /// Run the turn through the core `Driver` and render its `RuntimeEvent`
-    /// stream, answering approval/interaction over channels. The Driver owns
+    /// stream, answering approval/key requests over channels. The Driver owns
     /// clones of `tools`/`extensions` (Lua VM shared via Arc) and `Arc`
     /// provider/session; it runs as a local future pumped by a `select!` loop
     /// on this task — so there's no spawn, no borrow conflict, and (crucially)
@@ -71,12 +136,11 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         use crate::runtime::{
-            ApprovalRequest, ChannelApprovalGate, Driver, ReplyRegistry, RuntimeEvent,
+            ApprovalRequest, ChannelApprovalGate, Driver, KeyReplyRegistry, RuntimeEvent,
         };
         use crate::session_sink::{NullSessionSink, SessionSink};
         use crate::tools::CallOutcome;
         use crate::ui::prompt::Decision;
-        use serde_json::Value;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -114,9 +178,12 @@ impl App {
 
         let (rt_tx, mut rt_rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
         let (appr_tx, mut appr_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
-        let registry = ReplyRegistry::new();
+        let key_registry = KeyReplyRegistry::new();
         let cancel = Arc::new(AtomicBool::new(false));
         let session: Arc<dyn SessionSink> = Arc::new(NullSessionSink);
+
+        let approval_mode = Arc::new(self.approval_mode);
+        let mut approval_mode_sync = Arc::clone(&approval_mode);
 
         let driver = Driver {
             llm: self.llm.clone(),
@@ -124,14 +191,14 @@ impl App {
             tools: self.tools.clone(),
             session,
             gate: Arc::new(ChannelApprovalGate::new(appr_tx)),
-            approval_mode: self.approval_mode,
+            approval_mode,
             agent_depth: 0,
             activity: None,
             on_token_usage: None,
             events: false,
             event_sender: None,
             runtime_events: Some(rt_tx),
-            reply_registry: Some(registry.clone()),
+            key_reply_registry: Some(key_registry.clone()),
             cancel: Some(cancel.clone()),
             history: build_chat_history(&self.transcript, None),
             transcript: self.transcript.clone(),
@@ -143,10 +210,7 @@ impl App {
         let mut cur_idx: Option<usize> = None;
         let mut pending: std::collections::HashMap<String, crate::tools::ToolCall> =
             std::collections::HashMap::new();
-        let mut pending_interacts: std::collections::HashMap<
-            u64,
-            tokio::sync::oneshot::Receiver<Value>,
-        > = std::collections::HashMap::new();
+        let mut pending_key: Option<PendingKeyReply> = None;
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -161,12 +225,11 @@ impl App {
                 &mut self.panes_visible,
                 &mut self.pages,
                 &mut self.active_page,
+                &mut pending_key,
             ) {
+                *Arc::make_mut(&mut approval_mode_sync) = self.approval_mode;
                 self.user_config.approval_mode = self.approval_mode;
                 self.persist_runtime_config();
-            }
-            if self.pump_drain_interact_replies(&registry, &mut pending_interacts) {
-                self.cancel_streaming = true;
             }
             if self.cancel_streaming {
                 cancel.store(true, Ordering::Relaxed);
@@ -176,7 +239,7 @@ impl App {
             tokio::select! {
                 outcome = &mut run_fut => break Some(outcome),
                 Some(ev) = rt_rx.recv() => {
-                    self.pump_apply_event(ev, &mut cur_idx, &mut pending, &mut pending_interacts, term)?;
+                    self.pump_apply_event(ev, &mut cur_idx, &mut pending, &key_registry, &mut pending_key, term)?;
                 }
                 Some(areq) = appr_rx.recv() => {
                     // Show the edit-file diff preview before deciding, so the
@@ -213,9 +276,8 @@ impl App {
         // Drain any trailing events emitted just before the Driver returned
         // (final text deltas, the last tool result, Finished).
         while let Ok(ev) = rt_rx.try_recv() {
-            self.pump_apply_event(ev, &mut cur_idx, &mut pending, &mut pending_interacts, term)?;
+            self.pump_apply_event(ev, &mut cur_idx, &mut pending, &key_registry, &mut pending_key, term)?;
         }
-        let _ = self.pump_drain_interact_replies(&registry, &mut pending_interacts);
 
         // Reabsorb authoritative state from the Driver when it completed.
         if let Some(outcome) = outcome {
@@ -255,6 +317,17 @@ impl App {
             // Persist usage events the Driver reported through its (null) sink.
             for usage in &outcome.usage {
                 self.record_usage_to_db(usage);
+            }
+
+            // Surface a driver/provider failure so the turn never ends in
+            // silence. The Driver aborts the turn (e.g. an HTTP 429/5xx after
+            // its retries, possibly mid tool-loop) by returning `Err`; without
+            // rendering it the TUI just stops with no output and looks like the
+            // agent hung mid-loop. `RuntimeEvent::Failed` is intentionally not
+            // drawn live — this is the single authoritative place we report it.
+            if let Err(err) = &outcome.result {
+                self.messages
+                    .push(Message::system(format!("⚠ turn failed: {err}")));
             }
         }
 
@@ -297,10 +370,8 @@ impl App {
         ev: crate::runtime::RuntimeEvent,
         cur_idx: &mut Option<usize>,
         pending: &mut std::collections::HashMap<String, crate::tools::ToolCall>,
-        pending_interacts: &mut std::collections::HashMap<
-            u64,
-            tokio::sync::oneshot::Receiver<serde_json::Value>,
-        >,
+        key_registry: &crate::runtime::KeyReplyRegistry,
+        pending_key: &mut Option<PendingKeyReply>,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         use crate::runtime::RuntimeEvent;
@@ -409,56 +480,14 @@ impl App {
                 }
                 self.pump_tick(term)?;
             }
-            RuntimeEvent::Interact { spec } => {
-                let (reply, rx) = tokio::sync::oneshot::channel();
-                let req = crate::pane_content::InteractRequest {
-                    question: spec.question,
-                    mode: spec.mode,
-                    options: spec.options,
-                    default_selected: spec.default_selected,
-                    allow_custom: spec.allow_custom,
-                    reply,
-                };
-                let page = PanePage::from_interact(req);
-                let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
-                self.active_page = active;
-                self.panes_visible = true;
-                pending_interacts.insert(spec.id, rx);
-                self.pump_tick(term)?;
+            RuntimeEvent::KeyRequest { id } => {
+                *pending_key = Some(PendingKeyReply::Runtime {
+                    id,
+                    registry: key_registry.clone(),
+                });
             }
         }
         Ok(())
-    }
-
-    fn pump_drain_interact_replies(
-        &mut self,
-        registry: &crate::runtime::ReplyRegistry,
-        pending_interacts: &mut std::collections::HashMap<
-            u64,
-            tokio::sync::oneshot::Receiver<serde_json::Value>,
-        >,
-    ) -> bool {
-        let mut cancelled = false;
-        pending_interacts.retain(|id, rx| match rx.try_recv() {
-            Ok(value) => {
-                if value
-                    .get("cancelled")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    cancelled = true;
-                }
-                registry.resolve(*id, value);
-                false
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => true,
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                registry.resolve(*id, serde_json::json!({ "cancelled": true }));
-                cancelled = true;
-                false
-            }
-        });
-        cancelled
     }
 
     /// Get (creating if needed) the current streaming assistant message index,
@@ -600,12 +629,7 @@ impl App {
                     self.panes_visible = true;
                 }
             }
-            ToolLiveEvent::Interact(req) => {
-                let page = PanePage::from_interact(req);
-                let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
-                self.active_page = active;
-                self.panes_visible = true;
-            }
+            ToolLiveEvent::Key(_) => {}
         }
     }
 
@@ -627,17 +651,15 @@ impl App {
                     live_sources.insert(pc.source.clone());
                 }
             }
-            ToolLiveEvent::Interact(_) => {
-                live_sources.insert("interact".to_string());
-            }
+            ToolLiveEvent::Key(_) => {}
         }
         self.apply_tool_live_event(event);
     }
 
     /// Drive a blocking-Lua future to completion while keeping the UI live:
-    /// pump pane events emitted via the `ToolLiveEvent` sender, drain
-    /// keystrokes into any active interactive pane (this is what unblocks
-    /// `ctx.ui.interact`), render the spinner, and clean up panes on cancel.
+    /// pump pane events emitted via the `ToolLiveEvent` sender, deliver
+    /// keystrokes to any pending `ctx.ui.key()` call, render the spinner, and
+    /// clean up panes on cancel.
     ///
     /// Generic over the future's output `T` so both model-invoked tools and
     /// slash commands share one execution loop. `on_cancel` produces the
@@ -661,17 +683,25 @@ impl App {
         // up lingering panes if the tool is cancelled before emitting its own
         // removal event.
         let mut live_sources = std::collections::HashSet::<String>::new();
+        let mut pending_key: Option<PendingKeyReply> = None;
 
         loop {
             tokio::select! {
                 results = &mut future => {
                     while let Ok(event) = rx.try_recv() {
-                        self.apply_and_track(event, &mut live_sources);
+                        if let ToolLiveEvent::Pane(_) = event {
+                            self.apply_and_track(event, &mut live_sources);
+                        }
                     }
                     return Ok(results);
                 }
                 Some(event) = rx.recv() => {
-                    self.apply_and_track(event, &mut live_sources);
+                    match event {
+                        ToolLiveEvent::Key(req) => {
+                            pending_key = Some(PendingKeyReply::Direct(req.reply));
+                        }
+                        other => self.apply_and_track(other, &mut live_sources),
+                    }
                 }
                 _ = spinner.tick() => {
                     if Self::drain_keys(
@@ -682,6 +712,7 @@ impl App {
                         &mut self.panes_visible,
                         &mut self.pages,
                         &mut self.active_page,
+                        &mut pending_key,
                     ) {
                         self.user_config.approval_mode = self.approval_mode;
                         self.persist_runtime_config();
@@ -692,7 +723,9 @@ impl App {
                         // Drain remaining live events before returning so that
                         // any pending pane updates are processed.
                         while let Ok(event) = rx.try_recv() {
-                            self.apply_and_track(event, &mut live_sources);
+                            if let ToolLiveEvent::Pane(_) = event {
+                                self.apply_and_track(event, &mut live_sources);
+                            }
                         }
                         // Remove any panes the cancelled tool left behind — its
                         // future was dropped, so it can't emit its own removal.
@@ -711,7 +744,12 @@ impl App {
                     // multi-question ask_user replacing one question with the
                     // next). Avoids a one-frame flash of the dead pane.
                     while let Ok(event) = rx.try_recv() {
-                        self.apply_and_track(event, &mut live_sources);
+                        match event {
+                            ToolLiveEvent::Key(req) => {
+                                pending_key = Some(PendingKeyReply::Direct(req.reply));
+                            }
+                            other => self.apply_and_track(other, &mut live_sources),
+                        }
                     }
                         self.pages.as_slice()
                     } else {
@@ -775,6 +813,7 @@ impl App {
         panes_visible: &mut bool,
         pages: &mut Vec<PanePage>,
         active_page: &mut usize,
+        pending_key: &mut Option<PendingKeyReply>,
     ) -> bool {
         let mut mode_changed = false;
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
@@ -793,15 +832,14 @@ impl App {
                         *panes_visible = !*panes_visible;
                         continue;
                     }
-                    // ── Interactive pane key handling (before navigation) ───
-                    if *panes_visible
-                        && PanePage::dispatch_interaction_key(
-                            pages,
-                            active_page,
-                            key.code,
-                            key.modifiers,
-                        )
+                    if pending_key.is_some()
+                        && !(key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL))
                     {
+                        deliver_pending_key(
+                            pending_key,
+                            key_event_from_crossterm(key.code, key.modifiers),
+                        );
                         continue;
                     }
                     // ── Page navigation (Tab/BackTab/PageUp/PageDown) ─────
@@ -864,25 +902,6 @@ impl App {
                                 next = result.trailing;
                                 match result.action {
                                     InputAction::Cancel => {
-                                        // If an interactive pane is active, cancel it instead of cancelling the stream.
-                                        if *panes_visible {
-                                            let active_idx =
-                                                (*active_page).min(pages.len().saturating_sub(1));
-                                            let cancelled =
-                                                pages.get(active_idx).is_some_and(|page| {
-                                                    page.interaction.as_ref().is_some_and(|i| {
-                                                        if i.is_active() {
-                                                            i.cancel();
-                                                            true
-                                                        } else {
-                                                            false
-                                                        }
-                                                    })
-                                                });
-                                            if cancelled {
-                                                continue;
-                                            }
-                                        }
                                         *cancel = true;
                                         queue.clear();
                                         return mode_changed;
@@ -898,7 +917,8 @@ impl App {
                                     }
                                     InputAction::ClearQueue => queue.clear(),
                                     InputAction::CycleMode => {
-                                        *mode = mode.cycle();
+                                        let new_mode = mode.cycle();
+                                        *mode = new_mode;
                                         mode_changed = true;
                                     }
                                     InputAction::Redraw

@@ -279,7 +279,7 @@ pub(crate) fn emit_event(
         crate::runtime::RuntimeEvent::TextDelta { .. }
         | crate::runtime::RuntimeEvent::ReasoningDelta { .. }
         | crate::runtime::RuntimeEvent::Pane { .. }
-        | crate::runtime::RuntimeEvent::Interact { .. } => return,
+        | crate::runtime::RuntimeEvent::KeyRequest { .. } => return,
     };
     println!("{json}");
 }
@@ -440,14 +440,14 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         tools,
         session,
         gate: Arc::new(crate::tools::AutoApprovalGate),
-        approval_mode: request.approval_mode,
+        approval_mode: Arc::new(request.approval_mode),
         agent_depth: request.agent_depth,
         activity: request.activity.clone(),
         on_token_usage: request.on_token_usage.clone(),
         events: request.events,
         event_sender: request.event_sender.clone(),
         runtime_events: None,
-        reply_registry: None,
+        key_reply_registry: None,
         cancel: None,
         history,
         transcript,

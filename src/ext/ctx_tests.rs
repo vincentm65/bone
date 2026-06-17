@@ -380,7 +380,7 @@ fn sample_app_state() -> AppCtxState {
     AppCtxState::new(
         &tools,
         &stats,
-        crate::tools::ApprovalMode::Danger,
+        &crate::tools::ApprovalMode::Danger,
         Some(42),
         "openrouter",
         "gemini",

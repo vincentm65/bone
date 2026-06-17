@@ -32,7 +32,7 @@ impl Default for Theme {
             diff_removed: Color::Rgb(135, 1, 1),
             diff_added: Color::Rgb(0, 95, 0),
             thinking: Color::Rgb(140, 220, 220), // pastel cyan
-            tab_active: Color::Cyan,
+            tab_active: Color::Rgb(140, 220, 220),
         }
     }
 }

@@ -10,7 +10,6 @@ use super::{InputState, Prompt, SPINNER, StatusInfo};
 use crate::tools::ApprovalMode;
 use crate::ui::autocomplete::{AutocompleteState, MAX_VISIBLE};
 use crate::ui::pane_page::PanePage;
-use crate::ui::pane_page::{InteractionMode, PaneInteraction};
 use crate::ui::tool_display;
 
 /// Arguments shared by pane-drawing methods.
@@ -64,10 +63,8 @@ pub const MAX_PANE_ROWS: usize = 24;
 struct PageLayout {
     /// Number of content rows that will be rendered.
     content_rows: u16,
-    /// Total height: top sep + content + (multi: bottom sep + tab indicator).
+    /// Total height: top sep + content.
     total_height: u16,
-    /// Whether multiple pages exist (draws bottom sep + tab indicator).
-    multi: bool,
 }
 
 impl PageLayout {
@@ -77,19 +74,16 @@ impl PageLayout {
             return Self {
                 content_rows: 0,
                 total_height: 0,
-                multi: false,
             };
         }
-        let multi = pages.len() > 1;
         let page_idx = active_page.min(pages.len() - 1);
         let wanted = page_visible_rows(&pages[page_idx]) as u16;
         let content_rows = wanted.min(max_content);
-        // Chrome: 1 top sep + (multi: 1 bottom sep + 1 tab indicator)
-        let chrome: u16 = 1 + if multi { 2 } else { 0 };
+        // Chrome: 1 top sep
+        let chrome: u16 = 1;
         Self {
             content_rows,
             total_height: chrome.saturating_add(content_rows),
-            multi,
         }
     }
 }
@@ -141,15 +135,13 @@ fn prompt_option_line(
     };
 
     let mut spans = vec![Span::styled(format!("  {marker} "), marker_style)];
-    if let Some(rest) = option.strip_prefix("● ") {
-        spans.push(Span::styled("● ", good_style));
-        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
-    } else if let Some(rest) = option.strip_prefix("○ ") {
-        spans.push(Span::styled("○ ", muted_style));
-        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
-    } else {
-        push_prompt_text_spans(option, text_style, muted_style, &mut spans);
-    }
+    spans.extend(styled_circle_option_spans(
+        option,
+        text_style,
+        muted_style,
+        good_style,
+        selected,
+    ));
     Line::from(spans)
 }
 
@@ -170,6 +162,30 @@ fn push_prompt_text_spans(
         ));
         first = false;
     }
+}
+
+fn styled_circle_option_spans(
+    option: &str,
+    text_style: Style,
+    muted_style: Style,
+    good_style: Style,
+    selected: bool,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if let Some(rest) = option.strip_prefix("● ") {
+        spans.push(Span::styled("● ", good_style));
+        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
+    } else if let Some(rest) = option.strip_prefix("○ ") {
+        if selected {
+            spans.push(Span::styled("● ", good_style));
+        } else {
+            spans.push(Span::styled("○ ", muted_style));
+        }
+        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
+    } else {
+        push_prompt_text_spans(option, text_style, muted_style, &mut spans);
+    }
+    spans
 }
 
 /// Split input buffer at cursor into (before, char-at-cursor, after).
@@ -239,13 +255,7 @@ pub(crate) fn clamped_pane_visible_rows(visible_rows: usize) -> usize {
 fn page_visible_rows(page: &PanePage) -> usize {
     let requested = clamped_pane_visible_rows(page.visible_rows);
     let content_rows = page.content.len().saturating_sub(page.scroll);
-    // When the page has an interactive overlay, don't cap at content length;
-    // the overlay rows are rendered separately and need the extra space.
-    if page.interaction.is_some() {
-        requested.max(content_rows)
-    } else {
-        content_rows.min(requested)
-    }
+    content_rows.min(requested)
 }
 
 /// Compute extra height needed for the page region (separators + content +
@@ -606,11 +616,10 @@ impl super::Renderer {
         // ── Page region ──────────────────────────────────────────────────
         if !pages.is_empty() {
             let bottom_sep_row = area.bottom().saturating_sub(1);
-            let status_row = area.bottom().saturating_sub(1);
             let page_start = content_bottom.max(area.y);
             let available = bottom_sep_row.saturating_sub(page_start);
 
-            let chrome: u16 = 1 + if pages.len() > 1 { 2 } else { 0 };
+            let chrome: u16 = 1;
             let max_content = available.saturating_sub(chrome);
             let layout = PageLayout::compute(pages, active_page, max_content);
 
@@ -645,63 +654,6 @@ impl super::Renderer {
                             Paragraph::new(line.clone()),
                             Rect {
                                 y: py,
-                                height: 1,
-                                ..area
-                            },
-                        );
-                    }
-
-                    // Render interactive overlay if the page has an active interaction.
-                    // Start overlay AFTER the page content lines so the question
-                    // text is visible above the option list.
-                    let content_start_y = page_start + 1;
-                    let overlay_start_y =
-                        content_start_y + layout.content_rows.min(page.content.len() as u16);
-                    // Overlay must not overrun the page's own bottom separator /
-                    // tab indicator (multi) — stop at the content region's end.
-                    let overlay_bottom_y = content_start_y + layout.content_rows;
-                    if let Some(ref interaction) = page.interaction
-                        && interaction.is_active() {
-                            let _extra = Self::render_interactive_overlay(
-                                frame,
-                                page,
-                                interaction,
-                                overlay_start_y,
-                                Rect {
-                                    y: overlay_start_y,
-                                    height: overlay_bottom_y.saturating_sub(overlay_start_y),
-                                    ..area
-                                },
-                                &self.theme,
-                            );
-                        }
-                }
-
-                if layout.multi {
-                    // Page bottom separator
-                    let bot_sep_y = page_start + 1 + layout.content_rows;
-                    if bot_sep_y < bottom_sep_row {
-                        frame.render_widget(
-                            Paragraph::new(sep.clone())
-                                .style(Style::default().fg(self.theme.input_border)),
-                            Rect {
-                                y: bot_sep_y,
-                                height: 1,
-                                ..area
-                            },
-                        );
-                    }
-
-                    // Tab indicator
-                    let tab_y = bot_sep_y + 1;
-                    if tab_y < status_row {
-                        frame.render_widget(
-                            Paragraph::new(Span::styled(
-                                "Tab to switch",
-                                Style::default().fg(ratatui::style::Color::DarkGray),
-                            )),
-                            Rect {
-                                y: tab_y,
                                 height: 1,
                                 ..area
                             },
@@ -794,13 +746,14 @@ impl super::Renderer {
         }
 
         if status_info.show("status_show_timer")
-            && let Some(ref elapsed) = status_info.elapsed {
-                status_spans.push(Span::styled(
-                    elapsed.clone(),
-                    Style::default().fg(self.theme.status_text),
-                ));
-                status_spans.push(sep());
-            }
+            && let Some(ref elapsed) = status_info.elapsed
+        {
+            status_spans.push(Span::styled(
+                elapsed.clone(),
+                Style::default().fg(self.theme.status_text),
+            ));
+            status_spans.push(sep());
+        }
 
         if status_info.show("status_show_spinner") && status_info.streaming {
             status_spans.push(Span::styled(
@@ -865,252 +818,11 @@ impl super::Renderer {
             frame.render_widget(Paragraph::new(Line::from(status_spans)), left_row);
             if right_width > 0 {
                 frame.render_widget(
-                    Paragraph::new(right_line)
-                        .alignment(ratatui::layout::Alignment::Right),
+                    Paragraph::new(right_line).alignment(ratatui::layout::Alignment::Right),
                     row,
                 );
             }
         }
     }
 
-    /// Render interactive elements (cursor, checkboxes, input field) overlaid on
-    /// a page that has an interactive PaneInteraction. Returns the number of
-    /// extra rows consumed beyond the page content.
-    fn render_interactive_overlay(
-        frame: &mut ratatui::Frame,
-        _page: &PanePage,
-        interaction: &PaneInteraction,
-        start_y: u16,
-        area: ratatui::layout::Rect,
-        theme: &crate::ui::theme::Theme,
-    ) -> u16 {
-        let mut y = start_y;
-        let options = interaction.options();
-        let sel = interaction.selected();
-        let mode = interaction.mode();
-        let allow_custom = interaction.allow_custom();
-        let custom_focused = interaction.custom_focused();
-        let input_buf = interaction.input_buffer();
-        let cursor_pos = interaction.cursor_pos();
-
-        let cursor_style = ratatui::style::Style::default()
-            .fg(theme.thinking)
-            .add_modifier(ratatui::style::Modifier::BOLD);
-        let selected_style = ratatui::style::Style::default()
-            .fg(ratatui::style::Color::White)
-            .add_modifier(ratatui::style::Modifier::BOLD);
-        let normal_style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
-        let muted_style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
-        let checkbox_on_style = ratatui::style::Style::default()
-            .fg(theme.approval_safe)
-            .add_modifier(ratatui::style::Modifier::BOLD);
-
-        if matches!(mode, InteractionMode::TextInput) {
-            // Render just an input field
-            if y < area.bottom() {
-                let line = Self::format_text_input_line(
-                    &input_buf,
-                    cursor_pos,
-                    cursor_style,
-                    selected_style,
-                );
-                frame.render_widget(
-                    ratatui::widgets::Paragraph::new(line),
-                    ratatui::layout::Rect {
-                        y,
-                        height: 1,
-                        ..area
-                    },
-                );
-                y += 1;
-            }
-            return y - start_y;
-        }
-
-        // Render options, windowed around the selection so long lists scroll
-        // instead of overflowing the pane. Reserve one row for the custom field
-        // (if present) and, when overflowing, one row each for the more-above /
-        // more-below indicators. `view` is the number of option rows shown.
-        let total = options.len();
-        let avail = area.bottom().saturating_sub(y) as usize;
-        let capacity = avail.saturating_sub(usize::from(allow_custom)).max(1);
-        let (start, end) = if total <= capacity {
-            (0, total)
-        } else {
-            // Overflow: reserve up to two indicator rows, center the selection
-            // in the remaining window, then reclaim any indicator row not needed
-            // at the list edges.
-            let mut view = capacity.saturating_sub(2).max(1);
-            let mut s = sel.saturating_sub(view / 2).min(total - view);
-            let reclaim = usize::from(s == 0) + usize::from(s + view >= total);
-            if reclaim > 0 {
-                view = (view + reclaim).min(total);
-                s = sel.saturating_sub(view / 2).min(total - view);
-            }
-            (s, s + view)
-        };
-
-        if start > 0 && y < area.bottom() {
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
-                    ratatui::text::Span::styled(format!("    ↑ {start} more"), muted_style),
-                )),
-                ratatui::layout::Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
-            );
-            y += 1;
-        }
-
-        for (i, opt) in options.iter().enumerate().take(end).skip(start) {
-            if y >= area.bottom() {
-                break;
-            }
-            let is_selected = i == sel && !custom_focused;
-            let line = match mode {
-                InteractionMode::MultiSelect => {
-                    let checked = interaction.checked(i);
-                    let checkbox = if checked { "[x]" } else { "[ ]" };
-                    let check_style = if checked {
-                        checkbox_on_style
-                    } else {
-                        muted_style
-                    };
-                    let marker = if is_selected { "›" } else { " " };
-                    let opt_style = if is_selected {
-                        selected_style
-                    } else {
-                        normal_style
-                    };
-                    let marker_style = if is_selected {
-                        cursor_style
-                    } else {
-                        normal_style
-                    };
-                    ratatui::text::Line::from(vec![
-                        ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                        ratatui::text::Span::styled(checkbox.to_string(), check_style),
-                        ratatui::text::Span::styled(format!(" {opt}"), opt_style),
-                    ])
-                }
-                _ => {
-                    let marker = if is_selected { "›" } else { " " };
-                    let marker_style = if is_selected {
-                        cursor_style
-                    } else {
-                        normal_style
-                    };
-                    let opt_style = if is_selected {
-                        selected_style
-                    } else {
-                        normal_style
-                    };
-                    ratatui::text::Line::from(vec![
-                        ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                        ratatui::text::Span::styled(opt.clone(), opt_style),
-                    ])
-                }
-            };
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new(line),
-                ratatui::layout::Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
-            );
-            y += 1;
-        }
-
-        if end < total && y < area.bottom() {
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
-                    ratatui::text::Span::styled(format!("    ↓ {} more", total - end), muted_style),
-                )),
-                ratatui::layout::Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
-            );
-            y += 1;
-        }
-
-        // Render "Custom:" row if allow_custom
-        if allow_custom && y < area.bottom() {
-            let is_custom_focused = custom_focused;
-            let marker = if is_custom_focused { "›" } else { " " };
-            let marker_style = if is_custom_focused {
-                cursor_style
-            } else {
-                normal_style
-            };
-            let label_style = if is_custom_focused {
-                selected_style
-            } else {
-                normal_style
-            };
-
-            // Build the custom input line: "  › Custom: text█"
-            let custom_text = if is_custom_focused {
-                Self::format_text_input_line(&input_buf, cursor_pos, cursor_style, selected_style)
-            } else if input_buf.is_empty() {
-                ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                    ratatui::text::Span::styled("Custom:", muted_style),
-                ])
-            } else {
-                ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled(format!("  {marker} "), marker_style),
-                    ratatui::text::Span::styled(format!("Custom: {input_buf}"), label_style),
-                ])
-            };
-
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new(custom_text),
-                ratatui::layout::Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
-            );
-            y += 1;
-        }
-
-        y - start_y
-    }
-
-    /// Build a single-line text input field with a cursor.
-    fn format_text_input_line(
-        input: &str,
-        cursor_pos: usize,
-        cursor_style: ratatui::style::Style,
-        text_style: ratatui::style::Style,
-    ) -> ratatui::text::Line<'static> {
-        let chars: Vec<char> = input.chars().collect();
-        let pos = cursor_pos.min(chars.len());
-        let before: String = chars[..pos].iter().collect();
-        let at_cursor = chars.get(pos).copied().unwrap_or(' ');
-        let after: String = chars
-            .get(pos + 1..)
-            .map(|s| s.iter().collect())
-            .unwrap_or_default();
-
-        let cursor_char = if at_cursor == ' ' {
-            "\u{00a0}"
-        } else {
-            &at_cursor.to_string()
-        };
-
-        ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(format!("> {before}"), text_style),
-            ratatui::text::Span::styled(
-                cursor_char.to_string(),
-                cursor_style.add_modifier(ratatui::style::Modifier::REVERSED),
-            ),
-            ratatui::text::Span::styled(after, text_style),
-        ])
-    }
 }

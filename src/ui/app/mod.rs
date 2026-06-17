@@ -1,4 +1,3 @@
-mod config_picker;
 mod editor;
 mod keymap;
 mod paste;
@@ -34,6 +33,10 @@ pub struct App {
     pub transcript: Vec<ChatMessage>,
     pub input: InputState,
     pub streaming: bool,
+    /// A live Lua command is running through `drive_live`. This needs the same
+    /// cancellation plumbing as streaming, but it is not a model turn and
+    /// should not show the thinking spinner.
+    pub live_command: bool,
     pub provider: String,
     pub model: String,
     pub llm: std::sync::Arc<dyn LlmProvider>,
@@ -164,6 +167,7 @@ impl App {
             transcript: Vec::new(),
             input: InputState::default(),
             streaming: false,
+            live_command: false,
             provider,
             model,
             llm,
@@ -320,13 +324,13 @@ impl App {
         }
     }
 
-    /// Start a new conversation in the database (used by /clear, /new).
     /// Apply a generic action returned by a Lua command or hook.
-    pub(crate) fn apply_lua_action(
+    pub(crate) async fn apply_lua_action(
         &mut self,
         action: crate::ext::types::LuaReturnAction,
         term: &mut BoneTerminal,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<String>> {
+        let mut action_reply = None;
         if let Some(new_messages) = action.conversation_replace {
             // Replace the active transcript.
             self.transcript = new_messages;
@@ -351,7 +355,67 @@ impl App {
         if let Some(load) = action.conversation_load {
             self.load_conversation(load, term)?;
         }
-        Ok(())
+
+        if let Some(config_action) = action.config_action {
+            action_reply = Some(self.apply_config_action(config_action).await);
+        }
+        Ok(action_reply)
+    }
+
+    async fn apply_config_action(&mut self, action: crate::ext::types::ConfigAction) -> String {
+        match action {
+            crate::ext::types::ConfigAction::Apply => {
+                let custom = config::custom::CustomConfigs::load();
+                self.apply_custom_configs_to_runtime(custom);
+                "Configuration applied.".to_string()
+            }
+            crate::ext::types::ConfigAction::ReloadTools => {
+                let config_dir = crate::config::bone_dir();
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let mut custom = config::custom::CustomConfigs::load();
+                let booted = crate::ext::boot_with_tools(
+                    &config_dir,
+                    &cwd,
+                    &mut custom,
+                    true,
+                    crate::ext::BootOptions {
+                        agent_depth: 0,
+                        headless: false,
+                        model: self.model.clone(),
+                        provider: self.provider.clone(),
+                    },
+                    &self.model,
+                    &self.provider,
+                );
+                self.extensions = booted.manager;
+                self.tools = booted.tools;
+                self.user_config.apply_custom_configs(&custom);
+                self.approval_mode = self.user_config.approval_mode;
+                self.custom_configs = custom;
+                self.user_config.enabled_tools = self.tools.enabled_names();
+                let count = self.tools.definitions().len();
+                format!("Tools and Lua extensions reloaded. {count} tools enabled.")
+            }
+            crate::ext::types::ConfigAction::SwitchProvider { id } => {
+                let mut custom = config::custom::CustomConfigs::load();
+                let providers_config = custom.derive_providers_config();
+                match providers::create_provider_with_config(&id, &providers_config) {
+                    Ok(new_provider) => match new_provider.validate().await {
+                        Ok(()) => {
+                            self.provider =
+                                format!("{} ({})", new_provider.name(), new_provider.id());
+                            self.model = new_provider.model().to_string();
+                            self.llm = std::sync::Arc::from(new_provider);
+                            custom.set_last_provider(&id);
+                            self.custom_configs = custom;
+                            format!("Switched to {} ({})", self.model, self.provider)
+                        }
+                        Err(err) => format!("Provider validation failed: {err}"),
+                    },
+                    Err(err) => err.to_string(),
+                }
+            }
+        }
     }
 
     /// Load a past conversation as the active chat (the `conversation.load`
@@ -470,10 +534,6 @@ impl App {
 
         self.messages.clear();
         self.transcript.clear();
-        let banner = Self::collect_banner(&self.extensions);
-        if !banner.is_empty() {
-            self.messages.push(Message::system(banner));
-        }
         self.messages.push(Message::system(
             "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
         ));
@@ -679,9 +739,10 @@ impl App {
     /// live cumulative output-token estimate.
     fn stream_status_info_with_tokens(&self, estimated_tokens: Option<u64>) -> StatusInfo {
         // Don't show the "thinking" spinner / timer while an interactive pane
-        // (e.g. the /history picker or ask_user) is waiting on the user —
-        // nothing is running, so a spinner is misleading.
-        let interacting = self.has_active_interaction();
+        // owns the UI. The pane may be briefly inactive after submitting a
+        // navigation value and before Lua upserts the replacement pane; treating
+        // that handoff as interactive avoids a one-frame spinner flash.
+        let interacting = self.has_lua_menu_pane();
         let spinner_active = self.streaming && !interacting;
         let elapsed = if interacting {
             None
@@ -698,18 +759,17 @@ impl App {
             &self.user_config,
             elapsed,
         );
-        info.lua_status = self.lua_status
+        info.lua_status = self
+            .lua_status
             .iter()
             .flat_map(|(_, segs)| segs.iter().cloned())
             .collect();
         info
     }
 
-    /// True when a pane is showing an active interactive prompt awaiting input.
-    fn has_active_interaction(&self) -> bool {
-        self.pages
-            .iter()
-            .any(|p| p.interaction.as_ref().is_some_and(|i| i.is_active()))
+    /// True when Lua is showing its shared menu pane.
+    fn has_lua_menu_pane(&self) -> bool {
+        self.pages.iter().any(|p| p.source == "interact")
     }
 
     /// Tick subagent job status: refresh pane if needed, auto-inject
@@ -841,8 +901,7 @@ impl App {
                     let before = self.lua_status.len();
                     self.lua_status.retain(|(i, _)| i != &id);
                     if self.lua_status.len() == before {
-                        self.active_page =
-                            PanePage::remove(&mut self.pages, &id, self.active_page);
+                        self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
                     }
                     changed = true;
                 }
@@ -1038,21 +1097,6 @@ impl App {
         modifiers: KeyModifiers,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        // ── Interactive pane key interception ─────────────────────────
-        // dispatch_interaction_key handles submit/cancel cleanup (removing the
-        // pane when the interaction goes inactive, except the shared "interact"
-        // page).
-        if self.panes_visible
-            && PanePage::dispatch_interaction_key(
-                &mut self.pages,
-                &mut self.active_page,
-                code,
-                modifiers,
-            )
-        {
-            return self.redraw(term);
-        }
-
         // Handle page keybindings before input processing
         if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
             self.panes_visible = !self.panes_visible;
@@ -1177,6 +1221,15 @@ impl App {
             InputAction::Cancel => self.handle_ctrl_c(term),
             InputAction::Submit => {
                 self.autocomplete = None;
+                // Remove the old interact page before clearing the input so
+                // the screen is clean — avoids a flash where the stale
+                // interact page is visible with an empty input buffer.
+                if self.panes_visible && !self.pages.is_empty() {
+                    self.pages.retain(|p| p.source != "interact");
+                    if self.pages.is_empty() {
+                        self.active_page = 0;
+                    }
+                }
                 self.send_message(term).await?;
                 while let Some(queued) = self.queue.pop_front() {
                     self.input.buffer = queued;
@@ -1266,32 +1319,8 @@ impl App {
         None
     }
 
-    /// Cancel any active interaction on the current pane.
-    /// Returns true if an interaction was cancelled.
-    fn cancel_active_interaction(&mut self) -> bool {
-        if !self.panes_visible {
-            return false;
-        }
-        let active_idx = self.active_page.min(self.pages.len().saturating_sub(1));
-        self.pages.get(active_idx).is_some_and(|page| {
-            page.interaction.as_ref().is_some_and(|i| {
-                if i.is_active() {
-                    i.cancel();
-                    true
-                } else {
-                    false
-                }
-            })
-        })
-    }
-
     /// Handle Ctrl+C: cancel streaming response, or quit on double-tap.
     fn handle_ctrl_c(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        // If an interactive pane is active, cancel it instead of quitting.
-        if self.cancel_active_interaction() {
-            return self.redraw(term);
-        }
-
         let now = Instant::now();
         let double_tap = self
             .last_ctrl_c
@@ -1310,7 +1339,7 @@ impl App {
 
         self.last_ctrl_c = Some(now);
 
-        if self.streaming {
+        if self.streaming || self.live_command {
             self.cancel_streaming = true;
         }
         self.queue.clear();
@@ -1489,15 +1518,39 @@ impl App {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0].to_string();
         let arg = parts.get(1).copied().unwrap_or("").to_string();
+        let has_lua_config = self
+            .extensions
+            .commands()
+            .iter()
+            .any(|registered| registered.name == "config");
 
-        if cmd == "provider" && arg.is_empty() {
-            return self.config_picker(term, Some("providers")).await;
+        if has_lua_config && cmd == "provider" && arg.is_empty() {
+            if self
+                .run_lua_command("config", "providers", term)
+                .await
+                .is_some()
+            {
+                return Ok(());
+            }
         }
-        if cmd == "tools" {
-            return self.handle_tools_command(&arg, term).await;
+        if has_lua_config && cmd == "tools" {
+            let config_arg = if arg.trim() == "reload" {
+                "tools reload"
+            } else {
+                "tools"
+            };
+            if self
+                .run_lua_command("config", config_arg, term)
+                .await
+                .is_some()
+            {
+                return Ok(());
+            }
         }
-        if cmd == "config" {
-            return self.config_picker(term, None).await;
+        if has_lua_config && cmd == "config" {
+            if self.run_lua_command("config", &arg, term).await.is_some() {
+                return Ok(());
+            }
         }
 
         // Protected built-ins always win over Lua commands.
@@ -1518,9 +1571,10 @@ impl App {
                 enabled_commands
             };
             if enabled.contains(&cmd)
-                && let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await {
-                    return Ok(());
-                }
+                && let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await
+            {
+                return Ok(());
+            }
         }
 
         if matches!(cmd.as_str(), "clear" | "new") {
@@ -1597,7 +1651,7 @@ impl App {
         crate::ext::ctx::AppCtxState::new(
             &self.tools,
             &self.token_stats,
-            self.approval_mode,
+            &self.approval_mode,
             self.conversation_id,
             self.llm.id(),
             self.llm.model(),
@@ -1620,15 +1674,12 @@ impl App {
         // cancellation) and flipped by `drive_live` when the user hits Esc.
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        self.streaming = true;
-        self.turn_start = Some(Instant::now());
-        self.turn_paused_duration = std::time::Duration::ZERO;
-        self.turn_pause_start = None;
-        self.redraw(term).ok();
+        self.live_command = true;
+        self.cancel_streaming = false;
 
         // Run the command through the shared live-driver loop so it gets the
-        // same capabilities as tools — including `ctx.ui.interact`, which needs
-        // the loop to pump pane events and drain keystrokes into the pane.
+        // same capabilities as tools, including `ctx.ui.key()`, which needs
+        // the loop to pump pane events and deliver keystrokes to Lua.
         let cancel_for_ctx = cancel.clone();
         let reply = self
             .drive_live(
@@ -1683,12 +1734,14 @@ impl App {
             .ok()
             .flatten();
 
-        self.streaming = false;
-        self.turn_start = None;
+        self.live_command = false;
+        self.cancel_streaming = false;
 
-        if let Some(Some((reply, submit, action))) = reply {
+        if let Some(Some((mut reply, submit, action))) = reply {
             if let Some(action) = action {
-                self.apply_lua_action(action, term).ok();
+                if let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await {
+                    reply = action_reply;
+                }
             }
             if submit {
                 let display = format!(

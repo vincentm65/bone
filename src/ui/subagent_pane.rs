@@ -54,7 +54,6 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
         content: lines,
         visible_rows: 8,
         scroll: 0,
-        interaction: None,
     })
 }
 

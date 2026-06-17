@@ -118,9 +118,12 @@ pub(crate) fn create_engine(
         ";"
     };
     let lua_dir_str = lua_dir.to_string_lossy();
+    let lua_lib_dir = lua_dir.join("lib");
+    let lua_lib_dir_str = lua_lib_dir.to_string_lossy();
     let new_path = format!(
-        "{lua_dir_str}/?.lua;{lua_dir_str}/?/init.lua{sep}{existing_path}",
+        "{lua_dir_str}/?.lua;{lua_dir_str}/?/init.lua;{lua_lib_dir_str}/?.lua;{lua_lib_dir_str}/?/init.lua{sep}{existing_path}",
         lua_dir_str = lua_dir_str,
+        lua_lib_dir_str = lua_lib_dir_str,
     );
     package.set("path", new_path).map_err(|e| e.to_string())?;
 
@@ -153,7 +156,8 @@ pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
     let init_path = config_dir.join("init.lua");
     if !init_path.exists() {
         let default_init = DEFAULT_INIT_LUA;
-        std::fs::write(&init_path, default_init).map_err(|e| format!("failed to create init.lua: {e}"))?;
+        std::fs::write(&init_path, default_init)
+            .map_err(|e| format!("failed to create init.lua: {e}"))?;
         return Ok(false);
     }
 

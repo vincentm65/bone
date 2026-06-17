@@ -82,14 +82,14 @@ fn driver_with_gate(
         tools: ToolHandler::new(builtin_tools()),
         session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
         gate,
-        approval_mode: mode,
+        approval_mode: Arc::new(mode),
         agent_depth: 0,
         activity: None,
         on_token_usage: None,
         events: false,
         event_sender: None,
         runtime_events: None,
-        reply_registry: None,
+        key_reply_registry: None,
         cancel: None,
         history,
         transcript,
@@ -178,8 +178,7 @@ async fn driver_outcome_carries_usage_records() {
 async fn driver_outcome_usage_falls_back_to_estimate() {
     // When the provider streams no TokenUsage, the Driver estimates and still
     // records a (flagged) usage entry in the outcome.
-    let (driver, prompt) =
-        driver_with(vec![ChatEvent::TextDelta("hi".into())], ApprovalMode::Safe);
+    let (driver, prompt) = driver_with(vec![ChatEvent::TextDelta("hi".into())], ApprovalMode::Safe);
 
     let outcome = driver.run_to_outcome(prompt).await;
     assert_eq!(outcome.usage.len(), 1, "one estimated usage record");
@@ -268,9 +267,10 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
     let mut tool_error: Option<bool> = None;
     while let Ok(ev) = erx.try_recv() {
         if let AgentRunEvent::ToolResult { name, is_error, .. } = ev
-            && name == "read_file" {
-                tool_error = Some(is_error);
-            }
+            && name == "read_file"
+        {
+            tool_error = Some(is_error);
+        }
     }
     assert_eq!(
         tool_error,
@@ -285,7 +285,7 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
 /// `ToolLiveEvent::Pane` to the frontend as `RuntimeEvent::Pane`.
 struct PaneTool;
 
-struct InteractTool;
+struct KeyTool;
 
 #[async_trait]
 impl Tool for PaneTool {
@@ -319,11 +319,11 @@ impl Tool for PaneTool {
 }
 
 #[async_trait]
-impl Tool for InteractTool {
+impl Tool for KeyTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "interact_tool".into(),
-            description: "asks a question".into(),
+            name: "key_tool".into(),
+            description: "waits for a key".into(),
             input_schema: serde_json::json!({ "type": "object" }),
         }
     }
@@ -340,21 +340,10 @@ impl Tool for InteractTool {
             return Ok(ToolOutput::text("no events".into()));
         };
         let (reply, rx) = tokio::sync::oneshot::channel();
-        tx.send(ToolLiveEvent::Interact(
-            bone::pane_content::InteractRequest {
-                question: "pick one".into(),
-                mode: bone::pane_content::InteractionMode::SingleSelect,
-                options: vec!["yes".into(), "no".into()],
-                default_selected: 0,
-                allow_custom: false,
-                reply,
-            },
-        ))
-        .unwrap();
-        let value = rx.await.unwrap();
-        Ok(ToolOutput::text(
-            value["value"].as_str().unwrap().to_string(),
-        ))
+        tx.send(ToolLiveEvent::Key(bone::pane_content::KeyRequest { reply }))
+            .unwrap();
+        let key = rx.await.unwrap();
+        Ok(ToolOutput::text(key.code))
     }
 }
 
@@ -377,14 +366,14 @@ async fn driver_forwards_tool_pane_to_runtime_event() {
         tools: ToolHandler::new(builtin_tools().register(PaneTool)),
         session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
         gate: Arc::new(AutoApprovalGate),
-        approval_mode: ApprovalMode::Danger, // pane_tool isn't read-only
+        approval_mode: Arc::new(ApprovalMode::Danger), // pane_tool isn't read-only
         agent_depth: 0,
         activity: None,
         on_token_usage: None,
         events: false,
         event_sender: None,
         runtime_events: Some(tx),
-        reply_registry: None,
+        key_reply_registry: None,
         cancel: None,
         history,
         transcript,
@@ -398,10 +387,11 @@ async fn driver_forwards_tool_pane_to_runtime_event() {
     let mut saw_pane = false;
     while let Ok(ev) = rx.try_recv() {
         if let RuntimeEvent::Pane { pane } = ev
-            && pane.source == "pane_tool" {
-                assert!(matches!(&pane.lines[0], PaneLineSpec::Plain(s) if s == "hello from tool"));
-                saw_pane = true;
-            }
+            && pane.source == "pane_tool"
+        {
+            assert!(matches!(&pane.lines[0], PaneLineSpec::Plain(s) if s == "hello from tool"));
+            saw_pane = true;
+        }
     }
     assert!(
         saw_pane,
@@ -410,9 +400,9 @@ async fn driver_forwards_tool_pane_to_runtime_event() {
 }
 
 #[tokio::test]
-async fn driver_interact_reply_completes_turn() {
+async fn driver_key_reply_completes_turn() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
-    let registry = bone::runtime::ReplyRegistry::new();
+    let registry = bone::runtime::KeyReplyRegistry::new();
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
     let history = build_chat_history(&transcript, None);
@@ -421,22 +411,22 @@ async fn driver_interact_reply_completes_turn() {
             "mock-1",
             vec![ChatEvent::ToolCall(ToolCall {
                 id: "c1".into(),
-                name: "interact_tool".into(),
+                name: "key_tool".into(),
                 arguments: serde_json::json!({}),
             })],
         )),
         extensions: ExtensionManager::unloaded(),
-        tools: ToolHandler::new(builtin_tools().register(InteractTool)),
+        tools: ToolHandler::new(builtin_tools().register(KeyTool)),
         session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
         gate: Arc::new(AutoApprovalGate),
-        approval_mode: ApprovalMode::Danger,
+        approval_mode: Arc::new(ApprovalMode::Danger),
         agent_depth: 0,
         activity: None,
         on_token_usage: None,
         events: false,
         event_sender: None,
         runtime_events: Some(tx),
-        reply_registry: Some(registry.clone()),
+        key_reply_registry: Some(registry.clone()),
         cancel: None,
         history,
         transcript,
@@ -445,18 +435,30 @@ async fn driver_interact_reply_completes_turn() {
     };
 
     let run = tokio::spawn(async move { driver.run(prompt).await });
-    let spec = loop {
-        if let RuntimeEvent::Interact { spec } = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("runtime event timed out")
-            .expect("runtime event") { break spec }
+    let id = loop {
+        if let RuntimeEvent::KeyRequest { id } =
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("runtime event timed out")
+                .expect("runtime event")
+        {
+            break id;
+        }
     };
-    assert_eq!(spec.question, "pick one");
-    assert!(registry.resolve(spec.id, serde_json::json!({ "value": "yes" })));
+    assert!(registry.resolve(
+        id,
+        bone::pane_content::KeyEvent {
+            code: "Enter".into(),
+            char: None,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    ));
 
     tokio::time::timeout(std::time::Duration::from_secs(5), run)
         .await
-        .expect("driver wedged after interact reply")
+        .expect("driver wedged after key reply")
         .unwrap()
         .expect("driver run");
 }

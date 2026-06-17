@@ -2,6 +2,8 @@
 -- conversation history. The agent calls this; the user picks a conversation with
 -- the arrow keys, and the selected transcript is returned to the agent as JSON.
 
+local menu = require("ui.menu")
+
 local function trim(s)
   local out = (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
   return out
@@ -116,13 +118,12 @@ bone.register_tool({
       return "No conversation history found."
     end
 
-    local ok, choice = pcall(ctx.ui.interact, {
+    local ok, choice = pcall(menu.select, ctx, {
       question = "Select conversation history",
-      type = "single_select",
       options = options,
       allow_custom = false,
     })
-    pcall(ctx.ui.pane, { source = "interact", title = "", lines = {} })
+    menu.clear(ctx)
 
     if not ok then
       return "error: history selector failed: " .. tostring(choice)

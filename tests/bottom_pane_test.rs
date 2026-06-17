@@ -226,7 +226,6 @@ fn pane_page_adds_height_to_viewport() {
         ],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
-        interaction: None,
     }];
 
     // Without pages: top_sep(1) + input(1) + bot_sep(1) + status(1) = 4
@@ -250,7 +249,6 @@ fn pane_page_honors_visible_rows() {
             .collect(),
         visible_rows: 12,
         scroll: 0,
-        interaction: None,
     }];
 
     // base(3) + page_sep(1) + tool-requested content rows(12)
@@ -261,7 +259,7 @@ fn pane_page_honors_visible_rows() {
 }
 
 #[test]
-fn pane_page_with_two_pages_adds_tab_indicator() {
+fn pane_page_with_two_pages_renders_content() {
     let input = InputState::default();
     let pages = vec![
         PanePage {
@@ -270,7 +268,6 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
             content: vec![ratatui::text::Line::raw("task 1")],
             visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
             scroll: 0,
-            interaction: None,
         },
         PanePage {
             source: "notes".to_string(),
@@ -278,14 +275,13 @@ fn pane_page_with_two_pages_adds_tab_indicator() {
             content: vec![ratatui::text::Line::raw("note 1")],
             visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
             scroll: 0,
-            interaction: None,
         },
     ];
 
-    // base(3) + page_sep(1) + content(1) + page_sep(1) + tab_indicator(1) = 7
+    // base(3) + page_sep(1) + content(1) = 5
     assert_eq!(
         Renderer::desired_height(&input, None, 80, &pages, 0, None),
-        7
+        5
     );
 }
 
@@ -302,7 +298,6 @@ fn pane_page_does_not_panic_with_tiny_viewport() {
             .collect(),
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
-        interaction: None,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
 
@@ -331,7 +326,6 @@ fn pane_page_renders_content_between_input_and_status() {
         content: vec![ratatui::text::Line::raw("hello pane")],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
-        interaction: None,
     }];
     let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
 
@@ -370,7 +364,6 @@ fn redraw_clears_stale_prompt_and_pane_rows() {
         ],
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
-        interaction: None,
     }];
     let mut prompt = Prompt::new(
         "General",

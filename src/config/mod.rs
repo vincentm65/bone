@@ -151,6 +151,7 @@ pub fn seed_all() {
     seed_agents_md_if_missing();
     custom::seed_builtin_pages();
     ext::seed_default_lua_tools(&bone_dir().join("lua/tools"));
+    ext::seed_default_lua_libs(&bone_dir().join("lua/lib"));
 }
 
 fn is_local_base_url(base_url: &str) -> bool {

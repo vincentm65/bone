@@ -51,6 +51,9 @@ pub struct LuaReturnAction {
     /// (a per-turn allow-list). Returned by `before_turn`; an empty list hides
     /// every tool. Filters what the model *sees*, not the approval policy.
     pub tool_filter: Option<Vec<String>>,
+    /// Config/runtime mutation requested by an interactive Lua command. These
+    /// are applied by the TUI `App` after the Lua command returns.
+    pub config_action: Option<ConfigAction>,
 }
 
 /// Payload for the `conversation.load` action (`/history`).
@@ -59,6 +62,13 @@ pub struct ConversationLoad {
     pub messages: Vec<crate::llm::ChatMessage>,
     /// Conversation id to resume; future messages append here.
     pub conversation_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConfigAction {
+    Apply,
+    ReloadTools,
+    SwitchProvider { id: String },
 }
 
 /// Normalized result from a Lua command handler.
@@ -172,8 +182,8 @@ impl ExtensionManager {
     ///
     /// **Non-blocking by design.** This runs on the render tick, which can fire
     /// while the Lua VM is busy executing a command or tool — e.g. a blocking
-    /// `ctx.ui.interact` picker (`/history`) holds the VM lock while it waits
-    /// for the user. A plain `lock()` here would deadlock the UI against the
+    /// Lua menu waiting on `ctx.ui.key()` holds the VM lock while it waits for
+    /// the user. A plain `lock()` here would deadlock the UI against the
     /// blocked command. We `try_lock` instead and skip this tick if the VM is
     /// busy; the diffs are still there to drain on the next free tick.
     pub fn drain_view_diffs(&self) -> Vec<crate::runtime::view::ViewDiff> {
@@ -522,6 +532,28 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
                 any = true;
             }
         }
+        Some("config.apply") => {
+            out.config_action = Some(ConfigAction::Apply);
+            any = true;
+        }
+        Some("config.reload_tools") => {
+            out.config_action = Some(ConfigAction::ReloadTools);
+            any = true;
+        }
+        Some("config.switch_provider") => {
+            let id = table
+                .get::<Option<String>>("provider")
+                .ok()
+                .flatten()
+                .or_else(|| table.get::<Option<String>>("id").ok().flatten())
+                .unwrap_or_default();
+            if id.is_empty() {
+                eprintln!("bone-lua warn: config.switch_provider missing provider id; ignoring");
+            } else {
+                out.config_action = Some(ConfigAction::SwitchProvider { id });
+                any = true;
+            }
+        }
         Some(other) => eprintln!("bone-lua warn: unknown action '{other}'; ignoring"),
         None => {}
     }
@@ -820,5 +852,32 @@ mod tests {
         let parsed = parse_lua_return_action(&action).expect("action parsed");
         let load = parsed.conversation_load.expect("load payload");
         assert_eq!(load.conversation_id, None);
+    }
+
+    #[test]
+    fn parses_config_actions() {
+        let lua = Lua::new();
+
+        let apply = lua.create_table().unwrap();
+        apply.set("action", "config.apply").unwrap();
+        let parsed = parse_lua_return_action(&apply).expect("apply action");
+        assert!(matches!(parsed.config_action, Some(ConfigAction::Apply)));
+
+        let reload = lua.create_table().unwrap();
+        reload.set("action", "config.reload_tools").unwrap();
+        let parsed = parse_lua_return_action(&reload).expect("reload action");
+        assert!(matches!(
+            parsed.config_action,
+            Some(ConfigAction::ReloadTools)
+        ));
+
+        let switch = lua.create_table().unwrap();
+        switch.set("action", "config.switch_provider").unwrap();
+        switch.set("provider", "openai").unwrap();
+        let parsed = parse_lua_return_action(&switch).expect("switch action");
+        assert!(matches!(
+            parsed.config_action,
+            Some(ConfigAction::SwitchProvider { ref id }) if id == "openai"
+        ));
     }
 }
