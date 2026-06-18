@@ -429,39 +429,53 @@ impl Renderer {
         let user_background = self.theme.user_msg_bg;
 
         let row_count = logical_lines_row_count(&rendered, terminal_width);
-        let w = terminal_width.max(1);
-        let h = term.size()?.height;
+        // The optimized direct-crossterm path (`scrollback_insert_direct`) uses
+        // terminal scrolling regions that conhost doesn't support, so it is
+        // Windows-excluded. Critically the `insert_before` fallback must still
+        // run on Windows — keeping it inside the `cfg(not(windows))` else branch
+        // compiled the entire write out on Windows, so no committed message
+        // (user input, tool rows) ever reached scrollback there. Mirroring
+        // `insert_lines_to_scrollback`, gate only the fast path and let the
+        // portable `insert_before` always execute. `w`/`h` are fast-path only,
+        // so they're scoped under the same guard to avoid dead bindings on
+        // Windows.
         #[cfg(not(windows))]
-        if self.viewport_height >= h {
-            self.scrollback_insert_direct(term, &rendered, w, Some(user_background))?;
-        } else {
-            term.insert_before(row_count, |buf| {
-                let mut row = 0u16;
-                for line in &rendered {
-                    let height = wrapped_line_count(line, buf.area.width.max(1));
-                    let msg_area = Rect {
-                        x: 0,
-                        y: row,
-                        width: buf.area.width,
-                        height,
-                    };
-                    if line
-                        .spans
-                        .iter()
-                        .any(|span| span.style.bg == Some(user_background))
-                    {
-                        buf.set_style(
-                            msg_area,
-                            ratatui::style::Style::default().bg(user_background),
-                        );
-                    }
-                    Paragraph::new(line.clone())
-                        .wrap(Wrap { trim: false })
-                        .render(msg_area, buf);
-                    row = row.saturating_add(height);
-                }
-            })?;
+        {
+            let w = terminal_width.max(1);
+            let h = term.size()?.height;
+            if self.viewport_height >= h {
+                self.scrollback_insert_direct(term, &rendered, w, Some(user_background))?;
+                self.scrollback_cursor = messages.len();
+                return Ok(());
+            }
         }
+
+        term.insert_before(row_count, |buf| {
+            let mut row = 0u16;
+            for line in &rendered {
+                let height = wrapped_line_count(line, buf.area.width.max(1));
+                let msg_area = Rect {
+                    x: 0,
+                    y: row,
+                    width: buf.area.width,
+                    height,
+                };
+                if line
+                    .spans
+                    .iter()
+                    .any(|span| span.style.bg == Some(user_background))
+                {
+                    buf.set_style(
+                        msg_area,
+                        ratatui::style::Style::default().bg(user_background),
+                    );
+                }
+                Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .render(msg_area, buf);
+                row = row.saturating_add(height);
+            }
+        })?;
 
         self.scrollback_cursor = messages.len();
         Ok(())
