@@ -698,8 +698,52 @@ impl App {
     /// Redraw from scratch, updating the tracked terminal size.
     /// Used after resize or stale-size detection.
     fn force_redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        // On a physical terminal resize (cols/rows changed), the emulator has
+        // already reflowed both scrollback and the inline viewport. ratatui's
+        // built-in inline autoresize re-anchors the viewport by scrolling
+        // (`append_lines`), which leaves the old, reflowed viewport rows (the
+        // separators above/below the input, wrapped to an unknown height) stuck
+        // in scrollback as glitchy duplicates. There's no reliable in-place
+        // erase, so rebuild from scratch: wipe screen + scrollback and re-flush
+        // all history at the new width — the same way scrollback is built from
+        // empty on startup.
+        let size = crossterm::terminal::size()?;
+        if self.renderer.last_size.is_some_and(|last| last != size) {
+            self.rebuild_scrollback_after_resize(terminal)?;
+            self.renderer.last_size = Some(size);
+        }
         self.ensure_viewport_and_draw(terminal)?;
-        self.renderer.last_size = Some(crossterm::terminal::size()?);
+        self.renderer.last_size = Some(size);
+        Ok(())
+    }
+
+    /// Wipe the screen and native scrollback, then re-render all message history
+    /// into scrollback at the current terminal width. Used after a physical
+    /// resize, where reflowed/duplicated viewport rows can't be erased in place.
+    fn rebuild_scrollback_after_resize(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        Renderer::hard_reset_viewport(terminal, self.renderer.viewport_height)?;
+        self.renderer.reset_scrollback_state();
+
+        // The in-progress streamed assistant message (if any) is flushed via the
+        // streaming path rather than as a committed message, and `scrollback_cursor`
+        // counts it as already accounted for. Re-flush committed messages up to
+        // it, then replay the streamed portion so the counters line up.
+        let stream_idx = if self.streaming {
+            self.messages.len().checked_sub(1)
+        } else {
+            None
+        };
+        let committed_end = stream_idx.unwrap_or(self.messages.len());
+        self.renderer
+            .flush_new_to_scrollback(&self.messages[..committed_end], terminal)?;
+
+        if let Some(idx) = stream_idx {
+            self.renderer.scrollback_cursor += 1;
+            self.renderer.streaming_source_flushed = 0;
+            self.renderer.streaming_lines_flushed = 0;
+            self.renderer
+                .flush_streaming_message(&self.messages[idx].content, terminal)?;
+        }
         Ok(())
     }
 
@@ -746,7 +790,10 @@ impl App {
         // navigation value and before Lua upserts the replacement pane; treating
         // that handoff as interactive avoids a one-frame spinner flash.
         let interacting = self.has_lua_menu_pane();
-        let spinner_active = self.streaming && !interacting;
+        // A live Lua command (e.g. /shotgun) runs through `drive_live` without
+        // setting `streaming`, but it's still working — keep the spinner/timer
+        // alive so the UI doesn't look frozen during long multi-model runs.
+        let spinner_active = (self.streaming || self.live_command) && !interacting;
         let elapsed = if interacting {
             None
         } else {
@@ -1702,6 +1749,11 @@ impl App {
 
         self.live_command = true;
         self.cancel_streaming = false;
+        // Seed the turn timer so the status bar shows elapsed time while the
+        // command works (mirrors a normal streamed turn).
+        self.turn_start = Some(std::time::Instant::now());
+        self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_pause_start = None;
 
         // Run the command through the shared live-driver loop so it gets the
         // same capabilities as tools, including `ctx.ui.key()`, which needs

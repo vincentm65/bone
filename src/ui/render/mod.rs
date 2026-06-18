@@ -162,6 +162,31 @@ impl Renderer {
         Self::replace_terminal(term, new_height)
     }
 
+    /// Wipe the visible screen *and* native scrollback, home the cursor, then
+    /// rebuild the inline viewport so ratatui's tracked area matches the new
+    /// terminal size. Used after a physical resize: the emulator has reflowed
+    /// the old viewport into an unknown number of rows, so the only reliable way
+    /// to clear it is a hard reset followed by re-flushing history from scratch.
+    ///
+    /// `\x1b[2J` clears the screen, `\x1b[3J` clears the scrollback buffer, and
+    /// `\x1b[H` homes the cursor so the rebuilt viewport starts at the top and
+    /// is pushed down to the bottom as history is re-flushed (mirroring startup).
+    pub fn hard_reset_viewport(term: &mut BoneTerminal, height: u16) -> io::Result<()> {
+        crossterm::queue!(
+            term.backend_mut(),
+            crossterm::style::Print("\x1b[2J\x1b[3J\x1b[H"),
+        )?;
+        Write::flush(term.backend_mut())?;
+        Self::replace_terminal(term, height)
+    }
+
+    /// Reset the scrollback render cursor so the next flush re-renders all
+    /// messages from the top. Used by the resize rebuild.
+    pub fn reset_scrollback_state(&mut self) {
+        self.scrollback_cursor = 0;
+        self.scrollback_last_blank = false;
+    }
+
     fn replace_terminal(term: &mut BoneTerminal, new_height: u16) -> io::Result<()> {
         let backend = BoneBackend::new(io::stdout());
         let new_term = Terminal::with_options(

@@ -1,18 +1,34 @@
--- /shotgun — multi-model review: search, parallel blast, judge.
+-- /shotgun — multi-model review: research, parallel blast, judge.
 
 -- All configuration lives here. Edit these values to customize behavior.
 local CONFIG = {
-  search_provider = "",
-  judge_provider = "",
-  blast_providers = '[{"provider":"openai"},{"provider":"openai","model":"gpt-4o"}]',
-  search_prompt = "Search for relevant code, structure, and context. Read key files, check git diff, examine imports, and summarize what you find.",
-  blast_prompt = "Review the following data and provide your analysis:\n\n{task}\n\n{search_results}",
+  research_provider = "local",
+  judge_provider = "codex",
+  blast_providers = '["codex","deepseek","glm_plan","minimax","openrouter","local"]',
+  blast_prompt = "Review the following data and provide your analysis:\n\n{task}\n\n{research}",
   judge_prompt = "Synthesize the following analyses into a single coherent response:\n\n{task}\n\n{analyses}",
 
-  max_context_chars = 90000,
-  max_section_chars = 30000,
   max_result_chars = 50000,
 }
+
+local STATUS_ID = "shotgun"
+
+-- Phase feedback in the status bar. `ctx.ui.status` only writes to stderr (hidden
+-- in the TUI), so use the statusline view diff, which the live-command driver
+-- drains and renders while the command runs.
+local function set_status(text)
+  if bone and bone.api and bone.api.ui and bone.api.ui.set_statusline then
+    bone.api.ui.set_statusline(STATUS_ID, {
+      { text = "shotgun: " .. text, fg = "cyan", align = "right" },
+    })
+  end
+end
+
+local function clear_status()
+  if bone and bone.api and bone.api.ui and bone.api.ui.close then
+    bone.api.ui.close(STATUS_ID)
+  end
+end
 
 local function trim(s)
   return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -22,57 +38,6 @@ local function truncate(s, max)
   s = tostring(s or "")
   if #s <= max then return s end
   return s:sub(1, max) .. "\n... (truncated)"
-end
-
-
-
-local function status(ctx, msg)
-  if ctx.ui and ctx.ui.status then ctx.ui.status("shotgun: " .. msg) end
-end
-
-local function shell_text(ctx, title, cmd, max_chars)
-  local ok, result = pcall(ctx.shell, cmd, { timeout_ms = 120000 })
-  if not ok then
-    return "## " .. title .. "\nERROR: " .. tostring(result)
-  end
-  local out = result.stdout or ""
-  local err = result.stderr or ""
-  local body = trim(out)
-  if result.exit_code ~= 0 then
-    body = body .. "\n(exit " .. tostring(result.exit_code) .. ")\n" .. trim(err)
-  end
-  if body == "" then body = "(empty)" end
-  return "## " .. title .. "\n" .. truncate(body, max_chars or CONFIG.max_section_chars)
-end
-
-local function read_if_exists(ctx, path, max_chars)
-  if not (ctx.fs and ctx.fs.is_file and ctx.fs.is_file(path)) then return nil end
-  local ok, content = pcall(ctx.read_file, path)
-  if not ok then return "## " .. path .. "\nERROR: " .. tostring(content) end
-  return "## " .. path .. "\n" .. truncate(content, max_chars or 12000)
-end
-
-local function gather_context(ctx)
-  local parts = {
-    shell_text(ctx, "git status", "git status --short --branch", 12000),
-    shell_text(ctx, "git diff", "git diff --no-color", 40000),
-    shell_text(ctx, "tracked files", "git ls-files | sed -n '1,300p'", 20000),
-  }
-
-  local files = {
-    "AGENTS.md",
-    "README.md",
-    "Cargo.toml",
-    "package.json",
-    "src/main.rs",
-    "src/lib.rs",
-  }
-  for _, path in ipairs(files) do
-    local section = read_if_exists(ctx, path, 12000)
-    if section then parts[#parts + 1] = section end
-  end
-
-  return truncate(table.concat(parts, "\n\n"), CONFIG.max_context_chars)
 end
 
 local function provider_map(ctx)
@@ -119,20 +84,14 @@ local function agent_opts(provider, model, label)
   return opts
 end
 
-local function run_search(ctx, task, context)
-  local prompt = table.concat({
-    CONFIG.search_prompt,
-    "",
-    "Task:",
-    task,
-    "",
-    "Context:",
-    context,
-  }, "\n")
-  return ctx.agent.run(prompt, agent_opts(CONFIG.search_provider, nil, nil))
+local function run_research(ctx, task)
+  return ctx.agent.run(
+    "Research the codebase and gather relevant context for this task. Read files, check git diff, examine imports and structure. Summarize what you find.\n\nTask: " .. task,
+    agent_opts(CONFIG.research_provider, nil, nil)
+  )
 end
 
-local function spawn_blast(ctx, task, search_results, entries, providers)
+local function spawn_blast(ctx, task, research, entries, providers)
   local template = CONFIG.blast_prompt
   local ids = {}
   local labels = {}
@@ -144,7 +103,7 @@ local function spawn_blast(ctx, task, search_results, entries, providers)
     else
       local prompt = apply_template(template, {
         task = task,
-        search_results = search_results,
+        research = research,
       })
       local label = "shotgun-" .. tostring(os.time()) .. "-" .. tostring(i)
       local spawned = ctx.agent.spawn(prompt, agent_opts(entry.provider, entry.model, label))
@@ -167,7 +126,7 @@ local function collect_results(waited, labels)
     for _, job in ipairs(waited.jobs) do
       local label = labels[job.id] or job.agent or job.id
       if job.status == "done" then
-        analyses[#analyses + 1] = "## " .. label .. "\n" .. truncate(job.result or "", MAX_RESULT_CHARS)
+        analyses[#analyses + 1] = "## " .. label .. "\n" .. truncate(job.result or "", CONFIG.max_result_chars)
       else
         errors[#errors + 1] = label .. ": " .. tostring(job.result or "error")
       end
@@ -181,25 +140,24 @@ local function collect_results(waited, labels)
   return analyses, errors
 end
 
-local function judge(ctx, task, search_results, analyses, errors)
+local function judge(ctx, task, research, analyses, errors)
   local text = table.concat(analyses, "\n\n")
   if #errors > 0 then
     text = text .. "\n\n## Blast errors\n- " .. table.concat(errors, "\n- ")
   end
   if trim(text) == "" then
-    text = "No blast model completed successfully. Search results:\n\n" .. search_results
+    text = "No blast model completed successfully. Research:\n\n" .. research
   end
 
   local prompt = apply_template(CONFIG.judge_prompt, {
     task = task,
     analyses = text,
-    search_results = search_results,
   })
   return ctx.agent.run(prompt, agent_opts(CONFIG.judge_provider, nil, nil))
 end
 
 bone.register_command("shotgun", {
-  description = "Run a search/blast/judge multi-model AI review",
+  description = "Run a research/blast/judge multi-model AI review",
   handler = function(arg, ctx)
     local task = trim(arg)
     if task == "" then
@@ -213,26 +171,24 @@ bone.register_command("shotgun", {
 
     local providers = provider_map(ctx)
 
-    status(ctx, "gathering context")
-    local context = gather_context(ctx)
-
-    status(ctx, "searching")
-    local search = run_search(ctx, task, context)
-    local search_results
-    if search and search.ok then
-      search_results = search.content or ""
+    set_status("researching…")
+    local research = run_research(ctx, task)
+    local research_text
+    if research and research.ok then
+      research_text = research.content or ""
     else
-      local err = search and search.error or "search failed"
-      ctx.ui.notify("shotgun search failed: " .. tostring(err), "warn")
-      search_results = "Search failed: " .. tostring(err) .. "\n\nRaw context:\n" .. context
+      local err = research and research.error or "research failed"
+      ctx.ui.notify("shotgun research failed: " .. tostring(err), "warn")
+      research_text = "Research failed: " .. tostring(err)
     end
 
-    status(ctx, "blasting to " .. tostring(#entries) .. " models")
-    local ids, labels, errors = spawn_blast(ctx, task, search_results, entries, providers)
+    set_status("blasting " .. tostring(#entries) .. " models…")
+    local ids, labels, errors = spawn_blast(ctx, task, research_text, entries, providers)
     local waited = nil
     if #ids > 0 then
       waited = ctx.agent.wait(ids, { timeout_ms = 300000 })
       if waited and waited.cancelled then
+        clear_status()
         return { display = "shotgun: cancelled", submit = false }
       end
     end
@@ -240,8 +196,9 @@ bone.register_command("shotgun", {
     local analyses, wait_errors = collect_results(waited, labels)
     for _, err in ipairs(wait_errors) do errors[#errors + 1] = err end
 
-    status(ctx, "judging")
-    local judged = judge(ctx, task, search_results, analyses, errors)
+    set_status("judging…")
+    local judged = judge(ctx, task, research_text, analyses, errors)
+    clear_status()
     if not judged or not judged.ok then
       return {
         display = "shotgun judge failed: " .. tostring(judged and judged.error or "unknown"),
@@ -249,7 +206,6 @@ bone.register_command("shotgun", {
       }
     end
 
-    status(ctx, "done")
-    return { display = judged.content or "", submit = true }
+    return { display = judged.content or "", submit = false }
   end,
 })
