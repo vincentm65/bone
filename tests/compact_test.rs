@@ -482,6 +482,7 @@ fn lua_command_string_return_submits_to_agent_loop() {
     assert_eq!(parsed.output, "expanded prompt");
     assert!(parsed.submit, "string returns should submit a user turn");
     assert!(parsed.action.is_none());
+    assert!(parsed.display_role.is_none());
 }
 
 #[test]
@@ -497,6 +498,7 @@ fn lua_command_table_return_can_be_display_only() {
     assert_eq!(parsed.output, "shown only");
     assert!(!parsed.submit);
     assert!(parsed.action.is_none());
+    assert!(parsed.display_role.is_none());
 }
 
 #[test]
@@ -511,6 +513,23 @@ fn lua_command_table_return_defaults_to_submit() {
     assert_eq!(parsed.output, "prompt from table");
     assert!(parsed.submit);
     assert!(parsed.action.is_none());
+    assert!(parsed.display_role.is_none());
+}
+
+#[test]
+fn lua_command_table_return_can_request_assistant_markdown_display() {
+    let lua = mlua::Lua::new();
+    let table = lua.create_table().unwrap();
+    table.set("display", "## rendered").unwrap();
+    table.set("submit", false).unwrap();
+    table.set("display_role", "assistant").unwrap();
+
+    let parsed = bone::ext::types::parse_lua_command_return(mlua::Value::Table(table))
+        .expect("table command return should be handled");
+
+    assert_eq!(parsed.output, "## rendered");
+    assert!(!parsed.submit);
+    assert_eq!(parsed.display_role.as_deref(), Some("assistant"));
 }
 
 // ── 5. Default compact.lua internal logic ──────────────────────────────────

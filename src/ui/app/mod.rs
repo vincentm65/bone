@@ -985,9 +985,6 @@ impl App {
     /// Only shows when there are running jobs; hides when all are idle.
     fn refresh_subagent_pane(&mut self) {
         let agents = self.extensions.subagent_names();
-        if agents.is_empty() {
-            return;
-        }
         let jobs = crate::ext::jobs::registry().all_jobs();
         let has_running = !crate::ext::jobs::registry().running_ids().is_empty();
         if has_running {
@@ -1793,10 +1790,10 @@ impl App {
 
                         let reply = match result {
                             Ok(value) => crate::ext::types::parse_lua_command_return(value)
-                                .map(|ret| (ret.output, ret.submit, ret.action)),
+                                .map(|ret| (ret.output, ret.submit, ret.action, ret.display_role)),
                             Err(e) => {
                                 eprintln!("bone-lua error: command '{cmd_owned}': {e}");
-                                Some((format!("Lua command error: {e}"), false, None))
+                                Some((format!("Lua command error: {e}"), false, None, None))
                             }
                         };
                         Some(reply)
@@ -1816,7 +1813,7 @@ impl App {
         self.live_command = false;
         self.cancel_streaming = false;
 
-        if let Some(Some((mut reply, submit, action))) = reply {
+        if let Some(Some((mut reply, submit, action, display_role))) = reply {
             if let Some(action) = action {
                 if let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await {
                     reply = action_reply;
@@ -1833,7 +1830,11 @@ impl App {
                 );
                 self.submit_user_turn(reply, Some(display), term).await.ok();
             } else {
-                self.show_reply(reply, term).ok();
+                if display_role.as_deref() == Some("assistant") {
+                    self.show_assistant_reply(reply, term).ok();
+                } else {
+                    self.show_reply(reply, term).ok();
+                }
             }
         } else {
             self.redraw(term).ok();
@@ -1844,6 +1845,17 @@ impl App {
 
     fn show_reply(&mut self, reply: impl Into<String>, term: &mut BoneTerminal) -> io::Result<()> {
         self.messages.push(Message::system(reply.into()));
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.redraw(term)
+    }
+
+    fn show_assistant_reply(
+        &mut self,
+        reply: impl Into<String>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        self.messages.push(Message::assistant(reply.into()));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)

@@ -25,6 +25,19 @@ fn render_returns_none_without_agents() {
 }
 
 #[test]
+fn render_includes_ad_hoc_job_agents() {
+    let jobs = vec![job("job-1", "shotgun codex/gpt-5 #1", JobStatus::Running)];
+    let pane = render(&[], &jobs).unwrap();
+    let first: String = pane.content[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(first.contains("shotgun codex/gpt-5 #1"));
+    assert!(first.contains("running"));
+}
+
+#[test]
 fn render_lists_all_agents() {
     let agents = vec!["researcher".to_string(), "coder".to_string()];
     let jobs = vec![

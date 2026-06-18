@@ -81,6 +81,9 @@ pub struct LuaCommandReturn {
     pub output: String,
     pub submit: bool,
     pub action: Option<LuaReturnAction>,
+    /// Display role for non-submitted command output. Defaults to system.
+    /// `assistant` renders Markdown like a normal assistant response.
+    pub display_role: Option<String>,
 }
 
 /// Owning manager for the Lua VM and all registered extension data.
@@ -408,6 +411,7 @@ pub fn parse_lua_command_return(value: mlua::Value) -> Option<LuaCommandReturn> 
                     output,
                     submit: true,
                     action: None,
+                    display_role: None,
                 })
             }
         }
@@ -432,6 +436,7 @@ pub fn parse_lua_command_return(value: mlua::Value) -> Option<LuaCommandReturn> 
                     output,
                     submit,
                     action,
+                    display_role: t.get::<Option<String>>("display_role").ok().flatten(),
                 })
             }
         }
@@ -440,6 +445,7 @@ pub fn parse_lua_command_return(value: mlua::Value) -> Option<LuaCommandReturn> 
             output: format!("{other:?}"),
             submit: true,
             action: None,
+            display_role: None,
         }),
     }
 }

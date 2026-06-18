@@ -624,8 +624,20 @@ end)
 | `nil` | Command handled, no prompt submitted |
 | string | Injected as user prompt/output |
 | table with `display`/`reply`/`content` and `submit = false` | Show message in UI without submitting a prompt |
+| table with `display_role = "assistant"` and `submit = false` | Show `display`/`reply`/`content` as assistant Markdown instead of plain system text |
 | table with `action` field | Apply a state-mutating action (see below) |
 | error | Show error in UI |
+
+Display-only command output defaults to system text, which is plain-wrapped.
+Use `display_role = "assistant"` for Markdown-rendered reports:
+
+```lua
+return {
+    display = "## Result\n\n- Rendered as Markdown",
+    submit = false,
+    display_role = "assistant",
+}
+```
 
 #### Return Actions
 
