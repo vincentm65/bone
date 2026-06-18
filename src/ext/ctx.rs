@@ -177,7 +177,73 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     }
     ctx.set("log", log_table)?;
 
-    // ctx.fs — filesystem helpers
+    ctx.set("fs", build_fs_table(lua)?)?;
+
+    // ctx.shell / ctx.shell_streaming / ctx.read_file / ctx.write_file — the
+    // top-level I/O primitives (set directly on ctx, not under a sub-table).
+    add_io_primitives(lua, &ctx)?;
+
+    // ctx.ui — notifications, live pane updates, blocking key reads.
+    ctx.set("ui", build_ui_table(lua, cfg)?)?;
+
+    // ctx.usage.snapshot() → current conversation usage details.
+    ctx.set("usage", build_usage_table(lua, cfg)?)?;
+
+    // ctx.conversation — active conversation snapshot + history.
+    ctx.set("conversation", build_conversation_table(lua, cfg)?)?;
+
+    // ctx.state — per-process shared key/value scratch space.
+    ctx.set("state", build_state_table(lua, cfg)?)?;
+
+    // ctx.tools — inspect tool definitions and call tools directly.
+    ctx.set("tools", build_tools_table(lua, cfg)?)?;
+
+    // ctx.agent.run(prompt, opts?) → { ok, content, error }
+    add_agent_table(lua, &ctx, cfg)?;
+
+    // ctx.config — access to persisted configuration.
+    ctx.set("config", build_config_table(lua, cfg)?)?;
+
+    // ctx.session — read-only access to session/conversation history.
+    ctx.set("session", build_session_table(lua, cfg)?)?;
+
+    // ctx.db.query — read-only raw SQL against the session db.
+    ctx.set("db", build_db_table(lua)?)?;
+
+    // ctx.call_id — the tool call's unique ID (available during execute_output_live).
+    if let Some(cid) = &cfg.call_id {
+        ctx.set("call_id", cid.as_str())?;
+    }
+    // ctx.emit_pane(table) — push a live pane update into the shared UiState
+    // handle (v2: no longer goes through the channel). Works when `ui` is set.
+    // Same closure as `ctx.ui.pane`; both share `make_pane_emit_fn`.
+    if let Some(ui_state) = cfg.ui.clone() {
+        ctx.set("emit_pane", make_pane_emit_fn(lua, ui_state)?)?;
+    }
+
+    Ok(ctx)
+}
+
+/// Build the closure backing both `ctx.ui.pane` and `ctx.emit_pane`: deserialize
+/// a `PaneContent` table and push it into the shared UI handle as a `ViewDiff`.
+/// Each call site captures its own clone of the handle.
+fn make_pane_emit_fn(
+    lua: &Lua,
+    ui_state: super::api_ui::SharedUi,
+) -> Result<mlua::Function, mlua::Error> {
+    lua.create_function(move |lua, table: mlua::Table| {
+        let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
+        let pane =
+            crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
+        let diff = crate::runtime::view::view_diff_from_pane_content(pane);
+        super::api_ui::lock_shared(&ui_state).apply(diff);
+        Ok(true)
+    })
+}
+
+/// Build the `ctx.fs` table: synchronous filesystem queries (no policy gate —
+/// these are read-only inspections plus path classification).
+fn build_fs_table(lua: &Lua) -> Result<Table, mlua::Error> {
     let fs_table = lua.create_table()?;
 
     // ctx.fs.exists(path) → bool
@@ -244,14 +310,17 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     })?;
     fs_table.set("metadata", fs_metadata)?;
 
-    ctx.set("fs", fs_table)?;
+    Ok(fs_table)
+}
 
+/// Set the top-level I/O primitives on `ctx`: `shell`, `shell_streaming`,
+/// `read_file`, `write_file`. These hang directly off `ctx` (not a sub-table),
+/// so this takes the `ctx` table and sets onto it rather than returning one.
+fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
     // ctx.shell(command, opts?) → { stdout, stderr, exit_code }
     let shell_fn = lua.create_function(|lua, (command, opts): (String, Option<Table>)| {
         // Parse opts.
-        let timeout_ms = opts
-            .as_ref()
-            .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
+        let timeout_ms = opt_u64(&opts, "timeout_ms")
             .unwrap_or(120_000)
             .clamp(1_000, 300_000);
 
@@ -285,9 +354,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     // Runs command via bash, reads stdout line-by-line, calls callback(line) for each.
     let shell_streaming_fn = lua.create_function(
         |lua, (command, callback, opts): (String, mlua::Function, Option<Table>)| {
-            let timeout_ms = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
+            let timeout_ms = opt_u64(&opts, "timeout_ms")
                 .unwrap_or(300_000)
                 .clamp(1_000, 300_000);
 
@@ -431,6 +498,13 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     })?;
     ctx.set("write_file", write_fn)?;
 
+    Ok(())
+}
+
+/// Build the `ctx.ui` table: stderr notifications plus the live pane/key
+/// primitives. `pane` and `key` degrade to inert stubs when their handles
+/// (`cfg.ui` / `cfg.pane_sender`) are absent (e.g. headless before_turn).
+fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     // ctx.ui.notify(message, level?) — write a notification-style stderr line
     // for warnings/errors. Info notifications are intentionally quiet so
     // background hooks do not corrupt the TUI.
@@ -455,15 +529,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     // ctx.ui.pane(opts) — push a ViewDiff directly into the shared UiState
     // handle (v2: no longer goes through the channel). Works when `ui` is set.
     if let Some(ui_state) = cfg.ui.clone() {
-        let pane_fn = lua.create_function(move |lua, table: mlua::Table| {
-            let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane =
-                crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
-            let diff = crate::runtime::view::view_diff_from_pane_content(pane);
-            super::api_ui::lock_shared(&ui_state).apply(diff);
-            Ok(true)
-        })?;
-        ui_table.set("pane", pane_fn)?;
+        ui_table.set("pane", make_pane_emit_fn(lua, ui_state)?)?;
     } else {
         let pane_unavailable_fn =
             lua.create_function(|_, _: ()| Ok((false, "pane unavailable")))?;
@@ -495,9 +561,12 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         ui_table.set("key", key_unavailable_fn)?;
     }
 
-    ctx.set("ui", ui_table)?;
+    Ok(ui_table)
+}
 
-    // ctx.usage.snapshot() → current conversation usage details.
+/// Build the `ctx.usage` table: `snapshot()` returns the current conversation's
+/// token/cost figures, or nil when no usage context is attached.
+fn build_usage_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let usage_table = lua.create_table()?;
     if let Some(usage) = cfg.usage.clone() {
         let snapshot_fn = lua.create_function(move |lua, _: ()| {
@@ -533,31 +602,16 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         let snapshot_fn = lua.create_function(|_, _: ()| Ok(Value::Nil))?;
         usage_table.set("snapshot", snapshot_fn)?;
     }
-    ctx.set("usage", usage_table)?;
+    Ok(usage_table)
+}
 
-    // ctx.conversation — active conversation snapshot.
-    // ctx.conversation.current() → table or nil
-    // ctx.conversation.history() → array of {role, content, name?, tool_call_id?}
+/// Build the `ctx.conversation` table: `current()` and `history()` over the
+/// in-memory turn history. Both return nil when no history is attached.
+fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let conversation_table = lua.create_table()?;
     if let Some(ref history) = cfg.conversation_history {
-        let session_id = cfg.session_id;
-        let provider = cfg.provider.clone();
-        let model = cfg.model.clone();
-
-        let current_fn = lua.create_function(move |lua, _: ()| match session_id {
-            Some(id) => {
-                let t = lua.create_table()?;
-                t.set("id", id)?;
-                if let Some(ref p) = provider {
-                    t.set("provider", p.as_str())?;
-                }
-                if let Some(ref m) = model {
-                    t.set("model", m.as_str())?;
-                }
-                Ok(Value::Table(t))
-            }
-            None => Ok(Value::Nil),
-        })?;
+        let current_fn =
+            build_current_fn(lua, cfg.session_id, cfg.provider.clone(), cfg.model.clone())?;
         conversation_table.set("current", current_fn)?;
 
         let history_clone = history.clone();
@@ -594,11 +648,12 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         conversation_table.set("current", nil_fn.clone())?;
         conversation_table.set("history", nil_fn)?;
     }
-    ctx.set("conversation", conversation_table)?;
+    Ok(conversation_table)
+}
 
-    // ctx.state.get(key) → string or nil
-    // ctx.state.set(key, value) → true
-    // ctx.state.clear(key) → true
+/// Build the `ctx.state` table: get/set/clear over the per-process shared
+/// key/value map (`cfg.shared_state`).
+fn build_state_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let state_get = lua.create_function({
         let state_ref = cfg.shared_state.clone();
         move |_, key: String| {
@@ -632,9 +687,13 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     state_table.set("get", state_get)?;
     state_table.set("set", state_set)?;
     state_table.set("clear", state_clear)?;
-    ctx.set("state", state_table)?;
+    Ok(state_table)
+}
 
-    // ctx.tools — invoke registered tool definitions and call tools directly
+/// Build the `ctx.tools` table: `definitions()` lists the registered tools and
+/// `call(name, args, opts)` invokes one through the same approval gate the model
+/// goes through. Both degrade to inert stubs when no tool handler is attached.
+fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let tools_table = lua.create_table()?;
 
     // ctx.tools.definitions() → array of {name, description, input_schema}
@@ -684,9 +743,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
                 }
 
                 // Determine approval mode: opts.approval or inherited
-                let mode_str: Option<String> = opts
-                    .as_ref()
-                    .and_then(|t| t.get::<Option<String>>("approval").ok().flatten());
+                let mode_str: Option<String> = opt_str(&opts, "approval");
                 // Generate synthetic call id (needed for error responses)
                 let call_id = format!(
                     "lua-call-{}",
@@ -777,12 +834,163 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
         tools_table.set("call", no_handler_fn)?;
     }
 
-    ctx.set("tools", tools_table)?;
+    Ok(tools_table)
+}
 
-    // ctx.agent.run(prompt, opts?) → { ok, content, error }
-    add_agent_table(lua, &ctx, cfg)?;
+/// Build the `ctx.session` table: `current()` plus `list()`/`messages()` which
+/// read directly from the session db. (Overlaps `ctx.conversation` on
+/// `current`; see the API-shape note in the review.)
+fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
+    let session_table = lua.create_table()?;
 
-    // ctx.config — access to persisted configuration.
+    // ctx.session.current() → table or nil
+    let session_current_fn =
+        build_current_fn(lua, cfg.session_id, cfg.provider.clone(), cfg.model.clone())?;
+    session_table.set("current", session_current_fn)?;
+
+    // ctx.session.list(opts?) → array of conversation summaries
+    let session_list_fn = lua.create_function(move |lua, opts: Option<mlua::Table>| {
+        let limit = opt_usize(&opts, "limit").unwrap_or(20).clamp(1, 100);
+        let db_path = crate::session_db::db_path();
+        let db = crate::session_db::SessionDb::open(&db_path)
+            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+        let conversations = db
+            .list_conversations(limit)
+            .map_err(|e| mlua::Error::external(format!("failed to list conversations: {e}")))?;
+        let result = lua.create_table()?;
+        for conv in conversations {
+            let t = lua.create_table()?;
+            t.set("id", conv.id)?;
+            t.set("provider", conv.provider)?;
+            t.set("model", conv.model)?;
+            t.set("started_at", conv.started_at)?;
+            if let Some(ended) = conv.ended_at {
+                t.set("ended_at", ended)?;
+            }
+            result.push(t)?;
+        }
+        Ok(Value::Table(result))
+    })?;
+    session_table.set("list", session_list_fn)?;
+
+    // ctx.session.messages(conversation_id, opts?) → array of messages
+    let session_messages_fn = lua.create_function(
+        move |lua, (conversation_id, opts): (i64, Option<mlua::Table>)| {
+            let limit = opt_usize(&opts, "limit").unwrap_or(200).clamp(1, 1000);
+            let db_path = crate::session_db::db_path();
+            let db = crate::session_db::SessionDb::open(&db_path)
+                .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+            let messages = db
+                .list_messages(conversation_id, limit)
+                .map_err(|e| mlua::Error::external(format!("failed to list messages: {e}")))?;
+            let result = lua.create_table()?;
+            for msg in messages {
+                let t = lua.create_table()?;
+                t.set("seq", msg.seq)?;
+                t.set("role", msg.role)?;
+                t.set("content", msg.content)?;
+                if let Some(tn) = msg.tool_name {
+                    t.set("tool_name", tn)?;
+                }
+                if let Some(tci) = msg.tool_call_id {
+                    t.set("tool_call_id", tci)?;
+                }
+                if let Some(ref tc_json) = msg.tool_calls
+                    && let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
+                {
+                    let tc_table = lua.create_table()?;
+                    for tc_val in tc_vec {
+                        let tc = lua.create_table()?;
+                        if let Some(id) = tc_val.get("id") {
+                            tc.set("id", lua.to_value(id)?)?;
+                        }
+                        if let Some(name) = tc_val.get("name") {
+                            tc.set("name", lua.to_value(name)?)?;
+                        }
+                        if let Some(args) = tc_val.get("arguments") {
+                            tc.set("arguments", lua.to_value(args)?)?;
+                        }
+                        tc_table.push(tc)?;
+                    }
+                    t.set("tool_calls", tc_table)?;
+                }
+                result.push(t)?;
+            }
+            Ok(Value::Table(result))
+        },
+    )?;
+    session_table.set("messages", session_messages_fn)?;
+
+    Ok(session_table)
+}
+
+/// Build the `ctx.db` table: `query(sql, params?)` runs a read-only (SELECT)
+/// statement against the session db and returns an array of row tables.
+fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
+    let db_query_fn = lua.create_function(|lua, (sql, params): (String, Option<Vec<Value>>)| {
+        let db_path = crate::session_db::db_path();
+        let db = crate::session_db::SessionDb::open(&db_path)
+            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+
+        // Read-only: only allow SELECT statements.
+        let sql_trimmed = sql.trim();
+        if !sql_trimmed.to_lowercase().starts_with("select") {
+            return Err(mlua::Error::external(
+                "ctx.db.query only allows SELECT statements",
+            ));
+        }
+
+        // Build bound parameters.
+        let params: Vec<rusqlite::types::Value> = match &params {
+            Some(p) => p
+                .iter()
+                .map(|v| match v {
+                    Value::Integer(i) => rusqlite::types::Value::Integer(*i),
+                    Value::Number(n) => rusqlite::types::Value::Real(*n),
+                    Value::String(s) => rusqlite::types::Value::Text(
+                        s.to_str().ok().map(|b| b.to_string()).unwrap_or_default(),
+                    ),
+                    Value::Nil => rusqlite::types::Value::Null,
+                    Value::Boolean(b) => rusqlite::types::Value::Integer(*b as i64),
+                    _ => rusqlite::types::Value::Text(tostring_lua_value(v)),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let mut stmt = db
+            .conn_ref()
+            .prepare(&sql)
+            .map_err(|e| mlua::Error::external(format!("SQL error: {e}")))?;
+
+        let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(&params))
+            .map_err(|e| mlua::Error::external(format!("query error: {e}")))?;
+
+        let result = lua.create_table()?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| mlua::Error::external(format!("row error: {e}")))?
+        {
+            let row_map = lua.create_table()?;
+            for (i, col_name) in columns.iter().enumerate() {
+                let val = row_to_lua_value(lua, row, i)?;
+                row_map.set(col_name.as_str(), val)?;
+            }
+            result.push(row_map)?;
+        }
+        Ok(Value::Table(result))
+    })?;
+    let db_table = lua.create_table()?;
+    db_table.set("query", db_query_fn)?;
+    Ok(db_table)
+}
+
+/// Build the `ctx.config` table: read-only access to persisted YAML config plus
+/// the read/write helpers backing the customize UI (pages, provider entries).
+fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let config_table = lua.create_table()?;
     config_table.set("dir", cfg.config_dir.as_str())?;
 
@@ -967,194 +1175,7 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
     })?;
     config_table.set("set_provider_entry", set_provider_entry_fn)?;
 
-    ctx.set("config", config_table)?;
-
-    // ctx.session — read-only access to session/conversation history.
-    let session_table = lua.create_table()?;
-
-    // ctx.session.current() → table or nil
-    let current_session_id = cfg.session_id;
-    let current_provider = cfg.provider.clone();
-    let current_model = cfg.model.clone();
-    let session_current_fn = lua.create_function(move |lua, _: ()| match current_session_id {
-        Some(id) => {
-            let t = lua.create_table()?;
-            t.set("id", id)?;
-            if let Some(ref p) = current_provider {
-                t.set("provider", p.as_str())?;
-            }
-            if let Some(ref m) = current_model {
-                t.set("model", m.as_str())?;
-            }
-            Ok(Value::Table(t))
-        }
-        None => Ok(Value::Nil),
-    })?;
-    session_table.set("current", session_current_fn)?;
-
-    // ctx.session.list(opts?) → array of conversation summaries
-    let session_list_fn = lua.create_function(move |lua, opts: Option<mlua::Table>| {
-        let limit = opts
-            .as_ref()
-            .and_then(|t| t.get::<Option<usize>>("limit").ok().flatten())
-            .unwrap_or(20)
-            .clamp(1, 100);
-        let db_path = crate::session_db::db_path();
-        let db = crate::session_db::SessionDb::open(&db_path)
-            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
-        let conversations = db
-            .list_conversations(limit)
-            .map_err(|e| mlua::Error::external(format!("failed to list conversations: {e}")))?;
-        let result = lua.create_table()?;
-        for conv in conversations {
-            let t = lua.create_table()?;
-            t.set("id", conv.id)?;
-            t.set("provider", conv.provider)?;
-            t.set("model", conv.model)?;
-            t.set("started_at", conv.started_at)?;
-            if let Some(ended) = conv.ended_at {
-                t.set("ended_at", ended)?;
-            }
-            result.push(t)?;
-        }
-        Ok(Value::Table(result))
-    })?;
-    session_table.set("list", session_list_fn)?;
-
-    // ctx.session.messages(conversation_id, opts?) → array of messages
-    let session_messages_fn = lua.create_function(
-        move |lua, (conversation_id, opts): (i64, Option<mlua::Table>)| {
-            let limit = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<usize>>("limit").ok().flatten())
-                .unwrap_or(200)
-                .clamp(1, 1000);
-            let db_path = crate::session_db::db_path();
-            let db = crate::session_db::SessionDb::open(&db_path)
-                .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
-            let messages = db
-                .list_messages(conversation_id, limit)
-                .map_err(|e| mlua::Error::external(format!("failed to list messages: {e}")))?;
-            let result = lua.create_table()?;
-            for msg in messages {
-                let t = lua.create_table()?;
-                t.set("seq", msg.seq)?;
-                t.set("role", msg.role)?;
-                t.set("content", msg.content)?;
-                if let Some(tn) = msg.tool_name {
-                    t.set("tool_name", tn)?;
-                }
-                if let Some(tci) = msg.tool_call_id {
-                    t.set("tool_call_id", tci)?;
-                }
-                if let Some(ref tc_json) = msg.tool_calls
-                    && let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
-                {
-                    let tc_table = lua.create_table()?;
-                    for tc_val in tc_vec {
-                        let tc = lua.create_table()?;
-                        if let Some(id) = tc_val.get("id") {
-                            tc.set("id", lua.to_value(id)?)?;
-                        }
-                        if let Some(name) = tc_val.get("name") {
-                            tc.set("name", lua.to_value(name)?)?;
-                        }
-                        if let Some(args) = tc_val.get("arguments") {
-                            tc.set("arguments", lua.to_value(args)?)?;
-                        }
-                        tc_table.push(tc)?;
-                    }
-                    t.set("tool_calls", tc_table)?;
-                }
-                result.push(t)?;
-            }
-            Ok(Value::Table(result))
-        },
-    )?;
-    session_table.set("messages", session_messages_fn)?;
-
-    ctx.set("session", session_table)?;
-
-    // ctx.db.query(sql, params?) — raw SQL query, returns array of row tables.
-    let db_query_fn = lua.create_function(|lua, (sql, params): (String, Option<Vec<Value>>)| {
-        let db_path = crate::session_db::db_path();
-        let db = crate::session_db::SessionDb::open(&db_path)
-            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
-
-        // Read-only: only allow SELECT statements.
-        let sql_trimmed = sql.trim();
-        if !sql_trimmed.to_lowercase().starts_with("select") {
-            return Err(mlua::Error::external(
-                "ctx.db.query only allows SELECT statements",
-            ));
-        }
-
-        // Build bound parameters.
-        let params: Vec<rusqlite::types::Value> = match &params {
-            Some(p) => p
-                .iter()
-                .map(|v| match v {
-                    Value::Integer(i) => rusqlite::types::Value::Integer(*i),
-                    Value::Number(n) => rusqlite::types::Value::Real(*n),
-                    Value::String(s) => rusqlite::types::Value::Text(
-                        s.to_str().ok().map(|b| b.to_string()).unwrap_or_default(),
-                    ),
-                    Value::Nil => rusqlite::types::Value::Null,
-                    Value::Boolean(b) => rusqlite::types::Value::Integer(*b as i64),
-                    _ => rusqlite::types::Value::Text(tostring_lua_value(v)),
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-
-        let mut stmt = db
-            .conn_ref()
-            .prepare(&sql)
-            .map_err(|e| mlua::Error::external(format!("SQL error: {e}")))?;
-
-        let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-
-        let mut rows = stmt
-            .query(rusqlite::params_from_iter(&params))
-            .map_err(|e| mlua::Error::external(format!("query error: {e}")))?;
-
-        let result = lua.create_table()?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| mlua::Error::external(format!("row error: {e}")))?
-        {
-            let row_map = lua.create_table()?;
-            for (i, col_name) in columns.iter().enumerate() {
-                let val = row_to_lua_value(lua, row, i)?;
-                row_map.set(col_name.as_str(), val)?;
-            }
-            result.push(row_map)?;
-        }
-        Ok(Value::Table(result))
-    })?;
-    let db_table = lua.create_table()?;
-    db_table.set("query", db_query_fn)?;
-    ctx.set("db", db_table)?;
-
-    // ctx.call_id — the tool call's unique ID (available during execute_output_live).
-    if let Some(cid) = &cfg.call_id {
-        ctx.set("call_id", cid.as_str())?;
-    }
-    // ctx.emit_pane(table) — push a live pane update into the shared UiState
-    // handle (v2: no longer goes through the channel). Works when `ui` is set.
-    if let Some(ui_state) = cfg.ui.clone() {
-        let emit_pane_fn = lua.create_function(move |lua, table: mlua::Table| {
-            let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
-            let pane =
-                crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
-            let diff = crate::runtime::view::view_diff_from_pane_content(pane);
-            super::api_ui::lock_shared(&ui_state).apply(diff);
-            Ok(true)
-        })?;
-        ctx.set("emit_pane", emit_pane_fn)?;
-    }
-
-    Ok(ctx)
+    Ok(config_table)
 }
 
 /// Maximum nesting depth for subagent calls. Sub-agents cannot spawn
@@ -1238,13 +1259,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let run_stream_fn =
         lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
             // Extract Lua callbacks from opts.
-            let on_started = opts_cb(&opts, "on_started");
-            let on_status = opts_cb(&opts, "on_status");
-            let on_tool_call = opts_cb(&opts, "on_tool_call");
-            let on_tool_result = opts_cb(&opts, "on_tool_result");
-            let on_token_usage = opts_cb(&opts, "on_token_usage");
-            let on_finished = opts_cb(&opts, "on_finished");
-            let on_failed = opts_cb(&opts, "on_failed");
+            let cbs = StreamCallbacks::from_opts(&opts);
 
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
@@ -1275,43 +1290,18 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                     loop {
                         tokio::select! {
                             result = &mut agent_future => {
-                                // Drain remaining events.
-                                let mut drain_err: Option<String> = None;
-                                while let Ok(event) = rx.try_recv() {
-                                    if let Err(e) = dispatch_event(lua, &event,
-                                        &on_started, &on_status, &on_tool_call,
-                                        &on_tool_result, &on_token_usage,
-                                        &on_finished, &on_failed) {
-                                        drain_err = Some(format!("callback error: {e}"));
-                                        break;
-                                    }
-                                }
-                                if let Some(e) = drain_err {
+                                if let Err(e) = drain_pending(lua, &mut rx, &cbs) {
                                     break Err(e);
                                 }
                                 break result;
                             }
                             Some(event) = rx.recv() => {
-                                if let Err(e) = dispatch_event(lua, &event,
-                                    &on_started, &on_status, &on_tool_call,
-                                    &on_tool_result, &on_token_usage,
-                                    &on_finished, &on_failed) {
+                                if let Err(e) = dispatch_event(lua, &event, &cbs) {
                                     break Err(format!("callback error: {e}"));
                                 }
                             }
                             _ = await_cancelled(&cancelled) => {
-                                // Drain remaining events.
-                                let mut drain_err: Option<String> = None;
-                                while let Ok(event) = rx.try_recv() {
-                                    if let Err(e) = dispatch_event(lua, &event,
-                                        &on_started, &on_status, &on_tool_call,
-                                        &on_tool_result, &on_token_usage,
-                                        &on_finished, &on_failed) {
-                                        drain_err = Some(format!("callback error: {e}"));
-                                        break;
-                                    }
-                                }
-                                if let Some(e) = drain_err {
+                                if let Err(e) = drain_pending(lua, &mut rx, &cbs) {
                                     break Err(e);
                                 }
                                 break Err("cancelled".to_string());
@@ -1345,13 +1335,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
         // Read agent name (registered sub-agent name, default "") and the
         // per-template concurrency cap and tool allowlist from opts.
-        let agent_name: String = opts
-            .as_ref()
-            .and_then(|t| t.get::<Option<String>>("agent").ok().flatten())
-            .unwrap_or_default();
-        let max_concurrency: usize = opts
-            .as_ref()
-            .and_then(|t| t.get::<Option<u64>>("max_concurrency").ok().flatten())
+        let agent_name: String = opt_str(&opts, "agent").unwrap_or_default();
+        let max_concurrency: usize = opt_u64(&opts, "max_concurrency")
             .map(|n| n.max(1) as usize)
             .unwrap_or(1);
         let tool_allowlist: Option<Vec<String>> = opts
@@ -1460,9 +1445,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
             warn_unknown_opts(&opts, WAIT_OPT_KEYS);
 
-            let timeout_ms = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
+            let timeout_ms = opt_u64(&opts, "timeout_ms")
                 .unwrap_or(DEFAULT_AGENT_TIMEOUT_MS)
                 .clamp(1_000, MAX_AGENT_TIMEOUT_MS);
 
@@ -1669,30 +1652,20 @@ fn parse_agent_opts(
 > {
     warn_unknown_opts(opts, allowed_keys);
 
-    let approval = match opts
-        .as_ref()
-        .and_then(|t| t.get::<Option<String>>("approval").ok().flatten())
-        .as_deref()
-    {
+    let approval = match opt_str(opts, "approval").as_deref() {
         Some("safe") | Some("read_only") => crate::tools::ApprovalMode::Safe,
         Some("danger") => crate::tools::ApprovalMode::Danger,
         Some(s) => return Err(format!("Unknown approval mode: {s}")),
         None => inherited_approval,
     };
 
-    let explicit_provider = opts
-        .as_ref()
-        .and_then(|t| t.get::<Option<String>>("provider").ok().flatten())
-        .filter(|s| !s.is_empty());
+    let explicit_provider = opt_str(opts, "provider").filter(|s| !s.is_empty());
 
     let provider = explicit_provider
         .clone()
         .or_else(|| inherited_provider.clone());
 
-    let explicit_model = opts
-        .as_ref()
-        .and_then(|t| t.get::<Option<String>>("model").ok().flatten())
-        .filter(|s| !s.is_empty());
+    let explicit_model = opt_str(opts, "model").filter(|s| !s.is_empty());
 
     let model = explicit_model.or_else(|| {
         if explicit_provider.is_none() {
@@ -1702,13 +1675,9 @@ fn parse_agent_opts(
         }
     });
 
-    let system_prompt: Option<String> = opts
-        .as_ref()
-        .and_then(|t| t.get::<Option<String>>("system_prompt").ok().flatten());
+    let system_prompt: Option<String> = opt_str(opts, "system_prompt");
 
-    let timeout_ms = opts
-        .as_ref()
-        .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
+    let timeout_ms = opt_u64(opts, "timeout_ms")
         .unwrap_or(DEFAULT_AGENT_TIMEOUT_MS)
         .clamp(1_000, MAX_AGENT_TIMEOUT_MS);
 
@@ -1721,18 +1690,95 @@ fn opts_cb(opts: &Option<Table>, key: &str) -> Option<mlua::Function> {
         .and_then(|t| t.get::<Option<mlua::Function>>(key).ok().flatten())
 }
 
+/// Read an optional string field from an opts table (missing/wrong-type → None).
+fn opt_str(opts: &Option<Table>, key: &str) -> Option<String> {
+    opts.as_ref()
+        .and_then(|t| t.get::<Option<String>>(key).ok().flatten())
+}
+
+/// Read an optional `u64` field from an opts table (missing/wrong-type → None).
+fn opt_u64(opts: &Option<Table>, key: &str) -> Option<u64> {
+    opts.as_ref()
+        .and_then(|t| t.get::<Option<u64>>(key).ok().flatten())
+}
+
+/// Read an optional `usize` field from an opts table (missing/wrong-type → None).
+fn opt_usize(opts: &Option<Table>, key: &str) -> Option<usize> {
+    opts.as_ref()
+        .and_then(|t| t.get::<Option<usize>>(key).ok().flatten())
+}
+
+/// Build the `current()` closure shared by `ctx.conversation.current` and
+/// `ctx.session.current`: returns `{ id, provider?, model? }`, or nil when there
+/// is no active session.
+fn build_current_fn(
+    lua: &Lua,
+    session_id: Option<i64>,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<mlua::Function, mlua::Error> {
+    lua.create_function(move |lua, _: ()| match session_id {
+        Some(id) => {
+            let t = lua.create_table()?;
+            t.set("id", id)?;
+            if let Some(ref p) = provider {
+                t.set("provider", p.as_str())?;
+            }
+            if let Some(ref m) = model {
+                t.set("model", m.as_str())?;
+            }
+            Ok(Value::Table(t))
+        }
+        None => Ok(Value::Nil),
+    })
+}
+
+/// The optional Lua callbacks `ctx.agent.run_stream` forwards events to. Bundled
+/// so the dispatch/drain helpers take one argument instead of seven.
+#[derive(Default)]
+struct StreamCallbacks {
+    on_started: Option<mlua::Function>,
+    on_status: Option<mlua::Function>,
+    on_tool_call: Option<mlua::Function>,
+    on_tool_result: Option<mlua::Function>,
+    on_token_usage: Option<mlua::Function>,
+    on_finished: Option<mlua::Function>,
+    on_failed: Option<mlua::Function>,
+}
+
+impl StreamCallbacks {
+    /// Pull the `on_*` callbacks out of a `run_stream` opts table.
+    fn from_opts(opts: &Option<Table>) -> Self {
+        Self {
+            on_started: opts_cb(opts, "on_started"),
+            on_status: opts_cb(opts, "on_status"),
+            on_tool_call: opts_cb(opts, "on_tool_call"),
+            on_tool_result: opts_cb(opts, "on_tool_result"),
+            on_token_usage: opts_cb(opts, "on_token_usage"),
+            on_finished: opts_cb(opts, "on_finished"),
+            on_failed: opts_cb(opts, "on_failed"),
+        }
+    }
+}
+
+/// Drain every event currently queued in `rx`, dispatching each to `cbs`.
+/// Returns a `callback error: ...` string on the first failing callback.
+fn drain_pending(
+    lua: &Lua,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::agent::AgentRunEvent>,
+    cbs: &StreamCallbacks,
+) -> Result<(), String> {
+    while let Ok(event) = rx.try_recv() {
+        dispatch_event(lua, &event, cbs).map_err(|e| format!("callback error: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Dispatch a single RuntimeEvent to the appropriate Lua callback.
-#[allow(clippy::too_many_arguments)]
 fn dispatch_event(
     lua: &Lua,
     event: &crate::runtime::RuntimeEvent,
-    on_started: &Option<mlua::Function>,
-    on_status: &Option<mlua::Function>,
-    on_tool_call: &Option<mlua::Function>,
-    on_tool_result: &Option<mlua::Function>,
-    on_token_usage: &Option<mlua::Function>,
-    on_finished: &Option<mlua::Function>,
-    on_failed: &Option<mlua::Function>,
+    cbs: &StreamCallbacks,
 ) -> Result<(), mlua::Error> {
     use crate::runtime::RuntimeEvent;
     match event {
@@ -1741,7 +1787,7 @@ fn dispatch_event(
             task,
             model,
         } => {
-            if let Some(cb) = on_started {
+            if let Some(cb) = &cbs.on_started {
                 let t = lua.create_table()?;
                 t.set("approval", approval.as_str())?;
                 t.set("task", task.as_str())?;
@@ -1750,12 +1796,12 @@ fn dispatch_event(
             }
         }
         RuntimeEvent::Status { message } => {
-            if let Some(cb) = on_status {
+            if let Some(cb) = &cbs.on_status {
                 cb.call::<()>(message.as_str())?;
             }
         }
         RuntimeEvent::ToolCall { name, summary, .. } => {
-            if let Some(cb) = on_tool_call {
+            if let Some(cb) = &cbs.on_tool_call {
                 let t = lua.create_table()?;
                 t.set("name", name.as_str())?;
                 t.set("summary", summary.as_str())?;
@@ -1763,7 +1809,7 @@ fn dispatch_event(
             }
         }
         RuntimeEvent::ToolResult { name, is_error, .. } => {
-            if let Some(cb) = on_tool_result {
+            if let Some(cb) = &cbs.on_tool_result {
                 let t = lua.create_table()?;
                 t.set("name", name.as_str())?;
                 t.set("is_error", *is_error)?;
@@ -1775,7 +1821,7 @@ fn dispatch_event(
             received,
             context_length,
         } => {
-            if let Some(cb) = on_token_usage {
+            if let Some(cb) = &cbs.on_token_usage {
                 let t = lua.create_table()?;
                 t.set("sent", *sent as i64)?;
                 t.set("received", *received as i64)?;
@@ -1784,12 +1830,12 @@ fn dispatch_event(
             }
         }
         RuntimeEvent::Finished { content } => {
-            if let Some(cb) = on_finished {
+            if let Some(cb) = &cbs.on_finished {
                 cb.call::<()>(content.as_str())?;
             }
         }
         RuntimeEvent::Failed { message } => {
-            if let Some(cb) = on_failed {
+            if let Some(cb) = &cbs.on_failed {
                 cb.call::<()>(message.as_str())?;
             }
         }
