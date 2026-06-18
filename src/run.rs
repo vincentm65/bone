@@ -112,12 +112,12 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             activity: None,
             llm: None,
             session_sink: None,
+            tool_allowlist: None,
         })
         .await;
     }
 
     let prompt = request.prompt.clone();
-
     agent::run_agent(AgentRequest {
         prompt,
         approval_mode: request.approval_mode,
@@ -131,6 +131,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         activity: None,
         llm: None,
         session_sink: None,
+        tool_allowlist: None,
     })
     .await
 }
@@ -171,6 +172,7 @@ async fn expand_lua_command(
                 headless: true,
                 model: model.clone().unwrap_or_default(),
                 provider: provider.clone().unwrap_or_default(),
+                tool_allowlist: None,
             },
             &model.clone().unwrap_or_default(),
             &provider.clone().unwrap_or_default(),

@@ -244,8 +244,10 @@ fn spawn_err_omits_content_field() {
 
 #[test]
 fn agent_depth_exceeded_shape() {
+    // A depth/opts error from the dispatch closures is rendered through
+    // agent_result_to_lua as { ok=false, content="", error=<msg> }.
     let lua = Lua::new();
-    let result = agent_depth_exceeded(&lua).unwrap();
+    let result = agent_result_to_lua(&lua, Err("max agent depth exceeded".to_string())).unwrap();
     let tbl: serde_json::Value = lua.from_value(result).unwrap();
     assert_eq!(tbl["ok"], false);
     assert_eq!(tbl["content"], "");

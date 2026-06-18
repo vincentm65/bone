@@ -85,21 +85,21 @@ fields:
     type: provider
     value:
       label: MiniMax
-      base_url: https://api.minimax.io/anthropic/v1
+      base_url: https://api.minimax.io/v1
       model: MiniMax-M2.7
       api_key: ""
       endpoint: /chat/completions
-      handler: anthropic
+      handler: openai
   - key: minimax_plan
     label: MiniMax Plan
     type: provider
     value:
       label: MiniMax Plan
-      base_url: https://api.minimax.io/anthropic/v1
+      base_url: https://api.minimax.io/v1
       model: MiniMax-M2.7
       api_key: ""
       endpoint: /chat/completions
-      handler: anthropic
+      handler: openai
   - key: codex
     label: Codex
     type: provider

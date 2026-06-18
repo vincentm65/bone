@@ -169,6 +169,7 @@ pub async fn run_daemon(
                     activity: None,
                     llm: provider.clone(),
                     session_sink: None,
+                    tool_allowlist: None,
                 };
 
                 match crate::agent::run_agent(request).await {

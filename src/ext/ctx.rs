@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
@@ -481,11 +481,11 @@ pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua
             sender
                 .send(crate::tools::types::ToolLiveEvent::Key(request))
                 .map_err(|e| mlua::Error::external(format!("key request send failed: {e}")))?;
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(rx)
-            })
-            .map_err(|e| mlua::Error::external(format!("key request cancelled: {e}")))?;
-            let lua_result = lua.to_value(&result)
+            let result =
+                tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(rx))
+                    .map_err(|e| mlua::Error::external(format!("key request cancelled: {e}")))?;
+            let lua_result = lua
+                .to_value(&result)
                 .map_err(|e| mlua::Error::external(format!("key result conversion: {e}")))?;
             Ok(lua_result)
         })?;
@@ -1188,58 +1188,33 @@ async fn inactivity_elapsed(activity: Arc<AtomicU64>, timeout_ms: u64) {
 fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
     let agent_table = lua.create_table()?;
 
-    // Clone needed fields for the 'static closures.
-    let inherited_approval = cfg.approval_mode;
-    let inherited_provider = cfg.provider.clone();
-    let inherited_model = cfg.model.clone();
-    let agent_depth = cfg.agent_depth;
+    // Captures shared by all three dispatch closures. Built once and cloned
+    // per closure (each needs its own 'static copy).
+    let inherited = InheritedCtx {
+        approval: cfg.approval_mode,
+        provider: cfg.provider.clone(),
+        model: cfg.model.clone(),
+        agent_depth: cfg.agent_depth,
+    };
     let cancelled_flag = cfg.cancelled.clone();
 
-    // Extra clones for spawn_fn (run_fn and run_stream_fn each move their own copies).
-    let inherited_approval_j = inherited_approval;
-    let inherited_provider_j = inherited_provider.clone();
-    let inherited_model_j = inherited_model.clone();
-
     // --- ctx.agent.run(prompt, opts?) ---
+    // Blocking: run a sub-agent to completion and return its result.
+    let inherited_run = inherited.clone();
+    let cancelled_run = cancelled_flag.clone();
     let run_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
-        if agent_depth >= MAX_AGENT_DEPTH {
-            return agent_depth_exceeded(lua);
-        }
+        let built =
+            match build_agent_request(prompt, &opts, &inherited_run, RUN_OPT_KEYS, None, None) {
+                Ok(b) => b,
+                Err(e) => return agent_result_to_lua(lua, Err(e)),
+            };
+        let BuiltAgent {
+            request,
+            activity,
+            timeout_ms,
+        } = built;
 
-        let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(
-            &opts,
-            inherited_approval,
-            &inherited_provider,
-            &inherited_model,
-            RUN_OPT_KEYS,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("content", "")?;
-                result.set("error", e)?;
-                return Ok(Value::Table(result));
-            }
-        };
-
-        let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
-        let request = crate::agent::AgentRequest {
-            prompt,
-            approval_mode: approval,
-            provider,
-            model,
-            system_prompt,
-            events: false,
-            event_sender: None,
-            agent_depth: agent_depth + 1,
-            on_token_usage: None,
-            activity: Some(activity.clone()),
-            llm: None,
-            session_sink: None,
-        };
-
-        let cancelled = cancelled_flag.clone();
+        let cancelled = cancelled_run.clone();
         let response = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 tokio::select! {
@@ -1257,35 +1232,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     agent_table.set("run", run_fn)?;
 
     // --- ctx.agent.run_stream(prompt, opts?) ---
-    // Re-clone for the stream closure (same captures).
-    let inherited_approval_s = cfg.approval_mode;
-    let inherited_provider_s = cfg.provider.clone();
-    let inherited_model_s = cfg.model.clone();
-    let agent_depth_s = cfg.agent_depth;
-    let cancelled_flag_s = cfg.cancelled.clone();
+    // Blocking like `run`, but forwards live events to Lua callbacks.
+    let inherited_stream = inherited.clone();
+    let cancelled_stream = cancelled_flag.clone();
     let run_stream_fn =
         lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
-            if agent_depth_s >= MAX_AGENT_DEPTH {
-                return agent_depth_exceeded(lua);
-            }
-
-            let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(
-                &opts,
-                inherited_approval_s,
-                &inherited_provider_s,
-                &inherited_model_s,
-                RUN_STREAM_OPT_KEYS,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("ok", false)?;
-                    result.set("content", "")?;
-                    result.set("error", e)?;
-                    return Ok(Value::Table(result));
-                }
-            };
-
             // Extract Lua callbacks from opts.
             let on_started = opts_cb(&opts, "on_started");
             let on_status = opts_cb(&opts, "on_status");
@@ -1297,23 +1248,24 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
-            let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
-            let request = crate::agent::AgentRequest {
+            let built = match build_agent_request(
                 prompt,
-                approval_mode: approval,
-                provider,
-                model,
-                system_prompt,
-                events: false,
-                event_sender: Some(tx),
-                agent_depth: agent_depth_s + 1,
-                on_token_usage: None,
-                activity: Some(activity.clone()),
-                llm: None,
-                session_sink: None,
+                &opts,
+                &inherited_stream,
+                RUN_STREAM_OPT_KEYS,
+                Some(tx),
+                None,
+            ) {
+                Ok(b) => b,
+                Err(e) => return agent_result_to_lua(lua, Err(e)),
             };
+            let BuiltAgent {
+                request,
+                activity,
+                timeout_ms,
+            } = built;
 
-            let cancelled = cancelled_flag_s.clone();
+            let cancelled = cancelled_stream.clone();
             let response = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     let agent_future = crate::agent::run_agent(request);
@@ -1379,44 +1331,59 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // --- ctx.agent.spawn(prompt, opts?) ---
     // Dispatch a non-blocking background agent run. Results are queryable
     // via ctx.agent.jobs() or delivered through the TUI peek/mark flow.
+    let inherited_spawn = inherited.clone();
     let spawn_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         // Sub-agents (depth > 0) cannot spawn background jobs — their results
         // would inject into the wrong conversation. They can still use blocking
         // ctx.agent.run.
-        if agent_depth > 0 {
+        if inherited_spawn.agent_depth > 0 {
             let result = lua.create_table()?;
             result.set("ok", false)?;
             result.set("error", "sub-agents cannot spawn background jobs")?;
             return Ok(Value::Table(result));
         }
 
-        let (approval, provider, model, system_prompt, timeout_ms) = match parse_agent_opts(
-            &opts,
-            inherited_approval_j,
-            &inherited_provider_j,
-            &inherited_model_j,
-            SPAWN_OPT_KEYS,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", e)?;
-                return Ok(Value::Table(result));
-            }
-        };
-
-        // Read agent name from opts (registered sub-agent name, default "").
+        // Read agent name (registered sub-agent name, default "") and the
+        // per-template concurrency cap and tool allowlist from opts.
         let agent_name: String = opts
             .as_ref()
             .and_then(|t| t.get::<Option<String>>("agent").ok().flatten())
             .unwrap_or_default();
+        let max_concurrency: usize = opts
+            .as_ref()
+            .and_then(|t| t.get::<Option<u64>>("max_concurrency").ok().flatten())
+            .map(|n| n.max(1) as usize)
+            .unwrap_or(1);
+        let tool_allowlist: Option<Vec<String>> = opts
+            .as_ref()
+            .and_then(|t| t.get::<Option<mlua::Table>>("tools").ok().flatten())
+            .map(|t| t.sequence_values::<String>().flatten().collect());
 
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|e| mlua::Error::external(format!("spawn requires a tokio runtime: {e}")))?;
 
-        // Atomic busy check: rejects when this agent already has a running job.
-        let id = match crate::ext::jobs::registry().create(agent_name.clone(), prompt.clone()) {
+        // Build the request first so a bad-opts error never leaves an orphan
+        // job in the registry.
+        let mut built = match build_agent_request(
+            prompt.clone(),
+            &opts,
+            &inherited_spawn,
+            SPAWN_OPT_KEYS,
+            None,
+            tool_allowlist,
+        ) {
+            Ok(b) => b,
+            Err(e) => return agent_result_to_lua(lua, Err(e)),
+        };
+
+        let job_cancel = Arc::new(AtomicBool::new(false));
+        let id = match crate::ext::jobs::registry().create(crate::ext::jobs::NewJob {
+            agent: agent_name,
+            task: prompt,
+            max_concurrency,
+            parent: None, // Tier 3 fills this with the spawning scope.
+            cancel_flag: job_cancel.clone(),
+        }) {
             Ok(id) => id,
             Err(e) => {
                 let result = lua.create_table()?;
@@ -1425,40 +1392,29 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 return Ok(Value::Table(result));
             }
         };
-        let id_for_task = id.clone();
-        let id_for_spawn = id.clone();
 
-        // Token tracking: shared counters updated by run_agent callback.
+        // Token tracking: shared counters mirrored into the registry as the
+        // job streams, and read out once more when it completes.
         let token_sent = Arc::new(AtomicU64::new(0));
         let token_received = Arc::new(AtomicU64::new(0));
-        let token_sent_clone = token_sent.clone();
-        let token_received_clone = token_received.clone();
+        let (ts_cb, tr_cb, id_for_task) = (token_sent.clone(), token_received.clone(), id.clone());
+        built.request.on_token_usage = Some(Arc::new(move |sent: u64, received: u64| {
+            ts_cb.store(sent, Ordering::Relaxed);
+            tr_cb.store(received, Ordering::Relaxed);
+            crate::ext::jobs::registry().update_tokens(&id_for_task, sent, received);
+        }));
 
-        let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
-        let request = crate::agent::AgentRequest {
-            prompt,
-            approval_mode: approval,
-            provider,
-            model,
-            system_prompt,
-            events: false,
-            event_sender: None,
-            agent_depth: agent_depth + 1,
-            on_token_usage: Some(Arc::new(move |sent: u64, received: u64| {
-                token_sent_clone.store(sent, Ordering::Relaxed);
-                token_received_clone.store(received, Ordering::Relaxed);
-                crate::ext::jobs::registry().update_tokens(&id_for_task, sent, received);
-            })),
-            activity: Some(activity.clone()),
-            llm: None,
-            session_sink: None,
-        };
-
+        let BuiltAgent {
+            request,
+            activity,
+            timeout_ms,
+        } = built;
+        let id_for_spawn = id.clone();
+        let cancel_watch = Some(job_cancel);
         handle.spawn(async move {
             let outcome = tokio::select! {
-                result = crate::agent::run_agent(request) => {
-                    result.map(|resp| resp.content)
-                }
+                result = crate::agent::run_agent(request) => result.map(|resp| resp.content),
+                _ = await_cancelled(&cancel_watch) => Err(format!("{id_for_spawn}: cancelled")),
                 _ = inactivity_elapsed(activity, timeout_ms) => {
                     Err(format!("{id_for_spawn}: {}", inactivity_message(timeout_ms)))
                 }
@@ -1502,6 +1458,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 return Ok(Value::Table(result));
             }
 
+            warn_unknown_opts(&opts, WAIT_OPT_KEYS);
+
             let timeout_ms = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
@@ -1544,20 +1502,95 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     )?;
     agent_table.set("wait", wait_fn)?;
 
+    // --- ctx.agent.cancel(id) ---
+    // Cancel a running job by setting its cancel flag.
+    let agent_depth_c = cfg.agent_depth;
+    let cancel_fn = lua.create_function(move |lua, id: String| {
+        if agent_depth_c > 0 {
+            let result = lua.create_table()?;
+            result.set("ok", false)?;
+            result.set("error", "sub-agents cannot cancel jobs")?;
+            return Ok(Value::Table(result));
+        }
+        let ok = crate::ext::jobs::registry().cancel(&id);
+        let result = lua.create_table()?;
+        result.set("ok", ok)?;
+        Ok(Value::Table(result))
+    })?;
+    agent_table.set("cancel", cancel_fn)?;
+
     ctx.set("agent", agent_table)?;
     Ok(())
 }
 
-/// Return `{ ok=false, content="", error="max agent depth exceeded" }`.
-fn agent_depth_exceeded(lua: &Lua) -> Result<Value, mlua::Error> {
-    let result = lua.create_table()?;
-    result.set("ok", false)?;
-    result.set("content", "")?;
-    result.set("error", "max agent depth exceeded")?;
-    Ok(Value::Table(result))
+/// Dispatch settings inherited from the parent agent, shared by `run`,
+/// `run_stream`, and `spawn`. Built once in `add_agent_table` and cloned into
+/// each closure.
+#[derive(Clone)]
+struct InheritedCtx {
+    approval: crate::tools::ApprovalMode,
+    provider: Option<String>,
+    model: Option<String>,
+    agent_depth: usize,
+}
+
+/// A ready-to-run `AgentRequest` plus the handles the dispatch loops need: the
+/// shared activity timestamp (for the inactivity watchdog) and the resolved
+/// inactivity timeout.
+struct BuiltAgent {
+    request: crate::agent::AgentRequest,
+    activity: Arc<AtomicU64>,
+    timeout_ms: u64,
+}
+
+/// Shared setup for all three dispatch paths: enforce the depth limit, parse
+/// opts, and assemble the `AgentRequest`. The caller-specific bits —
+/// `event_sender` (streaming) and `tool_allowlist` (spawn) — are passed in;
+/// `on_token_usage` is left `None` for the caller to fill if needed. On a
+/// depth or bad-opts error, returns the message to hand to `agent_result_to_lua`.
+fn build_agent_request(
+    prompt: String,
+    opts: &Option<Table>,
+    inherited: &InheritedCtx,
+    allowed_keys: &[&str],
+    event_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentRunEvent>>,
+    tool_allowlist: Option<Vec<String>>,
+) -> Result<BuiltAgent, String> {
+    if inherited.agent_depth >= MAX_AGENT_DEPTH {
+        return Err("max agent depth exceeded".to_string());
+    }
+    let (approval, provider, model, system_prompt, timeout_ms) = parse_agent_opts(
+        opts,
+        inherited.approval,
+        &inherited.provider,
+        &inherited.model,
+        allowed_keys,
+    )?;
+    let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
+    let request = crate::agent::AgentRequest {
+        prompt,
+        approval_mode: approval,
+        provider,
+        model,
+        system_prompt,
+        events: false,
+        event_sender,
+        agent_depth: inherited.agent_depth + 1,
+        on_token_usage: None,
+        activity: Some(activity.clone()),
+        llm: None,
+        session_sink: None,
+        tool_allowlist,
+    };
+    Ok(BuiltAgent {
+        request,
+        activity,
+        timeout_ms,
+    })
 }
 
 /// Known option keys per `ctx.agent` call, used to warn on typos.
+const WAIT_OPT_KEYS: &[&str] = &["timeout_ms"];
 const RUN_OPT_KEYS: &[&str] = &[
     "approval",
     "provider",
@@ -1586,6 +1619,7 @@ const SPAWN_OPT_KEYS: &[&str] = &[
     "system_prompt",
     "timeout_ms",
     "agent",
+    "max_concurrency",
 ];
 
 /// Human-readable inactivity timeout message.

@@ -39,3 +39,18 @@ pub fn create_provider_with_config(
     }
     Err(LlmError::new_with_kind(LlmErrorKind::Config, msg))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::create_provider_with_config;
+    use crate::config::ProvidersConfig;
+
+    #[test]
+    fn seeded_minimax_providers_use_supported_handler() {
+        let config: ProvidersConfig =
+            serde_yaml::from_str(include_str!("../../../defaults/providers.yaml")).unwrap();
+
+        create_provider_with_config("minimax", &config).unwrap();
+        create_provider_with_config("minimax_plan", &config).unwrap();
+    }
+}

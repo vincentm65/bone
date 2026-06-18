@@ -12,6 +12,18 @@ use std::time::Duration;
 
 use bone::tools::types::ToolCall;
 
+/// Build a default `NewJob` (cap 1, no parent, fresh cancel flag) for tests
+/// that seed the registry directly.
+fn test_job(agent: &str, task: &str) -> bone::ext::jobs::NewJob {
+    bone::ext::jobs::NewJob {
+        agent: agent.into(),
+        task: task.into(),
+        max_concurrency: 1,
+        parent: None,
+        cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }
+}
+
 // ── 1. Registration + dynamic description ───────────────────────────────────
 
 /// Two sub-agents registered in init.lua.
@@ -93,6 +105,41 @@ fn no_agents_registered_no_tool() {
     assert!(
         !names.contains(&"subagent"),
         "subagent tool should NOT be registered when no agents exist; got: {names:?}",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+/// A `tool_allowlist` on the boot options narrows the exposed tools to the
+/// intersection with the globally-enabled set. Guards the per-agent allowlist
+/// wiring (it was previously a dead field).
+#[test]
+fn tool_allowlist_narrows_exposed_tools() {
+    let config_dir = common::temp_dir("subagent-tool-allowlist");
+
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions {
+            tool_allowlist: Some(vec!["read_file".to_string()]),
+            ..Default::default()
+        },
+        "test-model",
+        "TestProvider",
+    );
+
+    let defs = booted.tools.definitions();
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"read_file"),
+        "allowlisted tool should remain; got: {names:?}",
+    );
+    assert!(
+        !names.contains(&"write_file"),
+        "non-allowlisted tool should be filtered out; got: {names:?}",
     );
 
     std::fs::remove_dir_all(&config_dir).ok();
@@ -317,10 +364,10 @@ fn wait_action_collects_dispatched_job() {
     // subagent wait action and does not race another real background run.
     let registry = bone::ext::jobs::registry();
     let job_id = registry
-        .create(
-            "waiter-collect".into(),
-            "unique-task-wait-action-collect".into(),
-        )
+        .create(test_job(
+            "waiter-collect",
+            "unique-task-wait-action-collect",
+        ))
         .expect("wait-action job should be created");
     registry.complete(&job_id, Ok("collected job result".into()));
 
@@ -473,26 +520,26 @@ fn rust_subagent_pane_returns_valid_panepage() {
     // Create some fake jobs in the registry.
     let registry = bone::ext::jobs::registry();
     let id1 = registry
-        .create("render-researcher".into(), "search query".into())
+        .create(test_job("render-researcher", "search query"))
         .expect("render-researcher job should be created");
     let id2 = registry
-        .create("render-coder".into(), "fix bug in module".into())
+        .create(test_job("render-coder", "fix bug in module"))
         .expect("render-coder job should be created");
+    // Complete one job so only one is running (pane should still show).
     registry.complete(&id1, Ok("found 3 relevant papers".into()));
-    registry.complete(&id2, Err("timeout".into()));
 
     // Call the Rust-side pane renderer directly.
     let pane =
         bone::ui::subagent_pane::render(booted.manager.subagent_names(), &registry.all_jobs());
     assert!(
         pane.is_some(),
-        "subagent pane renderer should return Some; got None",
+        "subagent pane renderer should return Some for running jobs; got None",
     );
 
     let pane = pane.unwrap();
     assert_eq!(pane.source, "subagents");
     assert!(pane.title.contains("Agents"));
-    assert_eq!(pane.content.len(), 3); // one line per agent + separator
+    assert_eq!(pane.content.len(), 2); // one line for running agent + separator
 
     std::fs::remove_dir_all(&config_dir).ok();
 }

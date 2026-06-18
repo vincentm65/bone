@@ -23,6 +23,10 @@ pub struct BootOptions {
     pub model: String,
     /// Provider name for the banner (e.g. "OpenAI (openai)").
     pub provider: String,
+    /// Per-agent tool allowlist. When set, the booted tool handler only
+    /// exposes tools whose names appear here (intersected with the globally
+    /// enabled set). `None` (the default) exposes all enabled tools.
+    pub tool_allowlist: Option<Vec<String>>,
 }
 
 /// Result of dispatching an event through all Lua handlers.

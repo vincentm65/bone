@@ -15,35 +15,73 @@ use super::pane_page::PanePage;
 pub const PANE_SOURCE: &str = "subagents";
 
 /// Render the sub-agent pane for the registered `agents` from a registry
-/// `jobs` snapshot. Returns `None` when no agents are registered.
+/// `jobs` snapshot. Only shows agents with running jobs.
+/// Returns `None` when no agents are registered or all are idle.
 pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
     if agents.is_empty() {
         return None;
     }
 
     let now = current_unix_seconds();
-    let mut lines = Vec::with_capacity(agents.len());
+    let mut lines = Vec::new();
 
     for agent in agents {
-        let latest = latest_job_for(agent, jobs);
-        let (icon, status) = job_status(latest, now);
-        let is_idle = icon == "○" && status.starts_with("idle");
+        let agent_jobs: Vec<&Job> = jobs.iter().filter(|j| j.agent == *agent).collect();
+        let running: Vec<&Job> = agent_jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Running)
+            .copied()
+            .collect();
 
-        let (icon_fg, name_fg) = if is_idle {
-            (Color::DarkGray, Color::DarkGray)
+        if running.is_empty() {
+            continue;
+        }
+
+        if running.len() > 1 {
+            // Multi-job template header.
+            lines.push(Line::from(Span::styled(
+                format!(" ◑ {} ({} running)", agent, running.len()),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for job in &running {
+                let elapsed = now.saturating_sub(job.started_at);
+                let mut task = job.task.replace(['\n', '\r'], " ");
+                if task.chars().count() > 36 {
+                    task = format!("{}...", task.chars().take(33).collect::<String>());
+                }
+                lines.push(Line::from(vec![
+                    Span::styled("   ◑ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(task, Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!(
+                            " ({}s) {}/{} in/out",
+                            elapsed, job.token_sent, job.token_received
+                        ),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
         } else {
-            (Color::White, Color::White)
-        };
+            let job = running[0];
+            let (icon, status) = job_status(job, now);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {icon} "),
+                    Style::default()
+                        .fg(icon_fg(job))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(agent.clone(), Style::default().fg(name_fg(job))),
+                Span::styled(" ", Style::default().fg(Color::DarkGray)),
+                Span::styled(status, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
 
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {icon} "),
-                Style::default().fg(icon_fg).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(agent.clone(), Style::default().fg(name_fg)),
-            Span::styled(" ", Style::default().fg(Color::DarkGray)),
-            Span::styled(status, Style::default().fg(Color::DarkGray)),
-        ]));
+    if lines.is_empty() {
+        return None;
     }
 
     lines.push(Line::raw(""));
@@ -57,28 +95,24 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
     })
 }
 
-/// Find the most recent job for an agent (highest numeric job id).
-fn latest_job_for<'a>(agent: &str, jobs: &'a [Job]) -> Option<&'a Job> {
-    jobs.iter()
-        .filter(|j| j.agent == agent)
-        .max_by_key(|j| job_id_number(&j.id))
+fn icon_fg(job: &Job) -> Color {
+    match job.status {
+        JobStatus::Running => Color::White,
+        JobStatus::Done => Color::DarkGray,
+        JobStatus::Error => Color::Red,
+    }
 }
 
-/// Extract the numeric suffix of a `job-N` id (0 when malformed).
-fn job_id_number(id: &str) -> u64 {
-    id.rsplit('-')
-        .next()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
+fn name_fg(job: &Job) -> Color {
+    if job.status == JobStatus::Running {
+        Color::White
+    } else {
+        Color::DarkGray
+    }
 }
 
-/// Build `(icon, status-text)` for the latest job of an agent.
-fn job_status(job: Option<&Job>, now: u64) -> (&'static str, String) {
-    let job = match job {
-        Some(j) => j,
-        None => return ("○", "idle".to_string()),
-    };
-
+/// Build `(icon, status-text)` for a single job.
+fn job_status(job: &Job, now: u64) -> (&'static str, String) {
     match job.status {
         JobStatus::Running => {
             let elapsed = now.saturating_sub(job.started_at);

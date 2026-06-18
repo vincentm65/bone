@@ -728,7 +728,8 @@ fn auto_compact_enabled_under_denylist_config() {
 
     let lua_arc = booted.manager.lua_arc();
     let lua = lua_arc.lock().unwrap();
-    lua.load(r#"
+    lua.load(
+        r#"
         local handler = bone._handlers.before_turn[1]
         -- Deny-list config format: disabled is empty → compact is enabled.
         local ctx = {
@@ -755,7 +756,8 @@ fn auto_compact_enabled_under_denylist_config() {
         -- Should NOT have bailed at the gate: it ran compaction and returned
         -- a replacement transcript (non-nil) with the summary.
         _AUTO_COMPACT_RET = ret and "table" or "nil"
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 
@@ -784,7 +786,8 @@ fn auto_compact_disabled_when_in_denylist() {
 
     let lua_arc = booted.manager.lua_arc();
     let lua = lua_arc.lock().unwrap();
-    lua.load(r#"
+    lua.load(
+        r#"
         local handler = bone._handlers.before_turn[1]
         -- compact is in the disabled array → the gate bails with nil.
         local ctx = {
@@ -803,7 +806,8 @@ fn auto_compact_disabled_when_in_denylist() {
         }
         local ret = handler({}, ctx)
         _AUTO_COMPACT_DISABLED_RET = ret and "table" or "nil"
-    "#)
+    "#,
+    )
     .exec()
     .unwrap();
 

@@ -820,5 +820,4 @@ impl super::Renderer {
             }
         }
     }
-
 }

@@ -5,7 +5,7 @@
 //! `peek_finished_unconsumed` / `mark_consumed` auto-injection flow.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -52,6 +52,30 @@ pub struct Job {
     /// Path to a file holding the full result when it exceeds the
     /// injection limit (results are truncated when delivered inline).
     pub result_file: Option<String>,
+    /// Maximum concurrent jobs allowed for this agent template.
+    pub max_concurrency: usize,
+    /// Per-job cancellation flag, settable by [`JobRegistry::cancel`].
+    #[serde(skip)]
+    pub cancel_flag: Arc<AtomicBool>,
+    /// The spawning scope key (prep for Tier 3 recursion).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+}
+
+/// Parameters for [`JobRegistry::create`]. Bundled into a struct so the call
+/// sites stay readable and new fields (e.g. Tier 3 scope) don't grow the
+/// positional argument list.
+pub struct NewJob {
+    /// Agent template name (used for the per-template concurrency count).
+    pub agent: String,
+    /// The task prompt handed to the agent.
+    pub task: String,
+    /// How many jobs may run concurrently for this agent template.
+    pub max_concurrency: usize,
+    /// Spawning scope key (prep for Tier 3 recursion; `None` at depth 0).
+    pub parent: Option<String>,
+    /// Per-job cancellation flag, shared with the running task.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────
@@ -99,17 +123,24 @@ impl JobRegistry {
     }
 
     /// Create a new running job. Returns its ID, or an error if the named
-    /// agent already has a running job (checked atomically under the lock).
-    pub fn create(&self, agent: String, task: String) -> Result<String, String> {
+    /// agent is at its concurrency cap (checked atomically under the lock).
+    pub fn create(&self, job: NewJob) -> Result<String, String> {
+        let NewJob {
+            agent,
+            task,
+            max_concurrency,
+            parent,
+            cancel_flag,
+        } = job;
         let now = current_unix_seconds();
         let mut jobs = self.jobs.lock().unwrap();
-        if let Some(busy) = jobs
+        let running_for_agent = jobs
             .iter()
-            .find(|j| j.status == JobStatus::Running && j.agent == agent)
-        {
+            .filter(|j| j.status == JobStatus::Running && j.agent == agent)
+            .count();
+        if running_for_agent >= max_concurrency {
             return Err(format!(
-                "agent '{}' is already busy with {}; wait for it to finish",
-                agent, busy.id
+                "agent '{agent}' is at its concurrency cap ({max_concurrency})"
             ));
         }
         let id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -125,6 +156,9 @@ impl JobRegistry {
             token_sent: 0,
             token_received: 0,
             result_file: None,
+            max_concurrency,
+            cancel_flag,
+            parent,
         });
         // Prune oldest finished-and-consumed jobs to cap memory growth.
         if jobs.len() > MAX_RETAINED_JOBS {
@@ -314,6 +348,23 @@ impl JobRegistry {
             .collect();
         finished.sort_by_key(|j| j.started_at);
         finished
+    }
+
+    /// Cancel a job by setting its cancel flag. Returns `true` if the id was
+    /// found. The running task observes the flag and aborts at its next await.
+    pub fn cancel(&self, id: &str) -> bool {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
+            return false;
+        };
+        if job.status != JobStatus::Running {
+            return false;
+        }
+        job.cancel_flag.store(true, Ordering::Relaxed);
+        self.completed.notify_all();
+        drop(jobs);
+        self.version.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     /// Mark the given job ids as consumed. Bumps the version if any changed.

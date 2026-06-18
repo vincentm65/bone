@@ -170,6 +170,7 @@ fn resolve_provider_uses_injected_provider_and_shares_arc() {
         on_token_usage: None,
         activity: None,
         llm: Some(injected.clone()), // now refcount == 2
+        tool_allowlist: None,
         session_sink: None,
     };
     let mut custom = CustomConfigs::default();
@@ -207,6 +208,7 @@ fn resolve_provider_short_circuits_without_any_config() {
         on_token_usage: None,
         activity: None,
         llm: Some(injected),
+        tool_allowlist: None,
         session_sink: None,
     };
     let mut custom = CustomConfigs::default();

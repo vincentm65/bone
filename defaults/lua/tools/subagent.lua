@@ -94,6 +94,9 @@ local function build_description()
         if agent.approval then
             extras[#extras + 1] = "approval: " .. agent.approval
         end
+        if agent.max_concurrency and agent.max_concurrency > 1 then
+            extras[#extras + 1] = "concurrency: " .. agent.max_concurrency
+        end
         local suffix = #extras > 0 and (" [" .. table.concat(extras, ", ") .. "]") or ""
         parts[#parts + 1] = string.format("  - %s: %s%s", agent.name, agent.description, suffix)
     end
@@ -103,6 +106,7 @@ local function build_description()
             "Actions:",
             '- dispatch: start one or more tasks (one tasks[] entry each, run in parallel). Blocks until all dispatched tasks finish and returns their results.',
             '- wait: block until previously dispatched jobs finish. Waits on the given ids[] (or all running jobs when omitted) and returns their results.',
+            '- cancel: stop running jobs by id. Sets a per-job cancel flag.',
             '- status: non-blocking snapshot of job progress. Use sparingly; never call status in a loop.',
             "",
             "Rules:",
@@ -116,13 +120,13 @@ local function build_description()
             '  - If you need the results to continue, or you have nothing else productive to do, set wait=true: the call blocks and returns the results directly. This is the right choice for fan-out/fan-in work (e.g. dispatching research and then synthesizing it).',
             '  - Omit wait ONLY when you have separate, independent work to do that does NOT overlap the dispatched tasks: dispatch returns immediately and you continue on that other work. Finished results are delivered automatically in a later message — do NOT poll for them, and NEVER fabricate or assume results you have not received.',
             '- wait: block until previously dispatched jobs finish. Waits on the given ids[] (or all running jobs when omitted) and returns their results. Use when you reach a point where you need pending results before continuing.',
+            '- cancel: stop running jobs by id. Sets a per-job cancel flag.',
             '- status: non-blocking snapshot of job progress. Use sparingly; never call status in a loop.',
             "",
             "Rules:",
             "- Batch independent tasks into a single dispatch call to maximize parallelism.",
             "- Each agent runs one job at a time; dispatching to a busy agent is rejected.",
             "- NEVER duplicate the work you delegated. Once a task is dispatched, do not read the same files, run the same searches, or research the same questions yourself — that wastes context and defeats the purpose of delegating. Let the sub-agent do it.",
-            "- After a non-waiting dispatch, do only your separate independent work, then end your turn; the results arrive as an automated message. If you have no such independent work, you should have used wait=true instead.",
         }, "\n")
     end
     return table.concat(parts, "\n")
@@ -216,7 +220,6 @@ local function execute(params, ctx)
 
             if agent_def then
                 -- Build spawn opts from the agent definition.
-                -- Busy agents are rejected atomically by the Rust registry.
                 local opts = {
                     agent = agent_name,
                     system_prompt = agent_def.system_prompt,
@@ -224,7 +227,11 @@ local function execute(params, ctx)
                     model = agent_def.model,
                     approval = agent_def.approval,
                     timeout_ms = agent_def.timeout_ms,
+                    max_concurrency = agent_def.max_concurrency or 1,
                 }
+                if agent_def.tools and #agent_def.tools > 0 then
+                    opts.tools = agent_def.tools
+                end
 
                 local result = ctx.agent.spawn(task_desc, opts)
                 if result.ok then
@@ -277,6 +284,21 @@ local function execute(params, ctx)
         return format_wait_outcome(outcome)
     end
 
+    if action == "cancel" then
+        local ids = params.ids or {}
+        if #ids == 0 then
+            return { ok = false, error = "Provide ids for 'cancel'." }
+        end
+        local parts = {}
+        for _, id in ipairs(ids) do
+            local result = ctx.agent.cancel(id)
+            parts[#parts + 1] = string.format(
+                "%s: %s", id, result.ok and "cancelled" or "not found"
+            )
+        end
+        return table.concat(parts, "\n")
+    end
+
     if action == "status" then
         local jobs = ctx.agent.jobs()
         local parts = { "Sub-agent status:" }
@@ -286,7 +308,7 @@ local function execute(params, ctx)
         return table.concat(parts, "\n")
     end
 
-    return "ERROR: Action must be 'dispatch', 'wait' or 'status'."
+    return "ERROR: Action must be 'dispatch', 'wait', 'cancel' or 'status'."
 end
 
 -- ---------------------------------------------------------------------------
@@ -302,8 +324,8 @@ bone.register_tool({
         properties = {
             action = {
                 type = "string",
-                enum = { "dispatch", "wait", "status" },
-                description = "dispatch (start tasks), wait (block for results), or status (non-blocking snapshot)",
+                enum = { "dispatch", "wait", "cancel", "status" },
+                description = "dispatch (start tasks), wait (block for results), cancel (stop jobs by id), or status (non-blocking snapshot)",
             },
             tasks = {
                 type = "array",
@@ -326,12 +348,12 @@ bone.register_tool({
             },
             wait = {
                 type = "boolean",
-                description = "dispatch only: block until the dispatched tasks finish and return their results. Use when your next step depends on them.",
+                description = "dispatch only: block until the dispatched tasks finish and return the results. Use when your next step depends on them.",
             },
             ids = {
                 type = "array",
                 items = { type = "string" },
-                description = "wait only: job ids to wait for (omit to wait for all running jobs)",
+                description = "wait/cancel: job ids to wait for (omit to wait for all running jobs) / job ids to cancel",
             },
             timeout_ms = {
                 type = "integer",

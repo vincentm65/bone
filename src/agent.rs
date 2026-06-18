@@ -190,6 +190,10 @@ pub struct AgentRequest {
     /// Injected session sink. When set, `agent_setup` reuses it as-is instead
     /// of constructing a `SessionWriter` backed by SQLite.
     pub session_sink: Option<Arc<dyn SessionSink>>,
+    /// Optional tool allowlist. When set, the agent only sees tools whose
+    /// names appear in this list. When `None` (the default), all tools are
+    /// available.
+    pub tool_allowlist: Option<Vec<String>>,
 }
 
 /// Current time in epoch milliseconds.
@@ -371,6 +375,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
             headless: true,
             model: model.clone(),
             provider: provider.clone(),
+            tool_allowlist: request.tool_allowlist.clone(),
         },
         &model,
         &provider,
@@ -503,17 +508,56 @@ pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "read_file" | "write_file" | "edit_file" => call
+        "write_file" => call
             .arguments
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        _ => call
+        "edit_file" => call
             .arguments
-            .as_object()
-            .and_then(|m| m.values().next())
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default(),
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "read_file" => call
+            .arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => {
+            let json = serde_json::to_string(&call.arguments).unwrap_or_default();
+            if json.len() > 80 {
+                let mut end = 77;
+                while !json.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &json[..end])
+            } else {
+                json
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_call_args;
+    use crate::tools::ToolCall;
+
+    #[test]
+    fn summarize_call_args_truncates_json_on_char_boundary() {
+        let value = format!("{}{}{}", "a".repeat(67), "😀", "b".repeat(20));
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "custom_tool".to_string(),
+            arguments: serde_json::json!({ "text": value }),
+        };
+
+        let summary = summarize_call_args(&call);
+
+        assert!(summary.ends_with("..."));
+        assert!(summary.len() <= 80);
     }
 }

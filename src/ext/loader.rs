@@ -31,7 +31,15 @@ pub fn boot(
     // TUI can drain diffs even while a tool blocks on ctx.ui.key().
     let shared_ui = super::api_ui::new_shared();
 
-    let lua = match engine::create_engine(version, cwd, config_dir, opts, model, provider, shared_ui.clone()) {
+    let lua = match engine::create_engine(
+        version,
+        cwd,
+        config_dir,
+        opts,
+        model,
+        provider,
+        shared_ui.clone(),
+    ) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("bone: warning: Lua engine creation failed: {e}");

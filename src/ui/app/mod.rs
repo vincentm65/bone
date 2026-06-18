@@ -118,6 +118,7 @@ impl App {
             headless: false,
             model: model.clone(),
             provider: provider.clone(),
+            tool_allowlist: None,
         };
         let booted = crate::ext::boot_with_tools(
             &crate::config::bone_dir(),
@@ -383,6 +384,7 @@ impl App {
                         headless: false,
                         model: self.model.clone(),
                         provider: self.provider.clone(),
+                        tool_allowlist: None,
                     },
                     &self.model,
                     &self.provider,
@@ -847,6 +849,14 @@ impl App {
         if version != self.subagent_seen_version && !registry.running_ids().is_empty() {
             self.panes_visible = true;
         }
+        // Hide the pane when all running jobs finish.
+        if version != self.subagent_seen_version && registry.running_ids().is_empty() {
+            self.active_page = PanePage::remove(
+                &mut self.pages,
+                crate::ui::subagent_pane::PANE_SOURCE,
+                self.active_page,
+            );
+        }
         self.refresh_subagent_pane();
         self.subagent_seen_version = version;
         self.subagent_last_refresh = std::time::Instant::now();
@@ -895,10 +905,9 @@ impl App {
                 }
                 true
             }
-            ViewDiff::SetHighlight { name, fg } => self
-                .renderer
-                .theme
-                .set_highlight(&name, fg.as_deref()),
+            ViewDiff::SetHighlight { name, fg } => {
+                self.renderer.theme.set_highlight(&name, fg.as_deref())
+            }
         }
     }
 
@@ -926,15 +935,27 @@ impl App {
     ///
     /// Rendered natively in Rust (no Lua) so the pane stays live even while
     /// a Lua tool blocks the VM (e.g. a long `ctx.agent.wait`).
+    /// Only shows when there are running jobs; hides when all are idle.
     fn refresh_subagent_pane(&mut self) {
         let agents = self.extensions.subagent_names();
         if agents.is_empty() {
             return;
         }
         let jobs = crate::ext::jobs::registry().all_jobs();
-        if let Some(page) = crate::ui::subagent_pane::render(agents, &jobs) {
-            let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
-            self.active_page = new_active;
+        let has_running = !crate::ext::jobs::registry().running_ids().is_empty();
+        if has_running {
+            if let Some(page) = crate::ui::subagent_pane::render(agents, &jobs) {
+                let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+                self.active_page = new_active;
+                self.panes_visible = true;
+            }
+        } else {
+            // No running jobs — hide the pane.
+            self.active_page = PanePage::remove(
+                &mut self.pages,
+                crate::ui::subagent_pane::PANE_SOURCE,
+                self.active_page,
+            );
         }
     }
 
@@ -1231,10 +1252,8 @@ impl App {
                 // the screen is clean — avoids a flash where the stale
                 // interact page is visible with an empty input buffer.
                 if self.panes_visible && !self.pages.is_empty() {
-                    self.pages.retain(|p| p.source != "interact");
-                    if self.pages.is_empty() {
-                        self.active_page = 0;
-                    }
+                    self.active_page =
+                        PanePage::remove(&mut self.pages, "interact", self.active_page);
                 }
                 self.send_message(term).await?;
                 while let Some(queued) = self.queue.pop_front() {

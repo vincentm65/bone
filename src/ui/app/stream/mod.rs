@@ -27,6 +27,15 @@ use super::{App, apply_input_key_with_paste_burst};
 /// it to `drain_keys`; a key event from the terminal is delivered here.
 pub(crate) struct KeySink {
     pending: Option<PendingKeyReply>,
+    /// Keys read from the terminal while no reply slot was registered, held for
+    /// the tool's next key request. A single `drain_keys` pass can read several
+    /// keystrokes (fast typing) but only one reply slot exists at a time; the
+    /// tool re-arms via the channel only after `drain_keys` returns. Without
+    /// this buffer the extra keys leak into the main chat input.
+    buffer: std::collections::VecDeque<crate::pane_content::KeyEvent>,
+    /// Latched true once a tool has requested at least one key, marking the tool
+    /// as the input owner so subsequent keys buffer instead of falling through.
+    owns_input: bool,
 }
 
 enum PendingKeyReply {
@@ -39,25 +48,52 @@ enum PendingKeyReply {
 
 impl KeySink {
     pub fn new() -> Self {
-        Self { pending: None }
+        Self {
+            pending: None,
+            buffer: std::collections::VecDeque::new(),
+            owns_input: false,
+        }
     }
 
-    pub fn is_pending(&self) -> bool {
-        self.pending.is_some()
+    /// True when a key from `drain_keys` should be routed to the tool — either a
+    /// reply slot is armed, or a tool owns input and the key can be buffered for
+    /// its next request. When false, keys fall through to the main chat input.
+    pub fn wants_key(&self) -> bool {
+        self.pending.is_some() || self.owns_input
+    }
+
+    /// Resolve a freshly registered reply slot from the buffer if a key is
+    /// already waiting; otherwise store `reply` as the pending slot.
+    fn arm(&mut self, reply: PendingKeyReply) {
+        self.owns_input = true;
+        match self.buffer.pop_front() {
+            Some(key) => match reply {
+                PendingKeyReply::Direct(tx) => {
+                    let _ = tx.send(key);
+                }
+                PendingKeyReply::Runtime { id, registry } => {
+                    registry.resolve(id, key);
+                }
+            },
+            None => self.pending = Some(reply),
+        }
     }
 
     /// Register a direct oneshot channel (from `ctx.ui.key()` via the
     /// `ToolLiveEvent` channel transport).
     pub fn set_direct(&mut self, tx: tokio::sync::oneshot::Sender<crate::pane_content::KeyEvent>) {
-        self.pending = Some(PendingKeyReply::Direct(tx));
+        self.arm(PendingKeyReply::Direct(tx));
     }
 
     /// Register a runtime key request (from `RuntimeEvent::KeyRequest`).
     pub fn set_runtime(&mut self, id: u64, registry: crate::runtime::KeyReplyRegistry) {
-        self.pending = Some(PendingKeyReply::Runtime { id, registry });
+        self.arm(PendingKeyReply::Runtime { id, registry });
     }
 
-    /// Deliver `key` to the waiting caller (if any). Returns true if delivered.
+    /// Route `key` to the tool. Delivers to the pending reply slot if armed;
+    /// otherwise, if a tool owns input, buffers it for the next request. Returns
+    /// true if the key was consumed (delivered or buffered), false if it should
+    /// fall through to the main chat input.
     pub fn deliver(&mut self, key: crate::pane_content::KeyEvent) -> bool {
         match self.pending.take() {
             Some(PendingKeyReply::Direct(tx)) => {
@@ -68,8 +104,24 @@ impl KeySink {
                 registry.resolve(id, key);
                 true
             }
+            None if self.owns_input => {
+                self.buffer.push_back(key);
+                true
+            }
             None => false,
         }
+    }
+
+    /// Release input ownership when the owning tool finishes. `owns_input`
+    /// latches across the gaps between a tool's successive key requests (so
+    /// keys typed mid-loop buffer instead of leaking to chat); without this
+    /// reset it would stay latched for the rest of the turn, swallowing every
+    /// keystroke after the tool returns. Called from the `ToolResult` branch —
+    /// the only reliable "tool done, no re-arm coming" signal. Drops any
+    /// buffered keys so they can't bleed into a later tool's key request.
+    pub fn clear_owner(&mut self) {
+        self.owns_input = false;
+        self.buffer.clear();
     }
 }
 
@@ -104,11 +156,7 @@ impl PaneOwnership {
     }
 
     /// Remove every owned pane from `pages`. Called on cancel.
-    pub fn drain_for_cancel(
-        &mut self,
-        pages: &mut Vec<PanePage>,
-        active_page: &mut usize,
-    ) {
+    pub fn drain_for_cancel(&mut self, pages: &mut Vec<PanePage>, active_page: &mut usize) {
         for source in self.sources.drain() {
             *active_page = PanePage::remove(pages, &source, *active_page);
         }
@@ -351,7 +399,14 @@ impl App {
         // Drain any trailing events emitted just before the Driver returned
         // (final text deltas, the last tool result, Finished).
         while let Ok(ev) = rt_rx.try_recv() {
-            self.pump_apply_event(ev, &mut cur_idx, &mut pending, &key_registry, &mut pending_key, term)?;
+            self.pump_apply_event(
+                ev,
+                &mut cur_idx,
+                &mut pending,
+                &key_registry,
+                &mut pending_key,
+                term,
+            )?;
         }
 
         // Reabsorb authoritative state from the Driver when it completed.
@@ -516,6 +571,11 @@ impl App {
                 is_error,
                 content,
             } => {
+                // The tool finished, so it won't re-arm a key request — release
+                // input ownership latched by any `ctx.ui.key()` call, otherwise
+                // every later keystroke this turn buffers instead of reaching
+                // the chat input.
+                pending_key.clear_owner();
                 if let Some(idx) = cur_idx.take() {
                     self.renderer
                         .finalize_streaming_message(&self.messages[idx].content, term)?;
@@ -842,7 +902,7 @@ impl App {
                         *panes_visible = !*panes_visible;
                         continue;
                     }
-                    if pending_key.is_pending()
+                    if pending_key.wants_key()
                         && !(key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL))
                     {
@@ -942,5 +1002,82 @@ impl App {
             }
         }
         mode_changed
+    }
+}
+
+#[cfg(test)]
+mod keysink_tests {
+    use super::KeySink;
+    use crate::pane_content::KeyEvent;
+
+    fn key(c: &str) -> KeyEvent {
+        KeyEvent {
+            code: c.to_string(),
+            char: Some(c.to_string()),
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+
+    #[test]
+    fn key_routes_to_armed_reply_slot() {
+        let mut sink = KeySink::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sink.set_direct(tx);
+        assert!(sink.wants_key());
+        assert!(sink.deliver(key("a")));
+        assert_eq!(rx.blocking_recv().unwrap(), key("a"));
+    }
+
+    #[test]
+    fn owner_buffers_keys_between_requests() {
+        // Between a tool's successive requests the slot is empty but the tool
+        // still owns input, so keys buffer rather than leaking to chat.
+        let mut sink = KeySink::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sink.set_direct(tx);
+        sink.deliver(key("a")); // resolves the slot, owns_input stays latched
+        assert_eq!(rx.blocking_recv().unwrap(), key("a"));
+        assert!(sink.wants_key()); // still owned
+        assert!(sink.deliver(key("b"))); // buffered, consumed (not leaked)
+
+        // Next request drains the buffered key instead of blocking.
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        sink.set_direct(tx2);
+        assert_eq!(rx2.blocking_recv().unwrap(), key("b"));
+    }
+
+    #[test]
+    fn clear_owner_releases_input_to_chat() {
+        // After the owning tool finishes, keys must fall through to chat input
+        // instead of staying latched/buffered for the rest of the turn.
+        let mut sink = KeySink::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sink.set_direct(tx);
+        sink.deliver(key("a"));
+        assert_eq!(rx.blocking_recv().unwrap(), key("a"));
+
+        sink.clear_owner();
+        assert!(!sink.wants_key());
+        assert!(!sink.deliver(key("b"))); // falls through to chat
+    }
+
+    #[test]
+    fn clear_owner_drops_stale_buffer() {
+        // Buffered keys belong to the finished tool and must not bleed into a
+        // later tool's first key request.
+        let mut sink = KeySink::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sink.set_direct(tx);
+        sink.deliver(key("a"));
+        let _ = rx.blocking_recv();
+        sink.deliver(key("buffered")); // buffered for next request
+        sink.clear_owner();
+
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        sink.set_direct(tx2);
+        sink.deliver(key("fresh"));
+        assert_eq!(rx2.blocking_recv().unwrap(), key("fresh"));
     }
 }

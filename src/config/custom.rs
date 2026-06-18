@@ -169,7 +169,6 @@ impl CustomConfigs {
         false
     }
 
-
     // ── Deny-list page helpers ──────────────────────────────────────────────
 
     /// Scan a Lua directory for .lua file stems.

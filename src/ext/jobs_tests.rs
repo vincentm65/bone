@@ -4,12 +4,25 @@ fn fresh_registry() -> JobRegistry {
     JobRegistry::new()
 }
 
+/// A `NewJob` with default cap (1), no parent, and a fresh cancel flag.
+fn new_job(agent: &str, task: &str) -> NewJob {
+    NewJob {
+        agent: agent.to_string(),
+        task: task.to_string(),
+        max_concurrency: 1,
+        parent: None,
+        cancel_flag: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+fn create_default(reg: &JobRegistry, agent: &str, task: &str) -> String {
+    reg.create(new_job(agent, task)).unwrap()
+}
+
 #[test]
 fn create_and_snapshot() {
     let reg = fresh_registry();
-    let id = reg
-        .create("researcher".into(), "search the web".into())
-        .unwrap();
+    let id = create_default(&reg, "researcher", "search the web");
     assert_eq!(id, "job-1");
     let snap = reg.snapshot();
     let arr = snap.as_array().unwrap();
@@ -22,29 +35,86 @@ fn create_and_snapshot() {
 }
 
 #[test]
-fn create_rejects_busy_agent() {
+fn create_rejects_at_concurrency_cap() {
     let reg = fresh_registry();
-    let id = reg.create("coder".into(), "task one".into()).unwrap();
-    let err = reg.create("coder".into(), "task two".into()).unwrap_err();
-    assert!(err.contains("busy"), "unexpected error: {err}");
-    assert!(err.contains(&id));
+    let id1 = create_default(&reg, "coder", "task one");
+    // Default max_concurrency=1 rejects second spawn.
+    let err = reg.create(new_job("coder", "task two")).unwrap_err();
+    assert!(
+        err.contains("at its concurrency cap"),
+        "unexpected error: {err}"
+    );
 
     // Once the first job finishes, the agent is free again.
-    reg.complete(&id, Ok("done".into()));
-    assert!(reg.create("coder".into(), "task two".into()).is_ok());
+    reg.complete(&id1, Ok("done".into()));
+    assert!(reg.create(new_job("coder", "task three")).is_ok());
+}
+
+#[test]
+fn create_respects_concurrency_cap() {
+    let reg = fresh_registry();
+    // max_concurrency=2 allows two jobs.
+    create_default(&reg, "parallel", "task one");
+    reg.create(NewJob {
+        max_concurrency: 2,
+        ..new_job("parallel", "task two")
+    })
+    .unwrap();
+    // Third is rejected.
+    let err = reg
+        .create(NewJob {
+            max_concurrency: 2,
+            ..new_job("parallel", "task three")
+        })
+        .unwrap_err();
+    assert!(
+        err.contains("at its concurrency cap (2)"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
 fn create_allows_different_agents_concurrently() {
     let reg = fresh_registry();
-    reg.create("a".into(), "t1".into()).unwrap();
-    assert!(reg.create("b".into(), "t2".into()).is_ok());
+    create_default(&reg, "a", "t1");
+    assert!(reg.create(new_job("b", "t2")).is_ok());
+}
+
+#[test]
+fn cancel_sets_flag_and_completes() {
+    let reg = fresh_registry();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let id = reg
+        .create(NewJob {
+            cancel_flag: cancel_flag.clone(),
+            ..new_job("cancellable", "task")
+        })
+        .unwrap();
+
+    // Cancel the job.
+    assert!(reg.cancel(&id));
+    assert!(cancel_flag.load(Ordering::Relaxed));
+
+    // Cancelling a non-existent job returns false.
+    assert!(!reg.cancel("nonexistent"));
+}
+
+#[test]
+fn parent_field_recorded() {
+    let reg = fresh_registry();
+    reg.create(NewJob {
+        parent: Some("scope-1".into()),
+        ..new_job("agent", "task")
+    })
+    .unwrap();
+    let snap = reg.snapshot();
+    assert_eq!(snap[0]["parent"], "scope-1");
 }
 
 #[test]
 fn complete_sets_done() {
     let reg = fresh_registry();
-    reg.create("coder".into(), "write code".into()).unwrap();
+    create_default(&reg, "coder", "write code");
     reg.complete("job-1", Ok("finished".into()));
     let snap = reg.snapshot();
     assert_eq!(snap[0]["status"], "done");
@@ -56,7 +126,7 @@ fn complete_sets_done() {
 #[test]
 fn complete_sets_error() {
     let reg = fresh_registry();
-    reg.create("coder".into(), "write code".into()).unwrap();
+    create_default(&reg, "coder", "write code");
     reg.complete("job-1", Err("boom".into()));
     let snap = reg.snapshot();
     assert_eq!(snap[0]["status"], "error");
@@ -66,7 +136,7 @@ fn complete_sets_error() {
 #[test]
 fn complete_spills_long_result_to_file() {
     let reg = fresh_registry();
-    let id = reg.create("coder".into(), "long output".into()).unwrap();
+    let id = create_default(&reg, "coder", "long output");
     let long = "x".repeat(MAX_INJECT_CHARS + 100);
     reg.complete(&id, Ok(long.clone()));
     let snap = reg.snapshot();
@@ -80,7 +150,7 @@ fn complete_spills_long_result_to_file() {
 fn version_bumps_on_mutation() {
     let reg = fresh_registry();
     assert_eq!(reg.version(), 0);
-    reg.create("a".into(), "t".into()).unwrap();
+    create_default(&reg, "a", "t");
     assert_eq!(reg.version(), 1);
     reg.complete("job-1", Ok("ok".into()));
     assert_eq!(reg.version(), 2);
@@ -89,7 +159,7 @@ fn version_bumps_on_mutation() {
 #[test]
 fn update_tokens_bumps_version_on_change() {
     let reg = fresh_registry();
-    let id = reg.create("a".into(), "t".into()).unwrap();
+    let id = create_default(&reg, "a", "t");
     let v = reg.version();
     reg.update_tokens(&id, 10, 20);
     assert_eq!(reg.version(), v + 1);
@@ -99,9 +169,25 @@ fn update_tokens_bumps_version_on_change() {
 }
 
 #[test]
+fn cancel_bumps_version() {
+    let reg = fresh_registry();
+    let id = reg.create(new_job("a", "t")).unwrap();
+    let v = reg.version();
+    assert!(reg.cancel(&id));
+    assert_eq!(reg.version(), v + 1);
+    // Cancelling again while still running returns true, bumps version.
+    assert!(reg.cancel(&id));
+    assert_eq!(reg.version(), v + 2);
+    // After completion, cancelling returns false and does not bump version.
+    reg.complete(&id, Ok("done".into()));
+    assert!(!reg.cancel(&id));
+    assert_eq!(reg.version(), v + 3);
+}
+
+#[test]
 fn peek_then_mark_consumed() {
     let reg = fresh_registry();
-    reg.create("a".into(), "t".into()).unwrap();
+    create_default(&reg, "a", "t");
     reg.complete("job-1", Ok("result".into()));
 
     // Peek does not consume.
@@ -124,7 +210,7 @@ fn peek_then_mark_consumed() {
 #[test]
 fn peek_skips_running() {
     let reg = fresh_registry();
-    reg.create("a".into(), "t".into()).unwrap();
+    create_default(&reg, "a", "t");
     // Job is still running.
     assert!(reg.peek_finished_unconsumed().is_empty());
     assert_eq!(reg.version(), 1);
@@ -134,7 +220,7 @@ fn peek_skips_running() {
 fn pruning_caps_registry_size() {
     let reg = fresh_registry();
     for i in 0..(MAX_RETAINED_JOBS + 10) {
-        let id = reg.create(format!("agent-{i}"), "t".into()).unwrap();
+        let id = reg.create(new_job(&format!("agent-{i}"), "t")).unwrap();
         reg.complete(&id, Ok("r".into()));
         reg.mark_consumed(std::slice::from_ref(&id));
     }
@@ -146,10 +232,10 @@ fn pruning_caps_registry_size() {
 fn pruning_keeps_unconsumed_jobs() {
     let reg = fresh_registry();
     // First job finishes but is never consumed.
-    let keep = reg.create("keeper".into(), "t".into()).unwrap();
+    let keep = create_default(&reg, "keeper", "t");
     reg.complete(&keep, Ok("important".into()));
     for i in 0..(MAX_RETAINED_JOBS + 10) {
-        let id = reg.create(format!("agent-{i}"), "t".into()).unwrap();
+        let id = reg.create(new_job(&format!("agent-{i}"), "t")).unwrap();
         reg.complete(&id, Ok("r".into()));
         reg.mark_consumed(std::slice::from_ref(&id));
     }
@@ -189,7 +275,7 @@ fn truncate_short_string_unchanged() {
 #[test]
 fn wait_for_returns_immediately_when_finished() {
     let reg = fresh_registry();
-    let id = reg.create("a".into(), "t".into()).unwrap();
+    let id = create_default(&reg, "a", "t");
     reg.complete(&id, Ok("result".into()));
 
     let outcome = reg.wait_for(std::slice::from_ref(&id), Duration::from_secs(5), None);
@@ -206,7 +292,7 @@ fn wait_for_returns_immediately_when_finished() {
 #[test]
 fn wait_for_times_out_on_running_job() {
     let reg = fresh_registry();
-    let id = reg.create("a".into(), "t".into()).unwrap();
+    let id = create_default(&reg, "a", "t");
 
     let outcome = reg.wait_for(std::slice::from_ref(&id), Duration::from_millis(50), None);
     assert!(outcome.finished.is_empty());
@@ -221,7 +307,7 @@ fn wait_for_times_out_on_running_job() {
 #[test]
 fn wait_for_wakes_on_completion() {
     let reg = std::sync::Arc::new(fresh_registry());
-    let id = reg.create("a".into(), "t".into()).unwrap();
+    let id = create_default(&reg, "a", "t");
 
     let reg2 = reg.clone();
     let id2 = id.clone();
@@ -240,7 +326,7 @@ fn wait_for_wakes_on_completion() {
 #[test]
 fn wait_for_respects_cancellation() {
     let reg = fresh_registry();
-    let id = reg.create("a".into(), "t".into()).unwrap();
+    let id = create_default(&reg, "a", "t");
     let cancelled = AtomicBool::new(true);
 
     let outcome = reg.wait_for(
@@ -264,10 +350,8 @@ fn wait_for_ignores_unknown_ids() {
 
 #[test]
 fn wait_for_returns_already_consumed_jobs() {
-    // A job consumed elsewhere (e.g. by another wait) is still returned —
-    // wait_for reports completion regardless of the consumed flag.
     let reg = fresh_registry();
-    let id = reg.create("a".into(), "t".into()).unwrap();
+    let id = create_default(&reg, "a", "t");
     reg.complete(&id, Ok("r".into()));
     reg.mark_consumed(std::slice::from_ref(&id));
 
@@ -278,8 +362,8 @@ fn wait_for_returns_already_consumed_jobs() {
 #[test]
 fn running_ids_lists_only_running() {
     let reg = fresh_registry();
-    let id1 = reg.create("a".into(), "t1".into()).unwrap();
-    let id2 = reg.create("b".into(), "t2".into()).unwrap();
+    let id1 = create_default(&reg, "a", "t1");
+    let id2 = create_default(&reg, "b", "t2");
     reg.complete(&id1, Ok("done".into()));
     assert_eq!(reg.running_ids(), vec![id2.clone()]);
     let running = reg.running_jobs();
@@ -291,8 +375,8 @@ fn running_ids_lists_only_running() {
 #[test]
 fn multiple_jobs_ordered_in_snapshot() {
     let reg = fresh_registry();
-    reg.create("a".into(), "t1".into()).unwrap();
-    reg.create("b".into(), "t2".into()).unwrap();
+    create_default(&reg, "a", "t1");
+    create_default(&reg, "b", "t2");
     let snap = reg.snapshot();
     assert_eq!(snap[0]["agent"], "a");
     assert_eq!(snap[1]["agent"], "b");

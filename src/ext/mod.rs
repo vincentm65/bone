@@ -62,6 +62,8 @@ pub fn boot_with_tools(
     model: &str,
     provider: &str,
 ) -> BootedTools {
+    // Per-agent tool allowlist, captured before `opts` is moved into `boot`.
+    let tool_allowlist = opts.tool_allowlist.clone();
     let BootResult {
         manager: extensions,
         tools: lua_tools,
@@ -77,7 +79,7 @@ pub fn boot_with_tools(
         .map(|d| d.name.clone())
         .collect();
 
-    let enabled = if sync {
+    let mut enabled = if sync {
         let names = custom.enabled_tool_names();
         if names.is_empty() {
             all_tool_names
@@ -87,6 +89,12 @@ pub fn boot_with_tools(
     } else {
         all_tool_names
     };
+
+    // A per-agent allowlist further narrows the enabled set: a sub-agent only
+    // sees tools that are both globally enabled and named in its allowlist.
+    if let Some(allow) = &tool_allowlist {
+        enabled.retain(|name| allow.contains(name));
+    }
 
     let tools = super::tools::registry::ToolHandler::with_enabled_safety_and_display(
         loaded.registry,
