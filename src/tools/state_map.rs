@@ -30,11 +30,6 @@ impl ToolStateMap {
         self.entries.get(source)?.get(sub_key).map(|s| s.as_str())
     }
 
-    /// Get all sub_key -> state pairs for a source.
-    pub fn get_all(&self, source: &str) -> Option<&HashMap<String, String>> {
-        self.entries.get(source)
-    }
-
     /// Clear everything (session reset).
     pub fn clear(&mut self) {
         self.entries.clear();

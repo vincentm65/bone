@@ -27,10 +27,6 @@ pub struct TokenStats {
 
 impl TokenStats {
     /// Create a new empty tracker.
-    pub fn total(&self) -> u64 {
-        self.sent + self.received
-    }
-
     pub fn new() -> Self {
         Self::default()
     }
@@ -96,17 +92,6 @@ impl TokenStats {
         self.context_length = 0;
     }
 
-    /// Format for display: "curr 1,234 | in 1,234 | out 340".
-    /// Used during streaming to show a live estimate until provider usage arrives.
-    pub fn display_with_received_override(&self, received_override: Option<u64>) -> String {
-        let received = received_override.unwrap_or(self.received);
-        format!(
-            "curr {} | in {} | out {}",
-            format_tokens(self.context_length),
-            format_tokens(self.sent),
-            format_tokens(received)
-        )
-    }
 }
 
 /// Format a token count with comma-separated thousands.

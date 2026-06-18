@@ -20,12 +20,6 @@ pub struct SessionWriter {
 }
 
 impl SessionWriter {
-    /// Build a sink that appends to an existing conversation (`conv_id`), or a
-    /// no-op when `conv_id` is `None`.
-    pub fn new(db_path: PathBuf, conv_id: Option<i64>) -> Self {
-        Self { db_path, conv_id }
-    }
-
     fn conv_id(&self) -> Option<i64> {
         self.conv_id
     }

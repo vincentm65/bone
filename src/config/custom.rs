@@ -560,18 +560,6 @@ impl CustomConfigs {
     pub fn set_last_provider(&mut self, id: &str) {
         self.set_value("providers", "_last_provider", id.to_string());
     }
-
-    /// Get all provider field keys (provider IDs).
-    pub fn provider_ids(&self) -> Vec<String> {
-        let Some(page) = self.page_ref("providers") else {
-            return Vec::new();
-        };
-        page.fields
-            .iter()
-            .filter(|f| f.field_type == ConfigFieldType::Provider)
-            .map(|f| f.key.clone())
-            .collect()
-    }
 }
 
 // ── Migration ───────────────────────────────────────────────────────────────

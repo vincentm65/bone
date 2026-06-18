@@ -84,11 +84,6 @@ impl UserConfig {
             .collect()
     }
 
-    /// Helper to check a status_show toggle. Returns true if missing (default on).
-    pub fn status_show(&self, key: &str) -> bool {
-        self.status_show.get(key).copied().unwrap_or(true)
-    }
-
     /// Build a UserConfig by reading all values from the custom config pages.
     pub fn from_custom_configs(custom: &custom::CustomConfigs) -> Self {
         let mut cfg = Self::default();

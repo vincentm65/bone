@@ -16,9 +16,7 @@
 //! - `bone.api.config.set/get` — mutate `bone.config` at runtime.
 //!
 //! Keymap and config changes mutate the live `bone.keymap` / `bone.config`
-//! tables; Rust reads the current values via
-//! [`super::ExtensionManager::keymap_snapshot_live`] /
-//! [`super::ExtensionManager::config_snapshot_live`].
+//! tables; Rust captures a snapshot of both at boot.
 
 use mlua::{Function, Lua, Table, Value};
 

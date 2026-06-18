@@ -16,8 +16,6 @@
 //! fast-path `SessionWriter` already had internally), letting tests and a
 //! future Driver run the loop with zero side-effects and zero file I/O.
 
-use std::sync::Arc;
-
 /// Sink for persisting agent conversation turns and token usage.
 ///
 /// All methods take `&self` (the concrete `SessionWriter` opens a fresh DB
@@ -93,7 +91,3 @@ impl SessionSink for NullSessionSink {
     fn end(&self) {}
 }
 
-/// Convenience: wrap any `SessionSink` in an `Arc` for injection.
-pub fn shared<S: SessionSink + 'static>(sink: S) -> Arc<dyn SessionSink> {
-    Arc::new(sink)
-}

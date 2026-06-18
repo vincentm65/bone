@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use bone::session_sink::{NullSessionSink, SessionSink, shared};
+use bone::session_sink::{NullSessionSink, SessionSink};
 
 /// A recording sink that captures every call for later inspection.
 struct RecordingSink {
@@ -105,7 +105,7 @@ fn null_sink_is_inert() {
 #[test]
 fn sink_is_object_safe_via_arc_dyn() {
     // Arc<dyn SessionSink> is the injection type on AgentRequest.
-    let sink: Arc<dyn SessionSink> = shared(RecordingSink::new());
+    let sink: Arc<dyn SessionSink> = Arc::new(RecordingSink::new());
     assert_eq!(sink.conv_id(), Some(42));
     sink.append_message("user", "test", None, None, None, 0);
     assert_eq!(sink.conv_id(), Some(42)); // still works after a call
@@ -113,7 +113,7 @@ fn sink_is_object_safe_via_arc_dyn() {
 
 #[test]
 fn null_sink_is_object_safe_via_arc_dyn() {
-    let sink: Arc<dyn SessionSink> = shared(NullSessionSink);
+    let sink: Arc<dyn SessionSink> = Arc::new(NullSessionSink);
     assert_eq!(sink.conv_id(), None);
     sink.end();
 }
@@ -122,7 +122,7 @@ fn null_sink_is_object_safe_via_arc_dyn() {
 fn mixed_sink_types_unify_under_dyn() {
     // A Driver could hold a Vec of sinks of different concrete types.
     let sinks: Vec<Arc<dyn SessionSink>> =
-        vec![shared(NullSessionSink), shared(RecordingSink::new())];
+        vec![Arc::new(NullSessionSink), Arc::new(RecordingSink::new())];
     assert_eq!(sinks[0].conv_id(), None);
     assert_eq!(sinks[1].conv_id(), Some(42));
 }
@@ -130,7 +130,7 @@ fn mixed_sink_types_unify_under_dyn() {
 #[test]
 fn injected_sink_is_shareable_via_arc() {
     // Arc refcount — mirrors the Step 0 provider injection test.
-    let sink: Arc<dyn SessionSink> = shared(NullSessionSink);
+    let sink: Arc<dyn SessionSink> = Arc::new(NullSessionSink);
     let cloned = sink.clone();
     assert_eq!(Arc::strong_count(&sink), 2);
     assert_eq!(cloned.conv_id(), None);

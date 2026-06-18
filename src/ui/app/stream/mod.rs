@@ -263,7 +263,6 @@ impl App {
         };
         use crate::session_sink::{NullSessionSink, SessionSink};
         use crate::tools::CallOutcome;
-        use crate::ui::prompt::Decision;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -340,7 +339,11 @@ impl App {
         let outcome = loop {
             // Always drain keys before polling Driver/events. A fast stream can
             // otherwise starve a timer branch and make Esc lag until a lull.
-            if Self::drain_keys(
+            // While an approval prompt is up, keys drive the prompt instead of
+            // the input field — but the loop keeps pumping the spinner/events.
+            if self.pending_approval.is_some() {
+                self.drain_approval_keys(term)?;
+            } else if Self::drain_keys(
                 &mut self.input,
                 &mut self.queue,
                 &mut self.approval_mode,
@@ -364,7 +367,10 @@ impl App {
                 Some(ev) = rt_rx.recv() => {
                     self.pump_apply_event(ev, &mut cur_idx, &mut pending, &key_registry, &mut pending_key, term)?;
                 }
-                Some(areq) = appr_rx.recv() => {
+                // Don't pull a new approval while one is still pending — tool
+                // calls are resolved one at a time, as they were when this was
+                // a synchronous prompt.
+                Some(areq) = appr_rx.recv(), if self.pending_approval.is_none() => {
                     // Show the edit-file diff preview before deciding, so the
                     // user sees what's being changed (in Safe and Danger modes).
                     if areq.call.name == "edit_file" {
@@ -373,21 +379,9 @@ impl App {
                     if areq.auto_allows {
                         let _ = areq.reply.send(CallOutcome::Approve);
                     } else {
-                        self.timer_pause();
-                        let decision = self.prompt_and_wait(&areq.call, term)?;
-                        self.timer_resume();
-                        let resolved = match decision {
-                            Decision::Accept => CallOutcome::Approve,
-                            Decision::Advise(a) => CallOutcome::Blocked(format!(
-                                "[exit_code=1] Tool not executed. User advice: {a}"
-                            )),
-                            Decision::Cancel => {
-                                self.cancel_streaming = true;
-                                cancel.store(true, Ordering::Relaxed);
-                                CallOutcome::Denied
-                            }
-                        };
-                        let _ = areq.reply.send(resolved);
+                        // Show the prompt; the decision is collected by
+                        // drain_approval_keys at the top of the loop.
+                        self.begin_approval(&areq.call, areq.reply, term)?;
                     }
                 }
                 _ = ticker.tick() => {
@@ -483,6 +477,10 @@ impl App {
         self.turn_pause_start = None;
         self.cancel_streaming = false;
         self.last_ctrl_c = None;
+        // Drop any unresolved approval (dropping the reply makes the gate fall
+        // back to its non-interactive decision); clear the prompt UI too.
+        self.pending_approval = None;
+        self.active_prompt = None;
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         // Single blank line between the last message and the input field. Deduped
@@ -685,6 +683,13 @@ impl App {
     fn pump_tick(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         self.apply_view_diffs();
         self.maybe_refresh_subagent_pane();
+        self.render_streaming(term)
+    }
+
+    /// Render the bottom pane during a live turn or tool run: spinner-animated,
+    /// current panes (when visible), no autocomplete. Shared by the model-turn
+    /// tick and the Lua `drive_live` loop so both paint identically.
+    fn render_streaming(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         self.renderer.tick_spinner(
             term,
             &PaneDraw {
@@ -819,21 +824,7 @@ impl App {
                         pending_key.set_direct(req.reply);
                     }
 
-                    let visible_pages = if self.panes_visible {
-                        self.pages.as_slice()
-                    } else {
-                        &[]
-                    };
-                    self.renderer.tick_spinner(
-                        term,
-                        &PaneDraw {
-                            input: &self.input,
-                            status_info: &self.status_info(),
-                            pages: visible_pages,
-                            active_page: self.active_page,
-                            autocomplete: None,
-                        },
-                    )?;
+                    self.render_streaming(term)?;
                 }
             }
         }

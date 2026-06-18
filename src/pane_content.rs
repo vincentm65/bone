@@ -69,15 +69,6 @@ pub enum PaneLineSpec {
     },
 }
 
-impl PaneLineSpec {
-    /// True if the line renders no visible text.
-    pub fn is_empty(&self) -> bool {
-        match self {
-            PaneLineSpec::Plain(s) => s.is_empty(),
-            PaneLineSpec::Spans { spans } => spans.is_empty(),
-        }
-    }
-}
 
 /// Pure-data representation of a pane page.
 ///

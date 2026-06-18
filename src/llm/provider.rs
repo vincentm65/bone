@@ -141,17 +141,6 @@ pub struct LlmError {
 }
 
 impl LlmError {
-    /// Create an error with [`LlmErrorKind::Config`] kind.
-    ///
-    /// Use [`new_with_kind`](Self::new_with_kind) for specific error
-    /// classification.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            kind: LlmErrorKind::Config,
-            message: message.into(),
-        }
-    }
-
     pub fn new_with_kind(kind: LlmErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,

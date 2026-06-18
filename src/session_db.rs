@@ -34,14 +34,6 @@ pub(crate) struct StoredMessage {
     pub tool_calls: Option<String>,
 }
 
-pub struct SearchHit {
-    pub message_id: i64,
-    pub conversation_id: i64,
-    pub role: String,
-    pub snippet: String,
-    pub created_at: String,
-}
-
 /// Aggregated usage for one conversation.
 #[derive(Clone, Debug)]
 pub struct UsageSummary {
@@ -819,48 +811,6 @@ impl SessionDb {
         rows.collect()
     }
 
-    ///
-    /// Uses the raw query with FTS5's implicit OR between terms (`hello world` ->
-    /// match "hello" OR "world"). If FTS5 rejects the query as a syntax error
-    /// (e.g. unmatched operators), falls back to per-term phrase wrapping so the
-    /// user still gets results rather than an error.
-    pub fn search(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<SearchHit>> {
-        let result = self.try_search(query, limit);
-        if let Err(rusqlite::Error::SqliteFailure(_, Some(msg))) = &result
-            && msg.contains("syntax error")
-        {
-            // Fall back: treat as individual quoted terms so special chars
-            // don't cause FTS5 parser errors.
-            let safe = query
-                .split_whitespace()
-                .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(" ");
-            return self.try_search(&safe, limit);
-        }
-        result
-    }
-
-    fn try_search(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<SearchHit>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.conversation_id, m.role, snippet(messages_fts, 0, '▸', '◂', '...', 32) AS snippet, m.created_at
-             FROM messages_fts fts
-             JOIN messages m ON m.id = fts.rowid
-             WHERE messages_fts MATCH ?1
-             ORDER BY rank
-             LIMIT ?2"
-        )?;
-        let rows = stmt.query_map(params![query, limit], |row| {
-            Ok(SearchHit {
-                message_id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                role: row.get(2)?,
-                snippet: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })?;
-        rows.collect()
-    }
 }
 
 fn now_iso() -> String {

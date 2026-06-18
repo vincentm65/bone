@@ -14,7 +14,7 @@ use crate::session_db::SessionDb;
 
 use crate::ext::ExtensionManager;
 use crate::tools::registry::ToolHandler;
-use crate::tools::{ApprovalMode, ToolCall};
+use crate::tools::{ApprovalMode, CallOutcome, ToolCall};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
 use std::io;
@@ -27,6 +27,16 @@ use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
 use super::render::{BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, PaneDraw, Renderer, StatusInfo};
+
+/// A tool-call approval awaiting a user decision. Held in `App` while the
+/// bottom-pane prompt is shown so the streaming loop keeps pumping (spinner,
+/// events, subagent panes) instead of blocking on a nested poll loop. The
+/// `reply` resolves the `ChannelApprovalGate` that the running tool awaits.
+pub struct PendingApproval {
+    reply: tokio::sync::oneshot::Sender<CallOutcome>,
+    /// `true` once the user picked "Advise" and is typing free-form advice.
+    advising: bool,
+}
 
 pub struct App {
     pub messages: Vec<Message>,
@@ -49,6 +59,9 @@ pub struct App {
 
     pub approval_mode: ApprovalMode,
     pub active_prompt: Option<Prompt>,
+    /// Tool-call approval awaiting a decision, resolved inside the main stream
+    /// loop. `Some` only while `active_prompt` shows an approval prompt.
+    pub pending_approval: Option<PendingApproval>,
     /// Set to `true` to abort the current streaming response.
     pub cancel_streaming: bool,
     /// Timestamp of the last Ctrl+C press (for double-tap quit).
@@ -160,7 +173,7 @@ impl App {
             messages.push(Message::system(banner));
         }
         messages.push(Message::system(
-            "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
+            format!("bone v{} — type /help for commands. Ctrl+C twice to quit.", env!("CARGO_PKG_VERSION")),
         ));
 
         Ok(Self {
@@ -181,6 +194,7 @@ impl App {
 
             approval_mode,
             active_prompt: None,
+            pending_approval: None,
             cancel_streaming: false,
             last_ctrl_c: None,
             token_stats: TokenStats::new(),
@@ -429,13 +443,7 @@ impl App {
         load: crate::ext::types::ConversationLoad,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        self.cancel_streaming = true;
-        self.pages.clear();
-        self.active_page = 0;
-        self.tools.state_map.clear();
-        self.subagent_seen_version = u64::MAX;
-        self.queue.clear();
-        self.active_prompt = None;
+        self.reset_transient_ui_state();
 
         // Adopt the loaded conversation id so new messages append to it. End the
         // previous conversation we're leaving (if different), and clear the
@@ -497,6 +505,20 @@ impl App {
         rows
     }
 
+    /// Reset transient per-turn UI state before switching conversations:
+    /// abort any in-flight stream, drop panes, queued input, and any pending
+    /// tool-approval prompt. Shared by `/clear` and conversation load.
+    fn reset_transient_ui_state(&mut self) {
+        self.cancel_streaming = true;
+        self.pages.clear();
+        self.active_page = 0;
+        self.tools.state_map.clear();
+        self.subagent_seen_version = u64::MAX;
+        self.queue.clear();
+        self.active_prompt = None;
+        self.pending_approval = None;
+    }
+
     fn start_new_conversation(&mut self) {
         if let Some(ref db) = self.session_db {
             if let Some(conv_id) = self.conversation_id {
@@ -517,13 +539,7 @@ impl App {
     /// Clear chat history, end the current DB conversation, start a fresh one,
     /// and display a usage summary.
     fn clear_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        self.cancel_streaming = true;
-        self.pages.clear();
-        self.active_page = 0;
-        self.tools.state_map.clear();
-        self.subagent_seen_version = u64::MAX;
-        self.queue.clear();
-        self.active_prompt = None;
+        self.reset_transient_ui_state();
 
         let summary = if self.token_stats.request_count > 0 {
             format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
@@ -537,7 +553,7 @@ impl App {
         self.messages.clear();
         self.transcript.clear();
         self.messages.push(Message::system(
-            "bone v0.1.0 — type /help for commands. Ctrl+C twice to quit.",
+            format!("bone v{} — type /help for commands. Ctrl+C twice to quit.", env!("CARGO_PKG_VERSION")),
         ));
         self.messages.push(Message::system(summary));
         self.renderer.scrollback_cursor = 0;
@@ -1456,14 +1472,17 @@ impl App {
         Ok(None)
     }
 
-    /// Show a blocking prompt for a tool call that needs approval.
-    /// Renders the prompt options in the fixed bottom pane, waits for a choice,
-    /// then restores the normal input/status display.
-    pub(crate) fn prompt_and_wait(
+    /// Show an approval prompt for a tool call in the fixed bottom pane and
+    /// store the gate's `reply` channel. The decision is collected later by
+    /// [`Self::drain_approval_keys`] from inside the main stream loop, so the
+    /// spinner, streaming events, and subagent panes stay live while the user
+    /// decides (no nested blocking event loop).
+    pub(crate) fn begin_approval(
         &mut self,
         call: &ToolCall,
+        reply: tokio::sync::oneshot::Sender<CallOutcome>,
         term: &mut BoneTerminal,
-    ) -> io::Result<Decision> {
+    ) -> io::Result<()> {
         let summary = match call.name.as_str() {
             "read_file" | "write_file" | "edit_file" => {
                 call.arguments["path"].as_str().unwrap_or("?").to_string()
@@ -1504,79 +1523,109 @@ impl App {
             None
         };
         self.active_prompt = Some(prompt);
+        self.pending_approval = Some(PendingApproval {
+            reply,
+            advising: false,
+        });
+        self.timer_pause();
+        self.redraw(term)
+    }
 
-        self.redraw(term)?;
-
-        let mut advising = false;
-
-        let decision = loop {
-            if event::poll(std::time::Duration::from_millis(50))? {
-                let event = event::read()?;
-                if advising {
-                    if let Some(decision) = self.handle_advising_input_event(event, term)? {
-                        break decision;
-                    }
-                    continue;
+    /// Drain pending terminal events into the active approval prompt. Called
+    /// once per main-loop iteration while `pending_approval` is `Some`. On a
+    /// final choice it resolves the gate and clears the prompt; otherwise it
+    /// only updates selection/advice and returns, leaving the loop to pump.
+    pub(crate) fn drain_approval_keys(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        while self.pending_approval.is_some()
+            && event::poll(std::time::Duration::from_millis(0))?
+        {
+            let event = event::read()?;
+            let advising = self.pending_approval.as_ref().is_some_and(|p| p.advising);
+            if advising {
+                if let Some(decision) = self.handle_advising_input_event(event, term)? {
+                    self.resolve_approval(decision, term)?;
                 }
-                if let Event::Paste(_) = event {
-                    continue;
-                }
-                let Event::Key(key) = event else {
-                    continue;
-                };
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Up
-                    | KeyCode::Down
-                    | KeyCode::PageUp
-                    | KeyCode::PageDown
-                    | KeyCode::Char('p')
-                    | KeyCode::Char('P') => {
-                        self.navigate_prompt(key.code, true, term)?;
-                    }
-                    KeyCode::Enter => {
-                        if let Some(prompt) = self.active_prompt.as_ref() {
-                            let decision = prompt.decision();
-                            if matches!(decision, Decision::Advise(_)) {
-                                self.active_prompt = None;
-                                advising = true;
-                                self.redraw(term)?;
-                                continue;
-                            }
-                            break decision;
-                        }
-                        break Decision::Cancel;
-                    }
-                    KeyCode::Esc => {
-                        break Decision::Cancel;
-                    }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        break Decision::Cancel;
-                    }
-                    KeyCode::Char(c)
-                        if key.modifiers.is_empty()
-                            && self
-                                .active_prompt
-                                .as_ref()
-                                .is_some_and(|prompt| prompt.selected == 1) =>
-                    {
-                        self.input.insert_char(c);
-                        self.active_prompt = None;
-                        advising = true;
-                        self.redraw(term)?;
-                    }
-                    _ => {}
-                }
+                continue;
             }
-        };
+            if let Event::Paste(_) = event {
+                continue;
+            }
+            let Event::Key(key) = event else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
 
+            match key.code {
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Char('p')
+                | KeyCode::Char('P') => {
+                    self.navigate_prompt(key.code, true, term)?;
+                }
+                KeyCode::Enter => {
+                    let decision = self
+                        .active_prompt
+                        .as_ref()
+                        .map_or(Decision::Cancel, Prompt::decision);
+                    if matches!(decision, Decision::Advise(_)) {
+                        // Switch to free-form advice entry; stay pending.
+                        self.active_prompt = None;
+                        if let Some(p) = self.pending_approval.as_mut() {
+                            p.advising = true;
+                        }
+                        self.redraw(term)?;
+                    } else {
+                        self.resolve_approval(decision, term)?;
+                    }
+                }
+                KeyCode::Esc => self.resolve_approval(Decision::Cancel, term)?,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.resolve_approval(Decision::Cancel, term)?;
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty()
+                        && self
+                            .active_prompt
+                            .as_ref()
+                            .is_some_and(|prompt| prompt.selected == 1) =>
+                {
+                    self.input.insert_char(c);
+                    self.active_prompt = None;
+                    if let Some(p) = self.pending_approval.as_mut() {
+                        p.advising = true;
+                    }
+                    self.redraw(term)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Send the final [`CallOutcome`] to the waiting tool, clear prompt state,
+    /// and resume the turn timer. A `Cancel` aborts the streaming turn; the
+    /// loop's top-of-iteration check propagates the cancel to running tools.
+    fn resolve_approval(&mut self, decision: Decision, term: &mut BoneTerminal) -> io::Result<()> {
+        if let Some(pending) = self.pending_approval.take() {
+            let resolved = match decision {
+                Decision::Accept => CallOutcome::Approve,
+                Decision::Advise(advice) => CallOutcome::Blocked(format!(
+                    "[exit_code=1] Tool not executed. User advice: {advice}"
+                )),
+                Decision::Cancel => {
+                    self.cancel_streaming = true;
+                    CallOutcome::Denied
+                }
+            };
+            let _ = pending.reply.send(resolved);
+        }
         self.active_prompt = None;
-        self.redraw(term)?;
-
-        Ok(decision)
+        self.timer_resume();
+        self.redraw(term)
     }
 
     pub(super) async fn handle_command(

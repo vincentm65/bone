@@ -76,7 +76,6 @@ fn record_real_usage() {
     assert_eq!(stats.received, 56);
     assert_eq!(stats.request_count, 1);
     assert_eq!(stats.context_length, 1234);
-    assert_eq!(stats.total(), 1290);
 }
 
 #[test]
@@ -120,35 +119,6 @@ fn format_tokens_millions() {
     assert_eq!(format_tokens(1_000_000), "1,000,000");
     assert_eq!(format_tokens(1_234_567), "1,234,567");
     assert_eq!(format_tokens(12_345_678), "12,345,678");
-}
-
-#[test]
-fn display_format() {
-    let mut stats = TokenStats::new();
-    stats.record_request(1234, 56, None, None);
-    assert_eq!(
-        stats.display_with_received_override(None),
-        "curr 1,234 | in 1,234 | out 56"
-    );
-}
-
-#[test]
-fn display_format_no_context() {
-    let stats = TokenStats::new();
-    assert_eq!(
-        stats.display_with_received_override(None),
-        "curr 0 | in 0 | out 0"
-    );
-}
-
-#[test]
-fn display_received_override_is_cumulative() {
-    let mut stats = TokenStats::new();
-    stats.record_request(100, 25, None, None);
-    assert_eq!(
-        stats.display_with_received_override(Some(stats.received + 10)),
-        "curr 100 | in 100 | out 35"
-    );
 }
 
 #[test]

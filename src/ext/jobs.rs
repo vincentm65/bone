@@ -27,16 +27,6 @@ pub enum JobStatus {
     Error,
 }
 
-impl JobStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            JobStatus::Running => "running",
-            JobStatus::Done => "done",
-            JobStatus::Error => "error",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct Job {
     pub id: String,

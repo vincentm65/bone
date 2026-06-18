@@ -205,29 +205,6 @@ impl ExtensionManager {
         super::api_ui::drain_diffs(&self.ui)
     }
 
-    /// Snapshot the current Lua-driven `ViewModel` (full state, e.g. for a
-    /// late-joining frontend before it starts receiving diffs). Locks the
-    /// standalone `UiState` mutex only — never the Lua VM.
-    pub fn view_snapshot(&self) -> crate::runtime::view::ViewModel {
-        super::api_ui::snapshot(&self.ui)
-    }
-
-    /// Re-read the live `bone.keymap` table (reflects runtime
-    /// `bone.api.keymap.set/del`), not the boot-time snapshot.
-    pub fn keymap_snapshot_live(&self) -> LuaKeymapSnapshot {
-        let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
-        read_subtable_snapshot(&lua, "keymap", LuaKeymapSnapshot::from_lua_table)
-            .unwrap_or_default()
-    }
-
-    /// Re-read the live `bone.config` table (reflects runtime
-    /// `bone.api.config.set`), not the boot-time snapshot.
-    pub fn config_snapshot_live(&self) -> LuaConfigSnapshot {
-        let lua = self.lua.lock().unwrap_or_else(|e| e.into_inner());
-        read_subtable_snapshot(&lua, "config", LuaConfigSnapshot::from_lua_table)
-            .unwrap_or_default()
-    }
-
     /// Get registered Lua commands.
     pub fn commands(&self) -> &[super::ops_commands::RegisteredLuaCommand] {
         &self.commands
@@ -678,18 +655,6 @@ fn guard_with_bone(lua_arc: &Arc<Mutex<Lua>>) -> Option<std::sync::MutexGuard<'_
 /// Inner dispatch logic. When `blockable` is false, always returns
 /// `EventDispatchResult::Continue`. Handler errors are logged but never
 /// block (fail-open).
-/// Read `bone.<name>` and build a snapshot `T` from it, or `None` if the table
-/// is missing. Used for live config/keymap re-reads after runtime mutation.
-fn read_subtable_snapshot<T>(
-    lua: &mlua::Lua,
-    name: &str,
-    build: impl Fn(&mlua::Lua, &mlua::Table) -> Result<T, String>,
-) -> Option<T> {
-    let bone = lua.globals().get::<Option<mlua::Table>>("bone").ok()??;
-    let table = bone.get::<Option<mlua::Table>>(name).ok()??;
-    build(lua, &table).ok()
-}
-
 fn dispatch_event_inner(
     lua: &mlua::Lua,
     event_name: &str,
