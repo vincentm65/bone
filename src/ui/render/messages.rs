@@ -91,36 +91,77 @@ fn render_diff_preview(
     terminal_width: usize,
 ) {
     let content = content.strip_prefix('\n').unwrap_or(content);
+    let indent = "  ";
+    let effective_width = terminal_width.saturating_sub(indent.len());
     for raw_line in content.lines() {
         let (visual_lines, style, fill_background) =
             if let Some((gutter, body, marker)) = numbered_diff_parts(raw_line) {
-                let style = match marker {
+               let style = match marker {
                     '-' => Style::default().bg(theme.diff_removed),
                     '+' => Style::default().bg(theme.diff_added),
-                    _ => Style::default().fg(theme.system_msg),
+                    _ => Style::default().fg(theme.tool_call),
                 };
                 (
-                    wrap_numbered_diff_line(gutter, body, terminal_width),
+                    wrap_numbered_diff_line(gutter, body, effective_width),
                     style,
                     matches!(marker, '-' | '+'),
                 )
             } else {
                 (
-                    wrap::wrap_text(raw_line, terminal_width),
+                    wrap::wrap_text(raw_line, effective_width),
                     Style::default().fg(theme.system_msg),
                     false,
                 )
             };
 
         for visual_line in visual_lines {
+            let prefixed = format!("{indent}{visual_line}");
             let line = if fill_background {
-                pad_to_terminal_width(&visual_line, terminal_width)
+                pad_to_terminal_width(&prefixed, terminal_width)
             } else {
-                visual_line
+                prefixed
             };
-            lines.push(Line::from(Span::styled(line, style)));
+            if let Some(spans) = header_spans_for_line(&line, theme) {
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(Span::styled(line, style)));
+            }
         }
     }
+}
+
+fn header_spans_for_line(line: &str, theme: &Theme) -> Option<Vec<Span<'static>>> {
+    // Check if this line is part of a diff header (first line or continuation)
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let name_end = trimmed.find(' ')?;
+    let tool_name = &trimmed[..name_end];
+    let rest = &trimmed[name_end + 1..];
+    let paren_start = rest.rfind(" (-")?;
+    let counts = &rest[paren_start + 1..];
+    if !counts.ends_with(')') || !counts.contains(" | +") {
+        return None;
+    }
+
+    // If line is longer than the header, it's a wrapped continuation
+    let full_header = format!("{}{counts}", &rest[..paren_start]);
+    if line.len() > trimmed.len() + (full_header.len() - name_end - 1) {
+        // Wrapped continuation — use full line with detail style
+        return Some(vec![Span::styled(line.to_string(), Style::default().fg(theme.tool_call))]);
+    }
+
+    let path = &rest[..paren_start];
+    let name_style = Style::default().fg(Color::White);
+    let detail_style = Style::default().fg(theme.tool_call);
+
+    Some(vec![
+        Span::raw("  "),
+        Span::styled("  ", Style::default().fg(theme.tool_error)),
+        Span::styled(tool_name.to_string(), name_style),
+        Span::styled(format!(" {path} {counts}"), detail_style),
+    ])
 }
 
 fn numbered_diff_parts(line: &str) -> Option<(&str, &str, char)> {

@@ -462,7 +462,7 @@ async fn preview_uses_same_recovery_logic_as_execute() {
         "replace": "    let value = 2;\n"
     });
 
-    let preview = preview_edit_file(args.clone()).await.expect("preview");
+    let preview = preview_edit_file("edit_file", args.clone()).await.expect("preview");
     assert!(preview.diff.contains("let value = 2;"));
 
     let tool = EditFileTool;

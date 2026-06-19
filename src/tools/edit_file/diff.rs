@@ -5,9 +5,9 @@ pub(crate) fn summarize_change(old: &str, new: &str) -> String {
     format!("+{insertions}, -{deletions}")
 }
 
-pub(crate) fn build_unified_diff(path: &str, old: &str, new: &str) -> String {
+pub(crate) fn build_unified_diff(tool_name: &str, path: &str, old: &str, new: &str) -> String {
     let (lines, insertions, deletions) = build_numbered_diff_lines(old, new, 3);
-    let header = format!("{path} | -{deletions} | +{insertions}");
+    let header = format!("    {tool_name} {path} (-{deletions} | +{insertions})");
 
     if lines.is_empty() {
         return format!("\n{header}\n(no changes)");

@@ -41,17 +41,17 @@ fn long_added_and_removed_diff_lines_wrap_with_blank_gutters_and_backgrounds() {
 
     assert!(removed.len() > 1);
     assert!(added.len() > 1);
-    assert!(line_text(removed[0]).starts_with("   12 - "));
-    assert!(line_text(added[0]).starts_with("   12 + "));
+    assert!(line_text(removed[0]).starts_with("     12 - "));
+    assert!(line_text(added[0]).starts_with("     12 + "));
     assert!(
         removed[1..]
             .iter()
-            .all(|line| line_text(line).starts_with("        "))
+            .all(|line| line_text(line).starts_with("          "))
     );
     assert!(
         added[1..]
             .iter()
-            .all(|line| line_text(line).starts_with("        "))
+            .all(|line| line_text(line).starts_with("          "))
     );
     assert!(
         removed
@@ -84,7 +84,7 @@ fn indented_changed_expression_keeps_body_indent_on_continuations() {
         .collect::<Vec<_>>();
 
     assert!(added.len() > 1, "expected wrapped added line: {added:?}");
-    assert!(added[0].starts_with("   34 +             !StreamFailure"));
+    assert!(added[0].starts_with("     34 +             !StreamFailure"));
     assert!(
         added[1..]
             .iter()
@@ -109,5 +109,5 @@ fn diff_header_and_context_are_explicitly_wrapped_to_terminal_width() {
             .all(|line| { UnicodeWidthStr::width(line_text(line).as_str()) <= usize::from(width) })
     );
     let texts = lines.iter().map(line_text).collect::<Vec<_>>();
-    assert!(texts.iter().any(|line| line.starts_with("        ")));
+    assert!(texts.iter().any(|line| line.starts_with("          ")));
 }

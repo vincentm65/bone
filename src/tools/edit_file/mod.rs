@@ -111,11 +111,11 @@ impl Tool for EditFileTool {
     }
 }
 
-pub async fn preview_edit_file(arguments: Value) -> Result<EditPreview, String> {
+pub async fn preview_edit_file(tool_name: &str, arguments: Value) -> Result<EditPreview, String> {
     let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
     let (original, next) = build_candidate_content(&args).await?;
     let before_hash = sha256_hex(&original);
-    let diff = diff::build_unified_diff(&args.path, &original, &next);
+    let diff = diff::build_unified_diff(tool_name, &args.path, &original, &next);
     Ok(EditPreview { before_hash, diff })
 }
 
@@ -141,7 +141,7 @@ pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
         write_atomic(path, &next, permissions).await?;
     }
     let summary = diff::summarize_change(&original, &next);
-    let diff = diff::build_unified_diff(&args.path, &original, &next);
+    let diff = diff::build_unified_diff("edit_file", &args.path, &original, &next);
     Ok(format!("edited file ({summary}){diff}"))
 }
 

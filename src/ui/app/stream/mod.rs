@@ -2,8 +2,8 @@ use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatMessage, ChatRole};
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
-use crate::tools::types::{Tool, ToolLiveEvent};
-use crate::tools::{ApprovalMode, ToolCall, ToolResult};
+use crate::tools::types::ToolLiveEvent;
+use crate::tools::{ApprovalMode, Tool, ToolCall, ToolResult};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
@@ -756,32 +756,12 @@ impl App {
         call: &ToolCall,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        let preview = match preview_edit_file(call.arguments.clone()).await {
+        let preview = match preview_edit_file(&call.name, call.arguments.clone()).await {
             Ok(p) => p,
             Err(_) => return Ok(()), // execution will surface the real error
         };
-        let show_row = self
-            .tools
-            .display_for_call(call)
-            .and_then(|d| d.show)
-            .unwrap_or(true);
-        if show_row {
-            let placeholder = ToolResult {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                content: String::new(),
-                is_error: false,
-                pane_page: None,
-                state: None,
-            };
-            self.messages.push(build_tool_row(
-                call,
-                &placeholder,
-                self.tools.display_for_call(call),
-            ));
-            self.shown_tool_rows.insert(call.id.clone());
-        }
         self.messages.push(Message::system(preview.diff));
+        self.shown_tool_rows.insert(call.id.clone());
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         Ok(())
