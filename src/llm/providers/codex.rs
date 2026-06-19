@@ -36,7 +36,10 @@ impl CodexProvider {
         Self {
             client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(300))
+                // Idle (between-chunks) timeout, not a total-request timeout —
+                // a long reasoning stream must not be killed mid-turn. See the
+                // openai_compat provider for the rationale.
+                .read_timeout(std::time::Duration::from_secs(120))
                 .build()
                 .unwrap_or_default(),
             id: id.to_string(),

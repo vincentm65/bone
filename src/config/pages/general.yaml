@@ -5,6 +5,10 @@ fields:
     type: enum
     options: [safe, danger]
     default: safe
+  - key: show_thinking
+    label: "Show reasoning in a live pane"
+    type: bool
+    default: false
   - key: auto_compact_tokens
     label: auto_compact_tokens
     type: string

@@ -42,6 +42,10 @@ pub struct UserConfig {
     pub approval_mode: ApprovalMode,
     pub enabled_tools: Vec<String>,
     pub status_show: std::collections::HashMap<String, bool>,
+    /// Stream model reasoning/thinking into a live bottom pane while a turn
+    /// runs. Off by default; reasoning is otherwise dropped (only the spinner
+    /// shows). See `RuntimeEvent::ReasoningDelta` handling in the stream pump.
+    pub show_thinking: bool,
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
@@ -57,6 +61,7 @@ impl Default for UserConfig {
             approval_mode: ApprovalMode::default(),
             enabled_tools: default_enabled_tools(),
             status_show: Self::default_status_show(),
+            show_thinking: false,
         }
     }
 }
@@ -102,6 +107,7 @@ impl UserConfig {
         if self.enabled_tools.is_empty() {
             self.enabled_tools = default_enabled_tools();
         }
+        self.show_thinking = custom.get_value("general", "show_thinking") == "true";
 
         // Status bar toggles
         for key in Self::STATUS_TOGGLE_KEYS {

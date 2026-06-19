@@ -101,6 +101,7 @@ impl CustomConfigs {
         migrate_old_values_file();
         migrate_status_values_from_general();
         migrate_providers_file();
+        backfill_general_fields();
 
         let dir = config_dir();
         let mut configs = CustomConfigs::default();
@@ -719,6 +720,36 @@ fn migrate_status_values_from_general() {
 
 fn is_status_toggle_key(key: &str) -> bool {
     UserConfig::STATUS_TOGGLE_KEYS.contains(&key)
+}
+
+/// Append field *definitions* added to the seed `general.yaml` after a user's
+/// file was first written, so new built-in toggles (e.g. `show_thinking`)
+/// become reachable from `/config` without clobbering existing user values.
+/// No-op when the file is absent (fresh installs get the full seed) or already
+/// current.
+fn backfill_general_fields() {
+    let general_path = config_dir().join("general.yaml");
+    if !general_path.exists() {
+        return;
+    }
+    let Some(mut general) = load_yaml::<CustomConfigPage>(&general_path) else {
+        return;
+    };
+    let Some(seed) = serde_yaml::from_str::<CustomConfigPage>(GENERAL_YAML).ok() else {
+        return;
+    };
+
+    let mut changed = false;
+    for seed_field in seed.fields {
+        if !general.fields.iter().any(|f| f.key == seed_field.key) {
+            general.fields.push(seed_field);
+            changed = true;
+        }
+    }
+
+    if changed && let Ok(yaml) = serde_yaml::to_string(&general) {
+        let _ = std::fs::write(general_path, yaml);
+    }
 }
 
 fn value_for_field(field: &ConfigField, value: String) -> serde_yaml::Value {

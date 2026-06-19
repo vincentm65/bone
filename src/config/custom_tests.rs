@@ -47,6 +47,28 @@ fn old_values_file_general_status_toggles_migrate_to_status_page() {
 }
 
 #[test]
+fn backfill_adds_new_seed_field_to_existing_general_page() {
+    with_temp_config_home(|| {
+        seed_builtin_pages();
+        // Simulate an older general.yaml predating the show_thinking field.
+        let general_path = config_dir().join("general.yaml");
+        let mut general = load_yaml::<CustomConfigPage>(&general_path).unwrap();
+        general.fields.retain(|f| f.key != "show_thinking");
+        // Keep a user-set value on a surviving field to prove it's preserved.
+        if let Some(f) = general.fields.iter_mut().find(|f| f.key == "approval_mode") {
+            f.value = Some(serde_yaml::Value::String("danger".to_string()));
+        }
+        std::fs::write(&general_path, serde_yaml::to_string(&general).unwrap()).unwrap();
+
+        let configs = CustomConfigs::load();
+
+        // New field is now reachable (default false), existing value untouched.
+        assert_eq!(configs.get_value("general", "show_thinking"), "false");
+        assert_eq!(configs.get_value("general", "approval_mode"), "danger");
+    });
+}
+
+#[test]
 fn general_page_status_toggles_migrate_to_status_page() {
     with_temp_config_home(|| {
         seed_builtin_pages();

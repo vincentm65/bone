@@ -13,6 +13,7 @@ use futures_util::pin_mut;
 use std::collections::VecDeque;
 use std::io;
 use tokio::sync::mpsc;
+use std::time::Instant;
 use tokio::time::{self, Duration};
 
 use super::{App, apply_input_key_with_paste_burst};
@@ -468,6 +469,9 @@ impl App {
             self.renderer
                 .finalize_streaming_message(&self.messages[idx].content, term)?;
         }
+        // Defensive teardown: a tool-only or failed turn never emits TextDelta,
+        // so clear the live thinking pane here too.
+        self.clear_thinking_pane();
         self.streaming = false;
         // Authoritative token_stats are now reabsorbed; drop the live estimate
         // so the status bar shows the real `received` count.
@@ -505,15 +509,23 @@ impl App {
         use crate::runtime::RuntimeEvent;
         match ev {
             RuntimeEvent::TextDelta { text } => {
+                // The answer is starting — fade out the live thinking pane,
+                // honoring its minimum on-screen retention.
+                self.fade_thinking_pane();
                 let idx = self.pump_ensure_assistant(cur_idx);
                 self.bump_estimated_received(text.len());
                 self.messages[idx].content.push_str(&text);
                 self.renderer
                     .flush_streaming_message(&self.messages[idx].content, term)?;
             }
-            RuntimeEvent::ReasoningDelta { .. } => {
-                // Reasoning is retained in the Driver transcript; the current
-                // TUI has no visible reasoning pane yet.
+            RuntimeEvent::ReasoningDelta { text } => {
+                // Reasoning is always retained in the Driver transcript for
+                // echo-back; here we optionally surface it live. When disabled
+                // (default), drop it — only the spinner shows.
+                if self.user_config.show_thinking {
+                    self.push_thinking(&text);
+                    self.pump_tick(term)?;
+                }
             }
             RuntimeEvent::TokenUsage {
                 sent,
@@ -534,10 +546,22 @@ impl App {
                 self.stream_estimated_received = Some(received);
                 self.pump_tick(term)?;
             }
-            RuntimeEvent::Status { .. }
+            RuntimeEvent::Status { message } => {
+                // Most status lines are already covered by other UI (the
+                // spinner for "thinking", tool rows for "running …"). Surface
+                // only the problem signals — retries and stream errors — that
+                // would otherwise leave the user staring at a spinner with no
+                // explanation while the driver silently retries.
+                if message.starts_with("retry") || message.contains("stream error") {
+                    self.pump_notice(format!("⚠ {message}"), cur_idx, term)?;
+                }
+            }
+            // `Failed` stays authoritative at turn end (rendered from
+            // `outcome.result`); surfacing the retry/stream-error `Status`
+            // events above is enough to break the silent-hang illusion.
+            RuntimeEvent::Failed { .. }
             | RuntimeEvent::Started { .. }
-            | RuntimeEvent::Finished { .. }
-            | RuntimeEvent::Failed { .. } => {}
+            | RuntimeEvent::Finished { .. } => {}
             RuntimeEvent::ToolCall {
                 id,
                 name,
@@ -606,6 +630,100 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Push a one-off notice (retry/error) into scrollback mid-turn. Finalizes
+    /// any in-progress streamed assistant message first so the notice doesn't
+    /// interleave with partial markdown, mirroring the `ToolResult` path.
+    fn pump_notice(
+        &mut self,
+        message: String,
+        cur_idx: &mut Option<usize>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        if let Some(idx) = cur_idx.take() {
+            self.renderer
+                .finalize_streaming_message(&self.messages[idx].content, term)?;
+            self.renderer.flush_separator(term)?;
+        }
+        self.messages.push(Message::system(message));
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        Ok(())
+    }
+
+    /// Maximum chars of reasoning retained for the live pane. The pane only
+    /// ever shows its tail, so keeping the whole (potentially huge) reasoning
+    /// blob would make every delta re-wrap O(n) chars — exactly the quadratic
+    /// blowup that makes long-reasoning turns feel frozen. Bounding the buffer
+    /// keeps each redraw cheap.
+    const THINKING_TAIL_CAP: usize = 4096;
+    /// Total pane rows: a "Thinking" header plus the reasoning tail.
+    const THINKING_MAX_ROWS: usize = 10;
+    /// Minimum time the thinking pane stays on screen once shown, so a quick
+    /// reasoning burst doesn't flash away the instant the answer starts.
+    const THINKING_RETAIN: Duration = Duration::from_secs(1);
+
+    /// Append reasoning text to the bounded live-pane buffer and refresh the
+    /// "thinking" pane. Front-truncates to [`THINKING_TAIL_CAP`] on a char
+    /// boundary so multi-byte graphemes never split.
+    fn push_thinking(&mut self, text: &str) {
+        self.thinking_tail.push_str(text);
+        let len = self.thinking_tail.len();
+        if len > Self::THINKING_TAIL_CAP {
+            let mut cut = len - Self::THINKING_TAIL_CAP;
+            while cut < len && !self.thinking_tail.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.thinking_tail.drain(..cut);
+        }
+        // Fresh reasoning cancels any pending teardown and starts the clock.
+        self.thinking_clear_at = None;
+        self.thinking_first_shown.get_or_insert_with(Instant::now);
+
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::Line;
+        let grey = Style::default().fg(Color::Gray);
+        // Header + the last reasoning lines that fit; the header stays pinned.
+        let all: Vec<&str> = self.thinking_tail.split('\n').collect();
+        let start = all.len().saturating_sub(Self::THINKING_MAX_ROWS - 1);
+        let mut content = vec![Line::styled(
+            "✻ Thinking",
+            grey.add_modifier(Modifier::BOLD),
+        )];
+        content.extend(all[start..].iter().map(|l| Line::styled((*l).to_string(), grey)));
+        let visible_rows = content.len();
+        let page = PanePage {
+            source: "thinking".to_string(),
+            title: "thinking".to_string(),
+            content,
+            visible_rows,
+            scroll: 0,
+        };
+        let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+        self.active_page = active;
+    }
+
+    /// Tear down the thinking pane, but keep it on screen for at least
+    /// [`THINKING_RETAIN`] from when it first appeared. Called when the answer
+    /// starts; the pump tick removes it once the retention window elapses.
+    fn fade_thinking_pane(&mut self) {
+        match self.thinking_first_shown.map(|t| t + Self::THINKING_RETAIN) {
+            Some(deadline) if Instant::now() < deadline => self.thinking_clear_at = Some(deadline),
+            _ => self.clear_thinking_pane(),
+        }
+    }
+
+    /// Remove the live "thinking" pane and clear its buffer. Idempotent — a
+    /// no-op when no reasoning was shown this turn.
+    pub(crate) fn clear_thinking_pane(&mut self) {
+        self.thinking_clear_at = None;
+        self.thinking_first_shown = None;
+        if self.thinking_tail.is_empty() && !self.pages.iter().any(|p| p.source == "thinking") {
+            return;
+        }
+        self.thinking_tail.clear();
+        self.active_page = PanePage::remove(&mut self.pages, "thinking", self.active_page);
     }
 
     /// Get (creating if needed) the current streaming assistant message index,
@@ -681,6 +799,10 @@ impl App {
     /// (v2: safe to call while a Lua tool blocks — the UiState mutex is
     /// separate from the VM mutex), then renders the spinner and panes.
     fn pump_tick(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        // Retire the thinking pane once its retention window has elapsed.
+        if self.thinking_clear_at.is_some_and(|d| Instant::now() >= d) {
+            self.clear_thinking_pane();
+        }
         self.apply_view_diffs();
         self.maybe_refresh_subagent_pane();
         self.render_streaming(term)

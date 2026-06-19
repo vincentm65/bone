@@ -80,6 +80,16 @@ pub struct App {
     pub active_page: usize,
     /// Whether pane pages are shown in the bottom pane.
     pub panes_visible: bool,
+    /// Bounded tail of the current turn's reasoning text, rendered into the
+    /// live "thinking" pane while a reasoning model streams (only when
+    /// `user_config.show_thinking`). Cleared when the answer starts / turn ends.
+    pub thinking_tail: String,
+    /// When the thinking pane first appeared this turn — anchors the minimum
+    /// 1s on-screen retention so a quick reasoning burst doesn't flash away.
+    pub thinking_first_shown: Option<std::time::Instant>,
+    /// Deferred teardown deadline for the thinking pane: set when the answer
+    /// starts but the retention window hasn't elapsed; the pump tick clears it.
+    pub thinking_clear_at: Option<std::time::Instant>,
 
     /// SQLite session database for conversation persistence and usage tracking.
     session_db: Option<SessionDb>,
@@ -202,6 +212,9 @@ impl App {
             pages: Vec::new(),
             active_page: 0,
             panes_visible: true,
+            thinking_tail: String::new(),
+            thinking_first_shown: None,
+            thinking_clear_at: None,
 
             session_db: None,
             conversation_id: None,

@@ -36,7 +36,12 @@ impl OpenAiCompatProvider {
         Self {
             client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(300))
+                // Idle (between-chunks) timeout, NOT a total-request timeout. A
+                // reasoning model on a long prompt can legitimately stream for
+                // many minutes; a total `.timeout()` would kill the whole turn
+                // mid-think. `read_timeout` instead only trips when the stream
+                // genuinely stalls (dropped connection), which is what we want.
+                .read_timeout(std::time::Duration::from_secs(120))
                 .build()
                 .unwrap_or_default(),
             id: id.to_string(),
