@@ -197,7 +197,22 @@ impl LuaTool {
             Err(e) => return Err(format!("lua tool '{name}': {e}")),
         };
 
-        parse_tool_output(&text)
+        let output = parse_tool_output(&text)?;
+
+        // A tool-result `pane` envelope (host-stateful tools like `task_list`)
+        // renders through the same shared `UiState` handle the TUI drains as
+        // `ctx.ui.pane` — the only live-pane transport since the channel was
+        // retired. Without this push the pane is parsed into `pane_page` (and
+        // used for host state) but never reaches the screen. Skip for subagents
+        // (depth > 0): their panes must not leak into the parent TUI.
+        if context.agent_depth == 0
+            && let Some(pane) = &output.pane_page
+        {
+            let diff = crate::runtime::view::view_diff_from_pane_content(pane.clone());
+            super::api_ui::lock_shared(&ui).apply(diff);
+        }
+
+        Ok(output)
     }
 }
 
