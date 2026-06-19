@@ -90,4 +90,3 @@ impl SessionSink for NullSessionSink {
 
     fn end(&self) {}
 }
-

@@ -96,7 +96,7 @@ fn render_diff_preview(
     for raw_line in content.lines() {
         let (visual_lines, style, fill_background) =
             if let Some((gutter, body, marker)) = numbered_diff_parts(raw_line) {
-               let style = match marker {
+                let style = match marker {
                     '-' => Style::default().bg(theme.diff_removed),
                     '+' => Style::default().bg(theme.diff_added),
                     _ => Style::default().fg(theme.tool_call),
@@ -149,7 +149,10 @@ fn header_spans_for_line(line: &str, theme: &Theme) -> Option<Vec<Span<'static>>
     let full_header = format!("{}{counts}", &rest[..paren_start]);
     if line.len() > trimmed.len() + (full_header.len() - name_end - 1) {
         // Wrapped continuation — use full line with detail style
-        return Some(vec![Span::styled(line.to_string(), Style::default().fg(theme.tool_call))]);
+        return Some(vec![Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.tool_call),
+        )]);
     }
 
     let path = &rest[..paren_start];

@@ -190,8 +190,7 @@ impl Driver {
                 // before compaction ever triggers. The real provider-reported
                 // value overwrites this after the request lands.
                 token_stats.context_length =
-                    estimate_tokens(estimate_context_chars(&history, tool_defs_json_chars))
-                        as u64;
+                    estimate_tokens(estimate_context_chars(&history, tool_defs_json_chars)) as u64;
                 let state = crate::ext::ctx::AppCtxState::new(
                     &tools,
                     &token_stats,

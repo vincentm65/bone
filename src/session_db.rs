@@ -810,7 +810,6 @@ impl SessionDb {
         })?;
         rows.collect()
     }
-
 }
 
 fn now_iso() -> String {

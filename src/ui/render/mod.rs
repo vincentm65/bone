@@ -27,7 +27,6 @@ pub use bottom_pane::PaneDraw;
 pub(crate) use bottom_pane::approval_pane_lines;
 pub(crate) use bottom_pane::clamped_pane_visible_rows;
 pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
-pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
 
@@ -46,6 +45,18 @@ pub struct StatusInfo {
     /// Lua-defined status segments (`bone.api.ui.set_statusline`), appended to
     /// the native status bar. Empty when Lua has not set one.
     pub lua_status: Vec<crate::runtime::view::StatusSegment>,
+    /// Resolved spinner frames for the currently-selected style.
+    pub spinner_frames: Vec<String>,
+    /// Resolved frame speed in ms (override or style default).
+    pub spinner_speed_ms: u64,
+    /// Resolved rotating thinking-text phrases for the selected preset.
+    pub spinner_texts: Vec<String>,
+    /// Whether thinking-text phrases rotate while streaming.
+    pub spinner_text_rotate: bool,
+    /// Thinking-text rotation speed in ms/phrase; 0 means one phrase per spinner cycle.
+    pub spinner_text_speed_ms: u64,
+    /// Raw elapsed milliseconds of the current turn (for frame indexing).
+    pub spinner_elapsed_ms: u64,
 }
 
 impl StatusInfo {
@@ -59,7 +70,6 @@ pub struct Renderer {
     pub theme: Theme,
     /// Index of the first message NOT yet pushed to native scrollback.
     pub scrollback_cursor: usize,
-    pub spinner_tick: usize,
     /// Byte offset of the current streaming assistant message already flushed
     /// to native scrollback via insert_before.
     pub streaming_source_flushed: usize,
@@ -87,7 +97,6 @@ impl Renderer {
         Self {
             theme: Theme::default(),
             scrollback_cursor: 0,
-            spinner_tick: 0,
             streaming_source_flushed: 0,
             streaming_lines_flushed: 0,
             last_size: None,
@@ -522,9 +531,8 @@ impl Renderer {
         Ok(())
     }
 
-    /// Advance the spinner and redraw bottom pane.
+    /// Redraw the bottom pane during streaming (elapsed-time spinner advances).
     pub fn tick_spinner(&mut self, term: &mut BoneTerminal, args: &PaneDraw<'_>) -> io::Result<()> {
-        self.spinner_tick = self.spinner_tick.wrapping_add(1);
         self.ensure_viewport_height(term, args.input, None, args.pages, args.active_page, None)?;
         term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
         Ok(())

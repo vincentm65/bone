@@ -102,6 +102,7 @@ impl CustomConfigs {
         migrate_status_values_from_general();
         migrate_providers_file();
         backfill_general_fields();
+        backfill_status_fields();
 
         let dir = config_dir();
         let mut configs = CustomConfigs::default();
@@ -749,6 +750,34 @@ fn backfill_general_fields() {
 
     if changed && let Ok(yaml) = serde_yaml::to_string(&general) {
         let _ = std::fs::write(general_path, yaml);
+    }
+}
+
+/// Merge any new fields from the bundled seed into the user's on-disk
+/// `status.yaml`, preserving their existing values/order. Mirrors
+/// [`backfill_general_fields`].
+fn backfill_status_fields() {
+    let status_path = config_dir().join("status.yaml");
+    if !status_path.exists() {
+        return;
+    }
+    let Some(mut status) = load_yaml::<CustomConfigPage>(&status_path) else {
+        return;
+    };
+    let Some(seed) = serde_yaml::from_str::<CustomConfigPage>(STATUS_YAML).ok() else {
+        return;
+    };
+
+    let mut changed = false;
+    for seed_field in seed.fields {
+        if !status.fields.iter().any(|f| f.key == seed_field.key) {
+            status.fields.push(seed_field);
+            changed = true;
+        }
+    }
+
+    if changed && let Ok(yaml) = serde_yaml::to_string(&status) {
+        let _ = std::fs::write(status_path, yaml);
     }
 }
 

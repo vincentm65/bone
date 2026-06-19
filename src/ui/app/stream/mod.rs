@@ -12,8 +12,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::pin_mut;
 use std::collections::VecDeque;
 use std::io;
-use tokio::sync::mpsc;
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
 use super::{App, apply_input_key_with_paste_burst};
@@ -700,7 +700,11 @@ impl App {
             "✻ Thinking",
             grey.add_modifier(Modifier::BOLD),
         )];
-        content.extend(all[start..].iter().map(|l| Line::styled((*l).to_string(), grey)));
+        content.extend(
+            all[start..]
+                .iter()
+                .map(|l| Line::styled((*l).to_string(), grey)),
+        );
         let visible_rows = content.len();
         let page = PanePage {
             source: "thinking".to_string(),

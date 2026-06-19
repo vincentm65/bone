@@ -5,6 +5,114 @@
 
 use std::collections::HashMap;
 
+// ── Spinner / text presets ──────────────────────────────────────────────────
+
+/// A spinner style preset (frames + natural frame speed).
+#[derive(Debug, Clone, Default)]
+pub struct SpinnerPreset {
+    pub name: String,
+    /// Milliseconds per frame.
+    pub speed: u64,
+    pub frames: Vec<String>,
+}
+
+/// A rotating thinking-text preset.
+#[derive(Debug, Clone, Default)]
+pub struct TextPreset {
+    pub name: String,
+    pub phrases: Vec<String>,
+}
+
+/// Parse spinner presets, skipping any malformed entry rather than discarding
+/// the whole list. A preset needs a `name` and at least one frame to be usable.
+fn parse_spinner_presets(table: &mlua::Table) -> Vec<SpinnerPreset> {
+    let mut out = Vec::new();
+    for pair in table.pairs::<mlua::Value, mlua::Table>() {
+        let Ok((_, t)) = pair else {
+            continue;
+        };
+        let Ok(name) = t.get::<String>("name") else {
+            eprintln!("bone-lua warn: spinner preset missing name; skipping");
+            continue;
+        };
+        let speed: u64 = t.get::<Option<u64>>("speed").ok().flatten().unwrap_or(80);
+        let frames = t
+            .get::<Option<mlua::Table>>("frames")
+            .ok()
+            .flatten()
+            .map(|ft| {
+                ft.sequence_values::<String>()
+                    .filter_map(|f| f.ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if frames.is_empty() {
+            eprintln!("bone-lua warn: spinner preset '{name}' has no frames; skipping");
+            continue;
+        }
+        out.push(SpinnerPreset {
+            name,
+            speed,
+            frames,
+        });
+    }
+    out
+}
+
+/// Parse rotating-text presets, skipping malformed entries (see
+/// [`parse_spinner_presets`]).
+fn parse_text_presets(table: &mlua::Table) -> Vec<TextPreset> {
+    let mut out = Vec::new();
+    for pair in table.pairs::<mlua::Value, mlua::Table>() {
+        let Ok((_, t)) = pair else {
+            continue;
+        };
+        let Ok(name) = t.get::<String>("name") else {
+            eprintln!("bone-lua warn: text preset missing name; skipping");
+            continue;
+        };
+        let phrases = t
+            .get::<Option<mlua::Table>>("phrases")
+            .ok()
+            .flatten()
+            .map(|ft| {
+                ft.sequence_values::<String>()
+                    .filter_map(|p| p.ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        out.push(TextPreset { name, phrases });
+    }
+    out
+}
+
+// ── Spinner / text preset collection ────────────────────────────────────────
+
+/// `require("ui.spinners")` and parse its returned table into presets.
+/// Returns empty vecs if the module is missing or malformed (never panics).
+pub fn collect_presets(lua: &mlua::Lua) -> (Vec<SpinnerPreset>, Vec<TextPreset>) {
+    let module: mlua::Table = match lua
+        .load(r#"return require("ui.spinners")"#)
+        .eval::<mlua::Table>()
+    {
+        Ok(t) => t,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let spinners = module
+        .get::<Option<mlua::Table>>("spinners")
+        .ok()
+        .flatten()
+        .map(|t| parse_spinner_presets(&t))
+        .unwrap_or_default();
+    let texts = module
+        .get::<Option<mlua::Table>>("texts")
+        .ok()
+        .flatten()
+        .map(|t| parse_text_presets(&t))
+        .unwrap_or_default();
+    (spinners, texts)
+}
+
 // ── Config snapshot ─────────────────────────────────────────────────────────
 
 /// Subset of `bone.config` captured after init.lua.
@@ -12,6 +120,9 @@ use std::collections::HashMap;
 pub struct LuaConfigSnapshot {
     pub approval_mode: Option<String>,
     pub status_show: HashMap<String, bool>,
+    /// Spinner + text presets from `require("ui.spinners")` (boot snapshot).
+    pub spinners: Vec<SpinnerPreset>,
+    pub texts: Vec<TextPreset>,
 }
 
 impl LuaConfigSnapshot {
@@ -35,6 +146,8 @@ impl LuaConfigSnapshot {
         Ok(Self {
             approval_mode,
             status_show,
+            spinners: Vec::new(),
+            texts: Vec::new(),
         })
     }
 }

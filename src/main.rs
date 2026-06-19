@@ -375,7 +375,31 @@ async fn main() -> std::io::Result<()> {
 
     // Shared bootstrap for all entry points
     ensure_deps();
-    bone::config::seed_all();
+
+    // `bone setup` — explicit (re)run of the onboarding wizard.
+    if args.first().map(String::as_str) == Some("setup") {
+        bone::config::seed_base();
+        // Exit 2 on cancel so a parent (e.g. the tmux `/setup` popup) can tell
+        // a cancelled wizard from an applied one.
+        let applied = bone::ui::setup::run(false)?;
+        std::process::exit(if applied { 0 } else { 2 });
+    }
+
+    // Headless / non-interactive entry points must never block on the wizard;
+    // they seed everything (or honor a prior selection) and proceed.
+    let interactive = !matches!(
+        args.first().map(String::as_str),
+        Some("run") | Some("serve") | Some("connect") | Some("stats-popup") | Some("install")
+    );
+    if interactive && bone::config::needs_onboarding() {
+        // Fresh install: seed the always-safe base so the wizard can `require`
+        // its libs, then run onboarding (writes the selection + init.lua).
+        bone::config::seed_base();
+        bone::ui::setup::run(true)?;
+    }
+    // Seed tools (and base) filtered by whatever selection is now persisted;
+    // None ⇒ seed everything (default / upgrade behavior).
+    bone::config::seed_all_with_persisted();
 
     if args.first().map(String::as_str) == Some("run") {
         let request = run::parse_run_args(&args[1..]).map_err(std::io::Error::other)?;

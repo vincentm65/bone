@@ -26,6 +26,7 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("new", "clear chat history (alias for /clear)"),
     ("provider", "pick or switch provider (/provider <name>)"),
     ("quit", "exit bone"),
+    ("setup", "re-run the onboarding setup wizard"),
     ("stats", "open full-screen token stats dashboard"),
     ("tools", "enable or disable tools, /tools reload to rescan"),
 ];

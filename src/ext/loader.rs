@@ -62,14 +62,30 @@ pub fn boot(
     };
 
     // Seed default Lua tools and commands (never overwrite user files).
-    super::seed_default_lua_tools(&config_dir.join("lua/tools"));
-    super::seed_default_lua_commands(&config_dir.join("lua/commands"));
+    // A persisted setup selection (from the onboarding wizard) narrows which
+    // bundled tools/commands get seeded; absent it, all are seeded.
+    let selection = crate::config::load_setup_selection();
+    let tool_allow = selection
+        .as_ref()
+        .map(crate::config::SetupSelection::tool_set);
+    let cmd_allow = selection
+        .as_ref()
+        .map(crate::config::SetupSelection::command_set);
+    super::seed_default_lua_tools(&config_dir.join("lua/tools"), tool_allow.as_ref());
+    super::seed_default_lua_commands(&config_dir.join("lua/commands"), cmd_allow.as_ref());
 
-    // Run tool and command files from lua/{tools,commands}/ directories.
-    if let Err(e) = super::run_lua_files(&lua, &config_dir.join("lua/tools")) {
+    // Run tool and command files from lua/{tools,commands}/ directories. The
+    // onboarding selection is enforced here too, not just at seed time: a
+    // previously seeded bundled file the user later deselected stays on disk
+    // but must not load.
+    if let Err(e) =
+        super::run_lua_tool_files(&lua, &config_dir.join("lua/tools"), tool_allow.as_ref())
+    {
         eprintln!("bone: warning: Lua tools failed: {e}");
     }
-    if let Err(e) = super::run_lua_files(&lua, &config_dir.join("lua/commands")) {
+    if let Err(e) =
+        super::run_lua_command_files(&lua, &config_dir.join("lua/commands"), cmd_allow.as_ref())
+    {
         eprintln!("bone: warning: Lua commands failed: {e}");
     }
 
@@ -267,7 +283,7 @@ fn collect_config_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots:
         None => return super::snapshots::LuaConfigSnapshot::default(),
     };
 
-    match bone_table.get::<Option<mlua::Table>>("config") {
+    let mut snapshot = match bone_table.get::<Option<mlua::Table>>("config") {
         Ok(Some(t)) => match super::snapshots::LuaConfigSnapshot::from_lua_table(&lua, &t) {
             Ok(s) => s,
             Err(e) => {
@@ -276,7 +292,13 @@ fn collect_config_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots:
             }
         },
         _ => super::snapshots::LuaConfigSnapshot::default(),
-    }
+    };
+
+    // Spinner/text presets come from the seeded ui.spinners lib, not bone.config.
+    let (spinners, texts) = super::snapshots::collect_presets(&lua);
+    snapshot.spinners = spinners;
+    snapshot.texts = texts;
+    snapshot
 }
 
 /// Collect `bone.theme` snapshot from Lua.

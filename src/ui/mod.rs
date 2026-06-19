@@ -6,6 +6,7 @@ pub mod input;
 pub mod pane_page;
 pub mod prompt;
 pub mod render;
+pub mod setup;
 pub mod stats;
 pub mod subagent_pane;
 pub mod theme;

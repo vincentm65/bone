@@ -33,6 +33,12 @@ fn status_info() -> StatusInfo {
         status_show,
         elapsed: None,
         lua_status: Vec::new(),
+        spinner_frames: Vec::new(),
+        spinner_speed_ms: 0,
+        spinner_texts: Vec::new(),
+        spinner_text_rotate: true,
+        spinner_text_speed_ms: 0,
+        spinner_elapsed_ms: 0,
     }
 }
 

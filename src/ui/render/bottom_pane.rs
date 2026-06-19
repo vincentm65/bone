@@ -6,7 +6,7 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use super::wrap;
-use super::{InputState, Prompt, SPINNER, StatusInfo};
+use super::{InputState, Prompt, StatusInfo};
 use crate::tools::ApprovalMode;
 use crate::ui::autocomplete::{AutocompleteState, MAX_VISIBLE};
 use crate::ui::pane_page::PanePage;
@@ -335,7 +335,7 @@ impl super::Renderer {
         args: &PaneDraw<'_>,
         prompt: Option<&Prompt>,
     ) {
-        self.draw_bottom_pane_with_tick(frame, args, self.spinner_tick, prompt);
+        self.draw_bottom_pane_with_tick(frame, args, prompt);
     }
 
     /// Compute the desired viewport height for the current state.
@@ -383,7 +383,6 @@ impl super::Renderer {
         &self,
         frame: &mut Frame,
         args: &PaneDraw<'_>,
-        tick: usize,
         prompt: Option<&Prompt>,
     ) {
         let input = args.input;
@@ -819,14 +818,38 @@ impl super::Renderer {
         }
 
         if status_info.show("status_show_spinner") && status_info.streaming {
-            status_spans.push(Span::styled(
-                SPINNER[tick % SPINNER.len()],
-                Style::default().fg(self.theme.thinking),
-            ));
-            status_spans.push(Span::styled(
-                " thinking",
-                Style::default().fg(self.theme.status_text),
-            ));
+            let frames = &status_info.spinner_frames;
+            if !frames.is_empty() {
+                let speed = if status_info.spinner_speed_ms > 0 {
+                    status_info.spinner_speed_ms
+                } else {
+                    80
+                };
+                let frame_idx = (status_info.spinner_elapsed_ms / speed) as usize % frames.len();
+                status_spans.push(Span::styled(
+                    frames[frame_idx].clone(),
+                    Style::default().fg(self.theme.thinking),
+                ));
+                let texts = &status_info.spinner_texts;
+                let label = if texts.is_empty() {
+                    " thinking".to_string()
+                } else if !status_info.spinner_text_rotate || texts.len() == 1 {
+                    format!(" {}", texts[0])
+                } else {
+                    let cycle = if status_info.spinner_text_speed_ms > 0 {
+                        (status_info.spinner_elapsed_ms / status_info.spinner_text_speed_ms)
+                            as usize
+                    } else {
+                        (status_info.spinner_elapsed_ms / speed) as usize / frames.len()
+                    };
+                    let phrase = &texts[cycle % texts.len()];
+                    format!(" {phrase}")
+                };
+                status_spans.push(Span::styled(
+                    label,
+                    Style::default().fg(self.theme.status_text),
+                ));
+            }
         }
 
         // Remove trailing separator if present

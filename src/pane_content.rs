@@ -69,7 +69,6 @@ pub enum PaneLineSpec {
     },
 }
 
-
 /// Pure-data representation of a pane page.
 ///
 /// This is what flows through core types (`ToolResult`, `ToolLiveEvent`).

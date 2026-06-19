@@ -91,7 +91,6 @@ impl TokenStats {
         self.request_count = 0;
         self.context_length = 0;
     }
-
 }
 
 /// Format a token count with comma-separated thousands.

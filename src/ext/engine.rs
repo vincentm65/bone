@@ -64,6 +64,37 @@ bone.banner = function()
 end
 "#;
 
+/// Appended to the banner template when the user opts into a populated
+/// `init.lua` during onboarding: a live, ready-to-dispatch sub-agent.
+const SUBAGENT_INIT_SNIPPET: &str = r#"
+-- A ready-to-use sub-agent, live immediately. Dispatch it with the `subagent`
+-- tool, e.g. "use the researcher subagent to investigate X". Add more with
+-- additional bone.register_subagent { ... } calls, or delete this block.
+bone.register_subagent({
+    name = "researcher",
+    description = "Investigates a question across the codebase and reports concise findings.",
+    system_prompt = "You are a focused research agent. Investigate the assigned task "
+        .. "thoroughly using the available tools, then report concrete findings with "
+        .. "file:line references. Do not make edits.",
+})
+"#;
+
+/// Minimal `init.lua` written when the user opts out of auto-population.
+pub const BLANK_INIT_LUA: &str = "-- Bone init.lua
+-- Empty by choice. Define bone.banner, register sub-agents, or add event hooks
+-- here. See /customize for the full picture of what Lua can do.
+";
+
+/// Banner template + a live sub-agent — the \"auto-populated\" onboarding choice.
+pub fn populated_init_lua() -> String {
+    format!("{DEFAULT_INIT_LUA}{SUBAGENT_INIT_SNIPPET}")
+}
+
+/// Minimal `init.lua` — the \"blank\" onboarding choice.
+pub fn blank_init_lua() -> String {
+    BLANK_INIT_LUA.to_string()
+}
+
 /// Build a ready-to-use Lua state with the `bone` table populated.
 pub(crate) fn create_engine(
     version: &str,

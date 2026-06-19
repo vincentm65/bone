@@ -15,7 +15,9 @@ fn temp_path(name: &str) -> PathBuf {
 #[tokio::test]
 async fn reads_entire_file_when_no_options_given() {
     let path = temp_path("full.txt");
-    fs::write(&path, "line one\nline two\nline three").await.expect("setup");
+    fs::write(&path, "line one\nline two\nline three")
+        .await
+        .expect("setup");
     let tool = ReadFileTool;
 
     let result = tool
@@ -30,7 +32,9 @@ async fn reads_entire_file_when_no_options_given() {
 #[tokio::test]
 async fn start_line_skips_to_given_line() {
     let path = temp_path("start-line.txt");
-    fs::write(&path, "alpha\nbeta\ngamma\ndelta").await.expect("setup");
+    fs::write(&path, "alpha\nbeta\ngamma\ndelta")
+        .await
+        .expect("setup");
     let tool = ReadFileTool;
 
     let result = tool

@@ -1,38 +1,64 @@
 title: Status
 fields:
   - key: status_show_model
-    label: "Status: model name"
+    label: "Model name"
     type: bool
     default: true
   - key: status_show_approval
-    label: "Status: approval mode"
+    label: "Approval mode"
     type: bool
     default: true
   - key: status_show_tokens_curr
-    label: "Status: tokens curr (context)"
+    label: "Tokens curr (context)"
     type: bool
     default: true
   - key: status_show_tokens_in
-    label: "Status: tokens in"
+    label: "Tokens in"
     type: bool
     default: true
   - key: status_show_tokens_out
-    label: "Status: tokens out"
+    label: "Tokens out"
     type: bool
     default: true
   - key: status_show_tokens_total
-    label: "Status: tokens total (in+out)"
+    label: "Tokens total (in+out)"
     type: bool
     default: true
   - key: status_show_queue
-    label: "Status: queue length"
+    label: "Queue length"
     type: bool
     default: true
   - key: status_show_spinner
-    label: "Status: thinking spinner"
+    label: "Thinking spinner"
+    type: bool
+    default: true
+  - key: status_spinner_text_rotate
+    label: "Rotate spinner text"
     type: bool
     default: true
   - key: status_show_timer
-    label: "Status: elapsed timer"
+    label: "Elapsed timer"
     type: bool
     default: true
+  - key: status_spinner_style
+    label: "Spinner style"
+    type: enum
+    options: [braille, triangle, pipe, kaomoji, typing, waveline, dots_text, progblock]
+    default: braille
+  - key: status_spinner_text
+    label: "Spinner text preset"
+    type: enum
+    options: [thinking, pondering, processing]
+    default: thinking
+  - key: status_spinner_text_custom
+    label: "Spinner text custom phrases (comma-separated)"
+    type: string
+    default: ""
+  - key: status_spinner_speed
+    label: "Spinner speed (ms/frame, 0 = style default)"
+    type: number
+    default: 0
+  - key: status_spinner_text_speed
+    label: "Spinner text speed (ms/phrase, 0 = spinner cycle)"
+    type: number
+    default: 0

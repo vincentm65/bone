@@ -182,9 +182,10 @@ impl App {
         if !banner.is_empty() {
             messages.push(Message::system(banner));
         }
-        messages.push(Message::system(
-            format!("bone v{} — type /help for commands. Ctrl+C twice to quit.", env!("CARGO_PKG_VERSION")),
-        ));
+        messages.push(Message::system(format!(
+            "bone v{} — type /help for commands. Ctrl+C twice to quit.",
+            env!("CARGO_PKG_VERSION")
+        )));
 
         Ok(Self {
             messages,
@@ -557,9 +558,10 @@ impl App {
 
         self.messages.clear();
         self.transcript.clear();
-        self.messages.push(Message::system(
-            format!("bone v{} — type /help for commands. Ctrl+C twice to quit.", env!("CARGO_PKG_VERSION")),
-        ));
+        self.messages.push(Message::system(format!(
+            "bone v{} — type /help for commands. Ctrl+C twice to quit.",
+            env!("CARGO_PKG_VERSION")
+        )));
         self.messages.push(Message::system(summary));
         self.renderer.scrollback_cursor = 0;
         self.renderer
@@ -801,6 +803,17 @@ impl App {
         Some(format!("{}:{:02}", mins, secs))
     }
 
+    /// Raw active elapsed milliseconds of the current turn (for spinner frames).
+    pub(crate) fn timer_elapsed_ms(&self) -> u64 {
+        let Some(start) = self.turn_start else {
+            return 0;
+        };
+        start
+            .elapsed()
+            .saturating_sub(self.turn_paused_duration)
+            .as_millis() as u64
+    }
+
     pub(crate) fn status_info(&self) -> StatusInfo {
         self.stream_status_info_with_tokens(self.stream_estimated_received)
     }
@@ -839,6 +852,7 @@ impl App {
             .iter()
             .flat_map(|(_, segs)| segs.iter().cloned())
             .collect();
+        info.spinner_elapsed_ms = self.timer_elapsed_ms();
         info
     }
 
@@ -1085,6 +1099,11 @@ fn job_status_sym(status: crate::ext::jobs::JobStatus) -> &'static str {
     }
 }
 
+/// Built-in spinner used when no Lua preset resolves, so the streaming spinner
+/// is never blank. Mirrors the bundled `braille` preset.
+const FALLBACK_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const FALLBACK_SPINNER_SPEED_MS: u64 = 80;
+
 /// Build a [`StatusInfo`] with a live streaming cumulative output-token estimate.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_status_info_with_token_stats(
@@ -1097,6 +1116,47 @@ pub(crate) fn stream_status_info_with_token_stats(
     cfg: &crate::config::UserConfig,
     elapsed: Option<String>,
 ) -> StatusInfo {
+    // Resolve the selected spinner style + speed override. Fall back to a
+    // built-in spinner if the configured style has no matching preset (e.g. the
+    // `ui.spinners` lib failed to load, or the YAML enum drifted from presets)
+    // so the streaming spinner never silently disappears.
+    let (mut spinner_frames, mut spinner_speed_ms) = cfg
+        .spinner_styles
+        .iter()
+        .find(|s| s.name == cfg.spinner_style)
+        .map(|s| {
+            let speed = if cfg.spinner_speed > 0 {
+                cfg.spinner_speed
+            } else {
+                s.speed
+            };
+            (s.frames.clone(), speed)
+        })
+        .unwrap_or_default();
+    if spinner_frames.is_empty() {
+        spinner_frames = FALLBACK_SPINNER_FRAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if spinner_speed_ms == 0 {
+            spinner_speed_ms = FALLBACK_SPINNER_SPEED_MS;
+        }
+    }
+    let spinner_texts = if cfg.spinner_text_custom.trim().is_empty() {
+        cfg.spinner_texts
+            .iter()
+            .find(|t| t.name == cfg.spinner_text)
+            .map(|t| t.phrases.clone())
+            .unwrap_or_default()
+    } else {
+        cfg.spinner_text_custom
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    };
+
     StatusInfo {
         model: model.to_string(),
         token_stats: token_stats.clone(),
@@ -1107,6 +1167,12 @@ pub(crate) fn stream_status_info_with_token_stats(
         status_show: cfg.status_show.clone(),
         elapsed,
         lua_status: Vec::new(),
+        spinner_frames,
+        spinner_speed_ms,
+        spinner_texts,
+        spinner_text_rotate: cfg.spinner_text_rotate,
+        spinner_text_speed_ms: cfg.spinner_text_speed,
+        spinner_elapsed_ms: 0,
     }
 }
 
@@ -1581,9 +1647,7 @@ impl App {
     /// final choice it resolves the gate and clears the prompt; otherwise it
     /// only updates selection/advice and returns, leaving the loop to pump.
     pub(crate) fn drain_approval_keys(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        while self.pending_approval.is_some()
-            && event::poll(std::time::Duration::from_millis(0))?
-        {
+        while self.pending_approval.is_some() && event::poll(std::time::Duration::from_millis(0))? {
             let event = event::read()?;
             let advising = self.pending_approval.as_ref().is_some_and(|p| p.advising);
             if advising {
@@ -1748,6 +1812,9 @@ impl App {
         }
         if cmd == "stats" {
             return self.open_stats_dashboard(term);
+        }
+        if cmd == "setup" {
+            return self.open_setup_wizard(term);
         }
 
         let prev_provider = self.llm.id().to_string();
@@ -2001,6 +2068,62 @@ impl App {
         }
         Ok(())
     }
+
+    fn open_setup_wizard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let mut ran = false;
+        if std::env::var_os("TMUX").is_some()
+            && std::process::Command::new("tmux")
+                .arg("display-message")
+                .arg("-p")
+                .arg("ok")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        {
+            let exe = std::env::current_exe()?;
+            let cmd = format!("{} setup", shell_quote(&exe.to_string_lossy()));
+            let result = std::process::Command::new("tmux")
+                .arg("display-popup")
+                .arg("-E")
+                .arg("-w")
+                .arg("80%")
+                .arg("-h")
+                .arg("80%")
+                .arg(cmd)
+                .status();
+            self.force_redraw(term)?;
+            match result {
+                Ok(s) if s.success() => ran = true,
+                // `bone setup` exits 2 when the user cancels the wizard.
+                Ok(s) if s.code() == Some(2) => {
+                    return self.show_reply("Setup cancelled.".to_string(), term);
+                }
+                // Popup failed to launch — fall through to the inline wizard.
+                _ => {}
+            }
+        }
+
+        if !ran {
+            let result = crate::ui::setup::run(false);
+            self.force_redraw(term)?;
+            match result {
+                Ok(true) => {}
+                Ok(false) => return self.show_reply("Setup cancelled.".to_string(), term),
+                Err(err) => {
+                    return self.show_reply(format!("Setup wizard failed: {err}"), term);
+                }
+            }
+        }
+
+        self.show_reply(
+            format!(
+                "Setup saved to {}. Restart bone to load the new tools and commands.",
+                crate::config::bone_dir().display()
+            ),
+            term,
+        )
+    }
 }
 
 fn shell_quote(s: &str) -> String {
@@ -2025,5 +2148,13 @@ fn apply_lua_config_snapshot(
         for (k, v) in &snapshot.status_show {
             cfg.status_show.insert(k.clone(), *v);
         }
+    }
+
+    // Spinner/text presets from the seeded ui.spinners lib.
+    if !snapshot.spinners.is_empty() {
+        cfg.spinner_styles = snapshot.spinners.clone();
+    }
+    if !snapshot.texts.is_empty() {
+        cfg.spinner_texts = snapshot.texts.clone();
     }
 }

@@ -89,4 +89,3 @@ fn usage_by_provider_grouping() {
     assert_eq!(or.prompt_tokens, 2000);
     assert_eq!(or.request_count, 1);
 }
-
