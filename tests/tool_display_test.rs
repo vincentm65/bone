@@ -115,3 +115,70 @@ fn dynamic_display_template_renders_in_tool_label() {
         "web_search search \"rust async\""
     );
 }
+
+fn subagent_call(arguments: serde_json::Value) -> (ToolCall, ToolResult) {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "subagent".to_string(),
+        arguments,
+    };
+    let result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "subagent".to_string(),
+        content: "Dispatched 2, rejected 0".to_string(),
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+    (call, result)
+}
+
+#[test]
+fn subagent_dispatch_label_uses_task_titles() {
+    let (call, result) = subagent_call(json!({
+        "action": "dispatch",
+        "tasks": [
+            { "agent": "reviewer", "title": "Review unstaged changes", "task": "Review unstaged changes in /home/foo for bugs..." },
+            { "agent": "tester", "title": "Run the test suite", "task": "Run cargo test and report failures..." },
+        ],
+        "wait": false,
+    }));
+
+    assert_eq!(
+        tool_label(&call, &result, None),
+        "subagent dispatch: \"Review unstaged changes\", \"Run the test suite\""
+    );
+}
+
+#[test]
+fn subagent_dispatch_label_falls_back_to_task_when_no_title() {
+    let (call, result) = subagent_call(json!({
+        "action": "dispatch",
+        "tasks": [
+            { "agent": "reviewer", "task": "Review the diff" },
+        ],
+    }));
+
+    assert_eq!(
+        tool_label(&call, &result, None),
+        "subagent dispatch: \"Review the diff\""
+    );
+}
+
+#[test]
+fn subagent_non_dispatch_action_uses_generic_display() {
+    let (call, result) = subagent_call(json!({
+        "action": "status",
+    }));
+    let display = ToolDisplayConfig {
+        args: vec!["action".to_string()],
+        template: None,
+        show: None,
+        show_result: None,
+    };
+
+    assert_eq!(
+        tool_label(&call, &result, Some(&display)),
+        "subagent action=status"
+    );
+}

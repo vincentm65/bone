@@ -520,3 +520,77 @@ fn agent_opts_use_explicit_model_when_provider_changes() {
     assert_eq!(provider.as_deref(), Some("openrouter"));
     assert_eq!(model.as_deref(), Some("google/gemini-3.1-flash-lite"));
 }
+
+// ── await_cancelled: the cancel-detection future shared by run/spawn ─────────
+
+#[test]
+fn await_cancelled_resolves_once_flag_is_set() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let flag = Arc::new(AtomicBool::new(false));
+    let setter = flag.clone();
+    rt.spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        setter.store(true, Ordering::Relaxed);
+    });
+    rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            await_cancelled(&Some(flag)),
+        )
+        .await
+        .expect("await_cancelled must resolve once the flag flips to true");
+    });
+}
+
+#[test]
+fn await_cancelled_stays_pending_when_unset_or_absent() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // No flag at all → never resolves.
+    let none = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(120),
+            await_cancelled(&None),
+        )
+        .await
+    });
+    assert!(none.is_err(), "await_cancelled(None) must never resolve");
+
+    // Flag present but still false → stays pending within the poll window.
+    let flag = Arc::new(AtomicBool::new(false));
+    let pending = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(120),
+            await_cancelled(&Some(flag)),
+        )
+        .await
+    });
+    assert!(
+        pending.is_err(),
+        "await_cancelled must stay pending while the flag is false"
+    );
+}
+
+// ── extract_tool_allowlist: per-agent tools={} parsing for ctx.agent.spawn ──
+
+#[test]
+fn extract_tool_allowlist_reads_named_tools_in_order() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    let tools = lua.create_table().unwrap();
+    tools.set(1, "read_file").unwrap();
+    tools.set(2, "ls").unwrap();
+    opts.set("tools", tools).unwrap();
+
+    assert_eq!(
+        extract_tool_allowlist(&Some(opts)),
+        Some(vec!["read_file".to_string(), "ls".to_string()]),
+    );
+}
+
+#[test]
+fn extract_tool_allowlist_none_when_key_absent() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    assert_eq!(extract_tool_allowlist(&Some(opts)), None);
+    assert_eq!(extract_tool_allowlist(&None), None);
+}

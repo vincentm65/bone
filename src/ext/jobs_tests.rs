@@ -4,13 +4,13 @@ fn fresh_registry() -> JobRegistry {
     JobRegistry::new()
 }
 
-/// A `NewJob` with default cap (1), no parent, and a fresh cancel flag.
+/// A `NewJob` with default cap (1) and a fresh cancel flag.
 fn new_job(agent: &str, task: &str) -> NewJob {
     NewJob {
         agent: agent.to_string(),
         task: task.to_string(),
+        title: String::new(),
         max_concurrency: 1,
-        parent: None,
         cancel_flag: Arc::new(AtomicBool::new(false)),
     }
 }
@@ -97,18 +97,6 @@ fn cancel_sets_flag_and_completes() {
 
     // Cancelling a non-existent job returns false.
     assert!(!reg.cancel("nonexistent"));
-}
-
-#[test]
-fn parent_field_recorded() {
-    let reg = fresh_registry();
-    reg.create(NewJob {
-        parent: Some("scope-1".into()),
-        ..new_job("agent", "task")
-    })
-    .unwrap();
-    let snap = reg.snapshot();
-    assert_eq!(snap[0]["parent"], "scope-1");
 }
 
 #[test]

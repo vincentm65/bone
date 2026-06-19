@@ -7,7 +7,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::ext::jobs::{Job, JobStatus};
+use crate::ext::jobs::{current_unix_seconds, Job, JobStatus};
 
 use super::pane_page::PanePage;
 
@@ -51,7 +51,7 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
             // Multi-job template header.
             lines.push(Line::from(Span::styled(
                 format!(
-                    " ◑ {} ({} running, {} done)",
+                    " ◑ {} ({} active, {} done)",
                     agent,
                     running.len(),
                     visible_jobs
@@ -64,25 +64,34 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
                     .add_modifier(Modifier::BOLD),
             )));
             for job in &visible_jobs {
-                let elapsed = now.saturating_sub(job.started_at);
-                let mut task = job.task.replace(['\n', '\r'], " ");
+                let mut task = job_label(job).replace(['\n', '\r'], " ");
                 if task.chars().count() > 36 {
                     task = format!("{}...", task.chars().take(33).collect::<String>());
                 }
-                lines.push(Line::from(vec![
+                let total = job.token_sent + job.token_received;
+                let mut parts = vec![
                     Span::styled(
                         format!("   {} ", job_status_icon(job)),
                         Style::default().fg(icon_fg(job)),
                     ),
                     Span::styled(task, Style::default().fg(Color::Gray)),
-                    Span::styled(
-                        format!(
-                            " ({}s) {}/{} in/out",
-                            elapsed, job.token_sent, job.token_received
-                        ),
+                ];
+                let elapsed = match job.status {
+                    JobStatus::Running => Some(now.saturating_sub(job.started_at)),
+                    _ => None,
+                };
+                if let Some(elapsed) = elapsed {
+                    parts.push(Span::styled(
+                        format!(" ({}s) {} total", elapsed, format_tokens(total)),
                         Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
+                    ));
+                } else {
+                    parts.push(Span::styled(
+                        format!(" {} total", format_tokens(total)),
+                        Style::default().fg(icon_fg(job)),
+                    ));
+                }
+                lines.push(Line::from(parts));
             }
         } else {
             let job = running[0];
@@ -126,6 +135,16 @@ fn pane_agents(registered: &[String], jobs: &[Job]) -> Vec<String> {
     names
 }
 
+/// Display label for a job: the model-supplied title when present, otherwise
+/// the raw task prompt (truncated by callers).
+fn job_label(job: &Job) -> &str {
+    if job.title.is_empty() {
+        &job.task
+    } else {
+        &job.title
+    }
+}
+
 fn icon_fg(job: &Job) -> Color {
     match job.status {
         JobStatus::Running => Color::White,
@@ -155,15 +174,17 @@ fn job_status(job: &Job, now: u64) -> (&'static str, String) {
     match job.status {
         JobStatus::Running => {
             let elapsed = now.saturating_sub(job.started_at);
-            let mut task = job.task.replace(['\n', '\r'], " ");
+            let mut task = job_label(job).replace(['\n', '\r'], " ");
             if task.chars().count() > 40 {
                 task = format!("{}...", task.chars().take(37).collect::<String>());
             }
             (
                 job_status_icon(job),
                 format!(
-                    "running {} ({}s) {}/{} in/out",
-                    task, elapsed, job.token_sent, job.token_received
+                    "{} ({}s) {} total",
+                    task,
+                    elapsed,
+                    format_tokens(job.token_sent + job.token_received)
                 ),
             )
         }
@@ -171,7 +192,7 @@ fn job_status(job: &Job, now: u64) -> (&'static str, String) {
             if job.token_sent > 0 || job.token_received > 0 {
                 (
                     "○",
-                    format!("idle ({}/{} in/out)", job.token_sent, job.token_received),
+                    format!("idle ({} total)", format_tokens(job.token_sent + job.token_received)),
                 )
             } else {
                 ("○", "idle".to_string())
@@ -181,11 +202,25 @@ fn job_status(job: &Job, now: u64) -> (&'static str, String) {
     }
 }
 
-fn current_unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}m", n as f64 / 1_000_000.0)
+    } else if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else if n >= 1_000 {
+        let s = n.to_string();
+        let mut out = String::with_capacity(s.len() + s.len() / 3);
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out.chars().rev().collect()
+    } else {
+        n.to_string()
+    }
 }
 
 #[cfg(test)]

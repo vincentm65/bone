@@ -117,6 +117,9 @@ local function build_nav_options(questions, answers, current_idx)
     end
 
     table.insert(opts, "✓ Submit all answers")
+    -- Move submit to the top so the cursor starts there
+    table.remove(opts, #opts)
+    table.insert(opts, 1, "✓ Submit all answers")
 
     return opts
 end

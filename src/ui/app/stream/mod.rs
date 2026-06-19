@@ -164,6 +164,14 @@ impl PaneOwnership {
     }
 }
 
+/// True when `call` is a `subagent` tool call with `action == "dispatch"`.
+/// These block until the spawned agents finish, so their row is rendered at
+/// dispatch time rather than on completion.
+fn is_subagent_dispatch(call: &ToolCall) -> bool {
+    call.name == "subagent"
+        && call.arguments.get("action").and_then(|v| v.as_str()) == Some("dispatch")
+}
+
 fn key_event_from_crossterm(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -587,14 +595,20 @@ impl App {
                     .map(|s| s.len())
                     .unwrap_or(0);
                 self.bump_estimated_received(arg_len);
-                pending.insert(
-                    id.clone(),
-                    crate::tools::ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    },
-                );
+                let call = crate::tools::ToolCall {
+                    id: id.clone(),
+                    name,
+                    arguments,
+                };
+                // A subagent dispatch blocks (wait=true / headless) until the
+                // agents finish, so its tool row would otherwise only appear on
+                // completion. Render it now so it shows on dispatch; the id is
+                // recorded in `shown_tool_rows` so the later `ToolResult` event
+                // doesn't render a duplicate.
+                if is_subagent_dispatch(&call) {
+                    self.pump_show_dispatch_row(&call, cur_idx, term)?;
+                }
+                pending.insert(id, call);
             }
             RuntimeEvent::ToolResult {
                 name,
@@ -756,6 +770,39 @@ impl App {
                 i
             }
         }
+    }
+
+    /// Render a `subagent dispatch` tool row to scrollback at dispatch time,
+    /// mirroring the `ToolResult` rendering path with a synthetic (empty,
+    /// non-error) result. The dispatch label is derived purely from the call
+    /// arguments and the tool hides its result, so nothing is lost by showing
+    /// the row before the agents finish. The call id is recorded in
+    /// `shown_tool_rows` so the later `ToolResult` event skips the duplicate.
+    fn pump_show_dispatch_row(
+        &mut self,
+        call: &ToolCall,
+        cur_idx: &mut Option<usize>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        if let Some(idx) = cur_idx.take() {
+            self.renderer
+                .finalize_streaming_message(&self.messages[idx].content, term)?;
+            self.renderer.flush_separator(term)?;
+        }
+        let result = crate::tools::ToolResult {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            content: String::new(),
+            is_error: false,
+            pane_page: None,
+            state: None,
+        };
+        let display = self.tools.display_for_call(call);
+        self.messages.push(build_tool_row(call, &result, display));
+        self.shown_tool_rows.insert(call.id.clone());
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        Ok(())
     }
 
     /// Render the `edit_file` diff preview to scrollback (a tool row + the

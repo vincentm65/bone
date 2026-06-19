@@ -18,8 +18,8 @@ fn test_job(agent: &str, task: &str) -> bone::ext::jobs::NewJob {
     bone::ext::jobs::NewJob {
         agent: agent.into(),
         task: task.into(),
+        title: String::new(),
         max_concurrency: 1,
-        parent: None,
         cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
@@ -522,7 +522,7 @@ fn rust_subagent_pane_returns_valid_panepage() {
     let id1 = registry
         .create(test_job("render-researcher", "search query"))
         .expect("render-researcher job should be created");
-    let id2 = registry
+    let _id2 = registry
         .create(test_job("render-coder", "fix bug in module"))
         .expect("render-coder job should be created");
     // Complete one job so only one is running (pane should still show).
@@ -539,7 +539,138 @@ fn rust_subagent_pane_returns_valid_panepage() {
     let pane = pane.unwrap();
     assert_eq!(pane.source, "subagents");
     assert!(pane.title.contains("Agents"));
-    assert_eq!(pane.content.len(), 2); // one line for running agent + separator
+    assert!(pane.content.len() >= 2); // at least one line for running agent + separator
 
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+// ── 5. Cancel through the Lua tool (ctx.agent.cancel → flag) ─────────────────
+
+/// A Lua tool that delegates to `ctx.agent.cancel(id)` and reports the boolean
+/// `ok` it returns. Exercises the Lua→registry→cancel-flag wiring that the
+/// `spawn` watchdog observes.
+const CANCEL_TOOL_LUA: &str = r#"
+bone.register_tool({
+    name = "lua_cancel",
+    description = "cancels a job id via ctx.agent.cancel and reports ok",
+    safety = "read_only",
+    parameters = {
+        type = "object",
+        properties = { id = { type = "string" } },
+        required = { "id" },
+    },
+    execute = function(args, ctx)
+        local res = ctx.agent.cancel(args.id)
+        return "ok=" .. tostring(res and res.ok or false)
+    end,
+})
+"#;
+
+fn lua_cancel_call(marker: &str, id: &str) -> ToolCall {
+    ToolCall {
+        id: marker.into(),
+        name: "lua_cancel".into(),
+        arguments: serde_json::json!({ "id": id }),
+    }
+}
+
+/// `ctx.agent.cancel(id)` on a running job sets its cancel flag (ok=true);
+/// on a missing or already-finished job it is a no-op (ok=false). Driven
+/// end-to-end through a registered Lua tool at depth 0.
+#[test]
+fn cancel_running_job_via_lua_tool() {
+    let config_dir = common::temp_dir("subagent-cancel-lua");
+    let tools_dir = config_dir.join("lua/tools");
+    std::fs::create_dir_all(&tools_dir).unwrap();
+    std::fs::write(tools_dir.join("cancel.lua"), CANCEL_TOOL_LUA).unwrap();
+
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // A running job whose cancel flag we can inspect afterwards.
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registry = bone::ext::jobs::registry();
+    let job_id = registry
+        .create(bone::ext::jobs::NewJob {
+            agent: "cancel-target".into(),
+            task: "unique-task-cancel-via-lua".into(),
+            title: String::new(),
+            max_concurrency: 1,
+            cancel_flag: cancel_flag.clone(),
+        })
+        .expect("cancel-target job should be created");
+
+    // 1. Cancel the running job through the Lua tool at depth 0.
+    let results = rt
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                booted.tools
+                    .execute_all(vec![lua_cancel_call("call-cancel", &job_id)], 0),
+            )
+            .await
+        })
+        .expect("cancel tool timed out");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].content.contains("ok=true"),
+        "cancelling a running job should report ok=true; got: {}",
+        results[0].content,
+    );
+    assert!(
+        cancel_flag.load(std::sync::atomic::Ordering::Relaxed),
+        "ctx.agent.cancel must set the job's cancel flag",
+    );
+
+    // 2. Cancelling a non-existent id is a no-op (ok=false).
+    let miss = rt
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                booted.tools
+                    .execute_all(vec![lua_cancel_call("call-miss", "job-does-not-exist")], 0),
+            )
+            .await
+        })
+        .expect("miss tool timed out");
+    assert!(
+        miss[0].content.contains("ok=false"),
+        "cancelling a missing id should report ok=false; got: {}",
+        miss[0].content,
+    );
+
+    // 3. Cancelling a finished job is a no-op (ok=false).
+    registry.complete(&job_id, Ok("done".into()));
+    let after = rt
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                booted.tools
+                    .execute_all(vec![lua_cancel_call("call-after", &job_id)], 0),
+            )
+            .await
+        })
+        .expect("after tool timed out");
+    assert!(
+        after[0].content.contains("ok=false"),
+        "cancelling a finished job should report ok=false; got: {}",
+        after[0].content,
+    );
+
+    rt.shutdown_timeout(Duration::from_secs(1));
     std::fs::remove_dir_all(&config_dir).ok();
 }

@@ -130,6 +130,11 @@ pub(crate) fn create_engine(
     bone.set("headless", opts.headless)
         .map_err(|e| e.to_string())?;
 
+    // Shared truncation marker exposed to Lua so the subagent tool and the
+    // Rust inline-injection path stay in sync (see jobs::TRUNCATION_MARKER).
+    bone.set("truncation_marker", crate::ext::jobs::TRUNCATION_MARKER)
+        .map_err(|e| e.to_string())?;
+
     // Model and provider — set before init.lua runs so banner() can read them.
     bone.set("model", model).map_err(|e| e.to_string())?;
     bone.set("provider", provider).map_err(|e| e.to_string())?;

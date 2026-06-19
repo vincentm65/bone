@@ -45,7 +45,7 @@ local function job_status(job)
 
     if job.status == "running" then
         local elapsed = os.time() - job.started_at
-        local task = job.task or ""
+        local task = job.title ~= nil and job.title ~= "" and job.title or (job.task or "")
         if #task > 40 then
             task = task:sub(1, 37) .. "..."
         end
@@ -111,7 +111,7 @@ local function build_description()
             "",
             "Rules:",
             "- Batch independent tasks into a single dispatch call to maximize parallelism.",
-            "- Each agent runs one job at a time; dispatching to a busy agent is rejected.",
+            "- Each agent runs up to its `max_concurrency` jobs at a time (default 1); dispatching beyond the cap is rejected.",
         }, "\n")
     else
         parts[#parts + 1] = table.concat({
@@ -125,7 +125,7 @@ local function build_description()
             "",
             "Rules:",
             "- Batch independent tasks into a single dispatch call to maximize parallelism.",
-            "- Each agent runs one job at a time; dispatching to a busy agent is rejected.",
+            "- Each agent runs up to its `max_concurrency` jobs at a time (default 1); dispatching beyond the cap is rejected.",
             "- NEVER duplicate the work you delegated. Once a task is dispatched, do not read the same files, run the same searches, or research the same questions yourself — that wastes context and defeats the purpose of delegating. Let the sub-agent do it.",
         }, "\n")
     end
@@ -208,6 +208,7 @@ local function execute(params, ctx)
         for _, t in ipairs(tasks) do
             local agent_name = t.agent or ""
             local task_desc = t.task or ""
+            local title = t.title or ""
 
             -- Look up the agent definition
             local agent_def = nil
@@ -222,6 +223,7 @@ local function execute(params, ctx)
                 -- Build spawn opts from the agent definition.
                 local opts = {
                     agent = agent_name,
+                    title = title,
                     system_prompt = agent_def.system_prompt,
                     provider = agent_def.provider,
                     model = agent_def.model,
@@ -329,7 +331,7 @@ bone.register_tool({
             },
             tasks = {
                 type = "array",
-                description = "dispatch only: list of tasks to start in parallel. Each item: {agent: string, task: string}",
+                description = "dispatch only: list of tasks to start in parallel. Each item: {agent: string, title: string, task: string}",
                 items = {
                     type = "object",
                     properties = {
@@ -337,12 +339,16 @@ bone.register_tool({
                             type = "string",
                             description = "Registered agent name",
                         },
+                        title = {
+                            type = "string",
+                            description = "Short (≤ ~8 word) human-readable summary of the task, shown in the UI (live pane + tool-call row). E.g. \"Review unstaged changes for bugs\".",
+                        },
                         task = {
                             type = "string",
                             description = "Self-contained task description for the agent (it sees nothing else)",
                         },
                     },
-                    required = { "agent", "task" },
+                    required = { "agent", "title", "task" },
                     additionalProperties = false,
                 },
             },

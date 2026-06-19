@@ -43,6 +43,12 @@ pub fn tool_label(
             .unwrap_or_else(|| call.name.clone());
     }
 
+    if call.name == "subagent"
+        && let Some(label) = subagent_dispatch_label(call)
+    {
+        return label;
+    }
+
     if let Some(display_label) = display.and_then(|display| format_display_label(call, display)) {
         return display_label;
     }
@@ -64,6 +70,51 @@ pub fn tool_label(
     }
 
     label
+}
+
+/// Compact label for a `subagent dispatch` call: shows each task's title
+/// (falling back to a truncation of the task prompt) instead of dumping the
+/// full tasks JSON. Returns `None` for other actions so the generic display
+/// path handles wait/cancel/status.
+fn subagent_dispatch_label(call: &ToolCall) -> Option<String> {
+    if call.arguments.get("action").and_then(|v| v.as_str()) != Some("dispatch") {
+        return None;
+    }
+    let tasks = call.arguments.get("tasks").and_then(|v| v.as_array())?;
+    let titles: Vec<String> = tasks
+        .iter()
+        .map(|task| {
+            let title = task
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    task.get("task")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or("task");
+            format!(
+                "\"{}\"",
+                truncate_label(&title.replace(['\n', '\r'], " "), 60)
+            )
+        })
+        .collect();
+    if titles.is_empty() {
+        return None;
+    }
+    Some(format!("subagent dispatch: {}", titles.join(", ")))
+}
+
+/// Truncate to `max` chars on a char boundary, appending an ellipsis.
+fn truncate_label(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{kept}…")
 }
 
 fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<String> {

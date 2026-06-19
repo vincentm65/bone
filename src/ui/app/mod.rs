@@ -935,14 +935,6 @@ impl App {
         if version != self.subagent_seen_version && !registry.running_ids().is_empty() {
             self.panes_visible = true;
         }
-        // Hide the pane when all running jobs finish.
-        if version != self.subagent_seen_version && registry.running_ids().is_empty() {
-            self.active_page = PanePage::remove(
-                &mut self.pages,
-                crate::ui::subagent_pane::PANE_SOURCE,
-                self.active_page,
-            );
-        }
         self.refresh_subagent_pane();
         self.subagent_seen_version = version;
         self.subagent_last_refresh = std::time::Instant::now();
@@ -1025,7 +1017,9 @@ impl App {
     fn refresh_subagent_pane(&mut self) {
         let agents = self.extensions.subagent_names();
         let jobs = crate::ext::jobs::registry().all_jobs();
-        let has_running = !crate::ext::jobs::registry().running_ids().is_empty();
+        let has_running = jobs
+            .iter()
+            .any(|j| j.status == crate::ext::jobs::JobStatus::Running);
         if has_running {
             if let Some(page) = crate::ui::subagent_pane::render(agents, &jobs) {
                 let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
@@ -1095,7 +1089,7 @@ fn job_status_sym(status: crate::ext::jobs::JobStatus) -> &'static str {
     match status {
         crate::ext::jobs::JobStatus::Done => "✓",
         crate::ext::jobs::JobStatus::Error => "✗",
-        crate::ext::jobs::JobStatus::Running => "◐",
+        crate::ext::jobs::JobStatus::Running => "◑",
     }
 }
 
@@ -1976,6 +1970,11 @@ impl App {
 
         self.live_command = false;
         self.cancel_streaming = false;
+        // Tear down the turn timer seeded above; otherwise the status bar keeps
+        // ticking after the command returns (mirrors the streaming teardown).
+        self.turn_start = None;
+        self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_pause_start = None;
 
         if let Some(Some((mut reply, submit, action, display_role))) = reply {
             if let Some(action) = action {

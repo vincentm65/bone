@@ -32,6 +32,9 @@ pub struct Job {
     pub id: String,
     pub agent: String,
     pub task: String,
+    /// Short human-readable summary for display (live pane + tool-call row).
+    /// Falls back to a truncation of `task` when empty.
+    pub title: String,
     pub status: JobStatus,
     pub result: Option<String>,
     pub started_at: u64,
@@ -47,9 +50,6 @@ pub struct Job {
     /// Per-job cancellation flag, settable by [`JobRegistry::cancel`].
     #[serde(skip)]
     pub cancel_flag: Arc<AtomicBool>,
-    /// The spawning scope key (prep for Tier 3 recursion).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
 }
 
 /// Parameters for [`JobRegistry::create`]. Bundled into a struct so the call
@@ -60,10 +60,10 @@ pub struct NewJob {
     pub agent: String,
     /// The task prompt handed to the agent.
     pub task: String,
+    /// Short human-readable summary for display (empty falls back to `task`).
+    pub title: String,
     /// How many jobs may run concurrently for this agent template.
     pub max_concurrency: usize,
-    /// Spawning scope key (prep for Tier 3 recursion; `None` at depth 0).
-    pub parent: Option<String>,
     /// Per-job cancellation flag, shared with the running task.
     pub cancel_flag: Arc<AtomicBool>,
 }
@@ -118,8 +118,8 @@ impl JobRegistry {
         let NewJob {
             agent,
             task,
+            title,
             max_concurrency,
-            parent,
             cancel_flag,
         } = job;
         let now = current_unix_seconds();
@@ -138,6 +138,7 @@ impl JobRegistry {
             id: id.clone(),
             agent,
             task,
+            title,
             status: JobStatus::Running,
             result: None,
             started_at: now,
@@ -148,7 +149,6 @@ impl JobRegistry {
             result_file: None,
             max_concurrency,
             cancel_flag,
-            parent,
         });
         // Prune oldest finished-and-consumed jobs to cap memory growth.
         if jobs.len() > MAX_RETAINED_JOBS {
@@ -382,7 +382,7 @@ pub fn registry() -> &'static JobRegistry {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn current_unix_seconds() -> u64 {
+pub(crate) fn current_unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

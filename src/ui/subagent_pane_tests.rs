@@ -5,6 +5,7 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
         id: id.to_string(),
         agent: agent.to_string(),
         task: "do something".to_string(),
+        title: String::new(),
         status,
         result: None,
         started_at: current_unix_seconds(),
@@ -15,7 +16,6 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
         result_file: None,
         max_concurrency: 1,
         cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        parent: None,
     }
 }
 
@@ -34,7 +34,7 @@ fn render_includes_ad_hoc_job_agents() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(first.contains("shotgun codex/gpt-5 #1"));
-    assert!(first.contains("running"));
+    assert!(!first.contains("running"));
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn render_lists_all_agents() {
     assert_eq!(pane.source, PANE_SOURCE);
     assert_eq!(pane.title, "Agents (2)");
     assert_eq!(pane.content.len(), 3); // 2 agents + separator line
-    // Running agents show the running marker.
+    // Running agents show the active marker.
     let first: String = pane.content[0]
         .spans
         .iter()
@@ -56,7 +56,7 @@ fn render_lists_all_agents() {
         .collect();
     assert!(first.contains("◑"), "expected running icon: {first}");
     assert!(first.contains("researcher"));
-    assert!(first.contains("running"));
+    assert!(!first.contains("running"));
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn render_shows_running_status() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(line.contains("◑"), "expected running icon: {line}");
-    assert!(line.contains("running"));
+    assert!(!line.contains("running"));
     assert!(line.contains("do something"));
 }
 
@@ -111,5 +111,32 @@ fn multi_job_shows_header() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(header.contains("researcher"));
-    assert!(header.contains("2 running"));
+    assert!(header.contains("2 active"));
+}
+
+#[test]
+fn format_tokens_small() {
+    assert_eq!(format_tokens(0), "0");
+    assert_eq!(format_tokens(999), "999");
+}
+
+#[test]
+fn format_tokens_thousands() {
+    assert_eq!(format_tokens(1_000), "1,000");
+    assert_eq!(format_tokens(1_992), "1,992");
+    assert_eq!(format_tokens(9_999), "9,999");
+    assert_eq!(format_tokens(10_000), "10.0k");
+}
+
+#[test]
+fn format_tokens_k() {
+    assert_eq!(format_tokens(10_001), "10.0k");
+    assert_eq!(format_tokens(44_400), "44.4k");
+    assert_eq!(format_tokens(999_999), "1000.0k");
+}
+
+#[test]
+fn format_tokens_m() {
+    assert_eq!(format_tokens(1_000_000), "1.00m");
+    assert_eq!(format_tokens(1_234_567), "1.23m");
 }

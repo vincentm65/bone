@@ -516,14 +516,20 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     // Cloned per closure (mlua functions are 'static).
     let status_tx = cfg.runtime_status.clone();
     let notify_tx = cfg.runtime_status.clone();
+    // Subagents (depth > 0) run with no runtime_status channel but share the
+    // parent process's stderr, which the TUI owns in raw mode. Writing status
+    // there scrambles the chat (e.g. auto-compaction announcements from
+    // `compact.lua`). Suppress the stderr fallback for them; the parent agent
+    // keeps the real channel and still surfaces its own status.
+    let is_subagent = cfg.agent_depth > 0;
 
     // ctx.ui.status(message) — surface a live status line to the attached
     // frontend (e.g. auto-compaction announcing progress/savings). Headless
-    // (no frontend) falls back to stderr.
+    // (no frontend) falls back to stderr, except inside a subagent.
     let status_fn = lua.create_function(move |_, msg: String| {
         if let Some(tx) = &status_tx {
             let _ = tx.send(crate::runtime::RuntimeEvent::Status { message: msg });
-        } else {
+        } else if !is_subagent {
             eprintln!("bone-lua: {msg}");
         }
         Ok(())
@@ -531,14 +537,17 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     ui_table.set("status", status_fn)?;
 
     // ctx.ui.notify(message, level?) — warnings/errors still go to stderr for
-    // headless debugging. Info-level (and above) is also forwarded to an
-    // attached frontend as a status line, so background hooks like
-    // auto-compaction are no longer silently dropped in the TUI.
+    // headless debugging (but not from a subagent, which shares the TUI's
+    // stderr). Info-level (and above) is also forwarded to an attached frontend
+    // as a status line, so background hooks like auto-compaction are no longer
+    // silently dropped in the TUI.
     let notify_fn = lua.create_function(move |_, (msg, level): (String, Option<String>)| {
-        match level.as_deref() {
-            Some("warn") | Some("warning") => eprintln!("bone-lua warn: {msg}"),
-            Some("error") => eprintln!("bone-lua error: {msg}"),
-            _ => {}
+        if !is_subagent {
+            match level.as_deref() {
+                Some("warn") | Some("warning") => eprintln!("bone-lua warn: {msg}"),
+                Some("error") => eprintln!("bone-lua error: {msg}"),
+                _ => {}
+            }
         }
         if let Some(tx) = &notify_tx {
             let _ = tx.send(crate::runtime::RuntimeEvent::Status { message: msg });
@@ -1258,15 +1267,13 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
         let cancelled = cancelled_run.clone();
         let response = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                tokio::select! {
-                    result = crate::agent::run_agent(request) => result,
-                    _ = await_cancelled(&cancelled) => Err("cancelled".to_string()),
-                    _ = inactivity_elapsed(activity, timeout_ms) => {
-                        Err(inactivity_message(timeout_ms))
-                    }
-                }
-            })
+            tokio::runtime::Handle::current().block_on(run_agent_with_watchdog(
+                request,
+                activity,
+                timeout_ms,
+                cancelled,
+                None,
+            ))
         });
 
         agent_result_to_lua(lua, response)
@@ -1325,10 +1332,10 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                                 if let Err(e) = drain_pending(lua, &mut rx, &cbs) {
                                     break Err(e);
                                 }
-                                break Err("cancelled".to_string());
+                                break Err(prefix_err(None, "cancelled"));
                             }
                             _ = inactivity_elapsed(activity.clone(), timeout_ms) => {
-                                break Err(inactivity_message(timeout_ms));
+                                break Err(prefix_err(None, &inactivity_message(timeout_ms)));
                             }
                         }
                     }
@@ -1357,13 +1364,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         // Read agent name (registered sub-agent name, default "") and the
         // per-template concurrency cap and tool allowlist from opts.
         let agent_name: String = opt_str(&opts, "agent").unwrap_or_default();
+        let title: String = opt_str(&opts, "title").unwrap_or_default();
         let max_concurrency: usize = opt_u64(&opts, "max_concurrency")
             .map(|n| n.max(1) as usize)
             .unwrap_or(1);
-        let tool_allowlist: Option<Vec<String>> = opts
-            .as_ref()
-            .and_then(|t| t.get::<Option<mlua::Table>>("tools").ok().flatten())
-            .map(|t| t.sequence_values::<String>().flatten().collect());
+        let tool_allowlist = extract_tool_allowlist(&opts);
 
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|e| mlua::Error::external(format!("spawn requires a tokio runtime: {e}")))?;
@@ -1386,8 +1391,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         let id = match crate::ext::jobs::registry().create(crate::ext::jobs::NewJob {
             agent: agent_name,
             task: prompt,
+            title,
             max_concurrency,
-            parent: None, // Tier 3 fills this with the spawning scope.
             cancel_flag: job_cancel.clone(),
         }) {
             Ok(id) => id,
@@ -1416,15 +1421,16 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             timeout_ms,
         } = built;
         let id_for_spawn = id.clone();
-        let cancel_watch = Some(job_cancel);
         handle.spawn(async move {
-            let outcome = tokio::select! {
-                result = crate::agent::run_agent(request) => result.map(|resp| resp.content),
-                _ = await_cancelled(&cancel_watch) => Err(format!("{id_for_spawn}: cancelled")),
-                _ = inactivity_elapsed(activity, timeout_ms) => {
-                    Err(format!("{id_for_spawn}: {}", inactivity_message(timeout_ms)))
-                }
-            };
+            let outcome = run_agent_with_watchdog(
+                request,
+                activity,
+                timeout_ms,
+                Some(job_cancel),
+                Some(&id_for_spawn),
+            )
+            .await
+            .map(|resp| resp.content);
             let ts = token_sent.load(Ordering::Relaxed);
             let tr = token_received.load(Ordering::Relaxed);
             crate::ext::jobs::registry().complete_with_tokens(&id_for_spawn, outcome, ts, tr);
@@ -1623,7 +1629,9 @@ const SPAWN_OPT_KEYS: &[&str] = &[
     "system_prompt",
     "timeout_ms",
     "agent",
+    "title",
     "max_concurrency",
+    "tools",
 ];
 
 /// Human-readable inactivity timeout message.
@@ -1632,6 +1640,40 @@ fn inactivity_message(timeout_ms: u64) -> String {
         "agent timed out after {}s of inactivity (no stream or tool progress)",
         timeout_ms / 1000
     )
+}
+
+/// Format a watchdog error string, optionally prefixed with a job id (used
+/// by `spawn` so background-job results name the offending job).
+fn prefix_err(prefix: Option<&str>, msg: &str) -> String {
+    match prefix {
+        Some(p) => format!("{p}: {msg}"),
+        None => msg.to_string(),
+    }
+}
+
+/// Run `run_agent` to completion under the cancel-flag + inactivity watchdog.
+/// Shared core of `ctx.agent.run` and `ctx.agent.spawn`: both drive the agent
+/// future to completion unless `cancel` is set or the agent goes idle for
+/// `timeout_ms`. `err_prefix`, when `Some`, is prepended to the cancel /
+/// inactivity error strings (background `spawn` jobs tag results with their id).
+///
+/// `ctx.agent.run_stream` keeps its own streaming loop (it must interleave
+/// live event dispatch with the agent future) but routes its error strings
+/// through `prefix_err` so all three paths agree on formatting.
+async fn run_agent_with_watchdog(
+    request: crate::agent::AgentRequest,
+    activity: Arc<AtomicU64>,
+    timeout_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+    err_prefix: Option<&str>,
+) -> Result<crate::agent::AgentResponse, String> {
+    tokio::select! {
+        result = crate::agent::run_agent(request) => result,
+        _ = await_cancelled(&cancel) => Err(prefix_err(err_prefix, "cancelled")),
+        _ = inactivity_elapsed(activity, timeout_ms) => {
+            Err(prefix_err(err_prefix, &inactivity_message(timeout_ms)))
+        }
+    }
 }
 
 /// Warn (stderr) about unrecognized option keys so typos don't silently
@@ -1727,6 +1769,16 @@ fn opt_u64(opts: &Option<Table>, key: &str) -> Option<u64> {
 fn opt_usize(opts: &Option<Table>, key: &str) -> Option<usize> {
     opts.as_ref()
         .and_then(|t| t.get::<Option<usize>>(key).ok().flatten())
+}
+
+/// Read the per-agent tool allowlist (`opts.tools`) for `ctx.agent.spawn`.
+/// Returns the named tools in order, or `None` when the key is absent so the
+/// spawned agent inherits the full enabled set. Non-string entries are
+/// silently skipped (the Lua iterator yields only well-formed strings).
+fn extract_tool_allowlist(opts: &Option<Table>) -> Option<Vec<String>> {
+    opts.as_ref()
+        .and_then(|t| t.get::<Option<Table>>("tools").ok().flatten())
+        .map(|t| t.sequence_values::<String>().flatten().collect())
 }
 
 /// Build the `current()` closure shared by `ctx.conversation.current` and

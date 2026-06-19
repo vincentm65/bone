@@ -208,6 +208,11 @@ impl Driver {
                 // Thread the turn cancel flag so pressing Esc aborts an
                 // in-flight compaction (`ctx.agent.run` watches this).
                 ctx_cfg.cancelled = cancel.clone();
+                // Subagents (depth > 0) run with no runtime_status channel, so
+                // `ctx.ui.status`/`notify` would otherwise fall back to stderr
+                // — corrupting the parent TUI, which owns the terminal in raw
+                // mode. Mark the depth so those calls drop silently instead.
+                ctx_cfg.agent_depth = agent_depth;
 
                 let mut sys_appends: Vec<String> = Vec::new();
                 let mut tool_filter: Option<Vec<String>> = None;
