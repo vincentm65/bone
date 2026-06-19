@@ -15,7 +15,15 @@
 
 local state = { active = false, path = nil, iteration = 0 }
 
-local FILENAME = "/goals/active.md"
+-- Session-scoped so multiple CLIs on the same machine/project don't clobber
+-- each other's goal file. Falls back to "default" when no session is active.
+local function goal_path(ctx)
+    local sess = ctx.session and ctx.session.current and ctx.session.current()
+    local id = (sess and sess.id) or "default"
+    -- Sanitize to filename-safe characters.
+    id = id:gsub("[^%w%-]", "-")
+    return ctx.config_dir .. "/goals/" .. id .. ".md"
+end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -38,10 +46,6 @@ local function build_md(description)
         "<!-- One line per completed task, with timestamp. -->\n",
         description, now_ts()
     )
-end
-
-local function goal_path(ctx)
-    return ctx.config_dir .. FILENAME
 end
 
 local function shell_quote(s)
