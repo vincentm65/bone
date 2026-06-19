@@ -438,7 +438,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         tools,
         session,
         gate: Arc::new(crate::tools::AutoApprovalGate),
-        approval_mode: Arc::new(request.approval_mode),
+        approval_mode: crate::tools::SharedApprovalMode::new(request.approval_mode),
         agent_depth: request.agent_depth,
         activity: request.activity.clone(),
         on_token_usage: request.on_token_usage.clone(),

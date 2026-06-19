@@ -623,7 +623,7 @@ fn compact_preserves_tool_call_chains() {
                 { role = "user", content = "continue" },
             } end },
             agent = { run = function() return { ok = true, content = "summary" } end },
-            ui = { notify = function() end },
+            ui = { notify = function() end, status = function() end },
         }
         local ret = handler({}, ctx)
         _COMPACT_TOOL_RET = cjson.encode(ret.messages)
@@ -693,7 +693,7 @@ fn compact_drops_orphan_tool_results() {
                 { role = "assistant", content = "ok" },
             } end },
             agent = { run = function() return { ok = true, content = "summary" } end },
-            ui = { notify = function() end },
+            ui = { notify = function() end, status = function() end },
         }
         local ret = handler({}, ctx)
         _COMPACT_ORPHAN_RET = cjson.encode(ret.messages)
@@ -769,7 +769,7 @@ fn auto_compact_enabled_under_denylist_config() {
                 { role = "assistant", content = "ok" },
             } end },
             agent = { run = function() return { ok = true, content = "summary" } end },
-            ui = { notify = function() end },
+            ui = { notify = function() end, status = function() end },
         }
         local ret = handler({}, ctx)
         -- Should NOT have bailed at the gate: it ran compaction and returned
@@ -821,7 +821,7 @@ fn auto_compact_disabled_when_in_denylist() {
                 { role = "user", content = "x" },
             } end },
             agent = { run = function() return { ok = true, content = "should not run" } end },
-            ui = { notify = function() end },
+            ui = { notify = function() end, status = function() end },
         }
         local ret = handler({}, ctx)
         _AUTO_COMPACT_DISABLED_RET = ret and "table" or "nil"

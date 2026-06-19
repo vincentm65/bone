@@ -37,7 +37,7 @@ pub struct Driver {
     /// Resolves tool-call approval. Headless uses [`crate::tools::AutoApprovalGate`];
     /// interactive frontends supply a gate that prompts the user.
     pub gate: Arc<dyn ApprovalGate>,
-    pub approval_mode: Arc<ApprovalMode>,
+    pub approval_mode: crate::tools::SharedApprovalMode,
     pub agent_depth: usize,
     pub activity: Option<Arc<AtomicU64>>,
     pub on_token_usage: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
@@ -134,8 +134,9 @@ impl Driver {
             .map(|j| j.chars().count())
             .unwrap_or(0);
 
-        let approval_label = approval_mode.mode_str();
-        let approval_mode = Arc::clone(&approval_mode);
+        // Reported once at turn start; the live value is re-read each round so a
+        // frontend can toggle Safe/Danger mid-turn (see `SharedApprovalMode`).
+        let approval_label = approval_mode.get().mode_str();
 
         let mut session_seq = 0i64;
         let mut usage_records: Vec<UsageRecord> = Vec::new();
@@ -181,21 +182,48 @@ impl Driver {
             // narrowed only when a handler returns a `tool_filter`.
             let mut turn_tool_defs = tool_defs.clone();
             {
+                // Refresh context_length from the *current* pending history so
+                // the before_turn snapshot reflects what this request will
+                // actually send — including tool results appended mid-loop.
+                // Without this, the compaction threshold check sees the stale
+                // last-request size and can overshoot the model's context limit
+                // before compaction ever triggers. The real provider-reported
+                // value overwrites this after the request lands.
+                token_stats.context_length =
+                    estimate_tokens(estimate_context_chars(&history, tool_defs_json_chars))
+                        as u64;
                 let state = crate::ext::ctx::AppCtxState::new(
                     &tools,
                     &token_stats,
-                    &approval_mode,
+                    &approval_mode.get(),
                     session.conv_id(),
                     llm.id(),
                     llm.model(),
                     Vec::new(),
                     transcript.clone(),
                 );
-                let ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
+                let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
+                // Give before_turn handlers a live status channel so they can
+                // surface progress to the attached frontend (e.g. compaction).
+                ctx_cfg.runtime_status = runtime_events.clone();
+                // Thread the turn cancel flag so pressing Esc aborts an
+                // in-flight compaction (`ctx.agent.run` watches this).
+                ctx_cfg.cancelled = cancel.clone();
 
                 let mut sys_appends: Vec<String> = Vec::new();
                 let mut tool_filter: Option<Vec<String>> = None;
-                let actions = extensions.dispatch_before_turn(&ctx_cfg);
+                // Run before_turn on a blocking thread: handlers like
+                // auto-compaction call `ctx.agent.run`, which blocks (via
+                // `block_in_place`). Dispatching inline would freeze the
+                // frontend's poll loop for the whole summarization. Cloning the
+                // manager (shared `Arc<Mutex<Lua>>`) and awaiting the join lets
+                // this future yield so the UI keeps animating.
+                let ext_for_hook = extensions.clone();
+                let actions = tokio::task::spawn_blocking(move || {
+                    ext_for_hook.dispatch_before_turn(&ctx_cfg)
+                })
+                .await
+                .unwrap_or_default();
                 for action in actions {
                     if let Some(new_messages) = action.conversation_replace {
                         transcript = new_messages;
@@ -473,9 +501,11 @@ impl Driver {
 
             // Let running tools observe cancellation.
             tools.cancel_token = cancel.clone();
+            // Re-read each round so a mid-turn Safe/Danger toggle takes effect
+            // on the very next tool batch.
             let results = execute_tool_calls(
                 &tools,
-                &approval_mode,
+                &approval_mode.get(),
                 gate.as_ref(),
                 tool_calls,
                 &extensions,

@@ -8,9 +8,11 @@ use async_trait::async_trait;
 use futures_util::StreamExt; // for .boxed()
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 use bone::agent::AgentRunEvent;
 use bone::chat::build_chat_history;
-use bone::ext::ExtensionManager;
+use bone::ext::{BootOptions, ExtensionManager, boot_with_tools};
 use bone::llm::provider::LlmProvider;
 use bone::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, ResponseStream, TokenStats};
 use bone::runtime::{ChannelApprovalGate, Driver, RuntimeEvent};
@@ -81,7 +83,7 @@ fn driver_with_gate(
         tools: ToolHandler::new(builtin_tools()),
         session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
         gate,
-        approval_mode: Arc::new(mode),
+        approval_mode: bone::tools::SharedApprovalMode::new(mode),
         agent_depth: 0,
         activity: None,
         on_token_usage: None,
@@ -331,7 +333,7 @@ async fn driver_key_reply_completes_turn() {
         tools: ToolHandler::new(builtin_tools().register(KeyTool)),
         session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
         gate: Arc::new(AutoApprovalGate),
-        approval_mode: Arc::new(ApprovalMode::Danger),
+        approval_mode: bone::tools::SharedApprovalMode::new(ApprovalMode::Danger),
         agent_depth: 0,
         activity: None,
         on_token_usage: None,
@@ -435,4 +437,199 @@ async fn channel_gate_approve_runs_tool() {
 #[tokio::test]
 async fn channel_gate_deny_skips_tool() {
     run_with_channel_decision("deny", CallOutcome::Denied, true).await;
+}
+
+// A `before_turn` hook can now surface live status to the attached frontend:
+// the Driver threads its `runtime_events` sender into the hook ctx as
+// `runtime_status`, and `ctx.ui.status` emits a `RuntimeEvent::Status`. This is
+// the channel auto-compaction uses to announce "Compacting…/Compacted: …".
+#[tokio::test]
+async fn driver_before_turn_status_surfaces_to_runtime_events() {
+    let config_dir = common::temp_dir("driver-before-turn-status");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    // Register a before_turn hook that announces via ctx.ui.status.
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"
+bone.on("before_turn", function(_event, ctx)
+    if ctx and ctx.ui and ctx.ui.status then
+        ctx.ui.status("from before_turn hook")
+    end
+end)
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "mock-1",
+            vec![ChatEvent::TextDelta("ok".into())],
+        )),
+        extensions: booted.manager,
+        tools: booted.tools,
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: Some(tx),
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+    };
+
+    let response = driver.run(prompt).await.expect("driver run");
+    assert_eq!(response.content, "ok");
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            RuntimeEvent::Status { message } if message == "from before_turn hook"
+        )),
+        "before_turn ctx.ui.status should surface as a RuntimeEvent::Status; got {events:?}",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+/// Tool that returns a very large result, to prove compaction sees the *current*
+/// pending context mid-loop (including appended tool results), not a stale
+/// last-request size.
+struct BigTool;
+
+#[async_trait]
+impl Tool for BigTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "big_tool".into(),
+            description: "returns a large result".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+    async fn execute(&self, _arguments: serde_json::Value) -> Result<String, String> {
+        Ok("x".repeat(200_000))
+    }
+}
+
+// Regression: before_turn's `ctx.usage.snapshot().context_length` must reflect
+// the *current* pending history (with tool results appended mid-loop), not the
+// stale last-request size. Without the per-iteration refresh in the Driver, the
+// threshold check lags by one round, compaction never fires mid tool-call
+// sequence, and the next request overshoots the model's context limit.
+#[tokio::test]
+async fn driver_before_turn_sees_current_context_mid_loop() {
+    let config_dir = common::temp_dir("driver-before-turn-context");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"
+_OBS = {}
+bone.on("before_turn", function(_event, ctx)
+    local cl = 0
+    if ctx and ctx.usage and ctx.usage.snapshot then
+        local snap = ctx.usage.snapshot()
+        if snap then cl = snap.context_length or 0 end
+    end
+    _OBS[#_OBS + 1] = cl
+end)
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let lua_arc = booted.manager.lua_arc();
+
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "mock-1",
+            vec![ChatEvent::ToolCall(ToolCall {
+                id: "c1".into(),
+                name: "big_tool".into(),
+                arguments: serde_json::json!({}),
+            })],
+        )),
+        extensions: booted.manager,
+        tools: ToolHandler::new(builtin_tools().register(BigTool)),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone::tools::SharedApprovalMode::new(ApprovalMode::Danger),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: Some(tx),
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+    };
+
+    driver.run(prompt).await.expect("driver run");
+
+    // Read the recorded context_length observations from Lua.
+    let lua = lua_arc.lock().unwrap();
+    let obs: mlua::Table = lua.globals().get("_OBS").expect("_OBS set");
+    let observations: Vec<i64> = obs.sequence_values().filter_map(|v| v.ok()).collect();
+    drop(lua);
+
+    assert!(
+        observations.len() >= 2,
+        "before_turn should fire at least twice (init + after tool result); got {observations:?}",
+    );
+    let first = observations[0];
+    let second = observations[1];
+    // big_tool appended ~200_000 chars (~52k tokens). The 2nd before_turn
+    // observation must reflect that growth — proving the snapshot is the current
+    // pending context, not a stale last-request size (which would show ~no
+    // growth between the two observations).
+    assert!(
+        second > first + 10_000,
+        "2nd before_turn context_length ({second}) must exceed the 1st ({first}) \
+         by the appended tool result (~52k tokens); a stale snapshot would show ~no growth",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
 }

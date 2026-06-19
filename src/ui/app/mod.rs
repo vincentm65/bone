@@ -360,18 +360,10 @@ impl App {
     ) -> io::Result<Option<String>> {
         let mut action_reply = None;
         if let Some(new_messages) = action.conversation_replace {
-            // Replace the active transcript.
+            // Replace the active transcript. The caller (e.g. compact.lua's
+            // `display` return) already surfaces the compaction summary and
+            // savings to the user, so no separate marker is pushed here.
             self.transcript = new_messages;
-
-            // Rebuild the visible chat messages minimally:
-            // keep only a system note for this replacement since we can't
-            // reconstruct the full prior UI from ChatMessages alone.
-            // Existing messages stay in scrollback; add a compact marker.
-            self.messages.push(Message::system(
-                "Context compacted. Summary in transcript; recent messages preserved.",
-            ));
-            self.renderer
-                .flush_new_to_scrollback(&self.messages, term)?;
 
             // Recompute context_length estimate from the new transcript.
             let history = crate::chat::build_chat_history(&self.transcript, None);
@@ -701,7 +693,9 @@ impl App {
         let size = terminal.size()?;
         let desired = Renderer::desired_height(
             &self.input,
-            self.active_prompt.as_ref(),
+            // Approval prompt is a pane now (counted via `visible_pages`), so the
+            // input slot is sized normally — pass no prompt.
+            None,
             size.width,
             self.visible_pages(),
             self.active_page,
@@ -818,7 +812,9 @@ impl App {
         // owns the UI. The pane may be briefly inactive after submitting a
         // navigation value and before Lua upserts the replacement pane; treating
         // that handoff as interactive avoids a one-frame spinner flash.
-        let interacting = self.has_lua_menu_pane();
+        // A pending tool-approval is interactive too — it now lives in the pane
+        // region like Lua menus, so pause the spinner/timer the same way.
+        let interacting = self.has_lua_menu_pane() || self.active_prompt.is_some();
         // A live Lua command (e.g. /shotgun) runs through `drive_live` without
         // setting `streaming`, but it's still working — keep the spinner/timer
         // alive so the UI doesn't look frozen during long multi-model runs.
@@ -1125,7 +1121,10 @@ impl App {
                 active_page: self.active_page,
                 autocomplete: self.autocomplete.as_ref(),
             },
-            self.active_prompt.as_ref(),
+            // The tool-approval prompt renders as a live pane (source
+            // `"approval"`) in the pane region, not the input slot, so the input
+            // field stays usable (e.g. for typing free-form advice).
+            None,
         );
     }
 
@@ -1386,6 +1385,7 @@ impl App {
             KeyCode::Char('p') | KeyCode::Char('P') if allow_peek => prompt.toggle_peek(),
             _ => return Ok(false),
         }
+        self.refresh_approval_pane(term);
         self.redraw(term)?;
         Ok(true)
     }
@@ -1541,7 +1541,39 @@ impl App {
             advising: false,
         });
         self.timer_pause();
+        self.refresh_approval_pane(term);
         self.redraw(term)
+    }
+
+    /// (Re)build the tool-approval prompt as a live pane (source `"approval"`)
+    /// in the pane region, so it renders alongside reasoning/tool/subagent panes
+    /// — the same place `/config` and other interactive menus live. Called on
+    /// every state change (selection, peek toggle, entering advise mode) so the
+    /// pane stays in sync. No-op when no approval is pending.
+    pub(crate) fn refresh_approval_pane(&mut self, term: &BoneTerminal) {
+        let Some(prompt) = self.active_prompt.as_ref() else {
+            return;
+        };
+        let advising = self.pending_approval.as_ref().is_some_and(|p| p.advising);
+        let width = term.size().map(|s| s.width).unwrap_or(80);
+        let content =
+            crate::ui::render::approval_pane_lines(&self.renderer.theme, prompt, advising, width);
+        let visible_rows = content.len();
+        let page = PanePage {
+            source: "approval".to_string(),
+            title: "approval".to_string(),
+            content,
+            visible_rows,
+            scroll: 0,
+        };
+        self.panes_visible = true;
+        let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+        self.active_page = active;
+    }
+
+    /// Remove the live approval pane. Idempotent.
+    pub(crate) fn clear_approval_pane(&mut self) {
+        self.active_page = PanePage::remove(&mut self.pages, "approval", self.active_page);
     }
 
     /// Drain pending terminal events into the active approval prompt. Called
@@ -1585,11 +1617,13 @@ impl App {
                         .as_ref()
                         .map_or(Decision::Cancel, Prompt::decision);
                     if matches!(decision, Decision::Advise(_)) {
-                        // Switch to free-form advice entry; stay pending.
-                        self.active_prompt = None;
+                        // Switch to free-form advice entry; stay pending. Keep
+                        // `active_prompt` set so the approval pane keeps showing
+                        // the tool context above the "type advice" instruction.
                         if let Some(p) = self.pending_approval.as_mut() {
                             p.advising = true;
                         }
+                        self.refresh_approval_pane(term);
                         self.redraw(term)?;
                     } else {
                         self.resolve_approval(decision, term)?;
@@ -1607,10 +1641,10 @@ impl App {
                             .is_some_and(|prompt| prompt.selected == 1) =>
                 {
                     self.input.insert_char(c);
-                    self.active_prompt = None;
                     if let Some(p) = self.pending_approval.as_mut() {
                         p.advising = true;
                     }
+                    self.refresh_approval_pane(term);
                     self.redraw(term)?;
                 }
                 _ => {}
@@ -1637,6 +1671,7 @@ impl App {
             let _ = pending.reply.send(resolved);
         }
         self.active_prompt = None;
+        self.clear_approval_pane();
         self.timer_resume();
         self.redraw(term)
     }

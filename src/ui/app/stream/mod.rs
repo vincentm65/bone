@@ -305,8 +305,11 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let session: Arc<dyn SessionSink> = Arc::new(NullSessionSink);
 
-        let approval_mode = Arc::new(self.approval_mode);
-        let mut approval_mode_sync = Arc::clone(&approval_mode);
+        // Shared with the Driver so a mid-turn Safe/Danger toggle is observed on
+        // its next tool batch. Must be interior-mutable — a plain Arc can't be
+        // mutated once the Driver holds a clone.
+        let approval_mode = crate::tools::SharedApprovalMode::new(self.approval_mode);
+        let approval_mode_sync = approval_mode.clone();
 
         let driver = Driver {
             llm: self.llm.clone(),
@@ -354,7 +357,7 @@ impl App {
                 &mut self.active_page,
                 &mut pending_key,
             ) {
-                *Arc::make_mut(&mut approval_mode_sync) = self.approval_mode;
+                approval_mode_sync.set(self.approval_mode);
                 self.user_config.approval_mode = self.approval_mode;
                 self.persist_runtime_config();
             }
@@ -485,6 +488,7 @@ impl App {
         // back to its non-interactive decision); clear the prompt UI too.
         self.pending_approval = None;
         self.active_prompt = None;
+        self.clear_approval_pane();
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         // Single blank line between the last message and the input field. Deduped
@@ -549,11 +553,16 @@ impl App {
             RuntimeEvent::Status { message } => {
                 // Most status lines are already covered by other UI (the
                 // spinner for "thinking", tool rows for "running …"). Surface
-                // only the problem signals — retries and stream errors — that
-                // would otherwise leave the user staring at a spinner with no
-                // explanation while the driver silently retries.
+                // only the signals that would otherwise be invisible:
+                //  - retries / stream errors (already shown)
+                //  - compaction announcements from before_turn hooks
+                //    (auto-compaction via compact.lua), so the user sees that
+                //    context was summarized and what it saved.
+                let lower = message.to_lowercase();
                 if message.starts_with("retry") || message.contains("stream error") {
                     self.pump_notice(format!("⚠ {message}"), cur_idx, term)?;
+                } else if lower.contains("compact") {
+                    self.pump_notice(message, cur_idx, term)?;
                 }
             }
             // `Failed` stays authoritative at turn end (rendered from
@@ -863,7 +872,7 @@ impl App {
         F: FnOnce(mpsc::UnboundedSender<ToolLiveEvent>) -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        let mut spinner = time::interval(Duration::from_millis(90));
+        let mut spinner = time::interval(Duration::from_millis(70));
         let (tx, mut rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
         let future = make_future(tx);
         pin_mut!(future);

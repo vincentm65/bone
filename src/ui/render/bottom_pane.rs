@@ -144,6 +144,73 @@ fn prompt_option_line(
     Line::from(spans)
 }
 
+/// Build the styled content lines for the tool-approval prompt rendered as a
+/// live pane (consistent with `/config` and other interactive menus, which all
+/// live in the pane region). Mirrors the title/command/option styling the old
+/// input-slot prompt used, so the move is visual-only. `width` is the pane's
+/// render width, used to wrap the shell command preview.
+pub(crate) fn approval_pane_lines(
+    theme: &crate::ui::theme::Theme,
+    prompt: &Prompt,
+    advising: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Title: tool name + summary (for shell, the short label).
+    let title = if prompt.full_command.is_some() {
+        shell_prompt_title(prompt)
+    } else {
+        format!("  {}", prompt.title)
+    };
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().fg(theme.system_msg),
+    )));
+
+    // Shell command preview, respecting peek mode.
+    if let Some(ref cmd) = prompt.full_command {
+        let cmd_lines = shell_command_preview_lines(cmd, width as usize);
+        let max_preview = if prompt.peek_mode {
+            cmd_lines.len()
+        } else {
+            cmd_lines.len().min(COMMAND_PREVIEW_LINES)
+        };
+        for visual_line in cmd_lines.iter().take(max_preview) {
+            lines.push(Line::from(Span::styled(
+                visual_line.clone(),
+                Style::default().fg(theme.tool_call),
+            )));
+        }
+        if prompt.peek_mode {
+            lines.push(Line::from(Span::styled(
+                "    Press P to hide full command".to_string(),
+                Style::default().fg(theme.system_msg),
+            )));
+        } else if cmd_lines.len() > COMMAND_PREVIEW_LINES {
+            let remaining = cmd_lines.len() - COMMAND_PREVIEW_LINES;
+            lines.push(Line::from(Span::styled(
+                format!("    … [+{remaining} more lines]  Press P to show full command"),
+                Style::default().fg(theme.system_msg),
+            )));
+        }
+    }
+
+    if advising {
+        // Free-form advice mode: the user types into the chat input field
+        // (rendered above the status bar); the pane shows the instruction.
+        lines.push(Line::from(Span::styled(
+            "  Type advice below · Enter to send · Esc to cancel".to_string(),
+            Style::default().fg(theme.status_text),
+        )));
+    } else {
+        for (i, option) in prompt.options.iter().enumerate() {
+            lines.push(prompt_option_line(theme, option, i == prompt.selected));
+        }
+    }
+    lines
+}
+
 fn push_prompt_text_spans(
     text: &str,
     text_style: Style,

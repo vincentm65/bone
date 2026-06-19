@@ -97,8 +97,8 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.write_file(path, content)` | `true` | Create new file; fails if file exists (raises Lua error) |
 
 | **`ctx.ui.*`** | | UI output |
-| `ctx.ui.notify(msg, level?)` | | Show notification (`"info"`, `"warn"`, `"error"`) |
-| `ctx.ui.status(msg)` | | Write status line to stderr |
+| `ctx.ui.notify(msg, level?)` | | Show notification (`"info"`, `"warn"`, `"error"`); forwarded to the frontend as a status line when one is attached |
+| `ctx.ui.status(msg)` | | Surface a live status line to the attached frontend (TUI); stderr fallback when headless |
 | `ctx.ui.pane(table)` | `true\|(false, string)` | Upsert/clear a live pane (tools only) — see [Live Panes](#live-panes) |
 | `ctx.ui.key()` | `table` | Block for one key event: `{code, char, ctrl, alt, shift}` — see [Live Panes](#live-panes) |
 | **Live events** | | During `execute_output_live` only |
@@ -430,6 +430,8 @@ Configuration:
 - `auto_compact_keep_messages` — recent user/assistant message count to preserve after compaction. Blank/unset disables manual and automatic compaction.
 
 Auto-compaction runs after a user message is appended and before the provider request is built. It triggers only when both config values are positive integers and the current context estimate is at or above `auto_compact_tokens`.
+
+Auto-compaction announces itself to the attached frontend via `ctx.ui.status`: a `Compacting context…` notice before the summarization call and a `Compacted: N → M messages (~X → ~Y tokens)` notice with the savings afterwards. The Driver runs the `before_turn` hook on a blocking thread so the UI stays responsive (spinner animates, Esc cancels) during the summarization, and threads the turn cancel flag so Esc aborts an in-flight compaction. `ctx.ui.notify` at info level is forwarded to the frontend the same way (no longer a silent no-op).
 
 **Known limitation:** compaction preserves only complete tool-call chains. If the keep boundary would leave a `tool` result without its matching assistant `tool_calls`, or an assistant `tool_calls` entry without its matching result, that incomplete chain is dropped from the compacted transcript to keep provider history valid.
 

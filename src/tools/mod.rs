@@ -106,4 +106,51 @@ impl ApprovalMode {
             Self::Danger => "danger",
         }
     }
+
+    /// Encode for storage in a shared [`std::sync::atomic::AtomicU8`] so a live
+    /// frontend can toggle the mode while the driver is mid-turn (see
+    /// [`SharedApprovalMode`]).
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Safe => 0,
+            Self::Danger => 1,
+        }
+    }
+
+    /// Decode a value previously produced by [`Self::as_u8`]. Any unexpected
+    /// value falls back to the safe default.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Danger,
+            _ => Self::Safe,
+        }
+    }
+}
+
+/// A handle to the current [`ApprovalMode`] that can be read and written from
+/// multiple owners. The interactive frontend and the running [`Driver`] hold
+/// clones of the *same* atomic, so cycling the mode mid-turn is observed by the
+/// driver on its next tool batch.
+///
+/// This must stay interior-mutable: a plain `Arc<ApprovalMode>` cannot be
+/// mutated once shared (`Arc::make_mut` forks a private copy instead), which
+/// silently strands the driver on the old mode.
+#[derive(Clone)]
+pub struct SharedApprovalMode(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl SharedApprovalMode {
+    pub fn new(mode: ApprovalMode) -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            mode.as_u8(),
+        )))
+    }
+
+    pub fn get(&self) -> ApprovalMode {
+        ApprovalMode::from_u8(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn set(&self, mode: ApprovalMode) {
+        self.0
+            .store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
+    }
 }

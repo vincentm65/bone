@@ -366,6 +366,65 @@ fn tool_definition_array_serializes_correctly() {
     assert_eq!(tbl.as_array().unwrap().len(), 2);
 }
 
+// ── ui.status / ui.notify emit RuntimeEvent::Status (compaction feedback) ────
+
+/// When `runtime_status` is set (the interactive Driver path), `ctx.ui.status`
+/// and info-level `ctx.ui.notify` surface to the frontend as a `Status` event.
+/// This is the channel auto-compaction uses to announce progress + savings.
+#[test]
+fn ui_status_and_info_notify_emit_runtime_status() {
+    use crate::runtime::RuntimeEvent;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+    let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
+    cfg.runtime_status = Some(tx);
+
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    lua.load("ctx.ui.status('Compacting context...')")
+        .exec()
+        .unwrap();
+    lua.load("ctx.ui.notify('Compacted: 40 → 5 messages', 'info')")
+        .exec()
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert_eq!(
+        events.len(),
+        2,
+        "status + info notify should each emit one event"
+    );
+    match &events[0] {
+        RuntimeEvent::Status { message } => assert_eq!(message, "Compacting context..."),
+        other => panic!("first event should be Status, got {other:?}"),
+    }
+    match &events[1] {
+        RuntimeEvent::Status { message } => assert_eq!(message, "Compacted: 40 → 5 messages"),
+        other => panic!("second event should be Status, got {other:?}"),
+    }
+}
+
+// Without a frontend (headless before_turn), `ctx.ui.status` must not send and
+// must not panic — it falls back to stderr.
+#[test]
+fn ui_status_without_frontend_is_inert() {
+    let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    let cfg = CtxConfig::new("/tmp".to_string(), shared);
+    assert!(cfg.runtime_status.is_none());
+
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+    // Must not error.
+    lua.load("ctx.ui.status('headless line')").exec().unwrap();
+}
+
 // ── AppCtxState parity (commands ⇆ tools share one ctx) ─────────────────────
 
 fn sample_app_state() -> AppCtxState {

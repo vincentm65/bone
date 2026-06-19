@@ -295,6 +295,11 @@ bone.on("before_turn", function(event, ctx)
         return nil
     end
 
+    -- Tell the user compaction is running BEFORE the (potentially long)
+    -- summarization LLM call, so the turn doesn't look frozen. Surfaced to
+    -- the TUI via the runtime status channel.
+    ctx.ui.status("Compacting context (summarizing older messages)...")
+
     local messages = compact(history, ctx, config.keep_messages)
     if not messages then
         return nil
@@ -310,13 +315,10 @@ bone.on("before_turn", function(event, ctx)
     local new_context = overhead + transcript_tokens
     last_auto_context[context_key] = new_context
 
-    ctx.ui.notify(
-        string.format(
-            "compacting: %d messages → %d (context: ~%d → ~%d tokens)",
-            #history, #messages, context_length, new_context
-        ),
-        "info"
-    )
+    ctx.ui.status(string.format(
+        "Compacted: %d → %d messages (~%d → ~%d tokens)",
+        #history, #messages, context_length, new_context
+    ))
 
     return {
         action = "conversation.replace",

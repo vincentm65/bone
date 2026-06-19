@@ -68,6 +68,11 @@ pub(crate) struct CtxConfig {
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
     pub conversation_history: Option<Vec<crate::llm::ChatMessage>>,
+    /// Sender for the frontend-facing `RuntimeEvent` stream. When set, hooks
+    /// (e.g. `before_turn`) can surface live status to the attached frontend
+    /// (the TUI) via `ctx.ui.status`/`ctx.ui.notify`. `None` headless, where
+    /// those calls fall back to stderr.
+    pub runtime_status: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
 }
 
 impl CtxConfig {
@@ -94,6 +99,7 @@ impl CtxConfig {
             cancelled: None,
             usage: None,
             conversation_history: None,
+            runtime_status: None,
         }
     }
 }
@@ -505,26 +511,41 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
 /// primitives. `pane` and `key` degrade to inert stubs when their handles
 /// (`cfg.ui` / `cfg.pane_sender`) are absent (e.g. headless before_turn).
 fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
-    // ctx.ui.notify(message, level?) — write a notification-style stderr line
-    // for warnings/errors. Info notifications are intentionally quiet so
-    // background hooks do not corrupt the TUI.
     let ui_table = lua.create_table()?;
-    let notify_fn = lua.create_function(|_, (msg, level): (String, Option<String>)| {
+    // Senders for surfacing live status to an attached frontend (the TUI).
+    // Cloned per closure (mlua functions are 'static).
+    let status_tx = cfg.runtime_status.clone();
+    let notify_tx = cfg.runtime_status.clone();
+
+    // ctx.ui.status(message) — surface a live status line to the attached
+    // frontend (e.g. auto-compaction announcing progress/savings). Headless
+    // (no frontend) falls back to stderr.
+    let status_fn = lua.create_function(move |_, msg: String| {
+        if let Some(tx) = &status_tx {
+            let _ = tx.send(crate::runtime::RuntimeEvent::Status { message: msg });
+        } else {
+            eprintln!("bone-lua: {msg}");
+        }
+        Ok(())
+    })?;
+    ui_table.set("status", status_fn)?;
+
+    // ctx.ui.notify(message, level?) — warnings/errors still go to stderr for
+    // headless debugging. Info-level (and above) is also forwarded to an
+    // attached frontend as a status line, so background hooks like
+    // auto-compaction are no longer silently dropped in the TUI.
+    let notify_fn = lua.create_function(move |_, (msg, level): (String, Option<String>)| {
         match level.as_deref() {
             Some("warn") | Some("warning") => eprintln!("bone-lua warn: {msg}"),
             Some("error") => eprintln!("bone-lua error: {msg}"),
             _ => {}
         }
+        if let Some(tx) = &notify_tx {
+            let _ = tx.send(crate::runtime::RuntimeEvent::Status { message: msg });
+        }
         Ok(())
     })?;
     ui_table.set("notify", notify_fn)?;
-
-    // ctx.ui.status(message) — write a notification-style stderr line
-    let status_fn = lua.create_function(|_, msg: String| {
-        eprintln!("bone-lua: {msg}");
-        Ok(())
-    })?;
-    ui_table.set("status", status_fn)?;
 
     // ctx.ui.pane(opts) — push a ViewDiff directly into the shared UiState
     // handle (v2: no longer goes through the channel). Works when `ui` is set.

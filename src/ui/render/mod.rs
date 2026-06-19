@@ -24,6 +24,7 @@ use backend::BoneBackend;
 /// Minimum viewport rows: top-sep + input(1) + status.
 pub(crate) const MIN_ROWS: u16 = 3;
 pub use bottom_pane::PaneDraw;
+pub(crate) use bottom_pane::approval_pane_lines;
 pub(crate) use bottom_pane::clamped_pane_visible_rows;
 pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
