@@ -160,9 +160,7 @@ pub(crate) fn create_engine(
             Ok(())
         })
         .map_err(|e| e.to_string())?;
-    globals
-        .set("print", print_fn)
-        .map_err(|e| e.to_string())?;
+    globals.set("print", print_fn).map_err(|e| e.to_string())?;
 
     // Set safe package.path entries so users can `require` from their lua dir.
     let lua_dir = config_dir.join("lua");

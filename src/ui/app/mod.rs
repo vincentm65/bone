@@ -295,42 +295,44 @@ impl App {
             Err(err) => Some(format!("warning: failed to open session database: {err}")),
         }
     }
+    /// Append a message to the session database under the active conversation,
+    /// allocating the next sequence number. No-op when no db/conversation is
+    /// open. Shared by the assistant and tool-result append helpers.
+    fn append_db_message(
+        &mut self,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        call_id: Option<&str>,
+        tool_calls_json: Option<&str>,
+    ) {
+        let Some(conv_id) = self.conversation_id else {
+            return;
+        };
+        let Some(db) = self.session_db.as_ref() else {
+            return;
+        };
+        self.session_seq += 1;
+        db.append_message(
+            conv_id,
+            role,
+            content,
+            tool_name,
+            call_id,
+            tool_calls_json,
+            self.session_seq,
+        )
+        .ok();
+    }
+
     /// Append an assistant message to the session database.
     pub(crate) fn append_assistant_to_db(&mut self, content: &str, tool_calls_json: Option<&str>) {
-        if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id
-        {
-            self.session_seq += 1;
-            db.append_message(
-                conv_id,
-                "assistant",
-                content,
-                None,
-                None,
-                tool_calls_json,
-                self.session_seq,
-            )
-            .ok();
-        }
+        self.append_db_message("assistant", content, None, None, tool_calls_json);
     }
 
     /// Append a tool result to the session database.
     pub(crate) fn append_tool_result_to_db(&mut self, name: &str, call_id: &str, content: &str) {
-        if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id
-        {
-            self.session_seq += 1;
-            db.append_message(
-                conv_id,
-                "tool",
-                content,
-                Some(name),
-                Some(call_id),
-                None,
-                self.session_seq,
-            )
-            .ok();
-        }
+        self.append_db_message("tool", content, Some(name), Some(call_id), None);
     }
     /// Record a token-usage event for the active conversation. The Driver runs
     /// with a `NullSessionSink` (the TUI owns `session_seq`), so usage events it
@@ -2022,32 +2024,43 @@ impl App {
         self.redraw(term)
     }
 
-    fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        if std::env::var_os("TMUX").is_some()
+    /// Launch `<bone-exe> <subcommand>` in a tmux `display-popup` sized
+    /// `width`×`height`, redrawing afterward. Returns the popup's exit status,
+    /// or `None` when not in a responsive tmux or the popup failed to launch (so
+    /// the caller falls back to its inline fullscreen path). Shared by the stats
+    /// dashboard and setup wizard, the two popup-capable fullscreen entries.
+    fn try_tmux_popup(
+        &mut self,
+        subcommand: &str,
+        width: &str,
+        height: &str,
+        term: &mut BoneTerminal,
+    ) -> io::Result<Option<std::process::ExitStatus>> {
+        let tmux_ok = std::env::var_os("TMUX").is_some()
             && std::process::Command::new("tmux")
-                .arg("display-message")
-                .arg("-p")
-                .arg("ok")
+                .args(["display-message", "-p", "ok"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .is_ok_and(|s| s.success())
+                .is_ok_and(|s| s.success());
+        if !tmux_ok {
+            return Ok(None);
+        }
+        let exe = std::env::current_exe()?;
+        let cmd = format!("{} {subcommand}", shell_quote(&exe.to_string_lossy()));
+        let result = std::process::Command::new("tmux")
+            .args(["display-popup", "-E", "-w", width, "-h", height])
+            .arg(cmd)
+            .status();
+        self.force_redraw(term)?;
+        Ok(result.ok())
+    }
+
+    fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if let Some(status) = self.try_tmux_popup("stats-popup", "96%", "92%", term)?
+            && status.success()
         {
-            let exe = std::env::current_exe()?;
-            let cmd = format!("{} stats-popup", shell_quote(&exe.to_string_lossy()));
-            let result = std::process::Command::new("tmux")
-                .arg("display-popup")
-                .arg("-E")
-                .arg("-w")
-                .arg("96%")
-                .arg("-h")
-                .arg("92%")
-                .arg(cmd)
-                .status();
-            self.force_redraw(term)?;
-            if result.is_ok_and(|s| s.success()) {
-                return Ok(());
-            }
+            return Ok(());
         }
 
         let Some(ref db) = self.session_db else {
@@ -2072,32 +2085,11 @@ impl App {
 
     fn open_setup_wizard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let mut ran = false;
-        if std::env::var_os("TMUX").is_some()
-            && std::process::Command::new("tmux")
-                .arg("display-message")
-                .arg("-p")
-                .arg("ok")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        {
-            let exe = std::env::current_exe()?;
-            let cmd = format!("{} setup", shell_quote(&exe.to_string_lossy()));
-            let result = std::process::Command::new("tmux")
-                .arg("display-popup")
-                .arg("-E")
-                .arg("-w")
-                .arg("80%")
-                .arg("-h")
-                .arg("80%")
-                .arg(cmd)
-                .status();
-            self.force_redraw(term)?;
-            match result {
-                Ok(s) if s.success() => ran = true,
+        if let Some(status) = self.try_tmux_popup("setup", "80%", "80%", term)? {
+            match status {
+                s if s.success() => ran = true,
                 // `bone setup` exits 2 when the user cancels the wizard.
-                Ok(s) if s.code() == Some(2) => {
+                s if s.code() == Some(2) => {
                     return self.show_reply("Setup cancelled.".to_string(), term);
                 }
                 // Popup failed to launch — fall through to the inline wizard.

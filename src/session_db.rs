@@ -298,6 +298,28 @@ impl TimeWindow {
     }
 }
 
+/// Aggregate column list for a `(prompt, completion, cached, cost, count)` row,
+/// consumed by [`SessionDb::read_summary_row`] / [`SessionDb::read_provider_row`].
+const SUM_COLS: &str = "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+     COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*)";
+
+/// Aggregate column list for a `(prompt, completion, cached, count)` row (no
+/// cost), consumed by [`SessionDb::read_hour_row`].
+const HOUR_SUM_COLS: &str = "COALESCE(SUM(prompt_tokens),0), \
+     COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0), COUNT(*)";
+
+/// Aliased aggregate columns for the inner `usage` CTE of a bucket query.
+const BUCKET_AGG_COLS: &str = "COALESCE(SUM(prompt_tokens),0) AS prompt, \
+     COALESCE(SUM(completion_tokens),0) AS completion, \
+     COALESCE(SUM(cached_tokens),0) AS cached, \
+     COALESCE(SUM(cost),0.0) AS cost, COUNT(*) AS requests";
+
+/// Final projection pulling the gap-filled aggregates out of the `usage` CTE,
+/// in the column order [`SessionDb::read_usage_bucket_row`] expects after the
+/// bucket label.
+const BUCKET_PROJECTION: &str = "COALESCE(usage.prompt,0), COALESCE(usage.completion,0), \
+     COALESCE(usage.cached,0), COALESCE(usage.cost,0.0), COALESCE(usage.requests,0)";
+
 /// SQLite-backed conversation and usage storage.
 pub struct SessionDb {
     conn: Connection,
@@ -551,17 +573,9 @@ impl SessionDb {
         )?;
 
         let total = self.conn.query_row(
-            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) FROM usage_events",
+            &format!("SELECT {SUM_COLS} FROM usage_events"),
             [],
-            |row| {
-                Ok(UsageSummary {
-                    prompt_tokens: row.get(0)?,
-                    completion_tokens: row.get(1)?,
-                    cached_tokens: row.get(2)?,
-                    cost: row.get(3)?,
-                    request_count: row.get(4)?,
-                })
-            },
+            Self::read_summary_row,
         )?;
 
         let by_model_today = self.usage_by_model_since(TimeWindow::Today)?;
@@ -603,26 +617,14 @@ impl SessionDb {
     fn usage_by_model_since(&self, window: TimeWindow) -> rusqlite::Result<Vec<ProviderUsage>> {
         let (where_clause, param) = window.clause();
         let sql = format!(
-            "SELECT provider, model, \
-             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-             COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
+            "SELECT provider, model, {SUM_COLS} \
              FROM usage_events{where_clause} \
              GROUP BY provider, model \
              ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC"
         );
         let params: Vec<String> = param.into_iter().collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(&params), |row| {
-            Ok(ProviderUsage {
-                provider: row.get(0)?,
-                model: row.get(1)?,
-                prompt_tokens: row.get(2)?,
-                completion_tokens: row.get(3)?,
-                cached_tokens: row.get(4)?,
-                cost: row.get(5)?,
-                request_count: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(&params), Self::read_provider_row)?;
         rows.collect()
     }
 
@@ -634,6 +636,44 @@ impl SessionDb {
             cached_tokens: row.get(3)?,
             cost: row.get(4)?,
             request_count: row.get(5)?,
+        })
+    }
+
+    /// Map a `(prompt, completion, cached, cost, count)` row — the [`SUM_COLS`]
+    /// aggregate — into a [`UsageSummary`].
+    fn read_summary_row(row: &rusqlite::Row) -> rusqlite::Result<UsageSummary> {
+        Ok(UsageSummary {
+            prompt_tokens: row.get(0)?,
+            completion_tokens: row.get(1)?,
+            cached_tokens: row.get(2)?,
+            cost: row.get(3)?,
+            request_count: row.get(4)?,
+        })
+    }
+
+    /// Map a `(provider, model, prompt, completion, cached, cost, count)` row
+    /// into a [`ProviderUsage`].
+    fn read_provider_row(row: &rusqlite::Row) -> rusqlite::Result<ProviderUsage> {
+        Ok(ProviderUsage {
+            provider: row.get(0)?,
+            model: row.get(1)?,
+            prompt_tokens: row.get(2)?,
+            completion_tokens: row.get(3)?,
+            cached_tokens: row.get(4)?,
+            cost: row.get(5)?,
+            request_count: row.get(6)?,
+        })
+    }
+
+    /// Map a `(hour, prompt, completion, cached, count)` row — the
+    /// [`HOUR_SUM_COLS`] aggregate — into a [`HourUsage`].
+    fn read_hour_row(row: &rusqlite::Row) -> rusqlite::Result<HourUsage> {
+        Ok(HourUsage {
+            hour: row.get(0)?,
+            prompt_tokens: row.get(1)?,
+            completion_tokens: row.get(2)?,
+            cached_tokens: row.get(3)?,
+            request_count: row.get(4)?,
         })
     }
 
@@ -649,27 +689,21 @@ impl SessionDb {
 
     fn usage_today_by_hour(&self) -> rusqlite::Result<Vec<UsageBucket>> {
         self.query_buckets(
-            "WITH RECURSIVE hours(hour) AS (
+            &format!(
+                "WITH RECURSIVE hours(hour) AS (
                 VALUES(0)
                 UNION ALL SELECT hour + 1 FROM hours WHERE hour < 23
              ), usage AS (
-                SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER) AS hour,
-                       COALESCE(SUM(prompt_tokens),0) AS prompt,
-                       COALESCE(SUM(completion_tokens),0) AS completion,
-                       COALESCE(SUM(cached_tokens),0) AS cached,
-                       COALESCE(SUM(cost),0.0) AS cost,
-                       COUNT(*) AS requests
+                SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER) AS hour, {BUCKET_AGG_COLS}
                 FROM usage_events
                 WHERE date(created_at, 'localtime') = date('now', 'localtime')
                 GROUP BY hour
              )
-             SELECT printf('%02d:00', hours.hour),
-                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
-                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
-                    COALESCE(usage.requests,0)
+             SELECT printf('%02d:00', hours.hour), {BUCKET_PROJECTION}
              FROM hours
              LEFT JOIN usage ON usage.hour = hours.hour
-             ORDER BY hours.hour ASC",
+             ORDER BY hours.hour ASC"
+            ),
             [],
         )
     }
@@ -677,27 +711,21 @@ impl SessionDb {
     fn usage_recent_days(&self, days: i64) -> rusqlite::Result<Vec<UsageBucket>> {
         let modifier = format!("-{} days", days.saturating_sub(1));
         self.query_buckets(
-            "WITH RECURSIVE series(n, day) AS (
+            &format!(
+                "WITH RECURSIVE series(n, day) AS (
                 VALUES(0, date('now', 'localtime', ?1))
                 UNION ALL SELECT n + 1, date(day, '+1 day') FROM series WHERE n + 1 < ?2
              ), usage AS (
-                SELECT date(created_at, 'localtime') AS day,
-                       COALESCE(SUM(prompt_tokens),0) AS prompt,
-                       COALESCE(SUM(completion_tokens),0) AS completion,
-                       COALESCE(SUM(cached_tokens),0) AS cached,
-                       COALESCE(SUM(cost),0.0) AS cost,
-                       COUNT(*) AS requests
+                SELECT date(created_at, 'localtime') AS day, {BUCKET_AGG_COLS}
                 FROM usage_events
                 WHERE date(created_at, 'localtime') >= date('now', 'localtime', ?1)
                 GROUP BY day
              )
-             SELECT series.day,
-                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
-                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
-                    COALESCE(usage.requests,0)
+             SELECT series.day, {BUCKET_PROJECTION}
              FROM series
              LEFT JOIN usage ON usage.day = series.day
-             ORDER BY series.day ASC",
+             ORDER BY series.day ASC"
+            ),
             params![modifier, days],
         )
     }
@@ -706,29 +734,23 @@ impl SessionDb {
         let first_label_modifier = format!("-{} days", weeks.saturating_sub(1).saturating_mul(7));
         let usage_modifier = format!("-{} days", weeks.saturating_mul(7).saturating_sub(1));
         self.query_buckets(
-            "WITH RECURSIVE series(n, week) AS (
+            &format!(
+                "WITH RECURSIVE series(n, week) AS (
                 VALUES(0, strftime('%Y-W%W', date('now', 'localtime', ?1)))
                 UNION ALL
                 SELECT n + 1, strftime('%Y-W%W', date('now', 'localtime', printf('-%d days', (?2 - n - 2) * 7)))
                 FROM series WHERE n + 1 < ?2
              ), usage AS (
-                SELECT strftime('%Y-W%W', created_at, 'localtime') AS week,
-                       COALESCE(SUM(prompt_tokens),0) AS prompt,
-                       COALESCE(SUM(completion_tokens),0) AS completion,
-                       COALESCE(SUM(cached_tokens),0) AS cached,
-                       COALESCE(SUM(cost),0.0) AS cost,
-                       COUNT(*) AS requests
+                SELECT strftime('%Y-W%W', created_at, 'localtime') AS week, {BUCKET_AGG_COLS}
                 FROM usage_events
                 WHERE date(created_at, 'localtime') >= date('now', 'localtime', ?3)
                 GROUP BY week
              )
-             SELECT series.week,
-                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
-                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
-                    COALESCE(usage.requests,0)
+             SELECT series.week, {BUCKET_PROJECTION}
              FROM series
              LEFT JOIN usage ON usage.week = series.week
-             ORDER BY series.n ASC",
+             ORDER BY series.n ASC"
+            ),
             params![first_label_modifier, weeks, usage_modifier],
         )
     }
@@ -736,28 +758,22 @@ impl SessionDb {
     fn usage_buckets(&self, limit: i64) -> rusqlite::Result<Vec<UsageBucket>> {
         let modifier = format!("-{} months", limit.saturating_sub(1));
         self.query_buckets(
-            "WITH RECURSIVE series(n, month) AS (
+            &format!(
+                "WITH RECURSIVE series(n, month) AS (
                 VALUES(0, strftime('%Y-%m', date('now', 'localtime', ?1)))
                 UNION ALL
                 SELECT n + 1, strftime('%Y-%m', date(month || '-01', '+1 month'))
                 FROM series WHERE n + 1 < ?2
              ), usage AS (
-                SELECT strftime('%Y-%m', created_at, 'localtime') AS month,
-                       COALESCE(SUM(prompt_tokens),0) AS prompt,
-                       COALESCE(SUM(completion_tokens),0) AS completion,
-                       COALESCE(SUM(cached_tokens),0) AS cached,
-                       COALESCE(SUM(cost),0.0) AS cost,
-                       COUNT(*) AS requests
+                SELECT strftime('%Y-%m', created_at, 'localtime') AS month, {BUCKET_AGG_COLS}
                 FROM usage_events
                 GROUP BY month
              )
-             SELECT series.month,
-                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
-                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
-                    COALESCE(usage.requests,0)
+             SELECT series.month, {BUCKET_PROJECTION}
              FROM series
              LEFT JOIN usage ON usage.month = series.month
-             ORDER BY series.month ASC",
+             ORDER BY series.month ASC"
+            ),
             params![modifier, limit],
         )
     }
@@ -765,12 +781,10 @@ impl SessionDb {
     /// All-time usage grouped by calendar year (`YYYY`), oldest first.
     fn usage_by_year(&self) -> rusqlite::Result<Vec<UsageBucket>> {
         self.query_buckets(
-            "SELECT strftime('%Y', created_at, 'localtime') AS year,
-                    COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
-                    COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*)
-             FROM usage_events
-             GROUP BY year
-             ORDER BY year ASC",
+            &format!(
+                "SELECT strftime('%Y', created_at, 'localtime') AS year, {SUM_COLS} \
+                 FROM usage_events GROUP BY year ORDER BY year ASC"
+            ),
             [],
         )
     }
@@ -779,7 +793,11 @@ impl SessionDb {
     /// fields the dashboard consults in custom-range mode are populated; the
     /// daily buckets, model breakdown and hourly histogram carry the range, and
     /// `total` aggregates the window.
-    pub fn usage_stats_range(&self, start: &str, end: &str) -> rusqlite::Result<UsageStatsSnapshot> {
+    pub fn usage_stats_range(
+        &self,
+        start: &str,
+        end: &str,
+    ) -> rusqlite::Result<UsageStatsSnapshot> {
         let daily = self.usage_range_days(start, end)?;
         let by_model_today = self.usage_by_model_range(start, end)?;
         let hourly_today = self.usage_by_hour_range(start, end)?;
@@ -790,20 +808,12 @@ impl SessionDb {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let total = self.conn.query_row(
-            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-             COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
-             FROM usage_events \
-             WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2",
+            &format!(
+                "SELECT {SUM_COLS} FROM usage_events \
+                 WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2"
+            ),
             params![start, end],
-            |row| {
-                Ok(UsageSummary {
-                    prompt_tokens: row.get(0)?,
-                    completion_tokens: row.get(1)?,
-                    cached_tokens: row.get(2)?,
-                    cost: row.get(3)?,
-                    request_count: row.get(4)?,
-                })
-            },
+            Self::read_summary_row,
         )?;
 
         let empty = Vec::new();
@@ -831,98 +841,60 @@ impl SessionDb {
     /// Daily buckets for an explicit `[start, end]` inclusive range.
     fn usage_range_days(&self, start: &str, end: &str) -> rusqlite::Result<Vec<UsageBucket>> {
         self.query_buckets(
-            "WITH RECURSIVE series(n, day) AS (
+            &format!(
+                "WITH RECURSIVE series(n, day) AS (
                 VALUES(0, date(?1))
                 UNION ALL SELECT n + 1, date(day, '+1 day')
                 FROM series WHERE date(day, '+1 day') <= date(?2)
              ), usage AS (
-                SELECT date(created_at, 'localtime') AS day,
-                       COALESCE(SUM(prompt_tokens),0) AS prompt,
-                       COALESCE(SUM(completion_tokens),0) AS completion,
-                       COALESCE(SUM(cached_tokens),0) AS cached,
-                       COALESCE(SUM(cost),0.0) AS cost,
-                       COUNT(*) AS requests
+                SELECT date(created_at, 'localtime') AS day, {BUCKET_AGG_COLS}
                 FROM usage_events
                 WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2
                 GROUP BY day
              )
-             SELECT series.day,
-                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
-                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
-                    COALESCE(usage.requests,0)
+             SELECT series.day, {BUCKET_PROJECTION}
              FROM series
              LEFT JOIN usage ON usage.day = series.day
-             ORDER BY series.day ASC",
+             ORDER BY series.day ASC"
+            ),
             params![start, end],
         )
     }
 
     /// Provider/model breakdown for an explicit `[start, end]` range.
     fn usage_by_model_range(&self, start: &str, end: &str) -> rusqlite::Result<Vec<ProviderUsage>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT provider, model, \
-             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-             COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT provider, model, {SUM_COLS} \
              FROM usage_events \
              WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2 \
              GROUP BY provider, model \
              ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC",
-        )?;
-        let rows = stmt.query_map(params![start, end], |row| {
-            Ok(ProviderUsage {
-                provider: row.get(0)?,
-                model: row.get(1)?,
-                prompt_tokens: row.get(2)?,
-                completion_tokens: row.get(3)?,
-                cached_tokens: row.get(4)?,
-                cost: row.get(5)?,
-                request_count: row.get(6)?,
-            })
-        })?;
+        ))?;
+        let rows = stmt.query_map(params![start, end], Self::read_provider_row)?;
         rows.collect()
     }
 
     /// Hour-of-day histogram for an explicit `[start, end]` range.
     fn usage_by_hour_range(&self, start: &str, end: &str) -> rusqlite::Result<Vec<HourUsage>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
-             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-             COALESCE(SUM(cached_tokens),0), COUNT(*) \
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), {HOUR_SUM_COLS} \
              FROM usage_events \
              WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2 \
              GROUP BY 1 ORDER BY 1",
-        )?;
-        let rows = stmt.query_map(params![start, end], |row| {
-            Ok(HourUsage {
-                hour: row.get(0)?,
-                prompt_tokens: row.get(1)?,
-                completion_tokens: row.get(2)?,
-                cached_tokens: row.get(3)?,
-                request_count: row.get(4)?,
-            })
-        })?;
+        ))?;
+        let rows = stmt.query_map(params![start, end], Self::read_hour_row)?;
         rows.collect()
     }
 
     fn usage_by_hour_since(&self, window: TimeWindow) -> rusqlite::Result<Vec<HourUsage>> {
         let (where_clause, param) = window.clause();
         let sql = format!(
-            "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
-             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
-             COALESCE(SUM(cached_tokens),0), COUNT(*) \
+            "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), {HOUR_SUM_COLS} \
              FROM usage_events{where_clause} GROUP BY 1 ORDER BY 1"
         );
         let params: Vec<String> = param.into_iter().collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(&params), |row| {
-            Ok(HourUsage {
-                hour: row.get(0)?,
-                prompt_tokens: row.get(1)?,
-                completion_tokens: row.get(2)?,
-                cached_tokens: row.get(3)?,
-                request_count: row.get(4)?,
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(&params), Self::read_hour_row)?;
         rows.collect()
     }
 

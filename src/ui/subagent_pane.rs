@@ -7,7 +7,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::ext::jobs::{current_unix_seconds, Job, JobStatus};
+use crate::ext::jobs::{Job, JobStatus, current_unix_seconds};
 
 use super::pane_page::PanePage;
 
@@ -192,7 +192,10 @@ fn job_status(job: &Job, now: u64) -> (&'static str, String) {
             if job.token_sent > 0 || job.token_received > 0 {
                 (
                     "○",
-                    format!("idle ({} total)", format_tokens(job.token_sent + job.token_received)),
+                    format!(
+                        "idle ({} total)",
+                        format_tokens(job.token_sent + job.token_received)
+                    ),
                 )
             } else {
                 ("○", "idle".to_string())
@@ -201,7 +204,6 @@ fn job_status(job: &Job, now: u64) -> (&'static str, String) {
         JobStatus::Error => ("✗", "error".to_string()),
     }
 }
-
 
 fn format_tokens(n: u64) -> String {
     if n >= 1_000_000 {

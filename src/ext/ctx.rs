@@ -17,6 +17,58 @@ use crate::tools::write_atomic::write_atomic;
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Run an async future to completion from inside a synchronous Lua callback.
+/// Wraps the `block_in_place` + current-runtime `block_on` dance used by every
+/// blocking ctx primitive (`shell`, `read_file`, `write_file`, `tools.call`,
+/// the agent dispatch paths).
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+}
+
+/// Classify a path as `"file"`, `"dir"`, or `"other"` for the `ctx.fs` helpers.
+fn kind_str(path: &Path) -> &'static str {
+    if path.is_file() {
+        "file"
+    } else if path.is_dir() {
+        "dir"
+    } else {
+        "other"
+    }
+}
+
+/// Open the session db at its default path, mapping errors to `mlua` errors.
+fn open_session_db() -> Result<crate::session_db::SessionDb, mlua::Error> {
+    let db_path = crate::session_db::db_path();
+    crate::session_db::SessionDb::open(&db_path)
+        .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))
+}
+
+/// Build the `{ ok=false, name, call_id, content, is_error=true }` table that
+/// `ctx.tools.call` returns on every rejection/early-out path.
+fn tool_err(
+    lua: &Lua,
+    name: impl mlua::IntoLua,
+    call_id: impl mlua::IntoLua,
+    content: impl mlua::IntoLua,
+) -> Result<Value, mlua::Error> {
+    let t = lua.create_table()?;
+    t.set("ok", false)?;
+    t.set("name", name)?;
+    t.set("call_id", call_id)?;
+    t.set("content", content)?;
+    t.set("is_error", true)?;
+    Ok(Value::Table(t))
+}
+
+/// Build the `{ ok=false, error=msg }` table that the `ctx.agent` dispatch
+/// helpers return when a sub-agent is not allowed to perform an action.
+fn agent_err(lua: &Lua, msg: impl mlua::IntoLua) -> Result<Value, mlua::Error> {
+    let t = lua.create_table()?;
+    t.set("ok", false)?;
+    t.set("error", msg)?;
+    Ok(Value::Table(t))
+}
+
 /// Shared mutable state accessible via ctx.state.
 pub(crate) type SharedState = Arc<Mutex<HashMap<String, String>>>;
 
@@ -216,7 +268,6 @@ pub(crate) fn lua_log(config_dir: &str, level: &str, msg: &str) {
 pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let ctx = lua.create_table()?;
 
-
     ctx.set("config_dir", cfg.config_dir.as_str())?;
     ctx.set("cwd", cfg.cwd.as_str())?;
 
@@ -326,13 +377,7 @@ fn build_fs_table(lua: &Lua) -> Result<Table, mlua::Error> {
             let name = entry.file_name().to_string_lossy().into_owned();
             let entry_path = entry.path();
             let entry_path_str = entry_path.to_string_lossy().into_owned();
-            let kind = if entry_path.is_file() {
-                "file"
-            } else if entry_path.is_dir() {
-                "dir"
-            } else {
-                "other"
-            };
+            let kind = kind_str(&entry_path);
             vec.push((name, entry_path_str, kind.to_string()));
         }
         vec.sort_by(|a, b| a.0.cmp(&b.0));
@@ -353,16 +398,7 @@ fn build_fs_table(lua: &Lua) -> Result<Table, mlua::Error> {
         let meta = std::fs::metadata(&path).map_err(|e| mlua::Error::external(e.to_string()))?;
         let result = lua.create_table()?;
         result.set("path", Path::new(&path).to_string_lossy().into_owned())?;
-        result.set(
-            "kind",
-            if meta.is_file() {
-                "file"
-            } else if meta.is_dir() {
-                "dir"
-            } else {
-                "other"
-            },
-        )?;
+        result.set("kind", kind_str(Path::new(&path)))?;
         result.set("len", meta.len())?;
         result.set("readonly", meta.permissions().readonly())?;
         Ok(Value::Table(result))
@@ -384,17 +420,11 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
             .clamp(1_000, 300_000);
 
         // We need to run an async function from this synchronous Lua callback.
-        // Use block_in_place since we're inside a tokio runtime.
-        let output = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                run_script(ScriptRequest {
-                    command,
-                    env: Vec::new(),
-                    timeout_ms,
-                })
-                .await
-            })
-        });
+        let output = block_on(run_script(ScriptRequest {
+            command,
+            env: Vec::new(),
+            timeout_ms,
+        }));
 
         match output {
             Ok(out) => {
@@ -518,11 +548,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
 
     // ctx.read_file(path) → content string (raises a Lua error on failure)
     let read_fn = lua.create_function(|_, path: String| {
-        // block_in_place for async fs::read_to_string
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { tokio::fs::read_to_string(&path).await })
-        });
+        let result = block_on(tokio::fs::read_to_string(&path));
         match result {
             Ok(content) => Ok(content),
             Err(e) => Err(mlua::Error::external(e.to_string())),
@@ -532,23 +558,21 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
 
     // ctx.write_file(path, content) → true or nil, error_string
     let write_fn = lua.create_function(|_, (path, content): (String, String)| {
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let path = Path::new(&path);
-                // Reject if file exists — same policy as native write_file tool.
-                if path.exists() {
-                    return Err("file already exists; use edit_file for modifications".to_string());
-                }
-                // Create parent directories.
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                }
-                write_atomic(path, &content, None).await
-            })
+        let result = block_on(async {
+            let path = Path::new(&path);
+            // Reject if file exists — same policy as native write_file tool.
+            if path.exists() {
+                return Err("file already exists; use edit_file for modifications".to_string());
+            }
+            // Create parent directories.
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            write_atomic(path, &content, None).await
         });
         match result {
             Ok(()) => Ok(true),
@@ -648,34 +672,9 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
 fn build_usage_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let usage_table = lua.create_table()?;
     if let Some(usage) = cfg.usage.clone() {
-        let snapshot_fn = lua.create_function(move |lua, _: ()| {
-            let result = lua.create_table()?;
-            result.set("request_count", usage.request_count)?;
-            result.set("sent", usage.sent)?;
-            result.set("received", usage.received)?;
-            result.set("cached", usage.cached)?;
-            result.set("cost", usage.cost)?;
-            result.set("context_length", usage.context_length)?;
-            result.set("tool_count", usage.tool_count)?;
-            result.set("tool_schema_chars", usage.tool_schema_chars)?;
-            result.set("tool_schema_tokens", usage.tool_schema_tokens)?;
-            result.set("system_prompt_chars", usage.system_prompt_chars)?;
-            result.set("system_prompt_tokens", usage.system_prompt_tokens)?;
-            let by_provider = lua.create_table()?;
-            for provider in &usage.by_provider {
-                let row = lua.create_table()?;
-                row.set("provider", provider.provider.clone())?;
-                row.set("model", provider.model.clone())?;
-                row.set("prompt_tokens", provider.prompt_tokens)?;
-                row.set("completion_tokens", provider.completion_tokens)?;
-                row.set("cached_tokens", provider.cached_tokens)?;
-                row.set("cost", provider.cost)?;
-                row.set("request_count", provider.request_count)?;
-                by_provider.push(row)?;
-            }
-            result.set("by_provider", by_provider)?;
-            Ok(Value::Table(result))
-        })?;
+        // `UsageContext`/`UsageProviderContext` derive `Serialize` with field
+        // names matching the Lua keys consumers read, so serde builds the table.
+        let snapshot_fn = lua.create_function(move |lua, _: ()| lua.to_value(&usage))?;
         usage_table.set("snapshot", snapshot_fn)?;
     } else {
         let snapshot_fn = lua.create_function(|_, _: ()| Ok(Value::Nil))?;
@@ -812,13 +811,7 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                 // nested execution so that the next level gets its own
                 // incremented depth in its ctx table.
                 if depth >= MAX_TOOL_CALL_DEPTH {
-                    let result = lua.create_table()?;
-                    result.set("ok", false)?;
-                    result.set("name", name)?;
-                    result.set("call_id", Value::Nil)?;
-                    result.set("content", "max tool call depth exceeded")?;
-                    result.set("is_error", true)?;
-                    return Ok(Value::Table(result));
+                    return tool_err(lua, name, Value::Nil, "max tool call depth exceeded");
                 }
 
                 // Determine approval mode: opts.approval or inherited
@@ -834,13 +827,12 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                     Some("danger") => crate::tools::ApprovalMode::Danger,
                     _ => {
                         let mode_str = mode_str.as_deref().unwrap_or("(none)");
-                        let result = lua.create_table()?;
-                        result.set("ok", false)?;
-                        result.set("name", name)?;
-                        result.set("call_id", call_id.clone())?;
-                        result.set("content", format!("Unknown approval mode: {mode_str}"))?;
-                        result.set("is_error", true)?;
-                        return Ok(Value::Table(result));
+                        return tool_err(
+                            lua,
+                            name,
+                            call_id.clone(),
+                            format!("Unknown approval mode: {mode_str}"),
+                        );
                     }
                 };
 
@@ -854,31 +846,21 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                 };
 
                 if !handler.allows_call(mode, &call) {
-                    let result = lua.create_table()?;
-                    result.set("ok", false)?;
-                    result.set("name", name)?;
-                    result.set("call_id", call_id)?;
-                    result.set(
-                        "content",
+                    return tool_err(
+                        lua,
+                        name,
+                        call_id,
                         "Tool not executed. Approval mode does not allow this call.",
-                    )?;
-                    result.set("is_error", true)?;
-                    return Ok(Value::Table(result));
+                    );
                 }
 
-                // Execute the tool synchronously (block_in_place).
-                let results = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        handler
-                            .execute_all_live(
-                                vec![call],
-                                pane_sender.clone(),
-                                agent_depth,
-                                depth + 1,
-                            )
-                            .await
-                    })
-                });
+                // Execute the tool synchronously.
+                let results = block_on(handler.execute_all_live(
+                    vec![call],
+                    pane_sender.clone(),
+                    agent_depth,
+                    depth + 1,
+                ));
 
                 if let Some(result) = results.into_iter().next() {
                     let out = lua.create_table()?;
@@ -889,26 +871,14 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                     out.set("is_error", result.is_error)?;
                     Ok(Value::Table(out))
                 } else {
-                    let out = lua.create_table()?;
-                    out.set("ok", false)?;
-                    out.set("name", name)?;
-                    out.set("call_id", call_id)?;
-                    out.set("content", "tool execution returned no results")?;
-                    out.set("is_error", true)?;
-                    Ok(Value::Table(out))
+                    tool_err(lua, name, call_id, "tool execution returned no results")
                 }
             },
         )?;
         tools_table.set("call", call_fn)?;
     } else {
         let no_handler_fn = lua.create_function(|lua, _: ()| {
-            let out = lua.create_table()?;
-            out.set("ok", false)?;
-            out.set("name", Value::Nil)?;
-            out.set("call_id", Value::Nil)?;
-            out.set("content", "tools unavailable")?;
-            out.set("is_error", true)?;
-            Ok(Value::Table(out))
+            tool_err(lua, Value::Nil, Value::Nil, "tools unavailable")
         })?;
         tools_table.set("call", no_handler_fn)?;
     }
@@ -930,9 +900,7 @@ fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
     // ctx.session.list(opts?) → array of conversation summaries
     let session_list_fn = lua.create_function(move |lua, opts: Option<mlua::Table>| {
         let limit = opt_usize(&opts, "limit").unwrap_or(20).clamp(1, 100);
-        let db_path = crate::session_db::db_path();
-        let db = crate::session_db::SessionDb::open(&db_path)
-            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+        let db = open_session_db()?;
         let conversations = db
             .list_conversations(limit)
             .map_err(|e| mlua::Error::external(format!("failed to list conversations: {e}")))?;
@@ -956,9 +924,7 @@ fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
     let session_messages_fn = lua.create_function(
         move |lua, (conversation_id, opts): (i64, Option<mlua::Table>)| {
             let limit = opt_usize(&opts, "limit").unwrap_or(200).clamp(1, 1000);
-            let db_path = crate::session_db::db_path();
-            let db = crate::session_db::SessionDb::open(&db_path)
-                .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+            let db = open_session_db()?;
             let messages = db
                 .list_messages(conversation_id, limit)
                 .map_err(|e| mlua::Error::external(format!("failed to list messages: {e}")))?;
@@ -1007,9 +973,7 @@ fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
 /// statement against the session db and returns an array of row tables.
 fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
     let db_query_fn = lua.create_function(|lua, (sql, params): (String, Option<Vec<Value>>)| {
-        let db_path = crate::session_db::db_path();
-        let db = crate::session_db::SessionDb::open(&db_path)
-            .map_err(|e| mlua::Error::external(format!("failed to open session db: {e}")))?;
+        let db = open_session_db()?;
 
         // Read-only: only allow SELECT statements.
         let sql_trimmed = sql.trim();
@@ -1315,15 +1279,9 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         } = built;
 
         let cancelled = cancelled_run.clone();
-        let response = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(run_agent_with_watchdog(
-                request,
-                activity,
-                timeout_ms,
-                cancelled,
-                None,
-            ))
-        });
+        let response = block_on(run_agent_with_watchdog(
+            request, activity, timeout_ms, cancelled, None,
+        ));
 
         agent_result_to_lua(lua, response)
     })?;
@@ -1358,37 +1316,35 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             } = built;
 
             let cancelled = cancelled_stream.clone();
-            let response = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let agent_future = crate::agent::run_agent(request);
-                    tokio::pin!(agent_future);
+            let response = block_on(async {
+                let agent_future = crate::agent::run_agent(request);
+                tokio::pin!(agent_future);
 
-                    // Process events and agent result concurrently.
-                    loop {
-                        tokio::select! {
-                            result = &mut agent_future => {
-                                if let Err(e) = drain_pending(lua, &mut rx, &cbs) {
-                                    break Err(e);
-                                }
-                                break result;
+                // Process events and agent result concurrently.
+                loop {
+                    tokio::select! {
+                        result = &mut agent_future => {
+                            if let Err(e) = drain_pending(lua, &mut rx, &cbs) {
+                                break Err(e);
                             }
-                            Some(event) = rx.recv() => {
-                                if let Err(e) = dispatch_event(lua, &event, &cbs) {
-                                    break Err(format!("callback error: {e}"));
-                                }
-                            }
-                            _ = await_cancelled(&cancelled) => {
-                                if let Err(e) = drain_pending(lua, &mut rx, &cbs) {
-                                    break Err(e);
-                                }
-                                break Err(prefix_err(None, "cancelled"));
-                            }
-                            _ = inactivity_elapsed(activity.clone(), timeout_ms) => {
-                                break Err(prefix_err(None, &inactivity_message(timeout_ms)));
+                            break result;
+                        }
+                        Some(event) = rx.recv() => {
+                            if let Err(e) = dispatch_event(lua, &event, &cbs) {
+                                break Err(format!("callback error: {e}"));
                             }
                         }
+                        _ = await_cancelled(&cancelled) => {
+                            if let Err(e) = drain_pending(lua, &mut rx, &cbs) {
+                                break Err(e);
+                            }
+                            break Err(prefix_err(None, "cancelled"));
+                        }
+                        _ = inactivity_elapsed(activity.clone(), timeout_ms) => {
+                            break Err(prefix_err(None, &inactivity_message(timeout_ms)));
+                        }
                     }
-                })
+                }
             });
 
             agent_result_to_lua(lua, response)
@@ -1404,10 +1360,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         // would inject into the wrong conversation. They can still use blocking
         // ctx.agent.run.
         if inherited_spawn.agent_depth > 0 {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set("error", "sub-agents cannot spawn background jobs")?;
-            return Ok(Value::Table(result));
+            return agent_err(lua, "sub-agents cannot spawn background jobs");
         }
 
         // Read agent name (registered sub-agent name, default "") and the
@@ -1445,12 +1398,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             cancel_flag: job_cancel.clone(),
         }) {
             Ok(id) => id,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", e)?;
-                return Ok(Value::Table(result));
-            }
+            Err(e) => return agent_err(lua, e),
         };
 
         // Token tracking: shared counters mirrored into the registry as the
@@ -1513,10 +1461,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             // Background jobs belong to the main conversation; sub-agents
             // can neither spawn nor wait on them.
             if agent_depth_w > 0 {
-                let result = lua.create_table()?;
-                result.set("ok", false)?;
-                result.set("error", "sub-agents cannot wait on background jobs")?;
-                return Ok(Value::Table(result));
+                return agent_err(lua, "sub-agents cannot wait on background jobs");
             }
 
             warn_unknown_opts(&opts, WAIT_OPT_KEYS);
@@ -1566,10 +1511,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let agent_depth_c = cfg.agent_depth;
     let cancel_fn = lua.create_function(move |lua, id: String| {
         if agent_depth_c > 0 {
-            let result = lua.create_table()?;
-            result.set("ok", false)?;
-            result.set("error", "sub-agents cannot cancel jobs")?;
-            return Ok(Value::Table(result));
+            return agent_err(lua, "sub-agents cannot cancel jobs");
         }
         let ok = crate::ext::jobs::registry().cancel(&id);
         let result = lua.create_table()?;

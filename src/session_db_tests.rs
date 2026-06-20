@@ -221,3 +221,50 @@ fn tool_calls_roundtrip() {
     assert_eq!(msg.content, "Let me check.");
     assert_eq!(msg.tool_calls, Some(tc_json.to_string()));
 }
+
+/// Every stats query (snapshot bucket queries + custom range) runs without SQL
+/// error against a populated db and aggregates the recorded usage. Guards the
+/// shared `SUM_COLS` / `BUCKET_AGG_COLS` / `BUCKET_PROJECTION` SQL fragments.
+#[test]
+fn usage_stats_queries_aggregate_recorded_usage() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    // A row "now" so today/hourly/range buckets are populated.
+    db.record_usage(
+        conv,
+        "openai",
+        "gpt-4",
+        100,
+        50,
+        Some(10),
+        Some(0.01),
+        false,
+    )
+    .unwrap();
+
+    let snap = db.usage_stats_snapshot().unwrap();
+    assert_eq!(snap.total.prompt_tokens, 100);
+    assert_eq!(snap.total.completion_tokens, 50);
+    assert_eq!(snap.total.cached_tokens, 10);
+    assert_eq!(snap.total.request_count, 1);
+    // Bucket queries each return their fixed-width series, not an error.
+    assert_eq!(snap.daily.len(), 24, "today is a 24-hour histogram");
+    assert!(!snap.weekly.is_empty() && !snap.monthly.is_empty() && !snap.yearly.is_empty());
+    assert!(!snap.by_model_today.is_empty());
+    // The model breakdown carries the same totals via SUM_COLS.
+    let model = &snap.by_model_today[0];
+    assert_eq!(model.prompt_tokens, 100);
+    assert_eq!(model.completion_tokens, 50);
+
+    // Custom range covering today aggregates the same event.
+    let today: String = db
+        .conn
+        .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))
+        .unwrap();
+    let range = db.usage_stats_range(&today, &today).unwrap();
+    assert_eq!(range.total.prompt_tokens, 100);
+    assert_eq!(range.daily.len(), 1, "single-day range yields one bucket");
+    assert_eq!(range.daily[0].prompt_tokens, 100);
+}

@@ -619,7 +619,8 @@ fn cancel_running_job_via_lua_tool() {
         .block_on(async {
             tokio::time::timeout(
                 Duration::from_secs(15),
-                booted.tools
+                booted
+                    .tools
                     .execute_all(vec![lua_cancel_call("call-cancel", &job_id)], 0),
             )
             .await
@@ -641,7 +642,8 @@ fn cancel_running_job_via_lua_tool() {
         .block_on(async {
             tokio::time::timeout(
                 Duration::from_secs(15),
-                booted.tools
+                booted
+                    .tools
                     .execute_all(vec![lua_cancel_call("call-miss", "job-does-not-exist")], 0),
             )
             .await
@@ -659,7 +661,8 @@ fn cancel_running_job_via_lua_tool() {
         .block_on(async {
             tokio::time::timeout(
                 Duration::from_secs(15),
-                booted.tools
+                booted
+                    .tools
                     .execute_all(vec![lua_cancel_call("call-after", &job_id)], 0),
             )
             .await

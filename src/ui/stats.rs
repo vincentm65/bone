@@ -16,9 +16,7 @@ const ACCENT: Color = Color::Indexed(250);
 const BAR: Color = Color::Cyan;
 const BAR_EMPTY: Color = Color::Indexed(236);
 
-use crate::session_db::{
-    DateRange, HourUsage, UsageBucket, UsageStatsSnapshot, ViewMode,
-};
+use crate::session_db::{DateRange, HourUsage, UsageBucket, UsageStatsSnapshot, ViewMode};
 use crate::ui::fullscreen::{self, FullscreenTerminal};
 
 pub fn run<F>(mut load: F) -> io::Result<()>
@@ -41,7 +39,18 @@ where
     let mut error: Option<String> = None;
 
     // Draw once, then only redraw on events — this dashboard is static.
-    term.draw(|frame| draw(frame, &snapshot, mode, custom.as_ref(), &picker, &error, scroll, refreshed))?;
+    term.draw(|frame| {
+        draw(
+            frame,
+            &snapshot,
+            mode,
+            custom.as_ref(),
+            &picker,
+            &error,
+            scroll,
+            refreshed,
+        )
+    })?;
     loop {
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -51,18 +60,16 @@ where
                             picker = None;
                             error = None;
                         }
-                        Some(PickerAction::Apply(range)) => {
-                            match load(&Some(range.clone())) {
-                                Ok(s) => {
-                                    snapshot = s;
-                                    custom = Some(range);
-                                    scroll = 0;
-                                    error = None;
-                                    picker = None;
-                                }
-                                Err(e) => error = Some(e.to_string()),
+                        Some(PickerAction::Apply(range)) => match load(&Some(range.clone())) {
+                            Ok(s) => {
+                                snapshot = s;
+                                custom = Some(range);
+                                scroll = 0;
+                                error = None;
+                                picker = None;
                             }
-                        }
+                            Err(e) => error = Some(e.to_string()),
+                        },
                         None => {}
                     }
                 } else {
