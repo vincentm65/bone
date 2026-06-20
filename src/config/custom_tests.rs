@@ -30,7 +30,7 @@ fn with_temp_config_home(test: impl FnOnce()) {
 #[test]
 fn old_values_file_general_status_toggles_migrate_to_status_page() {
     with_temp_config_home(|| {
-        seed_builtin_pages();
+        seed_builtin_pages(None, false);
         let values_path = bone_dir().join("config-values.yaml");
         std::fs::write(
             &values_path,
@@ -49,7 +49,7 @@ fn old_values_file_general_status_toggles_migrate_to_status_page() {
 #[test]
 fn backfill_adds_new_seed_field_to_existing_general_page() {
     with_temp_config_home(|| {
-        seed_builtin_pages();
+        seed_builtin_pages(None, false);
         // Simulate an older general.yaml predating the show_thinking field.
         let general_path = config_dir().join("general.yaml");
         let mut general = load_yaml::<CustomConfigPage>(&general_path).unwrap();
@@ -71,7 +71,7 @@ fn backfill_adds_new_seed_field_to_existing_general_page() {
 #[test]
 fn general_page_status_toggles_migrate_to_status_page() {
     with_temp_config_home(|| {
-        seed_builtin_pages();
+        seed_builtin_pages(None, false);
         let general_path = config_dir().join("general.yaml");
         let mut general = load_yaml::<CustomConfigPage>(&general_path).unwrap();
         general.fields.push(ConfigField {

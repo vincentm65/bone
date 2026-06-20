@@ -180,6 +180,12 @@ pub fn seed_file_if_missing(path: &Path, content: &str) {
     if path.exists() {
         return;
     }
+    seed_file_forced(path, content);
+}
+
+/// Write `content` to `path`, overwriting any existing file. Used by the
+/// /setup re-seed action to refresh bundled files with this build's defaults.
+pub fn seed_file_forced(path: &Path, content: &str) {
     if let Some(parent) = path.parent()
         && let Err(e) = fs::create_dir_all(parent)
     {
@@ -246,8 +252,8 @@ pub fn needs_onboarding() -> bool {
 pub fn seed_base() {
     seed_command_policy_if_missing();
     seed_agents_md_if_missing();
-    custom::seed_builtin_pages();
-    ext::seed_default_lua_libs(&bone_dir().join("lua/lib"));
+    custom::seed_builtin_pages(None, false);
+    ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
 }
 
 /// Seed all file-based config if missing. Should be called once at startup
@@ -261,7 +267,59 @@ pub fn seed_all() {
 pub fn seed_all_with(selection: Option<&SetupSelection>) {
     seed_base();
     let allow = selection.map(SetupSelection::tool_set);
-    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), allow.as_ref());
+    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), allow.as_ref(), false);
+}
+
+/// The bundled files the /setup re-seed checklist can refresh, grouped by
+/// category as `(filename, description)`. Tools and commands are limited to the
+/// persisted onboarding selection — the set a re-seed would otherwise touch;
+/// libraries and config pages list everything bundled. `init.lua`, `AGENTS.md`,
+/// and `command-policy.yaml` are intentionally absent.
+pub struct ReseedCatalog {
+    pub config_pages: Vec<(&'static str, String)>,
+    pub libs: Vec<(&'static str, String)>,
+    pub tools: Vec<(&'static str, String)>,
+    pub commands: Vec<(&'static str, String)>,
+}
+
+pub fn reseed_catalog() -> ReseedCatalog {
+    let selection = load_setup_selection();
+    let filter = |catalog: Vec<(&'static str, String)>,
+                  allow: Option<std::collections::HashSet<String>>| {
+        catalog
+            .into_iter()
+            .filter(|(name, _)| allow.as_ref().is_none_or(|a| a.contains(*name)))
+            .collect::<Vec<_>>()
+    };
+    ReseedCatalog {
+        config_pages: custom::builtin_page_catalog(),
+        libs: ext::default_lib_catalog(),
+        tools: filter(
+            ext::default_tool_catalog(),
+            selection.as_ref().map(SetupSelection::tool_set),
+        ),
+        commands: filter(
+            ext::default_command_catalog(),
+            selection.as_ref().map(SetupSelection::command_set),
+        ),
+    }
+}
+
+/// Force-overwrite the chosen bundled files with this build's versions. Each
+/// set names the files (by filename, as in [`reseed_catalog`]) to refresh in
+/// its category; files absent from a set are left untouched. Does NOT touch
+/// init.lua, AGENTS.md, or command-policy. Backs the /setup re-seed checklist.
+pub fn reseed_selected(
+    config_pages: &std::collections::HashSet<String>,
+    libs: &std::collections::HashSet<String>,
+    tools: &std::collections::HashSet<String>,
+    commands: &std::collections::HashSet<String>,
+) -> std::io::Result<()> {
+    custom::seed_builtin_pages(Some(config_pages), true);
+    ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), Some(libs), true);
+    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), Some(tools), true);
+    ext::seed_default_lua_commands(&bone_dir().join("lua/commands"), Some(commands), true);
+    Ok(())
 }
 
 /// Seed using whatever selection is persisted on disk (or all, if none).
@@ -301,10 +359,11 @@ pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io
     }
 
     seed_base();
-    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), Some(&selection.tool_set()));
+    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), Some(&selection.tool_set()), false);
     ext::seed_default_lua_commands(
         &bone_dir().join("lua/commands"),
         Some(&selection.command_set()),
+        false,
     );
 
     save_setup_selection(selection)

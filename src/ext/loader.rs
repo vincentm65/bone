@@ -51,7 +51,7 @@ pub fn boot(
     };
 
     // Seed libraries before init.lua so user startup code can `require` them.
-    super::seed_default_lua_libs(&config_dir.join("lua/lib"));
+    super::seed_default_lua_libs(&config_dir.join("lua/lib"), None, false);
 
     let loaded = match engine::run_init(&lua, config_dir) {
         Ok(loaded) => loaded,
@@ -71,8 +71,8 @@ pub fn boot(
     let cmd_allow = selection
         .as_ref()
         .map(crate::config::SetupSelection::command_set);
-    super::seed_default_lua_tools(&config_dir.join("lua/tools"), tool_allow.as_ref());
-    super::seed_default_lua_commands(&config_dir.join("lua/commands"), cmd_allow.as_ref());
+    super::seed_default_lua_tools(&config_dir.join("lua/tools"), tool_allow.as_ref(), false);
+    super::seed_default_lua_commands(&config_dir.join("lua/commands"), cmd_allow.as_ref(), false);
 
     // Run tool and command files from lua/{tools,commands}/ directories. The
     // onboarding selection is enforced here too, not just at seed time: a

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{UserConfig, bone_dir, load_yaml, seed_file_if_missing};
+use super::{UserConfig, bone_dir, load_yaml, seed_file_forced, seed_file_if_missing};
 
 // ── Schema types ────────────────────────────────────────────────────────────
 
@@ -82,15 +82,53 @@ const PROVIDERS_YAML: &str = include_str!("pages/providers.yaml");
 const STATUS_YAML: &str = include_str!("pages/status.yaml");
 const COMMANDS_YAML: &str = include_str!("pages/commands.yaml");
 
-/// Seed built-in config pages into `~/.bone-rust/config/` if missing.
-pub fn seed_builtin_pages() {
+/// `(filename, embedded contents)` for every built-in config page.
+const BUILTIN_PAGES: &[(&str, &str)] = &[
+    ("general.yaml", GENERAL_YAML),
+    ("tools.yaml", TOOLS_YAML),
+    ("status.yaml", STATUS_YAML),
+    ("providers.yaml", PROVIDERS_YAML),
+    ("commands.yaml", COMMANDS_YAML),
+];
+
+/// `(filename, description)` for every built-in config page — drives the
+/// /setup re-seed checklist. The description is the page's `title:` field.
+pub fn builtin_page_catalog() -> Vec<(&'static str, String)> {
+    BUILTIN_PAGES
+        .iter()
+        .map(|(name, content)| (*name, page_title(content)))
+        .collect()
+}
+
+/// Pull the `title:` field from a config page's YAML, for display.
+fn page_title(content: &str) -> String {
+    content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("title:"))
+        .map(|t| t.trim().trim_matches('"').to_string())
+        .unwrap_or_default()
+}
+
+/// Seed built-in config pages into `~/.bone-rust/config/`. `allow` filters
+/// which pages are written (`None` = all). When `force` is false, existing
+/// files are left untouched; when true, they are overwritten with this build's
+/// defaults (the /setup re-seed action).
+pub fn seed_builtin_pages(allow: Option<&std::collections::HashSet<String>>, force: bool) {
     let dir = config_dir();
     let _ = std::fs::create_dir_all(&dir);
-    seed_file_if_missing(&dir.join("general.yaml"), GENERAL_YAML);
-    seed_file_if_missing(&dir.join("tools.yaml"), TOOLS_YAML);
-    seed_file_if_missing(&dir.join("status.yaml"), STATUS_YAML);
-    seed_file_if_missing(&dir.join("providers.yaml"), PROVIDERS_YAML);
-    seed_file_if_missing(&dir.join("commands.yaml"), COMMANDS_YAML);
+    for (name, content) in BUILTIN_PAGES {
+        if let Some(allow) = allow
+            && !allow.contains(*name)
+        {
+            continue;
+        }
+        let path = dir.join(name);
+        if force {
+            seed_file_forced(&path, content);
+        } else {
+            seed_file_if_missing(&path, content);
+        }
+    }
 }
 
 // ── Load / save ─────────────────────────────────────────────────────────────

@@ -78,6 +78,12 @@ pub fn default_command_catalog() -> Vec<(&'static str, String)> {
     catalog(DEFAULT_LUA_COMMANDS)
 }
 
+/// `(filename, description)` for every bundled Lua library — drives the /setup
+/// re-seed checklist.
+pub fn default_lib_catalog() -> Vec<(&'static str, String)> {
+    catalog(DEFAULT_LUA_LIBS)
+}
+
 fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
     let Ok(existing) = std::fs::read_to_string(path) else {
         return false;
@@ -166,7 +172,9 @@ pub fn boot_with_tools(
 /// `allow` filters which bundled tools are seeded: `None` seeds all (default /
 /// upgrade behavior), `Some(set)` seeds only the named files. The setup wizard
 /// persists the chosen set so both seed paths (startup + Lua boot) agree.
-pub fn seed_default_lua_tools(dir: &Path, allow: Option<&HashSet<String>>) {
+/// `force` unconditionally overwrites existing files (used by the /setup
+/// re-seed action to pull in this build's defaults).
+pub fn seed_default_lua_tools(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("bone: warning: could not create {}: {e}", dir.display());
         return;
@@ -178,7 +186,7 @@ pub fn seed_default_lua_tools(dir: &Path, allow: Option<&HashSet<String>>) {
             continue;
         }
         let path = dir.join(name);
-        if (!path.exists() || should_refresh_seeded_lua(&path, name))
+        if (force || !path.exists() || should_refresh_seeded_lua(&path, name))
             && let Err(e) = std::fs::write(&path, content)
         {
             eprintln!("bone: warning: could not write {}: {e}", path.display());
@@ -189,12 +197,19 @@ pub fn seed_default_lua_tools(dir: &Path, allow: Option<&HashSet<String>>) {
 /// Seed bundled default Lua libraries into the config directory.
 /// Existing files are not overwritten except for stale bundled menu modules
 /// from the Rust-to-Lua menu migration.
-pub fn seed_default_lua_libs(dir: &Path) {
+/// `allow` filters which bundled libs are seeded; `force` unconditionally
+/// overwrites existing files. See [`seed_default_lua_tools`] for semantics.
+pub fn seed_default_lua_libs(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("bone: warning: could not create {}: {e}", dir.display());
         return;
     }
     for (name, content) in DEFAULT_LUA_LIBS {
+        if let Some(allow) = allow
+            && !allow.contains(*name)
+        {
+            continue;
+        }
         let path = dir.join(name);
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -202,7 +217,7 @@ pub fn seed_default_lua_libs(dir: &Path) {
             eprintln!("bone: warning: could not create {}: {e}", parent.display());
             continue;
         }
-        if (!path.exists() || should_refresh_seeded_lua(&path, name))
+        if (force || !path.exists() || should_refresh_seeded_lua(&path, name))
             && let Err(e) = std::fs::write(&path, content)
         {
             eprintln!("bone: warning: could not write {}: {e}", path.display());
@@ -213,9 +228,9 @@ pub fn seed_default_lua_libs(dir: &Path) {
 /// Seed bundled default Lua commands into the config directory.
 /// Existing files are not overwritten except for bundled files that still use
 /// the removed Rust interaction API.
-/// `allow` filters which bundled commands are seeded; see
-/// [`seed_default_lua_tools`] for semantics.
-pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>) {
+/// `allow` filters which bundled commands are seeded; `force` unconditionally
+/// overwrites existing files. See [`seed_default_lua_tools`] for semantics.
+pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("bone: warning: could not create {}: {e}", dir.display());
         return;
@@ -227,7 +242,7 @@ pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>) {
             continue;
         }
         let path = dir.join(name);
-        if (!path.exists() || should_refresh_seeded_lua(&path, name))
+        if (force || !path.exists() || should_refresh_seeded_lua(&path, name))
             && let Err(e) = std::fs::write(&path, content)
         {
             eprintln!("bone: warning: could not write {}: {e}", path.display());
@@ -264,7 +279,7 @@ mod seed_tests {
         // Pick the first bundled tool to allow, exclude the rest.
         let first = DEFAULT_LUA_TOOLS[0].0.to_string();
         let allow: HashSet<String> = std::iter::once(first.clone()).collect();
-        seed_default_lua_tools(&dir, Some(&allow));
+        seed_default_lua_tools(&dir, Some(&allow), false);
 
         assert!(dir.join(&first).exists(), "allowed file should be seeded");
         for (name, _) in DEFAULT_LUA_TOOLS.iter().skip(1) {
@@ -275,10 +290,42 @@ mod seed_tests {
         }
 
         // None seeds everything.
-        seed_default_lua_tools(&dir, None);
+        seed_default_lua_tools(&dir, None, false);
         for (name, _) in DEFAULT_LUA_TOOLS {
             assert!(dir.join(name).exists(), "{name} should be seeded with None");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn force_overwrites_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "bone-seed-force-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (first, content) = DEFAULT_LUA_TOOLS[0];
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(first), "-- user edit\n").unwrap();
+
+        // Without force, an existing file is left untouched.
+        seed_default_lua_tools(&dir, None, false);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(first)).unwrap(),
+            "-- user edit\n",
+            "without force, existing file should be preserved"
+        );
+
+        // With force, the bundled default replaces it.
+        seed_default_lua_tools(&dir, None, true);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(first)).unwrap(),
+            content,
+            "force should overwrite with the bundled default"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
