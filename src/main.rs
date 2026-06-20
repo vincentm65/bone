@@ -421,9 +421,13 @@ async fn main() -> std::io::Result<()> {
     if args.first().map(String::as_str) == Some("stats-popup") {
         let db = bone::session_db::SessionDb::open(&bone::session_db::db_path())
             .map_err(std::io::Error::other)?;
-        bone::ui::stats::run(|| {
-            db.usage_stats_snapshot()
-                .map_err(|err| std::io::Error::other(err.to_string()))
+        bone::ui::stats::run(|range| match range {
+            None => db
+                .usage_stats_snapshot()
+                .map_err(|err| std::io::Error::other(err.to_string())),
+            Some(r) => db
+                .usage_stats_range(&r.start, &r.end)
+                .map_err(|err| std::io::Error::other(err.to_string())),
         })?;
         return Ok(());
     }

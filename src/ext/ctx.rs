@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 
@@ -19,6 +19,22 @@ static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Shared mutable state accessible via ctx.state.
 pub(crate) type SharedState = Arc<Mutex<HashMap<String, String>>>;
+
+/// The single process-wide [`SharedState`] backing `ctx.state`.
+///
+/// Tools, slash commands, and `before_turn` hooks all resolve `ctx.state` to
+/// this one map, so a value set in one context is visible in the others — e.g.
+/// the `task_list` tool writes the checklist and the `task_list` `before_turn`
+/// hook reads it back to keep the list salient. Because it lives in process
+/// memory rather than the transcript, it also survives compaction
+/// (`conversation.replace`). Previously each construction site created its own
+/// empty map, so cross-context reads always saw `nil`.
+pub(crate) fn process_shared_state() -> SharedState {
+    static STATE: OnceLock<SharedState> = OnceLock::new();
+    STATE
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct UsageProviderContext {
@@ -568,20 +584,22 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     })?;
     ui_table.set("status", status_fn)?;
 
-    // ctx.ui.notify(message, level?) — warnings/errors echo to stderr for
-    // headless debugging only; the echo is suppressed while the TUI owns the
-    // terminal. All levels forward to an attached frontend as a status line,
-    // so background hooks like auto-compaction are never silently dropped.
+    // ctx.ui.notify(message, level?) — all levels forward to an attached
+    // frontend as a status line, so background hooks like auto-compaction are
+    // never silently dropped. Only when there's no frontend to receive the
+    // event do warnings/errors fall back to a raw stderr echo (headless
+    // debugging). Keying off `notify_tx` rather than `tui_owns_terminal()`
+    // avoids a race: raw mode can briefly be off around turn/teardown
+    // boundaries, which previously let the echo leak onto the TUI screen.
     let notify_fn = lua.create_function(move |_, (msg, level): (String, Option<String>)| {
-        if !tui_owns_terminal() {
+        if let Some(tx) = &notify_tx {
+            let _ = tx.send(crate::runtime::RuntimeEvent::Status { message: msg });
+        } else if !tui_owns_terminal() {
             match level.as_deref() {
                 Some("warn") | Some("warning") => eprintln!("bone-lua warn: {msg}"),
                 Some("error") => eprintln!("bone-lua error: {msg}"),
                 _ => {}
             }
-        }
-        if let Some(tx) = &notify_tx {
-            let _ = tx.send(crate::runtime::RuntimeEvent::Status { message: msg });
         }
         Ok(())
     })?;
@@ -2104,10 +2122,9 @@ pub(crate) fn build_usage_context(
 /// request, from a shared app-state snapshot. The snapshot is the single source
 /// of truth for app-derived fields ([`AppCtxState::apply_to`]).
 pub(crate) fn build_before_turn_config(state: &AppCtxState) -> CtxConfig {
-    let shared_state: SharedState = Arc::new(Mutex::new(HashMap::new()));
     let mut cfg = CtxConfig::new(
         crate::config::bone_dir().to_string_lossy().to_string(),
-        shared_state,
+        process_shared_state(),
     );
     state.apply_to(&mut cfg);
     cfg

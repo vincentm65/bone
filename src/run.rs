@@ -185,8 +185,7 @@ async fn expand_lua_command(
 
         // Create ctx table.
         let config_dir_str = config_dir_owned.to_string_lossy().to_string();
-        let shared_state: crate::ext::ctx::SharedState =
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let shared_state = crate::ext::ctx::process_shared_state();
         let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir_str, shared_state);
         ctx_cfg.tool_handler = Some(booted.tools);
         ctx_cfg.approval_mode = approval_mode;

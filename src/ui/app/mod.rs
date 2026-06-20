@@ -1928,9 +1928,7 @@ impl App {
                         };
 
                         let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
-                        let shared_state: crate::ext::ctx::SharedState = std::sync::Arc::new(
-                            std::sync::Mutex::new(std::collections::HashMap::new()),
-                        );
+                        let shared_state = crate::ext::ctx::process_shared_state();
                         let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
                         app_state.apply_to(&mut ctx_cfg);
                         ctx_cfg.pane_sender = Some(events);
@@ -2056,9 +2054,13 @@ impl App {
             return self.show_reply("Stats database is not available.".to_string(), term);
         };
 
-        let result = crate::ui::stats::run(|| {
-            db.usage_stats_snapshot()
-                .map_err(|err| io::Error::other(err.to_string()))
+        let result = crate::ui::stats::run(|range| match range {
+            None => db
+                .usage_stats_snapshot()
+                .map_err(|err| io::Error::other(err.to_string())),
+            Some(r) => db
+                .usage_stats_range(&r.start, &r.end)
+                .map_err(|err| io::Error::other(err.to_string())),
         });
 
         self.force_redraw(term)?;

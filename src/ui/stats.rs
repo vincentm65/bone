@@ -2,10 +2,10 @@ use std::io;
 use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 const BG: Color = Color::Indexed(16);
 const TEXT: Color = Color::Indexed(252);
@@ -16,77 +16,213 @@ const ACCENT: Color = Color::Indexed(250);
 const BAR: Color = Color::Cyan;
 const BAR_EMPTY: Color = Color::Indexed(236);
 
-use crate::session_db::{HourUsage, UsageBucket, UsageStatsSnapshot, ViewMode};
+use crate::session_db::{
+    DateRange, HourUsage, UsageBucket, UsageStatsSnapshot, ViewMode,
+};
 use crate::ui::fullscreen::{self, FullscreenTerminal};
 
 pub fn run<F>(mut load: F) -> io::Result<()>
 where
-    F: FnMut() -> io::Result<UsageStatsSnapshot>,
+    F: FnMut(&Option<DateRange>) -> io::Result<UsageStatsSnapshot>,
 {
     fullscreen::run(|term| run_loop(term, &mut load))
 }
 
 fn run_loop<F>(term: &mut FullscreenTerminal, load: &mut F) -> io::Result<()>
 where
-    F: FnMut() -> io::Result<UsageStatsSnapshot>,
+    F: FnMut(&Option<DateRange>) -> io::Result<UsageStatsSnapshot>,
 {
-    let mut snapshot = load()?;
+    let mut snapshot = load(&None)?;
     let mut mode = ViewMode::SevenDays;
+    let mut custom: Option<DateRange> = None;
+    let mut picker: Option<DatePick> = None;
     let mut scroll = 0usize;
     let mut refreshed = Instant::now();
+    let mut error: Option<String> = None;
 
     // Draw once, then only redraw on events — this dashboard is static.
-    term.draw(|frame| draw(frame, &snapshot, mode, scroll, refreshed))?;
+    term.draw(|frame| draw(frame, &snapshot, mode, custom.as_ref(), &picker, &error, scroll, refreshed))?;
     loop {
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Char('d') | KeyCode::Char('1') => {
-                    mode = ViewMode::Today;
-                    scroll = 0;
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if let Some(pick) = picker.as_mut() {
+                    match handle_picker_key(key.code, pick) {
+                        Some(PickerAction::Cancel) => {
+                            picker = None;
+                            error = None;
+                        }
+                        Some(PickerAction::Apply(range)) => {
+                            match load(&Some(range.clone())) {
+                                Ok(s) => {
+                                    snapshot = s;
+                                    custom = Some(range);
+                                    scroll = 0;
+                                    error = None;
+                                    picker = None;
+                                }
+                                Err(e) => error = Some(e.to_string()),
+                            }
+                        }
+                        None => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('d') | KeyCode::Char('1') => {
+                            custom = None;
+                            mode = ViewMode::Today;
+                            scroll = 0;
+                        }
+                        KeyCode::Char('w') | KeyCode::Char('2') => {
+                            custom = None;
+                            mode = ViewMode::SevenDays;
+                            scroll = 0;
+                        }
+                        KeyCode::Char('m') | KeyCode::Char('3') => {
+                            custom = None;
+                            mode = ViewMode::FourWeeks;
+                            scroll = 0;
+                        }
+                        KeyCode::Char('y') | KeyCode::Char('4') => {
+                            custom = None;
+                            mode = ViewMode::Yearly;
+                            scroll = 0;
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('5') => {
+                            custom = None;
+                            mode = ViewMode::Months;
+                            scroll = 0;
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            custom = None;
+                            mode = mode.prev();
+                            scroll = 0;
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            custom = None;
+                            mode = mode.next();
+                            scroll = 0;
+                        }
+                        KeyCode::Char('t') => {
+                            picker = Some(DatePick::for_snapshot(&snapshot));
+                            error = None;
+                        }
+                        KeyCode::Char('r') => {
+                            snapshot = load(&custom)?;
+                            refreshed = Instant::now();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
+                        KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                        KeyCode::PageDown => scroll = scroll.saturating_add(8),
+                        KeyCode::PageUp => scroll = scroll.saturating_sub(8),
+                        _ => continue,
+                    }
                 }
-                KeyCode::Char('w') | KeyCode::Char('2') => {
-                    mode = ViewMode::SevenDays;
-                    scroll = 0;
-                }
-                KeyCode::Char('m') | KeyCode::Char('3') => {
-                    mode = ViewMode::FourWeeks;
-                    scroll = 0;
-                }
-                KeyCode::Char('a') | KeyCode::Char('4') => {
-                    mode = ViewMode::Months;
-                    scroll = 0;
-                }
-                KeyCode::Left | KeyCode::Char('h') => {
-                    mode = mode.prev();
-                    scroll = 0;
-                }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    mode = mode.next();
-                    scroll = 0;
-                }
-                KeyCode::Char('r') => {
-                    snapshot = load()?;
-                    refreshed = Instant::now();
-                }
-                KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
-                KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
-                KeyCode::PageDown => scroll = scroll.saturating_add(8),
-                KeyCode::PageUp => scroll = scroll.saturating_sub(8),
-                _ => continue,
-            },
+            }
             Event::Resize(_, _) => {}
             _ => continue,
         }
-        term.draw(|frame| draw(frame, &snapshot, mode, scroll, refreshed))?;
+        term.draw(|frame| {
+            draw(
+                frame,
+                &snapshot,
+                mode,
+                custom.as_ref(),
+                &picker,
+                &error,
+                scroll,
+                refreshed,
+            )
+        })?;
     }
     Ok(())
 }
 
+/// Editable start/end fields for the custom date-range picker.
+#[derive(Clone)]
+struct DatePick {
+    start: String,
+    end: String,
+    field: usize,
+}
+
+impl DatePick {
+    fn for_snapshot(snapshot: &UsageStatsSnapshot) -> Self {
+        let (start, end) = snapshot
+            .daily_activity
+            .first()
+            .zip(snapshot.daily_activity.last())
+            .map(|(a, b)| (a.label.clone(), b.label.clone()))
+            .unwrap_or_default();
+        Self {
+            start,
+            end,
+            field: 0,
+        }
+    }
+
+    fn current(&mut self) -> &mut String {
+        match self.field {
+            0 => &mut self.start,
+            _ => &mut self.end,
+        }
+    }
+}
+
+enum PickerAction {
+    Apply(DateRange),
+    Cancel,
+}
+
+fn handle_picker_key(code: KeyCode, pick: &mut DatePick) -> Option<PickerAction> {
+    match code {
+        KeyCode::Esc => Some(PickerAction::Cancel),
+        KeyCode::Enter => {
+            let clean = |s: &str| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            };
+            let start = clean(&pick.start).unwrap_or_else(|| "0000-01-01".into());
+            let end = clean(&pick.end).unwrap_or_else(|| "9999-12-31".into());
+            Some(PickerAction::Apply(DateRange { start, end }))
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            pick.field = (pick.field + 1) % 2;
+            None
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            pick.field = (pick.field + 1) % 2;
+            None
+        }
+        KeyCode::Backspace => {
+            pick.current().pop();
+            None
+        }
+        KeyCode::Char(c) => {
+            if c.is_ascii_digit() || c == '-' {
+                let s = pick.current();
+                if s.chars().count() < 10 {
+                    s.push(c);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw(
     frame: &mut ratatui::Frame,
     data: &UsageStatsSnapshot,
     mode: ViewMode,
+    custom: Option<&DateRange>,
+    picker: &Option<DatePick>,
+    error: &Option<String>,
     scroll: usize,
     refreshed: Instant,
 ) {
@@ -105,8 +241,8 @@ fn draw(
         ])
         .split(area);
 
-    draw_header(frame, vertical[0], data, refreshed, mode);
-    draw_cards(frame, vertical[1], data, mode);
+    draw_header(frame, vertical[0], data, refreshed, mode, custom);
+    draw_cards(frame, vertical[1], data, mode, custom);
 
     if vertical[2].width < 110 {
         let sections = Layout::default()
@@ -120,7 +256,7 @@ fn draw(
             .split(vertical[2]);
         draw_chart(frame, sections[0], data, mode, scroll);
         draw_hourly_chart(frame, sections[1], data, mode);
-        draw_models(frame, sections[2], data, mode);
+        draw_models(frame, sections[2], data, mode, custom);
         draw_daily_activity(frame, sections[3], data);
     } else {
         let lower = Layout::default()
@@ -133,21 +269,30 @@ fn draw(
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
             .split(lower[1]);
-        draw_models(frame, bottom[0], data, mode);
+        draw_models(frame, bottom[0], data, mode, custom);
         draw_heat_and_conversations(frame, bottom[1], data, mode);
     }
 
     let footer = Line::from(vec![
         Span::styled(" q/Esc ", key_style()),
         Span::styled("quit  ", dim()),
-        Span::styled(" 1-4 d/w/m/a ←→ ", key_style()),
+        Span::styled(" 1-5 d/w/m/y/a ←→ ", key_style()),
         Span::styled("view  ", dim()),
+        Span::styled(" t ", key_style()),
+        Span::styled("dates  ", dim()),
         Span::styled(" r ", key_style()),
         Span::styled("refresh  ", dim()),
         Span::styled(" ↑↓ PgUp/PgDn ", key_style()),
         Span::styled("scroll", dim()),
     ]);
     frame.render_widget(Paragraph::new(footer), vertical[3]);
+
+    if let Some(pick) = picker {
+        draw_date_picker(frame, area, pick);
+    }
+    if let Some(msg) = error {
+        draw_error_overlay(frame, area, msg);
+    }
 }
 
 fn draw_header(
@@ -156,8 +301,18 @@ fn draw_header(
     data: &UsageStatsSnapshot,
     refreshed: Instant,
     mode: ViewMode,
+    custom: Option<&DateRange>,
 ) {
-    let range = range_label(data, mode);
+    let range = match custom {
+        Some(r) => {
+            if r.start == r.end {
+                r.start.clone()
+            } else {
+                format!("{} → {}", r.start, r.end)
+            }
+        }
+        None => range_label(data, mode),
+    };
     let lines = vec![
         Line::from(vec![
             Span::styled(
@@ -168,7 +323,7 @@ fn draw_header(
             Span::styled(range, Style::default().fg(MUTED)),
         ]),
         Line::from(vec![
-            tabs(mode),
+            tabs(mode, custom.is_some()),
             Span::styled(
                 format!("  refreshed {}s ago", refreshed.elapsed().as_secs()),
                 dim(),
@@ -178,8 +333,17 @@ fn draw_header(
     frame.render_widget(Paragraph::new(lines).block(panel("Overview", BORDER)), area);
 }
 
-fn draw_cards(frame: &mut ratatui::Frame, area: Rect, data: &UsageStatsSnapshot, mode: ViewMode) {
-    let total = data.range_summary(mode);
+fn draw_cards(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    data: &UsageStatsSnapshot,
+    mode: ViewMode,
+    custom: Option<&DateRange>,
+) {
+    let total = match custom {
+        Some(_) => data.total.clone(),
+        None => data.range_summary(mode),
+    };
     let tokens = total.prompt_tokens + total.completion_tokens;
     let cache_pct = if total.prompt_tokens > 0 {
         (total.cached_tokens as f64 / total.prompt_tokens as f64 * 100.0).round() as i64
@@ -216,6 +380,84 @@ fn draw_cards(frame: &mut ratatui::Frame, area: Rect, data: &UsageStatsSnapshot,
         ));
         frame.render_widget(Paragraph::new(line).block(panel(label, BORDER)), cols[idx]);
     }
+}
+
+/// Centered modal for entering a custom start/end date range.
+fn draw_date_picker(frame: &mut ratatui::Frame, area: Rect, pick: &DatePick) {
+    let w = 44u16;
+    let h = 9u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BAR))
+        .title(Span::styled(
+            " Custom date range (YYYY-MM-DD) ",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ));
+    frame.render_widget(block, popup);
+
+    let inner = Rect::new(x + 2, y + 2, w.saturating_sub(4), h.saturating_sub(3));
+    let field = |label: &str, value: &str, on: bool| -> Line<'static> {
+        let style = if on {
+            Style::default().fg(BAR).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        Line::from(vec![
+            Span::styled(format!("{:<6}", label), dim()),
+            Span::styled(format!("{:<14}", value), style),
+            if on {
+                Span::styled("_", Style::default().fg(BAR))
+            } else {
+                Span::raw(" ")
+            },
+        ])
+    };
+
+    let lines = vec![
+        Line::from(""),
+        field("start:", &pick.start, pick.field == 0),
+        Line::from(""),
+        field("end:", &pick.end, pick.field == 1),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Tab switch · Enter apply · Esc cancel",
+            dim(),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Small error toast shown at the bottom center.
+fn draw_error_overlay(frame: &mut ratatui::Frame, area: Rect, msg: &str) {
+    let text = format!(" error: {msg} ");
+    let w = (text.chars().count() as u16 + 4).min(area.width);
+    let h = 3u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + area.height.saturating_sub(h + 1);
+    let popup = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                text,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red)),
+        ),
+        popup,
+    );
 }
 
 fn draw_chart(
@@ -271,8 +513,17 @@ fn draw_chart(
     );
 }
 
-fn draw_models(frame: &mut ratatui::Frame, area: Rect, data: &UsageStatsSnapshot, mode: ViewMode) {
-    let models = data.range_models(mode);
+fn draw_models(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    data: &UsageStatsSnapshot,
+    mode: ViewMode,
+    custom: Option<&DateRange>,
+) {
+    let models = match custom {
+        Some(_) => &data.by_model_today,
+        None => data.range_models(mode),
+    };
     let max_rows = area.height.saturating_sub(3) as usize;
     let w = area.width.saturating_sub(4) as usize; // inner width minus borders
     let name_w = (w / 2).max(12);
@@ -624,17 +875,18 @@ fn compact_number(count: u64) -> String {
     }
 }
 
-fn tabs(active: ViewMode) -> Span<'static> {
+fn tabs(active: ViewMode, custom: bool) -> Span<'static> {
     let modes = [
         ViewMode::Today,
         ViewMode::SevenDays,
         ViewMode::FourWeeks,
+        ViewMode::Yearly,
         ViewMode::Months,
     ];
-    let text = modes
+    let mut text = modes
         .iter()
         .map(|m| {
-            if m.title() == active.title() {
+            if !custom && m.title() == active.title() {
                 format!("[{} {}]", m.key(), m.title())
             } else {
                 format!(" {} {} ", m.key(), m.title())
@@ -642,7 +894,10 @@ fn tabs(active: ViewMode) -> Span<'static> {
         })
         .collect::<Vec<_>>()
         .join("  ");
-    Span::styled(text, Style::default().fg(TEXT))
+    if custom {
+        text.push_str("  [custom range]");
+    }
+    Span::styled(text, Style::default().fg(if custom { MUTED } else { TEXT }))
 }
 
 fn heat_style(value: i64, max: i64) -> Style {

@@ -60,9 +60,9 @@ fn tasklist_create_pushes_pane_to_shared_ui() {
     let res = run(
         &booted,
         serde_json::json!({
-            "action": "create",
+            "action": "write",
             "name": "Demo",
-            "texts": ["alpha", "beta"],
+            "tasks": ["alpha", "beta"],
         }),
     );
     assert!(!res.is_error, "tool errored: {}", res.content);
@@ -88,14 +88,14 @@ fn tasklist_kill_pushes_pane_removal() {
     let config_dir = common::temp_dir("tasklist-pane-kill");
     let booted = boot(&config_dir);
 
-    // Seed a list, then drain the create diff so we isolate the kill diff.
+    // Seed a list, then drain the write diff so we isolate the clear diff.
     run(
         &booted,
-        serde_json::json!({ "action": "create", "texts": ["x"] }),
+        serde_json::json!({ "action": "write", "tasks": ["x"] }),
     );
     let _ = booted.manager.drain_view_diffs();
 
-    let res = run(&booted, serde_json::json!({ "action": "kill" }));
+    let res = run(&booted, serde_json::json!({ "action": "clear" }));
     assert!(!res.is_error, "tool errored: {}", res.content);
 
     let diffs = booted.manager.drain_view_diffs();

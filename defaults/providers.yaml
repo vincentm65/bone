@@ -62,6 +62,13 @@ kimi:
   api_key: ''
   endpoint: /chat/completions
   handler: openai
+wafer:
+  label: Wafer
+  base_url: https://pass.wafer.ai/v1
+  model: GLM-5.2
+  api_key: ''
+  endpoint: /chat/completions
+  handler: openai
 minimax:
   label: MiniMax
   base_url: https://api.minimax.io/v1

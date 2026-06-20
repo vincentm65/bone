@@ -89,8 +89,9 @@ pub fn boot(
         eprintln!("bone: warning: Lua commands failed: {e}");
     }
 
-    // Shared mutable state for all Lua tools (ctx.state).
-    let shared_state: SharedState = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Shared mutable state for ctx.state — the single process-wide map, so
+    // tools, commands, and before_turn hooks all see the same scratch space.
+    let shared_state: SharedState = crate::ext::ctx::process_shared_state();
 
     // Wrap the Lua in Arc<Mutex> so LuaTool and ExtensionManager share it.
     let lua_arc = Arc::new(Mutex::new(lua));

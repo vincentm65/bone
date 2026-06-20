@@ -600,7 +600,10 @@ fn compact_preserves_tool_call_chains() {
     let lua_arc = booted.manager.lua_arc();
     let lua = lua_arc.lock().unwrap();
     lua.load(r#"
-        local handler = bone._handlers.before_turn[1]
+        -- task_list also registers a before_turn handler now, so don't assume
+        -- index 1 is compact's. The compact handler is the one that returns a
+        -- replacement transcript (a table with `.messages`); others return only
+        -- system_prompt_append. Located by the loop below.
         local ctx = {
             config = {
                 get = function(section, key)
@@ -625,7 +628,14 @@ fn compact_preserves_tool_call_chains() {
             agent = { run = function() return { ok = true, content = "summary" } end },
             ui = { notify = function() end, status = function() end },
         }
-        local ret = handler({}, ctx)
+        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
+        -- so they run without error while we hunt for compact's result.
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        local ret
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then ret = r; break end
+        end
         _COMPACT_TOOL_RET = cjson.encode(ret.messages)
     "#)
     .exec()
@@ -671,7 +681,10 @@ fn compact_drops_orphan_tool_results() {
     let lua_arc = booted.manager.lua_arc();
     let lua = lua_arc.lock().unwrap();
     lua.load(r#"
-        local handler = bone._handlers.before_turn[1]
+        -- task_list also registers a before_turn handler now, so don't assume
+        -- index 1 is compact's. The compact handler is the one that returns a
+        -- replacement transcript (a table with `.messages`); others return only
+        -- system_prompt_append. Located by the loop below.
         local ctx = {
             config = {
                 get = function(section, key)
@@ -695,7 +708,14 @@ fn compact_drops_orphan_tool_results() {
             agent = { run = function() return { ok = true, content = "summary" } end },
             ui = { notify = function() end, status = function() end },
         }
-        local ret = handler({}, ctx)
+        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
+        -- so they run without error while we hunt for compact's result.
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        local ret
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then ret = r; break end
+        end
         _COMPACT_ORPHAN_RET = cjson.encode(ret.messages)
     "#)
     .exec()
@@ -749,7 +769,10 @@ fn auto_compact_enabled_under_denylist_config() {
     let lua = lua_arc.lock().unwrap();
     lua.load(
         r#"
-        local handler = bone._handlers.before_turn[1]
+        -- task_list also registers a before_turn handler now, so don't assume
+        -- index 1 is compact's. The compact handler is the one that returns a
+        -- replacement transcript (a table with `.messages`); others return only
+        -- system_prompt_append. Located by the loop below.
         -- Deny-list config format: disabled is empty → compact is enabled.
         local ctx = {
             config = {
@@ -771,7 +794,14 @@ fn auto_compact_enabled_under_denylist_config() {
             agent = { run = function() return { ok = true, content = "summary" } end },
             ui = { notify = function() end, status = function() end },
         }
-        local ret = handler({}, ctx)
+        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
+        -- so they run without error while we hunt for compact's result.
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        local ret
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then ret = r; break end
+        end
         -- Should NOT have bailed at the gate: it ran compaction and returned
         -- a replacement transcript (non-nil) with the summary.
         _AUTO_COMPACT_RET = ret and "table" or "nil"
@@ -807,7 +837,10 @@ fn auto_compact_disabled_when_in_denylist() {
     let lua = lua_arc.lock().unwrap();
     lua.load(
         r#"
-        local handler = bone._handlers.before_turn[1]
+        -- task_list also registers a before_turn handler now, so don't assume
+        -- index 1 is compact's. The compact handler is the one that returns a
+        -- replacement transcript (a table with `.messages`); others return only
+        -- system_prompt_append. Located by the loop below.
         -- compact is in the disabled array → the gate bails with nil.
         local ctx = {
             config = {
@@ -823,7 +856,14 @@ fn auto_compact_disabled_when_in_denylist() {
             agent = { run = function() return { ok = true, content = "should not run" } end },
             ui = { notify = function() end, status = function() end },
         }
-        local ret = handler({}, ctx)
+        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
+        -- so they run without error while we hunt for compact's result.
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        local ret
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then ret = r; break end
+        end
         _AUTO_COMPACT_DISABLED_RET = ret and "table" or "nil"
     "#,
     )

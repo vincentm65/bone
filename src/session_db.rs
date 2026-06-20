@@ -77,6 +77,14 @@ pub struct HourUsage {
     pub request_count: i64,
 }
 
+/// A custom `[start, end]` date range (inclusive, `YYYY-MM-DD`, local time).
+/// Used by the stats dashboard to query an arbitrary window on demand.
+#[derive(Clone, Debug)]
+pub struct DateRange {
+    pub start: String,
+    pub end: String,
+}
+
 /// Full historical usage snapshot for the stats dashboard.
 #[derive(Clone, Debug)]
 pub struct UsageStatsSnapshot {
@@ -91,6 +99,7 @@ pub struct UsageStatsSnapshot {
     pub weekly: Vec<UsageBucket>,
     pub monthly: Vec<UsageBucket>,
     pub all_time: Vec<UsageBucket>,
+    pub yearly: Vec<UsageBucket>,
     pub hourly_today: Vec<HourUsage>,
     pub hourly_7d: Vec<HourUsage>,
     pub hourly_4w: Vec<HourUsage>,
@@ -104,11 +113,18 @@ pub enum ViewMode {
     Today,
     SevenDays,
     FourWeeks,
+    Yearly,
     Months,
 }
 
 impl ViewMode {
-    const ALL: [Self; 4] = [Self::Today, Self::SevenDays, Self::FourWeeks, Self::Months];
+    const ALL: [Self; 5] = [
+        Self::Today,
+        Self::SevenDays,
+        Self::FourWeeks,
+        Self::Yearly,
+        Self::Months,
+    ];
 
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|&m| m == self).unwrap()
@@ -119,6 +135,7 @@ impl ViewMode {
             Self::Today => "Today",
             Self::SevenDays => "7 days",
             Self::FourWeeks => "4 weeks",
+            Self::Yearly => "Yearly",
             Self::Months => "All time",
         }
     }
@@ -128,7 +145,8 @@ impl ViewMode {
             Self::Today => "1",
             Self::SevenDays => "2",
             Self::FourWeeks => "3",
-            Self::Months => "4",
+            Self::Yearly => "4",
+            Self::Months => "5",
         }
     }
 
@@ -150,6 +168,7 @@ impl UsageStatsSnapshot {
             ViewMode::Today => &self.daily,
             ViewMode::SevenDays => &self.weekly,
             ViewMode::FourWeeks => &self.monthly,
+            ViewMode::Yearly => &self.yearly,
             ViewMode::Months => &self.all_time,
         }
     }
@@ -160,7 +179,7 @@ impl UsageStatsSnapshot {
             ViewMode::Today => &self.hourly_today,
             ViewMode::SevenDays => &self.hourly_7d,
             ViewMode::FourWeeks => &self.hourly_4w,
-            ViewMode::Months => &self.hourly_all,
+            ViewMode::Yearly | ViewMode::Months => &self.hourly_all,
         }
     }
 
@@ -189,7 +208,7 @@ impl UsageStatsSnapshot {
             ViewMode::Today => &self.by_model_today,
             ViewMode::SevenDays => &self.by_model_7d,
             ViewMode::FourWeeks => &self.by_model_4w,
-            ViewMode::Months => &self.by_model_all,
+            ViewMode::Yearly | ViewMode::Months => &self.by_model_all,
         }
     }
 }
@@ -553,6 +572,7 @@ impl SessionDb {
         let weekly = self.usage_recent_days(7)?;
         let monthly = self.usage_recent_weeks(4)?;
         let all_time = self.usage_buckets(36)?;
+        let yearly = self.usage_by_year()?;
         let hourly_today = self.usage_by_hour_since(TimeWindow::Today)?;
         let hourly_7d = self.usage_by_hour_since(TimeWindow::SinceDaysAgo(6))?;
         let hourly_4w = self.usage_by_hour_since(TimeWindow::SinceDaysAgo(27))?;
@@ -571,6 +591,7 @@ impl SessionDb {
             weekly,
             monthly,
             all_time,
+            yearly,
             hourly_today,
             hourly_7d,
             hourly_4w,
@@ -739,6 +760,148 @@ impl SessionDb {
              ORDER BY series.month ASC",
             params![modifier, limit],
         )
+    }
+
+    /// All-time usage grouped by calendar year (`YYYY`), oldest first.
+    fn usage_by_year(&self) -> rusqlite::Result<Vec<UsageBucket>> {
+        self.query_buckets(
+            "SELECT strftime('%Y', created_at, 'localtime') AS year,
+                    COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
+                    COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*)
+             FROM usage_events
+             GROUP BY year
+             ORDER BY year ASC",
+            [],
+        )
+    }
+
+    /// Build a snapshot scoped to a custom `[start, end]` date range. Only the
+    /// fields the dashboard consults in custom-range mode are populated; the
+    /// daily buckets, model breakdown and hourly histogram carry the range, and
+    /// `total` aggregates the window.
+    pub fn usage_stats_range(&self, start: &str, end: &str) -> rusqlite::Result<UsageStatsSnapshot> {
+        let daily = self.usage_range_days(start, end)?;
+        let by_model_today = self.usage_by_model_range(start, end)?;
+        let hourly_today = self.usage_by_hour_range(start, end)?;
+
+        let (started_at, ended_at): (Option<String>, Option<String>) = self.conn.query_row(
+            "SELECT datetime(MIN(created_at), 'localtime'), datetime(MAX(created_at), 'localtime') FROM usage_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let total = self.conn.query_row(
+            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+             COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
+             FROM usage_events \
+             WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2",
+            params![start, end],
+            |row| {
+                Ok(UsageSummary {
+                    prompt_tokens: row.get(0)?,
+                    completion_tokens: row.get(1)?,
+                    cached_tokens: row.get(2)?,
+                    cost: row.get(3)?,
+                    request_count: row.get(4)?,
+                })
+            },
+        )?;
+
+        let empty = Vec::new();
+        Ok(UsageStatsSnapshot {
+            started_at,
+            ended_at,
+            total,
+            by_model_today,
+            by_model_7d: empty.clone(),
+            by_model_4w: empty.clone(),
+            by_model_all: empty,
+            daily: daily.clone(),
+            weekly: Vec::new(),
+            monthly: Vec::new(),
+            all_time: Vec::new(),
+            yearly: Vec::new(),
+            hourly_today,
+            hourly_7d: Vec::new(),
+            hourly_4w: Vec::new(),
+            hourly_all: Vec::new(),
+            daily_activity: daily.clone(),
+        })
+    }
+
+    /// Daily buckets for an explicit `[start, end]` inclusive range.
+    fn usage_range_days(&self, start: &str, end: &str) -> rusqlite::Result<Vec<UsageBucket>> {
+        self.query_buckets(
+            "WITH RECURSIVE series(n, day) AS (
+                VALUES(0, date(?1))
+                UNION ALL SELECT n + 1, date(day, '+1 day')
+                FROM series WHERE date(day, '+1 day') <= date(?2)
+             ), usage AS (
+                SELECT date(created_at, 'localtime') AS day,
+                       COALESCE(SUM(prompt_tokens),0) AS prompt,
+                       COALESCE(SUM(completion_tokens),0) AS completion,
+                       COALESCE(SUM(cached_tokens),0) AS cached,
+                       COALESCE(SUM(cost),0.0) AS cost,
+                       COUNT(*) AS requests
+                FROM usage_events
+                WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2
+                GROUP BY day
+             )
+             SELECT series.day,
+                    COALESCE(usage.prompt,0), COALESCE(usage.completion,0),
+                    COALESCE(usage.cached,0), COALESCE(usage.cost,0.0),
+                    COALESCE(usage.requests,0)
+             FROM series
+             LEFT JOIN usage ON usage.day = series.day
+             ORDER BY series.day ASC",
+            params![start, end],
+        )
+    }
+
+    /// Provider/model breakdown for an explicit `[start, end]` range.
+    fn usage_by_model_range(&self, start: &str, end: &str) -> rusqlite::Result<Vec<ProviderUsage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT provider, model, \
+             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+             COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*) \
+             FROM usage_events \
+             WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2 \
+             GROUP BY provider, model \
+             ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC",
+        )?;
+        let rows = stmt.query_map(params![start, end], |row| {
+            Ok(ProviderUsage {
+                provider: row.get(0)?,
+                model: row.get(1)?,
+                prompt_tokens: row.get(2)?,
+                completion_tokens: row.get(3)?,
+                cached_tokens: row.get(4)?,
+                cost: row.get(5)?,
+                request_count: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Hour-of-day histogram for an explicit `[start, end]` range.
+    fn usage_by_hour_range(&self, start: &str, end: &str) -> rusqlite::Result<Vec<HourUsage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), \
+             COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), \
+             COALESCE(SUM(cached_tokens),0), COUNT(*) \
+             FROM usage_events \
+             WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2 \
+             GROUP BY 1 ORDER BY 1",
+        )?;
+        let rows = stmt.query_map(params![start, end], |row| {
+            Ok(HourUsage {
+                hour: row.get(0)?,
+                prompt_tokens: row.get(1)?,
+                completion_tokens: row.get(2)?,
+                cached_tokens: row.get(3)?,
+                request_count: row.get(4)?,
+            })
+        })?;
+        rows.collect()
     }
 
     fn usage_by_hour_since(&self, window: TimeWindow) -> rusqlite::Result<Vec<HourUsage>> {
