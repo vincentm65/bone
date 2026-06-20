@@ -9,16 +9,13 @@
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::style::{Attribute, SetAttribute};
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::Terminal;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::config::{self, InitChoice, SetupSelection};
-use crate::ui::render::backend::BoneBackend;
+use crate::ui::fullscreen::{self, FullscreenTerminal};
 
 const BG: Color = Color::Indexed(16);
 const TEXT: Color = Color::Indexed(252);
@@ -27,31 +24,6 @@ const DIM: Color = Color::Indexed(239);
 const BORDER: Color = Color::Indexed(238);
 const ACCENT: Color = Color::Cyan;
 const GOOD: Color = Color::Indexed(71);
-
-/// RAII guard that disables raw mode on drop. Mirrors `stats::RawModeGuard`.
-struct RawModeGuard {
-    was_enabled: bool,
-}
-
-impl RawModeGuard {
-    fn enable() -> io::Result<Self> {
-        let was_enabled = crossterm::terminal::is_raw_mode_enabled()?;
-        if !was_enabled {
-            crossterm::terminal::enable_raw_mode()?;
-        }
-        Ok(Self { was_enabled })
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        if !self.was_enabled
-            && let Err(e) = crossterm::terminal::disable_raw_mode()
-        {
-            eprintln!("bone: warning: failed to disable raw mode: {e}");
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -191,32 +163,10 @@ impl State {
 /// `fresh` marks a genuine first-launch onboarding (vs. a `/setup` re-run); it
 /// only affects the skip/cancel copy, since fresh-launch skip seeds everything.
 pub fn run(fresh: bool) -> io::Result<bool> {
-    let _raw_guard = RawModeGuard::enable()?;
-
-    let result = (|| -> io::Result<bool> {
-        crossterm::execute!(
-            io::stdout(),
-            SetAttribute(Attribute::Reset),
-            EnterAlternateScreen
-        )?;
-        let backend = BoneBackend::new(io::stdout());
-        let mut term = Terminal::new(backend)?;
-        run_loop(&mut term, fresh)
-    })();
-
-    let leave_result = crossterm::execute!(
-        io::stdout(),
-        SetAttribute(Attribute::Reset),
-        LeaveAlternateScreen,
-        SetAttribute(Attribute::Reset)
-    );
-
-    let completed = result?;
-    leave_result?;
-    Ok(completed)
+    fullscreen::run(|term| run_loop(term, fresh))
 }
 
-fn run_loop(term: &mut Terminal<BoneBackend<io::Stdout>>, fresh: bool) -> io::Result<bool> {
+fn run_loop(term: &mut FullscreenTerminal, fresh: bool) -> io::Result<bool> {
     let mut state = State::new(fresh);
     term.draw(|frame| draw(frame, &state))?;
 

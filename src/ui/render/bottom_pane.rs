@@ -725,7 +725,15 @@ impl super::Renderer {
             }
         }
 
-        // ── Status bar ───────────────────────────────────────────────────
+        self.draw_status_bar(frame, status_info, area);
+    }
+
+    /// Draw the single-row status bar at the bottom of the viewport
+    /// (`area.bottom() - 1`). Renders native segments (model, approval mode,
+    /// token metrics, queue, timer, spinner) followed by Lua-defined segments;
+    /// right-aligned Lua segments are drawn on the same row with their width
+    /// reserved so they never overwrite the native/left content.
+    fn draw_status_bar(&self, frame: &mut Frame, status_info: &StatusInfo, area: Rect) {
         let mut status_spans: Vec<Span> = vec![];
         let sep = || Span::styled(" | ", Style::default().fg(self.theme.status_text));
 

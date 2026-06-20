@@ -163,20 +163,57 @@ impl AppCtxState {
     }
 }
 
+/// True while the TUI owns the terminal (raw mode on). The single gate that
+/// keeps Lua debug output off the screen ratatui is rendering. Headless/core
+/// builds (no `ui` feature) always report false.
+pub(crate) fn tui_owns_terminal() -> bool {
+    #[cfg(feature = "ui")]
+    {
+        crossterm::terminal::is_raw_mode_enabled().unwrap_or(false)
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        false
+    }
+}
+
+/// The one sink for Lua debug output (`ctx.log.*`, the global `print`):
+/// append `msg` to `bone.log`, and — unless the TUI owns the terminal — echo
+/// to stderr. Nothing here ever touches stdout/stderr while ratatui is in raw
+/// mode, so a stray `print()` can no longer scramble the status bar.
+pub(crate) fn lua_log(config_dir: &str, level: &str, msg: &str) {
+    let path = std::path::Path::new(config_dir).join("bone.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "bone-lua [{level}]: {msg}");
+    }
+    if !tui_owns_terminal() {
+        eprintln!("bone-lua [{level}]: {msg}");
+    }
+}
+
 /// Create the `ctx` table for a single tool invocation.
 pub(crate) fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let ctx = lua.create_table()?;
 
+
     ctx.set("config_dir", cfg.config_dir.as_str())?;
     ctx.set("cwd", cfg.cwd.as_str())?;
 
-    // ctx.log — print-to-stderr helpers
+    // ctx.log — debug helpers routed through `lua_log` (bone.log + headless
+    // stderr only), so they never corrupt the TUI's screen.
+    let log_config_dir = cfg.config_dir.clone();
     let log_table = lua.create_table()?;
     for level in &["debug", "info", "warn", "error"] {
         let lvl = level.to_string();
+        let config_dir = log_config_dir.clone();
         let log_fn = lua.create_function(move |lua, val: Value| {
             let msg: String = lua.from_value(val).unwrap_or_default();
-            eprintln!("bone-lua [{lvl}]: {msg}");
+            lua_log(&config_dir, &lvl, &msg);
             Ok(())
         })?;
         log_table.set(*level, log_fn)?;
@@ -516,33 +553,27 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     // Cloned per closure (mlua functions are 'static).
     let status_tx = cfg.runtime_status.clone();
     let notify_tx = cfg.runtime_status.clone();
-    // Subagents (depth > 0) run with no runtime_status channel but share the
-    // parent process's stderr, which the TUI owns in raw mode. Writing status
-    // there scrambles the chat (e.g. auto-compaction announcements from
-    // `compact.lua`). Suppress the stderr fallback for them; the parent agent
-    // keeps the real channel and still surfaces its own status.
-    let is_subagent = cfg.agent_depth > 0;
 
     // ctx.ui.status(message) — surface a live status line to the attached
     // frontend (e.g. auto-compaction announcing progress/savings). Headless
-    // (no frontend) falls back to stderr, except inside a subagent.
+    // (no frontend) falls back to stderr; that fallback is suppressed while
+    // the TUI owns the terminal in raw mode (`tui_owns_terminal`).
     let status_fn = lua.create_function(move |_, msg: String| {
         if let Some(tx) = &status_tx {
             let _ = tx.send(crate::runtime::RuntimeEvent::Status { message: msg });
-        } else if !is_subagent {
+        } else if !tui_owns_terminal() {
             eprintln!("bone-lua: {msg}");
         }
         Ok(())
     })?;
     ui_table.set("status", status_fn)?;
 
-    // ctx.ui.notify(message, level?) — warnings/errors still go to stderr for
-    // headless debugging (but not from a subagent, which shares the TUI's
-    // stderr). Info-level (and above) is also forwarded to an attached frontend
-    // as a status line, so background hooks like auto-compaction are no longer
-    // silently dropped in the TUI.
+    // ctx.ui.notify(message, level?) — warnings/errors echo to stderr for
+    // headless debugging only; the echo is suppressed while the TUI owns the
+    // terminal. All levels forward to an attached frontend as a status line,
+    // so background hooks like auto-compaction are never silently dropped.
     let notify_fn = lua.create_function(move |_, (msg, level): (String, Option<String>)| {
-        if !is_subagent {
+        if !tui_owns_terminal() {
             match level.as_deref() {
                 Some("warn") | Some("warning") => eprintln!("bone-lua warn: {msg}"),
                 Some("error") => eprintln!("bone-lua error: {msg}"),

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table};
+use mlua::{Function, Lua, LuaSerdeExt, Result as LuaResult, Table};
 
 use super::types::BootOptions;
 
@@ -139,9 +139,30 @@ pub(crate) fn create_engine(
     bone.set("model", model).map_err(|e| e.to_string())?;
     bone.set("provider", provider).map_err(|e| e.to_string())?;
 
-    // bone.log table
-    let log = create_log_table(&lua).map_err(|e| e.to_string())?;
+    // bone.log table (writes to a log file to avoid corrupting the TUI)
+    let log = create_log_table(&lua, config_dir).map_err(|e| e.to_string())?;
     bone.set("log", log).map_err(|e| e.to_string())?;
+    // Override the global `print` to route through `lua_log` (bone.log +
+    // headless stderr) instead of stdout. The TUI owns stdout in raw mode, so a
+    // stray `print()` in a tool/command would otherwise scramble the screen.
+    let print_config_dir = config_dir.to_string_lossy().to_string();
+    let print_fn = lua
+        .create_function(move |lua, args: mlua::Variadic<mlua::Value>| {
+            // Mirror real `print`: stringify every argument via Lua's `tostring`
+            // (honoring `__tostring`) so non-string args — nil, booleans, tables
+            // — log instead of raising, then join with tabs.
+            let tostring: mlua::Function = lua.globals().get("tostring")?;
+            let parts: Vec<String> = args
+                .into_iter()
+                .map(|v| tostring.call::<String>(v))
+                .collect::<mlua::Result<_>>()?;
+            super::ctx::lua_log(&print_config_dir, "info", &parts.join("\t"));
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    globals
+        .set("print", print_fn)
+        .map_err(|e| e.to_string())?;
 
     // Set safe package.path entries so users can `require` from their lua dir.
     let lua_dir = config_dir.join("lua");
@@ -211,26 +232,34 @@ pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
 }
 
 /// Create the `bone.log` sub-table with `info`, `warn`, `error` functions.
-fn create_log_table(lua: &Lua) -> LuaResult<Table> {
+fn create_log_table(lua: &Lua, config_dir: &Path) -> LuaResult<Table> {
     let log = lua.create_table()?;
+    let log_path = config_dir.join("bone.log");
 
-    let info_fn = lua.create_function(|_, msg: String| {
-        eprintln!("bone-lua: {msg}");
-        Ok(())
-    })?;
-    log.set("info", info_fn)?;
+    let make_log_fn = |lua: &Lua, level: &str| -> LuaResult<Function> {
+        let log_path = log_path.clone();
+        let level = level.to_string();
+        lua.create_function(move |_, msg: String| {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let line = format!("[{ts}] bone-lua {level}: {msg}\n");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                use std::io::Write;
+                let _ = write!(f, "{line}");
+            }
+            Ok(())
+        })
+    };
 
-    let warn_fn = lua.create_function(|_, msg: String| {
-        eprintln!("bone-lua warn: {msg}");
-        Ok(())
-    })?;
-    log.set("warn", warn_fn)?;
-
-    let error_fn = lua.create_function(|_, msg: String| {
-        eprintln!("bone-lua error: {msg}");
-        Ok(())
-    })?;
-    log.set("error", error_fn)?;
+    log.set("info", make_log_fn(lua, "info")?)?;
+    log.set("warn", make_log_fn(lua, "warn")?)?;
+    log.set("error", make_log_fn(lua, "error")?)?;
 
     Ok(log)
 }

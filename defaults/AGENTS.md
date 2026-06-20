@@ -363,25 +363,32 @@ bone.register_tool({
 ```
 
 ### task_list (Lua, session state, TUI pane)
-Manage a named visible task list with TUI pane rendering.
+Maintain a visible TodoWrite-style checklist with TUI pane rendering. `write`
+replaces the entire list each call (no indices to track); each task has a status
+of `pending`, `in_progress`, or `done`. A `before_turn` hook (root agent only)
+keeps the list salient by appending a short reminder to the system prompt — when
+a list is active it nudges the model to mark items `in_progress`/`done`; when none
+exists it suggests creating one for multi-step work.
 ```lua
 bone.register_tool({
     name = "task_list",
-    description = "Manage a named visible task list. State is held by the host; no state arg needed. Actions: create (pass texts and optional name, max 15 tasks), complete (pass index/indices), kill.",
+    description = "Maintain a visible checklist... Call 'write' with the FULL list every time; keep exactly one item 'in_progress'; flip items to 'done' when finished. Actions: write (pass tasks, optional name, max 15), clear.",
     safety = "read_only",
     parameters = {
         type = "object",
         properties = {
-            action = { type = "string", description = "create, complete, or kill" },
-            name = { type = "string", description = "Optional task list name for create." },
-            texts = { type = "array", items = { type = "string" }, description = "Task strings for create." },
-            index = { type = "number", description = "Single 1-based task index for complete." },
-            indices = { type = "array", items = { type = "number" }, description = "Multiple 1-based task indices for complete." },
+            action = { type = "string", enum = { "write", "clear" }, description = "'write' (replace full list) or 'clear'." },
+            name = { type = "string", description = "Optional list title shown in the pane." },
+            tasks = {
+                type = "array",
+                description = "Full task list for 'write'. Each item is a string (→ pending) or { text, status } with status pending | in_progress | done.",
+                items = { oneOf = { { type = "string" }, { type = "object", properties = { text = { type = "string" }, status = { type = "string", enum = { "pending", "in_progress", "done" } } }, required = { "text" } } } },
+            },
         },
         required = { "action" },
         additionalProperties = false,
     },
-    display = { show = false, show_result = false, args = { "action", "name", "texts", "index", "indices" } },
+    display = { show = false, show_result = false, args = { "action", "name", "tasks" } },
 })
 ```
 

@@ -2,9 +2,6 @@ use std::io;
 use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::style::{Attribute, SetAttribute};
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -20,69 +17,16 @@ const BAR: Color = Color::Cyan;
 const BAR_EMPTY: Color = Color::Indexed(236);
 
 use crate::session_db::{HourUsage, UsageBucket, UsageStatsSnapshot, ViewMode};
-use crate::ui::render::backend::BoneBackend;
+use crate::ui::fullscreen::{self, FullscreenTerminal};
 
-/// RAII guard that disables raw mode on drop.
-struct RawModeGuard {
-    was_enabled: bool,
-}
-
-impl RawModeGuard {
-    fn enable() -> io::Result<Self> {
-        let was_enabled = crossterm::terminal::is_raw_mode_enabled()?;
-        if !was_enabled {
-            crossterm::terminal::enable_raw_mode()?;
-        }
-        Ok(Self { was_enabled })
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        if !self.was_enabled
-            && let Err(e) = crossterm::terminal::disable_raw_mode()
-        {
-            eprintln!("bone: warning: failed to disable raw mode: {e}");
-        }
-    }
-}
-
-pub fn run<F>(load: F) -> io::Result<()>
+pub fn run<F>(mut load: F) -> io::Result<()>
 where
     F: FnMut() -> io::Result<UsageStatsSnapshot>,
 {
-    run_inner(load)
+    fullscreen::run(|term| run_loop(term, &mut load))
 }
 
-fn run_inner<F>(mut load: F) -> io::Result<()>
-where
-    F: FnMut() -> io::Result<UsageStatsSnapshot>,
-{
-    let _raw_guard = RawModeGuard::enable()?;
-
-    // Use an inner closure so that LeaveAlternateScreen always runs,
-    // even if Terminal::new or run_loop fails.
-    let result = (|| -> io::Result<()> {
-        crossterm::execute!(
-            io::stdout(),
-            SetAttribute(Attribute::Reset),
-            EnterAlternateScreen
-        )?;
-        let backend = BoneBackend::new(io::stdout());
-        let mut term = Terminal::new(backend)?;
-        run_loop(&mut term, &mut load)
-    })();
-
-    let leave_result = crossterm::execute!(
-        io::stdout(),
-        SetAttribute(Attribute::Reset),
-        LeaveAlternateScreen,
-        SetAttribute(Attribute::Reset)
-    );
-    result.and(leave_result)
-}
-
-fn run_loop<F>(term: &mut Terminal<BoneBackend<io::Stdout>>, load: &mut F) -> io::Result<()>
+fn run_loop<F>(term: &mut FullscreenTerminal, load: &mut F) -> io::Result<()>
 where
     F: FnMut() -> io::Result<UsageStatsSnapshot>,
 {

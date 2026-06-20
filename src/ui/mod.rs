@@ -2,6 +2,7 @@ pub mod app;
 pub mod autocomplete;
 pub mod color;
 pub mod commands;
+pub mod fullscreen;
 pub mod input;
 pub mod pane_page;
 pub mod prompt;
