@@ -90,6 +90,10 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
     };
     existing.contains("ctx.ui.interact")
         || (name == "ui/menu.lua" && !existing.contains("require(\"ui.pane\")"))
+        // task_list moved from a hardcoded host name check to a declared
+        // `stateful = true`; refresh older seeded copies that predate the field
+        // so they keep their host-managed state behavior.
+        || (name == "task_list.lua" && !existing.contains("stateful"))
 }
 
 /// Boot the Lua extension system.
@@ -158,6 +162,7 @@ pub fn boot_with_tools(
         &enabled,
         loaded.dynamic_display,
         loaded.dynamic_safety,
+        loaded.dynamic_state,
     );
 
     BootedTools {

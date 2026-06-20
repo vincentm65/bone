@@ -166,7 +166,13 @@ async fn tool_handler_execute_all_disabled_tool() {
     });
 
     let handler =
-        ToolHandler::with_enabled_safety_and_display(registry, &[], HashMap::new(), HashMap::new());
+        ToolHandler::with_enabled_safety_and_display(
+            registry,
+            &[],
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
     let calls = vec![make_call("disabled_tool", "c1")];
 
     let results = handler.execute_all(calls, 0).await;

@@ -27,6 +27,10 @@ pub struct LuaTool {
     config_dir: String,
     shared_state: SharedState,
     safety: CommandSafety,
+    /// Host-held state key when the tool declares `stateful = true`. The host
+    /// serializes batched calls to this tool and threads the prior result's
+    /// `state` back in before each call. `None` for ordinary stateless tools.
+    state_key: Option<String>,
     ui: super::api_ui::SharedUi,
 }
 
@@ -95,6 +99,24 @@ impl LuaTool {
             },
             _ => CommandSafety::Danger,
         };
+        // Host-held state opt-in: `stateful = true` makes the host serialize
+        // batched calls and feed the prior result's `state` back in. An explicit
+        // `state_key` overrides the default (the tool name), which is also the
+        // pane `source` the state is reconciled against.
+        let stateful: bool = entry.get("stateful").unwrap_or(false);
+        let state_key: Option<String> = if stateful {
+            Some(
+                entry
+                    .get::<Option<String>>("state_key")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| name.clone()),
+            )
+        } else {
+            None
+        };
+
         // Take ownership of the execute function via the registry.
         let execute_fn: mlua::Value = entry
             .get("execute")
@@ -111,6 +133,7 @@ impl LuaTool {
             lua: lua_arc,
             registry_key: Arc::new(registry_key),
             safety,
+            state_key,
             config_dir,
             shared_state,
             ui,
@@ -122,6 +145,10 @@ impl LuaTool {
     }
     pub fn safety(&self) -> CommandSafety {
         self.safety
+    }
+    /// Host-held state key, or `None` when the tool is stateless.
+    pub fn state_key(&self) -> Option<&str> {
+        self.state_key.as_deref()
     }
 
     /// Run the tool's Lua execute function synchronously on the current thread.

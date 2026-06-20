@@ -25,6 +25,9 @@ pub struct LoadedTools {
     pub dynamic_display: HashMap<String, types::ToolDisplayConfig>,
     /// Map from tool name to its declared safety level.
     pub dynamic_safety: HashMap<String, CommandSafety>,
+    /// Map from tool name to its host-held state key, for tools that declared
+    /// `stateful = true`. Drives serialized execution and state threading.
+    pub dynamic_state: HashMap<String, String>,
 }
 
 pub fn load_tools() -> LoadedTools {
@@ -34,6 +37,7 @@ pub fn load_tools() -> LoadedTools {
         registry,
         dynamic_display: HashMap::new(),
         dynamic_safety: HashMap::new(),
+        dynamic_state: HashMap::new(),
     }
 }
 
@@ -44,7 +48,10 @@ pub fn register_lua_tools(loaded: &mut LoadedTools, lua_tools: Vec<LuaTool>) {
         loaded
             .dynamic_display
             .insert(name.clone(), tool.display().clone());
-        loaded.dynamic_safety.insert(name, tool.safety());
+        loaded.dynamic_safety.insert(name.clone(), tool.safety());
+        if let Some(key) = tool.state_key() {
+            loaded.dynamic_state.insert(name, key.to_string());
+        }
         loaded.registry = loaded.registry.clone().register(tool);
     }
 }

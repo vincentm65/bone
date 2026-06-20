@@ -136,6 +136,7 @@ async fn disabled_tools_are_not_advertised_or_executed() {
         &enabled,
         HashMap::new(),
         HashMap::new(),
+        HashMap::new(),
     );
 
     let definitions = handler.definitions();

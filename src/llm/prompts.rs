@@ -33,6 +33,8 @@ pub fn subagent_system_prompt(persona: Option<&str>) -> String {
          Rules:\n\
          - Use tools for all file and system operations.\n\
          - Be concise. No emoji, no filler, no preamble.\n\
+         - Always work in the current working directory. Do not search or modify files in other projects or directories unless explicitly instructed.\n\
+         - Never modify your own `.bone-rust` files unless the user explicitly asks you to.\n\
          - You run non-interactively: never ask questions; make reasonable assumptions and state them.\n\
          - Your final message is returned verbatim to the agent that dispatched you. Make it a complete, self-contained answer to the task (include file paths and key findings).\n\n\
          Resolved config directory: {bone}\n\
@@ -48,6 +50,8 @@ Rules:
 - Be concise. No emoji, no filler, no preamble.
 - Create exactly what was asked, nothing extra.
 - Write minimal code that solves the exact problem. 
+- Always work in the current working directory. Do not search or modify files in other projects or directories unless explicitly instructed.
+- Never modify your own `.bone-rust` files (config, tools, plugins, AGENTS.md, etc.) unless the user explicitly asks you to.
 
 Config:
 - The bone config directory is printed below as \"Resolved config directory\".

@@ -144,6 +144,9 @@ bone.register_tool({
     name = "task_list",
     description = "Maintain a visible checklist (TUI pane) for the user. Use it for any task with ~3+ distinct steps or work spanning multiple files. Call 'write' with the FULL list every time — it replaces the whole list, so there are no indices to track. Keep exactly one item 'in_progress' (the step you're working on now) and flip items to 'done' the moment they're finished, then write again. State is host-held; no state arg. Actions: write (pass tasks, optional name, max 15), clear.",
     safety = "read_only",
+    -- Host-managed state: the host serializes batched calls and threads the
+    -- prior list back in (state_key defaults to the tool name, "task_list").
+    stateful = true,
     parameters = {
         type = "object",
         properties = {

@@ -108,6 +108,11 @@ pub struct ToolHandler {
     pub state_map: ToolStateMap,
     pub owner: String,
     dynamic_safety: HashMap<String, CommandSafety>,
+    /// Tools that hold host-managed state, mapped to their state key. A tool
+    /// declares this via `stateful = true` in `register_tool`; the host then
+    /// serializes its batched calls and threads state across rounds. Replaces
+    /// the previous hardcoded `task_list` name check.
+    host_state_keys: HashMap<String, String>,
     /// Cancellation token set by TUI when user cancels streaming.
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// App-derived ctx snapshot, refreshed per turn by the TUI before dispatch.
@@ -117,15 +122,12 @@ pub struct ToolHandler {
 }
 
 impl ToolHandler {
-    fn is_host_stateful_name(name: &str) -> bool {
-        matches!(name, "task_list")
+    fn is_host_stateful_name(&self, name: &str) -> bool {
+        self.host_state_keys.contains_key(name)
     }
 
-    fn host_state_key_for_name(name: &str) -> Option<&'static str> {
-        match name {
-            "task_list" => Some("task_list"),
-            _ => None,
-        }
+    fn host_state_key_for_name(&self, name: &str) -> Option<&str> {
+        self.host_state_keys.get(name).map(String::as_str)
     }
 
     fn result_clears_default_state(result: &ToolResult, state_key: &str) -> bool {
@@ -148,6 +150,7 @@ impl ToolHandler {
             state_map: ToolStateMap::default(),
             owner: String::new(),
             dynamic_safety: HashMap::new(),
+            host_state_keys: HashMap::new(),
             cancel_token: None,
             app_state: None,
         }
@@ -158,12 +161,14 @@ impl ToolHandler {
         enabled: &[String],
         dynamic_display: HashMap<String, ToolDisplayConfig>,
         dynamic_safety: HashMap<String, CommandSafety>,
+        host_state_keys: HashMap<String, String>,
     ) -> Self {
         Self {
             registry,
             enabled: enabled.iter().cloned().collect(),
             dynamic_display,
             dynamic_safety,
+            host_state_keys,
             state_map: ToolStateMap::default(),
             owner: String::new(),
             cancel_token: None,
@@ -238,7 +243,7 @@ impl ToolHandler {
 
         if calls
             .iter()
-            .filter(|call| Self::is_host_stateful_name(&call.name))
+            .filter(|call| self.is_host_stateful_name(&call.name))
             .count()
             > 1
         {
@@ -277,7 +282,7 @@ impl ToolHandler {
         let mut state_overrides: HashMap<String, Option<String>> = HashMap::new();
 
         for call in calls {
-            let state_key = Self::host_state_key_for_name(&call.name);
+            let state_key = self.host_state_key_for_name(&call.name);
             let session_state = state_key.and_then(|key| {
                 state_overrides
                     .get(key)
@@ -294,7 +299,7 @@ impl ToolHandler {
                     tool_call_depth,
                 )
                 .await;
-            if let Some(key) = Self::host_state_key_for_name(&result.name) {
+            if let Some(key) = self.host_state_key_for_name(&result.name) {
                 if Self::result_clears_default_state(&result, key) {
                     state_overrides.insert(key.to_string(), None);
                 } else if let Some(state) = result.state.clone() {
@@ -352,7 +357,7 @@ impl ToolHandler {
     }
 
     fn session_state_for_call(&self, call: &ToolCall) -> Option<String> {
-        Self::host_state_key_for_name(&call.name)
+        self.host_state_key_for_name(&call.name)
             .and_then(|key| self.state_map.get(key, "default").map(String::from))
     }
 }
