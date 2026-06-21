@@ -140,6 +140,45 @@ def resolve_chromium():
     with sync_playwright() as p:
         return p.chromium.executable_path
 
+def install_chromium():
+    """Download the bundled Chromium for the active Playwright into the shared
+    ms-playwright cache. The `uv run --with playwright==X` env carries the Python
+    package but NOT the browser binary, so a fresh machine (commonly Windows,
+    where nothing pre-seeds the cache) has no chrome.exe until this runs.
+    Returns the installer log."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+        return proc.stdout or ""
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout or ""
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        return out + "\nplaywright install chromium timed out"
+    except Exception as e:
+        return str(e)
+
+def ensure_chromium():
+    """Resolve the bundled Chromium, auto-installing it once if the binary is
+    missing. Fails with an actionable message only if install can't recover."""
+    try:
+        exe = resolve_chromium()
+    except Exception as e:
+        fail(f"Playwright unavailable: {e}\nInstall with: uv run --with playwright==1.59.0 python -m playwright install chromium", 1)
+    if exe and Path(exe).exists():
+        return exe
+    log = install_chromium()
+    try:
+        exe = resolve_chromium()
+    except Exception as e:
+        fail(f"Playwright unavailable after install attempt: {e}", 1)
+    if not exe or not Path(exe).exists():
+        tail = "\n".join((log or "").splitlines()[-15:])
+        fail(f"Chromium not found at {exe} and auto-install failed.\n{tail}\n"
+             f"Try manually: uv run --with playwright==1.59.0 python -m playwright install chromium", 1)
+    return exe
+
 def require_daemon():
     d = load_daemon()
     if not daemon_running(d):
@@ -190,12 +229,7 @@ def act_start(p):
         return
     if d:
         clear_daemon()
-    try:
-        exe = resolve_chromium()
-    except Exception as e:
-        fail(f"Playwright unavailable: {e}\nInstall with: uv run --with playwright python -m playwright install chromium", 1)
-    if not exe or not Path(exe).exists():
-        fail(f"Chromium not found at {exe}\nInstall with: uv run --with playwright python -m playwright install chromium", 1)
+    exe = ensure_chromium()
     port = free_port()
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     args = [exe,
@@ -533,8 +567,12 @@ local function execute(params, ctx)
     -- Budget = per-action timeout + headroom, floored at 60s so start's own
     -- waits and uv/playwright resolution always fit. Without this, a large
     -- timeout_ms would be silently capped and killed by the outer shell call.
+    -- `start` gets the full 5min the host allows: a cold machine may download
+    -- the Python interpreter, the playwright wheel, AND the Chromium binary
+    -- (auto-install) on the very first call — 60s is not enough for that.
+    local action = type(params) == "table" and params.action or nil
     local per_action = tonumber(params and params.timeout_ms) or 30000
-    local budget = math.max(60000, per_action + 15000)
+    local budget = (action == "start") and 300000 or math.max(60000, per_action + 15000)
     local result = ctx.shell(cmd, { timeout_ms = budget })
     if result.exit_code ~= 0 then
         local err = (result.stderr and #result.stderr > 0) and result.stderr or (result.stdout or "")
