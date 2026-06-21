@@ -141,10 +141,15 @@ impl<W: Write> Backend for BoneBackend<W> {
         Backend::flush(&mut self.inner)
     }
 
+    // Only compiled off-Windows: these `Backend` trait methods exist solely
+    // when ratatui's `scrolling-regions` feature is on, which we enable for
+    // every target except Windows (see Cargo.toml).
+    #[cfg(not(windows))]
     fn scroll_region_up(&mut self, region: std::ops::Range<u16>, lines: u16) -> io::Result<()> {
         self.inner.scroll_region_up(region, lines)
     }
 
+    #[cfg(not(windows))]
     fn scroll_region_down(&mut self, region: std::ops::Range<u16>, lines: u16) -> io::Result<()> {
         self.inner.scroll_region_down(region, lines)
     }

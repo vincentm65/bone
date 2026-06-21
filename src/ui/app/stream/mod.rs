@@ -521,6 +521,11 @@ impl App {
                 self.messages[idx].content.push_str(&text);
                 self.renderer
                     .flush_streaming_message(&self.messages[idx].content, term)?;
+                // On Windows, `insert_before` uses the no-scrolling-regions path
+                // which clears the inline viewport; repaint it immediately so the
+                // status bar doesn't flicker between this flush and the next tick.
+                #[cfg(windows)]
+                self.pump_tick(term)?;
             }
             RuntimeEvent::ReasoningDelta { text } => {
                 // Reasoning is always retained in the Driver transcript for
