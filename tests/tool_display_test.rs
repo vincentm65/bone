@@ -78,6 +78,7 @@ fn dynamic_display_args_render_in_tool_label() {
         template: None,
         show: None,
         show_result: None,
+        eager: None,
     };
 
     assert_eq!(
@@ -108,6 +109,7 @@ fn dynamic_display_template_renders_in_tool_label() {
         template: Some("search {query}".to_string()),
         show: None,
         show_result: None,
+        eager: None,
     };
 
     assert_eq!(
@@ -133,6 +135,26 @@ fn subagent_call(arguments: serde_json::Value) -> (ToolCall, ToolResult) {
     (call, result)
 }
 
+/// The display config the `subagent` tool declares (mirrors subagent.lua):
+/// an array template for the dispatch label plus `args` for the fallback.
+fn subagent_display() -> ToolDisplayConfig {
+    ToolDisplayConfig {
+        // Mirrors subagent.lua: the array template drives the dispatch label;
+        // absent args are filtered out of the fallback, so a non-dispatch call
+        // still renders as `action=status`.
+        args: vec![
+            "action".to_string(),
+            "tasks".to_string(),
+            "wait".to_string(),
+            "ids".to_string(),
+        ],
+        template: Some("dispatch: {tasks[].title|task}".to_string()),
+        show: Some(true),
+        show_result: Some(false),
+        eager: Some(true),
+    }
+}
+
 #[test]
 fn subagent_dispatch_label_uses_task_titles() {
     let (call, result) = subagent_call(json!({
@@ -145,7 +167,7 @@ fn subagent_dispatch_label_uses_task_titles() {
     }));
 
     assert_eq!(
-        tool_label(&call, &result, None),
+        tool_label(&call, &result, Some(&subagent_display())),
         "subagent dispatch: \"Review unstaged changes\", \"Run the test suite\""
     );
 }
@@ -160,25 +182,21 @@ fn subagent_dispatch_label_falls_back_to_task_when_no_title() {
     }));
 
     assert_eq!(
-        tool_label(&call, &result, None),
+        tool_label(&call, &result, Some(&subagent_display())),
         "subagent dispatch: \"Review the diff\""
     );
 }
 
 #[test]
 fn subagent_non_dispatch_action_uses_generic_display() {
+    // No `tasks` → the array template resolves to nothing and the row falls
+    // back to the `args` label.
     let (call, result) = subagent_call(json!({
         "action": "status",
     }));
-    let display = ToolDisplayConfig {
-        args: vec!["action".to_string()],
-        template: None,
-        show: None,
-        show_result: None,
-    };
 
     assert_eq!(
-        tool_label(&call, &result, Some(&display)),
+        tool_label(&call, &result, Some(&subagent_display())),
         "subagent action=status"
     );
 }

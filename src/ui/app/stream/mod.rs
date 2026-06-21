@@ -164,14 +164,6 @@ impl PaneOwnership {
     }
 }
 
-/// True when `call` is a `subagent` tool call with `action == "dispatch"`.
-/// These block until the spawned agents finish, so their row is rendered at
-/// dispatch time rather than on completion.
-fn is_subagent_dispatch(call: &ToolCall) -> bool {
-    call.name == "subagent"
-        && call.arguments.get("action").and_then(|v| v.as_str()) == Some("dispatch")
-}
-
 fn key_event_from_crossterm(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -561,17 +553,18 @@ impl App {
             RuntimeEvent::Status { message } => {
                 // Most status lines are already covered by other UI (the
                 // spinner for "thinking", tool rows for "running …"). Surface
-                // only the signals that would otherwise be invisible:
-                //  - retries / stream errors (already shown)
-                //  - compaction announcements from before_turn hooks
-                //    (auto-compaction via compact.lua), so the user sees that
-                //    context was summarized and what it saved.
-                let lower = message.to_lowercase();
+                // only the host-generated signals that would otherwise be
+                // invisible: retries / stream errors. Lua that wants a message
+                // kept in the transcript emits `RuntimeEvent::Notice` instead
+                // (see below) rather than relying on the host to guess.
                 if message.starts_with("retry") || message.contains("stream error") {
                     self.pump_notice(format!("⚠ {message}"), cur_idx, term)?;
-                } else if lower.contains("compact") {
-                    self.pump_notice(message, cur_idx, term)?;
                 }
+            }
+            RuntimeEvent::Notice { message } => {
+                // A persistent notice from Lua (e.g. auto-compaction via
+                // compact.lua): always keep it in the scrollback.
+                self.pump_notice(message, cur_idx, term)?;
             }
             // `Failed` stays authoritative at turn end (rendered from
             // `outcome.result`); surfacing the retry/stream-error `Status`
@@ -600,13 +593,18 @@ impl App {
                     name,
                     arguments,
                 };
-                // A subagent dispatch blocks (wait=true / headless) until the
-                // agents finish, so its tool row would otherwise only appear on
-                // completion. Render it now so it shows on dispatch; the id is
-                // recorded in `shown_tool_rows` so the later `ToolResult` event
-                // doesn't render a duplicate.
-                if is_subagent_dispatch(&call) {
-                    self.pump_show_dispatch_row(&call, cur_idx, term)?;
+                // Tools that declare `display.eager` (e.g. `subagent`, whose
+                // dispatch/wait calls block until the agents finish) would
+                // otherwise only show their row on completion. Render it now;
+                // the id is recorded in `shown_tool_rows` so the later
+                // `ToolResult` event doesn't render a duplicate.
+                if self
+                    .tools
+                    .display_for_call(&call)
+                    .and_then(|d| d.eager)
+                    .unwrap_or(false)
+                {
+                    self.pump_show_eager_row(&call, cur_idx, term)?;
                 }
                 pending.insert(id, call);
             }
@@ -772,13 +770,14 @@ impl App {
         }
     }
 
-    /// Render a `subagent dispatch` tool row to scrollback at dispatch time,
+    /// Render an `display.eager` tool row to scrollback at dispatch time,
     /// mirroring the `ToolResult` rendering path with a synthetic (empty,
-    /// non-error) result. The dispatch label is derived purely from the call
-    /// arguments and the tool hides its result, so nothing is lost by showing
-    /// the row before the agents finish. The call id is recorded in
-    /// `shown_tool_rows` so the later `ToolResult` event skips the duplicate.
-    fn pump_show_dispatch_row(
+    /// non-error) result. The label is derived purely from the call arguments
+    /// (the tool's declared `display`) and such tools hide their result, so
+    /// nothing is lost by showing the row before the call finishes. The call id
+    /// is recorded in `shown_tool_rows` so the later `ToolResult` event skips
+    /// the duplicate.
+    fn pump_show_eager_row(
         &mut self,
         call: &ToolCall,
         cur_idx: &mut Option<usize>,
@@ -844,7 +843,7 @@ impl App {
             self.clear_thinking_pane();
         }
         self.apply_view_diffs();
-        self.maybe_refresh_subagent_pane();
+        self.maybe_refresh_jobs_pane();
         self.render_streaming(term)
     }
 
@@ -979,7 +978,7 @@ impl App {
                     }
 
                     // Refresh subagent pane on registry change or ~1s ticker.
-                    self.maybe_refresh_subagent_pane();
+                    self.maybe_refresh_jobs_pane();
 
                     // Drain any key requests sent during drain_keys.
                     while let Ok(ToolLiveEvent::Key(req)) = rx.try_recv() {

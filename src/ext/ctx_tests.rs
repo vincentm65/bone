@@ -410,6 +410,38 @@ fn ui_status_and_info_notify_emit_runtime_status() {
     }
 }
 
+/// `ctx.ui.notice` emits a `Notice` event (persistent, kept in the transcript)
+/// rather than a transient `Status`. This is how Lua marks a message as worth
+/// surfacing without the host substring-matching the text — the seam that
+/// removed the hardcoded `contains("compact")` check in the stream handler.
+#[test]
+fn ui_notice_emits_runtime_notice() {
+    use crate::runtime::RuntimeEvent;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+    let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
+    cfg.runtime_status = Some(tx);
+
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    lua.load("ctx.ui.notice('Compacted: saved 1234 tokens')")
+        .exec()
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert_eq!(events.len(), 1, "notice should emit one event");
+    match &events[0] {
+        RuntimeEvent::Notice { message } => assert_eq!(message, "Compacted: saved 1234 tokens"),
+        other => panic!("event should be Notice, got {other:?}"),
+    }
+}
+
 // Without a frontend (headless before_turn), `ctx.ui.status` must not send and
 // must not panic — it falls back to stderr.
 #[test]

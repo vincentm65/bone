@@ -43,12 +43,6 @@ pub fn tool_label(
             .unwrap_or_else(|| call.name.clone());
     }
 
-    if call.name == "subagent"
-        && let Some(label) = subagent_dispatch_label(call)
-    {
-        return label;
-    }
-
     if let Some(display_label) = display.and_then(|display| format_display_label(call, display)) {
         return display_label;
     }
@@ -72,42 +66,6 @@ pub fn tool_label(
     label
 }
 
-/// Compact label for a `subagent dispatch` call: shows each task's title
-/// (falling back to a truncation of the task prompt) instead of dumping the
-/// full tasks JSON. Returns `None` for other actions so the generic display
-/// path handles wait/cancel/status.
-fn subagent_dispatch_label(call: &ToolCall) -> Option<String> {
-    if call.arguments.get("action").and_then(|v| v.as_str()) != Some("dispatch") {
-        return None;
-    }
-    let tasks = call.arguments.get("tasks").and_then(|v| v.as_array())?;
-    let titles: Vec<String> = tasks
-        .iter()
-        .map(|task| {
-            let title = task
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    task.get("task")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                })
-                .unwrap_or("task");
-            format!(
-                "\"{}\"",
-                truncate_label(&title.replace(['\n', '\r'], " "), 60)
-            )
-        })
-        .collect();
-    if titles.is_empty() {
-        return None;
-    }
-    Some(format!("subagent dispatch: {}", titles.join(", ")))
-}
-
 /// Truncate to `max` chars on a char boundary, appending an ellipsis.
 fn truncate_label(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -118,11 +76,11 @@ fn truncate_label(s: &str, max: usize) -> String {
 }
 
 fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<String> {
-    if let Some(template) = display.template.as_deref() {
-        let rendered = render_display_template(template, &call.arguments);
-        if !rendered.trim().is_empty() {
-            return Some(format!("{} {}", call.name, rendered.trim()));
-        }
+    if let Some(template) = display.template.as_deref()
+        && let Some(rendered) = render_display_template(template, &call.arguments)
+        && !rendered.trim().is_empty()
+    {
+        return Some(format!("{} {}", call.name, rendered.trim()));
     }
 
     let parts = display
@@ -143,16 +101,75 @@ fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<
     }
 }
 
-fn render_display_template(template: &str, arguments: &Value) -> String {
-    let mut rendered = template.to_string();
-    let Some(map) = arguments.as_object() else {
-        return rendered;
-    };
+/// Render a display template. Scalar placeholders `{key}` interpolate argument
+/// values; an array placeholder `{name[].f1|f2}` expands to the first present
+/// field (`f1` then `f2`…) of each element of array arg `name`, each value
+/// cleaned/truncated/quoted and joined with `, `.
+///
+/// Returns `None` when the template contains an array placeholder that resolves
+/// to nothing (array arg absent or empty) — this lets a "list" template apply
+/// only when the list is present (e.g. a dispatch label that shouldn't render
+/// for non-dispatch actions), falling back to the `args` label instead.
+fn render_display_template(template: &str, arguments: &Value) -> Option<String> {
+    let map = arguments.as_object();
+    let mut out = String::new();
+    let mut rest = template;
+    let mut empty_array_placeholder = false;
 
-    for (key, value) in map {
-        rendered = rendered.replace(&format!("{{{key}}}"), &format_display_value(value));
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            // Unterminated placeholder — emit the rest verbatim.
+            out.push('{');
+            rest = after;
+            continue;
+        };
+        let key = &after[..end];
+        rest = &after[end + 1..];
+
+        if let Some(idx) = key.find("[].") {
+            let arr_name = &key[..idx];
+            let fields: Vec<&str> = key[idx + 3..].split('|').collect();
+            let items: Vec<String> = map
+                .and_then(|m| m.get(arr_name))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|el| pick_field(el, &fields))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if items.is_empty() {
+                empty_array_placeholder = true;
+            }
+            out.push_str(&items.join(", "));
+        } else {
+            let value = map.and_then(|m| m.get(key));
+            out.push_str(&value.map(format_display_value).unwrap_or_default());
+        }
     }
-    rendered
+    out.push_str(rest);
+
+    if empty_array_placeholder {
+        return None;
+    }
+    Some(out)
+}
+
+/// First non-empty `fields` entry on `el`, cleaned of newlines, truncated, and
+/// quoted — the per-element rendering for an array template placeholder.
+fn pick_field(el: &Value, fields: &[&str]) -> Option<String> {
+    for field in fields {
+        if let Some(s) = el.get(field).and_then(|v| v.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                let cleaned = s.replace(['\n', '\r'], " ");
+                return Some(format!("\"{}\"", truncate_label(&cleaned, 60)));
+            }
+        }
+    }
+    None
 }
 
 fn format_display_value(value: &Value) -> String {

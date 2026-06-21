@@ -144,8 +144,15 @@ pub enum RuntimeEvent {
         task: String,
         model: String,
     },
-    /// Human-readable status line ("thinking", "running shell: …").
+    /// Human-readable status line ("thinking", "running shell: …"). Transient:
+    /// frontends may show it in the status/spinner area and let it be replaced.
     Status { message: String },
+    /// A persistent notice for the conversation scrollback (e.g. an
+    /// auto-compaction announcement). Unlike [`Status`], frontends keep it in
+    /// the transcript rather than treating it as ephemeral. Emitted by
+    /// `ctx.ui.notice` so Lua can surface a message without the host having to
+    /// guess from the text which status lines are worth keeping.
+    Notice { message: String },
     /// Incremental assistant text.
     TextDelta { text: String },
     /// Incremental reasoning/thinking text.

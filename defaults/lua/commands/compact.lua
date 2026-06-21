@@ -203,7 +203,7 @@ local function compact(history, ctx, keep_messages)
     local prompt = summarization_prompt(older, keep_messages)
     local run_result = ctx.agent.run(prompt, { timeout_ms = 120000 })
     if not run_result.ok then
-        ctx.ui.notify("compact: summarization failed: " .. (run_result.error or "unknown"), "warn")
+        ctx.ui.notice("compact: summarization failed: " .. (run_result.error or "unknown"))
         return nil
     end
 
@@ -296,9 +296,9 @@ bone.on("before_turn", function(event, ctx)
     end
 
     -- Tell the user compaction is running BEFORE the (potentially long)
-    -- summarization LLM call, so the turn doesn't look frozen. Surfaced to
-    -- the TUI via the runtime status channel.
-    ctx.ui.status("Compacting context (summarizing older messages)...")
+    -- summarization LLM call, so the turn doesn't look frozen. A notice (not a
+    -- transient status) so it stays in the transcript alongside the result.
+    ctx.ui.notice("Compacting context (summarizing older messages)...")
 
     local messages = compact(history, ctx, config.keep_messages)
     if not messages then
@@ -315,7 +315,7 @@ bone.on("before_turn", function(event, ctx)
     local new_context = overhead + transcript_tokens
     last_auto_context[context_key] = new_context
 
-    ctx.ui.status(string.format(
+    ctx.ui.notice(string.format(
         "Compacted: %d → %d messages (~%d → ~%d tokens)",
         #history, #messages, context_length, new_context
     ))

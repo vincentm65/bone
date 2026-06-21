@@ -94,6 +94,14 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         // `stateful = true`; refresh older seeded copies that predate the field
         // so they keep their host-managed state behavior.
         || (name == "task_list.lua" && !existing.contains("stateful"))
+        // subagent's eager-render + dispatch label moved from hardcoded host
+        // special-casing to declared `display.eager` / `display.template`;
+        // refresh older seeded copies that predate those fields.
+        || (name == "subagent.lua" && !existing.contains("eager"))
+        // compact's announcements moved from `ctx.ui.status` (surfaced by a
+        // host substring match on "compact") to `ctx.ui.notice`; refresh older
+        // seeded copies so their announcements still reach the transcript.
+        || (name == "compact.lua" && !existing.contains("ctx.ui.notice"))
 }
 
 /// Boot the Lua extension system.

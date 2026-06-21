@@ -21,13 +21,13 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
 
 #[test]
 fn render_returns_none_without_agents() {
-    assert!(render(&[], &[]).is_none());
+    assert!(render(&[]).is_none());
 }
 
 #[test]
 fn render_includes_ad_hoc_job_agents() {
     let jobs = vec![job("job-1", "shotgun codex/gpt-5 #1", JobStatus::Running)];
-    let pane = render(&[], &jobs).unwrap();
+    let pane = render(&jobs).unwrap();
     let first: String = pane.content[0]
         .spans
         .iter()
@@ -39,12 +39,11 @@ fn render_includes_ad_hoc_job_agents() {
 
 #[test]
 fn render_lists_all_agents() {
-    let agents = vec!["researcher".to_string(), "coder".to_string()];
     let jobs = vec![
         job("job-1", "researcher", JobStatus::Running),
         job("job-2", "coder", JobStatus::Running),
     ];
-    let pane = render(&agents, &jobs).unwrap();
+    let pane = render(&jobs).unwrap();
     assert_eq!(pane.source, PANE_SOURCE);
     assert_eq!(pane.title, "Agents (2)");
     assert_eq!(pane.content.len(), 3); // 2 agents + separator line
@@ -61,22 +60,19 @@ fn render_lists_all_agents() {
 
 #[test]
 fn render_returns_none_when_all_idle() {
-    let agents = vec!["researcher".to_string(), "coder".to_string()];
-    assert!(render(&agents, &[]).is_none());
+    assert!(render(&[]).is_none());
 }
 
 #[test]
 fn render_returns_none_when_jobs_done() {
-    let agents = vec!["researcher".to_string()];
     let jobs = vec![job("job-10", "researcher", JobStatus::Done)];
-    assert!(render(&agents, &jobs).is_none());
+    assert!(render(&jobs).is_none());
 }
 
 #[test]
 fn render_shows_running_status() {
-    let agents = vec!["researcher".to_string()];
     let jobs = vec![job("job-1", "researcher", JobStatus::Running)];
-    let pane = render(&agents, &jobs).unwrap();
+    let pane = render(&jobs).unwrap();
     let line: String = pane.content[0]
         .spans
         .iter()
@@ -89,9 +85,8 @@ fn render_shows_running_status() {
 
 #[test]
 fn running_agent_is_not_greyed() {
-    let agents = vec!["researcher".to_string()];
     let jobs = vec![job("job-1", "researcher", JobStatus::Running)];
-    let pane = render(&agents, &jobs).unwrap();
+    let pane = render(&jobs).unwrap();
     let spans = &pane.content[0].spans;
     assert_eq!(spans[0].style.fg, Some(Color::White));
     assert_eq!(spans[1].style.fg, Some(Color::White));
@@ -99,12 +94,11 @@ fn running_agent_is_not_greyed() {
 
 #[test]
 fn multi_job_shows_header() {
-    let agents = vec!["researcher".to_string()];
     let jobs = vec![
         job("job-1", "researcher", JobStatus::Running),
         job("job-2", "researcher", JobStatus::Running),
     ];
-    let pane = render(&agents, &jobs).unwrap();
+    let pane = render(&jobs).unwrap();
     let header: String = pane.content[0]
         .spans
         .iter()

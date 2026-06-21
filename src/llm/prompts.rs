@@ -16,10 +16,13 @@ pub fn system_prompt() -> String {
     )
 }
 
-/// System prompt for sub-agents: a fixed environment/tool scaffold composed
-/// with an optional custom persona. The persona replaces only the identity
-/// line — environment facts and non-interactive rules are always included.
-pub fn subagent_system_prompt(persona: Option<&str>) -> String {
+/// System prompt for any headless delegated agent (`ctx.agent.run`/`spawn` at
+/// depth > 0) — not specific to the `subagent` tool: `compact`, `memory` and
+/// `shotgun` runs get the same contract. A fixed environment/tool scaffold
+/// composed with an optional caller-supplied persona; the persona replaces only
+/// the identity line, while the environment facts and non-interactive rules
+/// (the runtime's contract for delegated agents) are always included.
+pub fn headless_agent_system_prompt(persona: Option<&str>) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".to_string());

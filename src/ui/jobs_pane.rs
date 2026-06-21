@@ -1,8 +1,10 @@
-//! Rust-side renderer for the sub-agent live pane.
+//! Rust-side renderer for the background-jobs live pane.
 //!
 //! Renders directly from the job registry snapshot — no Lua involved — so
 //! the pane stays live even while a Lua tool blocks the VM (e.g. a long
-//! `ctx.agent.wait`).
+//! `ctx.agent.wait`). Any tool that dispatches background jobs via
+//! `ctx.agent.spawn` (sub-agents, shotgun, …) surfaces here; the pane has no
+//! knowledge of which tool produced a job beyond the `agent` label it carries.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -12,14 +14,14 @@ use crate::ext::jobs::{Job, JobStatus, current_unix_seconds};
 use super::pane_page::PanePage;
 
 /// Pane source identifier (stable key for upsert/remove).
-pub const PANE_SOURCE: &str = "subagents";
+pub const PANE_SOURCE: &str = "jobs";
 
-/// Render the sub-agent pane for registered agents plus any ad-hoc job labels
-/// from the registry. Only shows active agents (running jobs, plus completed
-/// jobs while another job in the same group is still running).
+/// Render the jobs pane from the registry snapshot, grouping by `agent` label.
+/// Only shows agents with at least one running job (a completed job stays
+/// visible while a sibling in the same group is still running).
 /// Returns `None` when no jobs are active.
-pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
-    let agents = pane_agents(agents, jobs);
+pub fn render(jobs: &[Job]) -> Option<PanePage> {
+    let agents = pane_agents(jobs);
     if agents.is_empty() {
         return None;
     }
@@ -125,8 +127,9 @@ pub fn render(agents: &[String], jobs: &[Job]) -> Option<PanePage> {
     })
 }
 
-fn pane_agents(registered: &[String], jobs: &[Job]) -> Vec<String> {
-    let mut names = registered.to_vec();
+/// Unique, first-seen-ordered `agent` labels present in the job snapshot.
+fn pane_agents(jobs: &[Job]) -> Vec<String> {
+    let mut names = Vec::new();
     for job in jobs {
         if !job.agent.is_empty() && !names.iter().any(|name| name == &job.agent) {
             names.push(job.agent.clone());
@@ -226,5 +229,5 @@ fn format_tokens(n: u64) -> String {
 }
 
 #[cfg(test)]
-#[path = "subagent_pane_tests.rs"]
-mod subagent_pane_tests;
+#[path = "jobs_pane_tests.rs"]
+mod jobs_pane_tests;

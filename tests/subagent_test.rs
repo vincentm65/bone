@@ -496,28 +496,9 @@ fn depth_guard_rejects_spawn_at_depth_1() {
 // ── 4. Render path ──────────────────────────────────────────────────────────
 
 #[test]
-fn rust_subagent_pane_returns_valid_panepage() {
-    let config_dir = common::temp_dir("subagent-render");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(
-        config_dir.join("init.lua"),
-        r#"bone.register_subagent({ name = "render-researcher", description = "test", system_prompt = "test" })
-           bone.register_subagent({ name = "render-coder", description = "test", system_prompt = "test" })"#,
-    )
-    .unwrap();
-
-    let mut custom = bone::config::custom::CustomConfigs::default();
-    let booted = bone::ext::boot_with_tools(
-        &config_dir,
-        &config_dir,
-        &mut custom,
-        false,
-        bone::ext::BootOptions::default(),
-        "test-model",
-        "TestProvider",
-    );
-
-    // Create some fake jobs in the registry.
+fn rust_jobs_pane_returns_valid_panepage() {
+    // The pane is driven purely by the job registry — no registered-agent list
+    // is consulted, so the agent labels come from the jobs themselves.
     let registry = bone::ext::jobs::registry();
     let id1 = registry
         .create(test_job("render-researcher", "search query"))
@@ -529,19 +510,16 @@ fn rust_subagent_pane_returns_valid_panepage() {
     registry.complete(&id1, Ok("found 3 relevant papers".into()));
 
     // Call the Rust-side pane renderer directly.
-    let pane =
-        bone::ui::subagent_pane::render(booted.manager.subagent_names(), &registry.all_jobs());
+    let pane = bone::ui::jobs_pane::render(&registry.all_jobs());
     assert!(
         pane.is_some(),
-        "subagent pane renderer should return Some for running jobs; got None",
+        "jobs pane renderer should return Some for running jobs; got None",
     );
 
     let pane = pane.unwrap();
-    assert_eq!(pane.source, "subagents");
+    assert_eq!(pane.source, "jobs");
     assert!(pane.title.contains("Agents"));
     assert!(pane.content.len() >= 2); // at least one line for running agent + separator
-
-    std::fs::remove_dir_all(&config_dir).ok();
 }
 
 // ── 5. Cancel through the Lua tool (ctx.agent.cancel → flag) ─────────────────

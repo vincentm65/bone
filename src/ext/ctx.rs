@@ -593,6 +593,7 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     // Cloned per closure (mlua functions are 'static).
     let status_tx = cfg.runtime_status.clone();
     let notify_tx = cfg.runtime_status.clone();
+    let notice_tx = cfg.runtime_status.clone();
 
     // ctx.ui.status(message) — surface a live status line to the attached
     // frontend (e.g. auto-compaction announcing progress/savings). Headless
@@ -628,6 +629,21 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
         Ok(())
     })?;
     ui_table.set("notify", notify_fn)?;
+
+    // ctx.ui.notice(message) — surface a persistent notice to the conversation
+    // scrollback (e.g. auto-compaction announcing what it summarized/saved).
+    // Distinct from `status` (transient): the frontend keeps it in the
+    // transcript. This lets Lua mark a message as worth keeping instead of the
+    // host guessing from the text. Headless falls back to stderr.
+    let notice_fn = lua.create_function(move |_, msg: String| {
+        if let Some(tx) = &notice_tx {
+            let _ = tx.send(crate::runtime::RuntimeEvent::Notice { message: msg });
+        } else if !tui_owns_terminal() {
+            eprintln!("bone-lua: {msg}");
+        }
+        Ok(())
+    })?;
+    ui_table.set("notice", notice_fn)?;
 
     // ctx.ui.pane(opts) — push a ViewDiff directly into the shared UiState
     // handle (v2: no longer goes through the channel). Works when `ui` is set.
@@ -1859,7 +1875,7 @@ fn dispatch_event(
                 cb.call::<()>(Value::Table(t))?;
             }
         }
-        RuntimeEvent::Status { message } => {
+        RuntimeEvent::Status { message } | RuntimeEvent::Notice { message } => {
             if let Some(cb) = &cbs.on_status {
                 cb.call::<()>(message.as_str())?;
             }

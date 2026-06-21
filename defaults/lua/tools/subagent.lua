@@ -372,6 +372,13 @@ bone.register_tool({
     display = {
         show = true,
         show_result = false,
+        -- Dispatch/wait calls block until the agents finish, so render the row
+        -- at call time rather than on completion.
+        eager = true,
+        -- Dispatch label: each task's title (falling back to its task text).
+        -- For non-dispatch actions `tasks` is absent, so the template yields
+        -- nothing and the row falls back to the `args` label below.
+        template = "dispatch: {tasks[].title|task}",
         args = { "action", "tasks", "wait", "ids" },
     },
     execute = execute,

@@ -115,10 +115,10 @@ pub struct App {
     lua_status: Vec<(String, Vec<crate::runtime::view::StatusSegment>)>,
     /// Call IDs that already have a tool row in chat (to avoid duplicates).
     shown_tool_rows: std::collections::HashSet<String>,
-    /// Last-seen subagent job-registry version (forces first-tick render).
-    subagent_seen_version: u64,
-    /// Last wall-clock subagent pane refresh (drives the ~1s live ticker).
-    subagent_last_refresh: std::time::Instant,
+    /// Last-seen job-registry version (forces first-tick render).
+    jobs_seen_version: u64,
+    /// Last wall-clock jobs-pane refresh (drives the ~1s live ticker).
+    jobs_last_refresh: std::time::Instant,
     /// Set after the user was warned that quitting kills running sub-agent
     /// jobs; the next quit request goes through.
     quit_despite_jobs: bool,
@@ -228,8 +228,8 @@ impl App {
             lua_keymap,
             lua_status: Vec::new(),
             shown_tool_rows: std::collections::HashSet::new(),
-            subagent_seen_version: u64::MAX,
-            subagent_last_refresh: std::time::Instant::now(),
+            jobs_seen_version: u64::MAX,
+            jobs_last_refresh: std::time::Instant::now(),
             quit_despite_jobs: false,
         })
     }
@@ -521,7 +521,7 @@ impl App {
         self.pages.clear();
         self.active_page = 0;
         self.tools.state_map.clear();
-        self.subagent_seen_version = u64::MAX;
+        self.jobs_seen_version = u64::MAX;
         self.queue.clear();
         self.active_prompt = None;
         self.pending_approval = None;
@@ -599,7 +599,7 @@ impl App {
 
         self.renderer
             .flush_new_to_scrollback(&self.messages, &mut terminal)?;
-        self.refresh_subagent_pane();
+        self.refresh_jobs_pane();
         self.force_redraw(&mut terminal)?;
 
         while !self.should_quit {
@@ -654,8 +654,8 @@ impl App {
                 self.force_redraw(&mut terminal)?;
             }
 
-            // Tick subagent jobs: refresh pane + auto-inject finished results.
-            self.tick_subagents(&mut terminal).await?;
+            // Tick background jobs: refresh pane + auto-inject finished results.
+            self.tick_jobs(&mut terminal).await?;
 
             // Drain prompts queued by Lua via `bone.api.submit`.
             self.tick_inbox(&mut terminal).await?;
@@ -863,11 +863,11 @@ impl App {
         self.pages.iter().any(|p| p.source == "interact")
     }
 
-    /// Tick subagent job status: refresh pane if needed, auto-inject
+    /// Tick background-job status: refresh pane if needed, auto-inject
     /// finished results when the TUI is idle.
-    async fn tick_subagents(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    async fn tick_jobs(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         // 1. Pane refresh: version change, or ~1s ticker while jobs run.
-        if self.maybe_refresh_subagent_pane() {
+        if self.maybe_refresh_jobs_pane() {
             self.redraw(term)?;
         }
 
@@ -875,7 +875,7 @@ impl App {
         //    consumed only after the injection actually went through.
         if self.active_prompt.is_none() && !self.streaming && self.queue.is_empty() {
             let finished = crate::ext::jobs::registry().peek_finished_unconsumed();
-            if let Some((text, display)) = Self::format_subagent_results(&finished) {
+            if let Some((text, display)) = Self::format_job_results(&finished) {
                 let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
                 let draft = std::mem::take(&mut self.input.buffer);
                 let draft_cursor = self.input.cursor_pos;
@@ -922,24 +922,24 @@ impl App {
         Ok(())
     }
 
-    /// Refresh the subagent pane when the registry version changed or, while
+    /// Refresh the jobs pane when the registry version changed or, while
     /// jobs are running, at least once per second so elapsed time and token
     /// counters stay live. Returns `true` when the pane was refreshed.
-    pub(crate) fn maybe_refresh_subagent_pane(&mut self) -> bool {
+    pub(crate) fn maybe_refresh_jobs_pane(&mut self) -> bool {
         let registry = crate::ext::jobs::registry();
         let version = registry.version();
-        let periodic = self.subagent_last_refresh.elapsed() >= std::time::Duration::from_secs(1)
+        let periodic = self.jobs_last_refresh.elapsed() >= std::time::Duration::from_secs(1)
             && !registry.running_ids().is_empty();
-        if version == self.subagent_seen_version && !periodic {
+        if version == self.jobs_seen_version && !periodic {
             return false;
         }
-        // Unhide the pane when a new subagent job starts while hidden.
-        if version != self.subagent_seen_version && !registry.running_ids().is_empty() {
+        // Unhide the pane when a new job starts while hidden.
+        if version != self.jobs_seen_version && !registry.running_ids().is_empty() {
             self.panes_visible = true;
         }
-        self.refresh_subagent_pane();
-        self.subagent_seen_version = version;
-        self.subagent_last_refresh = std::time::Instant::now();
+        self.refresh_jobs_pane();
+        self.jobs_seen_version = version;
+        self.jobs_last_refresh = std::time::Instant::now();
         true
     }
 
@@ -992,7 +992,7 @@ impl App {
     }
 
     /// Drain UI diffs emitted by `bone.api.ui.*` and apply them. Mirrors
-    /// `maybe_refresh_subagent_pane`: called on the render tick and the live
+    /// `maybe_refresh_jobs_pane`: called on the render tick and the live
     /// ticks so Lua UI appears and updates. `Float` components map to panes via
     /// `Component::as_pane_content`; `StatusLine` segments append to the native
     /// status bar; `SetHighlight` recolors the live theme. Returns `true` when
@@ -1011,19 +1011,20 @@ impl App {
         changed
     }
 
-    /// Refresh the subagent live-pane from the job registry.
+    /// Refresh the background-jobs live-pane from the job registry.
     ///
     /// Rendered natively in Rust (no Lua) so the pane stays live even while
-    /// a Lua tool blocks the VM (e.g. a long `ctx.agent.wait`).
+    /// a Lua tool blocks the VM (e.g. a long `ctx.agent.wait`). The pane is
+    /// driven entirely by the generic job registry — it has no knowledge of
+    /// which tool (sub-agent, shotgun, …) dispatched a given job.
     /// Only shows when there are running jobs; hides when all are idle.
-    fn refresh_subagent_pane(&mut self) {
-        let agents = self.extensions.subagent_names();
+    fn refresh_jobs_pane(&mut self) {
         let jobs = crate::ext::jobs::registry().all_jobs();
         let has_running = jobs
             .iter()
             .any(|j| j.status == crate::ext::jobs::JobStatus::Running);
         if has_running {
-            if let Some(page) = crate::ui::subagent_pane::render(agents, &jobs) {
+            if let Some(page) = crate::ui::jobs_pane::render(&jobs) {
                 let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
                 self.active_page = new_active;
                 self.panes_visible = true;
@@ -1032,15 +1033,16 @@ impl App {
             // No running jobs — hide the pane.
             self.active_page = PanePage::remove(
                 &mut self.pages,
-                crate::ui::subagent_pane::PANE_SOURCE,
+                crate::ui::jobs_pane::PANE_SOURCE,
                 self.active_page,
             );
         }
     }
 
-    /// Format subagent results for auto-injection.
+    /// Format finished background-job results for auto-injection. Operates on
+    /// the generic job registry, independent of which tool dispatched them.
     /// Returns `(turn_text, display_text)` or `None` when no finished jobs.
-    fn format_subagent_results(jobs: &[crate::ext::jobs::Job]) -> Option<(String, String)> {
+    fn format_job_results(jobs: &[crate::ext::jobs::Job]) -> Option<(String, String)> {
         if jobs.is_empty() {
             return None;
         }
@@ -1071,7 +1073,7 @@ impl App {
             ));
         }
         let turn_text = format!(
-            "[automated message] Results from background sub-agent jobs you dispatched earlier are now ready. \
+            "[automated message] Results from background jobs you dispatched earlier are now ready. \
              Review them and continue the task they were dispatched for; if nothing remains to be done, \
              summarize the outcomes for the user.\n\n{}",
             lines.join("\n\n")
@@ -1081,7 +1083,7 @@ impl App {
             .map(|j| format!("{} {}", j.agent, job_status_sym(j.status)))
             .collect::<Vec<_>>()
             .join(", ");
-        let display_text = format!("[subagent results: {}]", display);
+        let display_text = format!("[job results: {}]", display);
         Some((turn_text, display_text))
     }
 }

@@ -80,12 +80,14 @@ impl LuaTool {
 
                 let show: Option<bool> = t.get::<Option<bool>>("show").ok().flatten();
                 let show_result: Option<bool> = t.get::<Option<bool>>("show_result").ok().flatten();
+                let eager: Option<bool> = t.get::<Option<bool>>("eager").ok().flatten();
 
                 ToolDisplayConfig {
                     args,
                     template,
                     show,
                     show_result,
+                    eager,
                 }
             }
             _ => ToolDisplayConfig::default(),

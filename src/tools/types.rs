@@ -37,8 +37,12 @@ pub struct ToolDisplayConfig {
     /// Argument names to show in the compact tool-call row.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Optional simple template. Placeholders like `{query}` are replaced
-    /// with argument values when present.
+    /// Optional simple template. Scalar placeholders like `{query}` are
+    /// replaced with argument values; an array placeholder `{items[].field}`
+    /// (with optional `|`-separated field fallbacks, e.g. `{tasks[].title|task}`)
+    /// expands to the chosen field of each array element, quoted and joined.
+    /// When such an array placeholder resolves to nothing, the template is
+    /// treated as not applicable and the row falls back to `args`.
     #[serde(default)]
     pub template: Option<String>,
     /// Whether to show the tool call row in chat. Defaults to true.
@@ -47,6 +51,13 @@ pub struct ToolDisplayConfig {
     /// Whether to show the tool result content in chat. Defaults to false.
     #[serde(default)]
     pub show_result: Option<bool>,
+    /// Render the tool-call row at dispatch time (when the model emits the
+    /// call) rather than waiting for the result. For tools whose calls block —
+    /// e.g. dispatching background agents and waiting on them — so the row
+    /// appears immediately; the later result row is suppressed as a duplicate.
+    /// Defaults to false.
+    #[serde(default)]
+    pub eager: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

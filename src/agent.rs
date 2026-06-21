@@ -241,6 +241,9 @@ pub(crate) fn emit_event(
         crate::runtime::RuntimeEvent::Status { message } => {
             serde_json::json!({ "type": "status", "message": message })
         }
+        crate::runtime::RuntimeEvent::Notice { message } => {
+            serde_json::json!({ "type": "notice", "message": message })
+        }
         crate::runtime::RuntimeEvent::ToolCall { name, summary, .. } => {
             let summary = truncate_str(summary, 200);
             serde_json::json!({
@@ -382,8 +385,11 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         "message",
         serde_json::json!({ "role": "user", "content": &request.prompt }),
     );
+    // Any delegated agent (depth > 0) gets the runtime's headless contract
+    // wrapped around the caller-supplied persona — independent of which tool or
+    // command dispatched it (subagent, compact, memory, shotgun).
     let system_prompt_override = if request.agent_depth > 0 {
-        Some(crate::llm::prompts::subagent_system_prompt(
+        Some(crate::llm::prompts::headless_agent_system_prompt(
             request.system_prompt.as_deref(),
         ))
     } else {

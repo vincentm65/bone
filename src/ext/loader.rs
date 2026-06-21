@@ -106,9 +106,6 @@ pub fn boot(
     let theme_snapshot = collect_theme_snapshot(&lua_arc);
     let keymap_snapshot = collect_keymap_snapshot(&lua_arc);
 
-    // Collect registered sub-agent names (for the Rust-side live pane).
-    let subagents = collect_subagent_names(&lua_arc);
-
     let manager = ExtensionManager::from_arc(
         lua_arc,
         true, // engine_ok
@@ -117,43 +114,9 @@ pub fn boot(
         config_snapshot,
         theme_snapshot,
         keymap_snapshot,
-        subagents,
         shared_ui,
     );
     BootResult { manager, tools }
-}
-
-/// Iterate `bone._subagents` and collect agent names.
-fn collect_subagent_names(lua_arc: &Arc<Mutex<mlua::Lua>>) -> Vec<String> {
-    let lua = match lua_arc.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("bone: warning: Lua mutex poisoned: {e}");
-            return Vec::new();
-        }
-    };
-
-    let bone_table = match get_bone(&lua) {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-
-    let subagents_table = match bone_table.get::<Option<mlua::Table>>("_subagents") {
-        Ok(Some(t)) => t,
-        _ => return Vec::new(),
-    };
-
-    let mut names = Vec::new();
-    for entry in subagents_table.sequence_values::<mlua::Table>() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if let Ok(Some(name)) = entry.get::<Option<String>>("name") {
-            names.push(name);
-        }
-    }
-    names
 }
 
 /// Get the `bone` global table from the Lua VM.

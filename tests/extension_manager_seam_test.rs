@@ -43,10 +43,9 @@ fn unloaded_simple_dispatch_is_a_noop() {
 }
 
 #[test]
-fn unloaded_has_no_commands_or_subagents() {
+fn unloaded_has_no_commands() {
     let m = ExtensionManager::unloaded();
     assert!(m.commands().is_empty());
-    assert!(m.subagent_names().is_empty());
 }
 
 #[test]

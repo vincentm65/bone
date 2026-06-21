@@ -108,8 +108,6 @@ pub struct ExtensionManager {
     theme_snapshot: LuaThemeSnapshot,
     /// Snapshot of `bone.keymap` captured after init.lua.
     keymap_snapshot: LuaKeymapSnapshot,
-    /// Names of sub-agents registered via `bone.register_subagent()`.
-    subagents: Vec<String>,
     /// Standalone shared UI-state handle. Lives outside the Lua VM mutex so
     /// the TUI can drain diffs even while a tool blocks on `ctx.ui.key()`.
     /// Also cloned into every `ctx.ui.pane` / `ctx.emit_pane` closure.
@@ -127,7 +125,6 @@ impl ExtensionManager {
         config_snapshot: LuaConfigSnapshot,
         theme_snapshot: LuaThemeSnapshot,
         keymap_snapshot: LuaKeymapSnapshot,
-        subagents: Vec<String>,
         ui: super::api_ui::SharedUi,
     ) -> Self {
         Self {
@@ -138,7 +135,6 @@ impl ExtensionManager {
             config_snapshot,
             theme_snapshot,
             keymap_snapshot,
-            subagents,
             ui,
         }
     }
@@ -154,7 +150,7 @@ impl ExtensionManager {
     ///
     /// It is exactly the fallback `boot()` already built internally on engine
     /// failure (`loader.rs`): a fresh `mlua::Lua::new()`, `engine_ok = false`,
-    /// `loaded = false`, empty commands/subagents, default snapshots. Exposing
+    /// `loaded = false`, empty commands, default snapshots. Exposing
     /// it publicly just makes that same construction reachable from tests and
     /// (eventually) a headless/Driver path that does not own a Lua runtime.
     pub fn unloaded() -> Self {
@@ -166,7 +162,6 @@ impl ExtensionManager {
             config_snapshot: LuaConfigSnapshot::default(),
             theme_snapshot: LuaThemeSnapshot::default(),
             keymap_snapshot: LuaKeymapSnapshot::default(),
-            subagents: Vec::new(),
             ui: super::api_ui::new_shared(),
         }
     }
@@ -223,11 +218,6 @@ impl ExtensionManager {
     /// Get the Lua keymap snapshot captured at boot.
     pub fn keymap_snapshot(&self) -> &LuaKeymapSnapshot {
         &self.keymap_snapshot
-    }
-
-    /// Names of sub-agents registered at boot (empty when none).
-    pub fn subagent_names(&self) -> &[String] {
-        &self.subagents
     }
 
     /// Dispatch a simple (non-blockable) event with a JSON-serializable

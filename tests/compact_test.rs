@@ -626,7 +626,7 @@ fn compact_preserves_tool_call_chains() {
                 { role = "user", content = "continue" },
             } end },
             agent = { run = function() return { ok = true, content = "summary" } end },
-            ui = { notify = function() end, status = function() end },
+            ui = { notify = function() end, status = function() end, notice = function() end },
         }
         -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
         -- so they run without error while we hunt for compact's result.
@@ -706,7 +706,7 @@ fn compact_drops_orphan_tool_results() {
                 { role = "assistant", content = "ok" },
             } end },
             agent = { run = function() return { ok = true, content = "summary" } end },
-            ui = { notify = function() end, status = function() end },
+            ui = { notify = function() end, status = function() end, notice = function() end },
         }
         -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
         -- so they run without error while we hunt for compact's result.
@@ -792,7 +792,7 @@ fn auto_compact_enabled_under_denylist_config() {
                 { role = "assistant", content = "ok" },
             } end },
             agent = { run = function() return { ok = true, content = "summary" } end },
-            ui = { notify = function() end, status = function() end },
+            ui = { notify = function() end, status = function() end, notice = function() end },
         }
         -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
         -- so they run without error while we hunt for compact's result.
@@ -854,7 +854,7 @@ fn auto_compact_disabled_when_in_denylist() {
                 { role = "user", content = "x" },
             } end },
             agent = { run = function() return { ok = true, content = "should not run" } end },
-            ui = { notify = function() end, status = function() end },
+            ui = { notify = function() end, status = function() end, notice = function() end },
         }
         -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
         -- so they run without error while we hunt for compact's result.
