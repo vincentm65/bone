@@ -417,6 +417,37 @@ bone.register_tool({
 })
 ```
 
+### browser (Lua)
+Drive a real Chromium over a persistent CDP daemon (Playwright via `uv`). One
+`start` spawns a background Chromium bound to a remote-debugging port; subsequent
+actions connect over CDP, reuse the live page, and disconnect only (never
+`browser.close()`). Call `stop` when done. Requires `uv` and the `playwright`
+Python package plus the bundled Chromium in `~/.cache/ms-playwright`.
+```lua
+bone.register_tool({
+    name = "browser",
+    description = "Drive a real web browser (Chromium) over a persistent CDP daemon...",
+    parameters = {
+        type = "object",
+        properties = {
+            action = { type = "string", enum = { "start", "stop", "status", "navigate", "text", "interactive", "click", "type", "eval", "wait", "screenshot", "back", "forward", "reload" } },
+            url = { type = "string", description = "URL for navigate." },
+            selector = { type = "string", description = "Playwright selector for text/interactive/click/type/wait/screenshot." },
+            text = { type = "string", description = "Value to type (action=type), or text to wait for (action=wait)." },
+            script = { type = "string", description = "JS expression for eval." },
+            headless = { type = "boolean", description = "start only: run headless (default true)." },
+            full = { type = "boolean", description = "screenshot only: capture full page (default false)." },
+            path = { type = "string", description = "screenshot only: output PNG path." },
+            timeout_ms = { type = "number", description = "Per-action timeout in ms (default 30000)." },
+        },
+        required = { "action" },
+        additionalProperties = false,
+    },
+    safety = "danger",
+    display = { show = true, args = { "action", "url", "selector", "text" } },
+})
+```
+
 ## Pre-Seeded Commands
 
 ### /compact
@@ -939,6 +970,7 @@ Plugins do not auto-run. Repeated `load` is a no-op.
       ask_user.lua             -- seeded default
       task_list.lua            -- seeded default
       cron.lua                 -- seeded default
+      browser.lua             -- seeded default
       my_custom_tool.lua       -- user-created
     commands/
       memory.lua               -- seeded default

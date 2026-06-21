@@ -4,6 +4,8 @@
 
 # Temp/scratch
 .temp/
+# Runtime tool data (browser profile, screenshots, daemon state)
+/data/
 
 # OS
 .DS_Store
