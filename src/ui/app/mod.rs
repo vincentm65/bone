@@ -1814,6 +1814,9 @@ impl App {
         if cmd == "setup" {
             return self.open_setup_wizard(term);
         }
+        if cmd == "catalogue" || cmd == "catalog" {
+            return self.open_catalogue(term);
+        }
 
         let prev_provider = self.llm.id().to_string();
         let prev_model = self.llm.model().to_string();
@@ -2083,6 +2086,38 @@ impl App {
             return self.show_reply(format!("Stats dashboard failed: {err}"), term);
         }
         Ok(())
+    }
+
+    fn open_catalogue(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        // Prefer a tmux popup (same as /setup); fall back to an inline takeover.
+        // `bone catalogue` exits 0 when something changed, 2 when nothing did —
+        // both are completed runs, so only a failed launch falls through.
+        if let Some(status) = self.try_tmux_popup("catalogue", "80%", "80%", term)? {
+            match status.code() {
+                Some(0) => {
+                    return self.show_reply(
+                        "Catalogue updated. Restart bone to load the changes.".to_string(),
+                        term,
+                    );
+                }
+                Some(2) => return self.show_reply("Catalogue: no changes.".to_string(), term),
+                _ => {} // popup failed to launch — fall through to inline
+            }
+        }
+
+        let result = crate::ui::catalogue::run();
+        self.force_redraw(term)?;
+        match result {
+            Ok(outcome) => {
+                let msg = if outcome.changed {
+                    format!("{} Restart bone to load the changes.", outcome.message)
+                } else {
+                    outcome.message
+                };
+                self.show_reply(msg, term)
+            }
+            Err(err) => self.show_reply(format!("Catalogue failed: {err}"), term),
+        }
     }
 
     fn open_setup_wizard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {

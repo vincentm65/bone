@@ -385,6 +385,14 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(if applied { 0 } else { 2 });
     }
 
+    // `bone catalogue` — browse/install/remove optional tools & commands. Used
+    // both directly and by the `/catalogue` tmux popup.
+    if matches!(args.first().map(String::as_str), Some("catalogue") | Some("catalog")) {
+        bone::config::seed_base();
+        let outcome = bone::ui::catalogue::run()?;
+        std::process::exit(if outcome.changed { 0 } else { 2 });
+    }
+
     // Headless / non-interactive entry points must never block on the wizard;
     // they seed everything (or honor a prior selection) and proceed.
     let interactive = !matches!(
@@ -435,6 +443,10 @@ async fn main() -> std::io::Result<()> {
     if args.first().map(String::as_str) == Some("install") {
         return do_install();
     }
+
+    // Throttled, non-blocking catalogue refresh: re-installs newer versions of
+    // already-installed items on a background thread; updates land next launch.
+    bone::ext::catalog::refresh_in_background();
 
     // Normal TUI mode
     let mut custom = CustomConfigs::load();

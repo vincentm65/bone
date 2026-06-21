@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod api_ui;
+pub mod catalog;
 pub mod ctx;
 mod engine;
 pub mod inbox;
@@ -67,21 +68,9 @@ fn catalog(items: &[(&'static str, &'static str)]) -> Vec<(&'static str, String)
         .collect()
 }
 
-/// `(filename, description)` for every bundled default tool — drives the setup
-/// wizard's tool picker.
-pub fn default_tool_catalog() -> Vec<(&'static str, String)> {
-    catalog(DEFAULT_LUA_TOOLS)
-}
-
 /// `(filename, description)` for every bundled default command.
 pub fn default_command_catalog() -> Vec<(&'static str, String)> {
     catalog(DEFAULT_LUA_COMMANDS)
-}
-
-/// `(filename, description)` for every bundled Lua library — drives the /setup
-/// re-seed checklist.
-pub fn default_lib_catalog() -> Vec<(&'static str, String)> {
-    catalog(DEFAULT_LUA_LIBS)
 }
 
 fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
@@ -289,13 +278,15 @@ mod seed_tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
 
-        // Pick the first bundled tool to allow, exclude the rest.
-        let first = DEFAULT_LUA_TOOLS[0].0.to_string();
+        // Optional tools all moved to the catalog, so exercise the (identical)
+        // seed logic against the bundled commands instead.
+        // Pick the first bundled command to allow, exclude the rest.
+        let first = DEFAULT_LUA_COMMANDS[0].0.to_string();
         let allow: HashSet<String> = std::iter::once(first.clone()).collect();
-        seed_default_lua_tools(&dir, Some(&allow), false);
+        seed_default_lua_commands(&dir, Some(&allow), false);
 
         assert!(dir.join(&first).exists(), "allowed file should be seeded");
-        for (name, _) in DEFAULT_LUA_TOOLS.iter().skip(1) {
+        for (name, _) in DEFAULT_LUA_COMMANDS.iter().skip(1) {
             assert!(
                 !dir.join(name).exists(),
                 "non-selected file {name} should not be seeded"
@@ -303,8 +294,8 @@ mod seed_tests {
         }
 
         // None seeds everything.
-        seed_default_lua_tools(&dir, None, false);
-        for (name, _) in DEFAULT_LUA_TOOLS {
+        seed_default_lua_commands(&dir, None, false);
+        for (name, _) in DEFAULT_LUA_COMMANDS {
             assert!(dir.join(name).exists(), "{name} should be seeded with None");
         }
 
@@ -320,12 +311,18 @@ mod seed_tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let (first, content) = DEFAULT_LUA_TOOLS[0];
+        // Use a bundled command that `should_refresh_seeded_lua` doesn't
+        // force-refresh by name (compact.lua is overwritten even without
+        // `force`, which would defeat the "preserved" check below).
+        let (first, content) = *DEFAULT_LUA_COMMANDS
+            .iter()
+            .find(|(name, _)| *name != "compact.lua")
+            .expect("a non-auto-refreshed bundled command");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(first), "-- user edit\n").unwrap();
 
         // Without force, an existing file is left untouched.
-        seed_default_lua_tools(&dir, None, false);
+        seed_default_lua_commands(&dir, None, false);
         assert_eq!(
             std::fs::read_to_string(dir.join(first)).unwrap(),
             "-- user edit\n",
@@ -333,7 +330,7 @@ mod seed_tests {
         );
 
         // With force, the bundled default replaces it.
-        seed_default_lua_tools(&dir, None, true);
+        seed_default_lua_commands(&dir, None, true);
         assert_eq!(
             std::fs::read_to_string(dir.join(first)).unwrap(),
             content,

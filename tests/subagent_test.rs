@@ -46,6 +46,7 @@ bone.register_subagent({
 #[test]
 fn two_agents_registered_and_listed_in_tool() {
     let config_dir = common::temp_dir("subagent-two-agents");
+    common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
@@ -88,6 +89,7 @@ fn two_agents_registered_and_listed_in_tool() {
 #[test]
 fn no_agents_registered_no_tool() {
     let config_dir = common::temp_dir("subagent-no-agents");
+    common::seed_catalog_into(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
@@ -116,6 +118,7 @@ fn no_agents_registered_no_tool() {
 #[test]
 fn tool_allowlist_narrows_exposed_tools() {
     let config_dir = common::temp_dir("subagent-tool-allowlist");
+    common::seed_catalog_into(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
@@ -150,6 +153,7 @@ fn tool_allowlist_narrows_exposed_tools() {
 #[test]
 fn spawn_lifecycle_no_provider() {
     let config_dir = common::temp_dir("subagent-lifecycle");
+    common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
 
@@ -259,6 +263,7 @@ fn spawn_lifecycle_no_provider() {
 #[test]
 fn dispatch_with_wait_returns_results_inline() {
     let config_dir = common::temp_dir("subagent-dispatch-wait");
+    common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     // Unique agent name: the busy-agent check is global by name, so avoid
     // colliding with other tests dispatching in parallel.
@@ -332,6 +337,7 @@ fn dispatch_with_wait_returns_results_inline() {
 #[test]
 fn wait_action_collects_dispatched_job() {
     let config_dir = common::temp_dir("subagent-wait-action");
+    common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
         config_dir.join("init.lua"),
@@ -429,6 +435,7 @@ bone.register_tool({
 #[test]
 fn depth_guard_rejects_spawn_at_depth_1() {
     let config_dir = common::temp_dir("subagent-depth-guard");
+    common::seed_catalog_into(&config_dir);
     let tools_dir = config_dir.join("lua/tools");
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("depth_guard.lua"), SPAWN_AT_DEPTH).unwrap();
@@ -558,6 +565,7 @@ fn lua_cancel_call(marker: &str, id: &str) -> ToolCall {
 #[test]
 fn cancel_running_job_via_lua_tool() {
     let config_dir = common::temp_dir("subagent-cancel-lua");
+    common::seed_catalog_into(&config_dir);
     let tools_dir = config_dir.join("lua/tools");
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("cancel.lua"), CANCEL_TOOL_LUA).unwrap();

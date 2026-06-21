@@ -16,6 +16,7 @@ pub enum CommandResult {
 /// Built-in slash commands as (name, description) pairs.
 /// Single source of truth for autocomplete, /help, and override protection.
 pub const BUILTINS: &[(&str, &str)] = &[
+    ("catalogue", "browse & install optional tools and commands"),
     ("clear", "clear chat history"),
     ("config", "change application settings"),
     ("edit", "open system editor for input"),

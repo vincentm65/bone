@@ -1,10 +1,12 @@
 pub mod app;
 pub mod autocomplete;
+pub mod catalogue;
 pub mod color;
 pub mod commands;
 pub mod fullscreen;
 pub mod input;
 pub mod pane_page;
+pub mod picker;
 pub mod prompt;
 pub mod render;
 pub mod jobs_pane;

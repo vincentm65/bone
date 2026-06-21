@@ -154,6 +154,9 @@ fn sandbox_blocks_dangerous_apis() {
 #[test]
 fn default_tools_boot_cleanly() {
     let config_dir = common::temp_dir("defaults-boot");
+    // The optional tools (ask_user/web_search/task_list) now ship via the
+    // catalogue, not the binary; seed them as if the user installed them.
+    common::seed_catalog_into(&config_dir);
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
         &config_dir,

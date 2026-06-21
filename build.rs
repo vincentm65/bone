@@ -1,16 +1,14 @@
 use std::{env, fs, path::PathBuf};
 
-fn generate_default_lua_tools(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
-    let dir = manifest_dir.join("defaults/lua/tools");
-    println!("cargo:rerun-if-changed={}", dir.display());
-
-    let entries = fs::read_dir(&dir)
-        .unwrap_or_else(|e| {
-            panic!(
-                "failed to read default lua tools dir {}: {e}",
-                dir.display()
-            )
-        })
+/// Collect sorted `.lua` paths from a flat directory. A missing directory is
+/// tolerated (yields no entries) — the optional tools/commands now live in the
+/// catalog, so `defaults/lua/tools` can be empty and untracked by git.
+fn collect_lua_flat(dir: &std::path::Path) -> Vec<PathBuf> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let mut entries = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("failed to read default lua dir {}: {e}", dir.display()))
         .map(|entry| {
             entry
                 .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", dir.display()))
@@ -18,8 +16,15 @@ fn generate_default_lua_tools(manifest_dir: &std::path::Path, out_dir: &std::pat
         })
         .filter(|path| path.extension().is_some_and(|ext| ext == "lua"))
         .collect::<Vec<_>>();
-    let mut entries = entries;
     entries.sort();
+    entries
+}
+
+fn generate_default_lua_tools(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
+    let dir = manifest_dir.join("defaults/lua/tools");
+    println!("cargo:rerun-if-changed={}", dir.display());
+
+    let entries = collect_lua_flat(&dir);
 
     let mut generated = String::from("pub const DEFAULT_LUA_TOOLS: &[(&str, &str)] = &[\n");
     for path in entries {
@@ -38,22 +43,7 @@ fn generate_default_lua_commands(manifest_dir: &std::path::Path, out_dir: &std::
     let dir = manifest_dir.join("defaults/lua/commands");
     println!("cargo:rerun-if-changed={}", dir.display());
 
-    let entries = fs::read_dir(&dir)
-        .unwrap_or_else(|e| {
-            panic!(
-                "failed to read default lua commands dir {}: {e}",
-                dir.display()
-            )
-        })
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", dir.display()))
-                .path()
-        })
-        .filter(|path| path.extension().is_some_and(|ext| ext == "lua"))
-        .collect::<Vec<_>>();
-    let mut entries = entries;
-    entries.sort();
+    let entries = collect_lua_flat(&dir);
 
     let mut generated = String::from("pub const DEFAULT_LUA_COMMANDS: &[(&str, &str)] = &[\n");
     for path in entries {

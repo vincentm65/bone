@@ -91,24 +91,6 @@ const BUILTIN_PAGES: &[(&str, &str)] = &[
     ("commands.yaml", COMMANDS_YAML),
 ];
 
-/// `(filename, description)` for every built-in config page — drives the
-/// /setup re-seed checklist. The description is the page's `title:` field.
-pub fn builtin_page_catalog() -> Vec<(&'static str, String)> {
-    BUILTIN_PAGES
-        .iter()
-        .map(|(name, content)| (*name, page_title(content)))
-        .collect()
-}
-
-/// Pull the `title:` field from a config page's YAML, for display.
-fn page_title(content: &str) -> String {
-    content
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("title:"))
-        .map(|t| t.trim().trim_matches('"').to_string())
-        .unwrap_or_default()
-}
-
 /// Seed built-in config pages into `~/.bone-rust/config/`. `allow` filters
 /// which pages are written (`None` = all). When `force` is false, existing
 /// files are left untouched; when true, they are overwritten with this build's
