@@ -52,11 +52,29 @@ def clear_daemon():
     except FileNotFoundError:
         pass
 
+IS_WINDOWS = os.name == "nt"
+
 def pid_alive(pid):
     if not pid:
         return False
     try:
-        os.kill(int(pid), 0)
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if IS_WINDOWS:
+        # Windows has no os.kill(pid, 0); query the exit code instead.
+        # STILL_ACTIVE (259) is the sentinel for a running process.
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        kernel32.CloseHandle(h)
+        return bool(ok) and code.value == 259
+    try:
+        os.kill(pid, 0)
         return True
     except ProcessLookupError:
         return False
@@ -64,6 +82,38 @@ def pid_alive(pid):
         return True
     except Exception:
         return False
+
+def terminate_process_tree(pid):
+    """Best-effort kill of `pid` and all descendants. POSIX reaps the process
+    group (the daemon is started as its own session/group leader, so pgid ==
+    pid); Windows uses `taskkill /T` to walk the tree."""
+    if not pid:
+        return
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if IS_WINDOWS:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    except Exception:
+        pgid = pid
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
+        for _ in range(20):
+            if not pid_alive(pid):
+                return
+            time.sleep(0.15)
 
 def free_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -160,7 +210,15 @@ def act_start(p):
         args.extend(["--headless=new", "--window-size=1280,720"])
     else:
         args.append("--window-size=1280,720")
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    # Detach the daemon so it survives this script: a new session/process-
+    # group on POSIX (lets terminate_process_tree reap the whole tree), a new
+    # process group on Windows (taskkill /T walks from this pid).
+    popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if IS_WINDOWS:
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(args, **popen_kwargs)
     deadline = time.time() + 15
     ready = False
     while time.time() < deadline:
@@ -171,10 +229,7 @@ def act_start(p):
             fail(f"Chromium exited immediately (code {proc.returncode}). Profile lock or disk issue?", 1)
         time.sleep(0.2)
     if not ready:
-        try:
-            os.kill(proc.pid, signal.SIGKILL)
-        except Exception:
-            pass
+        terminate_process_tree(proc.pid)
         fail(f"Chromium launched but CDP not ready on port {port} within 15s", 1)
     d = {"port": port, "pid": proc.pid, "started_at": time.time(), "headless": bool(headless)}
     save_daemon(d)
@@ -186,25 +241,9 @@ def act_stop(p):
         out({"stopped": True, "was_running": False})
         return
     pid = d.get("pid")
-    was = False
-    if pid_alive(pid):
-        was = True
-        # start_new_session=True makes the daemon its own process-group leader,
-        # so killpg reaps Chromium's children (renderers, gpu, zygote) instead
-        # of orphaning them. pgid == pid in practice.
-        try:
-            pgid = os.getpgid(int(pid))
-            os.killpg(pgid, signal.SIGTERM)
-            for _ in range(20):
-                if not pid_alive(pid):
-                    break
-                time.sleep(0.15)
-            if pid_alive(pid):
-                os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # exited between checks — already gone
-        except Exception as e:
-            fail(f"failed to stop pid {pid}: {e}", 1)
+    was = pid_alive(pid)
+    if was:
+        terminate_process_tree(pid)
     clear_daemon()
     out({"stopped": True, "was_running": was})
 
@@ -405,7 +444,9 @@ def act_history_nav(p, kind):
         disconnect(pw, browser)
 
 def main():
-    raw = os.environ.get("TOOL_PARAMS_B64", "")
+    # Params arrive as a base64 argv token (see execute() in browser.lua) so the
+    # transport is shell-agnostic — no `export`/`$env:` and no heredoc.
+    raw = sys.argv[1] if len(sys.argv) > 1 else ""
     try:
         p = json.loads(base64.b64decode(raw.encode()).decode()) if raw else {}
     except Exception as e:
@@ -459,14 +500,35 @@ local function b64encode(s)
     return table.concat(out)
 end
 
+-- Rewritten on the first call of each bone process so it always matches the
+-- embedded script. Held in a closure upvalue, so subsequent calls skip the write.
+local runner_installed = false
+
 local function execute(params, ctx)
+    -- Shell-agnostic transport: PowerShell (Windows) has no heredoc and the
+    -- shell primitive nulls stdin, so we can't feed the script inline. Instead
+    -- the runner is written to disk (config_dir always exists, so io.open needs
+    -- no parent-dir setup) and params ride as a base64 argv token — safe to
+    -- single-quote in both bash and PowerShell with no per-shell escaping, and
+    -- no `export`/`$env:` dance for an env var.
+    local runner = ctx.config_dir .. "/_browser_runner.py"
+    if not runner_installed then
+        local f, err = io.open(runner, "w")
+        if not f then
+            return "ERROR: cannot install browser runner at " .. runner .. ": " .. tostring(err)
+        end
+        f:write(PYTHON_SCRIPT)
+        f:close()
+        runner_installed = true
+    end
+
     local payload = b64encode(cjson.encode(params or {}))
-    -- Pin playwright==1.59.0 (matches the bundled chromium-1217 in
-    -- ~/.cache/ms-playwright). Keeps the engine deterministic and avoids
-    -- random browser re-downloads when a new playwright ships.
-    local cmd = "export TOOL_PARAMS_B64=" .. payload
-        .. "; uv run --no-project --with 'playwright==1.59.0' -- python3 <<'PYEOF'\n"
-        .. PYTHON_SCRIPT .. "\nPYEOF"
+    -- python3 on POSIX; Windows ships no python3.exe, only python.
+    local py = (package.config:sub(1, 1) == "\\") and "python" or "python3"
+    -- Pin playwright==1.59.0 (matches the bundled chromium-1217). Keeps the
+    -- engine deterministic and avoids random browser re-downloads.
+    local cmd = "uv run --no-project --with 'playwright==1.59.0' -- "
+        .. py .. " '" .. runner .. "' '" .. payload .. "'"
 
     -- Budget = per-action timeout + headroom, floored at 60s so start's own
     -- waits and uv/playwright resolution always fit. Without this, a large
