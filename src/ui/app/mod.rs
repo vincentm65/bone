@@ -236,39 +236,40 @@ impl App {
     /// Collect banner text from `bone.banner()` Lua function.
     /// Returns lines joined with newlines, or empty if undefined/nothing.
     fn collect_banner(extensions: &crate::ext::ExtensionManager) -> String {
-        let lua = extensions.lua_handle();
-        let lua = match lua.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("bone: warning: Lua mutex poisoned: {e}");
-                return String::new();
-            }
-        };
-        let bone = match lua.globals().get::<mlua::Table>("bone") {
-            Ok(b) => b,
-            Err(_) => return String::new(),
-        };
-        let banner_fn: mlua::Function = match bone.get("banner") {
-            Ok(f) => f,
-            Err(_) => return String::new(),
-        };
-        match banner_fn.call::<mlua::Table>(()) {
-            Ok(tbl) => {
-                let mut lines = Vec::new();
-                for item in tbl.sequence_values::<mlua::String>() {
-                    if let Ok(item_str) = item {
-                        if let Ok(s) = item_str.to_str() {
-                            lines.push(s.to_string());
+        let mut lines = Vec::new();
+        if let Ok(g) = extensions.lua_handle().lock() {
+            if let Ok(bone) = g.globals().get::<mlua::Table>("bone") {
+                if let Ok(banner_fn) = bone.get::<mlua::Function>("banner") {
+                    match banner_fn.call::<mlua::Table>(()) {
+                        Ok(tbl) => {
+                            for item in tbl.sequence_values::<mlua::String>() {
+                                if let Ok(item_str) = item
+                                    && let Ok(s) = item_str.to_str()
+                                {
+                                    lines.push(s.to_string());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("bone: warning: banner() call failed: {e}");
                         }
                     }
                 }
-                lines.join("\n")
-            }
-            Err(e) => {
-                eprintln!("bone: warning: banner() call failed: {e}");
-                String::new()
             }
         }
+
+        // Append a release hint if a newer version was seen (cached, local
+        // read — never blocks on network). Channel-agnostic: the releases
+        // page covers every install method.
+        if crate::update_check::update_available()
+            && let Some(latest) = crate::update_check::latest_seen()
+        {
+            lines.push(format!(
+                "bone {latest} available — https://github.com/vincentm65/bone/releases"
+            ));
+        }
+
+        lines.join("\n")
     }
 
     /// Dispatch a `session_end` event to Lua handlers.

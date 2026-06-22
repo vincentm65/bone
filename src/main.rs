@@ -447,6 +447,9 @@ async fn main() -> std::io::Result<()> {
     // Throttled, non-blocking catalog refresh: re-installs newer versions of
     // already-installed items on a background thread; updates land next launch.
     bone::ext::catalog::refresh_in_background();
+    // Throttled, non-blocking self-update check: fetches the latest GitHub
+    // release tag once per day; the banner surfaces it next launch if newer.
+    bone::update_check::check_in_background();
 
     // Normal TUI mode
     let mut custom = CustomConfigs::load();
