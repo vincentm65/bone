@@ -41,6 +41,11 @@ function M.wait_key(ctx)
     if not ok or type(key) ~= "table" then
         return nil
     end
+    -- Ctrl+C cancels any interactive pane. Callers treat nil as cancel, so a
+    -- single check here covers select / multi_select / text_input alike.
+    if key.ctrl and (key.char == "c" or key.char == "C") then
+        return nil
+    end
     return key
 end
 

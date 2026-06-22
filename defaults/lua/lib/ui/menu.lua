@@ -70,7 +70,10 @@ local function render_select(p, state)
     end
 
     local total = #state.options
-    local option_rows = math.max(1, rows_for(state) - #lines - (state.allow_custom and 2 or 1))
+    -- Reserve rows for the trailing chrome we render after the options: the
+    -- custom-input line (when enabled) and the hints legend (always).
+    local reserved = (state.allow_custom and 2 or 1) + 1
+    local option_rows = math.max(1, rows_for(state) - #lines - reserved)
     if total > option_rows then
         state.scroll = clamp(state.scroll or 0, 0, math.max(0, total - option_rows))
         if state.selected <= state.scroll then state.scroll = state.selected - 1 end
@@ -89,7 +92,7 @@ local function render_select(p, state)
         local selected = i == state.selected and not state.custom_focused
         local checked = state.checked and state.checked[i]
         local cursor = selected and ">" or " "
-        local cursor_fg = selected and "white" or "darkgray"
+        local cursor_fg = selected and "cyan" or "darkgray"
         local cursor_mods = selected and { "bold" } or {}
         local check = ""
         if state.multi then check = checked and "[x] " or "[ ] " end
@@ -116,13 +119,24 @@ local function render_select(p, state)
     end
     if state.allow_custom then
         local cursor = state.custom_focused and ">" or " "
-        local cursor_fg = state.custom_focused and "white" or "darkgray"
+        local cursor_fg = state.custom_focused and "cyan" or "darkgray"
         local fg = state.custom_focused and "white" or "darkgray"
         lines[#lines + 1] = line(
             span(" " .. cursor .. " Custom: ", cursor_fg, { "bold" }),
             span(state.input .. (state.custom_focused and "█" or ""), fg, state.custom_focused and { "bold" } or {})
         )
     end
+    -- Transient warning (e.g. an empty multi-select submit was blocked).
+    if state.notice and state.notice ~= "" then
+        lines[#lines + 1] = line(span(state.notice, "#E5C07B"))
+    end
+    -- One-line control legend so the keys aren't a guessing game.
+    local hints = { "↑↓ move" }
+    if state.multi then hints[#hints + 1] = "Space toggle" end
+    hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
+    if state.allow_custom then hints[#hints + 1] = "Tab custom" end
+    hints[#hints + 1] = "Esc cancel"
+    lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
     lines[#lines + 1] = ""
     p:set_lines(lines, math.min(24, math.max(3, #lines)))
 end
@@ -168,6 +182,7 @@ local function select_loop(ctx, spec, multi)
         render_select(p, state)
         local key = wait_key(ctx)
         if not key then return { cancelled = true } end
+        state.notice = nil -- clear any transient notice on the next keypress
         local code = key_name(key)
         local nav = handle_tab_nav(state, code)
         if nav then return { value = nav, navigation = true } end
@@ -223,15 +238,21 @@ local function select_loop(ctx, spec, multi)
                 for i, opt in ipairs(state.options) do
                     if state.checked[i] then values[#values + 1] = opt.value end
                 end
-                local result = { values = values }
-                if state.allow_custom and state.input ~= "" then result.custom = state.input end
-                result.selected = state.selected
-                return result
-            end
-            if state.custom_focused then
+                local custom = (state.allow_custom and state.input ~= "") and state.input or nil
+                if #values == 0 and not custom then
+                    -- Require an explicit choice before advancing.
+                    state.notice = "Select at least one option (Space) or type a custom answer."
+                else
+                    local result = { values = values }
+                    if custom then result.custom = custom end
+                    result.selected = state.selected
+                    return result
+                end
+            elseif state.custom_focused then
                 return { value = state.input, custom = true, selected = state.selected }
+            else
+                return { value = state.options[state.selected].value, selected = state.selected }
             end
-            return { value = state.options[state.selected].value, selected = state.selected }
         end
     end
 end
@@ -252,6 +273,7 @@ function M.text_input(ctx, spec)
         local lines = {
             line(span(spec.question or "", "white", { "bold" })),
             line(span("> " .. input .. "█", "white", { "bold" })),
+            line(span("Enter submit · Esc cancel", "darkgray")),
             "",
         }
         p:set_lines(lines, #lines)

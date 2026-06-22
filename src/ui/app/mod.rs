@@ -389,8 +389,32 @@ impl App {
         match action {
             crate::ext::types::ConfigAction::Apply => {
                 let custom = config::custom::CustomConfigs::load();
+                // Rebuild the live client for the active provider so edits to its
+                // credentials/model (just saved to disk) take effect without a
+                // restart. `apply_custom_configs_to_runtime` only refreshes
+                // settings — it leaves `self.llm`, which holds the API key in
+                // memory, untouched. Same-id rebuild, so provider identity is
+                // unchanged; non-fatal so a bad edit doesn't drop the client.
+                let active_id = self.llm.id().to_string();
+                let providers_config = custom.derive_providers_config();
+                let mut msg = "Configuration applied.".to_string();
+                if providers_config.providers.contains_key(&active_id) {
+                    match providers::create_provider_with_config(&active_id, &providers_config) {
+                        Ok(new_provider) => {
+                            self.provider =
+                                format!("{} ({})", new_provider.name(), new_provider.id());
+                            self.model = new_provider.model().to_string();
+                            self.llm = std::sync::Arc::from(new_provider);
+                        }
+                        Err(err) => {
+                            msg = format!(
+                                "Configuration applied, but reloading the active provider failed: {err}"
+                            );
+                        }
+                    }
+                }
                 self.apply_custom_configs_to_runtime(custom);
-                "Configuration applied.".to_string()
+                msg
             }
             crate::ext::types::ConfigAction::ReloadTools => {
                 let config_dir = crate::config::bone_dir();

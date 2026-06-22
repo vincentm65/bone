@@ -91,6 +91,10 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         // host substring match on "compact") to `ctx.ui.notice`; refresh older
         // seeded copies so their announcements still reach the transcript.
         || (name == "compact.lua" && !existing.contains("ctx.ui.notice"))
+        // config's providers page replaced the "Edit provider..." menu row with
+        // an `[e] edit` action key; refresh older seeded copies that predate the
+        // `action_keys` wiring so `e` opens the provider editor again.
+        || (name == "config.lua" && !existing.contains("action_keys"))
 }
 
 /// Boot the Lua extension system.

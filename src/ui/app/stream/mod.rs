@@ -1048,7 +1048,24 @@ impl App {
                 KeyCode::Null,
                 KeyModifiers::NONE,
             ))) {
-                Event::Paste(text) => input.insert_paste(&text),
+                Event::Paste(text) => {
+                    // A bracketed paste while a Lua menu owns the key input (e.g.
+                    // the /config api_key text entry) must reach the menu, not the
+                    // chat box. The menu reads keys as `Char` events and appends
+                    // `char`, so hand it the whole pasted string as one synthetic
+                    // Char event; only fall through to chat input when unowned.
+                    if pending_key.wants_key() {
+                        pending_key.deliver(crate::pane_content::KeyEvent {
+                            code: "Char".to_string(),
+                            char: Some(text),
+                            ctrl: false,
+                            alt: false,
+                            shift: false,
+                        });
+                    } else {
+                        input.insert_paste(&text);
+                    }
+                }
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press {
                         continue;
@@ -1059,10 +1076,12 @@ impl App {
                         *panes_visible = !*panes_visible;
                         continue;
                     }
-                    if pending_key.wants_key()
-                        && !(key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL))
-                    {
+                    // While a tool owns the key input (e.g. a Lua menu blocked on
+                    // `ctx.ui.key()`), forward every key to it — including Ctrl+C,
+                    // which the menu treats as cancel. Swallowing Ctrl+C here used
+                    // to leave the tool's key request unresolved, wedging the turn
+                    // on a oneshot that was never sent or dropped.
+                    if pending_key.wants_key() {
                         pending_key.deliver(key_event_from_crossterm(key.code, key.modifiers));
                         continue;
                     }
