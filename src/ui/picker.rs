@@ -1,5 +1,5 @@
 //! Shared primitives for the fullscreen checklist screens (the onboarding
-//! wizard and `/catalogue`): the palette, the `Item` row model, and the
+//! wizard and `/catalog`): the palette, the `Item` row model, and the
 //! two-column list/detail renderer. Keeping these in one place means both
 //! screens look and behave identically.
 
@@ -21,6 +21,9 @@ pub struct Item {
     pub name: String,
     pub desc: String,
     pub checked: bool,
+    /// True once the user has explicitly toggled this item. Used by `apply`
+    /// to distinguish "user unchecked" from "was unchecked by default".
+    pub user_touched: bool,
     /// Category tag shown after the name (e.g. "tool"/"config"). Empty to hide.
     pub category: &'static str,
     /// Optional status tag shown at the end of the row (e.g. "update"). Rendered
@@ -34,6 +37,7 @@ impl Item {
             name,
             desc,
             checked,
+            user_touched: false,
             category: "",
             tag: None,
         }

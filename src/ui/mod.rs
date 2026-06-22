@@ -1,6 +1,6 @@
 pub mod app;
 pub mod autocomplete;
-pub mod catalogue;
+pub mod catalog;
 pub mod color;
 pub mod commands;
 pub mod fullscreen;

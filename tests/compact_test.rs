@@ -925,6 +925,173 @@ fn compact_lua_loads_cleanly() {
     std::fs::remove_dir_all(&config_dir).ok();
 }
 
+// ── 6c. auto-compact does not thrash when it can't make progress ────────────
+//
+// Regression: the old ±50-token dedup gate sat below per-turn noise and was
+// keyed to the post-compaction estimate, so during an active conversation it
+// never engaged. When the keep window alone exceeds the threshold, compaction
+// would re-run (re-summarizing its own summary via a full LLM call) on every
+// turn. The growth gate must suppress a second attempt when context_length
+// hasn't grown materially since the last one.
+
+#[test]
+fn auto_compact_does_not_thrash_on_stable_context() {
+    let config_dir = common::temp_dir("compact-thrash");
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(
+        r#"
+        _RUN_COUNT = 0
+        local ctx = {
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "100000" end
+                    if key == "auto_compact_keep_messages" then return "2" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
+            -- Same context_length on both calls: no growth between turns.
+            usage = { snapshot = function() return { context_length = 150000 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "older" },
+                { role = "assistant", content = "older answer" },
+                { role = "user", content = "recent" },
+                { role = "assistant", content = "recent answer" },
+            } end },
+            agent = { run = function()
+                _RUN_COUNT = _RUN_COUNT + 1
+                return { ok = true, content = "summary" }
+            end },
+            ui = { notify = function() end, status = function() end, notice = function() end },
+        }
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        local function run_once()
+            local ret
+            for _, h in ipairs(bone._handlers.before_turn) do
+                local r = h({}, ctx)
+                if type(r) == "table" and r.messages then ret = r; break end
+            end
+            return ret
+        end
+        local first = run_once()
+        local second = run_once()
+        _FIRST_RET = first and "table" or "nil"
+        _SECOND_RET = second and "table" or "nil"
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    let run_count: i64 = lua.globals().get("_RUN_COUNT").unwrap();
+    let first: String = lua.globals().get("_FIRST_RET").unwrap();
+    let second: String = lua.globals().get("_SECOND_RET").unwrap();
+    assert_eq!(first, "table", "first turn should compact");
+    assert_eq!(
+        second, "nil",
+        "second turn with unchanged context must be suppressed (no re-compaction)",
+    );
+    assert_eq!(
+        run_count, 1,
+        "summarizer must run exactly once, not on every turn; got {run_count}",
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+// ── 6d. no spurious "Compacting…" notice when nothing is compactable ─────────
+//
+// Regression: the notice fired before compact() ran, so when everything fit the
+// keep window (#older == 0) the user saw "Compacting context…" every turn the
+// context sat over threshold, with no actual compaction.
+
+#[test]
+fn auto_compact_no_notice_when_nothing_older_than_keep_window() {
+    let config_dir = common::temp_dir("compact-no-notice");
+    let mut custom = bone::config::custom::CustomConfigs::default();
+    let booted = bone::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(
+        r#"
+        _NOTICES = {}
+        _RUN_COUNT = 0
+        local ctx = {
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "1" end
+                    -- keep window larger than the whole history → nothing older.
+                    if key == "auto_compact_keep_messages" then return "10" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
+            usage = { snapshot = function() return { context_length = 999 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "only" },
+                { role = "assistant", content = "answer" },
+            } end },
+            agent = { run = function()
+                _RUN_COUNT = _RUN_COUNT + 1
+                return { ok = true, content = "summary" }
+            end },
+            ui = {
+                notify = function() end,
+                status = function() end,
+                notice = function(msg) _NOTICES[#_NOTICES + 1] = msg end,
+            },
+        }
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        local ret
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then ret = r; break end
+        end
+        _RET = ret and "table" or "nil"
+        _SAW_COMPACTING_NOTICE = "no"
+        for _, m in ipairs(_NOTICES) do
+            if type(m) == "string" and m:find("Compacting") then _SAW_COMPACTING_NOTICE = "yes" end
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    let ret: String = lua.globals().get("_RET").unwrap();
+    let saw_notice: String = lua.globals().get("_SAW_COMPACTING_NOTICE").unwrap();
+    let run_count: i64 = lua.globals().get("_RUN_COUNT").unwrap();
+    assert_eq!(ret, "nil", "nothing to compact → no replacement transcript");
+    assert_eq!(
+        saw_notice, "no",
+        "must not emit a 'Compacting…' notice when nothing is compactable",
+    );
+    assert_eq!(run_count, 0, "summarizer must not run when nothing is older");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
 // ── 7. compact command is NOT a protected builtin ───────────────────────────
 
 #[test]

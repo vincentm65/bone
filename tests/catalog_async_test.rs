@@ -1,4 +1,4 @@
-//! Regression: the catalogue's blocking HTTP fetch must not panic when called
+//! Regression: the catalog's blocking HTTP fetch must not panic when called
 //! from inside bone's async runtime. `reqwest::blocking` builds a nested tokio
 //! runtime, which panics on drop if created within an async context; the client
 //! offloads the GET to a dedicated thread to avoid that. Reproduce by driving a
@@ -27,5 +27,5 @@ fn fetch_index_from_async_context_does_not_panic() {
     // blocking is not allowed." With no cache present, an unreachable URL yields
     // an empty index.
     let entries = rt.block_on(async { catalog::fetch_index() });
-    assert!(entries.is_empty(), "unreachable catalogue yields no entries");
+    assert!(entries.is_empty(), "unreachable catalog yields no entries");
 }

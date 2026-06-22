@@ -82,9 +82,13 @@ local function summarization_prompt(older, recent_count)
     return table.concat(parts, "\n")
 end
 
---- Count the approximate token count of a string (chars / 4).
+--- Count the approximate token count of a string.
+--- Matches the host's heuristic (CHARS_PER_TOKEN = 3.8 in src/agent.rs) so the
+--- values we store/report line up with the Rust-reported context_length. Caveat:
+--- Rust counts unicode *chars* while Lua `#s` is *byte* length, so 3.8 only
+--- aligns the scale, not exact counts on multibyte text.
 local function estimate_tokens(s)
-    return math.ceil(#s / 4)
+    return math.ceil(#s / 3.8)
 end
 
 -- ---------------------------------------------------------------------------
@@ -141,6 +145,19 @@ local function sanitize_tool_chains(messages)
     end
 
     return result
+end
+
+--- Count user+assistant messages. When this is <= keep_messages, the entire
+--- transcript fits the keep window and there is nothing older to summarize — a
+--- cheap pre-check that avoids a pointless notice / LLM call.
+local function count_user_assistant(history)
+    local n = 0
+    for _, msg in ipairs(history) do
+        if msg.role == "user" or msg.role == "assistant" then
+            n = n + 1
+        end
+    end
+    return n
 end
 
 --- Run compaction on the current transcript. Returns the replacement messages
@@ -231,6 +248,9 @@ end
 -- Auto-compaction: before_turn hook
 -- ---------------------------------------------------------------------------
 
+-- context_length (at the trigger point) of the last auto-compaction attempt,
+-- keyed by conversation id. Used to suppress re-running until the conversation
+-- has grown materially since the last attempt — see the growth gate below.
 local last_auto_context = {}
 
 bone.on("before_turn", function(event, ctx)
@@ -285,13 +305,30 @@ bone.on("before_turn", function(event, ctx)
     local conv = ctx.conversation.current and ctx.conversation.current() or nil
     local context_key = conv and conv.id or "default"
     local previous_context = last_auto_context[context_key]
-    -- Avoid repeated runs when context_length hasn't changed meaningfully.
-    if previous_context and math.abs(context_length - previous_context) < 50 then
+    -- Suppress re-running until the conversation has grown materially since the
+    -- last attempt. The old ±50-token gate sat below per-turn noise, so it never
+    -- engaged during an active conversation — when the keep window alone exceeds
+    -- the threshold, compaction would otherwise re-run (and re-summarize its own
+    -- summary via a full LLM call) on every turn without ever dropping below it.
+    local retry_growth = math.max(2000, math.floor(config.auto_tokens / 20))
+    if previous_context and (context_length - previous_context) < retry_growth then
         return nil
     end
 
     local history = ctx.conversation.history()
     if not history then
+        return nil
+    end
+
+    -- Record this attempt up front, keyed to the trigger context_length, so the
+    -- growth gate above suppresses retries regardless of outcome below. Hopeless
+    -- cases (keep window alone over threshold) must not re-run every turn.
+    last_auto_context[context_key] = context_length
+
+    -- Nothing older than the keep window → nothing to summarize. Skip silently
+    -- (no notice, no LLM call) rather than show a "Compacting…" notice that does
+    -- nothing.
+    if count_user_assistant(history) <= config.keep_messages then
         return nil
     end
 
@@ -313,7 +350,6 @@ bone.on("before_turn", function(event, ctx)
     local history_tokens = estimate_tokens(cjson.encode(history))
     local overhead = math.max(0, context_length - history_tokens)
     local new_context = overhead + transcript_tokens
-    last_auto_context[context_key] = new_context
 
     ctx.ui.notice(string.format(
         "Compacted: %d → %d messages (~%d → ~%d tokens)",
@@ -354,12 +390,7 @@ bone.register_command("compact", {
         end
 
         -- Check if there's enough to compact: need more than configured keep messages.
-        local user_assistant_count = 0
-        for _, msg in ipairs(history) do
-            if msg.role == "user" or msg.role == "assistant" then
-                user_assistant_count = user_assistant_count + 1
-            end
-        end
+        local user_assistant_count = count_user_assistant(history)
         if user_assistant_count <= config.keep_messages then
             return {
                 display = string.format(

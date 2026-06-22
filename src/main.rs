@@ -385,11 +385,11 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(if applied { 0 } else { 2 });
     }
 
-    // `bone catalogue` — browse/install/remove optional tools & commands. Used
-    // both directly and by the `/catalogue` tmux popup.
-    if matches!(args.first().map(String::as_str), Some("catalogue") | Some("catalog")) {
+    // `bone catalog` — browse/install/remove optional tools & commands. Used
+    // both directly and by the `/catalog` tmux popup.
+    if matches!(args.first().map(String::as_str), Some("catalog")) {
         bone::config::seed_base();
-        let outcome = bone::ui::catalogue::run()?;
+        let outcome = bone::ui::catalog::run()?;
         std::process::exit(if outcome.changed { 0 } else { 2 });
     }
 
@@ -444,7 +444,7 @@ async fn main() -> std::io::Result<()> {
         return do_install();
     }
 
-    // Throttled, non-blocking catalogue refresh: re-installs newer versions of
+    // Throttled, non-blocking catalog refresh: re-installs newer versions of
     // already-installed items on a background thread; updates land next launch.
     bone::ext::catalog::refresh_in_background();
 

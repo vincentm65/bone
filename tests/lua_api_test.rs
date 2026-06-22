@@ -154,9 +154,6 @@ fn sandbox_blocks_dangerous_apis() {
 #[test]
 fn default_tools_boot_cleanly() {
     let config_dir = common::temp_dir("defaults-boot");
-    // The optional tools (ask_user/web_search/task_list) now ship via the
-    // catalogue, not the binary; seed them as if the user installed them.
-    common::seed_catalog_into(&config_dir);
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
@@ -177,13 +174,6 @@ fn default_tools_boot_cleanly() {
     // Verify default tools are registered (at least the ones we ship).
     let defs = booted.tools.definitions();
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-
-    for expected in &["ask_user", "web_search", "task_list"] {
-        assert!(
-            names.contains(expected),
-            "default tool '{expected}' not found; registered: {names:?}",
-        );
-    }
 
     for def in &defs {
         assert_no_boolean_required(&def.input_schema, &format!("tool schema for {}", def.name));

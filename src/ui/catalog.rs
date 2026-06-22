@@ -1,10 +1,10 @@
-//! `/catalogue` — a fullscreen popup for browsing, installing, and removing the
-//! optional tools and commands hosted in the catalog. A checked box means the
-//! item is installed (present in `~/.bone-rust/lua/{tools,commands}/`); applying
-//! downloads newly-checked items and deletes newly-unchecked ones.
+//! `/catalog` — a fullscreen popup for browsing, installing, and removing the
+//! optional tools and commands hosted in the catalog. Tools are unchecked by
+//! default; applying only acts on items the user explicitly toggled, so
+//! already-installed items are preserved unless the user unchecks them.
 //!
 //! The list/detail rendering is shared with the onboarding wizard via
-//! [`crate::ui::picker`]; the onboarding "catalogue" step reuses
+//! [`crate::ui::picker`]; the onboarding "catalog" step reuses
 //! [`build_items`] and [`apply`] so both paths behave identically.
 
 use std::io;
@@ -27,8 +27,11 @@ pub struct Outcome {
     pub message: String,
 }
 
-/// Build picker rows for the given catalog entries, marking installed items
-/// checked and flagging those with a newer available version.
+/// Build picker rows for the given catalog entries. Tools are unchecked by
+/// default; already-installed items are preserved on apply unless the user
+/// explicitly unchecks them.
+///
+/// Flags with a newer available version are tagged "update".
 pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
     entries
         .iter()
@@ -36,7 +39,7 @@ pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
             let installed = catalog::is_installed(e);
             let update = installed
                 && catalog::installed_version(&e.name).is_some_and(|v| e.version > v);
-            let mut item = Item::new(e.name.clone(), e.description.clone(), installed);
+            let mut item = Item::new(e.name.clone(), e.description.clone(), false);
             item.category = if e.kind == "command" { "command" } else { "tool" };
             if update {
                 item.tag = Some("update".to_string());
@@ -46,14 +49,27 @@ pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
         .collect()
 }
 
-/// Apply a checklist against the catalog: install newly-checked / updated items,
-/// remove newly-unchecked ones. Returns `(installed, removed, errors)` counts.
-pub fn apply(entries: &[CatalogEntry], items: &[Item]) -> (usize, usize, Vec<String>) {
+/// Apply a checklist against the catalog.
+///
+/// When `touched_only` is true (catalog UI), only items the user explicitly
+/// toggled are acted on — untouched items keep their current install state.
+/// When false (onboarding), all items are applied as-is.
+///
+/// Returns `(installed, removed, errors)` counts.
+pub fn apply(entries: &[CatalogEntry], items: &[Item], touched_only: bool) -> (usize, usize, Vec<String>) {
     let mut installed = 0;
     let mut removed = 0;
     let mut errors = Vec::new();
     for (entry, item) in entries.iter().zip(items.iter()) {
         let on_disk = catalog::is_installed(entry);
+        let apply = if touched_only {
+            item.user_touched
+        } else {
+            true
+        };
+        if !apply {
+            continue;
+        }
         if item.checked {
             let outdated = catalog::installed_version(&entry.name).is_some_and(|v| entry.version > v);
             if !on_disk || outdated {
@@ -89,13 +105,13 @@ impl State {
             cursor: 0,
             outcome: Outcome {
                 changed: false,
-                message: "Catalogue closed.".to_string(),
+                message: "Catalog closed.".to_string(),
             },
         }
     }
 }
 
-/// Run the catalogue popup fullscreen. Returns the outcome (whether anything
+/// Run the catalog popup fullscreen. Returns the outcome (whether anything
 /// changed + a summary message).
 pub fn run() -> io::Result<Outcome> {
     fullscreen::run(run_loop)
@@ -138,17 +154,19 @@ fn move_cursor(state: &mut State, delta: i32) {
 fn toggle(state: &mut State) {
     if let Some(item) = state.items.get_mut(state.cursor) {
         item.checked = !item.checked;
+        item.user_touched = true;
     }
 }
 
 fn set_all(state: &mut State, checked: bool) {
     for item in state.items.iter_mut() {
         item.checked = checked;
+        item.user_touched = true;
     }
 }
 
 fn apply_state(state: &mut State) {
-    let (installed, removed, errors) = apply(&state.entries, &state.items);
+    let (installed, removed, errors) = apply(&state.entries, &state.items, true);
     state.outcome.changed = installed > 0 || removed > 0;
     let mut parts = Vec::new();
     if installed > 0 {
@@ -158,9 +176,9 @@ fn apply_state(state: &mut State) {
         parts.push(format!("removed {removed}"));
     }
     let mut msg = if parts.is_empty() {
-        "Catalogue: no changes.".to_string()
+        "Catalog: no changes.".to_string()
     } else {
-        format!("Catalogue: {}.", parts.join(", "))
+        format!("Catalog: {}.", parts.join(", "))
     };
     if !errors.is_empty() {
         msg.push_str(&format!(" {} failed.", errors.len()));
@@ -177,20 +195,14 @@ fn draw(frame: &mut ratatui::Frame, state: &State) {
         screen,
     );
 
-    let width = screen.width.min(76);
-    let area = Rect {
-        x: screen.x + (screen.width.saturating_sub(width)) / 2,
-        y: screen.y,
-        width,
-        height: screen.height,
-    };
+    let area = screen;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // header
-            Constraint::Min(6),    // body
-            Constraint::Length(2), // footer
+            Constraint::Length(3), // header
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // footer
         ])
         .split(area);
 
@@ -203,7 +215,7 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect) {
     let lines = vec![
         Line::from(vec![
             Span::styled("bone ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("catalogue", Style::default().fg(MUTED)),
+            Span::styled("catalog", Style::default().fg(MUTED)),
         ]),
         Line::from(Span::styled(
             "Optional tools & commands — download on demand",
@@ -225,12 +237,12 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     if state.items.is_empty() {
         let lines = vec![
             Line::from(Span::styled(
-                "No catalogue items available.",
+                "No catalog items available.",
                 Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "bone couldn't reach the catalogue (you may be offline). Anything \
+                "bone couldn't reach the catalog (you may be offline). Anything \
                  already installed still works; try again later.",
                 Style::default().fg(MUTED),
             )),

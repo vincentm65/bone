@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 /// Default catalog location (raw GitHub content). Override with `BONE_CATALOG_URL`
 /// — an `http(s)://` base or a local filesystem path (used by tests / dev).
-const DEFAULT_URL: &str = "https://raw.githubusercontent.com/vincentm65/bone-catalogue/main";
+const DEFAULT_URL: &str = "https://raw.githubusercontent.com/vincentm65/bone-catalog/main";
 
 /// How often the background refresh actually hits the network.
 const REFRESH_THROTTLE: Duration = Duration::from_secs(6 * 60 * 60);
@@ -127,7 +127,7 @@ pub fn fetch_index() -> Vec<CatalogEntry> {
         .unwrap_or_default()
 }
 
-/// Blocking index refresh used before building a picker (onboarding / `/catalogue`).
+/// Blocking index refresh used before building a picker (onboarding / `/catalog`).
 pub fn sync_quiet() -> Vec<CatalogEntry> {
     fetch_index()
 }

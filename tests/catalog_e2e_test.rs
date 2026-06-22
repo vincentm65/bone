@@ -1,4 +1,4 @@
-//! End-to-end catalogue flow against a local filesystem fixture: fetch the
+//! End-to-end catalog flow against a local filesystem fixture: fetch the
 //! index, install an item, refresh it after a version bump, fall back to the
 //! cache when offline, reject a bad checksum, and remove the item.
 //!

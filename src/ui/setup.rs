@@ -2,7 +2,7 @@
 //!
 //! A fullscreen, `/stats`-style takeover (see `crate::ui::stats`) that walks a
 //! new user through: picking a provider + API key (skippable), choosing optional
-//! tools/commands from the catalogue (auto-downloaded), and whether `init.lua`
+//! tools/commands from the catalog (auto-downloaded), and whether `init.lua`
 //! is auto-populated or blank. The choices are persisted via
 //! `config::apply_onboarding`, which doubles as the "already onboarded" marker.
 
@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::config::{self, InitChoice, SetupSelection};
 use crate::ext::catalog::{self, CatalogEntry};
-use crate::ui::catalogue;
+use crate::ui::catalog as catalog_ui;
 use crate::ui::fullscreen::{self, FullscreenTerminal};
 use crate::ui::picker::{self, Item, ACCENT, BG, BORDER, DIM, GOOD, MUTED, TEXT};
 
@@ -24,7 +24,7 @@ use crate::ui::picker::{self, Item, ACCENT, BG, BORDER, DIM, GOOD, MUTED, TEXT};
 enum Step {
     Welcome,
     Provider,
-    Catalogue,
+    Catalog,
     Init,
     Confirm,
 }
@@ -42,7 +42,7 @@ struct State {
     api_key: String,
     /// Provider id whose key we saved, for the confirm summary.
     provider_saved: Option<String>,
-    /// Catalogue entries and the matching checklist rows.
+    /// Catalog entries and the matching checklist rows.
     cat_entries: Vec<CatalogEntry>,
     cat_items: Vec<Item>,
     cat_cursor: usize,
@@ -71,10 +71,10 @@ impl State {
             .collect();
         providers.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Fetch the catalogue index (blocking, cached fallback) so the picker is
+        // Fetch the catalog index (blocking, cached fallback) so the picker is
         // populated; offline simply yields an empty list.
         let cat_entries = catalog::sync_quiet();
-        let cat_items = catalogue::build_items(&cat_entries);
+        let cat_items = catalog_ui::build_items(&cat_entries);
 
         let init_exists = config::setup_selection_path()
             .parent()
@@ -121,7 +121,7 @@ impl State {
         self.init_options[self.init_cursor].2
     }
 
-    /// Onboarding seeds no Lua tools (all optional ones live in the catalogue)
+    /// Onboarding seeds no Lua tools (all optional ones live in the catalog)
     /// and all bundled core commands. The selection file doubles as the
     /// onboarding-complete marker.
     fn selection(&self) -> SetupSelection {
@@ -138,8 +138,8 @@ impl State {
     fn next_step(&mut self) {
         self.step = match self.step {
             Step::Welcome => Step::Provider,
-            Step::Provider => Step::Catalogue,
-            Step::Catalogue => Step::Init,
+            Step::Provider => Step::Catalog,
+            Step::Catalog => Step::Init,
             Step::Init => Step::Confirm,
             Step::Confirm => Step::Confirm,
         };
@@ -149,8 +149,8 @@ impl State {
         self.step = match self.step {
             Step::Welcome => Step::Welcome,
             Step::Provider => Step::Welcome,
-            Step::Catalogue => Step::Provider,
-            Step::Init => Step::Catalogue,
+            Step::Catalog => Step::Provider,
+            Step::Init => Step::Catalog,
             Step::Confirm => Step::Init,
         };
     }
@@ -217,10 +217,10 @@ fn run_loop(term: &mut FullscreenTerminal, fresh: bool) -> io::Result<bool> {
 fn handle_char(state: &mut State, c: char) {
     match state.step {
         Step::Provider => state.api_key.push(c),
-        Step::Catalogue => match c {
-            ' ' => toggle_catalogue(state),
-            'a' => set_all_catalogue(state, true),
-            'n' => set_all_catalogue(state, false),
+        Step::Catalog => match c {
+            ' ' => toggle_catalog(state),
+            'a' => set_all_catalog(state, true),
+            'n' => set_all_catalog(state, false),
             'k' => move_cursor(state, -1),
             'j' => move_cursor(state, 1),
             _ => {}
@@ -236,7 +236,7 @@ fn handle_char(state: &mut State, c: char) {
 fn move_cursor(state: &mut State, delta: i32) {
     let (cursor, len) = match state.step {
         Step::Provider => (&mut state.provider_cursor, state.providers.len()),
-        Step::Catalogue => (&mut state.cat_cursor, state.cat_items.len()),
+        Step::Catalog => (&mut state.cat_cursor, state.cat_items.len()),
         Step::Init => (&mut state.init_cursor, state.init_options.len()),
         _ => return,
     };
@@ -246,15 +246,17 @@ fn move_cursor(state: &mut State, delta: i32) {
     *cursor = ((*cursor as i32 + delta).rem_euclid(len as i32)) as usize;
 }
 
-fn toggle_catalogue(state: &mut State) {
+fn toggle_catalog(state: &mut State) {
     if let Some(item) = state.cat_items.get_mut(state.cat_cursor) {
         item.checked = !item.checked;
+        item.user_touched = true;
     }
 }
 
-fn set_all_catalogue(state: &mut State, checked: bool) {
+fn set_all_catalog(state: &mut State, checked: bool) {
     for item in state.cat_items.iter_mut() {
         item.checked = checked;
+        item.user_touched = true;
     }
 }
 
@@ -268,8 +270,8 @@ fn advance(state: &mut State) {
 
 fn apply(state: &mut State) -> io::Result<()> {
     config::apply_onboarding(&state.selection(), state.init_choice())?;
-    // Install the catalogue picks (best-effort; failures don't abort onboarding).
-    let _ = catalogue::apply(&state.cat_entries, &state.cat_items);
+    // Install the catalog picks (best-effort; failures don't abort onboarding).
+    let _ = catalog_ui::apply(&state.cat_entries, &state.cat_items, false);
     state.completed = true;
     Ok(())
 }
@@ -280,7 +282,7 @@ fn draw(frame: &mut ratatui::Frame, state: &State) {
     let screen = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(BG)), screen);
 
-    let width = screen.width.min(76);
+    let width = screen.width.min(90);
     let area = Rect {
         x: screen.x + (screen.width.saturating_sub(width)) / 2,
         y: screen.y,
@@ -292,7 +294,7 @@ fn draw(frame: &mut ratatui::Frame, state: &State) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4), // header
-            Constraint::Min(6),    // body
+            Constraint::Min(10),   // body
             Constraint::Length(2), // footer
         ])
         .split(area);
@@ -306,7 +308,7 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     let step_n = match state.step {
         Step::Welcome => 1,
         Step::Provider => 2,
-        Step::Catalogue => 3,
+        Step::Catalog => 3,
         Step::Init => 4,
         Step::Confirm => 5,
     };
@@ -338,17 +340,17 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     match state.step {
         Step::Welcome => draw_welcome(frame, area),
         Step::Provider => draw_provider(frame, area, state),
-        Step::Catalogue => {
+        Step::Catalog => {
             if state.cat_items.is_empty() {
                 let lines = vec![
                     Line::from(Span::styled(
-                        "Catalogue unavailable.",
+                        "Catalog unavailable.",
                         Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
-                        "bone couldn't reach the catalogue (you may be offline). \
-                         Skip for now and add tools later with /catalogue.",
+                        "bone couldn't reach the catalog (you may be offline). \
+                         Skip for now and add tools later with /catalog.",
                         Style::default().fg(MUTED),
                     )),
                 ];
@@ -402,7 +404,7 @@ fn draw_welcome(frame: &mut ratatui::Frame, area: Rect) {
         )),
         Line::from(""),
         bullet("Provider", "Pick one and drop in an API key (optional)."),
-        bullet("Catalogue", "Optional tools & commands, downloaded on demand."),
+        bullet("Catalog", "Optional tools & commands, downloaded on demand."),
         bullet("init.lua", "Startup script — banner, sub-agents, hooks."),
         Line::from(""),
         Line::from(Span::styled(
@@ -595,7 +597,7 @@ fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         )),
         Line::from(""),
         summary("Provider", provider),
-        summary("Catalogue", format!("{n_cat} selected")),
+        summary("Catalog", format!("{n_cat} selected")),
         summary("init.lua", init_label.to_string()),
         Line::from(""),
         Line::from(Span::styled(
@@ -650,7 +652,7 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State) {
             push("←", "back");
             push("esc", cancel_label);
         }
-        Step::Catalogue => {
+        Step::Catalog => {
             push("↑↓", "move");
             push("space", "toggle");
             push("a/n", "all/none");

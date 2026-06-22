@@ -9,7 +9,7 @@ use std::time::Duration;
 use bone::runtime::view::ViewDiff;
 use bone::tools::types::ToolCall;
 
-const TASK_LIST: &str = include_str!("../catalog/tools/task_list.lua");
+const TASK_LIST: &str = include_str!("fixtures/task_list.lua");
 
 fn boot(config_dir: &std::path::Path) -> bone::ext::BootedTools {
     let tools_dir = config_dir.join("lua/tools");

@@ -1814,8 +1814,8 @@ impl App {
         if cmd == "setup" {
             return self.open_setup_wizard(term);
         }
-        if cmd == "catalogue" || cmd == "catalog" {
-            return self.open_catalogue(term);
+        if cmd == "catalog" {
+            return self.open_catalog(term);
         }
 
         let prev_provider = self.llm.id().to_string();
@@ -2088,24 +2088,24 @@ impl App {
         Ok(())
     }
 
-    fn open_catalogue(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    fn open_catalog(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         // Prefer a tmux popup (same as /setup); fall back to an inline takeover.
-        // `bone catalogue` exits 0 when something changed, 2 when nothing did —
+        // `bone catalog` exits 0 when something changed, 2 when nothing did —
         // both are completed runs, so only a failed launch falls through.
-        if let Some(status) = self.try_tmux_popup("catalogue", "80%", "80%", term)? {
+        if let Some(status) = self.try_tmux_popup("catalog", "96%", "92%", term)? {
             match status.code() {
                 Some(0) => {
                     return self.show_reply(
-                        "Catalogue updated. Restart bone to load the changes.".to_string(),
+                        "Catalog updated. Restart bone to load the changes.".to_string(),
                         term,
                     );
                 }
-                Some(2) => return self.show_reply("Catalogue: no changes.".to_string(), term),
+                Some(2) => return self.show_reply("Catalog: no changes.".to_string(), term),
                 _ => {} // popup failed to launch — fall through to inline
             }
         }
 
-        let result = crate::ui::catalogue::run();
+        let result = crate::ui::catalog::run();
         self.force_redraw(term)?;
         match result {
             Ok(outcome) => {
@@ -2116,13 +2116,13 @@ impl App {
                 };
                 self.show_reply(msg, term)
             }
-            Err(err) => self.show_reply(format!("Catalogue failed: {err}"), term),
+            Err(err) => self.show_reply(format!("Catalog failed: {err}"), term),
         }
     }
 
     fn open_setup_wizard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let mut ran = false;
-        if let Some(status) = self.try_tmux_popup("setup", "80%", "80%", term)? {
+        if let Some(status) = self.try_tmux_popup("setup", "96%", "92%", term)? {
             match status {
                 s if s.success() => ran = true,
                 // `bone setup` exits 2 when the user cancels the wizard.

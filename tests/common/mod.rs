@@ -20,7 +20,7 @@ pub fn temp_path(label: &str) -> PathBuf {
 }
 
 /// Copy the in-repo catalog tools/commands into `config_dir/lua/{tools,commands}`,
-/// simulating items the user installed from the catalogue. These optional tools
+/// simulating items the user installed from the catalog. These optional tools
 /// no longer ship in the binary, so tests that need them seed them this way.
 #[allow(dead_code)]
 pub fn seed_catalog_into(config_dir: &std::path::Path) {
