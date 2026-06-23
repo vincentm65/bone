@@ -96,8 +96,10 @@ fn help(lua_commands: &[(String, String)]) -> String {
     lines.push(format!("{bold}Input shortcuts{reset}"));
     lines.push("  Ctrl+A       — move cursor to start of line".to_string());
     lines.push("  Ctrl+E       — move cursor to end of line".to_string());
+    lines.push("  Alt+Left     — move cursor one word back".to_string());
+    lines.push("  Alt+Right    — move cursor one word forward".to_string());
     lines.push("  Ctrl+W       — delete word backward".to_string());
-    lines.push("  Ctrl+U       — clear line before cursor".to_string());
+    lines.push("  Ctrl+U       — clear the entire input".to_string());
     lines.push("  Ctrl+K       — clear line after cursor".to_string());
     lines.push("  Ctrl+X       — open system editor".to_string());
     lines.push("  Ctrl+D       — clear message queue".to_string());
@@ -107,7 +109,7 @@ fn help(lua_commands: &[(String, String)]) -> String {
     lines.push(format!("{bold}Pane navigation{reset}"));
     lines.push("  Ctrl+T       — toggle pane visibility".to_string());
     lines.push("  Tab          — cycle active pane (when panes visible)".to_string());
-    lines.push("  Shift+Tab    — cycle approval mode".to_string());
+    lines.push("  Shift+Tab    — cycle approval mode (or pane when visible)".to_string());
     lines.push("  PageUp/Down  — scroll active pane".to_string());
     lines.push("  Ctrl+Up/Down — scroll active pane by one line".to_string());
     lines.join("\n")
