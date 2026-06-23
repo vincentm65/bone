@@ -66,6 +66,11 @@ pub enum PaneLineSpec {
     Spans {
         #[serde(default, deserialize_with = "deserialize_vec_or_empty_map")]
         spans: Vec<PaneSpanSpec>,
+        /// Optional row background color (named or `#RRGGBB`), parsed by the
+        /// frontend. Fills the whole row width when rendered (e.g. the
+        /// selected-row highlight in `/config`).
+        #[serde(default)]
+        bg: Option<String>,
     },
 }
 

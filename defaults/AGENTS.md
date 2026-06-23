@@ -232,12 +232,13 @@ local result = ctx.agent.run("Summarize this file", {
     approval = "safe",
     system_prompt = "You are a summarizer.",
     timeout_ms = 300000,
+    max_tokens = 2048,
 })
 if result.ok then
     ctx.log.info(result.content)
 end
 ```
-Opts: `{ approval, provider, model, system_prompt, timeout_ms }`. Default timeout: 300s, max 900s. Agent requests use an inactivity timeout: an active sub-agent is not stopped merely because a hard wall-clock duration elapsed while it is still streaming output or tool results.
+Opts: `{ approval, provider, model, system_prompt, timeout_ms, max_tokens }`. Default timeout: 300s, max 900s. Agent requests use an inactivity timeout: an active sub-agent is not stopped merely because a hard wall-clock duration elapsed while it is still streaming output or tool results. `max_tokens` caps the subagent's output tokens (sent as the provider's `max_tokens`); omit it to let the provider/server apply its own default. The cap is applied to the freshly-constructed provider, so it never affects the main turn. Use it to bound a model whose output could run away — e.g. compaction summaries.
 
 `run_stream` accepts additional callback opts: `on_started`, `on_status`, `on_tool_call`, `on_tool_result`, `on_token_usage`, `on_finished`, `on_failed`. Each callback receives a table with event-specific fields.
 
@@ -460,7 +461,8 @@ Manual context compaction via summarization. Summarizes older conversation messa
 
 - Requires `ctx.conversation.history()` — shows an error if unavailable.
 - Skips when there are fewer user+assistant messages than the keep threshold.
-- Uses `ctx.agent.run()` to generate a summary of older messages.
+- Uses `ctx.agent.run()` to generate a summary of older messages, capped via `max_tokens` so a runaway/looping model can't emit a summary larger than the context it is meant to shrink.
+- Discards the result if the compacted context would not be smaller than the original (`new_context >= context_length`) — installing a larger transcript could push the next request past the model's context window (an unrecoverable provider 400). Both the manual and automatic paths enforce this.
 - Returns a `conversation.replace` action (see [Return Actions](#command-return-semantics)).
 - The default file `lua/commands/compact.lua` also registers a `before_turn` handler for automatic compaction.
 

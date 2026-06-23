@@ -188,6 +188,10 @@ pub struct AgentRequest {
     /// names appear in this list. When `None` (the default), all tools are
     /// available.
     pub tool_allowlist: Option<Vec<String>>,
+    /// Optional cap on output tokens for this run. Applied to a freshly
+    /// constructed provider (not an injected one). Used by context compaction
+    /// to bound the summarization model's output.
+    pub max_tokens: Option<u32>,
 }
 
 /// Current time in epoch milliseconds.
@@ -328,6 +332,11 @@ pub fn resolve_provider(
     providers_config: &mut crate::config::ProvidersConfig,
 ) -> Result<Arc<dyn crate::llm::provider::LlmProvider>, String> {
     if let Some(llm) = request.llm.as_ref() {
+        // max_tokens only applies to freshly-constructed providers (AgentRequest
+        // doc). Reject the combination rather than silently dropping the cap.
+        if request.max_tokens.is_some() {
+            return Err("max_tokens is not supported with an injected provider".to_string());
+        }
         return Ok(llm.clone());
     }
     let provider_id = request
@@ -347,8 +356,9 @@ pub fn resolve_provider(
         }
     }
     crate::config::warn_if_no_api_key_for(&provider_id, providers_config);
-    let boxed =
+    let mut boxed =
         create_provider_with_config(&provider_id, providers_config).map_err(|e| e.to_string())?;
+    boxed.set_max_tokens(request.max_tokens);
     Ok(Arc::from(boxed))
 }
 

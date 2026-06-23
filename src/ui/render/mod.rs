@@ -23,6 +23,21 @@ use backend::BoneBackend;
 
 /// Minimum viewport rows: top-sep + input(1) + status.
 pub(crate) const MIN_ROWS: u16 = 3;
+
+/// Largest inline-viewport height permitted for a given terminal height.
+///
+/// We deliberately reserve at least one row above the viewport so the inline
+/// viewport never occupies the *entire* screen. A full-screen inline viewport
+/// forces ratatui's `insert_before` down a fragile "borrow the top viewport
+/// line and scroll it into scrollback" path (see
+/// `insert_before_scrolling_regions`' `viewport_area.height ==
+/// last_known_area.height` branch), which intermittently strands bottom-pane
+/// rows (the input field, wrapped command preview, and `────` separators) in
+/// scrollback. Keeping one row free guarantees the robust partial-screen
+/// scroll path is always used.
+pub(crate) fn max_viewport_height(terminal_height: u16) -> u16 {
+    terminal_height.saturating_sub(1).max(1)
+}
 pub use bottom_pane::PaneDraw;
 pub(crate) use bottom_pane::approval_pane_lines;
 pub(crate) use bottom_pane::clamped_pane_visible_rows;
@@ -260,7 +275,7 @@ impl Renderer {
         let size = term.size()?;
         let desired =
             Self::desired_height(input, prompt, size.width, pages, active_page, autocomplete)
-                .min(size.height.max(1));
+                .min(max_viewport_height(size.height));
         let old = self.viewport_height;
         if desired != old {
             Self::resize_viewport(term, old, desired)?;

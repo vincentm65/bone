@@ -655,6 +655,23 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
         ui_table.set("pane", pane_unavailable_fn)?;
     }
 
+    // ctx.ui.width() → current terminal width in columns (0 when unknown).
+    // Read fresh each call from the shared handle (the renderer republishes it
+    // every frame), so interactive panes can wrap text to the live width.
+    if let Some(ui_state) = cfg.ui.clone() {
+        let width_fn = lua.create_function(move |_, _: ()| {
+            let width = ui_state
+                .lock()
+                .map(|ui| ui.terminal_width)
+                .unwrap_or(0);
+            Ok(width)
+        })?;
+        ui_table.set("width", width_fn)?;
+    } else {
+        let width_unavailable_fn = lua.create_function(|_, _: ()| Ok(0u16))?;
+        ui_table.set("width", width_unavailable_fn)?;
+    }
+
     // ctx.ui.key() → table
     // Blocks until the frontend delivers one terminal key event.
     if let Some(sender) = cfg.pane_sender.clone() {
@@ -1583,6 +1600,11 @@ fn build_agent_request(
         &inherited.model,
         allowed_keys,
     )?;
+    let max_tokens = match opt_u64(opts, "max_tokens") {
+        Some(0) | None => None,
+        Some(n) if n <= u32::MAX as u64 => Some(n as u32),
+        Some(_) => return Err("max_tokens is too large".to_string()),
+    };
     let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
     let request = crate::agent::AgentRequest {
         prompt,
@@ -1598,6 +1620,7 @@ fn build_agent_request(
         llm: None,
         session_sink: None,
         tool_allowlist,
+        max_tokens,
     };
     Ok(BuiltAgent {
         request,
@@ -1614,6 +1637,7 @@ const RUN_OPT_KEYS: &[&str] = &[
     "model",
     "system_prompt",
     "timeout_ms",
+    "max_tokens",
 ];
 const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "approval",
@@ -1621,6 +1645,7 @@ const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "model",
     "system_prompt",
     "timeout_ms",
+    "max_tokens",
     "on_started",
     "on_status",
     "on_tool_call",

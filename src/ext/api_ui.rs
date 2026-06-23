@@ -32,6 +32,9 @@ pub struct UiState {
     pub view: ViewModel,
     /// Diffs accumulated since the last [`drain_diffs`](UiState::drain_diffs).
     pub diffs: Vec<ViewDiff>,
+    /// Current terminal width in columns, published by the renderer each frame
+    /// so Lua panes (`ctx.ui.width`) can wrap text. 0 = not yet known.
+    pub terminal_width: u16,
 }
 
 impl UiState {

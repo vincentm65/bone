@@ -172,6 +172,7 @@ fn resolve_provider_uses_injected_provider_and_shares_arc() {
         llm: Some(injected.clone()), // now refcount == 2
         tool_allowlist: None,
         session_sink: None,
+        max_tokens: None,
     };
     let mut custom = CustomConfigs::default();
     let mut pc = custom.derive_providers_config();
@@ -210,6 +211,7 @@ fn resolve_provider_short_circuits_without_any_config() {
         llm: Some(injected),
         tool_allowlist: None,
         session_sink: None,
+        max_tokens: None,
     };
     let mut custom = CustomConfigs::default();
     let mut pc = custom.derive_providers_config();
@@ -222,4 +224,29 @@ fn resolve_provider_short_circuits_without_any_config() {
         custom.get_last_provider().is_empty(),
         "injection must not persist last_provider"
     );
+}
+
+#[test]
+#[ignore]
+fn resolve_provider_rejects_max_tokens_with_injected_provider() {
+    let request = AgentRequest {
+        prompt: "hi".into(),
+        approval_mode: ApprovalMode::Safe,
+        provider: None,
+        model: None,
+        system_prompt: None,
+        events: false,
+        event_sender: None,
+        agent_depth: 0,
+        on_token_usage: None,
+        activity: None,
+        llm: Some(Arc::new(MockProvider::new("mock", "mock-1", vec![]))),
+        tool_allowlist: None,
+        session_sink: None,
+        max_tokens: Some(1),
+    };
+    let mut custom = CustomConfigs::default();
+    let mut pc = custom.derive_providers_config();
+
+    assert!(resolve_provider(&request, &mut custom, &mut pc).is_err());
 }

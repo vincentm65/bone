@@ -48,14 +48,16 @@ local function truncate_utf8(s, max_bytes)
     if #s <= max_bytes then
         return s
     end
-    for cut = max_bytes, math.max(max_bytes - 4, 1), -1 do
+    local suffix = "..."
+    local limit = math.max(0, max_bytes - #suffix)
+    for cut = limit, math.max(limit - 4, 1), -1 do
         local chunk = s:sub(1, cut)
         local ok, len = pcall(utf8.len, chunk)
         if ok and len then
-            return chunk .. "..."
+            return chunk .. suffix
         end
     end
-    return "..."
+    return suffix
 end
 
 --- Build a summary prompt for the model to condense older messages.
@@ -216,9 +218,11 @@ local function compact(history, ctx, keep_messages)
         return nil
     end
 
-    -- Build the summary via ctx.agent.run().
+    -- Build the summary via ctx.agent.run(). Cap the output (max_tokens) so a
+    -- runaway/looping model can't emit a "summary" larger than the context it is
+    -- meant to shrink. The new_context guard in the caller is the final backstop.
     local prompt = summarization_prompt(older, keep_messages)
-    local run_result = ctx.agent.run(prompt, { timeout_ms = 120000 })
+    local run_result = ctx.agent.run(prompt, { timeout_ms = 120000, max_tokens = 2048 })
     if not run_result.ok then
         ctx.ui.notice("compact: summarization failed: " .. (run_result.error or "unknown"))
         return nil
@@ -229,6 +233,10 @@ local function compact(history, ctx, keep_messages)
         ctx.ui.notify("compact: empty summary, skipping", "warn")
         return nil
     end
+
+    -- Stopgap for hosts/providers that ignore max_tokens: never let the summary
+    -- itself exceed a sane bound (≈ 4k tokens) before it lands in the transcript.
+    summary = truncate_utf8(summary, 16000)
 
     -- Build replacement messages: synthetic user summary + preserved messages
     -- (the keep array was built backward, so reverse it).
@@ -351,6 +359,17 @@ bone.on("before_turn", function(event, ctx)
     local overhead = math.max(0, context_length - history_tokens)
     local new_context = overhead + transcript_tokens
 
+    -- Refuse to apply a "compaction" that didn't actually shrink the context.
+    -- A small local model can loop and return a summary larger than its input;
+    -- installing it would push the next request past the model's context window
+    -- (an unrecoverable 400). Discard and leave the transcript untouched.
+    if new_context >= context_length then
+        ctx.ui.notify(string.format(
+            "compact: summary did not shrink context (~%d ≥ ~%d), discarding",
+            new_context, context_length), "warn")
+        return nil
+    end
+
     ctx.ui.notice(string.format(
         "Compacted: %d → %d messages (~%d → ~%d tokens)",
         #history, #messages, context_length, new_context
@@ -414,11 +433,31 @@ bone.register_command("compact", {
         if snapshot and snapshot.context_length then
             local history_tokens = estimate_tokens(cjson.encode(history))
             local overhead = math.max(0, snapshot.context_length - history_tokens)
+            local new_context = overhead + transcript_tokens
+            -- Same backstop as auto-compaction: never install a summary that
+            -- grew the context (a looping model can return more than it ate).
+            if new_context >= snapshot.context_length then
+                return {
+                    display = string.format(
+                        "Compaction aborted: summary did not shrink context (~%d ≥ ~%d).",
+                        new_context, snapshot.context_length),
+                    submit = false,
+                }
+            end
             display = string.format(
                 "Compacted: %d messages → %d (context: ~%d → ~%d tokens).",
-                #history, #messages, snapshot.context_length, overhead + transcript_tokens
+                #history, #messages, snapshot.context_length, new_context
             )
         else
+            local history_tokens = estimate_tokens(cjson.encode(history))
+            if transcript_tokens >= history_tokens then
+                return {
+                    display = string.format(
+                        "Compaction aborted: summary did not shrink transcript (~%d ≥ ~%d).",
+                        transcript_tokens, history_tokens),
+                    submit = false,
+                }
+            end
             display = string.format(
                 "Compacted: %d messages → %d (summarized transcript ~%d tokens).",
                 #history, #messages, transcript_tokens

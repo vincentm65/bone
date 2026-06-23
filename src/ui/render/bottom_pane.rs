@@ -712,8 +712,15 @@ impl super::Renderer {
                         if py >= bottom_sep_row {
                             break;
                         }
+                        // Carry a line-level background to the paragraph so it
+                        // fills the full row width (edge-to-edge highlight, e.g.
+                        // the selected row in /config).
+                        let mut para = Paragraph::new(line.clone());
+                        if let Some(bg) = line.style.bg {
+                            para = para.style(Style::default().bg(bg));
+                        }
                         frame.render_widget(
-                            Paragraph::new(line.clone()),
+                            para,
                             Rect {
                                 y: py,
                                 height: 1,

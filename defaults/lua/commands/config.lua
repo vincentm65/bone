@@ -18,6 +18,7 @@ local COL = {
    dim    = "darkgray",
    text   = "white",
    muted  = "gray",
+   sel_bg = "#3A3F4B",  -- subtle highlight behind the selected row
 }
 
 local function split_args(arg)
@@ -123,49 +124,54 @@ local function find_page_index(pages, namespace)
    return 1
 end
 
--- Build one styled line from a list of spans.
-local function line_of(spans)
-   return { spans = spans }
+-- Build one styled line from a list of spans, with an optional row background
+-- (used to highlight the selected row edge-to-edge — see pane_content.rs).
+local function line_of(spans, bg)
+   return { spans = spans, bg = bg }
 end
 
--- Spans for a single selectable row.
-local function row_spans(row, selected)
-   local cur = selected and ">" or " "
+-- Right-pad `s` to `width` display columns (labels/ids are ASCII keys).
+local function pad(s, width)
+   s = tostring(s or "")
+   local gap = width - #s
+   if gap > 0 then s = s .. string.rep(" ", gap) end
+   return s
+end
+
+-- Spans for a single selectable row. `pad_w` aligns the value column.
+local function row_spans(row, selected, pad_w)
    local fg = selected and COL.text or COL.muted
    local mods = selected and { "bold" } or nil
-   local sp = { span(" " .. cur .. " ", selected and COL.accent or COL.dim, mods) }
+   -- Accent bar marks the selected row; a blank gutter keeps others aligned.
+   local sp = { span(selected and " \u{258c} " or "   ", COL.accent, mods) }
 
    if row.kind == "field" then
       local f = row.field
       local label = f.label or f.key
+      sp[#sp + 1] = span(pad(label, pad_w) .. "  ", fg, mods)
       if f.type == "bool" then
          local on = f.value == "true"
          sp[#sp + 1] = span(on and "\u{25cf} " or "\u{25cb} ", on and COL.green or COL.dim)
-         sp[#sp + 1] = span(label, fg, mods)
-         sp[#sp + 1] = span("  " .. (on and "on" or "off"), COL.dim)
+         sp[#sp + 1] = span(on and "on" or "off", on and COL.green or COL.dim, mods)
       elseif f.type == "enum" then
-         sp[#sp + 1] = span(label, fg, mods)
-         sp[#sp + 1] = span("  [", COL.dim)
+         sp[#sp + 1] = span("[ ", COL.dim)
          sp[#sp + 1] = span(tostring(f.value or "?"), COL.amber, mods)
-         sp[#sp + 1] = span("]", COL.dim)
+         sp[#sp + 1] = span(" ]", COL.dim)
       else
-         sp[#sp + 1] = span(label, fg, mods)
          local v = tostring(f.value or "")
          if v == "" then v = "(unset)" end
-         sp[#sp + 1] = span("  " .. v, f.type == "number" and COL.blue or COL.amber, mods)
+         sp[#sp + 1] = span(v, f.type == "number" and COL.blue or COL.amber, mods)
       end
    else -- provider
       local pr = row.provider
       local active = pr.active
       sp[#sp + 1] = span(active and "\u{25cf} " or "\u{25cb} ", active and COL.green or COL.dim)
-      sp[#sp + 1] = span(pr.id, fg, mods)
-      sp[#sp + 1] = span("  ", COL.dim)
-      sp[#sp + 1] = span(pr.model or "", selected and COL.amber or COL.dim, mods)
-      sp[#sp + 1] = span("  ", COL.dim)
-      sp[#sp + 1] = span(pr.handler or "openai", COL.blue)
+      sp[#sp + 1] = span(pad(pr.id, pad_w) .. "  ", fg, mods)
+      sp[#sp + 1] = span(pad(pr.model or "", 18) .. "  ", selected and COL.amber or COL.dim, mods)
+      sp[#sp + 1] = span(pad(pr.handler or "openai", 7) .. "  ", COL.blue)
       local url = pr.base_url or ""
       if #url > 38 then url = url:sub(1, 36) .. "\u{2026}" end
-      sp[#sp + 1] = span("  " .. url, COL.dim)
+      sp[#sp + 1] = span(url, COL.dim)
    end
    return sp
 end
@@ -186,6 +192,16 @@ local function build_rows(ctx, page)
    return rows
 end
 
+-- Width of the label/id column so values line up across the page.
+local function label_width(rows)
+   local w = 0
+   for _, row in ipairs(rows) do
+      local s = row.kind == "provider" and row.provider.id or (row.field.label or row.field.key)
+      w = math.max(w, #tostring(s or ""))
+   end
+   return w
+end
+
 local function run(ctx, start_ns)
    local pages = ctx.config.get_pages()
    if not pages or #pages == 0 then
@@ -200,9 +216,9 @@ local function run(ctx, start_ns)
    local cursor = {}   -- per-namespace selection memory (restored on tab change)
    local cur_ns = nil  -- namespace shown last render; detects tab switches
    local p = pane.new(ctx, { id = "interact", title = "Config" })
-   -- Pane emits up to 20 visible rows; reserve ~5 for chrome
-   -- (tabs, scroll indicators, blank line, hints).
-   local body_rows = 15
+   -- Pane emits up to 20 visible rows; reserve ~7 for chrome
+   -- (tabs, subtitle, blank line, scroll indicators, blank line, hints).
+   local body_rows = 13
 
    while true do
       pages = ctx.config.get_pages()
@@ -236,20 +252,22 @@ local function run(ctx, start_ns)
 
       local lines = {}
 
-      -- Styled tabs.
-      local tspans = {}
+      -- Styled tabs with ` │ ` separators.
+      local tspans = { span("  ", COL.dim) }
       for i, pg in ipairs(pages) do
-         if i > 1 then tspans[#tspans + 1] = span("   ", COL.dim) end
+         if i > 1 then tspans[#tspans + 1] = span("  \u{2502}  ", COL.dim) end
          local label = pg.title or pg.namespace
          if i == tab then
-            tspans[#tspans + 1] = span("\u{258c} ", COL.accent, { "bold" })
             tspans[#tspans + 1] = span(label, COL.text, { "bold" })
          else
-            tspans[#tspans + 1] = span("  ", COL.dim)
             tspans[#tspans + 1] = span(label, COL.dim)
          end
       end
       lines[#lines + 1] = line_of(tspans)
+
+      -- Page subtitle + breathing room.
+      lines[#lines + 1] = line_of({ span("  " .. (page.title or ns), COL.dim, { "italic" }) })
+      lines[#lines + 1] = line_of({})
 
       if total == 0 then
          lines[#lines + 1] = line_of({ span(
@@ -257,11 +275,13 @@ local function run(ctx, start_ns)
             COL.dim, { "italic" }
          ) })
       else
+         local pad_w = label_width(rows)
          if first > 1 then
             lines[#lines + 1] = line_of({ span("  \u{2191} " .. (first - 1) .. " more", COL.dim) })
          end
          for i = first, last do
-            lines[#lines + 1] = line_of(row_spans(rows[i], i == sel))
+            local is_sel = i == sel
+            lines[#lines + 1] = line_of(row_spans(rows[i], is_sel, pad_w), is_sel and COL.sel_bg or nil)
          end
          if last < total then
             lines[#lines + 1] = line_of({ span("  \u{2193} " .. (total - last) .. " more", COL.dim) })
@@ -271,7 +291,7 @@ local function run(ctx, start_ns)
       lines[#lines + 1] = line_of({})
       local enter_label = is_providers and "switch provider" or "edit"
       lines[#lines + 1] = line_of({ span(string.format(
-         "\u{2191}\u{2193} move  \u{00b7}  Enter %s  \u{00b7}  \u{2190}\u{2192} switch tab%s  \u{00b7}  Esc exit",
+         "  \u{2191}\u{2193} move  \u{00b7}  Enter %s  \u{00b7}  Tab/\u{2190}\u{2192} switch tab%s  \u{00b7}  Esc exit",
          enter_label, is_providers and "  \u{00b7}  e edit provider" or ""
       ), COL.dim) })
 
@@ -287,9 +307,9 @@ local function run(ctx, start_ns)
          sel = sel > 1 and sel - 1 or math.max(1, total)
       elseif code == "Down" then
          sel = sel < total and sel + 1 or 1
-      elseif code == "Left" then
+      elseif code == "Left" or code == "BackTab" then
          tab = tab > 1 and tab - 1 or #pages
-      elseif code == "Right" then
+      elseif code == "Right" or code == "Tab" then
          tab = tab < #pages and tab + 1 or 1
       elseif code == "PageUp" then
          sel = clamp(sel - 5, 1, math.max(1, total))

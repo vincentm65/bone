@@ -15,6 +15,60 @@ local M = {}
 local SOURCE = "interact"
 local MAX_ROWS = 12
 
+-- Current pane width in columns, or nil when the host can't report it (older
+-- binary lacking `ctx.ui.width`, or not yet drawn). Callers that get nil skip
+-- wrapping and fall back to the single-line behaviour.
+local function pane_width(ctx)
+    if not ctx or not ctx.ui or type(ctx.ui.width) ~= "function" then
+        return nil
+    end
+    local ok, w = pcall(ctx.ui.width)
+    if ok and type(w) == "number" and w > 0 then
+        return math.floor(w)
+    end
+    return nil
+end
+
+-- Iterate the UTF-8 characters of `s` (input fields are usually ASCII, but a
+-- char-aware split keeps multi-byte input from breaking mid-codepoint).
+local function utf8_chars(s)
+    local chars = {}
+    for ch in s:gmatch("[\1-\127\194-\244][\128-\191]*") do
+        chars[#chars + 1] = ch
+    end
+    return chars
+end
+
+-- Wrap `text` into segments of at most `max` characters each, preferring to
+-- break on the last whitespace within the window. Returns { text } unchanged
+-- when `max` is nil/non-positive or the text already fits.
+local function wrap_input(text, max)
+    if not max or max < 1 then return { text } end
+    local chars = utf8_chars(text)
+    if #chars <= max then return { text } end
+
+    local segments = {}
+    local start = 1
+    while start <= #chars do
+        local stop = math.min(start + max - 1, #chars)
+        if stop < #chars then
+            -- Look for a whitespace break inside [start, stop] to avoid
+            -- splitting a word; only honour it when it isn't the very first
+            -- char (which would make no forward progress).
+            for i = stop, start + 1, -1 do
+                if chars[i]:match("%s") then
+                    stop = i
+                    break
+                end
+            end
+        end
+        segments[#segments + 1] = table.concat(chars, "", start, stop)
+        start = stop + 1
+    end
+    if #segments == 0 then segments[1] = "" end
+    return segments
+end
+
 local function normalize_options(options)
     local out = {}
     for i, opt in ipairs(options or {}) do
@@ -70,9 +124,18 @@ local function render_select(p, state)
     end
 
     local total = #state.options
+    -- Custom-input value wraps under the " > Custom: " label (11 cols); compute
+    -- its rows once so both the reserve calc and the render agree.
+    local CUSTOM_LABEL_W = 11
+    local custom_segments
+    if state.allow_custom then
+        custom_segments = wrap_input(state.input, (pane_width(p.ctx) or math.huge) - CUSTOM_LABEL_W)
+    end
+    local custom_rows = custom_segments and math.min(#custom_segments, 4) or 1
     -- Reserve rows for the trailing chrome we render after the options: the
-    -- custom-input line (when enabled) and the hints legend (always).
-    local reserved = (state.allow_custom and 2 or 1) + 1
+    -- hints legend (1) + trailing blank (1) + the custom-input rows (when
+    -- enabled, possibly wrapped to several rows).
+    local reserved = 2 + (state.allow_custom and custom_rows or 0)
     local option_rows = math.max(1, rows_for(state) - #lines - reserved)
     if total > option_rows then
         state.scroll = clamp(state.scroll or 0, 0, math.max(0, total - option_rows))
@@ -121,10 +184,22 @@ local function render_select(p, state)
         local cursor = state.custom_focused and ">" or " "
         local cursor_fg = state.custom_focused and "cyan" or "darkgray"
         local fg = state.custom_focused and "white" or "darkgray"
-        lines[#lines + 1] = line(
-            span(" " .. cursor .. " Custom: ", cursor_fg, { "bold" }),
-            span(state.input .. (state.custom_focused and "█" or ""), fg, state.custom_focused and { "bold" } or {})
-        )
+        local mods = state.custom_focused and { "bold" } or {}
+        for i = 1, custom_rows do
+            local seg = custom_segments[i] or ""
+            if i == custom_rows and #custom_segments > custom_rows then
+                seg = seg .. "…"
+            end
+            -- First row carries the label; continuation rows indent to align
+            -- under the value. The cursor block sits on the last row.
+            local prefix = i == 1 and (" " .. cursor .. " Custom: ")
+                or string.rep(" ", CUSTOM_LABEL_W)
+            local tail = (i == custom_rows and state.custom_focused) and "█" or ""
+            lines[#lines + 1] = line(
+                span(prefix, cursor_fg, { "bold" }),
+                span(seg .. tail, fg, mods)
+            )
+        end
     end
     -- Transient warning (e.g. an empty multi-select submit was blocked).
     if state.notice and state.notice ~= "" then
@@ -270,12 +345,18 @@ function M.text_input(ctx, spec)
     local p = pane.new(ctx, { id = SOURCE, title = spec.title or "Input" })
     local input = tostring(spec.initial or "")
     while true do
-        local lines = {
-            line(span(spec.question or "", "white", { "bold" })),
-            line(span("> " .. input .. "█", "white", { "bold" })),
-            line(span("Enter submit · Esc cancel", "darkgray")),
-            "",
-        }
+        local lines = { line(span(spec.question or "", "white", { "bold" })) }
+        -- Wrap the input under the "> " prefix (2 cols); continuation rows are
+        -- indented to align under the text. The cursor block sits at the end of
+        -- the last wrapped row.
+        local segments = wrap_input(input, (pane_width(ctx) or math.huge) - 2)
+        for i, seg in ipairs(segments) do
+            local prefix = i == 1 and "> " or "  "
+            local tail = i == #segments and "█" or ""
+            lines[#lines + 1] = line(span(prefix .. seg .. tail, "white", { "bold" }))
+        end
+        lines[#lines + 1] = line(span("Enter submit · Esc cancel", "darkgray"))
+        lines[#lines + 1] = ""
         p:set_lines(lines, #lines)
         local key = wait_key(ctx)
         if not key then return { cancelled = true } end

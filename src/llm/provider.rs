@@ -220,6 +220,11 @@ pub trait LlmProvider: Send + Sync {
     /// Change the model to use for subsequent requests.
     fn set_model(&mut self, model: String);
 
+    /// Cap the number of output tokens for subsequent requests. `None` clears
+    /// any cap. Default is a no-op for providers that don't support it; used by
+    /// sub-agent runs (e.g. context compaction) to bound a model's output.
+    fn set_max_tokens(&mut self, _max_tokens: Option<u32>) {}
+
     /// Send messages and stream provider-neutral response events.
     async fn chat_stream(
         &self,

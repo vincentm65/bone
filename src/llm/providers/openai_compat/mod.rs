@@ -24,6 +24,9 @@ pub struct OpenAiCompatProvider {
     endpoint: String,
     id: String,
     label: String,
+    /// Optional cap on output tokens, sent as `max_tokens`. `None` omits the
+    /// field so the server applies its own default.
+    max_tokens: Option<u32>,
 }
 
 impl OpenAiCompatProvider {
@@ -50,6 +53,7 @@ impl OpenAiCompatProvider {
             model: entry.model.clone(),
             api_key: entry.api_key.clone(),
             endpoint: entry.endpoint.clone(),
+            max_tokens: None,
         }
     }
 
@@ -67,6 +71,8 @@ struct ChatRequest {
     tools: Vec<OpenAiTool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -407,6 +413,10 @@ impl LlmProvider for OpenAiCompatProvider {
         self.model = model;
     }
 
+    fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
+        self.max_tokens = max_tokens;
+    }
+
     async fn validate(&self) -> Result<(), LlmError> {
         Ok(())
     }
@@ -429,6 +439,7 @@ impl LlmProvider for OpenAiCompatProvider {
             stream: true,
             tools: openai_tools(tools),
             stream_options,
+            max_tokens: self.max_tokens,
         };
 
         let mut req = self.client.post(self.chat_url()).json(&request);

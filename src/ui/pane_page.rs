@@ -35,7 +35,7 @@ impl PanePage {
             .iter()
             .map(|spec| match spec {
                 PaneLineSpec::Plain(text) => Line::from(text.clone()),
-                PaneLineSpec::Spans { spans } => {
+                PaneLineSpec::Spans { spans, bg } => {
                     let ratatui_spans: Vec<Span<'static>> = spans
                         .iter()
                         .map(|s| {
@@ -59,11 +59,17 @@ impl PanePage {
                             Span::styled(s.text.clone(), style)
                         })
                         .collect();
-                    if ratatui_spans.is_empty() {
+                    let mut line = if ratatui_spans.is_empty() {
                         Line::from("")
                     } else {
                         Line::from(ratatui_spans)
+                    };
+                    if let Some(bg) = bg
+                        && let Some(c) = crate::ui::color::parse_color(bg)
+                    {
+                        line = line.style(Style::default().bg(c));
                     }
+                    line
                 }
             })
             .collect();

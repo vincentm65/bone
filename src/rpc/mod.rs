@@ -170,6 +170,7 @@ pub async fn run_daemon(
                     llm: provider.clone(),
                     session_sink: None,
                     tool_allowlist: None,
+                    max_tokens: None,
                 };
 
                 match crate::agent::run_agent(request).await {

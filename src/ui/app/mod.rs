@@ -720,6 +720,11 @@ impl App {
         // counted in the viewport height.
         self.apply_view_diffs();
         let size = terminal.size()?;
+        // Publish the live terminal width so Lua panes (`ctx.ui.width`) can wrap
+        // text to the current width. Re-read each frame so it tracks resizes.
+        if let Ok(mut ui) = self.extensions.ui_handle().lock() {
+            ui.terminal_width = size.width;
+        }
         let desired = Renderer::desired_height(
             &self.input,
             // Approval prompt is a pane now (counted via `visible_pages`), so the
@@ -734,8 +739,11 @@ impl App {
         // can't reserve more rows than exist, and an oversized inline viewport
         // scrolls and overlaps (duplicated tab bars, status text bleeding into
         // a tall /config menu over a subagent pane). The draw code already
-        // truncates content to its area, so clamping degrades gracefully.
-        .min(size.height.max(1));
+        // truncates content to its area, so clamping degrades gracefully. We
+        // reserve one row above it (`max_viewport_height`) so the viewport never
+        // fills the whole screen and `insert_before` keeps using its robust
+        // partial-screen scroll path.
+        .min(crate::ui::render::max_viewport_height(size.height));
 
         let old_height = self.renderer.viewport_height;
         if desired != old_height {
