@@ -408,6 +408,7 @@ impl App {
         }
 
         // Reabsorb authoritative state from the Driver when it completed.
+        let had_outcome = outcome.is_some();
         if let Some(outcome) = outcome {
             self.transcript = outcome.transcript;
             self.token_stats = outcome.token_stats;
@@ -457,6 +458,18 @@ impl App {
                 self.messages
                     .push(Message::system(format!("⚠ turn failed: {err}")));
             }
+        }
+
+        // On cancellation the driver's authoritative token_stats were
+        // discarded — the transcript reverted to pre-turn state (plus the
+        // user message), but context_length still holds the last completed
+        // request's value. Re-estimate from the current transcript so the
+        // displayed `curr` and the next turn's compaction check see the real
+        // context size instead of a stale overestimate.
+        if !had_outcome {
+            let history = build_chat_history(&self.transcript, None);
+            let prompt_chars = Self::estimate_context_chars(&history, &self.tools.definitions());
+            self.token_stats.set_context_estimate(prompt_chars);
         }
 
         if self.cancel_streaming {
