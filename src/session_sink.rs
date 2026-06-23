@@ -18,9 +18,9 @@
 
 /// Sink for persisting agent conversation turns and token usage.
 ///
-/// All methods take `&self` (the concrete `SessionWriter` opens a fresh DB
-/// connection per call and never mutates its own state), so the trait is
-/// object-safe and shareable via `Arc<dyn SessionSink>`.
+/// All methods take `&self`; the concrete `SessionWriter` holds a single
+/// `Mutex`-guarded connection (write methods lock, mutate, and return `()`),
+/// so the trait is object-safe and shareable via `Arc<dyn SessionSink>`.
 pub trait SessionSink: Send + Sync {
     /// Database conversation id, if a session is open.
     fn conv_id(&self) -> Option<i64>;
@@ -51,6 +51,16 @@ pub trait SessionSink: Send + Sync {
 
     /// Mark the current conversation as ended.
     fn end(&self);
+
+    /// Number of persistence writes that failed since the sink was created.
+    ///
+    /// Write methods never abort a turn on a flaky disk — they log and move
+    /// on. A non-zero count lets a caller (e.g. the TUI) surface to the user
+    /// that recent history may be incomplete. Sinks that cannot fail (e.g.
+    /// [`NullSessionSink`]) return `0`.
+    fn persist_failures(&self) -> u64 {
+        0
+    }
 }
 
 /// A no-op sink that discards everything. `conv_id` is `None`.

@@ -8,15 +8,34 @@ use crate::session_db::{SessionDb, db_path};
 use crate::session_sink::SessionSink;
 use crate::tools::ApprovalMode;
 use crate::tools::registry::ToolHandler;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-/// Thin wrapper around the optional session DB. It stores only Send data so
-/// headless agent futures can run concurrently on the async runtime. Public so
-/// the TUI can hand the runtime `Driver` a sink for its active conversation.
+/// Wraps an open SQLite session connection for the headless agent path.
+///
+/// Previously this reopened the database on *every* `append_message` /
+/// `record_usage` / `end` call. It now holds one [`SessionDb`] (and thus one
+/// `Connection`) behind a `Mutex` — `SessionDb` wraps a rusqlite `Connection`
+/// which is `Send` but not `Sync`, so the lock makes the sink shareable via
+/// `Arc<dyn SessionSink>` and serializes concurrent writers.
+///
+/// The lock recovers poison (`unwrap_or_else(|e| e.into_inner())`) so a panic
+/// while a write is in flight cannot wedge the sink — once `panic = "abort"`
+/// is removed a poisoned lock is otherwise a real failure mode.
+///
+/// Public so the TUI can hand the runtime `Driver` a sink for its active
+/// conversation. The TUI itself does not use this — it owns its own held
+/// `SessionDb` directly.
 pub struct SessionWriter {
-    db_path: PathBuf,
+    /// Lazily opened connection. `None` only when the DB failed to open at
+    /// construction (then `conv_id` is also `None` and every method no-ops).
+    db: Mutex<Option<SessionDb>>,
     conv_id: Option<i64>,
+    /// Count of persistence writes that failed since construction. Surfaced
+    /// via [`SessionSink::persist_failures`] so a caller can warn the user
+    /// that recent history may be incomplete — without aborting the turn on a
+    /// flaky disk (the write methods still return `()`).
+    failures: AtomicU64,
 }
 
 impl SessionWriter {
@@ -36,21 +55,20 @@ impl SessionWriter {
         let Some(conv_id) = self.conv_id else {
             return;
         };
-        match SessionDb::open(&self.db_path) {
-            Ok(db) => {
-                if let Err(e) = db.append_message(
-                    conv_id,
-                    role,
-                    content,
-                    tool_name,
-                    tool_call_id,
-                    tool_calls,
-                    seq,
-                ) {
-                    eprintln!("bone: warning: session db append_message failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("bone: warning: session db append_message failed: {e}"),
+        let guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(db) = guard.as_ref() else {
+            return;
+        };
+        if let Err(e) = db.append_message(
+            conv_id,
+            role,
+            content,
+            tool_name,
+            tool_call_id,
+            tool_calls,
+            seq,
+        ) {
+            self.note_failure("append_message", &e);
         }
     }
 
@@ -68,28 +86,21 @@ impl SessionWriter {
         let Some(conv_id) = self.conv_id else {
             return;
         };
-        match SessionDb::open(&self.db_path) {
-            Ok(db) => {
-                if let Err(e) = db.record_usage(
-                    conv_id,
-                    provider,
-                    model,
-                    prompt_tokens,
-                    completion_tokens,
-                    cached_tokens,
-                    cost,
-                    is_estimated,
-                ) {
-                    eprintln!(
-                        "bone: warning: session db record_usage{} failed: {e}",
-                        if is_estimated { " (estimated)" } else { "" }
-                    );
-                }
-            }
-            Err(e) => eprintln!(
-                "bone: warning: session db record_usage{} failed: {e}",
-                if is_estimated { " (estimated)" } else { "" }
-            ),
+        let guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(db) = guard.as_ref() else {
+            return;
+        };
+        if let Err(e) = db.record_usage(
+            conv_id,
+            provider,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cost,
+            is_estimated,
+        ) {
+            self.note_failure("record_usage", &e);
         }
     }
 
@@ -97,14 +108,20 @@ impl SessionWriter {
         let Some(conv_id) = self.conv_id else {
             return;
         };
-        match SessionDb::open(&self.db_path) {
-            Ok(db) => {
-                if let Err(e) = db.end_conversation(conv_id) {
-                    eprintln!("bone: warning: session db end_conversation failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("bone: warning: session db end_conversation failed: {e}"),
+        let guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(db) = guard.as_ref() else {
+            return;
+        };
+        if let Err(e) = db.end_conversation(conv_id) {
+            self.note_failure("end_conversation", &e);
         }
+    }
+
+    /// Count and log one failed write. Centralized so the call sites stay
+    /// uniform and the counter stays accurate.
+    fn note_failure(&self, op: &str, err: &rusqlite::Error) {
+        self.failures.fetch_add(1, Ordering::Relaxed);
+        eprintln!("bone: warning: session db {op} failed: {err}");
     }
 }
 
@@ -158,6 +175,10 @@ impl SessionSink for SessionWriter {
 
     fn end(&self) {
         SessionWriter::end(self)
+    }
+
+    fn persist_failures(&self) -> u64 {
+        self.failures.load(Ordering::Relaxed)
     }
 }
 
@@ -445,6 +466,12 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         system_prompt_override,
     } = setup;
 
+    // Keep a handle on the session sink so we can surface any persistence
+    // failures after the turn. The Driver consumes its own `Arc` clone; this
+    // one keeps the underlying `SessionWriter` alive (refcount) so the
+    // failure counter is readable once the run returns.
+    let session_report = session.clone();
+
     // The loop itself lives in the core `Driver`. Headless runs use the
     // non-interactive `AutoApprovalGate`; interactive frontends supply their
     // own gate. This is the single agent loop, shared with every frontend.
@@ -469,7 +496,22 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         system_prompt_override,
     };
 
-    driver.run(&request.prompt).await
+    // Snapshot before the turn so an injected sink reused across turns still
+    // reports only this turn's misses (the counter is monotonic).
+    let before = session_report.persist_failures();
+    let result = driver.run(&request.prompt).await;
+
+    // Only the top-level run (depth 0) warns — subagent/compaction runs are
+    // internal and a stderr line would be noise. Best-effort: the turn still
+    // succeeded, so this is a warning, not an error.
+    let failures = session_report.persist_failures().saturating_sub(before);
+    if request.agent_depth == 0 && failures > 0 {
+        eprintln!(
+            "bone: warning: {failures} session write(s) failed this turn; history may be incomplete"
+        );
+    }
+
+    result
 }
 
 pub(crate) fn estimate_tokens(chars: usize) -> u32 {
@@ -501,12 +543,24 @@ pub(crate) fn estimate_context_chars(
 
 fn open_headless_session(provider: &str, model: &str) -> SessionWriter {
     let path = db_path();
-    let conv_id = SessionDb::open(&path)
-        .ok()
-        .and_then(|db| db.create_conversation(provider, model).ok());
+    // Open once and hold the connection for the lifetime of the sink. On any
+    // failure (missing/blocked DB, schema error) we record `None`/`None` and
+    // every write method no-ops, matching the old fall-open-per-write behavior
+    // where a closed DB simply logged and moved on.
+    let (db, conv_id) = match SessionDb::open(&path).and_then(|db| {
+        let id = db.create_conversation(provider, model)?;
+        Ok((db, id))
+    }) {
+        Ok((db, id)) => (Some(db), Some(id)),
+        Err(e) => {
+            eprintln!("bone: warning: session db open failed: {e}");
+            (None, None)
+        }
+    };
     SessionWriter {
-        db_path: path,
+        db: Mutex::new(db),
         conv_id,
+        failures: AtomicU64::new(0),
     }
 }
 

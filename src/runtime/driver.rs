@@ -102,7 +102,50 @@ impl Driver {
     /// reclaimable [`DriverOutcome`]. `prompt` is the initiating user turn
     /// (already present in `history`/`transcript` from setup; passed here for
     /// event/session bookkeeping).
+    ///
+    /// Wraps [`run_to_outcome_inner`] in [`catch_unwind`] so a panic during the
+    /// turn (e.g. an unexpected `unwrap` on a malformed provider/tool response)
+    /// is caught and surfaced as `result: Err(...)` instead of crashing the
+    /// process. The reclaimable state (transcript, token stats, tools) is
+    /// snapshotted from `self` *before* the turn starts so a panicking turn
+    /// returns the pre-turn conversation — the user keeps their history and can
+    /// continue, rather than losing everything to a crash.
+    ///
+    /// Note: SQLite rows written before the panic are not rolled back, so the
+    /// DB may contain more entries than the returned transcript.
+    ///
+    /// [`catch_unwind`]: futures_util::FutureExt::catch_unwind
     pub async fn run_to_outcome(self, prompt: &str) -> DriverOutcome {
+        // Snapshot the reclaimable state now, before ownership moves into the
+        // inner future. On panic the inner locals are lost to unwinding, so
+        // without this the TUI would receive empty state and wipe the
+        // conversation transcript.
+        let transcript = self.transcript.clone();
+        let token_stats = self.token_stats.clone();
+        let tools = self.tools.clone();
+
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+        match AssertUnwindSafe(self.run_to_outcome_inner(prompt))
+            .catch_unwind()
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                let msg = super::panic_message(&*payload);
+                eprintln!("bone: agent turn panicked: {msg}");
+                DriverOutcome {
+                    result: Err(format!("agent turn panicked: {msg}")),
+                    tools,
+                    transcript,
+                    token_stats,
+                    usage: Vec::new(),
+                }
+            }
+        }
+    }
+
+    async fn run_to_outcome_inner(self, prompt: &str) -> DriverOutcome {
         let Driver {
             llm,
             extensions,

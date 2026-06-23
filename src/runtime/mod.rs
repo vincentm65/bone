@@ -18,3 +18,13 @@ pub use event::{
     ApprovalRequest, ChannelApprovalGate, KeyReplyRegistry, RuntimeCommand, RuntimeEvent,
 };
 pub use view::{Component, ViewDiff, ViewModel};
+
+/// Best-effort `String` from a panic payload (`&str`, `String`, or other),
+/// returning a placeholder for non-string payloads.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&'static str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_string())
+}

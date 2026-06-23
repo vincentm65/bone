@@ -2,6 +2,27 @@ use bone::config::{UserConfig, custom::CustomConfigs};
 use bone::llm::providers;
 use bone::run;
 use bone::ui::app::App;
+
+/// Wrap a future so a panic inside it is logged instead of silently killing
+/// the spawned task.
+///
+/// Now that `panic = "abort"` is gone, an unguarded `tokio::spawn` task that
+/// panics simply vanishes — the JoinHandle is never awaited, so nothing
+/// surfaces the death. This helper turns those silent deaths into a visible
+/// `eprintln!` so the operator at least knows *which* task died.
+async fn panic_guard<F>(label: &'static str, fut: F)
+where
+    F: std::future::Future,
+{
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
+    if let Err(payload) = AssertUnwindSafe(fut).catch_unwind().await {
+        eprintln!(
+            "bone: fatal: {label} task panicked: {}",
+            bone::runtime::panic_message(&*payload)
+        );
+    }
+}
 struct CliOptions {
     provider: Option<String>,
     model: Option<String>,
@@ -225,25 +246,36 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         std::sync::Arc::from(provider);
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
-    tokio::spawn(bone::rpc::run_daemon(
+    // Keep the handle so a panicking daemon tears the server down instead of
+    // leaving a zombie listener that silently drops every client's command.
+    let mut daemon = tokio::spawn(panic_guard("daemon", bone::rpc::run_daemon(
         hub.clone(),
         commands_rx,
         Some(provider),
         bone::tools::ApprovalMode::Safe,
-    ));
+    )));
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");
     loop {
-        let (stream, peer) = listener.accept().await?;
-        eprintln!("bone: client attached: {peer}");
-        let hub = hub.clone();
-        tokio::spawn(async move {
-            if let Err(e) = bone::rpc::serve_connection(stream, hub, Vec::new()).await {
-                eprintln!("bone: client {peer} ended: {e}");
+        tokio::select! {
+            res = listener.accept() => {
+                let (stream, peer) = res?;
+                eprintln!("bone: client attached: {peer}");
+                let hub = hub.clone();
+                tokio::spawn(panic_guard("client", async move {
+                    if let Err(e) = bone::rpc::serve_connection(stream, hub, Vec::new()).await {
+                        eprintln!("bone: client {peer} ended: {e}");
+                    }
+                }));
             }
-        });
+            _ = &mut daemon => {
+                eprintln!("bone: daemon exited; shutting down server");
+                break;
+            }
+        }
     }
+    Ok(())
 }
 
 /// `bone connect` — a minimal RPC frontend: each stdin line is a prompt; every
@@ -255,7 +287,7 @@ async fn run_connect(args: &[String]) -> std::io::Result<()> {
     let stream = tokio::net::TcpStream::connect(&addr).await?;
     let (read_half, mut write_half) = tokio::io::split(stream);
 
-    tokio::spawn(async move {
+    tokio::spawn(panic_guard("connect-reader", async move {
         let mut reader = bone::rpc::codec::MessageReader::new(read_half);
         while let Some(result) = reader.read::<bone::runtime::RuntimeEvent>().await {
             match result {
@@ -264,7 +296,7 @@ async fn run_connect(args: &[String]) -> std::io::Result<()> {
             }
         }
         eprintln!("bone: server closed connection");
-    });
+    }));
 
     eprintln!("bone: connected to {addr}; type a prompt and press enter.");
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();

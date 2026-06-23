@@ -123,7 +123,7 @@ impl JobRegistry {
             cancel_flag,
         } = job;
         let now = current_unix_seconds();
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let running_for_agent = jobs
             .iter()
             .filter(|j| j.status == JobStatus::Running && j.agent == agent)
@@ -178,7 +178,7 @@ impl JobRegistry {
         };
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
             job.status = status;
             job.result = Some(result);
@@ -192,7 +192,7 @@ impl JobRegistry {
 
     /// Update token counts for a running job.
     pub fn update_tokens(&self, id: &str, sent: u64, received: u64) {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = jobs.iter_mut().find(|j| j.id == id)
             && (job.token_sent != sent || job.token_received != received)
         {
@@ -219,7 +219,7 @@ impl JobRegistry {
         };
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
             job.status = status;
             job.result = Some(result);
@@ -235,7 +235,7 @@ impl JobRegistry {
 
     /// IDs of all currently running jobs.
     pub fn running_ids(&self) -> Vec<String> {
-        let jobs = self.jobs.lock().unwrap();
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.iter()
             .filter(|j| j.status == JobStatus::Running)
             .map(|j| j.id.clone())
@@ -244,7 +244,7 @@ impl JobRegistry {
 
     /// Clones of all currently running jobs.
     pub fn running_jobs(&self) -> Vec<Job> {
-        let jobs = self.jobs.lock().unwrap();
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.iter()
             .filter(|j| j.status == JobStatus::Running)
             .cloned()
@@ -264,7 +264,7 @@ impl JobRegistry {
         cancelled: Option<&AtomicBool>,
     ) -> WaitOutcome {
         let deadline = Instant::now() + timeout;
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             let pending: Vec<String> = jobs
                 .iter()
@@ -307,28 +307,28 @@ impl JobRegistry {
             let (guard, _) = self
                 .completed
                 .wait_timeout(jobs, Duration::from_millis(100))
-                .unwrap();
+                .unwrap_or_else(|e| e.into_inner());
             jobs = guard;
         }
     }
 
     /// Snapshot of all jobs as a JSON array.
     pub fn snapshot(&self) -> serde_json::Value {
-        let jobs = self.jobs.lock().unwrap();
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let array: Vec<_> = jobs.iter().cloned().collect();
         serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
     }
 
     /// Clones of all jobs (e.g. for the Rust-side pane renderer).
     pub fn all_jobs(&self) -> Vec<Job> {
-        self.jobs.lock().unwrap().clone()
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Peek at all unconsumed finished jobs without marking them consumed.
     /// Call [`JobRegistry::mark_consumed`] after the results have actually
     /// been delivered (e.g. injected into the conversation).
     pub fn peek_finished_unconsumed(&self) -> Vec<Job> {
-        let jobs = self.jobs.lock().unwrap();
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let mut finished: Vec<Job> = jobs
             .iter()
             .filter(|j| {
@@ -343,7 +343,7 @@ impl JobRegistry {
     /// Cancel a job by setting its cancel flag. Returns `true` if the id was
     /// found. The running task observes the flag and aborts at its next await.
     pub fn cancel(&self, id: &str) -> bool {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
             return false;
         };
@@ -359,7 +359,7 @@ impl JobRegistry {
 
     /// Mark the given job ids as consumed. Bumps the version if any changed.
     pub fn mark_consumed(&self, ids: &[String]) {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let mut any = false;
         for job in jobs.iter_mut() {
             if !job.consumed && ids.contains(&job.id) {
