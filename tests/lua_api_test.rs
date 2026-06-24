@@ -173,8 +173,6 @@ fn default_tools_boot_cleanly() {
 
     // Verify default tools are registered (at least the ones we ship).
     let defs = booted.tools.definitions();
-    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-
     for def in &defs {
         assert_no_boolean_required(&def.input_schema, &format!("tool schema for {}", def.name));
     }

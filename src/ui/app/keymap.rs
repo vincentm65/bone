@@ -120,6 +120,14 @@ fn arboard_clipboard_image() -> Result<crate::llm::ImageData, String> {
     Ok(png_image_data(png_bytes))
 }
 
+#[cfg(not(target_os = "android"))]
+fn png_image_data(png_bytes: Vec<u8>) -> crate::llm::ImageData {
+    crate::llm::ImageData {
+        media_type: "image/png".to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(png_bytes),
+    }
+}
+
 fn external_clipboard_image() -> Result<crate::llm::ImageData, String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         if let Ok(image) = run_clipboard_command("wl-paste", &["--type", "image/png"]) {
