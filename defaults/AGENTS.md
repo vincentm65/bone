@@ -6,9 +6,10 @@ All file paths below are relative to the bone config directory. The resolved pat
 
 ```
 init.lua              — Lua configuration and customization (optional)
-lua/tools/            — Custom Lua tools
-lua/commands/         — Custom Lua commands
+lua/tools/            — Custom + catalog Lua tools (installed via /catalog)
+lua/commands/         — Custom + bundled Lua commands
 lua/plugins/          — Lua plugins (optional)
+lua/lib/              — Lua library modules (optional, bundled: history.lua, ui/)
 providers.yaml        — LLM provider entries
 command-policy.yaml   — Shell command safety tiers
 memory.md             — User preferences (auto-maintained by /memory)
@@ -281,7 +282,7 @@ local outcome = ctx.agent.wait({ "job-1", "job-2" }, { timeout_ms = 300000 })
 
 **The `subagent` tool** (auto-created when agents are registered) exposes this to the main agent as three actions: `dispatch` (with optional `wait=true` for dependent work), `wait` (collect pending results), and `status` (non-blocking snapshot). The intended workflow: batch independent tasks into one dispatch; wait when the next step depends on results; otherwise end the turn and let results auto-inject.
 
-Existing user config files are not overwritten when default Lua tools are seeded. Users with an older `lua/tools/subagent.lua` may still have JSON-shaped return strings or the removed `bone._subagents_render` hook; copy the current bundled tool if they want the Rust-rendered pane and updated dispatch behavior.
+Existing user config files are not overwritten when catalog items are installed. If you need the latest version of a catalog tool, run `/catalog` to re-install it.
 
 #### Usage Snapshot
 
@@ -295,9 +296,56 @@ local u = ctx.usage.snapshot()
 ```
 Returns `nil` if usage data is unavailable in the current context.
 
-## Pre-Seeded Tools
+## Tools
 
-These tools are bundled with bone and seeded to `lua/tools/` on first launch.
+Bone has two categories of tools:
+
+### Native Rust Tools (always available)
+
+These are compiled into bone and do not require any seeding or installation:
+
+- **shell** — Run a non-interactive shell command with bash -lc
+- **read_file** — Read a UTF-8 text file
+- **write_file** — Create a new UTF-8 text file
+- **edit_file** — Edit an existing file (search+replace, edits[], rewrite)
+
+### Catalog Lua Tools (optional, installed via `/catalog`)
+
+Optional Lua tools live in the [`bone-catalog`](https://github.com/vincentm65/bone-catalog) repository. They are fetched from raw GitHub content at `https://raw.githubusercontent.com/vincentm65/bone-catalog/main` (overridable via `BONE_CATALOG_URL`) and installed into `~/.bone-rust/lua/tools/` on demand — during onboarding or via the `/catalog` command. Once on disk they are loaded by the normal Lua loader like any user file.
+
+Installed catalog tools:
+
+- **web_search** — Search the web via DuckDuckGo
+- **ask_user** — Ask the user a question with selectable options
+- **task_list** — Maintain a visible checklist with TUI pane rendering
+- **cron** — Manage scheduled bone jobs via crontab
+- **browser** — Drive a real Chromium browser over CDP (Playwright via uv)
+
+To browse and install catalog tools interactively, run `/catalog` in the TUI. To override the catalog source URL, set the `BONE_CATALOG_URL` environment variable to an `http(s)://` base or a local filesystem path.
+
+### Native Rust Tool Details
+
+```lua
+-- Native Rust tool, not Lua. Called by the LLM directly.
+-- Parameters: command (string, required), classification (string: "read_only" or "danger"), timeout_ms (integer, optional)
+```
+
+```lua
+-- Native Rust tool. Parameters: path, start_line?, max_lines?
+```
+
+```lua
+-- Native Rust tool. Parameters: path, content
+```
+
+```lua
+-- Native Rust tool. Parameters: path, search?, replace?, edits?, mode?, content?, expected_hash?
+```
+
+### Lua Tool Details
+
+#### web_search
+Search the web via DuckDuckGo. Requires `uv` and the `ddgs` Python package.
 
 ### shell (native Rust)
 Run a non-interactive shell command with bash -lc. Returns exit code, stdout, and stderr.
@@ -419,24 +467,27 @@ bone.register_tool({
 ```
 
 ### browser (Lua)
-Drive a real Chromium over a persistent CDP daemon (Playwright via `uv`). One
-`start` spawns a background Chromium bound to a remote-debugging port; subsequent
-actions connect over CDP, reuse the live page, and disconnect only (never
-`browser.close()`). Call `stop` when done. Requires `uv` and the `playwright`
-Python package plus the bundled Chromium in `~/.cache/ms-playwright`.
+Drive a real Chromium (always headful) over a persistent CDP daemon (Playwright
+via `uv`). The daemon auto-starts on the first page action and stays alive across
+calls (fast, keeps page state); actions connect over CDP, reuse the live page, and
+disconnect only (never `browser.close()`). `navigate`, `observe`, `click`, and
+`type` each return a page snapshot (url, title, text excerpt, indexed interactive
+elements), so one call yields both the result and the resulting page. Call `stop`
+when done. Requires `uv` and the `playwright` Python package plus the bundled
+Chromium in `~/.cache/ms-playwright` (the very first `start` may download it).
 ```lua
 bone.register_tool({
     name = "browser",
-    description = "Drive a real web browser (Chromium) over a persistent CDP daemon...",
+    description = "Drive a real web browser (Chromium, always headful) over a persistent CDP daemon...",
     parameters = {
         type = "object",
         properties = {
-            action = { type = "string", enum = { "start", "stop", "status", "navigate", "text", "interactive", "click", "type", "eval", "wait", "screenshot", "back", "forward", "reload" } },
+            action = { type = "string", enum = { "navigate", "observe", "click", "type", "eval", "wait", "screenshot", "start", "stop", "status" } },
             url = { type = "string", description = "URL for navigate." },
-            selector = { type = "string", description = "Playwright selector for text/interactive/click/type/wait/screenshot." },
+            selector = { type = "string", description = "Playwright selector for click/type/wait/screenshot." },
+            target = { type = "number", description = "Element index from a snapshot; alternative to selector for click/type." },
             text = { type = "string", description = "Value to type (action=type), or text to wait for (action=wait)." },
             script = { type = "string", description = "JS expression for eval." },
-            headless = { type = "boolean", description = "start only: run headless (default true)." },
             full = { type = "boolean", description = "screenshot only: capture full page (default false)." },
             path = { type = "string", description = "screenshot only: output PNG path." },
             timeout_ms = { type = "number", description = "Per-action timeout in ms (default 30000)." },
@@ -449,7 +500,7 @@ bone.register_tool({
 })
 ```
 
-## Pre-Seeded Commands
+## Commands
 
 ### /compact
 
@@ -480,15 +531,30 @@ Auto-compaction announces itself to the attached frontend via `ctx.ui.notice` (a
 
 **Implementation:** entirely in Lua. Rust provides only the generic APIs (`ctx.conversation`, `before_turn`, `conversation.replace` action).
 
+### /config
+
+Open the interactive config editor. See [Config, Theme, and Keymaps](#config-theme-and-keymaps) for the full API.
+
+### /customize
+
+Quick-start guide for customizing bone — describes configs, commands, tools, and the `ctx` API.
+
 ### /memory
+
 Incremental memory builder. Processes all conversations since last run and updates `memory.md`. If `memory.md` exists in the config directory, its contents are loaded into every conversation's system prompt.
+
+Available via the `bone-catalog` repo — install with `/catalog` or manually fetch from `https://raw.githubusercontent.com/vincentm65/bone-catalog/main/commands/memory.lua` into `~/.bone-rust/lua/commands/`.
 
 Run manually with `/memory`, or schedule daily:
 ```
 cron(action=add, name=memory, time=03:00, approval=danger, prompt=/memory)
 ```
 
-Disable by removing `lua/commands/memory.lua` from the config directory.
+### /usage
+
+Show token usage stats for the current session.
+
+
 
 ## Creating Custom Tools
 

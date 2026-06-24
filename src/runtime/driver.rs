@@ -183,7 +183,16 @@ impl Driver {
 
         let mut session_seq = 0i64;
         let mut usage_records: Vec<UsageRecord> = Vec::new();
-        session.append_message("user", prompt, None, None, None, session_seq);
+        if !prompt.is_empty()
+            || transcript
+                .last()
+                .is_none_or(|m| m.role != crate::llm::ChatRole::User)
+        {
+            let message = ChatMessage::new(crate::llm::ChatRole::User, prompt);
+            history.push(message.clone());
+            transcript.push(message);
+        }
+        session.append_message("user", prompt, None, None, None, None, session_seq);
 
         // Rich frontend event stream (best-effort; ignored if no consumer).
         let remit = |event: RuntimeEvent| {
@@ -513,7 +522,15 @@ impl Driver {
                 }
                 transcript.push(assistant);
                 session_seq += 1;
-                session.append_message("assistant", &assistant_text, None, None, None, session_seq);
+                session.append_message(
+                    "assistant",
+                    &assistant_text,
+                    None,
+                    None,
+                    None,
+                    None,
+                    session_seq,
+                );
                 break Ok(assistant_text);
             }
 
@@ -536,6 +553,7 @@ impl Driver {
                 None,
                 None,
                 tool_calls_json.as_deref(),
+                None,
                 session_seq,
             );
 
@@ -594,11 +612,33 @@ impl Driver {
                     Some(&result.name),
                     Some(&result.call_id),
                     None,
+                    None,
                     session_seq,
                 );
                 let message = ChatMessage::tool(result.clone());
                 history.push(message.clone());
                 transcript.push(message);
+
+                // The OpenAI wire format cannot carry images in a tool-role
+                // message, so relay any tool-returned images to vision-capable
+                // models as a follow-up user message.
+                if !result.images.is_empty() {
+                    let note = format!("Image output from {}:", result.name);
+                    let images_json = serde_json::to_string(&result.images).ok();
+                    session_seq += 1;
+                    session.append_message(
+                        "user",
+                        &note,
+                        None,
+                        None,
+                        None,
+                        images_json.as_deref(),
+                        session_seq,
+                    );
+                    let relay = ChatMessage::user_with_images(note, result.images.clone());
+                    history.push(relay.clone());
+                    transcript.push(relay);
+                }
             }
         };
 
@@ -675,6 +715,7 @@ pub(crate) async fn execute_tool_calls(
                         call_id: call.id.clone(),
                         name: call.name.clone(),
                         content: reason,
+                        images: Vec::new(),
                         is_error: true,
                         pane_page: None,
                         state: None,
@@ -689,6 +730,7 @@ pub(crate) async fn execute_tool_calls(
                         call_id: call.id.clone(),
                         name: call.name.clone(),
                         content: crate::tools::denied_message(*mode, safety),
+                        images: Vec::new(),
                         is_error: true,
                         pane_page: None,
                         state: None,

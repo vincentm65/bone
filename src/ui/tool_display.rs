@@ -26,6 +26,7 @@ pub fn build_tool_row(
             label,
             is_error: result.is_error,
         }),
+        image_count: result.images.len(),
     }
 }
 

@@ -660,10 +660,7 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     // every frame), so interactive panes can wrap text to the live width.
     if let Some(ui_state) = cfg.ui.clone() {
         let width_fn = lua.create_function(move |_, _: ()| {
-            let width = ui_state
-                .lock()
-                .map(|ui| ui.terminal_width)
-                .unwrap_or(0);
+            let width = ui_state.lock().map(|ui| ui.terminal_width).unwrap_or(0);
             Ok(width)
         })?;
         ui_table.set("width", width_fn)?;
@@ -991,6 +988,22 @@ fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
                         tc_table.push(tc)?;
                     }
                     t.set("tool_calls", tc_table)?;
+                }
+                if let Some(ref img_json) = msg.images
+                    && let Ok(img_vec) = serde_json::from_str::<Vec<serde_json::Value>>(img_json)
+                {
+                    let img_table = lua.create_table()?;
+                    for img_val in img_vec {
+                        let img = lua.create_table()?;
+                        if let Some(mt) = img_val.get("media_type") {
+                            img.set("media_type", lua.to_value(mt)?)?;
+                        }
+                        if let Some(data) = img_val.get("data") {
+                            img.set("data", lua.to_value(data)?)?;
+                        }
+                        img_table.push(img)?;
+                    }
+                    t.set("images", img_table)?;
                 }
                 result.push(t)?;
             }

@@ -49,7 +49,11 @@ impl CatalogEntry {
 
     /// Directory segment under `lua/` and the catalog, e.g. `"tools"`.
     fn dir_segment(&self) -> &'static str {
-        if self.is_command() { "commands" } else { "tools" }
+        if self.is_command() {
+            "commands"
+        } else {
+            "tools"
+        }
     }
 }
 
@@ -103,7 +107,9 @@ fn cache_dir() -> PathBuf {
 }
 
 fn lua_dir(entry: &CatalogEntry) -> PathBuf {
-    crate::config::bone_dir().join("lua").join(entry.dir_segment())
+    crate::config::bone_dir()
+        .join("lua")
+        .join(entry.dir_segment())
 }
 
 fn parse_index(bytes: &[u8]) -> Option<Vec<CatalogEntry>> {
@@ -192,9 +198,11 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     }
 
     let dir = lua_dir(entry);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let path = dir.join(&entry.name);
-    std::fs::write(&path, &bytes).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    std::fs::write(&path, &bytes)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
 
     let mut installed = load_installed();
     installed.insert(entry.name.clone(), entry.version);

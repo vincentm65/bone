@@ -25,7 +25,7 @@ local guide = [[
 
   ~D~════ ~C~Commands~R~ ~D~═══════════════════════════════~R~
   ~D~Lua scripts in lua/commands/ — slash commands like~R~
-  ~D~/compact or /memory, run on demand from the chat.~R~
+  ~D~/compact or /memory (via catalog), run on demand from the chat.~R~
 
     rename / rework bundled commands
     add your own — /release, /git-status, /find-dead-code

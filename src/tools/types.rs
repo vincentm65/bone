@@ -22,6 +22,11 @@ pub struct ToolResult {
     pub call_id: String,
     pub name: String,
     pub content: String,
+    /// Image attachments produced by the tool (e.g. reading an image file).
+    /// Relayed to vision-capable models as a follow-up user message, since the
+    /// OpenAI wire format cannot carry images in a `tool`-role message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::llm::ImageData>,
     pub is_error: bool,
     /// Optional pane content to display in the bottom pane.
     /// Not serialized — this is a UI-only field.
@@ -63,6 +68,8 @@ pub struct ToolDisplayConfig {
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub content: String,
+    /// Image attachments produced by the tool. Carried into [`ToolResult`].
+    pub images: Vec<crate::llm::ImageData>,
     pub pane_page: Option<PaneContent>,
     /// Optional session state to store in ToolStateMap (not sent to LLM).
     pub state: Option<String>,
@@ -98,6 +105,17 @@ impl ToolOutput {
     pub fn text(content: String) -> Self {
         Self {
             content,
+            images: Vec::new(),
+            pane_page: None,
+            state: None,
+        }
+    }
+
+    /// A tool output carrying image attachments alongside its text.
+    pub fn with_images(content: String, images: Vec<crate::llm::ImageData>) -> Self {
+        Self {
+            content,
+            images,
             pane_page: None,
             state: None,
         }

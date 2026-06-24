@@ -22,6 +22,7 @@ pub fn assistant_markdown_to_lines(content: &str, width: u16) -> Vec<Line<'stati
 pub fn render_tool(
     tool: &ToolDisplay,
     content: &str,
+    image_count: usize,
     theme: &Theme,
     lines: &mut Vec<Line<'static>>,
     width: usize,
@@ -63,6 +64,19 @@ pub fn render_tool(
                     Style::default().fg(theme.system_msg),
                 )));
             }
+        }
+    }
+    if image_count > 0 {
+        for idx in 1..=image_count {
+            let label = if image_count == 1 {
+                "  image (PNG)".to_string()
+            } else {
+                format!("  image {idx} (PNG)")
+            };
+            lines.push(Line::from(Span::styled(
+                label,
+                Style::default().fg(theme.system_msg),
+            )));
         }
     }
 }
@@ -246,6 +260,21 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
                     )));
                 }
             }
+            for idx in 1..=msg.image_count {
+                let label = if msg.image_count == 1 {
+                    "image (PNG)".to_string()
+                } else {
+                    format!("image {idx} (PNG)")
+                };
+                for visual_line in
+                    wrap_user_line(&label, msg.content.is_empty() && idx == 1, width as usize)
+                {
+                    lines.push(Line::from(Span::styled(
+                        visual_line,
+                        Style::default().fg(theme.user_msg).bg(theme.user_msg_bg),
+                    )));
+                }
+            }
         }
         ChatRole::Assistant => {
             let rendered = markdown::render_markdown(&msg.content, width);
@@ -289,7 +318,7 @@ pub fn msg_to_lines(
     for msg in msgs {
         // Skip invisible placeholders (e.g., empty assistant messages between
         // tool rounds) so they don't inject extra blank-line gaps.
-        if msg.tool.is_none() && msg.content.is_empty() {
+        if msg.tool.is_none() && msg.content.is_empty() && msg.image_count == 0 {
             prev_role = Some(msg.role);
             continue;
         }
@@ -299,7 +328,14 @@ pub fn msg_to_lines(
         }
 
         if let Some(tool) = &msg.tool {
-            render_tool(tool, &msg.content, theme, &mut lines, width as usize);
+            render_tool(
+                tool,
+                &msg.content,
+                msg.image_count,
+                theme,
+                &mut lines,
+                width as usize,
+            );
         } else {
             render_content(msg, theme, &mut lines, width);
         }

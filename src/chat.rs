@@ -35,6 +35,7 @@ pub struct Message {
     pub content: String,
     /// Present when this message represents a tool call or result.
     pub tool: Option<ToolDisplay>,
+    pub image_count: usize,
 }
 
 impl Message {
@@ -44,6 +45,17 @@ impl Message {
             role: ChatRole::User,
             content: content.into(),
             tool: None,
+            image_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn user_with_images(content: impl Into<String>, image_count: usize) -> Self {
+        Self {
+            role: ChatRole::User,
+            content: content.into(),
+            tool: None,
+            image_count,
         }
     }
 
@@ -53,6 +65,7 @@ impl Message {
             role: ChatRole::Assistant,
             content: content.into(),
             tool: None,
+            image_count: 0,
         }
     }
 
@@ -62,6 +75,7 @@ impl Message {
             role: ChatRole::System,
             content: content.into(),
             tool: None,
+            image_count: 0,
         }
     }
 
@@ -71,6 +85,7 @@ impl Message {
             role: ChatRole::Tool,
             content: String::new(),
             tool: Some(ToolDisplay { label, is_error }),
+            image_count: 0,
         }
     }
 
@@ -84,6 +99,7 @@ impl Message {
                 label: format!("shell: {command}"),
                 is_error,
             }),
+            image_count: 0,
         }
     }
 }

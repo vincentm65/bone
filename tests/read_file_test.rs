@@ -75,3 +75,22 @@ async fn start_line_beyond_file_returns_empty() {
     assert_eq!(result, "");
     let _ = fs::remove_file(&path).await;
 }
+
+#[tokio::test]
+async fn png_returns_image_output() {
+    let dir = common::temp_dir("read-file-image");
+    fs::create_dir_all(&dir).await.expect("setup dir");
+    let path = dir.join("image.png");
+    fs::write(&path, [137, 80, 78, 71]).await.expect("setup");
+    let tool = ReadFileTool;
+
+    let result = tool
+        .execute_output(json!({ "path": path }))
+        .await
+        .expect("read image should succeed");
+
+    assert_eq!(result.images.len(), 1);
+    assert_eq!(result.images[0].media_type, "image/png");
+    assert!(result.content.contains("image/png"));
+    let _ = fs::remove_dir_all(&dir).await;
+}

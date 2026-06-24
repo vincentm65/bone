@@ -18,7 +18,7 @@ use crate::config::{self, InitChoice, SetupSelection};
 use crate::ext::catalog::{self, CatalogEntry};
 use crate::ui::catalog as catalog_ui;
 use crate::ui::fullscreen::{self, FullscreenTerminal};
-use crate::ui::picker::{self, Item, ACCENT, BG, BORDER, DIM, GOOD, MUTED, TEXT};
+use crate::ui::picker::{self, ACCENT, BG, BORDER, DIM, GOOD, Item, MUTED, TEXT};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -404,7 +404,10 @@ fn draw_welcome(frame: &mut ratatui::Frame, area: Rect) {
         )),
         Line::from(""),
         bullet("Provider", "Pick one and drop in an API key (optional)."),
-        bullet("Catalog", "Optional tools & commands, downloaded on demand."),
+        bullet(
+            "Catalog",
+            "Optional tools & commands, downloaded on demand.",
+        ),
         bullet("init.lua", "Startup script — banner, sub-agents, hooks."),
         Line::from(""),
         Line::from(Span::styled(
@@ -468,7 +471,10 @@ fn draw_provider(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         let selected = i == state.provider_cursor;
         let marker = if selected { " ● " } else { " ○ " };
         list_lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(if selected { GOOD } else { DIM })),
+            Span::styled(
+                marker,
+                Style::default().fg(if selected { GOOD } else { DIM }),
+            ),
             Span::styled(
                 label.clone(),
                 if selected {
@@ -546,7 +552,10 @@ fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         let selected = i == state.init_cursor;
         let marker = if selected { " ● " } else { " ○ " };
         list_lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(if selected { GOOD } else { DIM })),
+            Span::styled(
+                marker,
+                Style::default().fg(if selected { GOOD } else { DIM }),
+            ),
             Span::styled(
                 label.to_string(),
                 if selected {
@@ -572,12 +581,14 @@ fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         Vec::new()
     };
     frame.render_widget(
-        Paragraph::new(detail_lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::LEFT)
-                .border_style(Style::default().fg(BORDER))
-                .padding(ratatui::widgets::Padding::horizontal(2)),
-        ),
+        Paragraph::new(detail_lines)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::LEFT)
+                    .border_style(Style::default().fg(BORDER))
+                    .padding(ratatui::widgets::Padding::horizontal(2)),
+            ),
         cols[1],
     );
 }
@@ -625,7 +636,10 @@ fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State) {
 fn summary(head: &str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {head:<10} "), Style::default().fg(MUTED)),
-        Span::styled(value, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            value,
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 
@@ -634,9 +648,15 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     let mut push = |k: &str, label: &str| {
         keys.push(Span::styled(
             format!(" {k} "),
-            Style::default().fg(BG).bg(MUTED).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(BG)
+                .bg(MUTED)
+                .add_modifier(Modifier::BOLD),
         ));
-        keys.push(Span::styled(format!(" {label}   "), Style::default().fg(DIM)));
+        keys.push(Span::styled(
+            format!(" {label}   "),
+            Style::default().fg(DIM),
+        ));
     };
 
     let cancel_label = if state.fresh { "skip" } else { "cancel" };
@@ -672,11 +692,13 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(keys)).alignment(Alignment::Left).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(BORDER)),
-        ),
+        Paragraph::new(Line::from(keys))
+            .alignment(Alignment::Left)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(BORDER)),
+            ),
         area,
     );
 }

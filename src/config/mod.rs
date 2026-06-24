@@ -270,7 +270,6 @@ pub fn seed_all_with(selection: Option<&SetupSelection>) {
     ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), allow.as_ref(), false);
 }
 
-
 /// Seed using whatever selection is persisted on disk (or all, if none).
 pub fn seed_all_with_persisted() {
     seed_all_with(load_setup_selection().as_ref());
@@ -308,7 +307,11 @@ pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io
     }
 
     seed_base();
-    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), Some(&selection.tool_set()), false);
+    ext::seed_default_lua_tools(
+        &bone_dir().join("lua/tools"),
+        Some(&selection.tool_set()),
+        false,
+    );
     ext::seed_default_lua_commands(
         &bone_dir().join("lua/commands"),
         Some(&selection.command_set()),

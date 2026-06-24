@@ -88,8 +88,6 @@ pub struct Renderer {
     /// Byte offset of the current streaming assistant message already flushed
     /// to native scrollback via insert_before.
     pub streaming_source_flushed: usize,
-    /// Number of stable rendered lines already inserted for the current response.
-    pub streaming_lines_flushed: usize,
     /// Terminal size at last successful draw (for stale-size detection).
     pub last_size: Option<(u16, u16)>,
     /// Current inline viewport height (resized dynamically).
@@ -113,7 +111,6 @@ impl Renderer {
             theme: Theme::default(),
             scrollback_cursor: 0,
             streaming_source_flushed: 0,
-            streaming_lines_flushed: 0,
             last_size: None,
             viewport_height: MIN_ROWS,
             scrollback_last_blank: false,
@@ -371,17 +368,7 @@ impl Renderer {
         content: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        let safe_end = safe_markdown_prefix_end(content);
-        if safe_end > self.streaming_source_flushed {
-            let width = term.size()?.width.max(1);
-            let rendered = messages::assistant_markdown_to_lines(&content[..safe_end], width);
-            if self.streaming_lines_flushed < rendered.len() {
-                self.insert_lines_to_scrollback(term, &rendered[self.streaming_lines_flushed..])?;
-                self.streaming_lines_flushed = rendered.len();
-            }
-            self.streaming_source_flushed = safe_end;
-        }
-        Ok(())
+        self.flush_fragment(content, safe_markdown_prefix_end(content), term)
     }
 
     /// Flush all remaining lines from the streaming message, including
@@ -392,14 +379,36 @@ impl Renderer {
         content: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        let width = term.size()?.width.max(1);
-        let rendered = messages::assistant_markdown_to_lines(content, width);
-        if self.streaming_lines_flushed < rendered.len() {
-            self.insert_lines_to_scrollback(term, &rendered[self.streaming_lines_flushed..])?;
-        }
-        self.streaming_source_flushed = content.len();
-        self.streaming_lines_flushed = rendered.len();
+        self.flush_fragment(content, content.len(), term)
+    }
 
+    /// Render `content[streaming_source_flushed..end]` as a standalone block
+    /// fragment and push it to scrollback. `end` is always a block boundary
+    /// (`safe_markdown_prefix_end` while streaming, `content.len()` at finalize),
+    /// so the slice renders identically to the same span inside a full-message
+    /// render — except for the inter-block blank that `render_markdown` trims at
+    /// fragment edges, which we re-insert at the seam. Rendering only the new
+    /// slice (rather than the whole prefix every delta) keeps streaming O(N)
+    /// and highlights each code block exactly once.
+    fn flush_fragment(
+        &mut self,
+        content: &str,
+        end: usize,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        if end <= self.streaming_source_flushed {
+            return Ok(());
+        }
+        let width = term.size()?.width.max(1);
+        let fragment = &content[self.streaming_source_flushed..end];
+        let mut rendered = messages::assistant_markdown_to_lines(fragment, width);
+        if !rendered.is_empty() && self.streaming_source_flushed > 0 {
+            // Restore the one blank separator render_markdown trims at the seam.
+            // dedup_scrollback_blanks collapses any accidental double.
+            rendered.insert(0, Line::raw(""));
+        }
+        self.insert_lines_to_scrollback(term, &rendered)?;
+        self.streaming_source_flushed = end;
         Ok(())
     }
 

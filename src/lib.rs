@@ -9,8 +9,8 @@ pub mod run;
 pub mod runtime;
 pub mod session_db;
 pub mod session_sink;
-pub mod update_check;
 pub mod shell_split;
 pub mod tools;
 #[cfg(feature = "ui")]
 pub mod ui;
+pub mod update_check;

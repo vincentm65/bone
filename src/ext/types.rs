@@ -623,6 +623,28 @@ fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::llm::ChatMes
                 });
             }
         }
+        if let Some(images_table) = entry.get::<Option<mlua::Table>>("images").ok().flatten() {
+            for image in images_table.sequence_values::<mlua::Table>() {
+                let image = match image {
+                    Ok(image) => image,
+                    Err(_) => continue,
+                };
+                let media_type: String = image
+                    .get::<Option<String>>("media_type")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let data: String = image
+                    .get::<Option<String>>("data")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if media_type.is_empty() || data.is_empty() {
+                    continue;
+                }
+                msg.images.push(crate::llm::ImageData { media_type, data });
+            }
+        }
         msg.name = name;
         msg.tool_call_id = tool_call_id;
         messages.push(msg);

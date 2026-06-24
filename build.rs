@@ -1,8 +1,8 @@
 use std::{env, fs, path::PathBuf};
 
-/// Collect sorted `.lua` paths from a flat directory. A missing directory is
-/// tolerated (yields no entries) — the optional tools/commands now live in the
-/// catalog, so `defaults/lua/tools` can be empty and untracked by git.
+/// Collect sorted `.lua` paths from a flat directory. `defaults/lua/tools` no
+/// longer exists — optional tools live in the catalog. A missing directory is
+/// tolerated (yields no entries).
 fn collect_lua_flat(dir: &std::path::Path) -> Vec<PathBuf> {
     if !dir.exists() {
         return Vec::new();

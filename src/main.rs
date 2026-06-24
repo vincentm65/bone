@@ -248,12 +248,15 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let (hub, commands_rx) = bone::rpc::Hub::new();
     // Keep the handle so a panicking daemon tears the server down instead of
     // leaving a zombie listener that silently drops every client's command.
-    let mut daemon = tokio::spawn(panic_guard("daemon", bone::rpc::run_daemon(
-        hub.clone(),
-        commands_rx,
-        Some(provider),
-        bone::tools::ApprovalMode::Safe,
-    )));
+    let mut daemon = tokio::spawn(panic_guard(
+        "daemon",
+        bone::rpc::run_daemon(
+            hub.clone(),
+            commands_rx,
+            Some(provider),
+            bone::tools::ApprovalMode::Safe,
+        ),
+    ));
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");

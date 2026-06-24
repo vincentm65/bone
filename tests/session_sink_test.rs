@@ -47,6 +47,7 @@ impl SessionSink for RecordingSink {
         _tool_name: Option<&str>,
         _tool_call_id: Option<&str>,
         _tool_calls: Option<&str>,
+        _images: Option<&str>,
         _seq: i64,
     ) {
         self.messages
@@ -76,8 +77,8 @@ impl SessionSink for RecordingSink {
 #[test]
 fn trait_is_externally_implementable_and_records() {
     let sink = RecordingSink::new();
-    sink.append_message("user", "hello", None, None, None, 0);
-    sink.append_message("assistant", "hi there", None, None, None, 1);
+    sink.append_message("user", "hello", None, None, None, None, 0);
+    sink.append_message("assistant", "hi there", None, None, None, None, 1);
     sink.record_usage("openai", "gpt-4", 100, 50, None, None, false);
     sink.end();
 
@@ -96,7 +97,7 @@ fn null_sink_is_inert() {
     assert_eq!(sink.conv_id(), None);
 
     // Every write method must be a no-op (not panic).
-    sink.append_message("user", "ignored", None, None, None, 0);
+    sink.append_message("user", "ignored", None, None, None, None, 0);
     sink.record_usage("p", "m", 1, 1, None, None, false);
     sink.end();
     // Nothing to assert beyond "didn't panic" — that IS the contract.
@@ -107,7 +108,7 @@ fn sink_is_object_safe_via_arc_dyn() {
     // Arc<dyn SessionSink> is the injection type on AgentRequest.
     let sink: Arc<dyn SessionSink> = Arc::new(RecordingSink::new());
     assert_eq!(sink.conv_id(), Some(42));
-    sink.append_message("user", "test", None, None, None, 0);
+    sink.append_message("user", "test", None, None, None, None, 0);
     assert_eq!(sink.conv_id(), Some(42)); // still works after a call
 }
 

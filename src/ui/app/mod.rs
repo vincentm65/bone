@@ -299,6 +299,7 @@ impl App {
     /// Append a message to the session database under the active conversation,
     /// allocating the next sequence number. No-op when no db/conversation is
     /// open. Shared by the assistant and tool-result append helpers.
+    #[allow(clippy::too_many_arguments)]
     fn append_db_message(
         &mut self,
         role: &str,
@@ -306,6 +307,7 @@ impl App {
         tool_name: Option<&str>,
         call_id: Option<&str>,
         tool_calls_json: Option<&str>,
+        images_json: Option<&str>,
     ) {
         let Some(conv_id) = self.conversation_id else {
             return;
@@ -321,6 +323,7 @@ impl App {
             tool_name,
             call_id,
             tool_calls_json,
+            images_json,
             self.session_seq,
         )
         .ok();
@@ -328,12 +331,18 @@ impl App {
 
     /// Append an assistant message to the session database.
     pub(crate) fn append_assistant_to_db(&mut self, content: &str, tool_calls_json: Option<&str>) {
-        self.append_db_message("assistant", content, None, None, tool_calls_json);
+        self.append_db_message("assistant", content, None, None, tool_calls_json, None);
     }
 
     /// Append a tool result to the session database.
     pub(crate) fn append_tool_result_to_db(&mut self, name: &str, call_id: &str, content: &str) {
-        self.append_db_message("tool", content, Some(name), Some(call_id), None);
+        self.append_db_message("tool", content, Some(name), Some(call_id), None, None);
+    }
+
+    /// Append a user message (optionally carrying image attachments) to the
+    /// session database. `images_json` is a JSON array of `{media_type, data}`.
+    pub(crate) fn append_user_to_db(&mut self, content: &str, images_json: Option<&str>) {
+        self.append_db_message("user", content, None, None, None, images_json);
     }
     /// Record a token-usage event for the active conversation. The Driver runs
     /// with a `NullSessionSink` (the TUI owns `session_seq`), so usage events it
@@ -522,7 +531,10 @@ impl App {
         let mut rows = Vec::new();
         for msg in transcript {
             match msg.role {
-                ChatRole::User => rows.push(Message::user(msg.content.clone())),
+                ChatRole::User => rows.push(Message::user_with_images(
+                    msg.content.clone(),
+                    msg.images.len(),
+                )),
                 ChatRole::Assistant => {
                     if !msg.content.trim().is_empty() {
                         rows.push(Message::assistant(msg.content.clone()));
@@ -530,7 +542,9 @@ impl App {
                 }
                 ChatRole::Tool => {
                     let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
-                    rows.push(Message::tool_row(label, false));
+                    let mut row = Message::tool_row(label, false);
+                    row.image_count = msg.images.len();
+                    rows.push(row);
                 }
                 ChatRole::System => {}
             }
@@ -800,7 +814,6 @@ impl App {
         if let Some(idx) = stream_idx {
             self.renderer.scrollback_cursor += 1;
             self.renderer.streaming_source_flushed = 0;
-            self.renderer.streaming_lines_flushed = 0;
             self.renderer
                 .flush_streaming_message(&self.messages[idx].content, terminal)?;
         }
@@ -912,7 +925,8 @@ impl App {
                 let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
                 let draft = std::mem::take(&mut self.input.buffer);
                 let draft_cursor = self.input.cursor_pos;
-                self.submit_user_turn(text, Some(display), term).await?;
+                self.submit_user_turn(text, Some(display), Vec::new(), term)
+                    .await?;
                 crate::ext::jobs::registry().mark_consumed(&ids);
                 if !draft.is_empty() {
                     self.input.buffer = draft;
@@ -2029,7 +2043,9 @@ impl App {
                         format!(" {arg}")
                     }
                 );
-                self.submit_user_turn(reply, Some(display), term).await.ok();
+                self.submit_user_turn(reply, Some(display), Vec::new(), term)
+                    .await
+                    .ok();
             } else {
                 if display_role.as_deref() == Some("assistant") {
                     self.show_assistant_reply(reply, term).ok();

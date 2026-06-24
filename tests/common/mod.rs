@@ -24,7 +24,9 @@ pub fn temp_path(label: &str) -> PathBuf {
 /// no longer ship in the binary, so tests that need them seed them this way.
 #[allow(dead_code)]
 pub fn seed_catalog_into(config_dir: &std::path::Path) {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("catalog");
+    let repo = std::env::var_os("BONE_CATALOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bone-catalog"));
     for (src, dst) in [("tools", "lua/tools"), ("commands", "lua/commands")] {
         let from = repo.join(src);
         let to = config_dir.join(dst);

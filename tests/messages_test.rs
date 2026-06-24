@@ -19,7 +19,7 @@ fn tool_label_preserves_explicit_newlines_and_indentation() {
     };
     let mut lines = Vec::new();
 
-    render_tool(&tool, "", &Theme::default(), &mut lines, 80);
+    render_tool(&tool, "", 0, &Theme::default(), &mut lines, 80);
 
     let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
     assert_eq!(rendered, vec!["    shell cd repo &&", "      cargo test"]);
@@ -33,7 +33,7 @@ fn tool_label_wraps_multiline_labels_at_narrow_width() {
     };
     let mut lines = Vec::new();
 
-    render_tool(&tool, "", &Theme::default(), &mut lines, 16);
+    render_tool(&tool, "", 0, &Theme::default(), &mut lines, 16);
 
     let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
     assert_eq!(

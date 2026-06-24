@@ -77,6 +77,7 @@ impl Tool for PaneTool {
         };
         Ok(ToolOutput {
             content: "pane result".to_string(),
+            images: Vec::new(),
             pane_page: Some(pane),
             state: None,
         })
@@ -165,14 +166,13 @@ async fn tool_handler_execute_all_disabled_tool() {
         result: Ok("ok".to_string()),
     });
 
-    let handler =
-        ToolHandler::with_enabled_safety_and_display(
-            registry,
-            &[],
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-        );
+    let handler = ToolHandler::with_enabled_safety_and_display(
+        registry,
+        &[],
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
     let calls = vec![make_call("disabled_tool", "c1")];
 
     let results = handler.execute_all(calls, 0).await;

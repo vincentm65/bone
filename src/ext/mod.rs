@@ -316,11 +316,10 @@ mod seed_tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         // Use a bundled command that `should_refresh_seeded_lua` doesn't
-        // force-refresh by name (compact.lua is overwritten even without
-        // `force`, which would defeat the "preserved" check below).
+        // force-refresh by name, which would defeat the "preserved" check below.
         let (first, content) = *DEFAULT_LUA_COMMANDS
             .iter()
-            .find(|(name, _)| *name != "compact.lua")
+            .find(|(name, _)| !matches!(*name, "compact.lua" | "config.lua"))
             .expect("a non-auto-refreshed bundled command");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(first), "-- user edit\n").unwrap();

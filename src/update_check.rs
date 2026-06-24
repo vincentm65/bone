@@ -35,7 +35,10 @@ fn check_due() -> bool {
 }
 
 fn mark_checked() {
-    let _ = std::fs::write(cache_dir().join("update_checked_at"), now_secs().to_string());
+    let _ = std::fs::write(
+        cache_dir().join("update_checked_at"),
+        now_secs().to_string(),
+    );
 }
 
 /// Fetch the latest release tag once per day, off the main thread. Safe to

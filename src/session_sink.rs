@@ -26,6 +26,7 @@ pub trait SessionSink: Send + Sync {
     fn conv_id(&self) -> Option<i64>;
 
     /// Append a message (user/assistant/tool) to the session transcript.
+    #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
         role: &str,
@@ -33,6 +34,7 @@ pub trait SessionSink: Send + Sync {
         tool_name: Option<&str>,
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
+        images: Option<&str>,
         seq: i64,
     );
 
@@ -75,6 +77,7 @@ impl SessionSink for NullSessionSink {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
         _role: &str,
@@ -82,6 +85,7 @@ impl SessionSink for NullSessionSink {
         _tool_name: Option<&str>,
         _tool_call_id: Option<&str>,
         _tool_calls: Option<&str>,
+        _images: Option<&str>,
         _seq: i64,
     ) {
     }

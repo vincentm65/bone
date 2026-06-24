@@ -126,7 +126,11 @@ pub fn draw_list(
         } else {
             Style::default().fg(MUTED)
         };
-        let mut spans = vec![cursor_span, check_span, Span::styled(name.to_string(), name_style)];
+        let mut spans = vec![
+            cursor_span,
+            check_span,
+            Span::styled(name.to_string(), name_style),
+        ];
         if !item.category.is_empty() {
             spans.push(Span::styled(
                 format!("  ·{}", item.category),

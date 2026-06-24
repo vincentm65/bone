@@ -358,8 +358,24 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
             let pane_page = map
                 .get("pane")
                 .and_then(|pane_val| PaneContent::from_json(pane_val).ok());
+            // Optional `images`: an array of `{ media_type, data }` (base64),
+            // relayed to vision-capable models. Malformed entries are skipped.
+            let images = map
+                .get("images")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|img| {
+                            let media_type = img.get("media_type")?.as_str()?.to_string();
+                            let data = img.get("data")?.as_str()?.to_string();
+                            Some(crate::llm::ImageData { media_type, data })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(ToolOutput {
                 content,
+                images,
                 pane_page,
                 state,
             })

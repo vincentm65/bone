@@ -17,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::ext::catalog::{self, CatalogEntry};
 use crate::ui::fullscreen::{self, FullscreenTerminal};
-use crate::ui::picker::{self, Item, ACCENT, BG, BORDER, DIM, MUTED, TEXT};
+use crate::ui::picker::{self, ACCENT, BG, BORDER, DIM, Item, MUTED, TEXT};
 
 /// Result of running the popup.
 pub struct Outcome {
@@ -37,10 +37,14 @@ pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
         .iter()
         .map(|e| {
             let installed = catalog::is_installed(e);
-            let update = installed
-                && catalog::installed_version(&e.name).is_some_and(|v| e.version > v);
+            let update =
+                installed && catalog::installed_version(&e.name).is_some_and(|v| e.version > v);
             let mut item = Item::new(e.name.clone(), e.description.clone(), false);
-            item.category = if e.kind == "command" { "command" } else { "tool" };
+            item.category = if e.kind == "command" {
+                "command"
+            } else {
+                "tool"
+            };
             if update {
                 item.tag = Some("update".to_string());
             }
@@ -56,7 +60,11 @@ pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
 /// When false (onboarding), all items are applied as-is.
 ///
 /// Returns `(installed, removed, errors)` counts.
-pub fn apply(entries: &[CatalogEntry], items: &[Item], touched_only: bool) -> (usize, usize, Vec<String>) {
+pub fn apply(
+    entries: &[CatalogEntry],
+    items: &[Item],
+    touched_only: bool,
+) -> (usize, usize, Vec<String>) {
     let mut installed = 0;
     let mut removed = 0;
     let mut errors = Vec::new();
@@ -71,7 +79,8 @@ pub fn apply(entries: &[CatalogEntry], items: &[Item], touched_only: bool) -> (u
             continue;
         }
         if item.checked {
-            let outdated = catalog::installed_version(&entry.name).is_some_and(|v| entry.version > v);
+            let outdated =
+                catalog::installed_version(&entry.name).is_some_and(|v| entry.version > v);
             if !on_disk || outdated {
                 match catalog::install(entry) {
                     Ok(()) => installed += 1,
@@ -190,10 +199,7 @@ fn apply_state(state: &mut State) {
 
 fn draw(frame: &mut ratatui::Frame, state: &State) {
     let screen = frame.area();
-    frame.render_widget(
-        Block::default().style(Style::default().bg(BG)),
-        screen,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), screen);
 
     let area = screen;
 
@@ -214,7 +220,10 @@ fn draw(frame: &mut ratatui::Frame, state: &State) {
 fn draw_header(frame: &mut ratatui::Frame, area: Rect) {
     let lines = vec![
         Line::from(vec![
-            Span::styled("bone ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "bone ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("catalog", Style::default().fg(MUTED)),
         ]),
         Line::from(Span::styled(
@@ -268,9 +277,15 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
     let mut push = |k: &str, label: &str| {
         keys.push(Span::styled(
             format!(" {k} "),
-            Style::default().fg(BG).bg(MUTED).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(BG)
+                .bg(MUTED)
+                .add_modifier(Modifier::BOLD),
         ));
-        keys.push(Span::styled(format!(" {label}   "), Style::default().fg(DIM)));
+        keys.push(Span::styled(
+            format!(" {label}   "),
+            Style::default().fg(DIM),
+        ));
     };
     push("↑↓", "move");
     push("space", "toggle");
@@ -279,11 +294,13 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
     push("esc", "close");
 
     frame.render_widget(
-        Paragraph::new(Line::from(keys)).alignment(Alignment::Left).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(BORDER)),
-        ),
+        Paragraph::new(Line::from(keys))
+            .alignment(Alignment::Left)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(BORDER)),
+            ),
         area,
     );
 }

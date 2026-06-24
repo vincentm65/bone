@@ -3,6 +3,7 @@
 
 use std::io;
 
+use base64::Engine;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{App, BoneTerminal};
@@ -27,6 +28,9 @@ impl App {
             if key_matches(&binding.key, code, modifiers) {
                 return Some(binding.action.clone());
             }
+        }
+        if mode == "i" && code == KeyCode::Char('v') && modifiers == KeyModifiers::CONTROL {
+            return Some("paste_image".to_string());
         }
         None
     }
@@ -54,6 +58,31 @@ impl App {
             }
             "cursor_to_end" => {
                 self.input.cursor_to_end();
+                self.redraw(term)
+            }
+            "paste_image" => {
+                if let Ok(mut clipboard) = arboard::Clipboard::new()
+                    && let Ok(image) = clipboard.get_image()
+                {
+                    let mut png_bytes = Vec::new();
+                    let mut encoder =
+                        png::Encoder::new(&mut png_bytes, image.width as u32, image.height as u32);
+                    encoder.set_color(png::ColorType::Rgba);
+                    encoder.set_depth(png::BitDepth::Eight);
+                    let encoded = {
+                        let ok = match encoder.write_header() {
+                            Ok(mut writer) => writer.write_image_data(image.bytes.as_ref()).is_ok(),
+                            Err(_) => false,
+                        };
+                        ok.then(|| base64::engine::general_purpose::STANDARD.encode(&png_bytes))
+                    };
+                    if let Some(data) = encoded {
+                        self.input.insert_image(crate::llm::ImageData {
+                            media_type: "image/png".to_string(),
+                            data,
+                        });
+                    }
+                }
                 self.redraw(term)
             }
             other => {

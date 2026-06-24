@@ -53,7 +53,7 @@ fn migrate_v1_preserves_user_data() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4, "schema should be migrated to latest version");
+    assert_eq!(version, 5, "schema should be migrated to latest version");
 
     // Pre-existing rows survive the migration.
     let conversations: i64 = db
@@ -157,7 +157,7 @@ fn fresh_database_initializes_at_latest_version() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
 
     // record_usage relies on the is_estimated column being present.
     db.create_conversation("openai", "gpt-4").unwrap();
@@ -173,9 +173,9 @@ fn max_message_seq_tracks_highest_seq() {
     // No messages yet → 0.
     assert_eq!(db.max_message_seq(conv).unwrap(), 0);
 
-    db.append_message(conv, "user", "hi", None, None, None, 1)
+    db.append_message(conv, "user", "hi", None, None, None, None, 1)
         .unwrap();
-    db.append_message(conv, "assistant", "hello", None, None, None, 2)
+    db.append_message(conv, "assistant", "hello", None, None, None, None, 2)
         .unwrap();
     assert_eq!(db.max_message_seq(conv).unwrap(), 2);
 
@@ -211,6 +211,7 @@ fn tool_calls_roundtrip() {
         None,
         None,
         Some(tc_json),
+        None,
         1,
     )
     .unwrap();
@@ -220,6 +221,23 @@ fn tool_calls_roundtrip() {
     let msg = &msgs[0];
     assert_eq!(msg.content, "Let me check.");
     assert_eq!(msg.tool_calls, Some(tc_json.to_string()));
+}
+
+/// Image attachments round-trip through append_message and list_messages.
+#[test]
+fn images_roundtrip() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+
+    let img_json = r#"[{"media_type":"image/png","data":"aGVsbG8="}]"#;
+    db.append_message(conv, "user", "look", None, None, None, Some(img_json), 1)
+        .unwrap();
+
+    let msgs = db.list_messages(conv, 100).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].images, Some(img_json.to_string()));
 }
 
 /// Every stats query (snapshot bucket queries + custom range) runs without SQL

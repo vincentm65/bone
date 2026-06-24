@@ -32,6 +32,8 @@ pub(crate) struct StoredMessage {
     pub tool_name: Option<String>,
     pub tool_call_id: Option<String>,
     pub tool_calls: Option<String>,
+    /// JSON array of `{media_type, data}` image attachments, if any.
+    pub images: Option<String>,
 }
 
 /// Aggregated usage for one conversation.
@@ -233,6 +235,7 @@ const FULL_SCHEMA: &str = "
         tool_name       TEXT,
         tool_call_id    TEXT,
         tool_calls      TEXT,
+        images          TEXT,
         seq             INTEGER NOT NULL,
         created_at      TEXT NOT NULL
     );
@@ -355,7 +358,7 @@ impl SessionDb {
             .map(|count| count > 0)
         }
 
-        const SCHEMA_VERSION: u32 = 4;
+        const SCHEMA_VERSION: u32 = 5;
 
         let current_version: u32 = self
             .conn
@@ -434,6 +437,14 @@ impl SessionDb {
             version = 4;
         }
 
+        if version == 4 {
+            // v4 -> v5: add images column (JSON array of {media_type, data}).
+            if !column_exists(&tx, "messages", "images")? {
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN images TEXT;")?;
+            }
+            version = 5;
+        }
+
         if version != current_version {
             tx.pragma_update(None, "user_version", version)?;
         }
@@ -462,12 +473,13 @@ impl SessionDb {
         tool_name: Option<&str>,
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
+        images: Option<&str>,
         seq: i64,
     ) -> rusqlite::Result<i64> {
         let now = now_iso();
         self.conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_name, tool_call_id, tool_calls, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![conversation_id, role, content, tool_name, tool_call_id, tool_calls, seq, now],
+            "INSERT INTO messages (conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, now],
         )?;
         let msg_id = self.conn.last_insert_rowid();
         // Build searchable text: include tool call info in FTS so it's findable
@@ -929,7 +941,7 @@ impl SessionDb {
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let limit = limit.clamp(1, 1000);
         let mut stmt = self.conn.prepare(
-            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls \
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls, images \
              FROM messages WHERE conversation_id = ?1 \
              ORDER BY seq ASC LIMIT ?2",
         )?;
@@ -941,6 +953,7 @@ impl SessionDb {
                 tool_name: row.get(3)?,
                 tool_call_id: row.get(4)?,
                 tool_calls: row.get(5)?,
+                images: row.get(6)?,
             })
         })?;
         rows.collect()

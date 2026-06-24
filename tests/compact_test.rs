@@ -1087,7 +1087,10 @@ fn auto_compact_no_notice_when_nothing_older_than_keep_window() {
         saw_notice, "no",
         "must not emit a 'Compacting…' notice when nothing is compactable",
     );
-    assert_eq!(run_count, 0, "summarizer must not run when nothing is older");
+    assert_eq!(
+        run_count, 0,
+        "summarizer must not run when nothing is older"
+    );
 
     std::fs::remove_dir_all(&config_dir).ok();
 }

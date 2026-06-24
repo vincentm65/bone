@@ -80,11 +80,34 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// Message `content` on the wire: either a plain string or, for multimodal
+/// messages, an array of typed parts (`text` / `image_url`).
 #[derive(Serialize)]
-struct OpenAiMessage {
+#[serde(untagged)]
+enum OaiContent {
+    Text(String),
+    Parts(Vec<OaiPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum OaiPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OaiImageUrl },
+}
+
+#[derive(Serialize)]
+struct OaiImageUrl {
+    url: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OpenAiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OaiContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<OpenAiToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,7 +168,7 @@ fn openai_tools(tools: Vec<ToolDefinition>) -> Vec<OpenAiTool> {
         .collect()
 }
 
-fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
+pub(crate) fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
     messages
         .into_iter()
         .map(|message| OpenAiMessage {
@@ -156,10 +179,27 @@ fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 ChatRole::Tool => "tool",
             }
             .to_string(),
-            content: if message.content.is_empty() && !message.tool_calls.is_empty() {
+            content: if !message.images.is_empty() {
+                // Multimodal: a leading text part (when present) followed by one
+                // image_url part per attachment, as a base64 data URL.
+                let mut parts = Vec::new();
+                if !message.content.is_empty() {
+                    parts.push(OaiPart::Text {
+                        text: message.content,
+                    });
+                }
+                for image in message.images {
+                    parts.push(OaiPart::ImageUrl {
+                        image_url: OaiImageUrl {
+                            url: format!("data:{};base64,{}", image.media_type, image.data),
+                        },
+                    });
+                }
+                Some(OaiContent::Parts(parts))
+            } else if message.content.is_empty() && !message.tool_calls.is_empty() {
                 None
             } else {
-                Some(message.content)
+                Some(OaiContent::Text(message.content))
             },
             tool_calls: message
                 .tool_calls
@@ -393,6 +433,39 @@ pub fn process_sse_chunk(
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openai_messages;
+    use crate::llm::{ChatMessage, ChatRole, ImageData};
+
+    #[test]
+    fn serializes_images_as_openai_content_parts() {
+        let messages = openai_messages(vec![ChatMessage::user_with_images(
+            "look",
+            vec![ImageData {
+                media_type: "image/png".to_string(),
+                data: "abc".to_string(),
+            }],
+        )]);
+        let json = serde_json::to_value(&messages[0]).unwrap();
+
+        assert_eq!(json["content"][0]["type"], "text");
+        assert_eq!(json["content"][0]["text"], "look");
+        assert_eq!(json["content"][1]["type"], "image_url");
+        assert_eq!(
+            json["content"][1]["image_url"]["url"],
+            "data:image/png;base64,abc"
+        );
+    }
+
+    #[test]
+    fn serializes_text_only_as_plain_string() {
+        let messages = openai_messages(vec![ChatMessage::new(ChatRole::User, "hello")]);
+        let json = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(json["content"], "hello");
+    }
 }
 
 #[async_trait]

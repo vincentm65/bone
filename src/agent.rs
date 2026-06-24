@@ -43,6 +43,7 @@ impl SessionWriter {
         self.conv_id
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
         role: &str,
@@ -50,6 +51,7 @@ impl SessionWriter {
         tool_name: Option<&str>,
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
+        images: Option<&str>,
         seq: i64,
     ) {
         let Some(conv_id) = self.conv_id else {
@@ -66,6 +68,7 @@ impl SessionWriter {
             tool_name,
             tool_call_id,
             tool_calls,
+            images,
             seq,
         ) {
             self.note_failure("append_message", &e);
@@ -130,6 +133,7 @@ impl SessionSink for SessionWriter {
         SessionWriter::conv_id(self)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
         role: &str,
@@ -137,6 +141,7 @@ impl SessionSink for SessionWriter {
         tool_name: Option<&str>,
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
+        images: Option<&str>,
         seq: i64,
     ) {
         SessionWriter::append_message(
@@ -146,6 +151,7 @@ impl SessionSink for SessionWriter {
             tool_name,
             tool_call_id,
             tool_calls,
+            images,
             seq,
         )
     }

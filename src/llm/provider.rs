@@ -30,11 +30,25 @@ impl ChatRole {
     }
 }
 
+/// A single image attachment carried by a message, ready for the wire.
+///
+/// `data` is standard base64 (no `data:` URL prefix); `media_type` is the MIME
+/// type, e.g. `image/png`. Providers build a data URL from these two fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageData {
+    pub media_type: String,
+    pub data: String,
+}
+
 /// Provider-neutral chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    /// Image attachments. Only honored by vision-capable providers; the
+    /// OpenAI-compatible serializer emits these as `image_url` content parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageData>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,10 +77,19 @@ impl ChatMessage {
         Self {
             role,
             content: content.into(),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
             reasoning: None,
+        }
+    }
+
+    /// A user message carrying image attachments alongside its text.
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageData>) -> Self {
+        Self {
+            images,
+            ..Self::new(ChatRole::User, content)
         }
     }
 
@@ -81,6 +104,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::Tool,
             content: result.content,
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(result.call_id),
             name: Some(result.name),

@@ -17,6 +17,11 @@ futures-util = "0.3"
 async-stream = "0.3"
 unicode-width = { version = "0.2", optional = true }
 sha2 = "0.10"
+base64 = "0.22"
+# Clipboard image paste (UI-only). `arboard` reads the OS clipboard image as raw
+# RGBA; `png` encodes it for the wire. Off the `--no-default-features` core path.
+arboard = { version = "3", optional = true }
+png = { version = "0.17", optional = true }
 similar = "2"
 strsim = "0.11"
 dirs = "6"
@@ -39,7 +44,7 @@ ratatui = { version = "0.29", features = ["scrolling-regions"], optional = true 
 # library (agent loop, tools, extensions, llm, session) compiles without it.
 # Gate the decoupling with: cargo check --lib --no-default-features
 default = ["ui"]
-ui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:syntect", "dep:pulldown-cmark"]
+ui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:syntect", "dep:pulldown-cmark", "dep:arboard", "dep:png"]
 
 # The binary is the TUI; it requires the `ui` feature. Cargo skips building it
 # when `ui` is off, so `--no-default-features` checks core in isolation.

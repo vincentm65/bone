@@ -211,6 +211,7 @@ pub fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
         call_id: call.id.clone(),
         name: call.name.clone(),
         content: content.into(),
+        images: Vec::new(),
         is_error: true,
         pane_page: None,
         state: None,
@@ -223,7 +224,7 @@ impl App {
         // receive the full pasted content, not the `[Pasted text …]` token.
         let text = self.input.expanded();
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && !self.input.has_images() {
             return Ok(());
         }
 
@@ -238,11 +239,11 @@ impl App {
         }
 
         // Keep the short placeholder in scrollback while sending full content.
-        let display_text = self
-            .input
-            .has_pastes()
+        let display_text = (self.input.has_pastes() || self.input.has_images())
             .then(|| self.input.buffer.trim().to_string());
-        self.submit_user_turn(text, display_text, term).await
+        let images = self.input.take_images();
+        self.submit_user_turn(text, display_text, images, term)
+            .await
     }
 
     /// Run the turn through the core `Driver` and render its `RuntimeEvent`
@@ -257,6 +258,7 @@ impl App {
         &mut self,
         text: String,
         display_text: Option<String>,
+        images: Vec<crate::llm::ImageData>,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         use crate::runtime::{
@@ -268,16 +270,20 @@ impl App {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         // User message + DB persistence.
-        self.messages
-            .push(Message::user(display_text.as_deref().unwrap_or(&text)));
-        self.transcript
-            .push(ChatMessage::new(ChatRole::User, &text));
-        if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id
-        {
-            self.session_seq += 1;
-            db.append_message(conv_id, "user", &text, None, None, None, self.session_seq)
-                .ok();
+        let image_count = images.len();
+        self.messages.push(Message::user_with_images(
+            display_text.as_deref().unwrap_or(&text),
+            image_count,
+        ));
+        if images.is_empty() {
+            self.transcript
+                .push(ChatMessage::new(ChatRole::User, &text));
+            self.append_user_to_db(&text, None);
+        } else {
+            let images_json = serde_json::to_string(&images).ok();
+            self.transcript
+                .push(ChatMessage::user_with_images(&text, images));
+            self.append_user_to_db(&text, images_json.as_deref());
         }
         self.extensions.dispatch_simple(
             "message",
@@ -438,6 +444,13 @@ impl App {
                             msg.tool_call_id.as_deref().unwrap_or(""),
                             &msg.content,
                         );
+                    }
+                    // Synthetic user messages relaying tool-returned images.
+                    ChatRole::User => {
+                        let images = (!msg.images.is_empty())
+                            .then(|| serde_json::to_string(&msg.images).ok())
+                            .flatten();
+                        self.append_user_to_db(&msg.content, images.as_deref());
                     }
                     _ => {}
                 }
@@ -648,6 +661,7 @@ impl App {
                     call_id: call_id.clone(),
                     name: name.clone(),
                     content,
+                    images: Vec::new(),
                     is_error,
                     pane_page: None,
                     state: None,
@@ -724,17 +738,17 @@ impl App {
         use ratatui::text::Line;
         let grey = Style::default().fg(Color::Gray);
         // Header + the last reasoning lines that fit; the header stays pinned.
-        let all: Vec<&str> = self.thinking_tail.split('\n').collect();
-        let start = all.len().saturating_sub(Self::THINKING_MAX_ROWS - 1);
+        let mut tail: Vec<&str> = self
+            .thinking_tail
+            .rsplit('\n')
+            .take(Self::THINKING_MAX_ROWS - 1)
+            .collect();
+        tail.reverse();
         let mut content = vec![Line::styled(
             "✻ Thinking",
             grey.add_modifier(Modifier::BOLD),
         )];
-        content.extend(
-            all[start..]
-                .iter()
-                .map(|l| Line::styled((*l).to_string(), grey)),
-        );
+        content.extend(tail.iter().map(|l| Line::styled((*l).to_string(), grey)));
         let visible_rows = content.len();
         let page = PanePage {
             source: "thinking".to_string(),
@@ -779,7 +793,6 @@ impl App {
             None => {
                 self.messages.push(Message::assistant(String::new()));
                 self.renderer.streaming_source_flushed = 0;
-                self.renderer.streaming_lines_flushed = 0;
                 self.renderer.scrollback_cursor += 1;
                 let i = self.messages.len() - 1;
                 *cur_idx = Some(i);
@@ -810,6 +823,7 @@ impl App {
             call_id: call.id.clone(),
             name: call.name.clone(),
             content: String::new(),
+            images: Vec::new(),
             is_error: false,
             pane_page: None,
             state: None,
