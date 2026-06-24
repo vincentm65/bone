@@ -9,49 +9,49 @@ use ratatui::style::Modifier;
 #[test]
 fn streaming_prefix_holds_paragraph_until_block_boundary() {
     let content = "Hello\n";
-    assert_eq!(safe_markdown_prefix_end(content), 0);
+    assert_eq!(safe_markdown_prefix_end(content, 0), 0);
 }
 
 #[test]
 fn streaming_prefix_holds_text_without_trailing_newline() {
-    assert_eq!(safe_markdown_prefix_end("Hello"), 0);
+    assert_eq!(safe_markdown_prefix_end("Hello", 0), 0);
 }
 
 #[test]
 fn streaming_prefix_flushes_completed_paragraph() {
     let content = "Hello\n\nWorld";
-    assert_eq!(safe_markdown_prefix_end(content), "Hello\n\n".len());
+    assert_eq!(safe_markdown_prefix_end(content, 0), "Hello\n\n".len());
 }
 
 #[test]
 fn streaming_prefix_holds_fenced_code_until_closing_fence() {
     let content = "Intro\n```rust\nfn main() {}\n";
-    assert_eq!(safe_markdown_prefix_end(content), 0);
+    assert_eq!(safe_markdown_prefix_end(content, 0), 0);
 }
 
 #[test]
 fn streaming_prefix_releases_fenced_code_after_closing_fence() {
     let content = "Intro\n```rust\nfn main() {}\n```\n";
-    assert_eq!(safe_markdown_prefix_end(content), content.len());
+    assert_eq!(safe_markdown_prefix_end(content, 0), content.len());
 }
 
 #[test]
 fn streaming_prefix_holds_trailing_pipe_table() {
     let content = "Intro\n\n| Name | Age |\n| ---- | --- |\n| Ada | 36 |\n";
-    assert_eq!(safe_markdown_prefix_end(content), "Intro\n\n".len());
+    assert_eq!(safe_markdown_prefix_end(content, 0), "Intro\n\n".len());
 }
 
 #[test]
 fn streaming_prefix_releases_table_after_blank_line_ends_it() {
     let content = "Intro\n\n| Name | Age |\n| ---- | --- |\n| Ada | 36 |\n\n";
-    assert_eq!(safe_markdown_prefix_end(content), content.len());
+    assert_eq!(safe_markdown_prefix_end(content, 0), content.len());
 }
 
 #[test]
 fn streaming_prefix_releases_table_after_non_table_line_ends_it() {
     let content = "Intro\n\n| Name | Age |\n| ---- | --- |\n| Ada | 36 |\nNext\n";
     assert_eq!(
-        safe_markdown_prefix_end(content),
+        safe_markdown_prefix_end(content, 0),
         content.len() - "Next\n".len()
     );
 }
@@ -59,13 +59,13 @@ fn streaming_prefix_releases_table_after_non_table_line_ends_it() {
 #[test]
 fn streaming_prefix_holds_one_pipe_line_until_next_line_disambiguates() {
     let content = "Use a | b\n";
-    assert_eq!(safe_markdown_prefix_end(content), 0);
+    assert_eq!(safe_markdown_prefix_end(content, 0), 0);
 }
 
 #[test]
 fn streaming_prefix_releases_pipe_looking_non_table_text() {
     let content = "Use a | b\nNext\n\n";
-    assert_eq!(safe_markdown_prefix_end(content), content.len());
+    assert_eq!(safe_markdown_prefix_end(content, 0), content.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ fn streamed_text(chunks: &[&str], width: usize) -> Vec<String> {
     };
     for chunk in chunks {
         content.push_str(chunk);
-        flush(safe_markdown_prefix_end(&content), &content, &mut inserted);
+        flush(safe_markdown_prefix_end(&content, 0), &content, &mut inserted);
     }
     flush(content.len(), &content, &mut inserted);
     inserted

@@ -20,7 +20,7 @@ fn sim_old(content: &str, width: u16) -> Vec<String> {
     let mut flushed = 0usize;
     let mut prev_safe = 0usize;
     for i in 1..=content.len() {
-        let safe = safe_markdown_prefix_end(&content[..i]);
+        let safe = safe_markdown_prefix_end(&content[..i], 0);
         if safe > prev_safe {
             let rendered = to_texts(&markdown::render_markdown(&content[..safe], width));
             if flushed < rendered.len() {
@@ -44,7 +44,7 @@ fn sim_new(content: &str, width: u16) -> Vec<String> {
     let mut prev_safe = 0usize;
     let mut has_prior = false;
     for i in 1..=content.len() {
-        let safe = safe_markdown_prefix_end(&content[..i]);
+        let safe = safe_markdown_prefix_end(&content[..i], 0);
         if safe > prev_safe {
             let delta = &content[flushed..safe];
             let mut rendered = to_texts(&markdown::render_markdown(delta, width));

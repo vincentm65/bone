@@ -368,7 +368,7 @@ impl Renderer {
         content: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        self.flush_fragment(content, safe_markdown_prefix_end(content), term)
+        self.flush_fragment(content, safe_markdown_prefix_end(content, self.streaming_source_flushed), term)
     }
 
     /// Flush all remaining lines from the streaming message, including
@@ -427,13 +427,13 @@ fn logical_lines_row_count(lines: &[Line<'static>], width: u16) -> u16 {
         .sum()
 }
 
-pub fn safe_markdown_prefix_end(content: &str) -> usize {
-    let mut safe_end = 0;
+pub fn safe_markdown_prefix_end(content: &str, from: usize) -> usize {
+    let mut safe_end = from;
     let mut in_fence: Option<(char, usize)> = None;
     let mut pending_pipe: Option<usize> = None;
     let mut in_table = false;
 
-    for (start, line_with_newline) in complete_lines(content) {
+    for (start, line_with_newline) in complete_lines(content, from) {
         let line = line_with_newline
             .trim_end_matches('\n')
             .trim_end_matches('\r');
@@ -485,10 +485,10 @@ pub fn safe_markdown_prefix_end(content: &str) -> usize {
     safe_end
 }
 
-fn complete_lines(content: &str) -> impl Iterator<Item = (usize, &str)> {
-    content
+fn complete_lines(content: &str, from: usize) -> impl Iterator<Item = (usize, &str)> {
+    content[from..]
         .split_inclusive('\n')
-        .scan(0usize, |offset, line| {
+        .scan(from, |offset, line| {
             let start = *offset;
             *offset += line.len();
             Some((start, line))
