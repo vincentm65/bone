@@ -998,11 +998,20 @@ bone.keymap = {
     i = {
         ["<C-a>"] = "cursor_to_start",
         ["<C-e>"] = "cursor_to_end",
+        ["<C-v>"] = "paste_image",
     },
 }
 ```
 
 Modes: `n` (normal), `i` (insert). Values are built-in action names. Unknown actions are ignored with a warning.
+
+Built-in actions:
+  - `toggle_panes` — show/hide the bottom pane area (normal mode)
+  - `cycle_approval_mode` — rotate through approval modes (normal mode)
+  - `cursor_to_start` — move cursor to start of line (insert mode)
+  - `cursor_to_end` — move cursor to end of line (insert mode)
+  - `paste_image` — paste clipboard image as attachment (insert mode; hardcoded to <C-v> when no Lua binding set)
+  - any custom action name registered via `bone.api.keymap.set(<mode>, <key>, <name>)`
 
 ## Plugin System
 
