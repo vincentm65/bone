@@ -31,14 +31,13 @@ pub struct Outcome {
 /// default; already-installed items are preserved on apply unless the user
 /// explicitly unchecks them.
 ///
-/// Flags with a newer available version are tagged "update".
+/// Items whose on-disk content differs from the catalog are tagged "update" and
+/// pre-checked (so a plain Enter pulls every pending update at once).
 pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
     entries
         .iter()
         .map(|e| {
-            let installed = catalog::is_installed(e);
-            let update =
-                installed && catalog::installed_version(&e.name).is_some_and(|v| e.version > v);
+            let update = catalog::is_installed(e) && catalog::needs_update(e);
             let mut item = Item::new(e.name.clone(), e.description.clone(), false);
             item.category = if e.kind == "command" {
                 "command"
@@ -47,6 +46,8 @@ pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
             };
             if update {
                 item.tag = Some("update".to_string());
+                item.checked = true;
+                item.user_touched = true;
             }
             item
         })
@@ -79,9 +80,7 @@ pub fn apply(
             continue;
         }
         if item.checked {
-            let outdated =
-                catalog::installed_version(&entry.name).is_some_and(|v| entry.version > v);
-            if !on_disk || outdated {
+            if !on_disk || catalog::needs_update(entry) {
                 match catalog::install(entry) {
                     Ok(()) => installed += 1,
                     Err(e) => errors.push(e),

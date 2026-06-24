@@ -479,8 +479,9 @@ async fn main() -> std::io::Result<()> {
         return do_install();
     }
 
-    // Throttled, non-blocking catalog refresh: re-installs newer versions of
-    // already-installed items on a background thread; updates land next launch.
+    // Throttled, non-blocking catalog refresh: pulls the latest index on a
+    // background thread so update flags / the startup hint stay current.
+    // Installs nothing — updates are applied only via `/catalog`.
     bone::ext::catalog::refresh_in_background();
     // Throttled, non-blocking self-update check: fetches the latest GitHub
     // release tag once per day; the banner surfaces it next launch if newer.

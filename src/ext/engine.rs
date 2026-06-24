@@ -82,7 +82,7 @@ bone.register_subagent({
 /// Minimal `init.lua` written when the user opts out of auto-population.
 pub const BLANK_INIT_LUA: &str = "-- Bone init.lua
 -- Empty by choice. Define bone.banner, register sub-agents, or add event hooks
--- here. See /customize for the full picture of what Lua can do.
+-- here. See the docs for the full picture of what Lua can do.
 ";
 
 /// Banner template + a live sub-agent — the \"auto-populated\" onboarding choice.

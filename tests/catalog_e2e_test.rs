@@ -1,6 +1,7 @@
 //! End-to-end catalog flow against a local filesystem fixture: fetch the
-//! index, install an item, refresh it after a version bump, fall back to the
-//! cache when offline, reject a bad checksum, and remove the item.
+//! index, install an item, detect an update when its content changes, refresh
+//! the cached index without auto-installing, fall back to the cache when
+//! offline, reject a bad checksum, and remove the item.
 //!
 //! Drives `BONE_CATALOG_URL` (the fixture) and `XDG_CONFIG_HOME` (so the client
 //! writes into a temp `bone-rust` dir). Kept to a single test to avoid env-var
@@ -10,24 +11,34 @@ use std::fs;
 use std::path::Path;
 
 use bone::ext::catalog::{self, CatalogEntry};
+use sha2::{Digest, Sha256};
 
 mod common;
 
-fn write_index(fixture: &Path, version: u32, sha256: &str) {
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Write the fixture's `demo.lua` plus an index whose sha256 matches it, and
+/// return the matching `CatalogEntry`.
+fn publish(fixture: &Path, body: &str) -> CatalogEntry {
+    fs::write(fixture.join("tools").join("demo.lua"), body).unwrap();
+    let sha = sha256_hex(body.as_bytes());
     let json = format!(
         r#"[{{ "name": "demo.lua", "kind": "tool", "description": "demo",
-              "version": {version}, "sha256": "{sha256}" }}]"#
+              "sha256": "{sha}" }}]"#
     );
     fs::write(fixture.join("catalog.json"), json).unwrap();
+    catalog::fetch_index().into_iter().next().unwrap()
 }
 
 #[test]
-fn catalog_fetch_install_refresh_remove() {
+fn catalog_fetch_install_update_remove() {
     let fixture = common::temp_dir("catalog-fixture");
     let cfg = common::temp_dir("catalog-cfg");
     fs::create_dir_all(fixture.join("tools")).unwrap();
-    fs::write(fixture.join("tools").join("demo.lua"), "-- demo v1\n").unwrap();
-    write_index(&fixture, 1, "");
 
     // SAFETY: single-test file; no other threads read these vars concurrently.
     unsafe {
@@ -36,24 +47,35 @@ fn catalog_fetch_install_refresh_remove() {
     }
     let installed_path = cfg.join("bone-rust").join("lua/tools/demo.lua");
 
-    // Fetch the index.
-    let entries = catalog::fetch_index();
-    assert_eq!(entries.len(), 1, "fixture index has one entry");
-    let entry = entries[0].clone();
+    // Publish v1 and install it.
+    let entry = publish(&fixture, "-- demo v1\n");
     assert!(!catalog::is_installed(&entry));
-
-    // Install it.
     catalog::install(&entry).unwrap();
     assert_eq!(fs::read_to_string(&installed_path).unwrap(), "-- demo v1\n");
     assert!(catalog::is_installed(&entry));
-    assert_eq!(catalog::installed_version("demo.lua"), Some(1));
+    // Fresh install matches the published content: no update pending.
+    assert!(!catalog::needs_update(&entry));
+    assert_eq!(catalog::updates_available(), 0);
 
-    // Bump the version and refresh: the installed copy is updated.
-    fs::write(fixture.join("tools").join("demo.lua"), "-- demo v2\n").unwrap();
-    write_index(&fixture, 2, "");
+    // Publish new content (a "git" change). The on-disk copy now differs.
+    let entry = publish(&fixture, "-- demo v2\n");
+    assert!(catalog::needs_update(&entry), "changed content flags update");
+    assert_eq!(catalog::updates_available(), 1);
+
+    // refresh_now only refreshes the cached index — it must NOT auto-install.
     catalog::refresh_now();
+    assert_eq!(
+        fs::read_to_string(&installed_path).unwrap(),
+        "-- demo v1\n",
+        "refresh must not pull updates without user action"
+    );
+    assert_eq!(catalog::updates_available(), 1);
+
+    // The user applies the update via install(); the flag clears.
+    catalog::install(&entry).unwrap();
     assert_eq!(fs::read_to_string(&installed_path).unwrap(), "-- demo v2\n");
-    assert_eq!(catalog::installed_version("demo.lua"), Some(2));
+    assert!(!catalog::needs_update(&entry));
+    assert_eq!(catalog::updates_available(), 0);
 
     // Offline: an unreachable base falls back to the cached index.
     unsafe {
@@ -69,7 +91,6 @@ fn catalog_fetch_install_refresh_remove() {
         name: "demo.lua".to_string(),
         kind: "tool".to_string(),
         description: String::new(),
-        version: 9,
         sha256: "deadbeef".to_string(),
     };
     assert!(catalog::install(&bad).is_err(), "bad sha256 should fail");
@@ -77,7 +98,6 @@ fn catalog_fetch_install_refresh_remove() {
     // Remove it.
     catalog::remove(&entry).unwrap();
     assert!(!installed_path.exists());
-    assert_eq!(catalog::installed_version("demo.lua"), None);
 
     fs::remove_dir_all(&fixture).ok();
     fs::remove_dir_all(&cfg).ok();

@@ -2,14 +2,15 @@
 //!
 //! Optional tools and commands live in a separate `bone-catalog` repo served as
 //! raw content (not embedded in the binary). This module fetches the catalog
-//! index, downloads individual items on demand, and keeps installed copies up
-//! to date. Installed items are written into `~/.bone-rust/lua/{tools,commands}/`
-//! — once on disk the normal loader runs them like any user file.
+//! index and downloads individual items on demand. Installed items are written
+//! into `~/.bone-rust/lua/{tools,commands}/` — once on disk the normal loader
+//! runs them like any user file. Updates are detected by comparing the on-disk
+//! file's sha256 against the catalog's, and surfaced to the user (`/catalog`
+//! tag + startup hint); they're applied only when the user asks.
 //!
 //! All operations are offline-safe: a network failure falls back to whatever is
 //! cached/installed and never errors out the app.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,15 +32,10 @@ pub struct CatalogEntry {
     pub kind: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default = "default_version")]
-    pub version: u32,
-    /// Hex sha256 of the file bytes; empty disables verification.
+    /// Hex sha256 of the file bytes. Drives both integrity verification and
+    /// update detection; empty disables both.
     #[serde(default)]
     pub sha256: String,
-}
-
-fn default_version() -> u32 {
-    1
 }
 
 impl CatalogEntry {
@@ -138,34 +134,47 @@ pub fn sync_quiet() -> Vec<CatalogEntry> {
     fetch_index()
 }
 
-// ---- installed-state tracking -------------------------------------------
-
-fn installed_path() -> PathBuf {
-    cache_dir().join("installed.json")
-}
-
-fn load_installed() -> HashMap<String, u32> {
-    std::fs::read(installed_path())
+/// Read the cached index only (no network). Returns an empty list if nothing is
+/// cached yet.
+fn cached_index() -> Vec<CatalogEntry> {
+    std::fs::read(cache_dir().join("catalog.json"))
         .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
+        .and_then(|b| parse_index(&b))
         .unwrap_or_default()
 }
 
-fn save_installed(map: &HashMap<String, u32>) {
-    let _ = std::fs::create_dir_all(cache_dir());
-    if let Ok(json) = serde_json::to_vec_pretty(map) {
-        let _ = std::fs::write(installed_path(), json);
-    }
-}
+// ---- install state & update detection -----------------------------------
 
 /// True if the item's file is present on disk.
 pub fn is_installed(entry: &CatalogEntry) -> bool {
     lua_dir(entry).join(&entry.name).exists()
 }
 
-/// Installed version recorded for `name`, if any.
-pub fn installed_version(name: &str) -> Option<u32> {
-    load_installed().get(name).copied()
+/// True if the on-disk copy differs from the catalog's current content.
+///
+/// Detection is purely content-based: the catalog publishes the sha256 of each
+/// file, and we hash whatever is installed. An empty `sha256` (no hash
+/// published) disables detection and returns `false`, so the feature stays dark
+/// until the catalog ships hashes — never a false positive.
+pub fn needs_update(entry: &CatalogEntry) -> bool {
+    if entry.sha256.is_empty() {
+        return false;
+    }
+    let path = lua_dir(entry).join(&entry.name);
+    match std::fs::read(&path) {
+        Ok(bytes) => !sha256_hex(&bytes).eq_ignore_ascii_case(&entry.sha256),
+        Err(_) => false,
+    }
+}
+
+/// Number of installed items with a newer version available, read from the
+/// cached index only (no network) so callers like the startup banner never
+/// block.
+pub fn updates_available() -> usize {
+    cached_index()
+        .iter()
+        .filter(|e| is_installed(e) && needs_update(e))
+        .count()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -203,10 +212,6 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     let path = dir.join(&entry.name);
     std::fs::write(&path, &bytes)
         .map_err(|e| format!("could not write {}: {e}", path.display()))?;
-
-    let mut installed = load_installed();
-    installed.insert(entry.name.clone(), entry.version);
-    save_installed(&installed);
     Ok(())
 }
 
@@ -217,9 +222,6 @@ pub fn remove(entry: &CatalogEntry) -> Result<(), String> {
         std::fs::remove_file(&path)
             .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
     }
-    let mut installed = load_installed();
-    installed.remove(&entry.name);
-    save_installed(&installed);
     Ok(())
 }
 
@@ -249,22 +251,11 @@ fn mark_refreshed() {
     let _ = std::fs::write(last_refresh_path(), now_secs().to_string());
 }
 
-/// Re-install any installed item whose catalog version is newer than the
-/// installed version. Blocking; intended to run on a background thread.
+/// Refresh the cached index so update detection and the startup hint reflect
+/// the latest catalog. Installs nothing — updates are applied only when the
+/// user does so in `/catalog`. Blocking; intended for a background thread.
 pub fn refresh_now() {
-    let installed = load_installed();
-    if installed.is_empty() {
-        mark_refreshed();
-        return;
-    }
-    let entries = fetch_index();
-    for entry in &entries {
-        if let Some(&have) = installed.get(&entry.name)
-            && entry.version > have
-        {
-            let _ = install(entry);
-        }
-    }
+    let _ = fetch_index();
     mark_refreshed();
 }
 

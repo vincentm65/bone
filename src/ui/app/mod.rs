@@ -267,6 +267,15 @@ impl App {
             ));
         }
 
+        // Append a catalog-update hint (cached/local read — never blocks).
+        let updates = crate::ext::catalog::updates_available();
+        if updates > 0 {
+            lines.push(format!(
+                "{updates} catalog update{} available — run /catalog",
+                if updates == 1 { "" } else { "s" }
+            ));
+        }
+
         lines.join("\n")
     }
 

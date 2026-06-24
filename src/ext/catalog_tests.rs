@@ -5,6 +5,7 @@ use super::*;
 
 #[test]
 fn parses_index_with_defaults() {
+    // An unknown `version` field is tolerated (serde ignores it).
     let json = br#"[
         { "name": "browser.lua", "kind": "tool", "description": "drive a browser",
           "version": 3, "sha256": "abc" },
@@ -13,10 +14,9 @@ fn parses_index_with_defaults() {
     let entries = parse_index(json).expect("valid index");
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].name, "browser.lua");
-    assert_eq!(entries[0].version, 3);
+    assert_eq!(entries[0].sha256, "abc");
     assert_eq!(entries[0].dir_segment(), "tools");
-    // Missing version/sha256 fall back to defaults.
-    assert_eq!(entries[1].version, 1);
+    // Missing sha256 falls back to empty (detection disabled).
     assert!(entries[1].sha256.is_empty());
     assert_eq!(entries[1].dir_segment(), "commands");
     assert!(entries[1].is_command());

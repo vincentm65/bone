@@ -540,10 +540,6 @@ Auto-compaction announces itself to the attached frontend via `ctx.ui.notice` (a
 
 Open the interactive config editor. See [Config, Theme, and Keymaps](#config-theme-and-keymaps) for the full API.
 
-### /customize
-
-Quick-start guide for customizing bone — describes configs, commands, tools, and the `ctx` API.
-
 ### /memory
 
 Incremental memory builder. Processes all conversations since last run and updates `memory.md`. If `memory.md` exists in the config directory, its contents are loaded into every conversation's system prompt.
