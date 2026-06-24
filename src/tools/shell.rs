@@ -57,19 +57,19 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
     let mut stderr = child.stderr.take().ok_or("failed to capture stderr")?;
 
     let wait = async {
-        let status_fut = async { child.wait().await.map_err(|e| e.to_string()) };
+        let status_fut = async { child.wait().await.map_err(crate::util::errstr) };
         let out_fut = async {
             let mut out = Vec::new();
             stdout
                 .read_to_end(&mut out)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(crate::util::errstr)?;
             Ok::<_, String>(out)
         };
         let err_fut = async {
@@ -77,7 +77,7 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
             stderr
                 .read_to_end(&mut err)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(crate::util::errstr)?;
             Ok::<_, String>(err)
         };
         let (status, out, err) = tokio::try_join!(status_fut, out_fut, err_fut)?;
@@ -162,7 +162,7 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
+        let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
         let _ = args.classification;
         let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 300_000);
 

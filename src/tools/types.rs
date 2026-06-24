@@ -17,7 +17,7 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,
@@ -35,6 +35,42 @@ pub struct ToolResult {
     /// Optional session state to store in ToolStateMap (not sent to LLM).
     #[serde(skip)]
     pub state: Option<String>,
+}
+
+impl ToolResult {
+    /// A successful result carrying a tool's [`ToolOutput`], preserving its
+    /// images, pane content, and session state. `is_error` defaults to `false`.
+    pub fn ok(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        output: ToolOutput,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            content: output.content,
+            images: output.images,
+            pane_page: output.pane_page,
+            state: output.state,
+            ..Default::default()
+        }
+    }
+
+    /// A failed result: `content` is the error message, with no images, pane,
+    /// or session state.
+    pub fn error(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            content: content.into(),
+            is_error: true,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,7 +101,7 @@ pub struct ToolDisplayConfig {
     pub eager: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolOutput {
     pub content: String,
     /// Image attachments produced by the tool. Carried into [`ToolResult`].
@@ -105,9 +141,7 @@ impl ToolOutput {
     pub fn text(content: String) -> Self {
         Self {
             content,
-            images: Vec::new(),
-            pane_page: None,
-            state: None,
+            ..Default::default()
         }
     }
 
@@ -116,8 +150,7 @@ impl ToolOutput {
         Self {
             content,
             images,
-            pane_page: None,
-            state: None,
+            ..Default::default()
         }
     }
 }

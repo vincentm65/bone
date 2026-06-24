@@ -711,30 +711,18 @@ pub(crate) async fn execute_tool_calls(
             CallOutcome::Blocked(reason) => {
                 out.push((
                     i,
-                    ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: reason,
-                        images: Vec::new(),
-                        is_error: true,
-                        pane_page: None,
-                        state: None,
-                    },
+                    ToolResult::error(call.id.clone(), call.name.clone(), reason),
                 ));
             }
             CallOutcome::Denied => {
                 let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
                 out.push((
                     i,
-                    ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: crate::tools::denied_message(*mode, safety),
-                        images: Vec::new(),
-                        is_error: true,
-                        pane_page: None,
-                        state: None,
-                    },
+                    ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        crate::tools::denied_message(*mode, safety),
+                    ),
                 ));
             }
         }

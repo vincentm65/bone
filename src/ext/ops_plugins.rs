@@ -25,12 +25,12 @@ fn symlink_plugin_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
 
 /// Set up the `bone.plugin` table on the Lua state.
 pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
-    let plugin_table = lua.create_table().map_err(|e| e.to_string())?;
+    let plugin_table = lua.create_table().map_err(crate::util::errstr)?;
 
     // Internal set of loaded plugin names to prevent double-loading.
-    let loaded_set = lua.create_table().map_err(|e| e.to_string())?;
+    let loaded_set = lua.create_table().map_err(crate::util::errstr)?;
     bone.set("_loaded_plugins", loaded_set)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // bone.plugin.load("name")
     let load_fn = lua
@@ -82,10 +82,10 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                 }
             }
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     plugin_table
         .set("load", load_fn)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // bone.plugin.install("user/repo") or bone.plugin.install("/local/path")
     let install_fn = lua
@@ -157,10 +157,10 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                 }
             }
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     plugin_table
         .set("install", install_fn)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // bone.plugin.remove("name")
     let remove_fn = lua
@@ -183,10 +183,10 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
 
             Ok(true)
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     plugin_table
         .set("remove", remove_fn)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // bone.plugin.list() → table of { name = { has_init = bool } }
     let list_fn = lua
@@ -220,10 +220,10 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
             }
             Ok(result)
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     plugin_table
         .set("list", list_fn)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // bone.plugin.update("name")
     let update_fn = lua
@@ -264,12 +264,12 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                 Err(e) => Err(mlua::Error::external(format!("git pull failed: {e}"))),
             }
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     plugin_table
         .set("update", update_fn)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     bone.set("plugin", plugin_table)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     Ok(())
 }

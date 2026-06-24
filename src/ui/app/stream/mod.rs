@@ -3,7 +3,7 @@ use crate::llm::{ChatMessage, ChatRole};
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
 use crate::tools::types::ToolLiveEvent;
-use crate::tools::{ApprovalMode, Tool, ToolCall, ToolResult};
+use crate::tools::{ApprovalMode, Tool, ToolCall};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
@@ -203,18 +203,6 @@ fn key_event_from_crossterm(
         ctrl: modifiers.contains(KeyModifiers::CONTROL),
         alt: modifiers.contains(KeyModifiers::ALT),
         shift: modifiers.contains(KeyModifiers::SHIFT),
-    }
-}
-
-pub fn tool_error(call: &ToolCall, content: impl Into<String>) -> ToolResult {
-    ToolResult {
-        call_id: call.id.clone(),
-        name: call.name.clone(),
-        content: content.into(),
-        images: Vec::new(),
-        is_error: true,
-        pane_page: None,
-        state: None,
     }
 }
 
@@ -661,10 +649,8 @@ impl App {
                     call_id: call_id.clone(),
                     name: name.clone(),
                     content,
-                    images: Vec::new(),
                     is_error,
-                    pane_page: None,
-                    state: None,
+                    ..Default::default()
                 };
                 // Skip the row if a preview already showed it (edit_file).
                 if self.shown_tool_rows.remove(&call_id) {
@@ -822,11 +808,7 @@ impl App {
         let result = crate::tools::ToolResult {
             call_id: call.id.clone(),
             name: call.name.clone(),
-            content: String::new(),
-            images: Vec::new(),
-            is_error: false,
-            pane_page: None,
-            state: None,
+            ..Default::default()
         };
         let display = self.tools.display_for_call(call);
         self.messages.push(build_tool_row(call, &result, display));

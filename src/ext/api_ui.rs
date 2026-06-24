@@ -116,17 +116,17 @@ fn from_lua<T: serde::de::DeserializeOwned>(lua: &Lua, value: Value) -> mlua::Re
 pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), String> {
     let api: Table = match bone
         .get::<Option<Table>>("api")
-        .map_err(|e| e.to_string())?
+        .map_err(crate::util::errstr)?
     {
         Some(t) => t,
         None => {
-            let t = lua.create_table().map_err(|e| e.to_string())?;
-            bone.set("api", &t).map_err(|e| e.to_string())?;
+            let t = lua.create_table().map_err(crate::util::errstr)?;
+            bone.set("api", &t).map_err(crate::util::errstr)?;
             t
         }
     };
 
-    let ui = lua.create_table().map_err(|e| e.to_string())?;
+    let ui = lua.create_table().map_err(crate::util::errstr)?;
 
     // open_float(opts) -> id
     let ui_state = shared_ui.clone();
@@ -152,9 +152,9 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             lock(&ui_state).apply(ViewDiff::Upsert { component });
             Ok(id)
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     ui.set("open_float", open_float)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // set_lines(id, lines) -> bool (true if the float existed and was updated)
     let ui_state = shared_ui.clone();
@@ -188,8 +188,8 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             };
             Ok(updated)
         })
-        .map_err(|e| e.to_string())?;
-    ui.set("set_lines", set_lines).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    ui.set("set_lines", set_lines).map_err(crate::util::errstr)?;
 
     // close(id)
     let ui_state = shared_ui.clone();
@@ -198,8 +198,8 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             lock(&ui_state).apply(ViewDiff::Remove { id });
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    ui.set("close", close).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    ui.set("close", close).map_err(crate::util::errstr)?;
 
     // set_statusline(id, segments)
     let ui_state = shared_ui.clone();
@@ -211,9 +211,9 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             });
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     ui.set("set_statusline", set_statusline)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // set_highlight(name, fg|nil)
     let ui_state = shared_ui.clone();
@@ -222,9 +222,9 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             lock(&ui_state).apply(ViewDiff::SetHighlight { name, fg });
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     ui.set("set_highlight", set_highlight)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // term_width() -> columns. Queries the live terminal size via ioctl on
     // every call (defaults to 80 when not a tty). Lua is sandboxed so it can't
@@ -239,11 +239,11 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             let w = 80u16;
             Ok(w)
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     ui.set("term_width", term_width)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
-    api.set("ui", ui).map_err(|e| e.to_string())?;
+    api.set("ui", ui).map_err(crate::util::errstr)?;
     Ok(())
 }
 

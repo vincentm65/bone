@@ -570,7 +570,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
             {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(crate::util::errstr)?;
             }
             write_atomic(path, &content, None).await
         });

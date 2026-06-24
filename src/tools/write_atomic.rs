@@ -22,7 +22,7 @@ pub async fn write_atomic(
             .create_new(true)
             .open(&temp_path)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::util::errstr)?;
         f.write_all(content.as_bytes()).await.map_err(|e| {
             let _ = std::fs::remove_file(&temp_path);
             e.to_string()

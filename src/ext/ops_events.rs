@@ -24,12 +24,12 @@ const EVENT_NAMES: &[&str] = &[
 
 /// Create the `bone.on` function and the `bone._handlers` storage table.
 pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
-    let handlers = lua.create_table().map_err(|e| e.to_string())?;
+    let handlers = lua.create_table().map_err(crate::util::errstr)?;
     for &name in EVENT_NAMES {
-        let array = lua.create_table().map_err(|e| e.to_string())?;
-        handlers.set(name, array).map_err(|e| e.to_string())?;
+        let array = lua.create_table().map_err(crate::util::errstr)?;
+        handlers.set(name, array).map_err(crate::util::errstr)?;
     }
-    bone.set("_handlers", handlers).map_err(|e| e.to_string())?;
+    bone.set("_handlers", handlers).map_err(crate::util::errstr)?;
 
     let on_fn = lua
         .create_function(|lua, (event_name, handler): (String, mlua::Function)| {
@@ -48,8 +48,8 @@ pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
             }
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
-    bone.set("on", on_fn).map_err(|e| e.to_string())?;
+    bone.set("on", on_fn).map_err(crate::util::errstr)?;
     Ok(())
 }

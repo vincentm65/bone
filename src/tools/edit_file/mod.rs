@@ -112,7 +112,7 @@ impl Tool for EditFileTool {
 }
 
 pub async fn preview_edit_file(tool_name: &str, arguments: Value) -> Result<EditPreview, String> {
-    let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
+    let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
     let (original, next) = build_candidate_content(&args).await?;
     let before_hash = sha256_hex(&original);
     let diff = diff::build_unified_diff(tool_name, &args.path, &original, &next);
@@ -120,7 +120,7 @@ pub async fn preview_edit_file(tool_name: &str, arguments: Value) -> Result<Edit
 }
 
 pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
-    let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
+    let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
     let (original, next) = build_candidate_content(&args).await?;
 
     if let Some(expected_hash) = args.expected_hash.as_deref() {
@@ -136,7 +136,7 @@ pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
 
     {
         let path = std::path::Path::new(&args.path);
-        let metadata = fs::metadata(path).await.map_err(|e| e.to_string())?;
+        let metadata = fs::metadata(path).await.map_err(crate::util::errstr)?;
         let permissions = Some(metadata.permissions());
         write_atomic(path, &next, permissions).await?;
     }
@@ -146,14 +146,14 @@ pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
 }
 
 async fn build_candidate_content(args: &Args) -> Result<(String, String), String> {
-    let metadata = fs::metadata(&args.path).await.map_err(|e| e.to_string())?;
+    let metadata = fs::metadata(&args.path).await.map_err(crate::util::errstr)?;
     if !metadata.is_file() {
         return Err("path is not a regular file".to_string());
     }
 
     let original = fs::read_to_string(&args.path)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     if args.mode.as_deref() == Some("rewrite") {
         ensure_no_edit_fields_for_rewrite(args)?;

@@ -51,9 +51,9 @@ pub struct RegisteredLuaCommand {
 
 /// Create the `bone.register_command` function and the `bone._commands` storage array.
 pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), String> {
-    let commands_array = lua.create_table().map_err(|e| e.to_string())?;
+    let commands_array = lua.create_table().map_err(crate::util::errstr)?;
     bone.set("_commands", commands_array)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     let register_fn = lua
         .create_function(|lua, args: Variadic<Value>| {
@@ -106,9 +106,9 @@ pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), Stri
             commands.push(entry)?;
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     bone.set("register_command", register_fn)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     Ok(())
 }

@@ -46,18 +46,18 @@ fn ensure_subtable(lua: &Lua, bone: &Table, name: &str) -> mlua::Result<Table> {
 
 /// Register `bone.api.autocmd/emit` and `bone.api.keymap.*` / `bone.api.config.*`.
 pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
-    let api = api_table(lua, bone).map_err(|e| e.to_string())?;
+    let api = api_table(lua, bone).map_err(crate::util::errstr)?;
 
     // Ensure the live config/keymap tables exist for runtime mutation.
-    ensure_subtable(lua, bone, "config").map_err(|e| e.to_string())?;
-    ensure_subtable(lua, bone, "keymap").map_err(|e| e.to_string())?;
+    ensure_subtable(lua, bone, "config").map_err(crate::util::errstr)?;
+    ensure_subtable(lua, bone, "keymap").map_err(crate::util::errstr)?;
 
     // bone.api.autocmd = bone.on (general event registration).
     if let Some(on) = bone
         .get::<Option<Function>>("on")
-        .map_err(|e| e.to_string())?
+        .map_err(crate::util::errstr)?
     {
-        api.set("autocmd", on).map_err(|e| e.to_string())?;
+        api.set("autocmd", on).map_err(crate::util::errstr)?;
     }
 
     // bone.api.emit(event, payload?) — synchronously invoke registered handlers.
@@ -84,8 +84,8 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             }
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    api.set("emit", emit).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    api.set("emit", emit).map_err(crate::util::errstr)?;
 
     // bone.api.submit(text) — queue a prompt for the frontend to submit, like
     // typed input. Drained between turns (or queued behind the active turn).
@@ -96,11 +96,11 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             }
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    api.set("submit", submit).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    api.set("submit", submit).map_err(crate::util::errstr)?;
 
     // bone.api.keymap.{set,del,get}
-    let keymap = lua.create_table().map_err(|e| e.to_string())?;
+    let keymap = lua.create_table().map_err(crate::util::errstr)?;
 
     let set = lua
         .create_function(|lua, (mode, key, action): (String, String, String)| {
@@ -124,8 +124,8 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             mode_tbl.set(key, action)?;
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    keymap.set("set", set).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    keymap.set("set", set).map_err(crate::util::errstr)?;
 
     let del = lua
         .create_function(|lua, (mode, key): (String, String)| {
@@ -137,8 +137,8 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             }
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    keymap.set("del", del).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    keymap.set("del", del).map_err(crate::util::errstr)?;
 
     let get = lua
         .create_function(|lua, mode: String| {
@@ -150,13 +150,13 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             }
             lua.create_table()
         })
-        .map_err(|e| e.to_string())?;
-    keymap.set("get", get).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    keymap.set("get", get).map_err(crate::util::errstr)?;
 
-    api.set("keymap", keymap).map_err(|e| e.to_string())?;
+    api.set("keymap", keymap).map_err(crate::util::errstr)?;
 
     // bone.api.config.{set,get}
-    let config = lua.create_table().map_err(|e| e.to_string())?;
+    let config = lua.create_table().map_err(crate::util::errstr)?;
 
     let cset = lua
         .create_function(|lua, (key, value): (String, Value)| {
@@ -172,8 +172,8 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             cfg.set(key, value)?;
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    config.set("set", cset).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    config.set("set", cset).map_err(crate::util::errstr)?;
 
     let cget = lua
         .create_function(|lua, key: String| {
@@ -183,10 +183,10 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
                 None => Ok(Value::Nil),
             }
         })
-        .map_err(|e| e.to_string())?;
-    config.set("get", cget).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    config.set("get", cget).map_err(crate::util::errstr)?;
 
-    api.set("config", config).map_err(|e| e.to_string())?;
+    api.set("config", config).map_err(crate::util::errstr)?;
 
     Ok(())
 }

@@ -63,10 +63,10 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        let args: Args = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
+        let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
         let content = fs::read_to_string(&args.path)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::util::errstr)?;
 
         let start = args.start_line.unwrap_or(1).saturating_sub(1);
         let max = args.max_lines.unwrap_or(500).min(1000);
@@ -80,7 +80,7 @@ impl Tool for ReadFileTool {
         // vision-capable models, rather than as (binary) text.
         if let Some(media_type) = path.and_then(image_media_type) {
             let path = path.unwrap().to_string();
-            let bytes = fs::read(&path).await.map_err(|e| e.to_string())?;
+            let bytes = fs::read(&path).await.map_err(crate::util::errstr)?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let note = format!("[read image {path} ({media_type}, {} bytes)]", bytes.len());
             return Ok(ToolOutput::with_images(

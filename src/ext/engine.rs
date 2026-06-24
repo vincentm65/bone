@@ -113,35 +113,35 @@ pub(crate) fn create_engine(
     sandbox_globals(&lua, &globals)?;
 
     // Create the `bone` table.
-    let bone = lua.create_table().map_err(|e| e.to_string())?;
+    let bone = lua.create_table().map_err(crate::util::errstr)?;
 
-    bone.set("version", version).map_err(|e| e.to_string())?;
+    bone.set("version", version).map_err(crate::util::errstr)?;
 
     bone.set("cwd", cwd.to_string_lossy().to_string())
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     bone.set("config_dir", config_dir.to_string_lossy().to_string())
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // Boot context: scripts can adapt to nesting depth and headless mode
     // (e.g. the subagent tool refuses to register inside sub-agent VMs).
     bone.set("agent_depth", opts.agent_depth)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     bone.set("headless", opts.headless)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // Shared truncation marker exposed to Lua so the subagent tool and the
     // Rust inline-injection path stay in sync (see jobs::TRUNCATION_MARKER).
     bone.set("truncation_marker", crate::ext::jobs::TRUNCATION_MARKER)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
 
     // Model and provider — set before init.lua runs so banner() can read them.
-    bone.set("model", model).map_err(|e| e.to_string())?;
-    bone.set("provider", provider).map_err(|e| e.to_string())?;
+    bone.set("model", model).map_err(crate::util::errstr)?;
+    bone.set("provider", provider).map_err(crate::util::errstr)?;
 
     // bone.log table (writes to a log file to avoid corrupting the TUI)
-    let log = create_log_table(&lua, config_dir).map_err(|e| e.to_string())?;
-    bone.set("log", log).map_err(|e| e.to_string())?;
+    let log = create_log_table(&lua, config_dir).map_err(crate::util::errstr)?;
+    bone.set("log", log).map_err(crate::util::errstr)?;
     // Override the global `print` to route through `lua_log` (bone.log +
     // headless stderr) instead of stdout. The TUI owns stdout in raw mode, so a
     // stray `print()` in a tool/command would otherwise scramble the screen.
@@ -159,8 +159,8 @@ pub(crate) fn create_engine(
             super::ctx::lua_log(&print_config_dir, "info", &parts.join("\t"));
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    globals.set("print", print_fn).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    globals.set("print", print_fn).map_err(crate::util::errstr)?;
 
     // Set safe package.path entries so users can `require` from their lua dir.
     let lua_dir = config_dir.join("lua");
@@ -181,15 +181,15 @@ pub(crate) fn create_engine(
         lua_dir_str = lua_dir_str,
         lua_lib_dir_str = lua_lib_dir_str,
     );
-    package.set("path", new_path).map_err(|e| e.to_string())?;
+    package.set("path", new_path).map_err(crate::util::errstr)?;
 
-    globals.set("bone", bone).map_err(|e| e.to_string())?;
+    globals.set("bone", bone).map_err(crate::util::errstr)?;
 
     // Inject cjson global (encode/decode via serde_json).
     inject_cjson(&lua, &globals)?;
 
     // bone.register_tool + bone._tools array
-    let bone = &globals.get::<Table>("bone").map_err(|e| e.to_string())?;
+    let bone = &globals.get::<Table>("bone").map_err(crate::util::errstr)?;
     super::ops_tools::setup_register_tool(&lua, bone)?;
     super::ops_tools::setup_register_subagent(&lua, bone)?;
     super::ops_commands::setup_register_command(&lua, bone)?;
@@ -291,10 +291,10 @@ fn sandbox_globals(lua: &Lua, globals: &Table) -> Result<(), String> {
                     "not available in bone Lua sandbox; use ctx APIs instead",
                 ))
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::util::errstr)?;
         package
             .set("loadlib", loadlib_stub)
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::util::errstr)?;
     }
 
     let stub = lua
@@ -303,11 +303,11 @@ fn sandbox_globals(lua: &Lua, globals: &Table) -> Result<(), String> {
                 "not available in bone Lua sandbox; use ctx APIs instead",
             ))
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     globals
         .set("dofile", stub.clone())
-        .map_err(|e| e.to_string())?;
-    globals.set("loadfile", stub).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    globals.set("loadfile", stub).map_err(crate::util::errstr)?;
 
     Ok(())
 }
@@ -319,9 +319,9 @@ fn sandbox_table(lua: &Lua, table: &Table, keys: &[&str]) -> Result<(), String> 
                 "not available in bone Lua sandbox; use ctx APIs instead",
             ))
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
     for &key in keys {
-        table.set(key, stub.clone()).map_err(|e| e.to_string())?;
+        table.set(key, stub.clone()).map_err(crate::util::errstr)?;
     }
     Ok(())
 }
@@ -329,7 +329,7 @@ fn sandbox_table(lua: &Lua, table: &Table, keys: &[&str]) -> Result<(), String> 
 /// Inject a `cjson` global table with `encode` and `decode` functions
 /// backed by serde_json. This matches the lua-cjson API used by seeded tools.
 fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
-    let cjson = lua.create_table().map_err(|e| e.to_string())?;
+    let cjson = lua.create_table().map_err(crate::util::errstr)?;
 
     let encode_fn = lua
         .create_function(|lua, value: mlua::Value| {
@@ -338,8 +338,8 @@ fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
                 .map_err(|e| mlua::Error::external(format!("cjson.encode: {e}")))?;
             Ok(s)
         })
-        .map_err(|e| e.to_string())?;
-    cjson.set("encode", encode_fn).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    cjson.set("encode", encode_fn).map_err(crate::util::errstr)?;
 
     let decode_fn = lua
         .create_function(|lua, s: String| {
@@ -348,9 +348,9 @@ fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
             let value = lua.to_value(&json)?;
             Ok(value)
         })
-        .map_err(|e| e.to_string())?;
-    cjson.set("decode", decode_fn).map_err(|e| e.to_string())?;
+        .map_err(crate::util::errstr)?;
+    cjson.set("decode", decode_fn).map_err(crate::util::errstr)?;
 
-    globals.set("cjson", cjson).map_err(|e| e.to_string())?;
+    globals.set("cjson", cjson).map_err(crate::util::errstr)?;
     Ok(())
 }

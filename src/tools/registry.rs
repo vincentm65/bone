@@ -65,34 +65,10 @@ impl ToolRegistry {
                 )
                 .await
             {
-                Ok(output) => ToolResult {
-                    call_id,
-                    name,
-                    content: output.content,
-                    images: output.images,
-                    is_error: false,
-                    pane_page: output.pane_page,
-                    state: output.state,
-                },
-                Err(content) => ToolResult {
-                    call_id,
-                    name,
-                    content,
-                    images: Vec::new(),
-                    is_error: true,
-                    pane_page: None,
-                    state: None,
-                },
+                Ok(output) => ToolResult::ok(call_id, name, output),
+                Err(content) => ToolResult::error(call_id, name, content),
             },
-            None => ToolResult {
-                call_id,
-                name,
-                content: "Unknown tool".to_string(),
-                images: Vec::new(),
-                is_error: true,
-                pane_page: None,
-                state: None,
-            },
+            None => ToolResult::error(call_id, name, "Unknown tool"),
         }
     }
 }
@@ -233,15 +209,7 @@ impl ToolHandler {
         {
             return calls
                 .into_iter()
-                .map(|call| ToolResult {
-                    call_id: call.id,
-                    name: call.name,
-                    content: "cancelled by user".to_string(),
-                    images: Vec::new(),
-                    is_error: true,
-                    pane_page: None,
-                    state: None,
-                })
+                .map(|call| ToolResult::error(call.id, call.name, "cancelled by user"))
                 .collect();
         }
 
@@ -326,15 +294,7 @@ impl ToolHandler {
         tool_call_depth: usize,
     ) -> ToolResult {
         if call.name.starts_with('/') {
-            ToolResult {
-                call_id: call.id,
-                name: call.name,
-                content: "Slash commands are UI commands, not tools.".to_string(),
-                images: Vec::new(),
-                is_error: true,
-                pane_page: None,
-                state: None,
-            }
+            ToolResult::error(call.id, call.name, "Slash commands are UI commands, not tools.")
         } else if self.is_enabled(&call.name) {
             self.registry
                 .execute_live(
@@ -350,15 +310,11 @@ impl ToolHandler {
                 )
                 .await
         } else {
-            ToolResult {
-                call_id: call.id,
-                name: call.name,
-                content: "Tool disabled in /tools settings".to_string(),
-                images: Vec::new(),
-                is_error: true,
-                pane_page: None,
-                state: None,
-            }
+            ToolResult::error(
+                call.id,
+                call.name,
+                "Tool disabled in /tools settings",
+            )
         }
     }
 

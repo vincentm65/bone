@@ -384,7 +384,7 @@ pub fn resolve_provider(
     }
     crate::config::warn_if_no_api_key_for(&provider_id, providers_config);
     let mut boxed =
-        create_provider_with_config(&provider_id, providers_config).map_err(|e| e.to_string())?;
+        create_provider_with_config(&provider_id, providers_config).map_err(crate::util::errstr)?;
     boxed.set_max_tokens(request.max_tokens);
     Ok(Arc::from(boxed))
 }
