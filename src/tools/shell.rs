@@ -11,6 +11,11 @@ use crate::tools::types::{Tool, ToolDefinition};
 
 // ── Script execution (formerly script_runner.rs) ────────────────────────────
 
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setsid() -> i32;
+}
+
 pub struct ScriptRequest {
     pub command: String,
     pub env: Vec<(String, String)>,
@@ -48,16 +53,21 @@ fn which(name: &str) -> bool {
 pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
     let timeout_ms = request.timeout_ms.clamp(1_000, 300_000);
     let (shell, shell_arg, _) = shell_command();
-    let mut child = Command::new(shell)
-        .arg(shell_arg)
+    let mut cmd = Command::new(shell);
+    cmd.arg(shell_arg)
         .arg(&request.command)
         .envs(request.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(crate::util::errstr)?;
+        .kill_on_drop(true);
+    // Detach controlling tty so sudo/ssh (reading /dev/tty) fail cleanly
+    // instead of corrupting the TUI and swallowing keystrokes.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| { setsid(); Ok(()) });
+    }
+    let mut child = cmd.spawn().map_err(crate::util::errstr)?;
 
     let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
     let mut stderr = child.stderr.take().ok_or("failed to capture stderr")?;
