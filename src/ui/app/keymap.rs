@@ -84,6 +84,9 @@ impl App {
 }
 
 fn clipboard_image() -> Result<crate::llm::ImageData, String> {
+    // `arboard` has no Android backend, so there we rely solely on the external
+    // clipboard command fallback.
+    #[cfg(not(target_os = "android"))]
     match arboard_clipboard_image() {
         Ok(image) => Ok(image),
         Err(arboard_err) => match external_clipboard_image() {
@@ -91,8 +94,12 @@ fn clipboard_image() -> Result<crate::llm::ImageData, String> {
             Err(external_err) => Err(format!("{arboard_err}; fallback failed: {external_err}")),
         },
     }
+
+    #[cfg(target_os = "android")]
+    external_clipboard_image()
 }
 
+#[cfg(not(target_os = "android"))]
 fn arboard_clipboard_image() -> Result<crate::llm::ImageData, String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|err| format!("clipboard unavailable: {err}"))?;
