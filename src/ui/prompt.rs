@@ -18,10 +18,6 @@ pub struct Prompt {
     pub full_command: Option<String>,
     /// When true, show all command lines instead of the truncated preview.
     pub peek_mode: bool,
-    /// Tab labels for multi-section prompts.
-    pub tabs: Vec<String>,
-    /// Index of the currently active tab.
-    pub active_tab: usize,
 }
 
 impl Prompt {
@@ -35,8 +31,6 @@ impl Prompt {
             hint: None,
             full_command: None,
             peek_mode: false,
-            tabs: Vec::new(),
-            active_tab: 0,
         }
     }
 

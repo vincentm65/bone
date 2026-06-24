@@ -125,6 +125,28 @@ fn get_bone(lua: &mlua::Lua) -> Option<mlua::Table> {
     lua.globals().get("bone").ok()
 }
 
+/// Lock the Lua mutex and retrieve the `bone` global table.
+/// Returns `T::default()` on mutex poison or missing bone table.
+fn with_bone<T: Default>(
+    lua_arc: &Arc<Mutex<mlua::Lua>>,
+    f: impl FnOnce(&mlua::Lua, &mlua::Table) -> T,
+) -> T {
+    let lua = match lua_arc.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("bone: warning: Lua mutex poisoned: {e}");
+            return T::default();
+        }
+    };
+
+    let bone_table = match get_bone(&lua) {
+        Some(t) => t,
+        None => return T::default(),
+    };
+
+    f(&lua, &bone_table)
+}
+
 /// Iterate `bone._tools` and build `LuaTool` instances.
 fn collect_tools(
     lua_arc: &Arc<Mutex<mlua::Lua>>,
@@ -132,191 +154,136 @@ fn collect_tools(
     shared_state: &SharedState,
     shared_ui: &super::api_ui::SharedUi,
 ) -> Vec<LuaTool> {
-    let lua = match lua_arc.lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!("bone: warning: Lua mutex poisoned: {e}");
-            return Vec::new();
-        }
-    };
-
-    let bone_table = match get_bone(&lua) {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-
-    let tools_table = match bone_table.get::<mlua::Table>("_tools") {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut tools = Vec::new();
-    for entry in tools_table.sequence_values::<mlua::Table>() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
+    with_bone(lua_arc, |lua, bone_table| {
+        let tools_table = match bone_table.get::<mlua::Table>("_tools") {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
         };
 
-        match LuaTool::from_entry(
-            &lua,
-            &entry,
-            Arc::clone(lua_arc),
-            config_dir.to_string(),
-            shared_state.clone(),
-            shared_ui.clone(),
-        ) {
-            Ok(tool) => tools.push(tool),
-            Err(e) => eprintln!("bone: warning: {e}"),
-        }
-    }
+        let mut tools = Vec::new();
+        for entry in tools_table.sequence_values::<mlua::Table>() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
 
-    tools
+            match LuaTool::from_entry(
+                lua,
+                &entry,
+                Arc::clone(lua_arc),
+                config_dir.to_string(),
+                shared_state.clone(),
+                shared_ui.clone(),
+            ) {
+                Ok(tool) => tools.push(tool),
+                Err(e) => eprintln!("bone: warning: {e}"),
+            }
+        }
+
+        tools
+    })
 }
 
 /// Iterate `bone._commands` and build `RegisteredLuaCommand` instances.
 fn collect_commands(
     lua_arc: &Arc<Mutex<mlua::Lua>>,
 ) -> Vec<super::ops_commands::RegisteredLuaCommand> {
-    let lua = match lua_arc.lock() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!("bone: warning: Lua mutex poisoned: {e}");
-            return Vec::new();
-        }
-    };
-
-    let bone_table = match get_bone(&lua) {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-
-    let commands_table = match bone_table.get::<mlua::Table>("_commands") {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut commands = Vec::new();
-    for entry in commands_table.sequence_values::<mlua::Table>() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
+    with_bone(lua_arc, |_lua, bone_table| {
+        let commands_table = match bone_table.get::<mlua::Table>("_commands") {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
         };
 
-        let name: String = match entry.get::<mlua::Value>("name") {
-            Ok(mlua::Value::String(s)) => match s.to_str() {
-                Ok(s) => s.to_string(),
-                Err(_) => {
-                    eprintln!("bone: warning: command has invalid UTF-8; skipping");
+        let mut commands = Vec::new();
+        for entry in commands_table.sequence_values::<mlua::Table>() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let name: String = match entry.get::<mlua::Value>("name") {
+                Ok(mlua::Value::String(s)) => match s.to_str() {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        eprintln!("bone: warning: command has invalid UTF-8; skipping");
+                        continue;
+                    }
+                },
+                _ => {
+                    eprintln!("bone: warning: command entry missing name; skipping");
                     continue;
                 }
-            },
-            _ => {
-                eprintln!("bone: warning: command entry missing name; skipping");
-                continue;
-            }
-        };
+            };
 
-        let description: String = entry
-            .get::<mlua::Value>("description")
-            .ok()
-            .and_then(|v| {
-                let s = v.as_string()?;
-                let bs = s.to_str().ok()?;
-                Some(bs.as_ref().to_string())
-            })
-            .unwrap_or_default();
+            let description: String = entry
+                .get::<mlua::Value>("description")
+                .ok()
+                .and_then(|v| {
+                    let s = v.as_string()?;
+                    let bs = s.to_str().ok()?;
+                    Some(bs.as_ref().to_string())
+                })
+                .unwrap_or_default();
 
-        commands.push(super::ops_commands::RegisteredLuaCommand { name, description });
-    }
+            commands.push(super::ops_commands::RegisteredLuaCommand { name, description });
+        }
 
-    commands
+        commands
+    })
 }
 
 /// Collect `bone.config` snapshot from Lua.
 fn collect_config_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaConfigSnapshot {
-    let lua = match lua_arc.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("bone: warning: Lua mutex poisoned: {e}");
-            return super::snapshots::LuaConfigSnapshot::default();
-        }
-    };
+    with_bone(lua_arc, |lua, bone_table| {
+        let mut snapshot = match bone_table.get::<Option<mlua::Table>>("config") {
+            Ok(Some(t)) => match super::snapshots::LuaConfigSnapshot::from_lua_table(lua, &t) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("bone-lua warn: config snapshot failed: {e}");
+                    super::snapshots::LuaConfigSnapshot::default()
+                }
+            },
+            _ => super::snapshots::LuaConfigSnapshot::default(),
+        };
 
-    let bone_table = match get_bone(&lua) {
-        Some(t) => t,
-        None => return super::snapshots::LuaConfigSnapshot::default(),
-    };
-
-    let mut snapshot = match bone_table.get::<Option<mlua::Table>>("config") {
-        Ok(Some(t)) => match super::snapshots::LuaConfigSnapshot::from_lua_table(&lua, &t) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("bone-lua warn: config snapshot failed: {e}");
-                super::snapshots::LuaConfigSnapshot::default()
-            }
-        },
-        _ => super::snapshots::LuaConfigSnapshot::default(),
-    };
-
-    // Spinner/text presets come from the seeded ui.spinners lib, not bone.config.
-    let (spinners, texts) = super::snapshots::collect_presets(&lua);
-    snapshot.spinners = spinners;
-    snapshot.texts = texts;
-    snapshot
+        // Spinner/text presets come from the seeded ui.spinners lib, not bone.config.
+        let (spinners, texts) = super::snapshots::collect_presets(lua);
+        snapshot.spinners = spinners;
+        snapshot.texts = texts;
+        snapshot
+    })
 }
 
 /// Collect `bone.theme` snapshot from Lua.
 fn collect_theme_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaThemeSnapshot {
-    let lua = match lua_arc.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("bone: warning: Lua mutex poisoned: {e}");
-            return super::snapshots::LuaThemeSnapshot::default();
+    with_bone(lua_arc, |lua, bone_table| {
+        match bone_table.get::<Option<mlua::Table>>("theme") {
+            Ok(Some(t)) => match super::snapshots::LuaThemeSnapshot::from_lua_table(lua, &t) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("bone-lua warn: theme snapshot failed: {e}");
+                    super::snapshots::LuaThemeSnapshot::default()
+                }
+            },
+            _ => super::snapshots::LuaThemeSnapshot::default(),
         }
-    };
-
-    let bone_table = match get_bone(&lua) {
-        Some(t) => t,
-        None => return super::snapshots::LuaThemeSnapshot::default(),
-    };
-
-    match bone_table.get::<Option<mlua::Table>>("theme") {
-        Ok(Some(t)) => match super::snapshots::LuaThemeSnapshot::from_lua_table(&lua, &t) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("bone-lua warn: theme snapshot failed: {e}");
-                super::snapshots::LuaThemeSnapshot::default()
-            }
-        },
-        _ => super::snapshots::LuaThemeSnapshot::default(),
-    }
+    })
 }
 
 /// Collect `bone.keymap` snapshot from Lua.
 fn collect_keymap_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaKeymapSnapshot {
-    let lua = match lua_arc.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("bone: warning: Lua mutex poisoned: {e}");
-            return super::snapshots::LuaKeymapSnapshot::default();
+    with_bone(lua_arc, |lua, bone_table| {
+        match bone_table.get::<Option<mlua::Table>>("keymap") {
+            Ok(Some(t)) => match super::snapshots::LuaKeymapSnapshot::from_lua_table(lua, &t) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("bone-lua warn: keymap snapshot failed: {e}");
+                    super::snapshots::LuaKeymapSnapshot::default()
+                }
+            },
+            _ => super::snapshots::LuaKeymapSnapshot::default(),
         }
-    };
-
-    let bone_table = match get_bone(&lua) {
-        Some(t) => t,
-        None => return super::snapshots::LuaKeymapSnapshot::default(),
-    };
-
-    match bone_table.get::<Option<mlua::Table>>("keymap") {
-        Ok(Some(t)) => match super::snapshots::LuaKeymapSnapshot::from_lua_table(&lua, &t) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("bone-lua warn: keymap snapshot failed: {e}");
-                super::snapshots::LuaKeymapSnapshot::default()
-            }
-        },
-        _ => super::snapshots::LuaKeymapSnapshot::default(),
-    }
+    })
 }
 
 #[cfg(test)]

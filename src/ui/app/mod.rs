@@ -1862,11 +1862,6 @@ impl App {
         let result = commands::handle(
             &cmd,
             &arg,
-            &mut self.messages,
-            &mut self.transcript,
-            &mut self.token_stats,
-            &mut self.renderer,
-            term,
             &mut self.llm,
             &mut self.provider,
             &mut self.model,

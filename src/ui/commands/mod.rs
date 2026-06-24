@@ -1,7 +1,5 @@
-use crate::chat::Message;
 use crate::config;
-use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
-use crate::ui::render::{BoneTerminal, Renderer};
+use crate::llm::{LlmProvider, providers};
 
 /// Result of executing a slash command.
 pub enum CommandResult {
@@ -42,11 +40,6 @@ pub fn is_protected_builtin(cmd: &str) -> bool {
 pub async fn handle(
     cmd: &str,
     arg: &str,
-    _messages: &mut Vec<Message>,
-    _transcript: &mut Vec<ChatMessage>,
-    _token_stats: &mut TokenStats,
-    _renderer: &mut Renderer,
-    _term: &mut BoneTerminal,
     llm: &mut std::sync::Arc<dyn LlmProvider>,
     provider_label: &mut String,
     model_label: &mut String,

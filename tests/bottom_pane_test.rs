@@ -379,14 +379,7 @@ fn redraw_clears_stale_prompt_and_pane_rows() {
             "auto_compact_keep_messages     3".to_string(),
         ],
     );
-    prompt.tabs = vec![
-        "General".to_string(),
-        "Providers".to_string(),
-        "Tools".to_string(),
-        "Commands".to_string(),
-        "Status".to_string(),
-    ];
-    prompt.hint = Some("Tab switch  Enter edit/cycle  Esc close".to_string());
+    prompt.hint = Some("Enter edit/cycle  Esc close".to_string());
     let width = 80;
     let height = 12;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

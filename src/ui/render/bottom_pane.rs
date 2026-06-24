@@ -20,29 +20,6 @@ pub struct PaneDraw<'a> {
     pub active_page: usize,
     pub autocomplete: Option<&'a AutocompleteState>,
 }
-fn build_tab_bar(items: &[String], active_idx: usize, separator: &str) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (i, label) in items.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(
-                format!(" {separator} "),
-                Style::default().fg(ratatui::style::Color::DarkGray),
-            ));
-        }
-        spans.push(Span::styled(
-            label.clone(),
-            if i == active_idx {
-                Style::default()
-                    .fg(ratatui::style::Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(ratatui::style::Color::DarkGray)
-            },
-        ));
-    }
-    Line::from(spans)
-}
-
 fn push_metric(parts: &mut Vec<Span<'static>>, style: Style, label: &str) {
     if !parts.is_empty() {
         parts.push(Span::styled(" / ", style));
@@ -350,7 +327,6 @@ impl super::Renderer {
         if let Some(p) = prompt {
             let options = p.options.len().min(p.visible_rows) as u16;
             let hint = u16::from(p.hint.is_some());
-            let tab_bar = u16::from(!p.tabs.is_empty());
             let prompt_rows = if let Some(ref cmd) = p.full_command {
                 let title = shell_prompt_title(p);
                 let title_lines = wrap::wrap_text(&title, terminal_width as usize).len() as u16;
@@ -365,12 +341,11 @@ impl super::Renderer {
                     title_lines + preview + hint + options
                 }
             } else {
-                // title (only without tabs) + hint + options
-                let title = u16::from(p.tabs.is_empty());
-                title + hint + options
+                // title + hint + options
+                1u16 + hint + options
             };
-            // top sep + tab bar + prompt region + status + page region
-            return 1 + tab_bar + prompt_rows + 1 + page_extra_height(pages, active_page);
+            // top sep + prompt region + status + page region
+            return 1 + prompt_rows + 1 + page_extra_height(pages, active_page);
         }
         let input_rows = rendered_input_rows(input, terminal_width);
         let ac_rows = autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
@@ -416,25 +391,6 @@ impl super::Renderer {
                 },
             );
             y += 1;
-        }
-
-        // ── Tab bar (for multi-section prompts like /config) ─────────────
-        if let Some(prompt) = prompt
-            && !prompt.tabs.is_empty()
-        {
-            let tab_y = y;
-            if tab_y < content_bottom {
-                let tab_bar = build_tab_bar(&prompt.tabs, prompt.active_tab, "│");
-                frame.render_widget(
-                    Paragraph::new(tab_bar),
-                    Rect {
-                        y: tab_y,
-                        height: 1,
-                        ..area
-                    },
-                );
-                y += 1;
-            }
         }
 
         if let Some(prompt) = prompt {
@@ -534,9 +490,8 @@ impl super::Renderer {
                     y += 1;
                 }
             } else {
-                // Title line — skip when tabs are shown (tab bar already displays it)
-                let show_title = prompt.tabs.is_empty();
-                if show_title && y < options_top {
+                // Title line
+                if y < options_top {
                     frame.render_widget(
                         Paragraph::new(Span::styled(
                             format!("  {}", prompt.title),
