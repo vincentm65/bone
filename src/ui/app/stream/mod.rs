@@ -416,37 +416,16 @@ impl App {
                 .get(persist_from..)
                 .map(<[ChatMessage]>::to_vec)
                 .unwrap_or_default();
-            for msg in &new_msgs {
-                match msg.role {
-                    ChatRole::Assistant => {
-                        let tc = if msg.tool_calls.is_empty() {
-                            None
-                        } else {
-                            serde_json::to_string(&msg.tool_calls).ok()
-                        };
-                        self.append_assistant_to_db(&msg.content, tc.as_deref());
-                    }
-                    ChatRole::Tool => {
-                        self.append_tool_result_to_db(
-                            msg.name.as_deref().unwrap_or("tool"),
-                            msg.tool_call_id.as_deref().unwrap_or(""),
-                            &msg.content,
-                        );
-                    }
-                    // Synthetic user messages relaying tool-returned images.
-                    ChatRole::User => {
-                        let images = (!msg.images.is_empty())
-                            .then(|| serde_json::to_string(&msg.images).ok())
-                            .flatten();
-                        self.append_user_to_db(&msg.content, images.as_deref());
-                    }
-                    _ => {}
+            // Persist the turn's new messages + usage in one atomic transaction
+            // (a single WAL sync) instead of one commit per row.
+            if let Some(ref db) = self.session_db
+                && let Some(conv_id) = self.conversation_id
+            {
+                if let Ok(next) =
+                    db.append_turn(conv_id, self.session_seq, &new_msgs, &outcome.usage)
+                {
+                    self.session_seq = next;
                 }
-            }
-
-            // Persist usage events the Driver reported through its (null) sink.
-            for usage in &outcome.usage {
-                self.record_usage_to_db(usage);
             }
 
             // Surface a driver/provider failure so the turn never ends in

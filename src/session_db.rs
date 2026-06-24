@@ -1,3 +1,5 @@
+use crate::llm::{ChatMessage, ChatRole};
+use crate::runtime::UsageRecord;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -463,6 +465,40 @@ impl SessionDb {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Insert a message row plus its FTS index entry. Shared by `append_message`
+    /// (top-level autocommit) and `append_turn` (batched transaction); `conn` is
+    /// a bare `&Connection`, and a `&Transaction` coerces to it.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_message_row(
+        conn: &Connection,
+        conversation_id: i64,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
+        tool_calls: Option<&str>,
+        images: Option<&str>,
+        seq: i64,
+        created_at: &str,
+    ) -> rusqlite::Result<i64> {
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, created_at],
+        )?;
+        let msg_id = conn.last_insert_rowid();
+        // Include tool-call info in the FTS index so it stays searchable.
+        let searchable = if let Some(tc) = tool_calls {
+            format!("{content} TOOL_CALL {tc}")
+        } else {
+            content.to_string()
+        };
+        conn.execute(
+            "INSERT INTO messages_fts (rowid, content, role, conversation_id) VALUES (?1, ?2, ?3, ?4)",
+            params![msg_id, searchable, role, conversation_id],
+        )?;
+        Ok(msg_id)
+    }
+
     /// Append a message to a conversation (inserts into both messages and messages_fts).
     #[allow(clippy::too_many_arguments)]
     pub fn append_message(
@@ -476,23 +512,100 @@ impl SessionDb {
         images: Option<&str>,
         seq: i64,
     ) -> rusqlite::Result<i64> {
+        Self::insert_message_row(
+            &self.conn,
+            conversation_id,
+            role,
+            content,
+            tool_name,
+            tool_call_id,
+            tool_calls,
+            images,
+            seq,
+            &now_iso(),
+        )
+    }
+
+    /// Append every new message and usage record from a completed turn in a
+    /// single transaction — one commit (one WAL sync) instead of one per row,
+    /// and the whole turn is atomic: a mid-loop failure rolls everything back,
+    /// so the DB can never hold a partial turn or desync `messages` from
+    /// `messages_fts`. `seq` is advanced per written message and returned.
+    pub fn append_turn(
+        &self,
+        conversation_id: i64,
+        mut seq: i64,
+        messages: &[ChatMessage],
+        usage: &[UsageRecord],
+    ) -> rusqlite::Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
         let now = now_iso();
-        self.conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, now],
-        )?;
-        let msg_id = self.conn.last_insert_rowid();
-        // Build searchable text: include tool call info in FTS so it's findable
-        let searchable = if let Some(tc) = tool_calls {
-            format!("{content} TOOL_CALL {tc}")
-        } else {
-            content.to_string()
-        };
-        self.conn.execute(
-            "INSERT INTO messages_fts (rowid, content, role, conversation_id) VALUES (?1, ?2, ?3, ?4)",
-            params![msg_id, searchable, role, conversation_id],
-        )?;
-        Ok(msg_id)
+        for msg in messages {
+            let (role, tool_name, tool_call_id, tool_calls_json, images_json) = match msg.role {
+                ChatRole::Assistant => (
+                    "assistant",
+                    None,
+                    None,
+                    if msg.tool_calls.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&msg.tool_calls).ok()
+                    },
+                    None,
+                ),
+                // Default `tool_name`/`tool_call_id` to "tool"/"" when absent
+                // to preserve the pre-rewrite row shape (consumers that read
+                // these back expect non-null values).
+                ChatRole::Tool => (
+                    "tool",
+                    Some(msg.name.as_deref().unwrap_or("tool")),
+                    Some(msg.tool_call_id.as_deref().unwrap_or("")),
+                    None,
+                    None,
+                ),
+                ChatRole::User => (
+                    "user",
+                    None,
+                    None,
+                    None,
+                    (!msg.images.is_empty())
+                        .then(|| serde_json::to_string(&msg.images).ok())
+                        .flatten(),
+                ),
+                _ => continue,
+            };
+            seq += 1;
+            Self::insert_message_row(
+                &tx,
+                conversation_id,
+                role,
+                &msg.content,
+                tool_name,
+                tool_call_id,
+                tool_calls_json.as_deref(),
+                images_json.as_deref(),
+                seq,
+                &now,
+            )?;
+        }
+        for u in usage {
+            tx.execute(
+                "INSERT INTO usage_events (conversation_id, provider, model, prompt_tokens, completion_tokens, cached_tokens, cost, is_estimated, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    conversation_id,
+                    &u.provider,
+                    &u.model,
+                    u.prompt_tokens as i64,
+                    u.completion_tokens as i64,
+                    u.cached_tokens.unwrap_or(0) as i64,
+                    u.cost.unwrap_or(0.0),
+                    u.is_estimated as i64,
+                    now
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(seq)
     }
 
     /// Record a usage event.

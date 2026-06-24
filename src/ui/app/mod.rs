@@ -327,40 +327,13 @@ impl App {
         .ok();
     }
 
-    /// Append an assistant message to the session database.
-    pub(crate) fn append_assistant_to_db(&mut self, content: &str, tool_calls_json: Option<&str>) {
-        self.append_db_message("assistant", content, None, None, tool_calls_json, None);
-    }
-
-    /// Append a tool result to the session database.
-    pub(crate) fn append_tool_result_to_db(&mut self, name: &str, call_id: &str, content: &str) {
-        self.append_db_message("tool", content, Some(name), Some(call_id), None, None);
-    }
-
     /// Append a user message (optionally carrying image attachments) to the
     /// session database. `images_json` is a JSON array of `{media_type, data}`.
+    /// Used at submit time for the user's own prompt; the turn's assistant/tool
+    /// messages and usage are batched in one transaction by
+    /// `SessionDb::append_turn` at turn end.
     pub(crate) fn append_user_to_db(&mut self, content: &str, images_json: Option<&str>) {
         self.append_db_message("user", content, None, None, None, images_json);
-    }
-    /// Record a token-usage event for the active conversation. The Driver runs
-    /// with a `NullSessionSink` (the TUI owns `session_seq`), so usage events it
-    /// reports are returned in the `DriverOutcome` and written here instead.
-    pub(crate) fn record_usage_to_db(&mut self, usage: &crate::runtime::UsageRecord) {
-        if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id
-        {
-            db.record_usage(
-                conv_id,
-                &usage.provider,
-                &usage.model,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.cached_tokens,
-                usage.cost,
-                usage.is_estimated,
-            )
-            .ok();
-        }
     }
 
     /// Apply a generic action returned by a Lua command or hook.
