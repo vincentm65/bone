@@ -20,7 +20,7 @@ sha2 = "0.10"
 base64 = "0.22"
 # Clipboard image paste (UI-only). `arboard` reads the OS clipboard image as raw
 # RGBA; `png` encodes it for the wire. Off the `--no-default-features` core path.
-arboard = { version = "3", optional = true }
+arboard = { version = "3", features = ["wayland-data-control"], optional = true }
 png = { version = "0.17", optional = true }
 similar = "2"
 strsim = "0.11"

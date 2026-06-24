@@ -883,6 +883,17 @@ impl App {
     /// current panes (when visible), no autocomplete. Shared by the model-turn
     /// tick and the Lua `drive_live` loop so both paint identically.
     fn render_streaming(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        // During streaming/tool loops the main event loop is not running, so
+        // physical resizes must be handled here too. A plain ratatui draw after
+        // resize can strand the old inline viewport rows in scrollback, showing
+        // duplicate input borders/fields. Use the same hard-reset path as idle
+        // redraws before repainting.
+        let size = crossterm::terminal::size()?;
+        if self.renderer.last_size.is_some_and(|last| last != size) {
+            return self.force_redraw(term);
+        }
+        self.renderer.last_size = Some(size);
+
         self.renderer.tick_spinner(
             term,
             &PaneDraw {

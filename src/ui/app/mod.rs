@@ -3,9 +3,7 @@ mod keymap;
 mod paste;
 pub mod stream;
 
-use paste::{
-    apply_input_key_with_paste_burst, collect_non_bracketed_paste_burst, is_paste_burst, plain_char,
-};
+use paste::{apply_input_key_with_paste_burst, collect_paste_burst, is_paste_burst, plain_char};
 
 use crate::chat::Message;
 use crate::config::{self, UserConfig};
@@ -652,7 +650,7 @@ impl App {
                         if let Some(c) = plain_char(&key)
                             && self.active_prompt.is_none()
                         {
-                            let burst = collect_non_bracketed_paste_burst(c)?;
+                            let burst = collect_paste_burst(c)?;
                             if is_paste_burst(&burst.text) {
                                 self.input.history_index = None;
                                 self.input.insert_paste(&burst.text);
@@ -673,6 +671,7 @@ impl App {
                     }
                     Event::Paste(text) => {
                         self.input.insert_paste(&text);
+                        self.update_autocomplete();
                         self.redraw(&mut terminal)?;
                     }
                     Event::Resize(_, _) | Event::Key(_) => {

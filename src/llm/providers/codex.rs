@@ -100,17 +100,28 @@ pub enum CodexInputItem {
 pub enum CodexContent {
     #[serde(rename = "input_text")]
     InputText { text: String },
+    #[serde(rename = "input_image")]
+    InputImage { image_url: String },
     #[serde(rename = "output_text")]
     OutputText { text: String },
 }
 
 impl CodexInputItem {
-    fn user_text(text: &str) -> Self {
+    fn user_message(text: &str, images: Vec<crate::llm::ImageData>) -> Self {
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(CodexContent::InputText {
+                text: text.to_string(),
+            });
+        }
+        for image in images {
+            content.push(CodexContent::InputImage {
+                image_url: format!("data:{};base64,{}", image.media_type, image.data),
+            });
+        }
         Self::Message {
             role: "user",
-            content: vec![CodexContent::InputText {
-                text: text.to_string(),
-            }],
+            content,
         }
     }
 
@@ -202,7 +213,7 @@ pub fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
     for msg in messages {
         match msg.role {
             ChatRole::System => continue,
-            ChatRole::User => items.push(CodexInputItem::user_text(&msg.content)),
+            ChatRole::User => items.push(CodexInputItem::user_message(&msg.content, msg.images)),
             ChatRole::Assistant => {
                 if !msg.content.is_empty() {
                     items.push(CodexInputItem::assistant_text(&msg.content));

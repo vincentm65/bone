@@ -319,7 +319,7 @@ Installed catalog tools:
 - **ask_user** — Ask the user a question with selectable options
 - **task_list** — Maintain a visible checklist with TUI pane rendering
 - **cron** — Manage scheduled bone jobs via crontab
-- **browser** — Drive a real Chromium browser over CDP (Playwright via uv)
+- **browser** — Delegate a web task to an autonomous browser agent (browser-use via uv)
 
 To browse and install catalog tools interactively, run `/catalog` in the TUI. To override the catalog source URL, set the `BONE_CATALOG_URL` environment variable to an `http(s)://` base or a local filesystem path.
 
@@ -467,36 +467,41 @@ bone.register_tool({
 ```
 
 ### browser (Lua)
-Drive a real Chromium (always headful) over a persistent CDP daemon (Playwright
-via `uv`). The daemon auto-starts on the first page action and stays alive across
-calls (fast, keeps page state); actions connect over CDP, reuse the live page, and
-disconnect only (never `browser.close()`). `navigate`, `observe`, `click`, and
-`type` each return a page snapshot (url, title, text excerpt, indexed interactive
-elements), so one call yields both the result and the resulting page. Call `stop`
-when done. Requires `uv` and the `playwright` Python package plus the bundled
-Chromium in `~/.cache/ms-playwright` (the very first `start` may download it).
+Delegate a whole web task to the [browser-use](https://github.com/browser-use/browser-use)
+agent, which drives a real Chromium on its own. You describe the goal in plain
+language (`task`); browser-use runs its own agent loop — navigating, clicking,
+typing, reading, extracting — and returns a final result. Unlike a primitive
+click/type tool, the host LLM does not drive individual steps.
+
+browser-use needs its own LLM: the tool reuses bone's **currently active provider**
+(`ctx.config.list_providers()` + `ctx.conversation.current()`), mapping
+`handler == "anthropic"` to `ChatAnthropic` and every OpenAI-compatible provider to
+`ChatOpenAI(base_url=…)`. The provider's API key is passed to the Python runner via
+an env var (never argv). Requires `uv`; the first call installs browser-use and its
+Chromium via `uv run --with browser-use`.
+
+One call is one agent run, bounded by the host's ~300s `ctx.shell` ceiling, so
+`max_steps` (default 15) is the practical bound; split very long jobs into several
+tasks. Runs headful by default so captcha/login pages can be solved in the visible
+window.
 ```lua
 bone.register_tool({
     name = "browser",
-    description = "Drive a real web browser (Chromium, always headful) over a persistent CDP daemon...",
+    description = "Delegate a web task to an autonomous browser agent (browser-use driving real Chromium)...",
     parameters = {
         type = "object",
         properties = {
-            action = { type = "string", enum = { "navigate", "observe", "click", "type", "eval", "wait", "screenshot", "start", "stop", "status" } },
-            url = { type = "string", description = "URL for navigate." },
-            selector = { type = "string", description = "Playwright selector for click/type/wait/screenshot." },
-            target = { type = "number", description = "Element index from a snapshot; alternative to selector for click/type." },
-            text = { type = "string", description = "Value to type (action=type), or text to wait for (action=wait)." },
-            script = { type = "string", description = "JS expression for eval." },
-            full = { type = "boolean", description = "screenshot only: capture full page (default false)." },
-            path = { type = "string", description = "screenshot only: output PNG path." },
-            timeout_ms = { type = "number", description = "Per-action timeout in ms (default 30000)." },
+            task = { type = "string", description = "The web task to complete, in plain language." },
+            max_steps = { type = "number", description = "Max agent steps before it must finish (default 15)." },
+            headless = { type = "boolean", description = "Run the browser hidden (default false)." },
+            vision = { type = "boolean", description = "Let the agent use page screenshots (default true)." },
+            start_url = { type = "string", description = "Optional URL to open before starting the task." },
         },
-        required = { "action" },
+        required = { "task" },
         additionalProperties = false,
     },
     safety = "danger",
-    display = { show = true, args = { "action", "url", "selector", "text" } },
+    display = { show = true, args = { "task" } },
 })
 ```
 
@@ -999,6 +1004,8 @@ bone.keymap = {
         ["<C-a>"] = "cursor_to_start",
         ["<C-e>"] = "cursor_to_end",
         ["<C-v>"] = "paste_image",
+        ["<A-v>"] = "paste_image",
+        ["<C-S-v>"] = "paste_image",
     },
 }
 ```
@@ -1010,7 +1017,7 @@ Built-in actions:
   - `cycle_approval_mode` — rotate through approval modes (normal mode)
   - `cursor_to_start` — move cursor to start of line (insert mode)
   - `cursor_to_end` — move cursor to end of line (insert mode)
-  - `paste_image` — paste clipboard image as attachment (insert mode; hardcoded to <C-v> when no Lua binding set)
+  - `paste_image` — paste clipboard image as attachment (insert mode; hardcoded to <C-v>, <A-v>, and <C-S-v> when no Lua binding set)
   - any custom action name registered via `bone.api.keymap.set(<mode>, <key>, <name>)`
 
 ## Plugin System

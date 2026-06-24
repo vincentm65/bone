@@ -2,6 +2,7 @@
 //! execute the resolved action name.
 
 use std::io;
+use std::process::Command;
 
 use base64::Engine;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -29,7 +30,12 @@ impl App {
                 return Some(binding.action.clone());
             }
         }
-        if mode == "i" && code == KeyCode::Char('v') && modifiers == KeyModifiers::CONTROL {
+        if mode == "i"
+            && code == KeyCode::Char('v')
+            && (modifiers == KeyModifiers::CONTROL
+                || modifiers == KeyModifiers::ALT
+                || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT))
+        {
             return Some("paste_image".to_string());
         }
         None
@@ -61,27 +67,11 @@ impl App {
                 self.redraw(term)
             }
             "paste_image" => {
-                if let Ok(mut clipboard) = arboard::Clipboard::new()
-                    && let Ok(image) = clipboard.get_image()
-                {
-                    let mut png_bytes = Vec::new();
-                    let mut encoder =
-                        png::Encoder::new(&mut png_bytes, image.width as u32, image.height as u32);
-                    encoder.set_color(png::ColorType::Rgba);
-                    encoder.set_depth(png::BitDepth::Eight);
-                    let encoded = {
-                        let ok = match encoder.write_header() {
-                            Ok(mut writer) => writer.write_image_data(image.bytes.as_ref()).is_ok(),
-                            Err(_) => false,
-                        };
-                        ok.then(|| base64::engine::general_purpose::STANDARD.encode(&png_bytes))
-                    };
-                    if let Some(data) = encoded {
-                        self.input.insert_image(crate::llm::ImageData {
-                            media_type: "image/png".to_string(),
-                            data,
-                        });
-                    }
+                match clipboard_image() {
+                    Ok(image) => self.input.insert_image(image),
+                    Err(err) => self.messages.push(crate::chat::Message::system(format!(
+                        "image paste failed: {err}"
+                    ))),
                 }
                 self.redraw(term)
             }
@@ -90,6 +80,94 @@ impl App {
                 self.redraw(term)
             }
         }
+    }
+}
+
+fn clipboard_image() -> Result<crate::llm::ImageData, String> {
+    match arboard_clipboard_image() {
+        Ok(image) => Ok(image),
+        Err(arboard_err) => match external_clipboard_image() {
+            Ok(image) => Ok(image),
+            Err(external_err) => Err(format!("{arboard_err}; fallback failed: {external_err}")),
+        },
+    }
+}
+
+fn arboard_clipboard_image() -> Result<crate::llm::ImageData, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|err| format!("clipboard unavailable: {err}"))?;
+    let image = clipboard
+        .get_image()
+        .map_err(|err| format!("clipboard has no image: {err}"))?;
+
+    let mut png_bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png_bytes, image.width as u32, image.height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .map_err(|err| format!("PNG header failed: {err}"))?
+        .write_image_data(image.bytes.as_ref())
+        .map_err(|err| format!("PNG encode failed: {err}"))?;
+
+    Ok(png_image_data(png_bytes))
+}
+
+fn external_clipboard_image() -> Result<crate::llm::ImageData, String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Ok(image) = run_clipboard_command("wl-paste", &["--type", "image/png"]) {
+            return Ok(image);
+        }
+    }
+
+    run_clipboard_command(
+        "xclip",
+        &["-selection", "clipboard", "-t", "image/png", "-o"],
+    )
+    .or_else(|_| {
+        run_clipboard_command(
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/jpeg", "-o"],
+        )
+    })
+    .or_else(|_| {
+        run_clipboard_command(
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/webp", "-o"],
+        )
+    })
+}
+
+fn run_clipboard_command(command: &str, args: &[&str]) -> Result<crate::llm::ImageData, String> {
+    let output = Command::new(command)
+        .args(args)
+        .output()
+        .map_err(|err| format!("{command} failed to start: {err}"))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("{command} returned no image")
+        } else {
+            format!("{command}: {stderr}")
+        });
+    }
+
+    let media_type = match args.last().copied() {
+        Some("image/jpeg") => "image/jpeg",
+        Some("image/webp") => "image/webp",
+        _ => "image/png",
+    };
+
+    Ok(crate::llm::ImageData {
+        media_type: media_type.to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(output.stdout),
+    })
+}
+
+fn png_image_data(png_bytes: Vec<u8>) -> crate::llm::ImageData {
+    crate::llm::ImageData {
+        media_type: "image/png".to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(png_bytes),
     }
 }
 
