@@ -467,41 +467,50 @@ bone.register_tool({
 ```
 
 ### browser (Lua)
-Delegate a whole web task to the [browser-use](https://github.com/browser-use/browser-use)
-agent, which drives a real Chromium on its own. You describe the goal in plain
-language (`task`); browser-use runs its own agent loop — navigating, clicking,
-typing, reading, extracting — and returns a final result. Unlike a primitive
-click/type tool, the host LLM does not drive individual steps.
+Drive a persistent browser through an observe/target remote-control API. The
+host model remains the loop: use `open`, then `observe`, then act on returned
+target IDs, then observe again. The browser process, cookies, profile, and page
+state persist between calls until `stop`.
 
-browser-use needs its own LLM: the tool reuses bone's **currently active provider**
-(`ctx.config.list_providers()` + `ctx.conversation.current()`), mapping
-`handler == "anthropic"` to `ChatAnthropic` and every OpenAI-compatible provider to
-`ChatOpenAI(base_url=…)`. The provider's API key is passed to the Python runner via
-an env var (never argv). Requires `uv`; the first call installs browser-use and its
-Chromium via `uv run --with browser-use`.
+For browser tasks, keep using browser actions for page state and interaction.
+Do not switch to shell/curl/grep/Python to scrape the same page unless the user
+explicitly asks for shell-level inspection or the browser tool is blocked. Use
+`eval` for page internals and `observe` for visible text plus target IDs.
+Screenshots are available for debugging but are not the normal path.
 
-One call is one agent run, bounded by the host's ~300s `ctx.shell` ceiling, so
-`max_steps` (default 15) is the practical bound; split very long jobs into several
-tasks. Runs headful by default so captcha/login pages can be solved in the visible
-window.
+The browser is always headful/visible. Headless mode is intentionally disabled.
 ```lua
 bone.register_tool({
     name = "browser",
-    description = "Delegate a web task to an autonomous browser agent (browser-use driving real Chromium)...",
+    description = "Drive a persistent browser through observe/target actions...",
     parameters = {
         type = "object",
         properties = {
-            task = { type = "string", description = "The web task to complete, in plain language." },
-            max_steps = { type = "number", description = "Max agent steps before it must finish (default 15)." },
-            headless = { type = "boolean", description = "Run the browser hidden (default false)." },
-            vision = { type = "boolean", description = "Let the agent use page screenshots (default true)." },
-            start_url = { type = "string", description = "Optional URL to open before starting the task." },
+            action = { type = "string", enum = { "open", "observe", "read", "scrape", "click", "type", "select", "check", "uncheck", "press", "scroll", "wait_for", "screenshot", "eval", "tabs", "current", "current_url", "back", "stop" } },
+            browser = { type = "string", enum = { "chromium", "firefox" }, description = "Engine on cold start; call stop before switching." },
+            url = { type = "string", description = "URL for open; scheme optional." },
+            target = { type = "string", description = "Target id from observe, e.g. t03, for click/type/select/check/uncheck." },
+            selector = { type = "string", description = "Advanced fallback selector; prefer target ids." },
+            ref = { type = "string", description = "Backward-compatible alias for target." },
+            text = { type = "string", description = "Text for type or wait_for." },
+            key = { type = "string", description = "Key name for press, e.g. Enter." },
+            value = { type = "string", description = "Option value for select." },
+            direction = { type = "string", enum = { "up", "down" }, description = "Direction for scroll." },
+            amount = { type = "number", description = "Pixels for scroll." },
+            enter = { type = "boolean", description = "For type: press Enter after filling." },
+            js = { type = "string", description = "JavaScript expression for eval." },
+            path = { type = "string", description = "Output PNG path for screenshot." },
+            full_page = { type = "boolean", description = "For screenshot: capture full scroll height." },
+            max_chars = { type = "number", description = "For open/observe/read/scrape/eval: result character bound." },
+            max_targets = { type = "number", description = "For open/observe/read/scrape: returned target bound." },
+            max_elements = { type = "number", description = "Deprecated alias for max_targets." },
+            timeout_ms = { type = "number", description = "Per-action timeout in ms (default 30000)." },
         },
-        required = { "task" },
+        required = { "action" },
         additionalProperties = false,
     },
     safety = "danger",
-    display = { show = true, args = { "task" } },
+    display = { show = true, args = { "action", "browser", "url", "target", "text" }, eager = true },
 })
 ```
 
