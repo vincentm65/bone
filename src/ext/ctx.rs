@@ -970,6 +970,9 @@ fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
                 if let Some(tci) = msg.tool_call_id {
                     t.set("tool_call_id", tci)?;
                 }
+                if msg.is_error {
+                    t.set("is_error", true)?;
+                }
                 if let Some(ref tc_json) = msg.tool_calls
                     && let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
                 {

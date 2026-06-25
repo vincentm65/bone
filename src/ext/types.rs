@@ -647,6 +647,11 @@ fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::llm::ChatMes
         }
         msg.name = name;
         msg.tool_call_id = tool_call_id;
+        msg.is_error = entry
+            .get::<Option<bool>>("is_error")
+            .ok()
+            .flatten()
+            .unwrap_or(false);
         messages.push(msg);
     }
     messages

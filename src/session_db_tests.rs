@@ -53,7 +53,7 @@ fn migrate_v1_preserves_user_data() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5, "schema should be migrated to latest version");
+    assert_eq!(version, 6, "schema should be migrated to latest version");
 
     // Pre-existing rows survive the migration.
     let conversations: i64 = db
@@ -99,6 +99,17 @@ fn migrate_v1_preserves_user_data() {
         )
         .unwrap();
     assert_eq!(has_tool_calls, 1);
+
+    // The v5->v6 is_error column exists.
+    let has_is_error: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'is_error'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_is_error, 1);
 }
 
 /// A non-empty database left at the pre-versioning default (user_version 0)
@@ -157,7 +168,7 @@ fn fresh_database_initializes_at_latest_version() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 
     // record_usage relies on the is_estimated column being present.
     db.create_conversation("openai", "gpt-4").unwrap();
@@ -173,9 +184,9 @@ fn max_message_seq_tracks_highest_seq() {
     // No messages yet → 0.
     assert_eq!(db.max_message_seq(conv).unwrap(), 0);
 
-    db.append_message(conv, "user", "hi", None, None, None, None, 1)
+    db.append_message(conv, "user", "hi", None, None, None, None, false, 1)
         .unwrap();
-    db.append_message(conv, "assistant", "hello", None, None, None, None, 2)
+    db.append_message(conv, "assistant", "hello", None, None, None, None, false, 2)
         .unwrap();
     assert_eq!(db.max_message_seq(conv).unwrap(), 2);
 
@@ -212,6 +223,7 @@ fn tool_calls_roundtrip() {
         None,
         Some(tc_json),
         None,
+        false,
         1,
     )
     .unwrap();
@@ -232,12 +244,64 @@ fn images_roundtrip() {
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
 
     let img_json = r#"[{"media_type":"image/png","data":"aGVsbG8="}]"#;
-    db.append_message(conv, "user", "look", None, None, None, Some(img_json), 1)
-        .unwrap();
+    db.append_message(
+        conv,
+        "user",
+        "look",
+        None,
+        None,
+        None,
+        Some(img_json),
+        false,
+        1,
+    )
+    .unwrap();
 
     let msgs = db.list_messages(conv, 100).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].images, Some(img_json.to_string()));
+}
+
+/// The tool-result error flag round-trips through append_message/list_messages.
+#[test]
+fn is_error_roundtrip() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+
+    db.append_message(
+        conv,
+        "tool",
+        "boom",
+        Some("shell"),
+        Some("c1"),
+        None,
+        None,
+        true,
+        1,
+    )
+    .unwrap();
+    db.append_message(
+        conv,
+        "tool",
+        "ok",
+        Some("shell"),
+        Some("c2"),
+        None,
+        None,
+        false,
+        2,
+    )
+    .unwrap();
+
+    let msgs = db.list_messages(conv, 100).unwrap();
+    assert_eq!(msgs.len(), 2);
+    assert!(
+        msgs[0].is_error,
+        "errored tool result should persist is_error"
+    );
+    assert!(!msgs[1].is_error, "successful tool result should not");
 }
 
 /// Every stats query (snapshot bucket queries + custom range) runs without SQL

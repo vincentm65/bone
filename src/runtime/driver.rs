@@ -503,9 +503,10 @@ impl Driver {
             }
             consecutive_errors = 0;
 
-            // Cancelled mid-stream: end the turn with whatever we have.
+            // Cancelled mid-stream: discard partial text — the stream was
+            // interrupted, so what we accumulated is incomplete.
             if is_cancelled() {
-                break Ok(assistant_text);
+                break Ok(String::new());
             }
 
             // No tool calls -> done. Record the final assistant message in the

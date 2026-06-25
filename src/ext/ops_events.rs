@@ -29,7 +29,8 @@ pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
         let array = lua.create_table().map_err(crate::util::errstr)?;
         handlers.set(name, array).map_err(crate::util::errstr)?;
     }
-    bone.set("_handlers", handlers).map_err(crate::util::errstr)?;
+    bone.set("_handlers", handlers)
+        .map_err(crate::util::errstr)?;
 
     let on_fn = lua
         .create_function(|lua, (event_name, handler): (String, mlua::Function)| {

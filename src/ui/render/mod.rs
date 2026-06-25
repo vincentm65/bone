@@ -368,7 +368,11 @@ impl Renderer {
         content: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        self.flush_fragment(content, safe_markdown_prefix_end(content, self.streaming_source_flushed), term)
+        self.flush_fragment(
+            content,
+            safe_markdown_prefix_end(content, self.streaming_source_flushed),
+            term,
+        )
     }
 
     /// Flush all remaining lines from the streaming message, including

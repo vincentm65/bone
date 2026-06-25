@@ -41,6 +41,11 @@ pub struct ImageData {
 }
 
 /// Provider-neutral chat message.
+/// `skip_serializing_if` predicate for plain `bool` fields that default false.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
@@ -55,6 +60,11 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// True when this is a tool result that errored. Persisted to the session
+    /// DB so restored scrollback can style the row as an error. Skipped on the
+    /// wire (it carries no meaning to providers) and defaults to `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
     /// Reasoning/thinking content produced during the turn. Some providers
     /// require it be echoed back when the turn involved tool calls; the wire
     /// field to round-trip it under is carried opaquely in [`Reasoning`].
@@ -81,6 +91,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            is_error: false,
             reasoning: None,
         }
     }
@@ -108,6 +119,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             tool_call_id: Some(result.call_id),
             name: Some(result.name),
+            is_error: result.is_error,
             reasoning: None,
         }
     }

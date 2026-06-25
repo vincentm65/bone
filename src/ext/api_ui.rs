@@ -189,7 +189,8 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             Ok(updated)
         })
         .map_err(crate::util::errstr)?;
-    ui.set("set_lines", set_lines).map_err(crate::util::errstr)?;
+    ui.set("set_lines", set_lines)
+        .map_err(crate::util::errstr)?;
 
     // close(id)
     let ui_state = shared_ui.clone();

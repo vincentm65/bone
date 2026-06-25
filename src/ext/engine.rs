@@ -137,7 +137,8 @@ pub(crate) fn create_engine(
 
     // Model and provider — set before init.lua runs so banner() can read them.
     bone.set("model", model).map_err(crate::util::errstr)?;
-    bone.set("provider", provider).map_err(crate::util::errstr)?;
+    bone.set("provider", provider)
+        .map_err(crate::util::errstr)?;
 
     // bone.log table (writes to a log file to avoid corrupting the TUI)
     let log = create_log_table(&lua, config_dir).map_err(crate::util::errstr)?;
@@ -160,7 +161,9 @@ pub(crate) fn create_engine(
             Ok(())
         })
         .map_err(crate::util::errstr)?;
-    globals.set("print", print_fn).map_err(crate::util::errstr)?;
+    globals
+        .set("print", print_fn)
+        .map_err(crate::util::errstr)?;
 
     // Set safe package.path entries so users can `require` from their lua dir.
     let lua_dir = config_dir.join("lua");
@@ -339,7 +342,9 @@ fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
             Ok(s)
         })
         .map_err(crate::util::errstr)?;
-    cjson.set("encode", encode_fn).map_err(crate::util::errstr)?;
+    cjson
+        .set("encode", encode_fn)
+        .map_err(crate::util::errstr)?;
 
     let decode_fn = lua
         .create_function(|lua, s: String| {
@@ -349,7 +354,9 @@ fn inject_cjson(lua: &Lua, globals: &Table) -> Result<(), String> {
             Ok(value)
         })
         .map_err(crate::util::errstr)?;
-    cjson.set("decode", decode_fn).map_err(crate::util::errstr)?;
+    cjson
+        .set("decode", decode_fn)
+        .map_err(crate::util::errstr)?;
 
     globals.set("cjson", cjson).map_err(crate::util::errstr)?;
     Ok(())

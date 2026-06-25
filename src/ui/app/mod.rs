@@ -12,7 +12,8 @@ use crate::session_db::SessionDb;
 
 use crate::ext::ExtensionManager;
 use crate::tools::registry::ToolHandler;
-use crate::tools::{ApprovalMode, CallOutcome, ToolCall};
+use crate::tools::{ApprovalMode, CallOutcome, ToolCall, ToolResult};
+use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
 use std::io;
@@ -331,6 +332,8 @@ impl App {
             call_id,
             tool_calls_json,
             images_json,
+            // Only ever called for user messages, which never carry an error.
+            false,
             self.session_seq,
         )
         .ok();
@@ -406,34 +409,7 @@ impl App {
                 self.apply_custom_configs_to_runtime(custom);
                 msg
             }
-            crate::ext::types::ConfigAction::ReloadTools => {
-                let config_dir = crate::config::bone_dir();
-                let cwd = std::env::current_dir().unwrap_or_default();
-                let mut custom = config::custom::CustomConfigs::load();
-                let booted = crate::ext::boot_with_tools(
-                    &config_dir,
-                    &cwd,
-                    &mut custom,
-                    true,
-                    crate::ext::BootOptions {
-                        agent_depth: 0,
-                        headless: false,
-                        model: self.model.clone(),
-                        provider: self.provider.clone(),
-                        tool_allowlist: None,
-                    },
-                    &self.model,
-                    &self.provider,
-                );
-                self.extensions = booted.manager;
-                self.tools = booted.tools;
-                self.user_config.apply_custom_configs(&custom);
-                self.approval_mode = self.user_config.approval_mode;
-                self.custom_configs = custom;
-                self.user_config.enabled_tools = self.tools.enabled_names();
-                let count = self.tools.definitions().len();
-                format!("Tools and Lua extensions reloaded. {count} tools enabled.")
-            }
+            crate::ext::types::ConfigAction::ReloadTools => self.reload_extensions(),
             crate::ext::types::ConfigAction::SwitchProvider { id } => {
                 let mut custom = config::custom::CustomConfigs::load();
                 let providers_config = custom.derive_providers_config();
@@ -485,8 +461,8 @@ impl App {
         // it (clearing the previous conversation's messages).
         self.transcript = load.messages;
         self.messages.clear();
-        self.messages
-            .extend(Self::rebuild_scrollback_from_transcript(&self.transcript));
+        let rows = self.rebuild_scrollback_from_transcript();
+        self.messages.extend(rows);
         self.renderer.scrollback_cursor = 0;
 
         // Update token counts: reset cumulative stats and estimate context from
@@ -503,13 +479,23 @@ impl App {
         Ok(())
     }
 
-    /// Convert a loaded transcript into rendered scrollback rows. Tool-call-only
-    /// assistant messages (empty content) are skipped; tool results render as a
-    /// compact tool row.
-    fn rebuild_scrollback_from_transcript(transcript: &[crate::llm::ChatMessage]) -> Vec<Message> {
+    /// Convert the loaded transcript into rendered scrollback rows, reusing the
+    /// live render path so a restored conversation looks identical to one built
+    /// turn-by-turn: tool rows are relabelled from the originating call's
+    /// arguments via [`build_tool_row`], and `edit_file` renders its diff
+    /// preview (the diff is embedded in the persisted result content).
+    fn rebuild_scrollback_from_transcript(&self) -> Vec<Message> {
         use crate::llm::ChatRole;
+        // Map each tool_call_id to its originating call so a tool-result row can
+        // be relabelled from the call's `arguments`, matching the live path.
+        let calls: std::collections::HashMap<&str, &ToolCall> = self
+            .transcript
+            .iter()
+            .flat_map(|m| m.tool_calls.iter())
+            .map(|c| (c.id.as_str(), c))
+            .collect();
         let mut rows = Vec::new();
-        for msg in transcript {
+        for msg in &self.transcript {
             match msg.role {
                 ChatRole::User => rows.push(Message::user_with_images(
                     msg.content.clone(),
@@ -520,10 +506,39 @@ impl App {
                         rows.push(Message::assistant(msg.content.clone()));
                     }
                 }
+                // A *successful* `edit_file` shows its diff (no separate tool
+                // row) live; the diff is embedded in the result content after
+                // the summary line, and a System message starting with `\n`
+                // renders as a preview. Failures (no diff) fall through to the
+                // generic tool-row path below so the error is still visible.
+                ChatRole::Tool
+                    if msg.name.as_deref() == Some("edit_file")
+                        && !msg.is_error
+                        && msg.content.starts_with("edited file (") =>
+                {
+                    if let Some(nl) = msg.content.find('\n') {
+                        rows.push(Message::system(msg.content[nl..].to_string()));
+                    }
+                }
                 ChatRole::Tool => {
-                    let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
-                    let mut row = Message::tool_row(label, false);
-                    row.image_count = msg.images.len();
+                    let row = match msg.tool_call_id.as_deref().and_then(|id| calls.get(id)) {
+                        Some(call) => build_tool_row(
+                            call,
+                            &ToolResult {
+                                content: msg.content.clone(),
+                                images: msg.images.clone(),
+                                is_error: msg.is_error,
+                                ..Default::default()
+                            },
+                            self.tools.display_for_call(call),
+                        ),
+                        None => {
+                            let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
+                            let mut row = Message::tool_row(label, msg.is_error);
+                            row.image_count = msg.images.len();
+                            row
+                        }
+                    };
                     rows.push(row);
                 }
                 ChatRole::System => {}
@@ -2113,6 +2128,38 @@ impl App {
         Ok(())
     }
 
+    /// Rebuild the Lua VM and tool registry from disk in place (the
+    /// `/tools reload` and post-`/catalog` hot-reload path). Returns a summary
+    /// line. Lets catalog installs/removes take effect without restarting bone.
+    fn reload_extensions(&mut self) -> String {
+        let config_dir = crate::config::bone_dir();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut custom = config::custom::CustomConfigs::load();
+        let booted = crate::ext::boot_with_tools(
+            &config_dir,
+            &cwd,
+            &mut custom,
+            true,
+            crate::ext::BootOptions {
+                agent_depth: 0,
+                headless: false,
+                model: self.model.clone(),
+                provider: self.provider.clone(),
+                tool_allowlist: None,
+            },
+            &self.model,
+            &self.provider,
+        );
+        self.extensions = booted.manager;
+        self.tools = booted.tools;
+        self.user_config.apply_custom_configs(&custom);
+        self.approval_mode = self.user_config.approval_mode;
+        self.custom_configs = custom;
+        self.user_config.enabled_tools = self.tools.enabled_names();
+        let count = self.tools.definitions().len();
+        format!("Tools and Lua extensions reloaded. {count} tools enabled.")
+    }
+
     fn open_catalog(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         // Prefer a tmux popup (same as /setup); fall back to an inline takeover.
         // `bone catalog` exits 0 when something changed, 2 when nothing did —
@@ -2120,10 +2167,10 @@ impl App {
         if let Some(status) = self.try_tmux_popup("catalog", "96%", "92%", term)? {
             match status.code() {
                 Some(0) => {
-                    return self.show_reply(
-                        "Catalog updated. Restart bone to load the changes.".to_string(),
-                        term,
-                    );
+                    // Files were written by the subprocess; hot-reload them here
+                    // so the changes take effect without a restart.
+                    let reloaded = self.reload_extensions();
+                    return self.show_reply(format!("Catalog updated. {reloaded}"), term);
                 }
                 Some(2) => return self.show_reply("Catalog: no changes.".to_string(), term),
                 _ => {} // popup failed to launch — fall through to inline
@@ -2135,7 +2182,8 @@ impl App {
         match result {
             Ok(outcome) => {
                 let msg = if outcome.changed {
-                    format!("{} Restart bone to load the changes.", outcome.message)
+                    let reloaded = self.reload_extensions();
+                    format!("{} {reloaded}", outcome.message)
                 } else {
                     outcome.message
                 };

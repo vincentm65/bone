@@ -6,7 +6,8 @@ use mlua::{Lua, Table};
 /// Create the `bone.register_tool` function and the `bone._tools` storage array.
 pub(crate) fn setup_register_tool(lua: &Lua, bone: &Table) -> Result<(), String> {
     let tools_array = lua.create_table().map_err(crate::util::errstr)?;
-    bone.set("_tools", tools_array).map_err(crate::util::errstr)?;
+    bone.set("_tools", tools_array)
+        .map_err(crate::util::errstr)?;
 
     let register_fn = lua
         .create_function(|lua, args: Table| {

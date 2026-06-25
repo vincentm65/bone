@@ -146,7 +146,9 @@ pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
 }
 
 async fn build_candidate_content(args: &Args) -> Result<(String, String), String> {
-    let metadata = fs::metadata(&args.path).await.map_err(crate::util::errstr)?;
+    let metadata = fs::metadata(&args.path)
+        .await
+        .map_err(crate::util::errstr)?;
     if !metadata.is_file() {
         return Err("path is not a regular file".to_string());
     }

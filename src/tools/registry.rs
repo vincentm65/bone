@@ -294,7 +294,11 @@ impl ToolHandler {
         tool_call_depth: usize,
     ) -> ToolResult {
         if call.name.starts_with('/') {
-            ToolResult::error(call.id, call.name, "Slash commands are UI commands, not tools.")
+            ToolResult::error(
+                call.id,
+                call.name,
+                "Slash commands are UI commands, not tools.",
+            )
         } else if self.is_enabled(&call.name) {
             self.registry
                 .execute_live(
@@ -310,11 +314,7 @@ impl ToolHandler {
                 )
                 .await
         } else {
-            ToolResult::error(
-                call.id,
-                call.name,
-                "Tool disabled in /tools settings",
-            )
+            ToolResult::error(call.id, call.name, "Tool disabled in /tools settings")
         }
     }
 

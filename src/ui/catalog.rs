@@ -17,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::ext::catalog::{self, CatalogEntry};
 use crate::ui::fullscreen::{self, FullscreenTerminal};
-use crate::ui::picker::{self, ACCENT, BG, BORDER, DIM, Item, MUTED, TEXT};
+use crate::ui::picker::{self, ACCENT, BAD, BG, BORDER, DIM, GOOD, Item, MUTED, TEXT};
 
 /// Result of running the popup.
 pub struct Outcome {
@@ -54,13 +54,64 @@ pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
         .collect()
 }
 
-/// Apply a checklist against the catalog.
+/// Per-row outcome of an apply pass, aligned 1:1 with the items slice.
+#[derive(Clone)]
+pub enum ItemResult {
+    /// No action taken (untouched, or already in the desired state).
+    Unchanged,
+    Installed,
+    Removed,
+    Failed(String),
+}
+
+/// Apply a checklist against the catalog, returning a per-row [`ItemResult`]
+/// aligned 1:1 with `items`.
 ///
 /// When `touched_only` is true (catalog UI), only items the user explicitly
 /// toggled are acted on — untouched items keep their current install state.
 /// When false (onboarding), all items are applied as-is.
-///
-/// Returns `(installed, removed, errors)` counts.
+pub fn apply_results(
+    entries: &[CatalogEntry],
+    items: &[Item],
+    touched_only: bool,
+) -> Vec<ItemResult> {
+    entries
+        .iter()
+        .zip(items.iter())
+        .map(|(entry, item)| {
+            let on_disk = catalog::is_installed(entry);
+            let act = if touched_only {
+                item.user_touched
+            } else {
+                true
+            };
+            if !act {
+                return ItemResult::Unchanged;
+            }
+            if item.checked {
+                if !on_disk || catalog::needs_update(entry) {
+                    match catalog::install(entry) {
+                        Ok(()) => ItemResult::Installed,
+                        Err(e) => ItemResult::Failed(e),
+                    }
+                } else {
+                    ItemResult::Unchanged
+                }
+            } else if on_disk {
+                match catalog::remove(entry) {
+                    Ok(()) => ItemResult::Removed,
+                    Err(e) => ItemResult::Failed(e),
+                }
+            } else {
+                ItemResult::Unchanged
+            }
+        })
+        .collect()
+}
+
+/// Apply a checklist against the catalog, returning `(installed, removed,
+/// errors)` counts. Thin wrapper over [`apply_results`] for callers (onboarding)
+/// that only need totals.
 pub fn apply(
     entries: &[CatalogEntry],
     items: &[Item],
@@ -69,28 +120,12 @@ pub fn apply(
     let mut installed = 0;
     let mut removed = 0;
     let mut errors = Vec::new();
-    for (entry, item) in entries.iter().zip(items.iter()) {
-        let on_disk = catalog::is_installed(entry);
-        let apply = if touched_only {
-            item.user_touched
-        } else {
-            true
-        };
-        if !apply {
-            continue;
-        }
-        if item.checked {
-            if !on_disk || catalog::needs_update(entry) {
-                match catalog::install(entry) {
-                    Ok(()) => installed += 1,
-                    Err(e) => errors.push(e),
-                }
-            }
-        } else if on_disk {
-            match catalog::remove(entry) {
-                Ok(()) => removed += 1,
-                Err(e) => errors.push(e),
-            }
+    for r in apply_results(entries, items, touched_only) {
+        match r {
+            ItemResult::Installed => installed += 1,
+            ItemResult::Removed => removed += 1,
+            ItemResult::Failed(e) => errors.push(e),
+            ItemResult::Unchanged => {}
         }
     }
     (installed, removed, errors)
@@ -101,6 +136,9 @@ struct State {
     items: Vec<Item>,
     cursor: usize,
     outcome: Outcome,
+    /// Set once the user has applied changes: a one-line banner summarizing what
+    /// happened. `Some` switches the screen into its read-only "result" phase.
+    result: Option<String>,
 }
 
 impl State {
@@ -115,6 +153,7 @@ impl State {
                 changed: false,
                 message: "Catalog closed.".to_string(),
             },
+            result: None,
         }
     }
 }
@@ -131,6 +170,16 @@ fn run_loop(term: &mut FullscreenTerminal) -> io::Result<Outcome> {
 
     loop {
         match event::read()? {
+            // Result phase: any of esc/enter closes; cursor still moves so the
+            // user can scroll the list and read per-item status / errors.
+            Event::Key(key) if key.kind == KeyEventKind::Press && state.result.is_some() => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => return Ok(state.outcome),
+                    KeyCode::Up | KeyCode::Char('k') => move_cursor(&mut state, -1),
+                    KeyCode::Down | KeyCode::Char('j') => move_cursor(&mut state, 1),
+                    _ => {}
+                }
+            }
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Esc => return Ok(state.outcome),
                 KeyCode::Up | KeyCode::Char('k') => move_cursor(&mut state, -1),
@@ -138,10 +187,8 @@ fn run_loop(term: &mut FullscreenTerminal) -> io::Result<Outcome> {
                 KeyCode::Char(' ') => toggle(&mut state),
                 KeyCode::Char('a') => set_all(&mut state, true),
                 KeyCode::Char('n') => set_all(&mut state, false),
-                KeyCode::Enter => {
-                    apply_state(&mut state);
-                    return Ok(state.outcome);
-                }
+                // Apply, then stay open showing the result until the user closes.
+                KeyCode::Enter => apply_state(&mut state),
                 _ => {}
             },
             Event::Resize(_, _) => {}
@@ -174,8 +221,21 @@ fn set_all(state: &mut State, checked: bool) {
 }
 
 fn apply_state(state: &mut State) {
-    let (installed, removed, errors) = apply(&state.entries, &state.items, true);
+    let results = apply_results(&state.entries, &state.items, true);
+    let mut installed = 0;
+    let mut removed = 0;
+    let mut failed = 0;
+    for r in &results {
+        match r {
+            ItemResult::Installed => installed += 1,
+            ItemResult::Removed => removed += 1,
+            ItemResult::Failed(_) => failed += 1,
+            ItemResult::Unchanged => {}
+        }
+    }
     state.outcome.changed = installed > 0 || removed > 0;
+
+    // Chat-transcript summary (used by the host once the popup closes).
     let mut parts = Vec::new();
     if installed > 0 {
         parts.push(format!("installed {installed}"));
@@ -188,10 +248,66 @@ fn apply_state(state: &mut State) {
     } else {
         format!("Catalog: {}.", parts.join(", "))
     };
-    if !errors.is_empty() {
-        msg.push_str(&format!(" {} failed.", errors.len()));
+    if failed > 0 {
+        msg.push_str(&format!(" {failed} failed."));
     }
     state.outcome.message = msg;
+
+    // In-popup banner shown above the (now read-only) list.
+    let banner = if parts.is_empty() && failed == 0 {
+        "Nothing to apply — no items changed.".to_string()
+    } else {
+        let mut b = format!("✓ {}", parts.join(", "));
+        if parts.is_empty() {
+            b = "✗ apply failed".to_string();
+        }
+        if failed > 0 {
+            b.push_str(&format!(" — {failed} failed"));
+        }
+        b
+    };
+
+    // Rebuild rows from fresh on-disk state so checkboxes and "update" tags
+    // reflect reality (successfully updated items lose their tag), then overlay
+    // per-item status tags keyed by name.
+    let name_results: Vec<(String, ItemResult)> = state
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .zip(results)
+        .collect();
+    let entries = catalog::sync_quiet();
+    let mut items = build_items(&entries);
+    overlay_results(&mut items, &name_results);
+    state.entries = entries;
+    state.items = items;
+    state.cursor = state.cursor.min(state.items.len().saturating_sub(1));
+    state.result = Some(banner);
+}
+
+/// Overlay per-item status tags onto freshly rebuilt rows, matched by name.
+fn overlay_results(items: &mut [Item], name_results: &[(String, ItemResult)]) {
+    for item in items.iter_mut() {
+        let Some((_, result)) = name_results.iter().find(|(name, _)| *name == item.name) else {
+            continue;
+        };
+        match result {
+            ItemResult::Installed => {
+                item.tag = Some("installed".to_string());
+                item.tag_color = GOOD;
+            }
+            ItemResult::Removed => {
+                item.tag = Some("removed".to_string());
+                item.tag_color = GOOD;
+            }
+            ItemResult::Failed(err) => {
+                item.tag = Some("✗ failed".to_string());
+                item.tag_color = BAD;
+                item.desc = format!("Failed: {err}");
+            }
+            ItemResult::Unchanged => {}
+        }
+    }
 }
 
 // ---- rendering ----------------------------------------------------------
@@ -213,7 +329,7 @@ fn draw(frame: &mut ratatui::Frame, state: &State) {
 
     draw_header(frame, chunks[0]);
     draw_body(frame, chunks[1], state);
-    draw_footer(frame, chunks[2]);
+    draw_footer(frame, chunks[2], state.result.is_some());
 }
 
 fn draw_header(frame: &mut ratatui::Frame, area: Rect) {
@@ -261,17 +377,46 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         );
         return;
     }
-    picker::draw_list(
-        frame,
-        area,
-        "Tools & commands",
-        "Check to install, uncheck to remove. Toggle with Space; Enter applies.",
-        &state.items,
-        state.cursor,
-    );
+    // Result phase: reserve the top rows for a status banner, list below.
+    let (banner, list_area) = if let Some(banner) = &state.result {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .split(area);
+        (Some((banner, rows[0])), rows[1])
+    } else {
+        (None, area)
+    };
+
+    if let Some((banner, banner_area)) = banner {
+        let failed = banner.contains("failed");
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                banner.clone(),
+                Style::default()
+                    .fg(if failed { BAD } else { GOOD })
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .block(Block::default().padding(ratatui::widgets::Padding::new(2, 0, 1, 0))),
+            banner_area,
+        );
+    }
+
+    let (title, hint) = if state.result.is_some() {
+        (
+            "Result",
+            "Done — Enter or Esc to close. Updated items lost their \"update\" tag.",
+        )
+    } else {
+        (
+            "Tools & commands",
+            "Check to install, uncheck to remove. Toggle with Space; Enter applies.",
+        )
+    };
+    picker::draw_list(frame, list_area, title, hint, &state.items, state.cursor);
 }
 
-fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
+fn draw_footer(frame: &mut ratatui::Frame, area: Rect, applied: bool) {
     let mut keys: Vec<Span> = Vec::new();
     let mut push = |k: &str, label: &str| {
         keys.push(Span::styled(
@@ -286,11 +431,16 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(DIM),
         ));
     };
-    push("↑↓", "move");
-    push("space", "toggle");
-    push("a/n", "all/none");
-    push("enter", "apply");
-    push("esc", "close");
+    if applied {
+        push("↑↓", "move");
+        push("enter/esc", "close");
+    } else {
+        push("↑↓", "move");
+        push("space", "toggle");
+        push("a/n", "all/none");
+        push("enter", "apply");
+        push("esc", "close");
+    }
 
     frame.render_widget(
         Paragraph::new(Line::from(keys))

@@ -69,6 +69,9 @@ impl SessionWriter {
             tool_call_id,
             tool_calls,
             images,
+            // The incremental SessionSink path doesn't carry an error flag; the
+            // authoritative tool-error state is persisted via `append_turn`.
+            false,
             seq,
         ) {
             self.note_failure("append_message", &e);

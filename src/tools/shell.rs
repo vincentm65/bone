@@ -65,7 +65,10 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
     // instead of corrupting the TUI and swallowing keystrokes.
     #[cfg(unix)]
     unsafe {
-        cmd.pre_exec(|| { setsid(); Ok(()) });
+        cmd.pre_exec(|| {
+            setsid();
+            Ok(())
+        });
     }
     let mut child = cmd.spawn().map_err(crate::util::errstr)?;
 

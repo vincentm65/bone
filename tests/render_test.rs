@@ -104,7 +104,11 @@ fn streamed_text(chunks: &[&str], width: usize) -> Vec<String> {
     };
     for chunk in chunks {
         content.push_str(chunk);
-        flush(safe_markdown_prefix_end(&content, 0), &content, &mut inserted);
+        flush(
+            safe_markdown_prefix_end(&content, 0),
+            &content,
+            &mut inserted,
+        );
     }
     flush(content.len(), &content, &mut inserted);
     inserted

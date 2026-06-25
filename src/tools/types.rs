@@ -40,11 +40,7 @@ pub struct ToolResult {
 impl ToolResult {
     /// A successful result carrying a tool's [`ToolOutput`], preserving its
     /// images, pane content, and session state. `is_error` defaults to `false`.
-    pub fn ok(
-        call_id: impl Into<String>,
-        name: impl Into<String>,
-        output: ToolOutput,
-    ) -> Self {
+    pub fn ok(call_id: impl Into<String>, name: impl Into<String>, output: ToolOutput) -> Self {
         Self {
             call_id: call_id.into(),
             name: name.into(),

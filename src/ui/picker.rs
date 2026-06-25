@@ -15,6 +15,7 @@ pub const DIM: Color = Color::Indexed(239);
 pub const BORDER: Color = Color::Indexed(238);
 pub const ACCENT: Color = Color::Cyan;
 pub const GOOD: Color = Color::Indexed(71);
+pub const BAD: Color = Color::Indexed(167);
 
 /// One toggleable row in a checklist.
 pub struct Item {
@@ -27,8 +28,10 @@ pub struct Item {
     /// Category tag shown after the name (e.g. "tool"/"config"). Empty to hide.
     pub category: &'static str,
     /// Optional status tag shown at the end of the row (e.g. "update"). Rendered
-    /// in the accent color; `None` to hide.
+    /// in `tag_color`; `None` to hide.
     pub tag: Option<String>,
+    /// Color for `tag`. Defaults to the accent color.
+    pub tag_color: Color,
 }
 
 impl Item {
@@ -40,6 +43,7 @@ impl Item {
             user_touched: false,
             category: "",
             tag: None,
+            tag_color: ACCENT,
         }
     }
 }
@@ -140,7 +144,9 @@ pub fn draw_list(
         if let Some(tag) = &item.tag {
             spans.push(Span::styled(
                 format!("  {tag}"),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(item.tag_color)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         list_lines.push(Line::from(spans));

@@ -36,6 +36,8 @@ pub(crate) struct StoredMessage {
     pub tool_calls: Option<String>,
     /// JSON array of `{media_type, data}` image attachments, if any.
     pub images: Option<String>,
+    /// True if this is a tool result that errored.
+    pub is_error: bool,
 }
 
 /// Aggregated usage for one conversation.
@@ -238,6 +240,7 @@ const FULL_SCHEMA: &str = "
         tool_call_id    TEXT,
         tool_calls      TEXT,
         images          TEXT,
+        is_error        INTEGER NOT NULL DEFAULT 0,
         seq             INTEGER NOT NULL,
         created_at      TEXT NOT NULL
     );
@@ -360,7 +363,7 @@ impl SessionDb {
             .map(|count| count > 0)
         }
 
-        const SCHEMA_VERSION: u32 = 5;
+        const SCHEMA_VERSION: u32 = 6;
 
         let current_version: u32 = self
             .conn
@@ -447,6 +450,17 @@ impl SessionDb {
             version = 5;
         }
 
+        if version == 5 {
+            // v5 -> v6: track whether a tool result errored, so restored
+            // scrollback can style failed tool rows as errors.
+            if !column_exists(&tx, "messages", "is_error")? {
+                tx.execute_batch(
+                    "ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+            version = 6;
+        }
+
         if version != current_version {
             tx.pragma_update(None, "user_version", version)?;
         }
@@ -478,12 +492,13 @@ impl SessionDb {
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
         images: Option<&str>,
+        is_error: bool,
         seq: i64,
         created_at: &str,
     ) -> rusqlite::Result<i64> {
         conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, seq, created_at],
+            "INSERT INTO messages (conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, is_error, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, is_error, seq, created_at],
         )?;
         let msg_id = conn.last_insert_rowid();
         // Include tool-call info in the FTS index so it stays searchable.
@@ -510,6 +525,7 @@ impl SessionDb {
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
         images: Option<&str>,
+        is_error: bool,
         seq: i64,
     ) -> rusqlite::Result<i64> {
         Self::insert_message_row(
@@ -521,6 +537,7 @@ impl SessionDb {
             tool_call_id,
             tool_calls,
             images,
+            is_error,
             seq,
             &now_iso(),
         )
@@ -574,6 +591,8 @@ impl SessionDb {
                 ),
                 _ => continue,
             };
+            // Only tool results carry an error flag; other roles persist `false`.
+            let is_error = msg.role == ChatRole::Tool && msg.is_error;
             seq += 1;
             Self::insert_message_row(
                 &tx,
@@ -584,6 +603,7 @@ impl SessionDb {
                 tool_call_id,
                 tool_calls_json.as_deref(),
                 images_json.as_deref(),
+                is_error,
                 seq,
                 &now,
             )?;
@@ -1054,7 +1074,7 @@ impl SessionDb {
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let limit = limit.clamp(1, 1000);
         let mut stmt = self.conn.prepare(
-            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls, images \
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls, images, is_error \
              FROM messages WHERE conversation_id = ?1 \
              ORDER BY seq ASC LIMIT ?2",
         )?;
@@ -1067,6 +1087,7 @@ impl SessionDb {
                 tool_call_id: row.get(4)?,
                 tool_calls: row.get(5)?,
                 images: row.get(6)?,
+                is_error: row.get::<_, i64>(7)? != 0,
             })
         })?;
         rows.collect()

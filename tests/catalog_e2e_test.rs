@@ -18,7 +18,11 @@ mod common;
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Write the fixture's `demo.lua` plus an index whose sha256 matches it, and
@@ -59,7 +63,10 @@ fn catalog_fetch_install_update_remove() {
 
     // Publish new content (a "git" change). The on-disk copy now differs.
     let entry = publish(&fixture, "-- demo v2\n");
-    assert!(catalog::needs_update(&entry), "changed content flags update");
+    assert!(
+        catalog::needs_update(&entry),
+        "changed content flags update"
+    );
     assert_eq!(catalog::updates_available(), 1);
 
     // refresh_now only refreshes the cached index — it must NOT auto-install.

@@ -11,7 +11,7 @@ pub mod session_db;
 pub mod session_sink;
 pub mod shell_split;
 pub mod tools;
-pub mod util;
 #[cfg(feature = "ui")]
 pub mod ui;
 pub mod update_check;
+pub mod util;

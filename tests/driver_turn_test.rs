@@ -14,7 +14,9 @@ use bone::agent::AgentRunEvent;
 use bone::chat::build_chat_history;
 use bone::ext::{BootOptions, ExtensionManager, boot_with_tools};
 use bone::llm::provider::LlmProvider;
-use bone::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, ResponseStream, TokenStats};
+use bone::llm::{
+    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream, TokenStats,
+};
 use bone::runtime::{ChannelApprovalGate, Driver, RuntimeEvent};
 use bone::session_sink::{NullSessionSink, SessionSink};
 use bone::tools::registry::ToolHandler;
@@ -27,16 +29,32 @@ use bone::tools::{
 /// Deterministic provider that replays one scripted stream per `chat_stream`
 /// call. After the script is drained, subsequent calls yield an empty stream
 /// (no text, no tool calls) — which the loop treats as a final empty turn.
+/// A single `chat_stream` call: either a stream of events or a
+/// connection-level error (so tests can exercise the connection retry path).
+enum MockAttempt {
+    Stream(Vec<Result<ChatEvent, LlmError>>),
+    ConnErr(LlmError),
+}
+
 struct MockProvider {
     model: String,
-    script: Mutex<Vec<ChatEvent>>,
+    script: Mutex<Vec<MockAttempt>>,
 }
 
 impl MockProvider {
     fn new(model: &str, script: Vec<ChatEvent>) -> Self {
+        Self::new_raw(
+            model,
+            vec![MockAttempt::Stream(script.into_iter().map(Ok).collect())],
+        )
+    }
+
+    /// Per-call scripts; later calls pop in reverse order. A `ConnErr`
+    /// attempt makes `chat_stream` itself return `Err`.
+    fn new_raw(model: &str, attempts: Vec<MockAttempt>) -> Self {
         Self {
             model: model.to_string(),
-            script: Mutex::new(script),
+            script: Mutex::new(attempts.into_iter().rev().collect()),
         }
     }
 }
@@ -60,8 +78,16 @@ impl LlmProvider for MockProvider {
         _messages: Vec<ChatMessage>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
-        let events = self.script.lock().unwrap().drain(..).collect::<Vec<_>>();
-        Ok(futures_util::stream::iter(events.into_iter().map(Ok)).boxed())
+        let attempt = self
+            .script
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(MockAttempt::Stream(vec![]));
+        match attempt {
+            MockAttempt::Stream(events) => Ok(futures_util::stream::iter(events).boxed()),
+            MockAttempt::ConnErr(e) => Err(e),
+        }
     }
 }
 
@@ -100,9 +126,48 @@ fn driver_with_gate(
     (driver, prompt)
 }
 
+/// Build a driver from per-call scripts (`MockAttempt`s), popped in reverse
+/// order so the first element is the first `chat_stream` call.
+fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &'static str) {
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new_raw("mock-1", attempts)),
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone::tools::SharedApprovalMode::new(mode),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+    };
+    (driver, prompt)
+}
+
 fn collect_events(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentRunEvent>,
 ) -> Vec<AgentRunEvent> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev);
+    }
+    out
+}
+
+fn collect_runtime_events(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<RuntimeEvent>,
+) -> Vec<RuntimeEvent> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         out.push(ev);
@@ -632,4 +697,128 @@ end)
     );
 
     std::fs::remove_dir_all(&config_dir).ok();
+}
+// --- Connection-level retry path (chat_stream returns Err) ---
+
+#[tokio::test]
+async fn driver_retries_connection_error_then_succeeds() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (mut driver, prompt) = driver_with_raw(
+        vec![
+            MockAttempt::ConnErr(LlmError::new_with_kind(
+                LlmErrorKind::Connection,
+                "dns failure",
+            )),
+            MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("recovered".into()))]),
+        ],
+        ApprovalMode::Safe,
+    );
+    driver.runtime_events = Some(tx);
+
+    let response = driver.run(prompt).await.expect("driver run");
+    assert_eq!(response.content, "recovered");
+
+    let events = collect_runtime_events(&mut rx);
+    assert!(
+        events.iter().any(|e| matches!(e,
+            RuntimeEvent::Status { message } if message.starts_with("retry"))),
+        "should emit retry status for connection error; got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn driver_connection_error_exhausts_retries() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let conn_err = || LlmError::new_with_kind(LlmErrorKind::Connection, "server down");
+    let (mut driver, prompt) = driver_with_raw(
+        vec![
+            MockAttempt::ConnErr(conn_err()),
+            MockAttempt::ConnErr(conn_err()),
+            MockAttempt::ConnErr(conn_err()),
+        ],
+        ApprovalMode::Safe,
+    );
+    driver.runtime_events = Some(tx);
+
+    let result = driver.run(prompt).await;
+    let err = result.err().expect("should fail after exhausting retries");
+    assert!(
+        err.contains("provider error after 3 attempts"),
+        "should report exhausted retries; got {err}"
+    );
+
+    let events = collect_runtime_events(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::Failed { .. })),
+        "should emit Failed runtime event; got {events:?}"
+    );
+}
+
+// --- Mid-stream error abort limit ---
+
+#[tokio::test]
+async fn driver_aborts_after_five_consecutive_stream_errors() {
+    let err = || LlmError::new_with_kind(LlmErrorKind::Connection, "reset");
+    // Five attempts, each yielding a single mid-stream error.
+    let (driver, prompt) = driver_with_raw(
+        (0..5)
+            .map(|_| MockAttempt::Stream(vec![Err::<ChatEvent, _>(err())]))
+            .collect(),
+        ApprovalMode::Safe,
+    );
+
+    let result = driver.run(prompt).await;
+    let err = result.err().expect("should abort after 5 errors");
+    assert!(
+        err.contains("5 consecutive stream errors"),
+        "should report the 5-error abort; got {err}"
+    );
+}
+
+// --- Mid-stream error then successful retry ---
+
+#[tokio::test]
+async fn driver_retries_after_stream_error_and_discards_partial() {
+    // Attempt 1: partial text then mid-stream error.
+    // Attempt 2: clean text — the transcript should contain ONLY this.
+    let (driver, prompt) = driver_with_raw(
+        vec![
+            MockAttempt::Stream(vec![
+                Ok(ChatEvent::TextDelta("partial".into())),
+                Err(LlmError::new_with_kind(LlmErrorKind::Connection, "reset")),
+            ]),
+            MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("final".into()))]),
+        ],
+        ApprovalMode::Safe,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.unwrap().content, "final");
+    assert_eq!(
+        outcome.transcript.last().unwrap().content,
+        "final",
+        "transcript should contain only the successful attempt's text"
+    );
+}
+
+// --- Cancellation ---
+
+#[tokio::test]
+async fn driver_cancelled_before_turn_returns_empty() {
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (mut driver, prompt) = driver_with(
+        vec![ChatEvent::TextDelta("should not appear".into())],
+        ApprovalMode::Safe,
+    );
+    driver.cancel = Some(cancel);
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.unwrap().content, "");
+    assert!(
+        outcome.transcript.iter().all(|m| m.role == ChatRole::User),
+        "no assistant message committed; got {:?}",
+        outcome.transcript
+    );
 }
