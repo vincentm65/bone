@@ -1,3 +1,5 @@
+//! Provider registry shape (`ProvidersConfig` / `ProviderEntry`) parsed from `providers.yaml`.
+
 use serde::{Deserialize, Serialize};
 
 /// A single provider entry. All OpenAI-compatible providers share the same

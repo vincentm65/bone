@@ -1,3 +1,5 @@
+//! The `shell` / `bash` tool: runs commands with streaming output and timeouts.
+
 use std::process::Stdio;
 
 use async_trait::async_trait;

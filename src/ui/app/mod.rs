@@ -1,3 +1,5 @@
+//! Main TUI application: event loop, state, and turn orchestration.
+
 mod editor;
 mod keymap;
 mod paste;
@@ -236,9 +238,9 @@ impl App {
     /// Returns lines joined with newlines, or empty if undefined/nothing.
     fn collect_banner(extensions: &crate::ext::ExtensionManager) -> String {
         let mut lines = Vec::new();
-        if let Ok(g) = extensions.lua_handle().lock() {
-            if let Ok(bone) = g.globals().get::<mlua::Table>("bone") {
-                if let Ok(banner_fn) = bone.get::<mlua::Function>("banner") {
+        if let Ok(g) = extensions.lua_handle().lock()
+            && let Ok(bone) = g.globals().get::<mlua::Table>("bone")
+                && let Ok(banner_fn) = bone.get::<mlua::Function>("banner") {
                     match banner_fn.call::<mlua::Table>(()) {
                         Ok(tbl) => {
                             for item in tbl.sequence_values::<mlua::String>() {
@@ -254,8 +256,6 @@ impl App {
                         }
                     }
                 }
-            }
-        }
 
         // Append a release hint if a newer version was seen (cached, local
         // read — never blocks on network). Channel-agnostic: the releases
@@ -1795,15 +1795,14 @@ impl App {
             .iter()
             .any(|registered| registered.name == "config");
 
-        if has_lua_config && cmd == "provider" && arg.is_empty() {
-            if self
+        if has_lua_config && cmd == "provider" && arg.is_empty()
+            && self
                 .run_lua_command("config", "providers", term)
                 .await
                 .is_some()
             {
                 return Ok(());
             }
-        }
         if has_lua_config && cmd == "tools" {
             let config_arg = if arg.trim() == "reload" {
                 "tools reload"
@@ -1818,11 +1817,10 @@ impl App {
                 return Ok(());
             }
         }
-        if has_lua_config && cmd == "config" {
-            if self.run_lua_command("config", &arg, term).await.is_some() {
+        if has_lua_config && cmd == "config"
+            && self.run_lua_command("config", &arg, term).await.is_some() {
                 return Ok(());
             }
-        }
 
         // Protected built-ins always win over Lua commands.
         if !commands::is_protected_builtin(cmd.as_str()) && self.extensions.is_available() {
@@ -2020,11 +2018,10 @@ impl App {
         self.turn_pause_start = None;
 
         if let Some(Some((mut reply, submit, action, display_role))) = reply {
-            if let Some(action) = action {
-                if let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await {
+            if let Some(action) = action
+                && let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await {
                     reply = action_reply;
                 }
-            }
             if submit {
                 let display = format!(
                     "/{cmd}{}",

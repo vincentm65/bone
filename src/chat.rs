@@ -1,3 +1,5 @@
+//! Conversation model: on-disk message representation and provider chat-history assembly.
+
 use crate::llm::prompts;
 use crate::llm::{ChatMessage, ChatRole};
 

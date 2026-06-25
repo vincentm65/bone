@@ -1,3 +1,5 @@
+//! Transcript message rendering (wrapping, markdown, and role styling).
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::chat::{Message, ToolDisplay};

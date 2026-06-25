@@ -1,3 +1,5 @@
+//! Provider factory: constructs a provider by id from a loaded config.
+
 use super::provider::{LlmError, LlmErrorKind, LlmProvider};
 use crate::config::ProvidersConfig;
 

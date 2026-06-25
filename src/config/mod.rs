@@ -1,3 +1,5 @@
+//! User configuration loading: YAML config files, custom configs, and provider entries.
+
 pub mod custom;
 pub mod providers_config;
 

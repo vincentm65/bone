@@ -1,3 +1,5 @@
+//! Terminal-width text-wrapping helpers.
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Wrap one logical line into terminal-width visual lines.

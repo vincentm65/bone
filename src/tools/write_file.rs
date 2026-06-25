@@ -1,3 +1,5 @@
+//! The `write_file` tool: creates a new file atomically (fails if it exists).
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};

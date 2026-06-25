@@ -1,3 +1,5 @@
+//! Bone — a terminal coding assistant. Crate root re-exporting the core modules.
+
 pub mod agent;
 pub mod chat;
 pub mod config;

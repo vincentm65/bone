@@ -1,3 +1,5 @@
+//! SQLite persistence for conversations and per-provider usage records.
+
 use crate::llm::{ChatMessage, ChatRole};
 use crate::runtime::UsageRecord;
 use rusqlite::{Connection, params};

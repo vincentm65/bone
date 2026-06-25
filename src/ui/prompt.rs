@@ -1,3 +1,5 @@
+//! Blocking approval/selection prompt rendered between transcript and input.
+
 /// User's response to a blocking prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {

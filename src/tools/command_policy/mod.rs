@@ -1,3 +1,5 @@
+//! Command safety classification and allow/deny policy enforcement.
+
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};

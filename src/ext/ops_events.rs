@@ -1,3 +1,5 @@
+//! Lua binding for `bone.on` / `bone.api.autocmd` event-handler registration.
+
 /// `bone.on(event_name, handler)` — registers an event handler (autocmd).
 ///
 /// The built-in event names below are pre-seeded, but **any** name is accepted:

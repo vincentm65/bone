@@ -1,3 +1,5 @@
+//! Unified-diff generation for `edit_file` previews.
+
 use similar::TextDiff;
 
 pub(crate) fn summarize_change(old: &str, new: &str) -> String {

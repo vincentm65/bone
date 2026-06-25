@@ -1,3 +1,5 @@
+//! The `read_file` tool: text and image reading with optional line ranges.
+
 use async_trait::async_trait;
 use base64::Engine;
 use serde::Deserialize;

@@ -1,3 +1,5 @@
+//! Provider-neutral LLM layer: chat types, streaming events, and token tracking.
+
 pub mod prompts;
 pub mod provider;
 pub mod providers;

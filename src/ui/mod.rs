@@ -1,3 +1,5 @@
+//! Terminal UI (feature `ui`): ratatui app, rendering, input, panes, and commands.
+
 pub mod app;
 pub mod autocomplete;
 pub mod catalog;

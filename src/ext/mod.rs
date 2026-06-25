@@ -256,6 +256,89 @@ pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>, fo
     }
 }
 
+/// Execute all Lua files from a directory.
+/// Files are expected to register tools, commands, or other extensions.
+pub fn run_lua_files(lua: &mlua::Lua, dir: &std::path::Path) -> Result<(), String> {
+    run_lua_files_filtered(lua, dir, |_| true)
+}
+
+/// Execute the Lua tool files from `dir`, honoring the onboarding selection.
+/// Bundled default tools the user deselected are skipped; user-authored files
+/// (not among the bundled defaults) always run. `allow == None` runs every
+/// file (default / upgrade behavior).
+pub fn run_lua_tool_files(
+    lua: &mlua::Lua,
+    dir: &std::path::Path,
+    allow: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    run_lua_files_selected(lua, dir, DEFAULT_LUA_TOOLS, allow)
+}
+
+/// Execute the Lua command files from `dir`, honoring the onboarding selection.
+/// See [`run_lua_tool_files`] for semantics.
+pub fn run_lua_command_files(
+    lua: &mlua::Lua,
+    dir: &std::path::Path,
+    allow: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    run_lua_files_selected(lua, dir, DEFAULT_LUA_COMMANDS, allow)
+}
+
+fn run_lua_files_selected(
+    lua: &mlua::Lua,
+    dir: &std::path::Path,
+    bundled: &[(&'static str, &'static str)],
+    allow: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    let bundled_names: HashSet<&str> = bundled.iter().map(|(n, _)| *n).collect();
+    run_lua_files_filtered(lua, dir, |name| match allow {
+        // A deselected bundled default is skipped; anything not bundled (a
+        // user's own file) always loads, as does everything when no selection
+        // is persisted.
+        Some(allow) if bundled_names.contains(name) => allow.contains(name),
+        _ => true,
+    })
+}
+
+/// Execute the `.lua` files in `dir` (sorted) for which `keep(file_name)` is
+/// true.
+fn run_lua_files_filtered(
+    lua: &mlua::Lua,
+    dir: &std::path::Path,
+    keep: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "lua"))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if !keep(&name) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        lua.load(&source)
+            .set_name(&name)
+            .exec()
+            .map_err(|e| format!("error executing {}: {e}", path.display()))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod seed_tests {
     use super::*;
@@ -342,87 +425,4 @@ mod seed_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Execute all Lua files from a directory.
-/// Files are expected to register tools, commands, or other extensions.
-pub fn run_lua_files(lua: &mlua::Lua, dir: &std::path::Path) -> Result<(), String> {
-    run_lua_files_filtered(lua, dir, |_| true)
-}
-
-/// Execute the Lua tool files from `dir`, honoring the onboarding selection.
-/// Bundled default tools the user deselected are skipped; user-authored files
-/// (not among the bundled defaults) always run. `allow == None` runs every
-/// file (default / upgrade behavior).
-pub fn run_lua_tool_files(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    allow: Option<&HashSet<String>>,
-) -> Result<(), String> {
-    run_lua_files_selected(lua, dir, DEFAULT_LUA_TOOLS, allow)
-}
-
-/// Execute the Lua command files from `dir`, honoring the onboarding selection.
-/// See [`run_lua_tool_files`] for semantics.
-pub fn run_lua_command_files(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    allow: Option<&HashSet<String>>,
-) -> Result<(), String> {
-    run_lua_files_selected(lua, dir, DEFAULT_LUA_COMMANDS, allow)
-}
-
-fn run_lua_files_selected(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    bundled: &[(&'static str, &'static str)],
-    allow: Option<&HashSet<String>>,
-) -> Result<(), String> {
-    let bundled_names: HashSet<&str> = bundled.iter().map(|(n, _)| *n).collect();
-    run_lua_files_filtered(lua, dir, |name| match allow {
-        // A deselected bundled default is skipped; anything not bundled (a
-        // user's own file) always loads, as does everything when no selection
-        // is persisted.
-        Some(allow) if bundled_names.contains(name) => allow.contains(name),
-        _ => true,
-    })
-}
-
-/// Execute the `.lua` files in `dir` (sorted) for which `keep(file_name)` is
-/// true.
-fn run_lua_files_filtered(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    keep: impl Fn(&str) -> bool,
-) -> Result<(), String> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "lua"))
-        .collect();
-    entries.sort();
-
-    for path in entries {
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        if !keep(&name) {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        lua.load(&source)
-            .set_name(&name)
-            .exec()
-            .map_err(|e| format!("error executing {}: {e}", path.display()))?;
-    }
-
-    Ok(())
 }

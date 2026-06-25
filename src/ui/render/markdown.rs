@@ -1,3 +1,5 @@
+//! Markdown rendering for the transcript via pulldown-cmark and syntect.
+
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

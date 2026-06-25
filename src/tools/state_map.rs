@@ -1,3 +1,5 @@
+//! Per-tool in-memory state keyed by source and sub-key.
+
 use std::collections::HashMap;
 
 /// In-memory tool state keyed by (source, sub_key).

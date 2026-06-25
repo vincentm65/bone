@@ -1,3 +1,5 @@
+//! OpenAI-compatible Chat Completions provider with tool-call and reasoning support.
+
 use async_stream::try_stream;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -435,39 +437,6 @@ pub fn process_sse_chunk(
     Ok(events)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::openai_messages;
-    use crate::llm::{ChatMessage, ChatRole, ImageData};
-
-    #[test]
-    fn serializes_images_as_openai_content_parts() {
-        let messages = openai_messages(vec![ChatMessage::user_with_images(
-            "look",
-            vec![ImageData {
-                media_type: "image/png".to_string(),
-                data: "abc".to_string(),
-            }],
-        )]);
-        let json = serde_json::to_value(&messages[0]).unwrap();
-
-        assert_eq!(json["content"][0]["type"], "text");
-        assert_eq!(json["content"][0]["text"], "look");
-        assert_eq!(json["content"][1]["type"], "image_url");
-        assert_eq!(
-            json["content"][1]["image_url"]["url"],
-            "data:image/png;base64,abc"
-        );
-    }
-
-    #[test]
-    fn serializes_text_only_as_plain_string() {
-        let messages = openai_messages(vec![ChatMessage::new(ChatRole::User, "hello")]);
-        let json = serde_json::to_value(&messages[0]).unwrap();
-        assert_eq!(json["content"], "hello");
-    }
-}
-
 #[async_trait]
 impl LlmProvider for OpenAiCompatProvider {
     fn id(&self) -> &str {
@@ -617,5 +586,38 @@ impl LlmProvider for OpenAiCompatProvider {
         };
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openai_messages;
+    use crate::llm::{ChatMessage, ChatRole, ImageData};
+
+    #[test]
+    fn serializes_images_as_openai_content_parts() {
+        let messages = openai_messages(vec![ChatMessage::user_with_images(
+            "look",
+            vec![ImageData {
+                media_type: "image/png".to_string(),
+                data: "abc".to_string(),
+            }],
+        )]);
+        let json = serde_json::to_value(&messages[0]).unwrap();
+
+        assert_eq!(json["content"][0]["type"], "text");
+        assert_eq!(json["content"][0]["text"], "look");
+        assert_eq!(json["content"][1]["type"], "image_url");
+        assert_eq!(
+            json["content"][1]["image_url"]["url"],
+            "data:image/png;base64,abc"
+        );
+    }
+
+    #[test]
+    fn serializes_text_only_as_plain_string() {
+        let messages = openai_messages(vec![ChatMessage::new(ChatRole::User, "hello")]);
+        let json = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(json["content"], "hello");
     }
 }

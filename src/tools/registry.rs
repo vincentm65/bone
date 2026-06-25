@@ -1,3 +1,5 @@
+//! Tool registry: dispatch, approval gating, and live-event plumbing.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

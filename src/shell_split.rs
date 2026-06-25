@@ -1,3 +1,5 @@
+//! Shell-command splitting into segments/lines for display and policy checks.
+
 /// Options controlling how shell command text is split into segments/lines.
 pub struct ShellSplitOptions {
     /// If true, include separator characters (`&&`, `||`, `|`, `;`) in the

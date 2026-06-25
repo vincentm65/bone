@@ -1,3 +1,5 @@
+//! System-prompt assembly: working dir, user memory, and the default bone prompt.
+
 use crate::config::bone_dir;
 
 /// Default system prompt injected at the start of every conversation.

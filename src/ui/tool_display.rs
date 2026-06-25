@@ -1,3 +1,5 @@
+//! Builds the tool-call summary rows shown in the transcript.
+
 use crate::chat::Message;
 use crate::tools::types::{ToolCall, ToolDisplayConfig, ToolResult};
 use serde_json::Value;

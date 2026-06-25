@@ -1,3 +1,5 @@
+//! Headless single-turn run: sends one prompt through the agent and prints the result.
+
 use crate::agent::{self, AgentRequest, AgentResponse};
 use crate::ext;
 use crate::tools::ApprovalMode;

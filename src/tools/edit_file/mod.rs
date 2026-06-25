@@ -1,3 +1,5 @@
+//! The `edit_file` tool: search/replace and rewrite edits with fuzzy anchor matching.
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};

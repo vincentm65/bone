@@ -1,3 +1,5 @@
+//! Bottom-pane content pages — tool-provided tabs such as jobs and status.
+
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 

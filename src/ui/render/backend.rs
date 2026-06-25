@@ -1,3 +1,5 @@
+//! Crossterm-based terminal backend abstraction (`BoneTerminal`).
+
 use std::io::{self, Write};
 
 #[cfg(not(windows))]

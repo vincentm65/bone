@@ -1,3 +1,5 @@
+//! Bottom-pane rendering: input box, prompt, status bar, and tool pages.
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -806,11 +808,12 @@ impl super::Renderer {
                 } else if !status_info.spinner_text_rotate || texts.len() == 1 {
                     format!(" {}", texts[0])
                 } else {
-                    let cycle = if status_info.spinner_text_speed_ms > 0 {
-                        (status_info.spinner_elapsed_ms / status_info.spinner_text_speed_ms)
-                            as usize
-                    } else {
-                        (status_info.spinner_elapsed_ms / speed) as usize / frames.len()
+                    let cycle = match status_info
+                        .spinner_elapsed_ms
+                        .checked_div(status_info.spinner_text_speed_ms)
+                    {
+                        Some(c) => c as usize,
+                        None => (status_info.spinner_elapsed_ms / speed) as usize / frames.len(),
                     };
                     let phrase = &texts[cycle % texts.len()];
                     format!(" {phrase}")

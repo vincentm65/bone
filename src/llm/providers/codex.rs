@@ -1,3 +1,5 @@
+//! Codex (OpenAI Responses API) provider implementation.
+
 use async_stream::try_stream;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;

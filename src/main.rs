@@ -1,3 +1,5 @@
+//! Binary entry point: arg parsing, provider setup, and TUI / headless dispatch.
+
 use bone::config::{UserConfig, custom::CustomConfigs};
 use bone::llm::providers;
 use bone::run;

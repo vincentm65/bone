@@ -1,3 +1,5 @@
+//! Cumulative token-usage tracking with a heuristic estimation fallback.
+
 use num_format::ToFormattedString;
 
 /// Rough heuristic: ~3.8 UTF-8 chars per token for typical text.

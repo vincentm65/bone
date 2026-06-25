@@ -1,3 +1,5 @@
+//! Chat input-field state: editing, history, and paste-placeholder handling.
+
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::llm::ImageData;

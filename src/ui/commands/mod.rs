@@ -1,3 +1,5 @@
+//! Slash-command handling and dispatch.
+
 use crate::config;
 use crate::llm::{LlmProvider, providers};
 

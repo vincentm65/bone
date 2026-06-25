@@ -1,3 +1,5 @@
+//! App-wide ratatui color theme.
+
 use ratatui::style::Color;
 
 /// App-wide color theme.

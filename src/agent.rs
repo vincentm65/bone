@@ -1,3 +1,5 @@
+//! Headless agent turn loop: drives a provider through chat history, tool calls, and session persistence without the TUI.
+
 use crate::chat::build_chat_history;
 use crate::config::{UserConfig, custom::CustomConfigs};
 use crate::llm::{

@@ -1,3 +1,5 @@
+//! Rendering pipeline: backend, messages, markdown, wrap, and pane drawing.
+
 pub mod backend;
 mod bottom_pane;
 pub mod markdown;

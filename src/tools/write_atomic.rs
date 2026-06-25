@@ -1,3 +1,5 @@
+//! Atomic file writes via a temp file plus rename.
+
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::{fs, io::AsyncWriteExt};

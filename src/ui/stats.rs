@@ -1,3 +1,5 @@
+//! In-app usage-stats popup view.
+
 use std::io;
 use std::time::Instant;
 

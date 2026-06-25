@@ -1,3 +1,5 @@
+//! Streaming turn driver: renders provider/tool events and handles keys during a turn.
+
 use crate::chat::{Message, build_chat_history};
 use crate::llm::{ChatMessage, ChatRole};
 use crate::tools::edit_file::preview_edit_file;
@@ -24,6 +26,7 @@ use super::{App, apply_input_key_with_paste_burst};
 ///     via the `ToolLiveEvent` channel (the future holds a `oneshot` sender).
 ///   - `Runtime`: the Driver requested a key via `RuntimeEvent::KeyRequest`,
 ///     resolved by id through the `KeyReplyRegistry`.
+///
 /// Both code paths (`drive_live`, `stream_runtime`) own a `KeySink` and pass
 /// it to `drain_keys`; a key event from the terminal is delivered here.
 pub(crate) struct KeySink {
@@ -420,13 +423,11 @@ impl App {
             // (a single WAL sync) instead of one commit per row.
             if let Some(ref db) = self.session_db
                 && let Some(conv_id) = self.conversation_id
-            {
-                if let Ok(next) =
+                && let Ok(next) =
                     db.append_turn(conv_id, self.session_seq, &new_msgs, &outcome.usage)
                 {
                     self.session_seq = next;
                 }
-            }
 
             // Surface a driver/provider failure so the turn never ends in
             // silence. The Driver aborts the turn (e.g. an HTTP 429/5xx after
@@ -1031,13 +1032,14 @@ impl App {
     }
 
     /// Drain pending key events into input edits or queue. Used during streaming.
+    #[allow(clippy::too_many_arguments)] // eight independent streaming UI-state slots
     fn drain_keys(
         input: &mut InputState,
         queue: &mut VecDeque<String>,
         mode: &mut ApprovalMode,
         cancel: &mut bool,
         panes_visible: &mut bool,
-        pages: &mut Vec<PanePage>,
+        pages: &mut [PanePage],
         active_page: &mut usize,
         pending_key: &mut KeySink,
     ) -> bool {
