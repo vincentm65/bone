@@ -7,11 +7,12 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
-    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
-    http_status_to_error_kind,
+    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ProviderRequestContext,
+    ResponseStream, http_status_to_error_kind,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -59,23 +60,37 @@ impl CodexProvider {
 }
 
 #[derive(Serialize)]
-struct CodexRequest {
-    model: String,
-    instructions: String,
-    input: Vec<CodexInputItem>,
-    stream: bool,
-    store: bool,
+pub struct CodexRequest {
+    pub model: String,
+    pub instructions: String,
+    pub input: Vec<CodexInputItem>,
+    pub stream: bool,
+    pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
+    pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f64>,
+    pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<CodexTool>>,
+    pub tools: Option<Vec<CodexTool>>,
+    /// Mirror the Codex CLI request shape: when tools are present it sends an
+    /// explicit `tool_choice: "auto"`. This is the Responses API default, so it
+    /// does not change selection behavior — it keeps the serialized request
+    /// prefix byte-identical to the Codex CLI so cached prefixes line up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<&'static str>,
+    /// Codex-only stable cache key. Set per conversation/thread so same-thread
+    /// requests route to the same cached-prefix backend, matching Codex CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// Request encrypted reasoning content so it can be replayed on the next
+    /// turn when `store: false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<&'static str>>,
 }
 
 /// Typed input items for the Codex Responses API. Uses `#[serde(untagged)]`;
 /// message variants have `role`+`content`, function variants have `type`+fields.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(untagged)]
 pub enum CodexInputItem {
     Message {
@@ -95,9 +110,16 @@ pub enum CodexInputItem {
         call_id: String,
         output: String,
     },
+    Reasoning {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        id: String,
+        summary: Vec<String>,
+        encrypted_content: String,
+    },
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum CodexContent {
     #[serde(rename = "input_text")]
@@ -152,6 +174,14 @@ impl CodexInputItem {
             output: output.to_string(),
         }
     }
+    fn reasoning(id: &str, encrypted_content: &str) -> Self {
+        Self::Reasoning {
+            kind: "reasoning",
+            id: id.to_string(),
+            summary: Vec::new(),
+            encrypted_content: encrypted_content.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -172,9 +202,13 @@ struct CodexOutputItem {
     #[serde(default)]
     call_id: Option<String>,
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
+    #[serde(default)]
+    encrypted_content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +232,8 @@ struct CodexUsage {
 }
 
 pub fn codex_tools(tools: Vec<ToolDefinition>) -> Vec<CodexTool> {
+    let mut tools = tools;
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
     tools
         .into_iter()
         .map(|tool| CodexTool {
@@ -216,7 +252,34 @@ pub fn build_codex_messages(messages: Vec<ChatMessage>) -> Vec<CodexInputItem> {
         match msg.role {
             ChatRole::System => continue,
             ChatRole::User => items.push(CodexInputItem::user_message(&msg.content, msg.images)),
+            ChatRole::Assistant if !msg.output_sequence.is_empty() => {
+                // Replay the turn's output items in their original emission
+                // order. Splitting reasoning and function calls into separate
+                // runs (all reasoning, then all calls) breaks Responses
+                // `store: false` validation and prefix-cache alignment when the
+                // backend interleaved them (reasoning A, call A, reasoning B…).
+                for item in &msg.output_sequence {
+                    match item {
+                        crate::llm::OutputItem::Reasoning(ri) => {
+                            items.push(CodexInputItem::reasoning(&ri.id, &ri.encrypted_content));
+                        }
+                        crate::llm::OutputItem::Text(text) if !text.is_empty() => {
+                            items.push(CodexInputItem::assistant_text(text));
+                        }
+                        crate::llm::OutputItem::Text(_) => {}
+                        crate::llm::OutputItem::ToolCall(tc) => {
+                            let args_str = tc.arguments.to_string();
+                            items.push(CodexInputItem::tool_call(&tc.id, &tc.name, &args_str));
+                        }
+                    }
+                }
+            }
             ChatRole::Assistant => {
+                // Fallback for messages with no recorded sequence (restored from
+                // the session DB, which does not persist reasoning items).
+                for ri in &msg.reasoning_items {
+                    items.push(CodexInputItem::reasoning(&ri.id, &ri.encrypted_content));
+                }
                 if !msg.content.is_empty() {
                     items.push(CodexInputItem::assistant_text(&msg.content));
                 }
@@ -267,25 +330,46 @@ pub fn build_instructions(messages: &[ChatMessage]) -> String {
 fn extract_response_events(
     resp: &CodexResponse,
 ) -> (Vec<ChatEvent>, Option<(u32, u32, Option<u32>)>) {
-    let tool_calls: Vec<ChatEvent> = resp
-        .output
-        .iter()
-        .filter(|item| item.item_type == "function_call")
-        .filter_map(|item| {
-            let id = item.call_id.clone()?;
-            let name = item.name.clone()?;
-            if id.is_empty() || name.is_empty() {
-                return None;
+    // Single pass over the output array so reasoning and function_call items
+    // stay in the backend's original order. Splitting them into separate lists
+    // (all reasoning, then all calls) would reorder interleaved sequences like
+    // [reasoning A, call A, reasoning B, call B] and break `store: false`
+    // validation / prefix-cache alignment.
+    let mut events: Vec<ChatEvent> = Vec::new();
+    for item in &resp.output {
+        match item.item_type.as_str() {
+            "function_call" => {
+                let (Some(id), Some(name)) = (item.call_id.clone(), item.name.clone()) else {
+                    continue;
+                };
+                if id.is_empty() || name.is_empty() {
+                    continue;
+                }
+                let args = serde_json::from_str(item.arguments.as_deref().unwrap_or("null"))
+                    .unwrap_or(Value::Null);
+                events.push(ChatEvent::ToolCall(ToolCall {
+                    id,
+                    name,
+                    arguments: args,
+                }));
             }
-            let args = serde_json::from_str(item.arguments.as_deref().unwrap_or("null"))
-                .unwrap_or(Value::Null);
-            Some(ChatEvent::ToolCall(ToolCall {
-                id,
-                name,
-                arguments: args,
-            }))
-        })
-        .collect();
+            "reasoning" => {
+                let (Some(id), Some(encrypted_content)) =
+                    (item.id.clone(), item.encrypted_content.clone())
+                else {
+                    continue;
+                };
+                if id.is_empty() || encrypted_content.is_empty() {
+                    continue;
+                }
+                events.push(ChatEvent::EncryptedReasoning {
+                    id,
+                    encrypted_content,
+                });
+            }
+            _ => {}
+        }
+    }
 
     let usage = resp.usage.as_ref().and_then(|u| {
         let prompt = u.input_tokens.map(|i| i as u32);
@@ -304,7 +388,7 @@ fn extract_response_events(
             })
     });
 
-    (tool_calls, usage)
+    (events, usage)
 }
 
 /// Resolve the event type. First checks the JSON `type` field (Responses API
@@ -315,6 +399,75 @@ fn resolve_event_type<'a>(raw: &'a Value, sse_event: &'a str) -> &'a str {
         return t;
     }
     sse_event
+}
+
+fn prompt_cache_key(context: &ProviderRequestContext) -> Option<String> {
+    context
+        .conversation_id
+        .map(|id| format!("bone-codex-thread-{id}"))
+}
+
+/// Diagnostic gate: when `BONE_CODEX_DEBUG` is set (and not empty/`0`), each
+/// Codex request body is dumped to its own file and its reported cache stats are
+/// logged, so prefix-cache divergence can be located by diffing two consecutive
+/// request JSONs. Zero-cost (a single env read) when unset.
+fn codex_debug_enabled() -> bool {
+    std::env::var("BONE_CODEX_DEBUG")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
+/// Monotonic request counter so a request dump and its later usage line share a
+/// stable `#N` and consecutive requests are diffable in order.
+static CODEX_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Append one line to `bone.log` (same file the Lua `ctx.log` helpers use).
+fn codex_debug_log_line(line: &str) {
+    let path = crate::config::bone_dir().join("bone.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Write the pretty-printed request body to `codex-debug-NNNN.json` and log a
+/// one-line summary to `bone.log`. Returns the request's sequence number so the
+/// matching usage line can reference it. Pretty-printed (one input item per
+/// block) so a plain `diff` of two dumps points straight at the first item where
+/// the cached prefix breaks.
+fn codex_debug_dump_request(request: &CodexRequest) -> u64 {
+    let seq = CODEX_DEBUG_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = crate::config::bone_dir();
+    let file = dir.join(format!("codex-debug-{seq:04}.json"));
+    let body = serde_json::to_string_pretty(request).unwrap_or_default();
+    let _ = std::fs::write(&file, &body);
+    codex_debug_log_line(&format!(
+        "[codex-debug] req #{seq} model={} input_items={} cache_key={} -> {}",
+        request.model,
+        request.input.len(),
+        request.prompt_cache_key.as_deref().unwrap_or("(none)"),
+        file.display(),
+    ));
+    seq
+}
+
+/// Log the provider-reported usage for request `#seq`, including the cache-hit
+/// rate (cached as a fraction of input), so the per-request hit rate can be
+/// read straight from `bone.log` without aggregation.
+fn codex_debug_log_usage(seq: u64, prompt: u32, completion: u32, cached: Option<u32>) {
+    let cached = cached.unwrap_or(0);
+    let pct = if prompt > 0 {
+        (cached as f64 / prompt as f64) * 100.0
+    } else {
+        0.0
+    };
+    codex_debug_log_line(&format!(
+        "[codex-debug] req #{seq} usage: input={prompt} cached={cached} ({pct:.1}%) output={completion}"
+    ));
 }
 
 #[async_trait]
@@ -344,9 +497,27 @@ impl LlmProvider for CodexProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
+        self.chat_stream_with_context(messages, tools, ProviderRequestContext::default())
+            .await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
         let instructions = build_instructions(&messages);
         let input_items = build_codex_messages(messages);
+        let prompt_cache_key = prompt_cache_key(&context);
         let codex_tools = codex_tools(tools);
+        let tools = if codex_tools.is_empty() {
+            None
+        } else {
+            Some(codex_tools)
+        };
+        // Codex CLI only emits `tool_choice` when it actually sends tools.
+        let tool_choice = tools.as_ref().map(|_| "auto");
 
         let request = CodexRequest {
             model: self.model.clone(),
@@ -356,12 +527,15 @@ impl LlmProvider for CodexProvider {
             store: false,
             temperature: None,
             top_p: None,
-            tools: if codex_tools.is_empty() {
-                None
-            } else {
-                Some(codex_tools)
-            },
+            tools,
+            tool_choice,
+            prompt_cache_key,
+            include: Some(vec!["reasoning.encrypted_content"]),
         };
+
+        // Diagnostic: dump the request body (gated by BONE_CODEX_DEBUG) so the
+        // matching usage line can correlate by sequence number.
+        let debug_seq = codex_debug_enabled().then(|| codex_debug_dump_request(&request));
 
         let mut req = self.client.post(self.chat_url()).json(&request);
 
@@ -399,6 +573,7 @@ impl LlmProvider for CodexProvider {
             futures_util::pin_mut!(events);
             let mut partial_tool_calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
             let mut emitted_tool_call_ids: BTreeSet<String> = BTreeSet::new();
+            let mut emitted_reasoning_ids: BTreeSet<String> = BTreeSet::new();
             let mut last_usage: Option<(u32, u32, Option<u32>)> = None;
 
             while let Some(event) = events.try_next().await.map_err(|err| {
@@ -495,6 +670,18 @@ impl LlmProvider for CodexProvider {
                             .and_then(|v| v.as_u64())
                             .map(|v| v as usize)
                             .unwrap_or(0);
+                        // Encrypted reasoning items: emit for in-memory replay.
+                        if let Some(item) = raw.get("item")
+                            && item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
+                            && let Some(id) = item.get("id").and_then(|v| v.as_str())
+                            && let Some(enc) = item.get("encrypted_content").and_then(|v| v.as_str())
+                            && !id.is_empty() && !enc.is_empty() {
+                                emitted_reasoning_ids.insert(id.to_string());
+                                yield ChatEvent::EncryptedReasoning {
+                                    id: id.to_string(),
+                                    encrypted_content: enc.to_string(),
+                                };
+                            }
                         if let Some(partial) = partial_tool_calls.remove(&output_index)
                             && !partial.id.is_empty() && !partial.name.is_empty() {
                                 let arguments =
@@ -509,7 +696,6 @@ impl LlmProvider for CodexProvider {
                             }
                     }
 
-                    // ── Final response (fallback for non-streaming tool calls) ─
                     "response.completed" => {
                         // Flush any remaining partial calls first.
                         for ev in flush_partial_tool_calls(&mut partial_tool_calls) {
@@ -519,7 +705,7 @@ impl LlmProvider for CodexProvider {
                             yield ev;
                         }
                         if let Some(resp_val) = raw.get("response")
-                            && let Ok(resp) = serde_json::from_value(resp_val.clone()) {
+                            && let Ok(resp) = serde_json::from_value::<CodexResponse>(resp_val.clone()) {
                                 let (events, usage) = extract_response_events(&resp);
                                 if let Some(u) = usage {
                                     last_usage = Some(u);
@@ -529,6 +715,11 @@ impl LlmProvider for CodexProvider {
                                         ChatEvent::ToolCall(call) if emitted_tool_call_ids.contains(&call.id) => {}
                                         ChatEvent::ToolCall(call) => {
                                             emitted_tool_call_ids.insert(call.id.clone());
+                                            yield ev;
+                                        }
+                                        ChatEvent::EncryptedReasoning { id, .. } if emitted_reasoning_ids.contains(id) => {}
+                                        ChatEvent::EncryptedReasoning { id, .. } => {
+                                            emitted_reasoning_ids.insert(id.clone());
                                             yield ev;
                                         }
                                         _ => yield ev,
@@ -547,6 +738,9 @@ impl LlmProvider for CodexProvider {
             }
 
             if let Some((prompt, completion, cached)) = last_usage {
+                if let Some(seq) = debug_seq {
+                    codex_debug_log_usage(seq, prompt, completion, cached);
+                }
                 yield ChatEvent::TokenUsage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,

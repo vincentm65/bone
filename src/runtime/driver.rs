@@ -17,7 +17,7 @@ use crate::agent::{
 };
 use crate::chat::build_chat_history;
 use crate::ext::ExtensionManager;
-use crate::llm::provider::LlmProvider;
+use crate::llm::provider::{LlmProvider, ProviderRequestContext};
 use crate::llm::{ChatEvent, ChatMessage, TokenStats, token_tracker::CHARS_PER_TOKEN};
 use crate::runtime::RuntimeEvent;
 use crate::session_sink::SessionSink;
@@ -60,6 +60,11 @@ pub struct Driver {
     pub transcript: Vec<ChatMessage>,
     pub token_stats: TokenStats,
     pub system_prompt_override: Option<String>,
+    /// Stable conversation id for this turn, independent of the session sink.
+    /// Frontends that persist out-of-band run with a [`NullSessionSink`] (whose
+    /// `conv_id` is `None`), so the id is threaded in directly — it drives the
+    /// provider cache key (`prompt_cache_key`) and the `ctx` conversation id.
+    pub conversation_id: Option<i64>,
 }
 
 /// What [`Driver::run`] hands back so a stateful frontend (the TUI) can reabsorb
@@ -96,6 +101,20 @@ impl Driver {
     /// discarding the reclaimable state.
     pub async fn run(self, prompt: &str) -> Result<AgentResponse, String> {
         self.run_to_outcome(prompt).await.result
+    }
+
+    /// Box the turn into an owned, `'static` future so a frontend connection
+    /// (`LocalConn`) can store and poll it on its own task without borrowing the
+    /// caller's prompt buffer. The future captures `self` and `prompt` by value.
+    ///
+    /// `Send`, so a `LocalConn` (and therefore the daemon that owns it) can be
+    /// driven on any tokio task — the turn never holds the Lua VM lock across an
+    /// `await` (the `before_turn` hook hops to `spawn_blocking`).
+    pub fn into_turn_future(
+        self,
+        prompt: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DriverOutcome> + Send>> {
+        Box::pin(async move { self.run_to_outcome(&prompt).await })
     }
 
     /// Drive the conversation to a final assistant message, returning the
@@ -165,6 +184,7 @@ impl Driver {
             mut transcript,
             mut token_stats,
             system_prompt_override,
+            conversation_id,
         } = self;
         let is_cancelled = || {
             cancel
@@ -183,11 +203,19 @@ impl Driver {
 
         let mut session_seq = 0i64;
         let mut usage_records: Vec<UsageRecord> = Vec::new();
-        if !prompt.is_empty()
-            || transcript
-                .last()
-                .is_none_or(|m| m.role != crate::llm::ChatRole::User)
-        {
+        // The initiating user turn is already present in history/transcript:
+        // headless `agent_setup` seeds it, and the TUI pushes it before
+        // building the driver. Only insert when it is NOT already the last
+        // message — otherwise we duplicate it in both the model context
+        // (history) and the persisted transcript (the TUI writes the turn's
+        // new messages from `persist_from` on, which would include the dup).
+        // `session.append_message` runs unconditionally so the headless sink
+        // still persists the user turn (the TUI uses a NullSessionSink, so it
+        // is a no-op there).
+        let prompt_already_last = transcript
+            .last()
+            .is_some_and(|m| m.role == crate::llm::ChatRole::User && m.content == prompt);
+        if !prompt_already_last {
             let message = ChatMessage::new(crate::llm::ChatRole::User, prompt);
             history.push(message.clone());
             transcript.push(message);
@@ -247,7 +275,7 @@ impl Driver {
                     &tools,
                     &token_stats,
                     &approval_mode.get(),
-                    session.conv_id(),
+                    conversation_id,
                     llm.id(),
                     llm.model(),
                     Vec::new(),
@@ -327,7 +355,11 @@ impl Driver {
             let mut stream = None;
             for attempt in 1..=3 {
                 match llm
-                    .chat_stream(history.clone(), turn_tool_defs.clone())
+                    .chat_stream_with_context(
+                        history.clone(),
+                        turn_tool_defs.clone(),
+                        ProviderRequestContext { conversation_id },
+                    )
                     .await
                 {
                     Ok(s) => {
@@ -354,7 +386,15 @@ impl Driver {
             let mut assistant_text = String::new();
             let mut reasoning_text = String::new();
             let mut reasoning_echo_field: Option<String> = None;
+            let mut reasoning_items: Vec<crate::llm::ReasoningItem> = Vec::new();
             let mut tool_calls = Vec::new();
+            // Ordered output items as the provider emits them, so Codex/Responses
+            // can replay reasoning + text + tool calls verbatim and in order.
+            let mut output_sequence: Vec<crate::llm::OutputItem> = Vec::new();
+            // Index of the (single) accumulating text item in `output_sequence`,
+            // so streamed deltas land in their original position relative to
+            // reasoning items and tool calls rather than always sorting first.
+            let mut text_item_index: Option<usize> = None;
             let mut stream_error = false;
             let mut had_usage = false;
 
@@ -367,6 +407,19 @@ impl Driver {
                     Ok(ChatEvent::TextDelta(text)) => {
                         remit(RuntimeEvent::TextDelta { text: text.clone() });
                         assistant_text.push_str(&text);
+                        match text_item_index {
+                            Some(i) => {
+                                if let Some(crate::llm::OutputItem::Text(s)) =
+                                    output_sequence.get_mut(i)
+                                {
+                                    s.push_str(&text);
+                                }
+                            }
+                            None => {
+                                text_item_index = Some(output_sequence.len());
+                                output_sequence.push(crate::llm::OutputItem::Text(text.clone()));
+                            }
+                        }
                     }
                     Ok(ChatEvent::ReasoningDelta { text, echo_field }) => {
                         remit(RuntimeEvent::ReasoningDelta { text: text.clone() });
@@ -374,6 +427,20 @@ impl Driver {
                         if reasoning_echo_field.is_none() {
                             reasoning_echo_field = echo_field;
                         }
+                    }
+                    Ok(ChatEvent::EncryptedReasoning {
+                        id,
+                        encrypted_content,
+                    }) => {
+                        // Captured for verbatim replay on the next request
+                        // (Codex/Responses). Not surfaced to the UI — it is an
+                        // opaque blob the model must see again, not text to show.
+                        let item = crate::llm::ReasoningItem {
+                            id,
+                            encrypted_content,
+                        };
+                        output_sequence.push(crate::llm::OutputItem::Reasoning(item.clone()));
+                        reasoning_items.push(item);
                     }
                     Ok(ChatEvent::ToolCall(call)) => {
                         let summary = format!("{}: {}", call.name, summarize_call_args(&call));
@@ -383,6 +450,7 @@ impl Driver {
                             summary: summary.clone(),
                             arguments: call.arguments.clone(),
                         });
+                        output_sequence.push(crate::llm::OutputItem::ToolCall(call.clone()));
                         tool_calls.push(call);
                     }
                     Ok(ChatEvent::TokenUsage {
@@ -521,6 +589,10 @@ impl Driver {
                         echo_field: reasoning_echo_field.take(),
                     });
                 }
+                if !reasoning_items.is_empty() {
+                    assistant.reasoning_items = std::mem::take(&mut reasoning_items);
+                }
+                assistant.output_sequence = std::mem::take(&mut output_sequence);
                 transcript.push(assistant);
                 session_seq += 1;
                 session.append_message(
@@ -544,6 +616,10 @@ impl Driver {
                     echo_field: reasoning_echo_field.take(),
                 });
             }
+            if !reasoning_items.is_empty() {
+                assistant.reasoning_items = std::mem::take(&mut reasoning_items);
+            }
+            assistant.output_sequence = std::mem::take(&mut output_sequence);
             history.push(assistant.clone());
             transcript.push(assistant);
             session_seq += 1;

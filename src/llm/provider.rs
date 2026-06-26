@@ -72,6 +72,36 @@ pub struct ChatMessage {
     /// field to round-trip it under is carried opaquely in [`Reasoning`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
+    /// Encrypted reasoning output items (OpenAI Responses API / Codex). Each is
+    /// replayed verbatim as a top-level input item on the next request so the
+    /// model recovers its prior reasoning across tool rounds and prefix caches
+    /// stay aligned. Other providers ignore this. Kept in memory only — not
+    /// persisted to the session DB.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_items: Vec<ReasoningItem>,
+    /// The assistant turn's output items in the exact order the provider
+    /// emitted them (reasoning, text, tool calls — possibly interleaved). Used
+    /// to replay the sequence verbatim and *in order* for providers that
+    /// require it (Codex / OpenAI Responses with `store: false`), where
+    /// splitting reasoning and function calls into separate runs breaks
+    /// validation and prefix-cache alignment. In-memory only: reconstructed
+    /// from the stream each turn, never persisted. When empty (e.g. messages
+    /// restored from the session DB, or other providers) consumers fall back to
+    /// the `content`/`tool_calls`/`reasoning_items` fields.
+    #[serde(skip)]
+    pub output_sequence: Vec<OutputItem>,
+}
+
+/// One item of an assistant turn's output, in emission order. See
+/// [`ChatMessage::output_sequence`].
+#[derive(Debug, Clone)]
+pub enum OutputItem {
+    /// Visible assistant text (an `output_text` message item).
+    Text(String),
+    /// An encrypted reasoning item to replay verbatim.
+    Reasoning(ReasoningItem),
+    /// A function/tool call.
+    ToolCall(ToolCall),
 }
 
 /// Provider-neutral reasoning/thinking content captured during a turn.
@@ -82,6 +112,18 @@ pub struct Reasoning {
     /// provider requires round-tripping it (else `None`). Opaque to the core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo_field: Option<String>,
+}
+
+/// An encrypted reasoning output item (OpenAI Responses API / Codex). Carries
+/// an opaque blob the provider replays verbatim on the next request so the
+/// model recovers its prior reasoning across tool rounds without exposing the
+/// plaintext.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningItem {
+    /// The reasoning item id (`rs_…`).
+    pub id: String,
+    /// Opaque encrypted reasoning content; replayed unchanged.
+    pub encrypted_content: String,
 }
 
 impl ChatMessage {
@@ -95,6 +137,8 @@ impl ChatMessage {
             name: None,
             is_error: false,
             reasoning: None,
+            reasoning_items: Vec::new(),
+            output_sequence: Vec::new(),
         }
     }
 
@@ -123,6 +167,8 @@ impl ChatMessage {
             name: Some(result.name),
             is_error: result.is_error,
             reasoning: None,
+            reasoning_items: Vec::new(),
+            output_sequence: Vec::new(),
         }
     }
 }
@@ -135,6 +181,13 @@ pub enum ChatEvent {
     ReasoningDelta {
         text: String,
         echo_field: Option<String>,
+    },
+    /// An encrypted reasoning output item (OpenAI Responses API / Codex). The
+    /// opaque blob must be replayed verbatim on the next request so the model
+    /// recovers its prior reasoning across tool rounds.
+    EncryptedReasoning {
+        id: String,
+        encrypted_content: String,
     },
     ToolCall(ToolCall),
     /// Token usage from the provider's response (real counts, not estimates).
@@ -238,6 +291,11 @@ pub fn http_status_to_error_kind(status: reqwest::StatusCode) -> LlmErrorKind {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRequestContext {
+    pub conversation_id: Option<i64>,
+}
+
 /// The only interface providers need to implement.
 ///
 /// To add a provider:
@@ -269,6 +327,17 @@ pub trait LlmProvider: Send + Sync {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError>;
+
+    /// Send messages with provider-specific stable context. Providers that do
+    /// not need session context should use the default implementation.
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        _context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
+        self.chat_stream(messages, tools).await
+    }
 
     /// Validate provider setup before first use.
     async fn validate(&self) -> Result<(), LlmError> {

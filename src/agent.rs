@@ -315,7 +315,8 @@ pub(crate) fn emit_event(
         }
         crate::runtime::RuntimeEvent::TextDelta { .. }
         | crate::runtime::RuntimeEvent::ReasoningDelta { .. }
-        | crate::runtime::RuntimeEvent::KeyRequest { .. } => return,
+        | crate::runtime::RuntimeEvent::KeyRequest { .. }
+        | crate::runtime::RuntimeEvent::ApprovalRequest { .. } => return,
     };
     println!("{json}");
 }
@@ -505,6 +506,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         transcript,
         token_stats,
         system_prompt_override,
+        conversation_id: session_report.conv_id(),
     };
 
     // Snapshot before the turn so an injected sink reused across turns still

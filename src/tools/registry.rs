@@ -31,7 +31,9 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|tool| tool.definition()).collect()
+        let mut definitions: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
+        definitions.sort_by(|a, b| a.name.cmp(&b.name));
+        definitions
     }
 
     #[allow(clippy::too_many_arguments)]

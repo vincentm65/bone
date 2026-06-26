@@ -98,10 +98,11 @@ pub(super) fn collect_paste_burst(first: char) -> io::Result<PasteBurst> {
                     // the poll is non-blocking so ordinary "type then submit"
                     // latency is unaffected. A lone char + Enter with nothing
                     // queued hands Enter back as the trailing submit key.
-                    KeyCode::Enter if plain
-                        && (is_paste_burst(&text) || event::poll(Duration::ZERO)?) => {
-                            text.push('\n');
-                        }
+                    KeyCode::Enter
+                        if plain && (is_paste_burst(&text) || event::poll(Duration::ZERO)?) =>
+                    {
+                        text.push('\n');
+                    }
                     _ => {
                         trailing = Some(Event::Key(key));
                         break;

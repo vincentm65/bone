@@ -252,13 +252,11 @@ impl App {
         images: Vec<crate::llm::ImageData>,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        use crate::runtime::{
-            ApprovalRequest, ChannelApprovalGate, Driver, KeyReplyRegistry, RuntimeEvent,
-        };
+        use crate::runtime::{ChannelApprovalGate, KeyReplyRegistry, RuntimeConn, RuntimeEvent};
         use crate::session_sink::{NullSessionSink, SessionSink};
         use crate::tools::CallOutcome;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::AtomicBool;
 
         // User message + DB persistence.
         let image_count = images.len();
@@ -267,14 +265,17 @@ impl App {
             image_count,
         ));
         if images.is_empty() {
-            self.transcript
+            self.runtime
+                .transcript
                 .push(ChatMessage::new(ChatRole::User, &text));
-            self.append_user_to_db(&text, None);
+            self.runtime.append_user_to_db(&text, None);
         } else {
             let images_json = serde_json::to_string(&images).ok();
-            self.transcript
+            self.runtime
+                .transcript
                 .push(ChatMessage::user_with_images(&text, images));
-            self.append_user_to_db(&text, images_json.as_deref());
+            self.runtime
+                .append_user_to_db(&text, images_json.as_deref());
         }
         self.extensions.dispatch_simple(
             "message",
@@ -282,7 +283,7 @@ impl App {
         );
         // New assistant/tool transcript messages begin here; persisted at turn end
         // from the Driver's authoritative returned transcript.
-        let persist_from = self.transcript.len();
+        let persist_from = self.runtime.transcript.len();
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.input.reset();
@@ -291,14 +292,18 @@ impl App {
         self.shown_tool_rows.clear();
         // Seed the live output-token estimate from the running total so the
         // status bar ticks up from where it left off as text/tools stream in.
-        self.stream_estimated_received = Some(self.token_stats.received);
+        self.stream_estimated_received = Some(self.runtime.token_stats.received);
         self.turn_start = Some(std::time::Instant::now());
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_pause_start = None;
 
-        let (rt_tx, mut rt_rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
-        let (appr_tx, mut appr_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        let (rt_tx, rt_rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
         let key_registry = KeyReplyRegistry::new();
+        // Approval now flows over the runtime event stream: the gate emits a
+        // `RuntimeEvent::ApprovalRequest` and awaits the decision routed back
+        // through `self.approval_registry`. Same registry instance the prompt
+        // resolves in `resolve_approval`.
+        let approval_registry = self.approval_registry.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let session: Arc<dyn SessionSink> = Arc::new(NullSessionSink);
 
@@ -308,27 +313,33 @@ impl App {
         let approval_mode = crate::tools::SharedApprovalMode::new(self.approval_mode);
         let approval_mode_sync = approval_mode.clone();
 
-        let driver = Driver {
-            llm: self.llm.clone(),
-            extensions: self.extensions.clone(),
-            tools: self.tools.clone(),
-            session,
-            gate: Arc::new(ChannelApprovalGate::new(appr_tx)),
+        // Build the turn's Driver from the session's authoritative state. The
+        // session owns transcript/token-stats/tool-state; the App shares its
+        // `llm`/`extensions` in. The same `build_driver` runs the daemon's turns.
+        let driver = self.runtime.build_driver(
+            self.llm.clone(),
+            self.extensions.clone(),
             approval_mode,
-            agent_depth: 0,
-            activity: None,
-            on_token_usage: None,
-            events: false,
-            event_sender: None,
-            runtime_events: Some(rt_tx),
-            key_reply_registry: Some(key_registry.clone()),
-            cancel: Some(cancel.clone()),
-            history: build_chat_history(&self.transcript, None),
-            transcript: self.transcript.clone(),
-            token_stats: self.token_stats.clone(),
-            system_prompt_override: None,
-        };
-        let mut run_fut = Box::pin(driver.run_to_outcome(&text));
+            Arc::new(ChannelApprovalGate::new(
+                rt_tx.clone(),
+                approval_registry.clone(),
+            )),
+            rt_tx,
+            key_registry.clone(),
+            cancel.clone(),
+            session,
+        );
+        // Drive the turn through a `LocalConn`: it owns the Driver future and
+        // streams its events on this task. The TUI renders purely from
+        // `next_event()` — the same surface a remote client renders from.
+        let mut conn = crate::runtime::LocalConn::new(
+            rt_rx,
+            driver,
+            cancel.clone(),
+            approval_registry.clone(),
+            key_registry.clone(),
+        );
+        conn.send(crate::runtime::RuntimeCommand::SubmitPrompt { text: text.clone() });
 
         let mut cur_idx: Option<usize> = None;
         let mut pending: std::collections::HashMap<String, crate::tools::ToolCall> =
@@ -359,75 +370,59 @@ impl App {
                 self.persist_runtime_config();
             }
             if self.cancel_streaming {
-                cancel.store(true, Ordering::Relaxed);
+                // Cancel the in-flight turn and stop pumping immediately; the
+                // dropped `conn` aborts the Driver future. No outcome to reabsorb.
+                conn.send(crate::runtime::RuntimeCommand::Cancel);
                 break None;
             }
 
             tokio::select! {
-                outcome = &mut run_fut => break Some(outcome),
-                Some(ev) = rt_rx.recv() => {
-                    self.pump_apply_event(ev, &mut cur_idx, &mut pending, &key_registry, &mut pending_key, term)?;
-                }
-                // Don't pull a new approval while one is still pending — tool
-                // calls are resolved one at a time, as they were when this was
-                // a synchronous prompt.
-                Some(areq) = appr_rx.recv(), if self.pending_approval.is_none() => {
-                    // Show the edit-file diff preview before deciding, so the
-                    // user sees what's being changed (in Safe and Danger modes).
-                    if areq.call.name == "edit_file" {
-                        self.pump_show_edit_preview(&areq.call, term).await?;
+                ev = conn.next_event() => match ev {
+                    // `None` = the turn future finished and its trailing events
+                    // are fully drained; reclaim the outcome and end the loop.
+                    None => break conn.take_outcome(),
+                    // Approval requests need the async edit-preview path, so they
+                    // are handled here rather than in the (sync) event pump. Tool
+                    // calls are resolved one at a time by the gate, so at most one
+                    // ApprovalRequest is outstanding.
+                    Some(RuntimeEvent::ApprovalRequest {
+                        id, call_id, name, arguments, auto_allows, ..
+                    }) => {
+                        let call = crate::tools::ToolCall { id: call_id, name, arguments };
+                        // Show the edit-file diff preview before deciding, so the
+                        // user sees what's being changed (in Safe and Danger modes).
+                        if call.name == "edit_file" {
+                            self.pump_show_edit_preview(&call, term).await?;
+                        }
+                        if auto_allows {
+                            conn.send(crate::runtime::RuntimeCommand::ApprovalReply {
+                                id,
+                                outcome: CallOutcome::Approve,
+                            });
+                        } else {
+                            // Show the prompt; the decision is collected by
+                            // drain_approval_keys at the top of the loop and
+                            // routed back through `self.approval_registry`.
+                            self.begin_approval(&call, id, term)?;
+                        }
                     }
-                    if areq.auto_allows {
-                        let _ = areq.reply.send(CallOutcome::Approve);
-                    } else {
-                        // Show the prompt; the decision is collected by
-                        // drain_approval_keys at the top of the loop.
-                        self.begin_approval(&areq.call, areq.reply, term)?;
+                    Some(ev) => {
+                        self.pump_apply_event(ev, &mut cur_idx, &mut pending, &key_registry, &mut pending_key, term)?;
                     }
-                }
+                },
                 _ = ticker.tick() => {
                     self.pump_tick(term)?;
                 }
             }
         };
 
-        // Drain any trailing events emitted just before the Driver returned
-        // (final text deltas, the last tool result, Finished).
-        while let Ok(ev) = rt_rx.try_recv() {
-            self.pump_apply_event(
-                ev,
-                &mut cur_idx,
-                &mut pending,
-                &key_registry,
-                &mut pending_key,
-                term,
-            )?;
-        }
-
-        // Reabsorb authoritative state from the Driver when it completed.
+        // Reabsorb authoritative state from the Driver when it completed: the
+        // session adopts the transcript/token-stats/tool-state and persists the
+        // turn (the same path the daemon uses). `apply_outcome` returns the
+        // turn's result so we can surface a failure here.
         let had_outcome = outcome.is_some();
         if let Some(outcome) = outcome {
-            self.transcript = outcome.transcript;
-            self.token_stats = outcome.token_stats;
-            self.tools.state_map = outcome.tools.state_map;
-
-            // Persist the turn's new assistant/tool messages to the session DB
-            // (so Driver turns appear in /history). Clone the slice out
-            // first to release the borrow before the &mut self DB helpers.
-            let new_msgs: Vec<ChatMessage> = self
-                .transcript
-                .get(persist_from..)
-                .map(<[ChatMessage]>::to_vec)
-                .unwrap_or_default();
-            // Persist the turn's new messages + usage in one atomic transaction
-            // (a single WAL sync) instead of one commit per row.
-            if let Some(ref db) = self.session_db
-                && let Some(conv_id) = self.conversation_id
-                && let Ok(next) =
-                    db.append_turn(conv_id, self.session_seq, &new_msgs, &outcome.usage)
-                {
-                    self.session_seq = next;
-                }
+            let result = self.runtime.apply_outcome(outcome, persist_from);
 
             // Surface a driver/provider failure so the turn never ends in
             // silence. The Driver aborts the turn (e.g. an HTTP 429/5xx after
@@ -435,7 +430,7 @@ impl App {
             // rendering it the TUI just stops with no output and looks like the
             // agent hung mid-loop. `RuntimeEvent::Failed` is intentionally not
             // drawn live — this is the single authoritative place we report it.
-            if let Err(err) = &outcome.result {
+            if let Err(err) = &result {
                 self.messages
                     .push(Message::system(format!("⚠ turn failed: {err}")));
             }
@@ -448,9 +443,10 @@ impl App {
         // displayed `curr` and the next turn's compaction check see the real
         // context size instead of a stale overestimate.
         if !had_outcome {
-            let history = build_chat_history(&self.transcript, None);
-            let prompt_chars = Self::estimate_context_chars(&history, &self.tools.definitions());
-            self.token_stats.set_context_estimate(prompt_chars);
+            let history = build_chat_history(&self.runtime.transcript, None);
+            let prompt_chars =
+                Self::estimate_context_chars(&history, &self.runtime.tools.definitions());
+            self.runtime.token_stats.set_context_estimate(prompt_chars);
         }
 
         if self.cancel_streaming {
@@ -540,9 +536,9 @@ impl App {
                 // outcome is reabsorbed. `context_length` (the `curr` metric)
                 // must update after every request so compaction sees the real
                 // context size mid-turn, not just at turn end.
-                self.token_stats.sent = sent;
-                self.token_stats.received = received;
-                self.token_stats.context_length = context_length;
+                self.runtime.token_stats.sent = sent;
+                self.runtime.token_stats.received = received;
+                self.runtime.token_stats.context_length = context_length;
                 // Real count arrived for this request — rebaseline the live
                 // estimate so further deltas (next request in the tool loop)
                 // tick up from the authoritative total instead of the guess.
@@ -570,7 +566,11 @@ impl App {
             // events above is enough to break the silent-hang illusion.
             RuntimeEvent::Failed { .. }
             | RuntimeEvent::Started { .. }
-            | RuntimeEvent::Finished { .. } => {}
+            | RuntimeEvent::Finished { .. }
+            // Approval requests are handled in the select loop (they need the
+            // async edit-preview path); the gate is always resolved before the
+            // turn ends, so any that reaches this sync pump is a no-op.
+            | RuntimeEvent::ApprovalRequest { .. } => {}
             RuntimeEvent::ToolCall {
                 id,
                 name,
@@ -598,6 +598,7 @@ impl App {
                 // the id is recorded in `shown_tool_rows` so the later
                 // `ToolResult` event doesn't render a duplicate.
                 if self
+                    .runtime
                     .tools
                     .display_for_call(&call)
                     .and_then(|d| d.eager)
@@ -636,7 +637,7 @@ impl App {
                 if self.shown_tool_rows.remove(&call_id) {
                     // preview already rendered the row + diff
                 } else if let Some(call) = pending.remove(&call_id) {
-                    let display = self.tools.display_for_call(&call);
+                    let display = self.runtime.tools.display_for_call(&call);
                     self.messages.push(build_tool_row(&call, &result, display));
                 } else {
                     self.messages.push(Message::tool_row(name, is_error));
@@ -790,7 +791,7 @@ impl App {
             name: call.name.clone(),
             ..Default::default()
         };
-        let display = self.tools.display_for_call(call);
+        let display = self.runtime.tools.display_for_call(call);
         self.messages.push(build_tool_row(call, &result, display));
         self.shown_tool_rows.insert(call.id.clone());
         self.renderer
@@ -893,7 +894,8 @@ impl App {
             .push(Message::terminal_output(cmd.to_string(), display, is_error));
         let transcript_text =
             crate::tools::shell::truncate_output(&format!("$ {cmd}\n{result}"), 500);
-        self.transcript
+        self.runtime
+            .transcript
             .push(ChatMessage::new(ChatRole::User, &transcript_text));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;

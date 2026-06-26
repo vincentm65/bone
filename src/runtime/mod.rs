@@ -9,14 +9,18 @@
 //! This module has no dependency on `crate::ui` or ratatui — it is part of the
 //! core that compiles with `--no-default-features`.
 
+pub mod conn;
 pub mod driver;
 pub mod event;
+pub mod session;
 pub mod view;
 
+pub use conn::{LocalConn, RuntimeConn, SocketConn};
 pub use driver::{Driver, UsageRecord};
 pub use event::{
-    ApprovalRequest, ChannelApprovalGate, KeyReplyRegistry, RuntimeCommand, RuntimeEvent,
+    ApprovalReplyRegistry, ChannelApprovalGate, KeyReplyRegistry, RuntimeCommand, RuntimeEvent,
 };
+pub use session::RuntimeSession;
 pub use view::{Component, ViewDiff, ViewModel};
 
 /// Best-effort `String` from a panic payload (`&str`, `String`, or other),

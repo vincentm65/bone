@@ -95,6 +95,156 @@ fn driver_with(script: Vec<ChatEvent>, mode: ApprovalMode) -> (Driver, &'static 
     driver_with_gate(script, mode, Arc::new(AutoApprovalGate))
 }
 
+/// Phase: the frontend transport. Drive a full turn through a `LocalConn` —
+/// the same surface the TUI renders from — instead of calling `Driver::run`
+/// directly. Proves `next_event()` streams the Driver's events, signals turn end
+/// with `None`, and hands back the reclaimable `DriverOutcome` via `take_outcome`.
+#[tokio::test]
+async fn local_conn_streams_turn_and_yields_outcome() {
+    use bone::runtime::{
+        ApprovalReplyRegistry, KeyReplyRegistry, LocalConn, RuntimeCommand, RuntimeConn,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+    let (mut driver, prompt) = driver_with(
+        vec![
+            ChatEvent::TextDelta("hello ".into()),
+            ChatEvent::TextDelta("world".into()),
+        ],
+        ApprovalMode::Safe,
+    );
+    driver.runtime_events = Some(tx);
+
+    let mut conn = LocalConn::new(
+        rx,
+        driver,
+        Arc::new(AtomicBool::new(false)),
+        ApprovalReplyRegistry::new(),
+        KeyReplyRegistry::new(),
+    );
+    conn.send(RuntimeCommand::SubmitPrompt {
+        text: prompt.to_string(),
+    });
+
+    // Pump exactly like the TUI loop: collect events until `None` (idle).
+    let mut events = Vec::new();
+    while let Some(ev) = conn.next_event().await {
+        events.push(ev);
+    }
+
+    assert!(
+        matches!(events.first(), Some(RuntimeEvent::Started { .. })),
+        "first event is Started, got {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            RuntimeEvent::TextDelta { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "hello world", "text deltas stream through the conn");
+    assert!(
+        matches!(events.last(), Some(RuntimeEvent::Finished { content }) if content == "hello world"),
+        "last event is Finished, got {events:?}"
+    );
+
+    // The reclaimable outcome is available once the turn drained.
+    let outcome = conn.take_outcome().expect("outcome after turn end");
+    assert_eq!(
+        outcome.result.expect("ok result").content,
+        "hello world",
+        "conn hands back the Driver's authoritative final content"
+    );
+    assert!(conn.is_finished());
+}
+
+/// Phase: the persistent session. Two turns run through one `RuntimeSession`
+/// via `build_driver` → `LocalConn` → `apply_outcome`. Proves the session is the
+/// cross-turn owner: the transcript accumulates both turns and token stats carry
+/// forward — the daemon (and the TUI) rely on this instead of a per-turn struct.
+#[tokio::test]
+async fn runtime_session_accumulates_state_across_turns() {
+    use bone::runtime::{
+        ApprovalReplyRegistry, KeyReplyRegistry, LocalConn, RuntimeCommand, RuntimeConn,
+        RuntimeSession,
+    };
+    use bone::tools::SharedApprovalMode;
+    use std::sync::atomic::AtomicBool;
+
+    // One shared provider scripts a distinct reply per turn (the script pops
+    // across `chat_stream` calls, so it spans both turns).
+    let llm: Arc<dyn LlmProvider> = Arc::new(MockProvider::new_raw(
+        "mock-1",
+        vec![
+            MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("first".into()))]),
+            MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("second".into()))]),
+        ],
+    ));
+    let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+
+    async fn run_turn(session: &mut RuntimeSession, llm: Arc<dyn LlmProvider>, prompt: &str) {
+        // The Driver appends the user message itself; mark where this turn's new
+        // messages begin, then drive the turn through a LocalConn.
+        let persist_from = session.transcript.len();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+        let driver = session.build_driver(
+            llm,
+            ExtensionManager::unloaded(),
+            SharedApprovalMode::new(ApprovalMode::Safe),
+            Arc::new(AutoApprovalGate),
+            tx,
+            KeyReplyRegistry::new(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        );
+        let mut conn = LocalConn::new(
+            rx,
+            driver,
+            Arc::new(AtomicBool::new(false)),
+            ApprovalReplyRegistry::new(),
+            KeyReplyRegistry::new(),
+        );
+        conn.send(RuntimeCommand::SubmitPrompt {
+            text: prompt.to_string(),
+        });
+        while conn.next_event().await.is_some() {}
+        let outcome = conn.take_outcome().expect("turn produced an outcome");
+        session
+            .apply_outcome(outcome, persist_from)
+            .expect("turn ok");
+    }
+
+    run_turn(&mut session, llm.clone(), "hi").await;
+    assert_eq!(
+        session.transcript.len(),
+        2,
+        "turn 1: user + assistant in transcript"
+    );
+    let after_turn1 = session.token_stats.received;
+
+    run_turn(&mut session, llm.clone(), "bye").await;
+    // Both turns are retained in order: user/assistant ×2.
+    let roles: Vec<_> = session.transcript.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        vec![
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::User,
+            ChatRole::Assistant
+        ],
+        "session accumulates both turns across the conversation"
+    );
+    assert!(
+        session.token_stats.received >= after_turn1,
+        "token stats carry forward across turns ({} then {})",
+        after_turn1,
+        session.token_stats.received
+    );
+}
+
 fn driver_with_gate(
     script: Vec<ChatEvent>,
     mode: ApprovalMode,
@@ -122,6 +272,7 @@ fn driver_with_gate(
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
+        conversation_id: None,
     };
     (driver, prompt)
 }
@@ -151,6 +302,7 @@ fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
+        conversation_id: None,
     };
     (driver, prompt)
 }
@@ -290,19 +442,21 @@ async fn driver_executes_tool_call_then_finishes() {
     );
 }
 
-/// Phase: channel-based approval. The Driver consults a `ChannelApprovalGate`
-/// for every tool call; the "frontend" (the test) receives an `ApprovalRequest`
-/// and replies. Approve → the tool runs (success on a real temp file). Deny →
-/// the tool is skipped with an error result, even though Safe mode would have
-/// auto-allowed this read-only call (the frontend reply overrides policy).
+/// Phase: protocol approval. The Driver consults a `ChannelApprovalGate` for
+/// every tool call; the gate emits a `RuntimeEvent::ApprovalRequest` and the
+/// "frontend" (the test) answers by resolving the `ApprovalReplyRegistry` by id.
+/// Approve → the tool runs (success on a real temp file). Deny → the tool is
+/// skipped with an error result, even though Safe mode would have auto-allowed
+/// this read-only call (the frontend reply overrides policy).
 async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_error: bool) {
     // A real, readable file so an Approved read_file succeeds (is_error=false).
     let path = std::env::temp_dir().join(format!("bone-approval-test-{label}"));
     std::fs::write(&path, "hello").unwrap();
 
-    let (atx, mut arx) = tokio::sync::mpsc::unbounded_channel::<bone::runtime::ApprovalRequest>();
+    let registry = bone::runtime::ApprovalReplyRegistry::new();
+    let (evtx, mut evrx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
     let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel::<AgentRunEvent>();
-    let gate: Arc<dyn ApprovalGate> = Arc::new(ChannelApprovalGate::new(atx));
+    let gate: Arc<dyn ApprovalGate> = Arc::new(ChannelApprovalGate::new(evtx, registry.clone()));
     let (mut driver, prompt) = driver_with_gate(
         vec![ChatEvent::ToolCall(ToolCall {
             id: "call_1".into(),
@@ -316,14 +470,23 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
 
     let run = tokio::spawn(async move { driver.run(prompt).await });
 
-    // Act as the frontend: receive the approval request and reply.
-    let req = tokio::time::timeout(std::time::Duration::from_secs(5), arx.recv())
+    // Act as the frontend: receive the approval request event and reply by id.
+    let ev = tokio::time::timeout(std::time::Duration::from_secs(5), evrx.recv())
         .await
         .expect("approval request timed out")
         .expect("approval request");
-    assert_eq!(req.call.name, "read_file");
-    assert!(req.auto_allows, "read-only in Safe mode is auto-allowed");
-    req.reply.send(decision).unwrap();
+    let RuntimeEvent::ApprovalRequest {
+        id,
+        name,
+        auto_allows,
+        ..
+    } = ev
+    else {
+        panic!("expected ApprovalRequest, got {ev:?}");
+    };
+    assert_eq!(name, "read_file");
+    assert!(auto_allows, "read-only in Safe mode is auto-allowed");
+    assert!(registry.resolve(id, decision), "reply routed to the gate");
 
     let response = run.await.unwrap().expect("driver run");
     assert_eq!(response.content, "", "second (empty) turn finishes");
@@ -411,6 +574,7 @@ async fn driver_key_reply_completes_turn() {
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
+        conversation_id: None,
     };
 
     let run = tokio::spawn(async move { driver.run(prompt).await });
@@ -563,6 +727,7 @@ end)
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
+        conversation_id: None,
     };
 
     let response = driver.run(prompt).await.expect("driver run");
@@ -670,6 +835,7 @@ end)
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
+        conversation_id: None,
     };
 
     driver.run(prompt).await.expect("driver run");

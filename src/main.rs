@@ -247,73 +247,122 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider> =
         std::sync::Arc::from(provider);
 
-    let (hub, commands_rx) = bone::rpc::Hub::new();
-    // Keep the handle so a panicking daemon tears the server down instead of
-    // leaving a zombie listener that silently drops every client's command.
-    let mut daemon = tokio::spawn(panic_guard(
-        "daemon",
-        bone::rpc::run_daemon(
-            hub.clone(),
-            commands_rx,
-            Some(provider),
-            bone::tools::ApprovalMode::Safe,
-        ),
-    ));
+    // Boot the Lua runtime + tools once and hold them in a persistent session,
+    // exactly like the TUI does — the daemon owns the conversation across turns.
+    let mut custom = custom;
+    let model = provider.model().to_string();
+    let provider_label = format!("{} ({})", provider.name(), provider.id());
+    let booted = bone::ext::boot_with_tools(
+        &bone::config::bone_dir(),
+        &std::env::current_dir().unwrap_or_default(),
+        &mut custom,
+        true,
+        bone::ext::BootOptions {
+            agent_depth: 0,
+            headless: false,
+            model: model.clone(),
+            provider: provider_label.clone(),
+            tool_allowlist: None,
+        },
+        &model,
+        &provider_label,
+    );
+    let mut session = bone::runtime::RuntimeSession::new(booted.tools);
+    if let Some(warning) = session.init_db(&*provider) {
+        eprintln!("bone: {warning}");
+    }
 
+    let (hub, commands_rx) = bone::rpc::Hub::new();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");
-    loop {
-        tokio::select! {
-            res = listener.accept() => {
-                let (stream, peer) = res?;
-                eprintln!("bone: client attached: {peer}");
-                let hub = hub.clone();
-                tokio::spawn(panic_guard("client", async move {
-                    if let Err(e) = bone::rpc::serve_connection(stream, hub, Vec::new()).await {
-                        eprintln!("bone: client {peer} ended: {e}");
-                    }
-                }));
-            }
-            _ = &mut daemon => {
-                eprintln!("bone: daemon exited; shutting down server");
-                break;
+
+    // The turn future is `!Send` (it owns the Lua VM), so the daemon can't be
+    // `tokio::spawn`ed; run it on this task and concurrently accept clients
+    // (whose per-connection I/O *is* spawnable).
+    let accept_hub = hub.clone();
+    let accept_loop = async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer)) => {
+                    eprintln!("bone: client attached: {peer}");
+                    let hub = accept_hub.clone();
+                    tokio::spawn(panic_guard("client", async move {
+                        if let Err(e) = bone::rpc::serve_connection(stream, hub, Vec::new()).await {
+                            eprintln!("bone: client {peer} ended: {e}");
+                        }
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("bone: accept error: {e}");
+                    break;
+                }
             }
         }
+    };
+
+    tokio::select! {
+        _ = bone::rpc::run_daemon(
+            hub,
+            commands_rx,
+            provider,
+            booted.manager,
+            session,
+            bone::tools::ApprovalMode::Safe,
+        ) => eprintln!("bone: daemon exited; shutting down server"),
+        _ = accept_loop => eprintln!("bone: accept loop ended; shutting down server"),
     }
     Ok(())
 }
 
-/// `bone connect` — a minimal RPC frontend: each stdin line is a prompt; every
-/// `RuntimeEvent` from the daemon is printed. Proves the protocol end to end.
+/// `bone connect` — a line-oriented RPC frontend, the reference *remote client*:
+/// each stdin line is a prompt, the daemon's `RuntimeEvent`s are printed, and
+/// tool-approval requests are answered over the wire (auto-approve what the
+/// approval mode already allows, otherwise deny). Drives the runtime purely
+/// through [`SocketConn`] — the same transport a remote TUI would use.
 async fn run_connect(args: &[String]) -> std::io::Result<()> {
+    use bone::runtime::{RuntimeCommand, RuntimeConn, RuntimeEvent, SocketConn};
+    use bone::tools::CallOutcome;
     use tokio::io::AsyncBufReadExt;
 
     let addr = parse_listen_addr(args);
     let stream = tokio::net::TcpStream::connect(&addr).await?;
-    let (read_half, mut write_half) = tokio::io::split(stream);
-
-    tokio::spawn(panic_guard("connect-reader", async move {
-        let mut reader = bone::rpc::codec::MessageReader::new(read_half);
-        while let Some(result) = reader.read::<bone::runtime::RuntimeEvent>().await {
-            match result {
-                Ok(ev) => println!("{ev:?}"),
-                Err(_) => continue,
-            }
-        }
-        eprintln!("bone: server closed connection");
-    }));
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut conn = SocketConn::new(read_half, write_half);
+    // Cloned handle so the stdin/approval arms can queue commands without
+    // borrowing `conn`, which `next_event` holds mutably in the other arm.
+    let commands = conn.command_sender();
 
     eprintln!("bone: connected to {addr}; type a prompt and press enter.");
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
+    loop {
+        tokio::select! {
+            line = lines.next_line() => match line? {
+                Some(line) if !line.trim().is_empty() => {
+                    let _ = commands.send(RuntimeCommand::SubmitPrompt { text: line });
+                }
+                Some(_) => {}
+                None => break, // stdin closed
+            },
+            ev = conn.next_event() => match ev {
+                Some(RuntimeEvent::ApprovalRequest { id, name, summary, auto_allows, .. }) => {
+                    let outcome = if auto_allows {
+                        CallOutcome::Approve
+                    } else {
+                        CallOutcome::Denied
+                    };
+                    eprintln!(
+                        "[approval] {name}: {summary} -> {}",
+                        if auto_allows { "approve" } else { "deny (run `bone` for interactive approval)" }
+                    );
+                    let _ = commands.send(RuntimeCommand::ApprovalReply { id, outcome });
+                }
+                Some(ev) => println!("{ev:?}"),
+                None => {
+                    eprintln!("bone: server closed connection");
+                    break;
+                }
+            },
         }
-        bone::rpc::codec::write_message(
-            &mut write_half,
-            &bone::runtime::RuntimeCommand::SubmitPrompt { text: line },
-        )
-        .await?;
     }
     Ok(())
 }

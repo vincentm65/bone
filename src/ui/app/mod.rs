@@ -9,11 +9,9 @@ use paste::{apply_input_key_with_paste_burst, collect_paste_burst, is_paste_burs
 
 use crate::chat::Message;
 use crate::config::{self, UserConfig};
-use crate::llm::{ChatMessage, LlmProvider, TokenStats, providers};
-use crate::session_db::SessionDb;
+use crate::llm::{LlmProvider, providers};
 
 use crate::ext::ExtensionManager;
-use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalMode, CallOutcome, ToolCall, ToolResult};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -32,16 +30,21 @@ use super::render::{BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, PaneDraw, Renderer, S
 /// A tool-call approval awaiting a user decision. Held in `App` while the
 /// bottom-pane prompt is shown so the streaming loop keeps pumping (spinner,
 /// events, subagent panes) instead of blocking on a nested poll loop. The
-/// `reply` resolves the `ChannelApprovalGate` that the running tool awaits.
+/// `id` routes the decision back through [`App::approval_registry`] to the
+/// `ChannelApprovalGate` that the running tool awaits.
 pub struct PendingApproval {
-    reply: tokio::sync::oneshot::Sender<CallOutcome>,
+    /// The `RuntimeEvent::ApprovalRequest` id this prompt answers.
+    id: u64,
     /// `true` once the user picked "Advise" and is typing free-form advice.
     advising: bool,
 }
 
 pub struct App {
     pub messages: Vec<Message>,
-    pub transcript: Vec<ChatMessage>,
+    /// The persistent agent turn-truth (transcript, token stats, tool state,
+    /// session DB). The App is a *client* of this: it renders from the runtime
+    /// event stream and reabsorbs each turn's outcome into the session.
+    pub runtime: crate::runtime::RuntimeSession,
     pub input: InputState,
     pub streaming: bool,
     /// A live Lua command is running through `drive_live`. This needs the same
@@ -56,19 +59,21 @@ pub struct App {
     pub user_config: UserConfig,
     pub custom_configs: config::custom::CustomConfigs,
     pub queue: VecDeque<String>,
-    pub tools: ToolHandler,
 
     pub approval_mode: ApprovalMode,
     pub active_prompt: Option<Prompt>,
     /// Tool-call approval awaiting a decision, resolved inside the main stream
     /// loop. `Some` only while `active_prompt` shows an approval prompt.
     pub pending_approval: Option<PendingApproval>,
+    /// Routes interactive approval decisions back to the blocked
+    /// `ChannelApprovalGate`. Shared (cloned) into the gate at turn start; the
+    /// approval prompt resolves it by id. (In Phase 1 this moves into the
+    /// `LocalConn`; today it lives on the App as the turn-loop bridge.)
+    pub approval_registry: crate::runtime::ApprovalReplyRegistry,
     /// Set to `true` to abort the current streaming response.
     pub cancel_streaming: bool,
     /// Timestamp of the last Ctrl+C press (for double-tap quit).
     pub last_ctrl_c: Option<Instant>,
-    /// Cumulative token usage stats.
-    pub token_stats: TokenStats,
     /// Live, running estimate of `received` (completion) tokens during a turn.
     /// `Some` while a turn streams — ticked up on each text/tool delta and
     /// rebaselined to the authoritative count on `TokenUsage`; `None` when idle
@@ -92,12 +97,6 @@ pub struct App {
     /// starts but the retention window hasn't elapsed; the pump tick clears it.
     pub thinking_clear_at: Option<std::time::Instant>,
 
-    /// SQLite session database for conversation persistence and usage tracking.
-    session_db: Option<SessionDb>,
-    /// Current conversation ID in the session database.
-    conversation_id: Option<i64>,
-    /// Message sequence counter for DB ordering.
-    session_seq: i64,
     /// Wall-clock start of the current agent turn (set when streaming begins).
     turn_start: Option<Instant>,
     /// Accumulated time spent paused for user approvals during this turn.
@@ -190,7 +189,7 @@ impl App {
 
         Ok(Self {
             messages,
-            transcript: Vec::new(),
+            runtime: crate::runtime::RuntimeSession::new(tools),
             input: InputState::default(),
             streaming: false,
             live_command: false,
@@ -202,14 +201,13 @@ impl App {
             user_config,
             custom_configs,
             queue: VecDeque::new(),
-            tools,
 
             approval_mode,
             active_prompt: None,
             pending_approval: None,
+            approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
             cancel_streaming: false,
             last_ctrl_c: None,
-            token_stats: TokenStats::new(),
             stream_estimated_received: None,
             pages: Vec::new(),
             active_page: 0,
@@ -218,9 +216,6 @@ impl App {
             thinking_first_shown: None,
             thinking_clear_at: None,
 
-            session_db: None,
-            conversation_id: None,
-            session_seq: 0,
             turn_start: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
@@ -240,22 +235,23 @@ impl App {
         let mut lines = Vec::new();
         if let Ok(g) = extensions.lua_handle().lock()
             && let Ok(bone) = g.globals().get::<mlua::Table>("bone")
-                && let Ok(banner_fn) = bone.get::<mlua::Function>("banner") {
-                    match banner_fn.call::<mlua::Table>(()) {
-                        Ok(tbl) => {
-                            for item in tbl.sequence_values::<mlua::String>() {
-                                if let Ok(item_str) = item
-                                    && let Ok(s) = item_str.to_str()
-                                {
-                                    lines.push(s.to_string());
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("bone: warning: banner() call failed: {e}");
+            && let Ok(banner_fn) = bone.get::<mlua::Function>("banner")
+        {
+            match banner_fn.call::<mlua::Table>(()) {
+                Ok(tbl) => {
+                    for item in tbl.sequence_values::<mlua::String>() {
+                        if let Ok(item_str) = item
+                            && let Ok(s) = item_str.to_str()
+                        {
+                            lines.push(s.to_string());
                         }
                     }
                 }
+                Err(e) => {
+                    eprintln!("bone: warning: banner() call failed: {e}");
+                }
+            }
+        }
 
         // Append a release hint if a newer version was seen (cached, local
         // read — never blocks on network). Channel-agnostic: the releases
@@ -286,68 +282,6 @@ impl App {
             .dispatch_simple("session_end", serde_json::json!({}));
     }
 
-    /// Initialize or open the session database.
-    fn init_session_db(&mut self) -> Option<String> {
-        if self.session_db.is_some() {
-            return None;
-        }
-        let db_path = crate::session_db::db_path();
-        match SessionDb::open(&db_path) {
-            Ok(db) => match db.create_conversation(self.llm.id(), self.llm.model()) {
-                Ok(conv_id) => {
-                    self.conversation_id = Some(conv_id);
-                    self.session_db = Some(db);
-                    None
-                }
-                Err(err) => Some(format!("warning: failed to create conversation: {err}")),
-            },
-            Err(err) => Some(format!("warning: failed to open session database: {err}")),
-        }
-    }
-    /// Append a message to the session database under the active conversation,
-    /// allocating the next sequence number. No-op when no db/conversation is
-    /// open. Shared by the assistant and tool-result append helpers.
-    #[allow(clippy::too_many_arguments)]
-    fn append_db_message(
-        &mut self,
-        role: &str,
-        content: &str,
-        tool_name: Option<&str>,
-        call_id: Option<&str>,
-        tool_calls_json: Option<&str>,
-        images_json: Option<&str>,
-    ) {
-        let Some(conv_id) = self.conversation_id else {
-            return;
-        };
-        let Some(db) = self.session_db.as_ref() else {
-            return;
-        };
-        self.session_seq += 1;
-        db.append_message(
-            conv_id,
-            role,
-            content,
-            tool_name,
-            call_id,
-            tool_calls_json,
-            images_json,
-            // Only ever called for user messages, which never carry an error.
-            false,
-            self.session_seq,
-        )
-        .ok();
-    }
-
-    /// Append a user message (optionally carrying image attachments) to the
-    /// session database. `images_json` is a JSON array of `{media_type, data}`.
-    /// Used at submit time for the user's own prompt; the turn's assistant/tool
-    /// messages and usage are batched in one transaction by
-    /// `SessionDb::append_turn` at turn end.
-    pub(crate) fn append_user_to_db(&mut self, content: &str, images_json: Option<&str>) {
-        self.append_db_message("user", content, None, None, None, images_json);
-    }
-
     /// Apply a generic action returned by a Lua command or hook.
     pub(crate) async fn apply_lua_action(
         &mut self,
@@ -359,13 +293,15 @@ impl App {
             // Replace the active transcript. The caller (e.g. compact.lua's
             // `display` return) already surfaces the compaction summary and
             // savings to the user, so no separate marker is pushed here.
-            self.transcript = new_messages;
+            self.runtime.transcript = new_messages;
 
             // Recompute context_length estimate from the new transcript.
-            let history = crate::chat::build_chat_history(&self.transcript, None);
-            let prompt_chars =
-                crate::ui::app::App::estimate_context_chars(&history, &self.tools.definitions());
-            self.token_stats.set_context_estimate(prompt_chars);
+            let history = crate::chat::build_chat_history(&self.runtime.transcript, None);
+            let prompt_chars = crate::ui::app::App::estimate_context_chars(
+                &history,
+                &self.runtime.tools.definitions(),
+            );
+            self.runtime.token_stats.set_context_estimate(prompt_chars);
         }
 
         if let Some(load) = action.conversation_load {
@@ -446,20 +382,20 @@ impl App {
         // Adopt the loaded conversation id so new messages append to it. End the
         // previous conversation we're leaving (if different), and clear the
         // target's `ended_at` so it's no longer marked closed.
-        if let (Some(db), Some(target)) = (&self.session_db, load.conversation_id) {
-            if let Some(old_id) = self.conversation_id
+        if let (Some(db), Some(target)) = (&self.runtime.session_db, load.conversation_id) {
+            if let Some(old_id) = self.runtime.conversation_id
                 && old_id != target
             {
                 db.end_conversation(old_id).ok();
             }
             db.reopen_conversation(target).ok();
-            self.session_seq = db.max_message_seq(target).unwrap_or(0);
-            self.conversation_id = Some(target);
+            self.runtime.session_seq = db.max_message_seq(target).unwrap_or(0);
+            self.runtime.conversation_id = Some(target);
         }
 
         // Swap in the loaded transcript and rebuild the rendered scrollback from
         // it (clearing the previous conversation's messages).
-        self.transcript = load.messages;
+        self.runtime.transcript = load.messages;
         self.messages.clear();
         let rows = self.rebuild_scrollback_from_transcript();
         self.messages.extend(rows);
@@ -467,10 +403,11 @@ impl App {
 
         // Update token counts: reset cumulative stats and estimate context from
         // the loaded transcript.
-        self.token_stats.reset();
-        let history = crate::chat::build_chat_history(&self.transcript, None);
-        let prompt_chars = Self::estimate_context_chars(&history, &self.tools.definitions());
-        self.token_stats.set_context_estimate(prompt_chars);
+        self.runtime.token_stats.reset();
+        let history = crate::chat::build_chat_history(&self.runtime.transcript, None);
+        let prompt_chars =
+            Self::estimate_context_chars(&history, &self.runtime.tools.definitions());
+        self.runtime.token_stats.set_context_estimate(prompt_chars);
 
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
@@ -489,13 +426,14 @@ impl App {
         // Map each tool_call_id to its originating call so a tool-result row can
         // be relabelled from the call's `arguments`, matching the live path.
         let calls: std::collections::HashMap<&str, &ToolCall> = self
+            .runtime
             .transcript
             .iter()
             .flat_map(|m| m.tool_calls.iter())
             .map(|c| (c.id.as_str(), c))
             .collect();
         let mut rows = Vec::new();
-        for msg in &self.transcript {
+        for msg in &self.runtime.transcript {
             match msg.role {
                 ChatRole::User => rows.push(Message::user_with_images(
                     msg.content.clone(),
@@ -530,7 +468,7 @@ impl App {
                                 is_error: msg.is_error,
                                 ..Default::default()
                             },
-                            self.tools.display_for_call(call),
+                            self.runtime.tools.display_for_call(call),
                         ),
                         None => {
                             let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
@@ -554,7 +492,7 @@ impl App {
         self.cancel_streaming = true;
         self.pages.clear();
         self.active_page = 0;
-        self.tools.state_map.clear();
+        self.runtime.tools.state_map.clear();
         self.jobs_seen_version = u64::MAX;
         self.queue.clear();
         self.active_prompt = None;
@@ -562,14 +500,14 @@ impl App {
     }
 
     fn start_new_conversation(&mut self) {
-        if let Some(ref db) = self.session_db {
-            if let Some(conv_id) = self.conversation_id {
+        if let Some(ref db) = self.runtime.session_db {
+            if let Some(conv_id) = self.runtime.conversation_id {
                 db.end_conversation(conv_id).ok();
             }
             match db.create_conversation(self.llm.id(), self.llm.model()) {
                 Ok(conv_id) => {
-                    self.conversation_id = Some(conv_id);
-                    self.session_seq = 0;
+                    self.runtime.conversation_id = Some(conv_id);
+                    self.runtime.session_seq = 0;
                 }
                 Err(err) => {
                     eprintln!("warning: failed to create conversation: {err}");
@@ -583,17 +521,20 @@ impl App {
     fn clear_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         self.reset_transient_ui_state();
 
-        let summary = if self.token_stats.request_count > 0 {
-            format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
+        let summary = if self.runtime.token_stats.request_count > 0 {
+            format!(
+                "Session: {}. Chat cleared.",
+                self.runtime.token_stats.one_liner()
+            )
         } else {
             "Chat cleared.".to_string()
         };
 
         self.start_new_conversation();
-        self.token_stats.reset();
+        self.runtime.token_stats.reset();
 
         self.messages.clear();
-        self.transcript.clear();
+        self.runtime.transcript.clear();
         self.messages.push(Message::system(format!(
             "bone v{} — type /help for commands. Ctrl+C twice to quit.",
             env!("CARGO_PKG_VERSION")
@@ -627,7 +568,7 @@ impl App {
     pub async fn run(&mut self) -> io::Result<()> {
         let mut terminal = Renderer::init_terminal(MIN_ROWS)?;
 
-        if let Some(warning) = self.init_session_db() {
+        if let Some(warning) = self.runtime.init_db(&*self.llm) {
             self.messages.push(Message::system(warning));
         }
 
@@ -884,7 +825,7 @@ impl App {
         let mut info = stream_status_info_with_token_stats(
             estimated_tokens,
             &self.model,
-            &self.token_stats,
+            &self.runtime.token_stats,
             spinner_active,
             self.approval_mode,
             self.queue.len(),
@@ -1515,8 +1456,8 @@ impl App {
             ));
         }
         // Best-effort end conversation in DB
-        if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id
+        if let Some(ref db) = self.runtime.session_db
+            && let Some(conv_id) = self.runtime.conversation_id
         {
             db.end_conversation(conv_id).ok();
         }
@@ -1600,7 +1541,7 @@ impl App {
     pub(crate) fn begin_approval(
         &mut self,
         call: &ToolCall,
-        reply: tokio::sync::oneshot::Sender<CallOutcome>,
+        id: u64,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         let summary = match call.name.as_str() {
@@ -1644,7 +1585,7 @@ impl App {
         };
         self.active_prompt = Some(prompt);
         self.pending_approval = Some(PendingApproval {
-            reply,
+            id,
             advising: false,
         });
         self.timer_pause();
@@ -1773,7 +1714,7 @@ impl App {
                     CallOutcome::Denied
                 }
             };
-            let _ = pending.reply.send(resolved);
+            self.approval_registry.resolve(pending.id, resolved);
         }
         self.active_prompt = None;
         self.clear_approval_pane();
@@ -1795,14 +1736,16 @@ impl App {
             .iter()
             .any(|registered| registered.name == "config");
 
-        if has_lua_config && cmd == "provider" && arg.is_empty()
+        if has_lua_config
+            && cmd == "provider"
+            && arg.is_empty()
             && self
                 .run_lua_command("config", "providers", term)
                 .await
                 .is_some()
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
+        }
         if has_lua_config && cmd == "tools" {
             let config_arg = if arg.trim() == "reload" {
                 "tools reload"
@@ -1817,10 +1760,12 @@ impl App {
                 return Ok(());
             }
         }
-        if has_lua_config && cmd == "config"
-            && self.run_lua_command("config", &arg, term).await.is_some() {
-                return Ok(());
-            }
+        if has_lua_config
+            && cmd == "config"
+            && self.run_lua_command("config", &arg, term).await.is_some()
+        {
+            return Ok(());
+        }
 
         // Protected built-ins always win over Lua commands.
         if !commands::is_protected_builtin(cmd.as_str()) && self.extensions.is_available() {
@@ -1915,18 +1860,18 @@ impl App {
     /// so every Lua entry point sees an identical `ctx`.
     pub(super) fn app_ctx_state(&self) -> crate::ext::ctx::AppCtxState {
         let by_provider = crate::ext::ctx::usage_by_provider_context(
-            self.session_db.as_ref(),
-            self.conversation_id,
+            self.runtime.session_db.as_ref(),
+            self.runtime.conversation_id,
         );
         crate::ext::ctx::AppCtxState::new(
-            &self.tools,
-            &self.token_stats,
+            &self.runtime.tools,
+            &self.runtime.token_stats,
             &self.approval_mode,
-            self.conversation_id,
+            self.runtime.conversation_id,
             self.llm.id(),
             self.llm.model(),
             by_provider,
-            self.transcript.clone(),
+            self.runtime.transcript.clone(),
         )
     }
 
@@ -2019,9 +1964,10 @@ impl App {
 
         if let Some(Some((mut reply, submit, action, display_role))) = reply {
             if let Some(action) = action
-                && let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await {
-                    reply = action_reply;
-                }
+                && let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await
+            {
+                reply = action_reply;
+            }
             if submit {
                 let display = format!(
                     "/{cmd}{}",
@@ -2105,7 +2051,7 @@ impl App {
             return Ok(());
         }
 
-        let Some(ref db) = self.session_db else {
+        let Some(ref db) = self.runtime.session_db else {
             return self.show_reply("Stats database is not available.".to_string(), term);
         };
 
@@ -2148,12 +2094,12 @@ impl App {
             &self.provider,
         );
         self.extensions = booted.manager;
-        self.tools = booted.tools;
+        self.runtime.tools = booted.tools;
         self.user_config.apply_custom_configs(&custom);
         self.approval_mode = self.user_config.approval_mode;
         self.custom_configs = custom;
-        self.user_config.enabled_tools = self.tools.enabled_names();
-        let count = self.tools.definitions().len();
+        self.user_config.enabled_tools = self.runtime.tools.enabled_names();
+        let count = self.runtime.tools.definitions().len();
         format!("Tools and Lua extensions reloaded. {count} tools enabled.")
     }
 

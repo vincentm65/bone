@@ -14,14 +14,21 @@
 //!   - Step 2: a channel-driven `Driver` supplies `blocked`/`allows` from a
 //!     client round-trip, and this function is unchanged.
 
+use serde::{Deserialize, Serialize};
+
 use crate::tools::{ApprovalMode, CommandSafety};
 
 /// Outcome of deciding whether a single tool call may execute.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializable so an interactive decision can travel back from a frontend over
+/// the runtime protocol as [`crate::runtime::RuntimeCommand::ApprovalReply`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallOutcome {
     /// Approved: queue for execution.
     Approve,
-    /// An extension hook vetoed it; `reason` becomes the error-result content.
+    /// An extension hook (or user advice) vetoed it; the string becomes the
+    /// error-result content.
     Blocked(String),
     /// Approval mode disallows this call's safety level; not executed.
     Denied,

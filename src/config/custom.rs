@@ -203,9 +203,10 @@ impl CustomConfigs {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("lua")
-                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        names.push(stem.to_string());
-                    }
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    names.push(stem.to_string());
+                }
             }
         }
         names.sort();
@@ -430,14 +431,15 @@ impl CustomConfigs {
             if self.save_denylist(namespace, &disabled, &title) {
                 // Update in-memory field for immediate UI feedback.
                 if let Some(page) = self.page_mut(namespace)
-                    && let Some(field) = page.fields.iter_mut().find(|f| f.key == key) {
-                        let yaml_val = match value.as_str() {
-                            "true" => serde_yaml::Value::Bool(true),
-                            "false" => serde_yaml::Value::Bool(false),
-                            _ => serde_yaml::Value::String(value),
-                        };
-                        field.value = Some(yaml_val);
-                    }
+                    && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
+                {
+                    let yaml_val = match value.as_str() {
+                        "true" => serde_yaml::Value::Bool(true),
+                        "false" => serde_yaml::Value::Bool(false),
+                        _ => serde_yaml::Value::String(value),
+                    };
+                    field.value = Some(yaml_val);
+                }
             }
             return;
         }
@@ -467,14 +469,14 @@ impl CustomConfigs {
         // Pages that exist only in memory (e.g. test fixtures) must not
         // leak to the user's config directory.
         let page_path = config_dir().join(format!("{namespace}.yaml"));
-        if page_path.exists()
-            && !self.save_page(namespace) {
-                // Revert on failure so UI doesn't show a change that wasn't persisted.
-                if let Some(page) = self.page_mut(namespace)
-                    && let Some(field) = page.fields.iter_mut().find(|f| f.key == key) {
-                        field.value = old_value;
-                    }
+        if page_path.exists() && !self.save_page(namespace) {
+            // Revert on failure so UI doesn't show a change that wasn't persisted.
+            if let Some(page) = self.page_mut(namespace)
+                && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
+            {
+                field.value = old_value;
             }
+        }
     }
 
     /// Find a field definition by namespace and key.
@@ -539,14 +541,14 @@ impl CustomConfigs {
             field.value = Some(nested);
         }
         let page_path = config_dir().join(format!("{namespace}.yaml"));
-        if page_path.exists()
-            && !self.save_page(namespace) {
-                // Revert on failure.
-                if let Some(page) = self.page_mut(namespace)
-                    && let Some(field) = page.fields.iter_mut().find(|f| f.key == key) {
-                        field.value = old_value;
-                    }
+        if page_path.exists() && !self.save_page(namespace) {
+            // Revert on failure.
+            if let Some(page) = self.page_mut(namespace)
+                && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
+            {
+                field.value = old_value;
             }
+        }
     }
 
     /// Derive a ProvidersConfig from the providers page fields.

@@ -130,9 +130,10 @@ fn png_image_data(png_bytes: Vec<u8>) -> crate::llm::ImageData {
 
 fn external_clipboard_image() -> Result<crate::llm::ImageData, String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && let Ok(image) = run_clipboard_command("wl-paste", &["--type", "image/png"]) {
-            return Ok(image);
-        }
+        && let Ok(image) = run_clipboard_command("wl-paste", &["--type", "image/png"])
+    {
+        return Ok(image);
+    }
 
     run_clipboard_command(
         "xclip",

@@ -1962,7 +1962,8 @@ fn dispatch_event(
         }
         RuntimeEvent::TextDelta { .. }
         | RuntimeEvent::ReasoningDelta { .. }
-        | RuntimeEvent::KeyRequest { .. } => {}
+        | RuntimeEvent::KeyRequest { .. }
+        | RuntimeEvent::ApprovalRequest { .. } => {}
     }
     Ok(())
 }

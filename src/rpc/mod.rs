@@ -129,66 +129,99 @@ where
     Ok(())
 }
 
-/// A minimal but real headless daemon: consume merged commands, and for each
-/// [`RuntimeCommand::SubmitPrompt`] run the agent, mapping its
-/// [`crate::agent::AgentRunEvent`]s to [`RuntimeEvent`]s broadcast to clients.
+/// The persistent headless runtime: owns one [`RuntimeSession`] across turns and
+/// drives each [`RuntimeCommand::SubmitPrompt`] to completion, broadcasting the
+/// turn's [`RuntimeEvent`]s to every attached client.
 ///
-/// Other commands are acknowledged via a `Status` event for now; the daemon is
-/// intentionally minimal (no interactive approval/interaction routing yet). It
-/// proves the end-to-end RPC path: a client submits a prompt over a socket and
-/// receives the streamed turn.
+/// Interaction (tool approval, `ctx.ui.key`) works over the wire: a turn runs
+/// through a [`LocalConn`] on this task (the Lua VM is `!Send`, so the turn is
+/// never spawned), while the daemon keeps reading the merged command stream and
+/// routes `ApprovalReply` / `KeyReply` / `Cancel` into the connection. After the
+/// turn, the session reabsorbs the outcome (transcript/token-stats/tool-state +
+/// DB persistence) so the next turn — and any newly attached client — sees the
+/// accumulated conversation. This is the server half of "the TUI is a client".
 pub async fn run_daemon(
     hub: Hub,
     mut commands: mpsc::UnboundedReceiver<RuntimeCommand>,
-    provider: Option<Arc<dyn crate::llm::provider::LlmProvider>>,
+    llm: Arc<dyn crate::llm::provider::LlmProvider>,
+    extensions: crate::ext::ExtensionManager,
+    mut session: crate::runtime::RuntimeSession,
     approval_mode: crate::tools::ApprovalMode,
 ) {
+    use crate::runtime::{
+        ApprovalReplyRegistry, ChannelApprovalGate, KeyReplyRegistry, LocalConn, RuntimeConn,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    let approval_registry = ApprovalReplyRegistry::new();
+    let key_registry = KeyReplyRegistry::new();
+    let mode = crate::tools::SharedApprovalMode::new(approval_mode);
+
     while let Some(cmd) = commands.recv().await {
-        match cmd {
-            RuntimeCommand::SubmitPrompt { text } => {
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                let hub_for_events = hub.clone();
-                let pump = tokio::spawn(async move {
-                    // `AgentRunEvent` is a type alias for `RuntimeEvent`, so the
-                    // agent's events are already in the hub's wire form.
-                    while let Some(ev) = rx.recv().await {
-                        hub_for_events.publish(ev);
-                    }
-                });
-
-                let request = crate::agent::AgentRequest {
-                    prompt: text,
-                    approval_mode,
-                    provider: None,
-                    model: None,
-                    system_prompt: None,
-                    events: false,
-                    event_sender: Some(tx),
-                    agent_depth: 0,
-                    on_token_usage: None,
-                    activity: None,
-                    llm: provider.clone(),
-                    session_sink: None,
-                    tool_allowlist: None,
-                    max_tokens: None,
-                };
-
-                match crate::agent::run_agent(request).await {
-                    Ok(_resp) => {}
-                    Err(e) => hub.publish(RuntimeEvent::Failed { message: e }),
-                }
-                let _ = pump.await;
-            }
-            RuntimeCommand::Cancel => {
+        let RuntimeCommand::SubmitPrompt { text } = cmd else {
+            // No turn is running; only a submit starts work. Acknowledge other
+            // commands so a client isn't left wondering.
+            if !matches!(cmd, RuntimeCommand::Cancel) {
                 hub.publish(RuntimeEvent::Status {
-                    message: "cancel requested".into(),
+                    message: format!("ignored (idle): {cmd:?}"),
                 });
             }
-            other => {
-                hub.publish(RuntimeEvent::Status {
-                    message: format!("unhandled command: {other:?}"),
-                });
+            continue;
+        };
+
+        let (rt_tx, rt_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(ChannelApprovalGate::new(
+            rt_tx.clone(),
+            approval_registry.clone(),
+        ));
+        let persist_from = session.transcript.len();
+        let driver = session.build_driver(
+            llm.clone(),
+            extensions.clone(),
+            mode.clone(),
+            gate,
+            rt_tx,
+            key_registry.clone(),
+            cancel.clone(),
+            Arc::new(crate::session_sink::NullSessionSink),
+        );
+        let mut conn = LocalConn::new(
+            rt_rx,
+            driver,
+            cancel,
+            approval_registry.clone(),
+            key_registry.clone(),
+        );
+        conn.send(RuntimeCommand::SubmitPrompt { text });
+
+        // Pump the turn: publish its events, and concurrently route interactive
+        // replies (and cancel) from any client back into the running turn.
+        loop {
+            tokio::select! {
+                ev = conn.next_event() => match ev {
+                    Some(ev) => hub.publish(ev),
+                    None => break, // turn drained
+                },
+                cmd = commands.recv() => match cmd {
+                    Some(cmd @ (RuntimeCommand::ApprovalReply { .. }
+                    | RuntimeCommand::KeyReply { .. }
+                    | RuntimeCommand::Cancel)) => conn.send(cmd),
+                    // A second submit mid-turn is dropped (the runtime is busy
+                    // running one turn at a time). Tell the client so it isn't
+                    // left waiting on a prompt that will never run, mirroring the
+                    // idle-path acknowledgement above.
+                    Some(RuntimeCommand::SubmitPrompt { .. }) => hub.publish(RuntimeEvent::Status {
+                        message: "busy: a turn is in progress; prompt ignored".into(),
+                    }),
+                    Some(_) => {}
+                    None => break,
+                },
             }
+        }
+
+        if let Some(outcome) = conn.take_outcome() {
+            let _ = session.apply_outcome(outcome, persist_from);
         }
     }
 }

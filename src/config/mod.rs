@@ -16,7 +16,7 @@ pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T
     serde_yaml::from_str(raw).ok()
 }
 
-pub(crate) fn bone_dir() -> PathBuf {
+pub fn bone_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("bone-rust");
     }
