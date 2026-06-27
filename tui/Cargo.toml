@@ -1,0 +1,42 @@
+[package]
+name = "bone"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "bone"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bone"
+path = "src/main.rs"
+
+[dependencies]
+bone-core = { path = "../core", features = ["tui"] }
+bone-protocol = { path = "../protocol" }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "macros", "process", "signal", "sync", "time", "fs", "net"] }
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info", "unstable-backend-writer"] }
+crossterm = "0.28"
+unicode-width = "0.2"
+syntect = { version = "5.3.0", features = ["default-syntaxes"] }
+pulldown-cmark = "0.13.4"
+serde_json = "1"
+base64 = "0.22"
+png = "0.17"
+mlua = { version = "0.11", features = ["lua54", "vendored", "send", "serialize"] }
+futures-util = "0.3"
+async-stream = "0.3"
+dirs = "6"
+async-trait = "0.1"
+serde_yaml = { package = "yaml_serde", version = "0.10" }
+serde = { version = "1", features = ["derive"] }
+
+# Scroll-region `insert_before` evicts lines into native scrollback on
+# Linux/macOS but ConPTY discards them, so enable `scrolling-regions` everywhere
+# except Windows.
+[target.'cfg(not(windows))'.dependencies]
+ratatui = { version = "0.29", features = ["scrolling-regions"] }
+
+# `arboard` has no Android clipboard backend, so it is only declared off Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }

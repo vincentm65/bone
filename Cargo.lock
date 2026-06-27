@@ -136,15 +136,37 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
+ "bone-core",
+ "bone-protocol",
+ "crossterm",
+ "dirs",
+ "futures-util",
+ "mlua",
+ "png 0.17.16",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tokio",
+ "unicode-width 0.2.0",
+ "yaml_serde",
+]
+
+[[package]]
+name = "bone-core"
+version = "2.2.3"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "base64",
+ "bone-protocol",
  "crossterm",
  "dirs",
  "eventsource-stream",
  "futures-util",
  "mlua",
  "num-format",
- "png 0.17.16",
- "pulldown-cmark",
- "ratatui",
  "reqwest",
  "rusqlite",
  "serde",
@@ -152,10 +174,17 @@ dependencies = [
  "sha2",
  "similar",
  "strsim",
- "syntect",
  "tokio",
- "unicode-width 0.2.0",
  "yaml_serde",
+]
+
+[[package]]
+name = "bone-protocol"
+version = "2.2.3"
+dependencies = [
+ "num-format",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

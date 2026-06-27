@@ -1,0 +1,812 @@
+//! RPC transport for the runtime protocol.
+//!
+//! Carries [`RuntimeEvent`] (core → frontend) and [`RuntimeCommand`]
+//! (frontend → core) over a byte stream as newline-delimited JSON. The same
+//! `serde` types flow over an in-process channel (Phase 3) and here over a
+//! socket — only the framing differs. (msgpack via `rmpv` could replace the
+//! JSONL codec later without touching the protocol types.)
+//!
+//! Pieces:
+//! - [`codec`]: read/write one framed message over any `AsyncRead`/`AsyncWrite`.
+//! - [`Hub`]: fan out events to every attached client and merge their commands
+//!   into one stream — the multi-client core of `nvim --embed`-style attach.
+//! - [`serve_connection`]: glue one client stream to a `Hub`.
+//! - [`run_daemon`]: a working headless daemon — each `SubmitPrompt` runs the
+//!   agent and streams its events back to all clients.
+//!
+//! This module is part of core (no `crate::ui`); it compiles ratatui-free.
+
+pub mod codec;
+
+use std::sync::{Arc, Mutex};
+
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{broadcast, mpsc};
+
+use crate::llm::ChatMessage;
+use crate::runtime::{RuntimeCommand, RuntimeEvent};
+
+/// Fans [`RuntimeEvent`]s out to all attached clients and merges every client's
+/// [`RuntimeCommand`]s into a single receiver the runtime consumes.
+#[derive(Clone)]
+pub struct Hub {
+    events_tx: broadcast::Sender<RuntimeEvent>,
+    commands_tx: mpsc::UnboundedSender<RuntimeCommand>,
+}
+
+impl Hub {
+    /// Create a hub and the single command receiver the runtime reads from.
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<RuntimeCommand>) {
+        let (events_tx, _) = broadcast::channel(1024);
+        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                events_tx,
+                commands_tx,
+            },
+            commands_rx,
+        )
+    }
+
+    /// Broadcast an event to all attached clients. No-op if none are attached.
+    pub fn publish(&self, event: RuntimeEvent) {
+        let _ = self.events_tx.send(event);
+    }
+
+    /// Subscribe a new client to the event stream.
+    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.events_tx.subscribe()
+    }
+
+    /// A sender a client uses to push commands into the merged stream.
+    pub fn command_sender(&self) -> mpsc::UnboundedSender<RuntimeCommand> {
+        self.commands_tx.clone()
+    }
+
+    /// Current attached-client count (event subscribers).
+    pub fn client_count(&self) -> usize {
+        self.events_tx.receiver_count()
+    }
+}
+
+/// Client-side counterpart to [`Hub`]: adapts a [`SocketConn`] to a remote
+/// `bone serve` into the same `command_sender()` / `subscribe()` interface the
+/// in-process [`Hub`] exposes. A frontend can therefore attach to a remote
+/// daemon without changing its event loop — it pulls events from a
+/// `broadcast::Receiver` and pushes commands to an `UnboundedSender` either way.
+///
+/// A background task forwards every `next_event()` from the socket into the
+/// broadcast channel; when the connection closes, the task ends and the channel
+/// closes, surfacing to the frontend as `RecvError::Closed` (same as the daemon
+/// dropping).
+///
+/// The primary receiver is created *before* the forwarder task is spawned and
+/// handed to the first `subscribe()` caller. On a multi-thread runtime the
+/// spawned task can begin pulling socket events on another worker immediately —
+/// before the caller (e.g. `App::with_daemon`, which does synchronous Lua boot
+/// work between `connect` and `subscribe`) has subscribed. Registering the
+/// receiver up front means the daemon's initial full-state replay is buffered
+/// for it rather than broadcast to zero receivers and dropped.
+pub struct RemoteClient {
+    command_tx: mpsc::UnboundedSender<RuntimeCommand>,
+    events_tx: broadcast::Sender<RuntimeEvent>,
+    /// Receiver registered at `connect` time, before the forwarder spawns.
+    /// Taken by the first `subscribe()`; later subscribers fork fresh ones.
+    primary_rx: std::sync::Mutex<Option<broadcast::Receiver<RuntimeEvent>>>,
+}
+
+impl RemoteClient {
+    /// Connect over the split halves of a duplex stream to a remote daemon.
+    pub fn connect<R, W>(read_half: R, write_half: W) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        use crate::runtime::{RuntimeConn, SocketConn};
+        let mut conn = SocketConn::new(read_half, write_half);
+        let command_tx = conn.command_sender();
+        // Create the primary receiver up front so it's registered before the
+        // forwarder can send — otherwise early events race the caller's
+        // `subscribe()` and are dropped on a multi-thread runtime.
+        let (events_tx, primary_rx) = broadcast::channel(1024);
+        let fwd = events_tx.clone();
+        tokio::spawn(async move {
+            // `send` errors only when there are no receivers; that's fine — an
+            // event with no subscriber is simply dropped, like the live Hub.
+            while let Some(ev) = conn.next_event().await {
+                let _ = fwd.send(ev);
+            }
+        });
+        Self {
+            command_tx,
+            events_tx,
+            primary_rx: std::sync::Mutex::new(Some(primary_rx)),
+        }
+    }
+
+    /// A cloneable command sender — same shape as [`Hub::command_sender`].
+    pub fn command_sender(&self) -> mpsc::UnboundedSender<RuntimeCommand> {
+        self.command_tx.clone()
+    }
+
+    /// Subscribe to the daemon's event stream — same shape as [`Hub::subscribe`].
+    /// The first call returns the receiver registered at `connect` time (so it
+    /// has the buffered initial replay); subsequent calls fork fresh receivers.
+    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
+        if let Some(rx) = self.primary_rx.lock().unwrap().take() {
+            rx
+        } else {
+            self.events_tx.subscribe()
+        }
+    }
+}
+
+/// Serve one client connection against `hub`.
+///
+/// Late-joiners get `initial` events first (full-state sync), then the live
+/// broadcast. Reads run until the client disconnects; writes run until the
+/// broadcast closes or the socket errors. Returns when the read side ends.
+pub async fn serve_connection<S>(
+    stream: S,
+    hub: Hub,
+    initial: Vec<RuntimeEvent>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (read_half, write_half) = tokio::io::split(stream);
+    let commands_tx = hub.command_sender();
+    let mut events_rx = hub.subscribe();
+
+    // Writer task: replay initial state, then stream live events.
+    let writer = tokio::spawn(async move {
+        let mut w = write_half;
+        for ev in initial {
+            if codec::write_message(&mut w, &ev).await.is_err() {
+                return;
+            }
+        }
+        loop {
+            match events_rx.recv().await {
+                Ok(ev) => {
+                    if codec::write_message(&mut w, &ev).await.is_err() {
+                        return;
+                    }
+                }
+                // Dropped messages under backpressure: keep going.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+
+    // Reader: decode commands until the client disconnects.
+    let mut reader = codec::MessageReader::new(read_half);
+    while let Some(result) = reader.read::<RuntimeCommand>().await {
+        match result {
+            Ok(cmd) => {
+                if commands_tx.send(cmd).is_err() {
+                    break; // runtime gone
+                }
+            }
+            // Skip malformed frames rather than dropping the connection.
+            Err(codec::ReadError::Decode(_)) => continue,
+            Err(codec::ReadError::Io(e)) => {
+                writer.abort();
+                return Err(e);
+            }
+        }
+    }
+
+    writer.abort();
+    Ok(())
+}
+
+/// Run a registered Lua slash command inside the daemon, forwarding its pane
+/// diffs (`ViewDiff`) and key requests (`KeyRequest`) to clients and pumping
+/// `KeyReply`/`Cancel` back, exactly like a turn. Returns the parsed handler
+/// result, or `None` if the command name isn't registered.
+///
+/// This is the daemon-side equivalent of the TUI's `run_lua_command`: it lets a
+/// *remote* frontend run interactive commands against the daemon's Lua VM
+/// instead of a local one (Phase 3-pure). The in-process TUI keeps running
+/// commands locally against the shared VM.
+#[allow(clippy::too_many_arguments)]
+async fn run_interactive_command(
+    extensions: &crate::ext::ExtensionManager,
+    session: &Arc<Mutex<crate::runtime::RuntimeSession>>,
+    llm: &Arc<dyn crate::llm::provider::LlmProvider>,
+    mode: &crate::tools::SharedApprovalMode,
+    key_registry: &crate::runtime::KeyReplyRegistry,
+    hub: &Hub,
+    commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
+    name: String,
+    input: String,
+) -> Option<crate::ext::types::LuaCommandReturn> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // App-derived ctx snapshot, assembled from the session + provider the same
+    // way the TUI's `app_ctx_state` does.
+    let app_state = {
+        let s = session.lock().unwrap();
+        let by_provider = crate::ext::ctx::usage_by_provider_context(
+            s.session_db.as_ref(),
+            s.conversation_id,
+        );
+        crate::ext::ctx::AppCtxState::new(
+            &s.tools,
+            &s.token_stats,
+            &mode.get(),
+            s.conversation_id,
+            llm.id(),
+            llm.model(),
+            by_provider,
+            s.transcript.clone(),
+        )
+    };
+
+    let lua = extensions.lua_handle();
+    let shared_ui = extensions.ui_handle();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_ctx = cancel.clone();
+    let (live_tx, mut live_rx) =
+        mpsc::unbounded_channel::<crate::tools::types::ToolLiveEvent>();
+
+    // The handler call blocks (Lua + nested tool calls), so run it off the
+    // async runtime. Mirrors the TUI's spawn_blocking in `run_lua_command`.
+    let mut handle = tokio::task::spawn_blocking(move || {
+        let lua_guard = lua.lock().unwrap_or_else(|e| e.into_inner());
+        let handler = crate::ext::ops_commands::find_handler(&lua_guard, &name)?;
+        let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
+        let shared_state = crate::ext::ctx::process_shared_state();
+        let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
+        app_state.apply_to(&mut ctx_cfg);
+        ctx_cfg.pane_sender = Some(live_tx);
+        ctx_cfg.ui = Some(shared_ui);
+        ctx_cfg.cancelled = Some(cancel_for_ctx);
+        let ctx_table = crate::ext::ctx::create_ctx_table(&lua_guard, &ctx_cfg).ok()?;
+        // Release the VM lock before calling in: a nested `ctx.tools.call` runs
+        // inline on this thread and must re-acquire the (non-reentrant) mutex.
+        drop(lua_guard);
+        match handler.call::<mlua::Value>((input, ctx_table)) {
+            Ok(value) => crate::ext::types::parse_lua_command_return(value),
+            Err(e) => Some(crate::ext::types::LuaCommandReturn {
+                output: format!("Lua command error: {e}"),
+                submit: false,
+                action: None,
+                display_role: None,
+            }),
+        }
+    });
+
+    let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            res = &mut handle => {
+                // Flush any trailing pane diffs the handler emitted.
+                for diff in extensions.drain_view_diffs() {
+                    hub.publish(RuntimeEvent::ViewDiff { diff });
+                }
+                return res.ok().flatten();
+            }
+            Some(crate::tools::types::ToolLiveEvent::Key(req)) = live_rx.recv() => {
+                let id = key_registry.register(req);
+                hub.publish(RuntimeEvent::KeyRequest { id });
+            }
+            _ = diff_timer.tick() => {
+                for diff in extensions.drain_view_diffs() {
+                    hub.publish(RuntimeEvent::ViewDiff { diff });
+                }
+            }
+            cmd = commands.recv() => match cmd {
+                Some(RuntimeCommand::KeyReply { id, key }) => { key_registry.resolve(id, key); }
+                Some(RuntimeCommand::Cancel) => cancel.store(true, Ordering::Relaxed),
+                Some(_) => {} // other commands are ignored while a command runs
+                None => cancel.store(true, Ordering::Relaxed),
+            },
+        }
+    }
+}
+
+/// The persistent headless runtime: owns one [`RuntimeSession`] across turns and
+/// drives each [`RuntimeCommand::SubmitPrompt`] to completion, broadcasting the
+/// turn's [`RuntimeEvent`]s to every attached client.
+///
+/// Interaction (tool approval, `ctx.ui.key`) works over the wire: a turn runs
+/// through a [`LocalConn`] on this task (the Lua VM is `!Send`, so the turn is
+/// never spawned), while the daemon keeps reading the merged command stream and
+/// routes `ApprovalReply` / `KeyReply` / `Cancel` into the connection. After the
+/// turn, the session reabsorbs the outcome (transcript/token-stats/tool-state +
+/// DB persistence) so the next turn — and any newly attached client — sees the
+/// accumulated conversation. This is the server half of "the TUI is a client".
+#[allow(clippy::too_many_arguments)]
+pub async fn run_daemon(
+    hub: Hub,
+    mut commands: mpsc::UnboundedReceiver<RuntimeCommand>,
+    mut llm: Arc<dyn crate::llm::provider::LlmProvider>,
+    mut extensions: crate::ext::ExtensionManager,
+    session: Arc<Mutex<crate::runtime::RuntimeSession>>,
+    approval_mode: crate::tools::ApprovalMode,
+    // In-process hand-off for `ReloadExtensions`. When a frontend shares the
+    // Lua VM with the daemon (the in-process TUI), it boots the extensions
+    // once and drops the cloned result here, letting the daemon adopt it
+    // instead of re-reading disk and booting a second VM. `None` (e.g. `bone
+    // serve`) falls back to booting from disk.
+    reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
+    // Forward Lua `ViewDiff`s (pane/UI updates) as `RuntimeEvent::ViewDiff` so a
+    // *remote* frontend renders them. The in-process TUI shares the VM and
+    // drains the `UiState` itself, so it passes `false` to avoid a double-drain
+    // race; `bone serve` passes `true`.
+    forward_view_diffs: bool,
+) {
+    use crate::runtime::{
+        ApprovalReplyRegistry, ChannelApprovalGate, KeyReplyRegistry, LocalConn, RuntimeConn,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    let approval_registry = ApprovalReplyRegistry::new();
+    let key_registry = KeyReplyRegistry::new();
+    let mode = crate::tools::SharedApprovalMode::new(approval_mode);
+
+    /// Publish a `StateSnapshot` derived from the current session + provider.
+    macro_rules! publish_snapshot {
+        () => {
+            hub.publish(RuntimeEvent::StateSnapshot {
+                snapshot: {
+                    let s = session.lock().unwrap();
+                    let mut snap = s.snapshot(llm.id(), llm.model());
+                    snap.usage_by_provider = crate::ext::ctx::usage_by_provider_context(
+                        s.session_db.as_ref(),
+                        s.conversation_id,
+                    );
+                    snap
+                },
+            })
+        };
+    }
+
+    while let Some(cmd) = commands.recv().await {
+        let text = match cmd {
+            RuntimeCommand::SubmitPrompt { text, images } => {
+                // Push the user message to the transcript + DB before building
+                // the driver. The Driver detects the duplicate (last message is
+                // already the user prompt) and skips its own push; images are
+                // embedded in the transcript entry the driver builds history
+                // from. This mirrors the TUI's pre-turn push.
+                let images_json = if images.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&images).ok()
+                };
+                {
+                    let mut s = session.lock().unwrap();
+                    if images.is_empty() {
+                        s.transcript.push(ChatMessage::new(
+                            crate::llm::ChatRole::User,
+                            &text,
+                        ));
+                    } else {
+                        s.transcript.push(ChatMessage::user_with_images(
+                            &text,
+                            images,
+                        ));
+                    }
+                    s.append_user_to_db(&text, images_json.as_deref());
+                }
+                extensions.dispatch_simple(
+                    "message",
+                    serde_json::json!({ "role": "user", "content": text }),
+                );
+                text
+            }
+            // ── Lifecycle commands (idle only) ──────────────────────────
+            RuntimeCommand::NewConversation => {
+                {
+                    let mut s = session.lock().unwrap();
+                    if let Some(db) = s.session_db.as_ref() {
+                        if let Some(conv_id) = s.conversation_id {
+                            let _ = db.end_conversation(conv_id);
+                        }
+                        match db.create_conversation(llm.id(), llm.model()) {
+                            Ok(conv_id) => {
+                                s.conversation_id = Some(conv_id);
+                                s.session_seq = 0;
+                            }
+                            Err(err) => {
+                                hub.publish(RuntimeEvent::Status {
+                                    message: format!("failed to create conversation: {err}"),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                    s.transcript.clear();
+                    s.token_stats.reset();
+                }
+                publish_snapshot!();
+                continue;
+            }
+            RuntimeCommand::LoadConversation { id } => {
+                let messages = {
+                    let s = session.lock().unwrap();
+                    s.session_db.as_ref().and_then(|db| {
+                        db.list_messages(id, 1000)
+                            .ok()
+                            .map(|rows| rows.into_iter().map(crate::session_db::stored_to_chat_message).collect::<Vec<_>>())
+                    })
+                };
+                if let Some(messages) = messages {
+                    let snapshot = {
+                        let mut s = session.lock().unwrap();
+                        if let Some(db) = s.session_db.as_ref() {
+                            if let Some(old) = s.conversation_id
+                                && old != id
+                            {
+                                let _ = db.end_conversation(old);
+                            }
+                            let _ = db.reopen_conversation(id);
+                        }
+                        s.conversation_id = Some(id);
+                        s.session_seq = s
+                            .session_db
+                            .as_ref()
+                            .and_then(|db| db.max_message_seq(id).ok())
+                            .unwrap_or(0);
+                        s.transcript = messages.clone();
+                        s.token_stats.reset();
+                        let mut snap = s.snapshot(llm.id(), llm.model());
+                        // `snapshot` leaves usage_by_provider empty; fill it from
+                        // the DB so the client's /usage table isn't blanked on
+                        // load (mirrors `publish_snapshot!`).
+                        snap.usage_by_provider = crate::ext::ctx::usage_by_provider_context(
+                            s.session_db.as_ref(),
+                            s.conversation_id,
+                        );
+                        snap
+                    };
+                    hub.publish(RuntimeEvent::ConversationLoaded { messages, snapshot });
+                } else {
+                    hub.publish(RuntimeEvent::Status {
+                        message: format!("failed to load conversation {id}"),
+                    });
+                }
+                continue;
+            }
+            RuntimeCommand::SetApprovalMode { mode: mode_str } => {
+                // The gate reads `mode` (the SharedApprovalMode) per call, so
+                // updating the atomic takes effect immediately — even mid-turn.
+                mode.set(match mode_str.as_str() {
+                    "danger" => crate::tools::ApprovalMode::Danger,
+                    _ => crate::tools::ApprovalMode::Safe,
+                });
+                continue;
+            }
+            RuntimeCommand::AppendMessage { role, content } => {
+                // Locally-produced context (inline `!command` output) folded into
+                // the transcript so the next turn's history includes it.
+                let chat_role = match role.as_str() {
+                    "assistant" => crate::llm::ChatRole::Assistant,
+                    "system" => crate::llm::ChatRole::System,
+                    _ => crate::llm::ChatRole::User,
+                };
+                let mut s = session.lock().unwrap();
+                s.transcript.push(ChatMessage::new(chat_role, &content));
+                // Persist so the folded context survives a reload / daemon
+                // restart, like the SubmitPrompt path's `append_user_to_db`.
+                // Without this the next turn captures `persist_from` past this
+                // message, so it is never written to the DB.
+                s.append_db_message(&role, &content, None, None, None, None);
+                continue;
+            }
+            RuntimeCommand::ClearConversation => {
+                {
+                    let mut s = session.lock().unwrap();
+                    s.transcript.clear();
+                    s.token_stats.reset();
+                }
+                publish_snapshot!();
+                continue;
+            }
+            RuntimeCommand::ReplaceConversation { messages } => {
+                {
+                    let mut s = session.lock().unwrap();
+                    s.transcript = messages;
+                    s.token_stats.reset();
+                    let history = crate::chat::build_chat_history(&s.transcript, None);
+                    let tool_defs_json_chars = serde_json::to_value(s.tools.definitions())
+                        .map(|v| v.to_string().chars().count())
+                        .unwrap_or(0);
+                    let prompt_chars = crate::agent::estimate_context_chars(
+                        &history,
+                        tool_defs_json_chars,
+                    );
+                    s.token_stats.set_context_estimate(prompt_chars);
+                }
+                publish_snapshot!();
+                continue;
+            }
+            RuntimeCommand::SwitchProvider { provider_id } => {
+                let custom = crate::config::custom::CustomConfigs::load();
+                let providers_config = custom.derive_providers_config();
+                match crate::llm::providers::create_provider_with_config(
+                    &provider_id,
+                    &providers_config,
+                ) {
+                    Ok(new_provider) => llm = Arc::from(new_provider),
+                    Err(err) => hub.publish(RuntimeEvent::Status {
+                        message: format!("failed to switch provider: {err}"),
+                    }),
+                }
+                // Always snapshot, even on failure (keeping the old provider), so
+                // the frontend's `await_state_snapshot` unblocks instead of
+                // hanging forever waiting on a snapshot that never comes.
+                publish_snapshot!();
+                continue;
+            }
+            RuntimeCommand::ReloadExtensions => {
+                // An in-process frontend boots the extensions itself and leaves
+                // the cloned result in the inbox; adopt it (shared Lua VM, no
+                // disk read). Otherwise boot from disk.
+                let booted = match reload_inbox.as_ref().and_then(|m| m.lock().unwrap().take()) {
+                    Some(booted) => booted,
+                    None => {
+                        let config_dir = crate::config::bone_dir();
+                        let cwd = std::env::current_dir().unwrap_or_default();
+                        let mut custom = crate::config::custom::CustomConfigs::load();
+                        let model = llm.model().to_string();
+                        let provider = format!("{} ({})", llm.name(), llm.id());
+                        crate::ext::boot_with_tools(
+                            &config_dir,
+                            &cwd,
+                            &mut custom,
+                            true,
+                            crate::ext::BootOptions {
+                                agent_depth: 0,
+                                headless: true,
+                                model: model.clone(),
+                                provider: provider.clone(),
+                                tool_allowlist: None,
+                            },
+                            &model,
+                            &provider,
+                        )
+                    }
+                };
+                extensions = booted.manager;
+                {
+                    let mut s = session.lock().unwrap();
+                    s.tools = booted.tools;
+                }
+                let count = session.lock().unwrap().tools.definitions().len();
+                hub.publish(RuntimeEvent::Status {
+                    message: format!("Tools and Lua extensions reloaded. {count} tools enabled."),
+                });
+                publish_snapshot!();
+                continue;
+            }
+            RuntimeCommand::RunCommand { name, input } => {
+                let result = run_interactive_command(
+                    &extensions,
+                    &session,
+                    &llm,
+                    &mode,
+                    &key_registry,
+                    &hub,
+                    &mut commands,
+                    name.clone(),
+                    input,
+                )
+                .await;
+                let Some(ret) = result else {
+                    hub.publish(RuntimeEvent::Status {
+                        message: format!("unknown command: {name}"),
+                    });
+                    hub.publish(RuntimeEvent::CommandComplete {
+                        output: String::new(),
+                        submit: false,
+                        display_role: None,
+                    });
+                    continue;
+                };
+                // v1 surfaces structured config/runtime mutations as a notice
+                // rather than applying them daemon-side (those are coupled to the
+                // frontend's config state). Pure display / pane / submit commands
+                // work fully.
+                if ret.action.is_some() {
+                    hub.publish(RuntimeEvent::Status {
+                        message: format!(
+                            "note: '{name}' requested a config action not yet applied over RPC"
+                        ),
+                    });
+                }
+                hub.publish(RuntimeEvent::CommandComplete {
+                    output: ret.output.clone(),
+                    submit: ret.submit,
+                    display_role: ret.display_role.clone(),
+                });
+                if ret.submit && !ret.output.is_empty() {
+                    // Submit the handler's output as the next turn (mirrors the
+                    // SubmitPrompt pre-turn push), then fall through to the turn.
+                    {
+                        let mut s = session.lock().unwrap();
+                        s.transcript
+                            .push(ChatMessage::new(crate::llm::ChatRole::User, &ret.output));
+                        s.append_user_to_db(&ret.output, None);
+                    }
+                    extensions.dispatch_simple(
+                        "message",
+                        serde_json::json!({ "role": "user", "content": ret.output }),
+                    );
+                    ret.output
+                } else {
+                    publish_snapshot!();
+                    continue;
+                }
+            }
+            // Acknowledge other non-turn commands so a client isn't left waiting.
+            other => {
+                if !matches!(other, RuntimeCommand::Cancel) {
+                    hub.publish(RuntimeEvent::Status {
+                        message: format!("ignored (idle): {other:?}"),
+                    });
+                }
+                continue;
+            }
+        };
+
+        let (rt_tx, rt_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(ChannelApprovalGate::new(
+            rt_tx.clone(),
+            approval_registry.clone(),
+        ));
+        let (persist_from, driver) = {
+            let s = session.lock().unwrap();
+            let pf = s.transcript.len();
+            let d = s.build_driver(
+                llm.clone(),
+                extensions.clone(),
+                mode.clone(),
+                gate,
+                rt_tx,
+                key_registry.clone(),
+                cancel.clone(),
+                Arc::new(crate::session_sink::NullSessionSink),
+            );
+            (pf, d)
+        };
+        let mut conn = LocalConn::new(
+            rt_rx,
+            driver,
+            cancel,
+            approval_registry.clone(),
+            key_registry.clone(),
+        );
+        conn.send(RuntimeCommand::SubmitPrompt { text, images: vec![] });
+
+        // Pump the turn: publish its events, and concurrently route interactive
+        // replies (and cancel) from any client back into the running turn. When
+        // forwarding is on, a timer drains the VM's `UiState` and forwards pane
+        // diffs as events (the in-process TUI drains the shared handle itself).
+        let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            tokio::select! {
+                ev = conn.next_event() => match ev {
+                    Some(ev) => hub.publish(ev),
+                    None => break, // turn drained
+                },
+                _ = diff_timer.tick(), if forward_view_diffs => {
+                    for diff in extensions.drain_view_diffs() {
+                        hub.publish(RuntimeEvent::ViewDiff { diff });
+                    }
+                },
+                cmd = commands.recv() => match cmd {
+                    Some(cmd @ (RuntimeCommand::ApprovalReply { .. }
+                    | RuntimeCommand::KeyReply { .. }
+                    | RuntimeCommand::Cancel)) => conn.send(cmd),
+                    // Mid-turn Safe/Danger toggle: update the shared atomic the
+                    // gate reads per call so it applies to the rest of the turn.
+                    Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => {
+                        mode.set(match mode_str.as_str() {
+                            "danger" => crate::tools::ApprovalMode::Danger,
+                            _ => crate::tools::ApprovalMode::Safe,
+                        });
+                    }
+                    // A second submit mid-turn is dropped (the runtime is busy
+                    // running one turn at a time). Tell the client so it isn't
+                    // left waiting on a prompt that will never run, mirroring the
+                    // idle-path acknowledgement above.
+                    Some(RuntimeCommand::SubmitPrompt { .. }) => hub.publish(RuntimeEvent::Status {
+                        message: "busy: a turn is in progress; prompt ignored".into(),
+                    }),
+                    Some(_) => {}
+                    None => break,
+                },
+            }
+        }
+        // Flush any diffs emitted between the last tick and turn end.
+        if forward_view_diffs {
+            for diff in extensions.drain_view_diffs() {
+                hub.publish(RuntimeEvent::ViewDiff { diff });
+            }
+        }
+
+        if let Some(outcome) = conn.take_outcome() {
+            let _ = session.lock().unwrap().apply_outcome(outcome, persist_from);
+        }
+        // Publish the post-turn state so clients can sync their view-model.
+        publish_snapshot!();
+        hub.publish(RuntimeEvent::TurnComplete);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn hub_fans_out_events_and_merges_commands() {
+        let (hub, mut commands_rx) = Hub::new();
+
+        // Two clients connected by in-memory duplex pipes.
+        let (client_a, server_a) = tokio::io::duplex(4096);
+        let (client_b, server_b) = tokio::io::duplex(4096);
+        tokio::spawn(serve_connection(server_a, hub.clone(), vec![]));
+        tokio::spawn(serve_connection(
+            server_b,
+            hub.clone(),
+            vec![RuntimeEvent::Status {
+                message: "welcome".into(),
+            }],
+        ));
+
+        // Give the writer tasks a moment to subscribe before broadcasting.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(hub.client_count(), 2);
+
+        // Broadcast an event; both clients receive it.
+        hub.publish(RuntimeEvent::Finished {
+            content: "done".into(),
+        });
+
+        let mut ra = codec::MessageReader::new(tokio::io::split(client_a).0);
+        let ev_a: RuntimeEvent = ra.read().await.unwrap().unwrap();
+        assert!(matches!(ev_a, RuntimeEvent::Finished { content } if content == "done"));
+
+        // Client B saw its initial welcome first, then the broadcast.
+        let mut rb = codec::MessageReader::new(tokio::io::split(client_b).0);
+        let ev_b0: RuntimeEvent = rb.read().await.unwrap().unwrap();
+        assert!(matches!(ev_b0, RuntimeEvent::Status { message } if message == "welcome"));
+        let ev_b1: RuntimeEvent = rb.read().await.unwrap().unwrap();
+        assert!(matches!(ev_b1, RuntimeEvent::Finished { .. }));
+
+        // A client writes a command; the hub surfaces it on the merged stream.
+        let (client_c, server_c) = tokio::io::duplex(4096);
+        tokio::spawn(serve_connection(server_c, hub.clone(), vec![]));
+        let mut wc = tokio::io::split(client_c).1;
+        codec::write_message(&mut wc, &RuntimeCommand::SubmitPrompt { text: "hi".into(), images: vec![] })
+            .await
+            .unwrap();
+
+        let cmd = commands_rx.recv().await.unwrap();
+        assert!(matches!(cmd, RuntimeCommand::SubmitPrompt { text, .. } if text == "hi"));
+    }
+
+    #[tokio::test]
+    async fn malformed_frame_is_skipped_not_fatal() {
+        let (hub, mut commands_rx) = Hub::new();
+        let (client, server) = tokio::io::duplex(4096);
+        tokio::spawn(serve_connection(server, hub.clone(), vec![]));
+
+        let mut w = tokio::io::split(client).1;
+        // Garbage line, then a valid command on the next line.
+        w.write_all(b"{not valid json}\n").await.unwrap();
+        codec::write_message(&mut w, &RuntimeCommand::Cancel)
+            .await
+            .unwrap();
+
+        let cmd = commands_rx.recv().await.unwrap();
+        assert!(matches!(cmd, RuntimeCommand::Cancel));
+    }
+}
