@@ -65,7 +65,49 @@ pub enum RuntimeEvent {
         output: String,
         submit: bool,
         display_role: Option<String>,
+        /// Frontend action requested by the command's Lua handler, forwarded so
+        /// the client can apply it. `None` for plain text/pane/submit commands.
+        #[serde(default)]
+        action: Option<CommandAction>,
     },
+}
+
+/// A frontend-coupled action an interactive command's Lua handler asked for.
+///
+/// These cannot be applied daemon-side because they read the frontend's local
+/// config state (config files, last-provider) or mutate the client's rendered
+/// scrollback. The daemon forwards them on `CommandComplete`; the client applies
+/// them after the interactive phase. Mirrors the command-relevant subset of
+/// `bone-core`'s `LuaReturnAction` (the `before_turn`-only fields are omitted).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommandAction {
+    /// Replace the active transcript with these messages (compaction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_replace: Option<Vec<ChatMessage>>,
+    /// Load a past conversation as the active chat (`/history`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_load: Option<ConversationLoad>,
+    /// Config/runtime mutation (`/config` apply, provider switch, tool reload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_action: Option<ConfigAction>,
+}
+
+/// Payload for the `conversation.load` action (`/history`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationLoad {
+    pub messages: Vec<ChatMessage>,
+    /// Conversation id to resume; future messages append here.
+    #[serde(default)]
+    pub conversation_id: Option<i64>,
+}
+
+/// Config/runtime mutation requested by an interactive command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigAction {
+    Apply,
+    ReloadTools,
+    SwitchProvider { id: String },
 }
 
 /// Frontend → daemon command.
@@ -196,6 +238,22 @@ mod tests {
                 output: "done".into(),
                 submit: false,
                 display_role: Some("assistant".into()),
+                action: None,
+            },
+            RuntimeEvent::CommandComplete {
+                output: "switched".into(),
+                submit: false,
+                display_role: None,
+                action: Some(CommandAction {
+                    conversation_replace: None,
+                    conversation_load: Some(ConversationLoad {
+                        messages: vec![ChatMessage::new(ChatRole::User, "past")],
+                        conversation_id: Some(9),
+                    }),
+                    config_action: Some(ConfigAction::SwitchProvider {
+                        id: "anthropic".into(),
+                    }),
+                }),
             },
         ];
         for ev in &variants {

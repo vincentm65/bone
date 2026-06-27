@@ -18,8 +18,8 @@ pub mod view;
 pub use conn::{LocalConn, RuntimeConn, SocketConn};
 pub use driver::{Driver, UsageRecord};
 pub use event::{
-    ApprovalReplyRegistry, ChannelApprovalGate, KeyReplyRegistry, RuntimeCommand, RuntimeEvent,
-    SessionSnapshot,
+    ApprovalReplyRegistry, ChannelApprovalGate, CommandAction, KeyReplyRegistry, RuntimeCommand,
+    RuntimeEvent, SessionSnapshot,
 };
 pub use session::RuntimeSession;
 pub use view::{Component, ViewDiff, ViewModel};

@@ -75,6 +75,60 @@ pub enum ConfigAction {
     SwitchProvider { id: String },
 }
 
+impl LuaReturnAction {
+    /// Project the command-relevant fields onto the wire type so the daemon can
+    /// forward this action to a remote client (`RuntimeEvent::CommandComplete`).
+    /// Returns `None` when no command-relevant field is set (the
+    /// `before_turn`-only `system_prompt_append`/`tool_filter` fields are
+    /// dropped — they never reach the command path).
+    pub fn to_command_action(&self) -> Option<bone_protocol::CommandAction> {
+        if self.conversation_replace.is_none()
+            && self.conversation_load.is_none()
+            && self.config_action.is_none()
+        {
+            return None;
+        }
+        Some(bone_protocol::CommandAction {
+            conversation_replace: self.conversation_replace.clone(),
+            conversation_load: self.conversation_load.as_ref().map(|l| {
+                bone_protocol::ConversationLoad {
+                    messages: l.messages.clone(),
+                    conversation_id: l.conversation_id,
+                }
+            }),
+            config_action: self.config_action.as_ref().map(|c| match c {
+                ConfigAction::Apply => bone_protocol::ConfigAction::Apply,
+                ConfigAction::ReloadTools => bone_protocol::ConfigAction::ReloadTools,
+                ConfigAction::SwitchProvider { id } => {
+                    bone_protocol::ConfigAction::SwitchProvider { id: id.clone() }
+                }
+            }),
+        })
+    }
+}
+
+impl From<bone_protocol::CommandAction> for LuaReturnAction {
+    /// Rebuild an action received over the wire so the client can apply it via
+    /// `App::apply_lua_action`, exactly as the local path does.
+    fn from(a: bone_protocol::CommandAction) -> Self {
+        LuaReturnAction {
+            conversation_replace: a.conversation_replace,
+            conversation_load: a.conversation_load.map(|l| ConversationLoad {
+                messages: l.messages,
+                conversation_id: l.conversation_id,
+            }),
+            config_action: a.config_action.map(|c| match c {
+                bone_protocol::ConfigAction::Apply => ConfigAction::Apply,
+                bone_protocol::ConfigAction::ReloadTools => ConfigAction::ReloadTools,
+                bone_protocol::ConfigAction::SwitchProvider { id } => {
+                    ConfigAction::SwitchProvider { id }
+                }
+            }),
+            ..Default::default()
+        }
+    }
+}
+
 /// Normalized result from a Lua command handler.
 #[derive(Debug, Clone)]
 pub struct LuaCommandReturn {
@@ -831,6 +885,44 @@ mod tests {
         let lua = Lua::new();
         let t = lua.create_table().unwrap();
         assert!(parse_lua_return_action(&t).is_none());
+    }
+
+    #[test]
+    fn command_action_round_trips_through_wire_type() {
+        let action = LuaReturnAction {
+            conversation_load: Some(ConversationLoad {
+                messages: vec![crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "past")],
+                conversation_id: Some(9),
+            }),
+            config_action: Some(ConfigAction::SwitchProvider { id: "anthropic".into() }),
+            // before_turn-only fields must be dropped on the way to the wire.
+            system_prompt_append: Some("ignored".into()),
+            tool_filter: Some(vec!["read_file".into()]),
+            ..Default::default()
+        };
+
+        let wire = action.to_command_action().expect("command-relevant fields set");
+        let back: LuaReturnAction = wire.into();
+
+        let load = back.conversation_load.expect("load survived");
+        assert_eq!(load.conversation_id, Some(9));
+        assert_eq!(load.messages.len(), 1);
+        assert!(matches!(
+            back.config_action,
+            Some(ConfigAction::SwitchProvider { id }) if id == "anthropic"
+        ));
+        // Turn-shaping fields don't cross the command path.
+        assert!(back.system_prompt_append.is_none());
+        assert!(back.tool_filter.is_none());
+    }
+
+    #[test]
+    fn turn_shaping_only_action_has_no_command_action() {
+        let action = LuaReturnAction {
+            system_prompt_append: Some("Plan only.".into()),
+            ..Default::default()
+        };
+        assert!(action.to_command_action().is_none());
     }
 
     #[test]

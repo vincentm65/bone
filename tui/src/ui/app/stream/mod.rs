@@ -485,7 +485,12 @@ impl App {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Captured from `CommandComplete`; rendered after the interactive phase.
-        let mut completion: Option<(String, bool, Option<String>)> = None;
+        let mut completion: Option<(
+            String,
+            bool,
+            Option<String>,
+            Option<crate::runtime::CommandAction>,
+        )> = None;
 
         'command: loop {
             // While an approval prompt is up (a tool the command invoked needs
@@ -549,8 +554,8 @@ impl App {
                         self.messages.push(Message::system(message));
                         self.renderer.flush_new_to_scrollback(&self.messages, term).ok();
                     }
-                    Ok(RuntimeEvent::CommandComplete { output, submit, display_role }) => {
-                        completion = Some((output, submit, display_role));
+                    Ok(RuntimeEvent::CommandComplete { output, submit, display_role, action }) => {
+                        completion = Some((output, submit, display_role, action));
                         break 'command;
                     }
                     // Keep the view-model synced if the daemon publishes state
@@ -590,7 +595,18 @@ impl App {
         self.active_prompt = None;
         self.clear_approval_pane();
 
-        let (output, submit, display_role) = completion?;
+        let (mut output, submit, display_role, action) = completion?;
+
+        // Apply any frontend action the handler requested, mirroring the local
+        // path (`run_lua_command` → `apply_lua_action`). A reply-bearing action
+        // (config_action) replaces the displayed output with its status reply;
+        // submit is already false in that case (enforced daemon-side), so this
+        // only affects rendering.
+        if let Some(action) = action
+            && let Ok(Some(action_reply)) = self.apply_lua_action(action.into(), term).await
+        {
+            output = action_reply;
+        }
 
         if submit && !output.is_empty() {
             // The daemon already pushed `output` as the user message and is

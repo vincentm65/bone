@@ -2142,7 +2142,11 @@ impl App {
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_pause_start = None;
 
-        if let Some(Some((mut reply, submit, action, display_role))) = reply {
+        if let Some(Some((mut reply, mut submit, action, display_role))) = reply {
+            // A reply-bearing action (config_action) yields a status reply
+            // that must be displayed, not submitted as a user turn. Force
+            // submit=false so the local path can't diverge from RPC.
+            submit &= !action.as_ref().and_then(|a| a.config_action.as_ref()).is_some();
             if let Some(action) = action
                 && let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await
             {

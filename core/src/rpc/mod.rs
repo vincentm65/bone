@@ -605,26 +605,32 @@ pub async fn run_daemon(
                         output: String::new(),
                         submit: false,
                         display_role: None,
+                        action: None,
                     });
                     continue;
                 };
-                // v1 surfaces structured config/runtime mutations as a notice
-                // rather than applying them daemon-side (those are coupled to the
-                // frontend's config state). Pure display / pane / submit commands
-                // work fully.
-                if ret.action.is_some() {
-                    hub.publish(RuntimeEvent::Status {
-                        message: format!(
-                            "note: '{name}' requested a config action not yet applied over RPC"
-                        ),
-                    });
-                }
+                // Forward any config/runtime/conversation action the handler
+                // requested. These are frontend-coupled (local config state,
+                // rendered scrollback), so the client applies them on receipt
+                // via `App::apply_lua_action`; the daemon only carries them.
+                // A reply-bearing action (config_action) yields a status
+                // reply ("Switched to …", "Configuration applied.") that must
+                // be displayed, not submitted as a user turn. Force submit=false
+                // so the RPC path can't diverge from the local path.
+                let reply_bearing = ret
+                    .action
+                    .as_ref()
+                    .and_then(|a| a.config_action.as_ref())
+                    .is_some();
+                let submit = ret.submit && !reply_bearing;
+                let action = ret.action.as_ref().and_then(|a| a.to_command_action());
                 hub.publish(RuntimeEvent::CommandComplete {
                     output: ret.output.clone(),
-                    submit: ret.submit,
+                    submit,
                     display_role: ret.display_role.clone(),
+                    action,
                 });
-                if ret.submit && !ret.output.is_empty() {
+                if submit && !ret.output.is_empty() {
                     // Submit the handler's output as the next turn (mirrors the
                     // SubmitPrompt pre-turn push), then fall through to the turn.
                     {
