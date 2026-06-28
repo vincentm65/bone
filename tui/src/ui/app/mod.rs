@@ -127,6 +127,10 @@ pub struct App {
     extensions: ExtensionManager,
     /// Lua keymap snapshot for custom bindings.
     lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
+    /// Slash commands `(name, description)` the daemon advertised via
+    /// `FrontendState`, for autocomplete. Empty until a remote daemon sends them;
+    /// when empty, autocomplete falls back to the local VM's `commands()`.
+    wire_commands: Vec<(String, String)>,
     /// Lua status lines keyed by id (`bone.api.ui.set_statusline`), in
     /// registration order. Each id's segments are appended to the native
     /// status bar; re-setting the same id updates it in place.
@@ -363,6 +367,7 @@ impl App {
             autocomplete: None,
             extensions,
             lua_keymap,
+            wire_commands: Vec::new(),
             lua_status: Vec::new(),
             shown_tool_rows: std::collections::HashSet::new(),
             jobs_seen_version: u64::MAX,
@@ -436,6 +441,14 @@ impl App {
             RuntimeEvent::Status { message } => {
                 self.messages.push(Message::system(message));
             }
+            // The daemon VM's boot-time display state. Adopt it so the frontend
+            // renders the daemon's theme/keymap/config/commands rather than its
+            // own local VM's — the step toward a VM-less client. Sent on attach
+            // and after a remote `ReloadExtensions`. The local VM (still present)
+            // remains the fallback for anything not carried here.
+            RuntimeEvent::FrontendState { theme, keymap, config, commands, .. } => {
+                self.apply_frontend_state(theme, keymap, config, commands);
+            }
             // Pane/UI diff from a remote daemon (e.g. a command's pane between
             // turns). In-process these come from the shared UiState drain.
             RuntimeEvent::ViewDiff { diff } => {
@@ -444,6 +457,36 @@ impl App {
             // All other events are turn-scoped and ignored in idle.
             _ => {}
         }
+    }
+
+    /// Adopt the daemon VM's display state (theme/keymap/config/commands) from a
+    /// `FrontendState` event. The blobs arrive as JSON (the protocol crate has no
+    /// Lua snapshot types); deserialize back into the `Lua*Snapshot` shapes and
+    /// apply them exactly as the boot path does. A blob that fails to decode is
+    /// skipped so a partial/garbled field can't blank the others.
+    fn apply_frontend_state(
+        &mut self,
+        theme: serde_json::Value,
+        keymap: serde_json::Value,
+        config: serde_json::Value,
+        commands: Vec<(String, String)>,
+    ) {
+        if let Ok(snap) =
+            serde_json::from_value::<crate::ext::snapshots::LuaThemeSnapshot>(theme)
+        {
+            self.renderer.theme.apply_snapshot(&snap);
+        }
+        if let Ok(snap) =
+            serde_json::from_value::<crate::ext::snapshots::LuaKeymapSnapshot>(keymap)
+        {
+            self.lua_keymap = snap;
+        }
+        if let Ok(snap) =
+            serde_json::from_value::<crate::ext::snapshots::LuaConfigSnapshot>(config)
+        {
+            apply_lua_config_snapshot(&mut self.user_config, &snap);
+        }
+        self.wire_commands = commands;
     }
 
     /// Dispatch a `session_end` event to Lua handlers.
@@ -1390,9 +1433,14 @@ impl App {
     }
 
     /// Collect all available slash commands with descriptions (builtins + Lua).
+    /// Prefers the daemon-advertised list (`wire_commands`) when present — the
+    /// authoritative source for a remote host — and otherwise falls back to the
+    /// local VM's registered commands.
     fn collect_commands(&self) -> Vec<(String, String)> {
         let mut cmds = crate::ui::autocomplete::builtin_commands();
-        if self.extensions.is_available() {
+        if !self.wire_commands.is_empty() {
+            cmds.extend(self.wire_commands.iter().cloned());
+        } else if self.extensions.is_available() {
             for cmd in self.extensions.commands() {
                 cmds.push((cmd.name.clone(), cmd.description.clone()));
             }

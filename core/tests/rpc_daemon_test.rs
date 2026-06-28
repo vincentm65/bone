@@ -787,4 +787,10 @@ bone.register_command("ping", {
         commands.iter().any(|(n, d)| n == "ping" && d == "pong"),
         "registered command must be listed for autocomplete, got {commands:?}"
     );
+
+    // The client's `apply_frontend_state` deserializes the JSON blob back into
+    // the same `Lua*Snapshot` type the boot path uses — prove that round-trips.
+    let theme_snap: bone_core::ext::snapshots::LuaThemeSnapshot =
+        serde_json::from_value(theme).expect("theme JSON deserializes back to LuaThemeSnapshot");
+    assert_eq!(theme_snap.tool_call.as_deref(), Some("#FF0000"));
 }
