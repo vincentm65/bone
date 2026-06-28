@@ -237,20 +237,131 @@ fn parse_listen_addr(args: &[String]) -> String {
     "127.0.0.1:7878".to_string()
 }
 
+/// Tolerantly pull `--provider <id>` / `--model <name>` out of a subcommand's
+/// args (ignores everything else, unlike [`parse_cli_options`] which rejects
+/// unknown flags). Used by `bone serve` so an auto-spawned daemon adopts the
+/// same provider/model the launching TUI selected.
+fn parse_provider_model(args: &[String]) -> (Option<String>, Option<String>) {
+    let (mut provider, mut model) = (None, None);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--provider" => provider = args.get(i + 1).cloned(),
+            "--model" => model = args.get(i + 1).cloned(),
+            _ => {}
+        }
+        i += 1;
+    }
+    (provider, model)
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
+}
+
+/// Owns an auto-spawned `bone serve` child so it dies with the TUI. `Drop` kills
+/// it on a clean exit; the daemon's `--shutdown-on-stdin-eof` is the backstop
+/// for a parent crash (the inherited stdin pipe closes, so the daemon sees EOF).
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawn `bone serve` on an ephemeral loopback port, returning the guard and the
+/// address to connect to. The child reads the same config dir (inherited env)
+/// and is told the provider/model so its runtime matches the client's display.
+fn spawn_local_daemon(
+    provider_id: &str,
+    model: Option<&str>,
+) -> std::io::Result<(ChildGuard, String)> {
+    // Let the OS pick a free port, then hand it to the child. The tiny gap
+    // between drop and re-bind is a benign race on loopback; connect retries.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = probe.local_addr()?.to_string();
+    drop(probe);
+
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("serve")
+        .arg("--listen")
+        .arg(&addr)
+        .arg("--provider")
+        .arg(provider_id)
+        .arg("--shutdown-on-stdin-eof")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(m) = model {
+        cmd.arg("--model").arg(m);
+    }
+    let child = cmd.spawn()?;
+    Ok((ChildGuard(child), addr))
+}
+
+/// Connect to `addr`, retrying briefly while the freshly-spawned daemon binds.
+async fn connect_with_retry(
+    addr: &str,
+    timeout: std::time::Duration,
+) -> std::io::Result<tokio::net::TcpStream> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+    }
+}
+
+/// Resolve when stdin reaches EOF. An auto-spawned daemon awaits this to shut
+/// down when its parent TUI goes away (the parent holds the write end of the
+/// child's stdin pipe; closing it — on exit or crash — yields EOF here).
+async fn wait_stdin_eof() {
+    use tokio::io::AsyncReadExt;
+    let mut stdin = tokio::io::stdin();
+    let mut buf = [0_u8; 256];
+    loop {
+        match stdin.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {} // ignore any input; we only care about EOF
+        }
+    }
+}
+
 /// `bone serve` — bind a socket, run the headless runtime, and fan its events
 /// out to every attached frontend. Each `SubmitPrompt` drives a full agent turn
 /// whose events stream back over the protocol.
 async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let addr = parse_listen_addr(args);
+    let shutdown_on_eof = has_flag(args, "--shutdown-on-stdin-eof");
 
-    // Build the provider from config, exactly like TUI mode.
-    let custom = CustomConfigs::load();
+    // Build the provider from config, honoring `--provider`/`--model` so an
+    // auto-spawned daemon adopts the launching TUI's selection (falls back to
+    // the persisted `last_provider`, exactly like TUI mode otherwise).
+    let (cli_provider, cli_model) = parse_provider_model(args);
+    let mut custom = CustomConfigs::load();
+    let provider_id = cli_provider.unwrap_or_else(|| {
+        if custom.get_last_provider().is_empty() {
+            "local".to_string()
+        } else {
+            custom.get_last_provider()
+        }
+    });
+    if let Some(model) = cli_model.as_ref()
+        && let Some(mut entry) = custom.get_provider_entry("providers", &provider_id)
+    {
+        entry.model = model.clone();
+        custom.set_provider_entry("providers", &provider_id, &entry);
+    }
     let providers_config = custom.derive_providers_config();
-    let provider_id = if custom.get_last_provider().is_empty() {
-        "local".to_string()
-    } else {
-        custom.get_last_provider()
-    };
     let provider = providers::create_provider_with_config(&provider_id, &providers_config)
         .map_err(std::io::Error::other)?;
     let provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider> =
@@ -258,7 +369,6 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
 
     // Boot the Lua runtime + tools once and hold them in a persistent session,
     // exactly like the TUI does — the daemon owns the conversation across turns.
-    let mut custom = custom;
     let model = provider.model().to_string();
     let provider_label = format!("{} ({})", provider.name(), provider.id());
     let booted = bone::ext::boot_with_tools(
@@ -344,6 +454,10 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             true, // forward view diffs: remote clients can't drain our UiState
         ) => eprintln!("bone: daemon exited; shutting down server"),
         _ = accept_loop => eprintln!("bone: accept loop ended; shutting down server"),
+        // Auto-spawned daemons exit when the launching TUI's stdin pipe closes.
+        _ = wait_stdin_eof(), if shutdown_on_eof => {
+            eprintln!("bone: parent exited; shutting down server")
+        }
     }
     Ok(())
 }
@@ -578,6 +692,7 @@ async fn main() -> std::io::Result<()> {
     let mut providers_config = custom.derive_providers_config();
 
     let cli_options = parse_cli_options(&args).map_err(std::io::Error::other)?;
+    let model_override = cli_options.model.clone();
     let provider_id = cli_options.provider.unwrap_or_else(|| {
         if custom.get_last_provider().is_empty() {
             "local".to_string()
@@ -624,9 +739,80 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
+    // Fail fast on bad credentials before launching anything (the daemon shares
+    // this config, so validating here covers it too).
     provider.validate().await.map_err(std::io::Error::other)?;
+
+    // Default (Phase 3-pure): spawn a local `bone serve` and attach the TUI to
+    // it as a client — the same protocol path as `--connect`, just against an
+    // auto-managed local daemon. The daemon owns turns/commands/hooks; the TUI
+    // keeps its own VM for display (theme/keymap/banner/autocomplete) until that
+    // state is carried over the protocol. Falls back to the in-process runtime
+    // if the daemon can't be spawned or reached, so a sandbox without subprocess
+    // spawning still works.
+    let daemon_client = match spawn_local_daemon(&provider_id, model_override.as_deref()) {
+        Ok((daemon, addr)) => match connect_with_retry(&addr, std::time::Duration::from_secs(8))
+            .await
+        {
+            Ok(stream) => {
+                let (read_half, write_half) = tokio::io::split(stream);
+                Some((daemon, bone::rpc::RemoteClient::connect(read_half, write_half)))
+            }
+            Err(e) => {
+                eprintln!("bone: local daemon unreachable ({e}); using in-process runtime");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("bone: could not spawn local daemon ({e}); using in-process runtime");
+            None
+        }
+    };
+
+    if let Some((daemon, client)) = daemon_client {
+        let mut app =
+            App::with_daemon(provider, cfg, custom, bone::ui::app::DaemonSource::Remote(client))?;
+        let result = app.run().await;
+        // Explicitly tear down the spawned daemon after the UI exits (Drop also
+        // kills it, but keep the lifetime obvious and ordered after run()).
+        drop(daemon);
+        return result;
+    }
 
     let mut app = App::new(provider, cfg, custom)?;
     app.run().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_flag, parse_provider_model};
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_provider_model_extracts_both() {
+        let (p, m) = parse_provider_model(&args(&[
+            "--listen", "127.0.0.1:7878", "--provider", "codex", "--model", "gpt-5.5",
+        ]));
+        assert_eq!(p.as_deref(), Some("codex"));
+        assert_eq!(m.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn parse_provider_model_ignores_unknown_and_missing() {
+        // Unlike `parse_cli_options`, unknown flags (e.g. `--listen`) are ignored
+        // rather than rejected, and absent flags yield `None`.
+        let (p, m) = parse_provider_model(&args(&["--listen", "x", "--shutdown-on-stdin-eof"]));
+        assert!(p.is_none());
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn has_flag_detects_presence() {
+        assert!(has_flag(&args(&["--shutdown-on-stdin-eof"]), "--shutdown-on-stdin-eof"));
+        assert!(!has_flag(&args(&["--listen", "x"]), "--shutdown-on-stdin-eof"));
+    }
 }
