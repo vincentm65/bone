@@ -169,6 +169,12 @@ impl ToolHandler {
         names
     }
 
+    /// All registered tool display configs (`name → config`). Lets the daemon
+    /// ship them to a VM-less frontend so it can render custom tool rows.
+    pub fn display_map(&self) -> &HashMap<String, ToolDisplayConfig> {
+        &self.dynamic_display
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.registry
             .definitions()

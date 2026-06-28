@@ -190,7 +190,10 @@ impl Drop for RemoteClient {
 /// display state (theme/keymap/banner/commands/config) for a VM-less frontend.
 /// Snapshots are serialized to JSON so the protocol crate stays free of the
 /// core's Lua snapshot types; the client deserializes them back.
-pub fn frontend_state(extensions: &crate::ext::ExtensionManager) -> RuntimeEvent {
+pub fn frontend_state(
+    extensions: &crate::ext::ExtensionManager,
+    tools: &crate::tools::registry::ToolHandler,
+) -> RuntimeEvent {
     RuntimeEvent::FrontendState {
         banner: extensions.frontend_banner(),
         theme: serde_json::to_value(extensions.theme_snapshot()).unwrap_or_default(),
@@ -201,6 +204,8 @@ pub fn frontend_state(extensions: &crate::ext::ExtensionManager) -> RuntimeEvent
             .iter()
             .map(|c| (c.name.clone(), c.description.clone()))
             .collect(),
+        tool_defs: tools.definitions(),
+        tool_display: serde_json::to_value(tools.display_map()).unwrap_or_default(),
     }
 }
 
@@ -665,8 +670,9 @@ pub async fn run_daemon(
                     message: format!("Tools and Lua extensions reloaded. {count} tools enabled."),
                 });
                 // Re-ship display state: a reload can change theme/keymap/banner/
-                // commands, and a VM-less frontend has no other way to learn them.
-                hub.publish(frontend_state(&extensions));
+                // commands/tools, and a VM-less frontend has no other way to
+                // learn them.
+                hub.publish(frontend_state(&extensions, &session.lock().unwrap().tools));
                 publish_snapshot!();
                 continue;
             }

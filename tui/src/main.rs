@@ -402,10 +402,11 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let accept_hub = hub.clone();
     let accept_session = session.clone();
     let accept_provider = provider.clone();
-    // Boot-time display state (theme/keymap/banner/commands/config) the VM
+    // Boot-time display state (theme/keymap/banner/commands/config/tools) the VM
     // produced, captured once and replayed to every client so a VM-less frontend
     // can render the user's customizations. Re-published on reload by run_daemon.
-    let frontend_ev = bone::rpc::frontend_state(&booted.manager);
+    let frontend_ev =
+        bone::rpc::frontend_state(&booted.manager, &session.lock().unwrap().tools);
     let accept_loop = async move {
         loop {
             match listener.accept().await {

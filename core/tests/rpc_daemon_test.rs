@@ -768,12 +768,20 @@ bone.register_command("ping", {
     );
     let extensions = booted.manager;
 
-    let ev = bone_core::rpc::frontend_state(&extensions);
+    let tools = booted.tools;
+    let ev = bone_core::rpc::frontend_state(&extensions, &tools);
     std::fs::remove_dir_all(&config_dir).ok();
 
-    let RuntimeEvent::FrontendState { banner, theme, commands, .. } = ev else {
+    let RuntimeEvent::FrontendState { banner, theme, commands, tool_defs, .. } = ev else {
         panic!("expected FrontendState");
     };
+    // Builtin tools (e.g. read_file) must reach a VM-less frontend for context
+    // estimation + tool-row rendering.
+    assert!(
+        tool_defs.iter().any(|t| t.name == "read_file"),
+        "tool definitions must cross the wire, got {:?}",
+        tool_defs.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
     assert!(
         banner.contains("hello from the daemon"),
         "banner from bone.banner() must cross the wire, got {banner:?}"

@@ -68,6 +68,15 @@ pub enum RuntimeEvent {
         config: serde_json::Value,
         /// `(name, description)` for slash-command autocomplete.
         commands: Vec<(String, String)>,
+        /// Enabled tool definitions, so a VM-less frontend can estimate context
+        /// size and (with `tool_display`) render tool rows. Defaults empty for
+        /// back-compat with daemons that predate this field.
+        #[serde(default)]
+        tool_defs: Vec<crate::tools::ToolDefinition>,
+        /// `name → ToolDisplayConfig` (opaque JSON; the core type lives outside
+        /// the protocol crate) so the frontend can render custom tool rows.
+        #[serde(default)]
+        tool_display: serde_json::Value,
     },
     ConversationLoaded {
         messages: Vec<ChatMessage>,
