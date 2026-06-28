@@ -819,7 +819,7 @@ impl App {
                 if self.shown_tool_rows.remove(&call_id) {
                     // preview already rendered the row + diff
                 } else if let Some(call) = pending.remove(&call_id) {
-                    let display = self.tools.display_for_call(&call);
+                    let display = self.wire_tools.display_for_call(&call);
                     self.messages.push(build_tool_row(&call, &result, display));
                 } else {
                     self.messages.push(Message::tool_row(name, is_error));
@@ -973,7 +973,7 @@ impl App {
             name: call.name.clone(),
             ..Default::default()
         };
-        let display = self.tools.display_for_call(call);
+        let display = self.wire_tools.display_for_call(call);
         self.messages.push(build_tool_row(call, &result, display));
         self.shown_tool_rows.insert(call.id.clone());
         self.renderer

@@ -38,6 +38,40 @@ pub struct PendingApproval {
     advising: bool,
 }
 
+/// Tool metadata the frontend needs to render — display configs (for tool rows)
+/// and definitions (for the context-size estimate) — fed from the daemon's
+/// `FrontendState`. The client never executes tools (the daemon does), so this
+/// is the VM-less replacement for the render concerns of the local `ToolHandler`.
+#[derive(Default)]
+pub struct WireTools {
+    defs: Vec<crate::tools::ToolDefinition>,
+    display: std::collections::HashMap<String, crate::tools::types::ToolDisplayConfig>,
+}
+
+impl WireTools {
+    /// Build from the local VM's tool handler (the in-process / boot path, before
+    /// any `FrontendState` arrives).
+    fn from_handler(handler: &crate::tools::registry::ToolHandler) -> Self {
+        Self {
+            defs: handler.definitions(),
+            display: handler.display_map().clone(),
+        }
+    }
+
+    /// Custom display config for a tool call, if the tool registered one.
+    pub fn display_for_call(
+        &self,
+        call: &crate::tools::ToolCall,
+    ) -> Option<&crate::tools::types::ToolDisplayConfig> {
+        self.display.get(&call.name)
+    }
+
+    /// Enabled tool definitions (for the local context-size estimate).
+    pub fn definitions(&self) -> &[crate::tools::ToolDefinition] {
+        &self.defs
+    }
+}
+
 pub struct App {
     pub messages: Vec<Message>,
     /// Channel to send commands (SubmitPrompt, lifecycle, approvals) to the
@@ -131,6 +165,10 @@ pub struct App {
     /// `FrontendState`, for autocomplete. Empty until a remote daemon sends them;
     /// when empty, autocomplete falls back to the local VM's `commands()`.
     wire_commands: Vec<(String, String)>,
+    /// Tool definitions + display configs the daemon advertised via
+    /// `FrontendState`, used to render tool rows + estimate context size. Seeded
+    /// from the local VM at boot and overwritten when a remote daemon sends its.
+    wire_tools: WireTools,
     /// Lua status lines keyed by id (`bone.api.ui.set_statusline`), in
     /// registration order. Each id's segments are appended to the native
     /// status bar; re-setting the same id updates it in place.
@@ -204,6 +242,9 @@ impl App {
         );
         let extensions = booted.manager;
         let tools = booted.tools;
+        // Seed the render-time tool metadata from the boot VM; a remote daemon
+        // overwrites it via `FrontendState`. Built before `tools` is moved.
+        let wire_tools = WireTools::from_handler(&tools);
 
         // Set model/provider on the Lua table (for banner and other Lua code).
         let lua = extensions.lua_handle();
@@ -368,6 +409,7 @@ impl App {
             extensions,
             lua_keymap,
             wire_commands: Vec::new(),
+            wire_tools,
             lua_status: Vec::new(),
             shown_tool_rows: std::collections::HashSet::new(),
             jobs_seen_version: u64::MAX,
@@ -446,8 +488,12 @@ impl App {
             // own local VM's — the step toward a VM-less client. Sent on attach
             // and after a remote `ReloadExtensions`. The local VM (still present)
             // remains the fallback for anything not carried here.
-            RuntimeEvent::FrontendState { theme, keymap, config, commands, .. } => {
-                self.apply_frontend_state(theme, keymap, config, commands);
+            RuntimeEvent::FrontendState {
+                theme, keymap, config, commands, tool_defs, tool_display, ..
+            } => {
+                self.apply_frontend_state(
+                    theme, keymap, config, commands, tool_defs, tool_display,
+                );
             }
             // Pane/UI diff from a remote daemon (e.g. a command's pane between
             // turns). In-process these come from the shared UiState drain.
@@ -464,12 +510,15 @@ impl App {
     /// Lua snapshot types); deserialize back into the `Lua*Snapshot` shapes and
     /// apply them exactly as the boot path does. A blob that fails to decode is
     /// skipped so a partial/garbled field can't blank the others.
+    #[allow(clippy::too_many_arguments)]
     fn apply_frontend_state(
         &mut self,
         theme: serde_json::Value,
         keymap: serde_json::Value,
         config: serde_json::Value,
         commands: Vec<(String, String)>,
+        tool_defs: Vec<crate::tools::ToolDefinition>,
+        tool_display: serde_json::Value,
     ) {
         if let Ok(snap) =
             serde_json::from_value::<crate::ext::snapshots::LuaThemeSnapshot>(theme)
@@ -487,6 +536,12 @@ impl App {
             apply_lua_config_snapshot(&mut self.user_config, &snap);
         }
         self.wire_commands = commands;
+        // Tool render metadata: definitions arrive typed; display configs as an
+        // opaque JSON map. A malformed display map is skipped (keeps the defs).
+        self.wire_tools = WireTools {
+            defs: tool_defs,
+            display: serde_json::from_value(tool_display).unwrap_or_default(),
+        };
     }
 
     /// Dispatch a `session_end` event to Lua handlers.
@@ -608,7 +663,7 @@ impl App {
         // estimate can't drift from the daemon's.
         self.token_stats.reset();
         let history = crate::chat::build_chat_history(&load.messages, None);
-        let tool_defs_json_chars = serde_json::to_string(&self.tools.definitions())
+        let tool_defs_json_chars = serde_json::to_string(self.wire_tools.definitions())
             .map(|json| json.chars().count())
             .unwrap_or(0);
         let prompt_chars = crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
@@ -679,7 +734,7 @@ impl App {
                                 is_error: msg.is_error,
                                 ..Default::default()
                             },
-                            self.tools.display_for_call(call),
+                            self.wire_tools.display_for_call(call),
                         ),
                         None => {
                             let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
