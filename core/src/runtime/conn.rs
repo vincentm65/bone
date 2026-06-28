@@ -127,6 +127,8 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::ReplaceConversation { .. }
             | RuntimeCommand::SetApprovalMode { .. }
             | RuntimeCommand::AppendMessage { .. }
+            | RuntimeCommand::DispatchHook { .. }
+            | RuntimeCommand::SetTerminalWidth { .. }
             | RuntimeCommand::ReloadExtensions => {}
         }
     }
@@ -164,7 +166,7 @@ impl RuntimeConn for LocalConn {
 pub struct SocketConn<R> {
     reader: codec::MessageReader<R>,
     cmd_tx: mpsc::UnboundedSender<RuntimeCommand>,
-    _writer: tokio::task::JoinHandle<()>,
+    writer: tokio::task::JoinHandle<()>,
 }
 
 impl<R> SocketConn<R>
@@ -190,7 +192,7 @@ where
         Self {
             reader: codec::MessageReader::new(read_half),
             cmd_tx,
-            _writer: writer,
+            writer,
         }
     }
 
@@ -199,6 +201,12 @@ where
     /// arm holds `&mut self` in [`next_event`](RuntimeConn::next_event).
     pub fn command_sender(&self) -> mpsc::UnboundedSender<RuntimeCommand> {
         self.cmd_tx.clone()
+    }
+}
+
+impl<R> Drop for SocketConn<R> {
+    fn drop(&mut self) {
+        self.writer.abort();
     }
 }
 

@@ -71,7 +71,7 @@ async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, 
     let (hub, commands_rx) = Hub::new();
     let session = std::sync::Arc::new(std::sync::Mutex::new(RuntimeSession::new(ToolHandler::new(builtin_tools()))));
     tokio::spawn(run_daemon(
-        hub.clone(),
+        hub.publisher(),
         commands_rx,
         provider,
         ExtensionManager::unloaded(),
@@ -103,6 +103,42 @@ async fn wait_for_clients(hub: &Hub, count: usize) {
     })
     .await
     .expect("clients did not subscribe");
+}
+
+#[tokio::test]
+async fn daemon_stops_when_last_command_sender_is_dropped() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
+    let (hub, commands_rx) = Hub::new();
+    let publisher = hub.publisher();
+    let command_tx = hub.command_sender();
+    let session = Arc::new(Mutex::new(RuntimeSession::new(ToolHandler::new(
+        builtin_tools(),
+    ))));
+    let weak_session = Arc::downgrade(&session);
+
+    let daemon = tokio::spawn(run_daemon(
+        publisher,
+        commands_rx,
+        provider,
+        ExtensionManager::unloaded(),
+        session.clone(),
+        ApprovalMode::Safe,
+        None,
+        false,
+    ));
+
+    drop(session);
+    drop(command_tx);
+    drop(hub);
+
+    tokio::time::timeout(Duration::from_secs(1), daemon)
+        .await
+        .expect("daemon did not stop after its clients disconnected")
+        .expect("daemon task panicked");
+    assert!(
+        weak_session.upgrade().is_none(),
+        "daemon retained its RuntimeSession after shutdown"
+    );
 }
 
 #[tokio::test]
@@ -294,7 +330,7 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
     })));
 
     tokio::spawn(run_daemon(
-        hub.clone(),
+        hub.publisher(),
         commands_rx,
         provider,
         ExtensionManager::unloaded(),
@@ -457,7 +493,7 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
             .apply(ViewDiff::SetHighlight { name: "marker".into(), fg: Some("#abcdef".into()) });
     }
     tokio::spawn(run_daemon(
-        hub.clone(),
+        hub.publisher(),
         commands_rx,
         provider,
         extensions,
@@ -547,7 +583,7 @@ bone.register_command("echo", {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
     tokio::spawn(run_daemon(
-        hub.clone(),
+        hub.publisher(),
         commands_rx,
         provider,
         extensions,
@@ -588,4 +624,103 @@ bone.register_command("echo", {
     std::fs::remove_dir_all(&config_dir).ok();
     assert_eq!(result.0, "echo: hi", "daemon ran the command in its VM");
     assert!(!result.1, "echo is a display command, not a submit");
+}
+
+/// A registered command whose handler returns a no-op (`{ submit = false }`
+/// with no output or action — what an interactive picker returns after the user
+/// applies/cancels) must complete cleanly. It must NOT be reported as "unknown
+/// command", because `parse_lua_command_return` maps such a return to `None` and
+/// the daemon previously conflated that with "handler not found". Regression for
+/// the `/themes`-picker-over-RPC false "unknown command: themes".
+#[tokio::test]
+async fn registered_command_with_noop_return_is_not_unknown() {
+    let config_dir = std::env::temp_dir().join(format!(
+        "bone-noopcmd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cmd_dir = config_dir.join("lua/commands");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    // Handler runs side effects (a picker would) but returns only `submit=false`,
+    // which `parse_lua_command_return` collapses to `None`.
+    std::fs::write(
+        cmd_dir.join("noop.lua"),
+        r#"
+bone.register_command("noop", {
+  description = "do work, return nothing to submit",
+  handler = function(_input, _ctx)
+    return { submit = false }
+  end,
+})
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = bone_core::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        true,
+        bone_core::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let extensions = booted.manager;
+    let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
+    let (hub, commands_rx) = Hub::new();
+    tokio::spawn(run_daemon(
+        hub.publisher(),
+        commands_rx,
+        provider,
+        extensions,
+        session,
+        ApprovalMode::Safe,
+        None,
+        true,
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serve_hub = hub.clone();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = serve_connection(stream, serve_hub, Vec::new()).await;
+    });
+
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (read_half, write_half) = tokio::io::split(stream);
+    let client = bone_core::rpc::RemoteClient::connect(read_half, write_half);
+    let mut events = client.subscribe();
+    client
+        .command_sender()
+        .send(RuntimeCommand::RunCommand { name: "noop".into(), input: String::new() })
+        .unwrap();
+
+    // Collect events until the command completes; assert no "unknown command"
+    // Status was emitted along the way.
+    let saw_unknown = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut saw_unknown = false;
+        loop {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::Status { message } if message.contains("unknown command") => {
+                    saw_unknown = true;
+                }
+                RuntimeEvent::CommandComplete { .. } => break saw_unknown,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("command did not complete");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+    assert!(
+        !saw_unknown,
+        "a found handler returning a no-op must not be reported as unknown"
+    );
 }

@@ -10,6 +10,12 @@ use crate::llm::ImageData;
 /// when the message is submitted.
 pub const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
 
+/// Input history is a convenience cache, not the authoritative transcript.
+/// Bound both dimensions so many unique prompts or a few enormous prompts do
+/// not remain resident for the full application lifetime.
+pub const MAX_INPUT_HISTORY_ENTRIES: usize = 500;
+pub const MAX_INPUT_HISTORY_BYTES: usize = 1024 * 1024;
+
 /// A large pasted blob held out of the visible buffer. `token` is the short
 /// placeholder shown in the input field; `content` is the real text spliced
 /// back in on submit via [`InputState::expanded`].
@@ -338,6 +344,11 @@ impl InputState {
                 self.history.remove(pos);
             }
             self.history.push(self.buffer.clone());
+            while self.history.len() > MAX_INPUT_HISTORY_ENTRIES
+                || self.history.iter().map(String::len).sum::<usize>() > MAX_INPUT_HISTORY_BYTES
+            {
+                self.history.remove(0);
+            }
         }
         self.buffer.clear();
         self.cursor_pos = 0;

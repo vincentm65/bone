@@ -334,7 +334,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
 
     tokio::select! {
         _ = bone::rpc::run_daemon(
-            hub,
+            hub.publisher(),
             commands_rx,
             provider,
             booted.manager,

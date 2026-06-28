@@ -141,6 +141,12 @@ pub enum RuntimeCommand {
     /// so a subsequent model turn can still see it now that the daemon owns the
     /// transcript.
     AppendMessage { role: String, content: String },
+    /// Fire a fire-and-forget Lua hook (`session_end`, `mode_change`, …) on the
+    /// daemon's VM. Used by a remote frontend that has no local VM of its own.
+    DispatchHook { name: String, payload: serde_json::Value },
+    /// Publish the live terminal width so Lua panes (`ctx.ui.width`) wrap text
+    /// correctly on the daemon's VM. Sent on startup and on every resize.
+    SetTerminalWidth { width: u16 },
 }
 
 #[cfg(test)]

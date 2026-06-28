@@ -179,12 +179,7 @@ impl JobRegistry {
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
-            job.status = status;
-            job.result = Some(result);
-            job.finished_at = Some(now);
-            job.result_file = result_file;
-        }
+        finish_job(&mut jobs, id, result, result_file, status, now, 0, 0);
         self.completed.notify_all();
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);
@@ -220,14 +215,7 @@ impl JobRegistry {
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
-            job.status = status;
-            job.result = Some(result);
-            job.finished_at = Some(now);
-            job.result_file = result_file;
-            job.token_sent = token_sent;
-            job.token_received = token_received;
-        }
+        finish_job(&mut jobs, id, result, result_file, status, now, token_sent, token_received);
         self.completed.notify_all();
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);
@@ -381,6 +369,27 @@ pub fn registry() -> &'static JobRegistry {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Apply finished-job state under the lock: update status/result/tokens.
+fn finish_job(
+    jobs: &mut Vec<Job>,
+    id: &str,
+    result: String,
+    result_file: Option<String>,
+    status: JobStatus,
+    now: u64,
+    token_sent: u64,
+    token_received: u64,
+) {
+    if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
+        job.status = status;
+        job.result = Some(result);
+        job.finished_at = Some(now);
+        job.result_file = result_file;
+        job.token_sent = token_sent;
+        job.token_received = token_received;
+    }
+}
 
 pub fn current_unix_seconds() -> u64 {
     std::time::SystemTime::now()

@@ -1,4 +1,6 @@
-use bone::ui::input::{InputState, PASTE_PLACEHOLDER_THRESHOLD};
+use bone::ui::input::{
+    InputState, MAX_INPUT_HISTORY_BYTES, MAX_INPUT_HISTORY_ENTRIES, PASTE_PLACEHOLDER_THRESHOLD,
+};
 
 #[test]
 fn inserted_multiline_text_is_kept_in_the_input_buffer() {
@@ -76,4 +78,27 @@ fn reset_clears_pending_pastes() {
 
     assert!(!input.has_pastes());
     assert_eq!(input.expanded(), "");
+}
+
+#[test]
+fn input_history_is_bounded_by_count() {
+    let mut input = InputState::default();
+    for i in 0..(MAX_INPUT_HISTORY_ENTRIES + 10) {
+        input.buffer = format!("prompt-{i}");
+        input.reset();
+    }
+
+    assert_eq!(input.history.len(), MAX_INPUT_HISTORY_ENTRIES);
+    assert_eq!(input.history.first().map(String::as_str), Some("prompt-10"));
+}
+
+#[test]
+fn input_history_is_bounded_by_bytes() {
+    let mut input = InputState {
+        buffer: "x".repeat(MAX_INPUT_HISTORY_BYTES + 1),
+        ..Default::default()
+    };
+    input.reset();
+
+    assert!(input.history.is_empty());
 }

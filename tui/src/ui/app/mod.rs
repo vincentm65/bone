@@ -51,6 +51,9 @@ pub struct App {
     pub reload_inbox: Option<std::sync::Arc<std::sync::Mutex<Option<crate::ext::BootedTools>>>>,
     /// Broadcast receiver for RuntimeEvents from the daemon.
     pub events_rx: tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
+    /// Keeps a remote socket bridge alive for exactly as long as the App. Its
+    /// `Drop` implementation terminates the bridge's forwarding/writer tasks.
+    _remote_client: Option<crate::rpc::RemoteClient>,
     /// Read-only session DB handle for stats queries (the daemon owns the
     /// authoritative connection through its own RuntimeSession).
     pub session_db: Option<crate::session_db::SessionDb>,
@@ -234,48 +237,70 @@ impl App {
         // Both arms yield the same channel pair the App's event loop consumes:
         // a command sender and a broadcast event receiver.
         let is_remote = matches!(daemon, DaemonSource::Remote(_));
-        let (command_tx, events_rx, initial_conversation_id, reload_inbox) = match daemon {
-            DaemonSource::InProcess => {
-                let runtime = std::sync::Arc::new(std::sync::Mutex::new(
-                    crate::runtime::RuntimeSession::new(tools.clone()),
-                ));
-                let (hub, commands_rx) = crate::rpc::Hub::new();
-                let command_tx = hub.command_sender();
-                let events_rx = hub.subscribe();
+        let (command_tx, events_rx, initial_conversation_id, reload_inbox, remote_client) =
+            match daemon {
+                DaemonSource::InProcess => {
+                    let runtime = std::sync::Arc::new(std::sync::Mutex::new(
+                        crate::runtime::RuntimeSession::new(tools.clone()),
+                    ));
+                    let (hub, commands_rx) = crate::rpc::Hub::new();
+                    let command_tx = hub.command_sender();
+                    let events_rx = hub.subscribe();
+                    let publisher = hub.publisher();
 
-                // Init the session DB inside the runtime. Snapshot the
-                // conversation_id before moving the runtime into the daemon.
-                if let Some(warning) = runtime.lock().unwrap().init_db(&*llm) {
-                    messages.push(Message::system(warning));
+                    // Init the session DB inside the runtime. Snapshot the
+                    // conversation_id before moving the runtime into the daemon.
+                    if let Some(warning) = runtime.lock().unwrap().init_db(&*llm) {
+                        messages.push(Message::system(warning));
+                    }
+                    let initial_conversation_id = runtime.lock().unwrap().conversation_id;
+
+                    let reload_inbox: std::sync::Arc<
+                        std::sync::Mutex<Option<crate::ext::BootedTools>>,
+                    > = std::sync::Arc::new(std::sync::Mutex::new(None));
+                    tokio::spawn(crate::rpc::run_daemon(
+                        publisher,
+                        commands_rx,
+                        llm.clone(),
+                        extensions.clone(),
+                        runtime,
+                        approval_mode,
+                        Some(reload_inbox.clone()),
+                        // In-process: the TUI shares this VM and drains the UiState
+                        // itself, so the daemon must not also drain/forward.
+                        false,
+                    ));
+                    (
+                        command_tx,
+                        events_rx,
+                        initial_conversation_id,
+                        Some(reload_inbox),
+                        None,
+                    )
                 }
-                let initial_conversation_id = runtime.lock().unwrap().conversation_id;
-
-                let reload_inbox: std::sync::Arc<
-                    std::sync::Mutex<Option<crate::ext::BootedTools>>,
-                > = std::sync::Arc::new(std::sync::Mutex::new(None));
-                tokio::spawn(crate::rpc::run_daemon(
-                    hub,
-                    commands_rx,
-                    llm.clone(),
-                    extensions.clone(),
-                    runtime,
-                    approval_mode,
-                    Some(reload_inbox.clone()),
-                    // In-process: the TUI shares this VM and drains the UiState
-                    // itself, so the daemon must not also drain/forward.
-                    false,
-                ));
-                (command_tx, events_rx, initial_conversation_id, Some(reload_inbox))
-            }
-            DaemonSource::Remote(client) => {
-                // Subscribe before any `.await` so the daemon's on-connect
-                // StateSnapshot isn't missed; the conversation id arrives with
-                // it. No reload inbox — the remote daemon owns its own Lua VM.
-                let command_tx = client.command_sender();
-                let events_rx = client.subscribe();
-                (command_tx, events_rx, None, None)
-            }
-        };
+                DaemonSource::Remote(client) => {
+                    // Subscribe before any `.await` so the daemon's on-connect
+                    // StateSnapshot isn't missed; the conversation id arrives with
+                    // it. No reload inbox — the remote daemon owns its own Lua VM.
+                    let command_tx = client.command_sender();
+                    let events_rx = client.subscribe();
+                    // Sync our configured approval mode to the daemon up front.
+                    // `bone serve` boots its gate at `Safe` regardless of config,
+                    // and the client otherwise only pushes the mode when the user
+                    // *cycles* it — so a `danger`-configured client would display
+                    // Danger while the daemon silently gated at Safe until the
+                    // first toggle. The in-process path doesn't need this: it
+                    // hands `approval_mode` straight to `run_daemon`.
+                    let _ = command_tx.send(crate::runtime::RuntimeCommand::SetApprovalMode {
+                        mode: match approval_mode {
+                            crate::tools::ApprovalMode::Danger => "danger",
+                            crate::tools::ApprovalMode::Safe => "safe",
+                        }
+                        .to_string(),
+                    });
+                    (command_tx, events_rx, None, None, Some(client))
+                }
+            };
 
         // Read-only DB handle for the App's stats queries (sqlite WAL supports
         // concurrent readers). For a local daemon this is the same file the
@@ -303,6 +328,7 @@ impl App {
             command_tx,
             reload_inbox,
             events_rx,
+            _remote_client: remote_client,
             session_db,
             tools,
             input: InputState::default(),
@@ -422,8 +448,15 @@ impl App {
 
     /// Dispatch a `session_end` event to Lua handlers.
     pub fn dispatch_session_end(&self) {
-        self.extensions
-            .dispatch_simple("session_end", serde_json::json!({}));
+        if self.is_remote {
+            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
+                name: "session_end".into(),
+                payload: serde_json::json!({}),
+            });
+        } else {
+            self.extensions
+                .dispatch_simple("session_end", serde_json::json!({}));
+        }
     }
 
     /// Apply a generic action returned by a Lua command or hook.
@@ -682,8 +715,15 @@ impl App {
         };
         self.custom_configs
             .set_value("general", "approval_mode", mode.to_string());
-        self.extensions
-            .dispatch_simple("mode_change", serde_json::json!({ "mode": mode }));
+        if self.is_remote {
+            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
+                name: "mode_change".into(),
+                payload: serde_json::json!({ "mode": mode }),
+            });
+        } else {
+            self.extensions
+                .dispatch_simple("mode_change", serde_json::json!({ "mode": mode }));
+        }
         // Push the mode to the daemon's authoritative `SharedApprovalMode` — the
         // atomic the gate actually reads. Without this, cycling Safe/Danger only
         // changes the UI while the daemon keeps gating at its startup mode.
@@ -809,7 +849,11 @@ impl App {
         let size = terminal.size()?;
         // Publish the live terminal width so Lua panes (`ctx.ui.width`) can wrap
         // text to the current width. Re-read each frame so it tracks resizes.
-        if let Ok(mut ui) = self.extensions.ui_handle().lock() {
+        if self.is_remote {
+            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SetTerminalWidth {
+                width: size.width,
+            });
+        } else if let Ok(mut ui) = self.extensions.ui_handle().lock() {
             ui.terminal_width = size.width;
         }
         let desired = Renderer::desired_height(
@@ -2146,7 +2190,10 @@ impl App {
             // A reply-bearing action (config_action) yields a status reply
             // that must be displayed, not submitted as a user turn. Force
             // submit=false so the local path can't diverge from RPC.
-            submit &= !action.as_ref().and_then(|a| a.config_action.as_ref()).is_some();
+            submit &= action
+                .as_ref()
+                .and_then(|a| a.config_action.as_ref())
+                .is_none();
             if let Some(action) = action
                 && let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await
             {
@@ -2229,6 +2276,12 @@ impl App {
     }
 
     fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if self.is_remote {
+            return self.show_reply(
+                "Stats dashboard is not available in remote mode.".to_string(),
+                term,
+            );
+        }
         if let Some(status) = self.try_tmux_popup("stats-popup", "96%", "92%", term)?
             && status.success()
         {
