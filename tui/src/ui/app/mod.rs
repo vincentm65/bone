@@ -166,20 +166,21 @@ pub struct App {
 }
 
 impl App {
-    /// Construct the TUI as a pure client of a `bone serve` daemon reached over
-    /// `client`. The daemon is the sole Lua-VM owner; the TUI boots no VM and
-    /// renders the daemon's state from the wire — theme/keymap/banner/commands/
-    /// tools all arrive in the on-connect `FrontendState`, the session in
-    /// `StateSnapshot`. `llm` is used only for initial provider display strings
-    /// (the daemon's snapshot corrects them).
-    pub fn with_daemon(
-        llm: Box<dyn LlmProvider>,
+    /// Construct the TUI as a pure client attached to a runtime over in-process
+    /// channels. The runtime (daemon) owns the Lua VM, tools, and session; the
+    /// TUI pushes [`RuntimeCommand`]s and renders [`RuntimeEvent`]s. For a remote
+    /// daemon, pass `daemon_client` to keep the socket bridge alive; the in-process
+    /// path passes `None`. `provider` seeds the initial `SessionSnapshot` display
+    /// strings.
+    pub fn with_runtime_client(
+        provider: std::sync::Arc<dyn LlmProvider>,
         user_config: UserConfig,
         custom_configs: config::custom::CustomConfigs,
-        client: crate::rpc::RemoteClient,
+        command_tx: tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeCommand>,
+        events_rx: tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
+        daemon_client: Option<crate::rpc::RemoteClient>,
     ) -> io::Result<Self> {
-        let llm: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(llm);
-        let model = llm.model().to_string();
+        let model = provider.model().to_string();
         let approval_mode = user_config.approval_mode;
 
         // Renderer starts on the default theme; the daemon's `FrontendState`
@@ -187,12 +188,8 @@ impl App {
         let renderer = Renderer::new();
         let mut messages = Vec::new();
 
-        // Subscribe before any `.await` so the on-connect `FrontendState` /
-        // `StateSnapshot` aren't missed.
-        let command_tx = client.command_sender();
-        let events_rx = client.subscribe();
-        // Sync our configured approval mode to the daemon up front: `bone serve`
-        // boots its gate at `Safe` regardless of config, and the client otherwise
+        // Sync our configured approval mode to the runtime up front: it boots
+        // its gate at `Safe` regardless of config, and the client otherwise
         // only pushes the mode when the user *cycles* it.
         let _ = command_tx.send(crate::runtime::RuntimeCommand::SetApprovalMode {
             mode: match approval_mode {
@@ -217,7 +214,7 @@ impl App {
         // Seed the frontend view from the active provider; the daemon's
         // `StateSnapshot` fills in the conversation id and token totals.
         let view = crate::runtime::SessionSnapshot {
-            provider_id: llm.id().to_string(),
+            provider_id: provider.id().to_string(),
             provider_model: model.clone(),
             conversation_id: None,
             ..Default::default()
@@ -227,7 +224,7 @@ impl App {
             messages,
             command_tx,
             events_rx,
-            _remote_client: Some(client),
+            _remote_client: daemon_client,
             session_db,
             input: InputState::default(),
             streaming: false,
@@ -269,6 +266,32 @@ impl App {
             jobs_last_refresh: std::time::Instant::now(),
             quit_despite_jobs: false,
         })
+    }
+
+    /// Construct the TUI as a pure client of a `bone serve` daemon reached over
+    /// `client`. The daemon is the sole Lua-VM owner; the TUI boots no VM and
+    /// renders the daemon's state from the wire. Delegates to
+    /// [`with_runtime_client`] after extracting the in-process channel handles
+    /// from the remote client.
+    pub fn with_daemon(
+        llm: Box<dyn LlmProvider>,
+        user_config: UserConfig,
+        custom_configs: config::custom::CustomConfigs,
+        client: crate::rpc::RemoteClient,
+    ) -> io::Result<Self> {
+        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(llm);
+        // Subscribe before any `.await` so the on-connect `FrontendState` /
+        // `StateSnapshot` aren't missed.
+        let command_tx = client.command_sender();
+        let events_rx = client.subscribe();
+        Self::with_runtime_client(
+            provider,
+            user_config,
+            custom_configs,
+            command_tx,
+            events_rx,
+            Some(client),
+        )
     }
 
     /// Client-side banner hints (release + catalog update notices) appended below

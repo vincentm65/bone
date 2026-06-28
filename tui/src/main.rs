@@ -1,6 +1,7 @@
 //! Binary entry point: arg parsing, provider setup, and TUI / headless dispatch.
 
 use bone::config::{UserConfig, custom::CustomConfigs};
+use bone::llm::provider::LlmProvider;
 use bone::llm::providers;
 use bone::run;
 use bone::ui::app::App;
@@ -239,8 +240,7 @@ fn parse_listen_addr(args: &[String]) -> String {
 
 /// Tolerantly pull `--provider <id>` / `--model <name>` out of a subcommand's
 /// args (ignores everything else, unlike [`parse_cli_options`] which rejects
-/// unknown flags). Used by `bone serve` so an auto-spawned daemon adopts the
-/// same provider/model the launching TUI selected.
+/// unknown flags). Used by `bone serve` to honor provider/model overrides.
 fn parse_provider_model(args: &[String]) -> (Option<String>, Option<String>) {
     let (mut provider, mut model) = (None, None);
     let mut i = 0;
@@ -259,71 +259,8 @@ fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
 }
 
-/// Owns an auto-spawned `bone serve` child so it dies with the TUI. `Drop` kills
-/// it on a clean exit; the daemon's `--shutdown-on-stdin-eof` is the backstop
-/// for a parent crash (the inherited stdin pipe closes, so the daemon sees EOF).
-struct ChildGuard(std::process::Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Spawn `bone serve` on an ephemeral loopback port, returning the guard and the
-/// address to connect to. The child reads the same config dir (inherited env)
-/// and is told the provider/model so its runtime matches the client's display.
-fn spawn_local_daemon(
-    provider_id: &str,
-    model: Option<&str>,
-) -> std::io::Result<(ChildGuard, String)> {
-    // Let the OS pick a free port, then hand it to the child. The tiny gap
-    // between drop and re-bind is a benign race on loopback; connect retries.
-    let probe = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let addr = probe.local_addr()?.to_string();
-    drop(probe);
-
-    let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("serve")
-        .arg("--listen")
-        .arg(&addr)
-        .arg("--provider")
-        .arg(provider_id)
-        .arg("--shutdown-on-stdin-eof")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Some(m) = model {
-        cmd.arg("--model").arg(m);
-    }
-    let child = cmd.spawn()?;
-    Ok((ChildGuard(child), addr))
-}
-
-/// Connect to `addr`, retrying briefly while the freshly-spawned daemon binds.
-async fn connect_with_retry(
-    addr: &str,
-    timeout: std::time::Duration,
-) -> std::io::Result<tokio::net::TcpStream> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match tokio::net::TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => {
-                if std::time::Instant::now() >= deadline {
-                    return Err(e);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        }
-    }
-}
-
-/// Resolve when stdin reaches EOF. An auto-spawned daemon awaits this to shut
-/// down when its parent TUI goes away (the parent holds the write end of the
-/// child's stdin pipe; closing it — on exit or crash — yields EOF here).
+/// Resolve when stdin reaches EOF. Parent-managed `bone serve` processes can
+/// opt into this so they shut down when the parent closes their stdin pipe.
 async fn wait_stdin_eof() {
     use tokio::io::AsyncReadExt;
     let mut stdin = tokio::io::stdin();
@@ -331,9 +268,50 @@ async fn wait_stdin_eof() {
     loop {
         match stdin.read(&mut buf).await {
             Ok(0) | Err(_) => return,
-            Ok(_) => {} // ignore any input; we only care about EOF
+            Ok(_) => {}
         }
     }
+}
+
+/// Fully booted runtime host: provider, Lua extension manager, and session.
+struct RuntimeHostBoot {
+    provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
+    manager: bone::ext::ExtensionManager,
+    session: std::sync::Arc<std::sync::Mutex<bone::runtime::RuntimeSession>>,
+}
+
+/// Boot the runtime host: create tools, init the session DB, and return
+/// the pieces a daemon (in-process or serve) needs.
+fn boot_runtime_host(
+    provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
+    custom: &mut CustomConfigs,
+) -> std::io::Result<RuntimeHostBoot> {
+    let model = provider.model().to_string();
+    let provider_label = format!("{} ({})", provider.name(), provider.id());
+    let booted = bone::ext::boot_with_tools(
+        &bone::config::bone_dir(),
+        &std::env::current_dir()?,
+        custom,
+        true,
+        bone::ext::BootOptions {
+            agent_depth: 0,
+            headless: false,
+            model: model.clone(),
+            provider: provider_label.clone(),
+            tool_allowlist: None,
+        },
+        &model,
+        &provider_label,
+    );
+    let mut session = bone::runtime::RuntimeSession::new(booted.tools);
+    if let Some(warning) = session.init_db(&*provider) {
+        eprintln!("bone: {warning}");
+    }
+    Ok(RuntimeHostBoot {
+        provider,
+        manager: booted.manager,
+        session: std::sync::Arc::new(std::sync::Mutex::new(session)),
+    })
 }
 
 /// `bone serve` — bind a socket, run the headless runtime, and fan its events
@@ -342,10 +320,7 @@ async fn wait_stdin_eof() {
 async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let addr = parse_listen_addr(args);
     let shutdown_on_eof = has_flag(args, "--shutdown-on-stdin-eof");
-
-    // Build the provider from config, honoring `--provider`/`--model` so an
-    // auto-spawned daemon adopts the launching TUI's selection (falls back to
-    // the persisted `last_provider`, exactly like TUI mode otherwise).
+    // Build the provider from config, honoring `--provider`/`--model`.
     let (cli_provider, cli_model) = parse_provider_model(args);
     let mut custom = CustomConfigs::load();
     let provider_id = cli_provider.unwrap_or_else(|| {
@@ -367,30 +342,11 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider> =
         std::sync::Arc::from(provider);
 
-    // Boot the Lua runtime + tools once and hold them in a persistent session,
-    // exactly like the TUI does — the daemon owns the conversation across turns.
-    let model = provider.model().to_string();
-    let provider_label = format!("{} ({})", provider.name(), provider.id());
-    let booted = bone::ext::boot_with_tools(
-        &bone::config::bone_dir(),
-        &std::env::current_dir().unwrap_or_default(),
-        &mut custom,
-        true,
-        bone::ext::BootOptions {
-            agent_depth: 0,
-            headless: false,
-            model: model.clone(),
-            provider: provider_label.clone(),
-            tool_allowlist: None,
-        },
-        &model,
-        &provider_label,
-    );
-    let mut session = bone::runtime::RuntimeSession::new(booted.tools);
-    if let Some(warning) = session.init_db(&*provider) {
-        eprintln!("bone: {warning}");
-    }
-    let session = std::sync::Arc::new(std::sync::Mutex::new(session));
+    let RuntimeHostBoot {
+        provider,
+        manager,
+        session,
+    } = boot_runtime_host(provider, &mut custom)?;
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -405,8 +361,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     // Boot-time display state (theme/keymap/banner/commands/config/tools) the VM
     // produced, captured once and replayed to every client so a VM-less frontend
     // can render the user's customizations. Re-published on reload by run_daemon.
-    let frontend_ev =
-        bone::rpc::frontend_state(&booted.manager, &session.lock().unwrap().tools);
+    let frontend_ev = bone::rpc::frontend_state(&manager, &session.lock().unwrap().tools);
     let accept_loop = async move {
         loop {
             match listener.accept().await {
@@ -455,16 +410,15 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             hub.publisher(),
             commands_rx,
             provider,
-            booted.manager,
+            manager,
             session,
             bone::tools::ApprovalMode::Safe,
             None,
             true, // forward view diffs: remote clients can't drain our UiState
         ) => eprintln!("bone: daemon exited; shutting down server"),
         _ = accept_loop => eprintln!("bone: accept loop ended; shutting down server"),
-        // Auto-spawned daemons exit when the launching TUI's stdin pipe closes.
         _ = wait_stdin_eof(), if shutdown_on_eof => {
-            eprintln!("bone: parent exited; shutting down server")
+            eprintln!("bone: parent stdin closed; shutting down server")
         }
     }
     Ok(())
@@ -700,7 +654,6 @@ async fn main() -> std::io::Result<()> {
     let mut providers_config = custom.derive_providers_config();
 
     let cli_options = parse_cli_options(&args).map_err(std::io::Error::other)?;
-    let model_override = cli_options.model.clone();
     let provider_id = cli_options.provider.unwrap_or_else(|| {
         if custom.get_last_provider().is_empty() {
             "local".to_string()
@@ -746,28 +699,60 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    // Fail fast on bad credentials before launching anything (the daemon shares
-    // this config, so validating here covers it too).
+    // Fail fast on bad credentials before booting Lua or the TUI.
     provider.validate().await.map_err(std::io::Error::other)?;
 
-    // Default (Phase 3-pure): spawn a local `bone serve` and attach the TUI to
-    // it as a client — the same protocol path as `--connect`, just against an
-    // auto-managed local daemon. The daemon is the sole Lua-VM owner; the TUI is
-    // a pure Rust frontend that renders the daemon's state from the wire. There
-    // is no in-process fallback — `bone` requires a spawnable local daemon.
-    let (daemon, addr) = spawn_local_daemon(&provider_id, model_override.as_deref())
-        .map_err(|e| std::io::Error::other(format!("could not spawn local daemon: {e}")))?;
-    let stream = connect_with_retry(&addr, std::time::Duration::from_secs(8))
+    // Default: in-process runtime host. The runtime (daemon) runs on a
+    // LocalSet alongside the TUI — one process, no socket, no child spawn.
+    // The TUI is a pure client pushing RuntimeCommands and rendering
+    // RuntimeEvents over in-process channels.
+    let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(provider);
+    let boot = boot_runtime_host(provider, &mut custom)?;
+
+    let (hub, commands_rx) = bone::rpc::Hub::new();
+    let command_tx = hub.command_sender();
+    let events_rx = hub.subscribe();
+
+    // Publish boot-time frontend/session state so the pure-client TUI renders
+    // the runtime's theme/keymap/banner/commands/tools and current conversation
+    // id immediately.
+    {
+        let s = boot.session.lock().unwrap();
+        hub.publish(bone::rpc::frontend_state(&boot.manager, &s.tools));
+        hub.publish(bone::runtime::RuntimeEvent::StateSnapshot {
+            snapshot: s.snapshot(boot.provider.id(), boot.provider.model()),
+        });
+    }
+
+    let mut app = App::with_runtime_client(
+        boot.provider.clone(),
+        cfg,
+        custom,
+        command_tx,
+        events_rx,
+        None,
+    )?;
+
+    // run_daemon is !Send (owns the Lua VM via session), so drive it and
+    // the TUI together on a LocalSet.
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let daemon = tokio::task::spawn_local(bone::rpc::run_daemon(
+                hub.publisher(),
+                commands_rx,
+                boot.provider,
+                boot.manager,
+                boot.session,
+                bone::tools::ApprovalMode::Safe,
+                None,
+                true, // forward view diffs: the TUI is a pure client
+            ));
+            let result = app.run().await;
+            daemon.abort();
+            result
+        })
         .await
-        .map_err(|e| std::io::Error::other(format!("local daemon unreachable: {e}")))?;
-    let (read_half, write_half) = tokio::io::split(stream);
-    let client = bone::rpc::RemoteClient::connect(read_half, write_half);
-    let mut app = App::with_daemon(provider, cfg, custom, client)?;
-    let result = app.run().await;
-    // Tear down the spawned daemon after the UI exits (Drop also kills it, but
-    // keep the lifetime obvious and ordered after run()).
-    drop(daemon);
-    result
 }
 
 #[cfg(test)]
@@ -781,7 +766,12 @@ mod tests {
     #[test]
     fn parse_provider_model_extracts_both() {
         let (p, m) = parse_provider_model(&args(&[
-            "--listen", "127.0.0.1:7878", "--provider", "codex", "--model", "gpt-5.5",
+            "--listen",
+            "127.0.0.1:7878",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-5.5",
         ]));
         assert_eq!(p.as_deref(), Some("codex"));
         assert_eq!(m.as_deref(), Some("gpt-5.5"));
@@ -791,14 +781,20 @@ mod tests {
     fn parse_provider_model_ignores_unknown_and_missing() {
         // Unlike `parse_cli_options`, unknown flags (e.g. `--listen`) are ignored
         // rather than rejected, and absent flags yield `None`.
-        let (p, m) = parse_provider_model(&args(&["--listen", "x", "--shutdown-on-stdin-eof"]));
+        let (p, m) = parse_provider_model(&args(&["--listen", "x", "--verbose"]));
         assert!(p.is_none());
         assert!(m.is_none());
     }
 
     #[test]
     fn has_flag_detects_presence() {
-        assert!(has_flag(&args(&["--shutdown-on-stdin-eof"]), "--shutdown-on-stdin-eof"));
-        assert!(!has_flag(&args(&["--listen", "x"]), "--shutdown-on-stdin-eof"));
+        assert!(has_flag(
+            &args(&["--shutdown-on-stdin-eof"]),
+            "--shutdown-on-stdin-eof"
+        ));
+        assert!(!has_flag(
+            &args(&["--listen", "x"]),
+            "--shutdown-on-stdin-eof"
+        ));
     }
 }
