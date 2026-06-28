@@ -8,7 +8,7 @@ use std::collections::HashMap;
 // ── Spinner / text presets ──────────────────────────────────────────────────
 
 /// A spinner style preset (frames + natural frame speed).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SpinnerPreset {
     pub name: String,
     /// Milliseconds per frame.
@@ -17,7 +17,7 @@ pub struct SpinnerPreset {
 }
 
 /// A rotating thinking-text preset.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TextPreset {
     pub name: String,
     pub phrases: Vec<String>,
@@ -116,7 +116,7 @@ pub fn collect_presets(lua: &mlua::Lua) -> (Vec<SpinnerPreset>, Vec<TextPreset>)
 // ── Config snapshot ─────────────────────────────────────────────────────────
 
 /// Subset of `bone.config` captured after init.lua.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LuaConfigSnapshot {
     pub approval_mode: Option<String>,
     pub status_show: HashMap<String, bool>,
@@ -158,7 +158,7 @@ impl LuaConfigSnapshot {
 ///
 /// Colors are stored as raw strings; parsing into `ratatui::style::Color`
 /// happens at the UI boundary in `Theme::apply_snapshot`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LuaThemeSnapshot {
     pub user_msg: Option<String>,
     pub user_msg_bg: Option<String>,
@@ -204,14 +204,14 @@ impl LuaThemeSnapshot {
 // ── Keymap snapshot ─────────────────────────────────────────────────────────
 
 /// A single key binding: key string → action name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LuaKeyBinding {
     pub key: String,
     pub action: String,
 }
 
 /// Snapshot of `bone.keymap` after init.lua.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LuaKeymapSnapshot {
     pub normal: Vec<LuaKeyBinding>,
     pub insert: Vec<LuaKeyBinding>,

@@ -402,6 +402,10 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let accept_hub = hub.clone();
     let accept_session = session.clone();
     let accept_provider = provider.clone();
+    // Boot-time display state (theme/keymap/banner/commands/config) the VM
+    // produced, captured once and replayed to every client so a VM-less frontend
+    // can render the user's customizations. Re-published on reload by run_daemon.
+    let frontend_ev = bone::rpc::frontend_state(&booted.manager);
     let accept_loop = async move {
         loop {
             match listener.accept().await {
@@ -417,9 +421,12 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
                     let initial = {
                         let s = accept_session.lock().unwrap();
                         let snapshot = s.snapshot(accept_provider.id(), accept_provider.model());
-                        let mut events = vec![bone::runtime::RuntimeEvent::StateSnapshot {
-                            snapshot: snapshot.clone(),
-                        }];
+                        let mut events = vec![
+                            frontend_ev.clone(),
+                            bone::runtime::RuntimeEvent::StateSnapshot {
+                                snapshot: snapshot.clone(),
+                            },
+                        ];
                         if !s.transcript.is_empty() {
                             events.push(bone::runtime::RuntimeEvent::ConversationLoaded {
                                 messages: s.transcript.clone(),

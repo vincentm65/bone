@@ -274,6 +274,31 @@ impl ExtensionManager {
         &self.keymap_snapshot
     }
 
+    /// The base banner lines from `bone.banner()` (no client-side update/catalog
+    /// hints — those stay a frontend concern). Empty if `banner()` is undefined
+    /// or errors. Lets the daemon ship the banner to a VM-less frontend.
+    pub fn frontend_banner(&self) -> String {
+        let lua = self.lua_handle();
+        let Ok(g) = lua.lock() else {
+            return String::new();
+        };
+        let Ok(bone) = g.globals().get::<mlua::Table>("bone") else {
+            return String::new();
+        };
+        let Ok(banner_fn) = bone.get::<mlua::Function>("banner") else {
+            return String::new();
+        };
+        let mut lines = Vec::new();
+        if let Ok(tbl) = banner_fn.call::<mlua::Table>(()) {
+            for item in tbl.sequence_values::<mlua::String>().flatten() {
+                if let Ok(s) = item.to_str() {
+                    lines.push(s.to_string());
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
     /// Dispatch a simple (non-blockable) event with a JSON-serializable
     /// payload. Used for `session_start`, `session_end`, `message`,
     /// `mode_change`.

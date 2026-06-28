@@ -1955,6 +1955,7 @@ fn dispatch_event(
         | RuntimeEvent::KeyRequest { .. }
         | RuntimeEvent::ApprovalRequest { .. }
         | RuntimeEvent::StateSnapshot { .. }
+        | RuntimeEvent::FrontendState { .. }
         | RuntimeEvent::ConversationLoaded { .. }
         | RuntimeEvent::ViewDiff { .. }
         | RuntimeEvent::CommandComplete { .. }

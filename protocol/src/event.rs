@@ -55,6 +55,20 @@ pub enum RuntimeEvent {
     Finished { content: String },
     Failed { message: String },
     StateSnapshot { snapshot: SessionSnapshot },
+    /// Boot-time display state the daemon's Lua VM produced (theme/keymap/banner/
+    /// command-list/config), so a frontend can render the user's customizations
+    /// without running Lua itself. Sent on connect and re-sent after a
+    /// `ReloadExtensions`. The snapshots are carried as opaque JSON to keep the
+    /// protocol crate free of the core's Lua snapshot types; the consuming client
+    /// deserializes them back into `Lua*Snapshot`.
+    FrontendState {
+        banner: String,
+        theme: serde_json::Value,
+        keymap: serde_json::Value,
+        config: serde_json::Value,
+        /// `(name, description)` for slash-command autocomplete.
+        commands: Vec<(String, String)>,
+    },
     ConversationLoaded {
         messages: Vec<ChatMessage>,
         snapshot: SessionSnapshot,

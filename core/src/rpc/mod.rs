@@ -186,6 +186,24 @@ impl Drop for RemoteClient {
     }
 }
 
+/// Build the [`RuntimeEvent::FrontendState`] carrying the daemon VM's boot-time
+/// display state (theme/keymap/banner/commands/config) for a VM-less frontend.
+/// Snapshots are serialized to JSON so the protocol crate stays free of the
+/// core's Lua snapshot types; the client deserializes them back.
+pub fn frontend_state(extensions: &crate::ext::ExtensionManager) -> RuntimeEvent {
+    RuntimeEvent::FrontendState {
+        banner: extensions.frontend_banner(),
+        theme: serde_json::to_value(extensions.theme_snapshot()).unwrap_or_default(),
+        keymap: serde_json::to_value(extensions.keymap_snapshot()).unwrap_or_default(),
+        config: serde_json::to_value(extensions.config_snapshot()).unwrap_or_default(),
+        commands: extensions
+            .commands()
+            .iter()
+            .map(|c| (c.name.clone(), c.description.clone()))
+            .collect(),
+    }
+}
+
 /// Serve one client connection against `hub`.
 ///
 /// Late-joiners get `initial` events first (full-state sync), then the live
@@ -646,6 +664,9 @@ pub async fn run_daemon(
                 hub.publish(RuntimeEvent::Status {
                     message: format!("Tools and Lua extensions reloaded. {count} tools enabled."),
                 });
+                // Re-ship display state: a reload can change theme/keymap/banner/
+                // commands, and a VM-less frontend has no other way to learn them.
+                hub.publish(frontend_state(&extensions));
                 publish_snapshot!();
                 continue;
             }

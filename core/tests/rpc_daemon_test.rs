@@ -724,3 +724,67 @@ bone.register_command("noop", {
         "a found handler returning a no-op must not be reported as unknown"
     );
 }
+
+/// `frontend_state` packages the daemon VM's boot-time display state (banner,
+/// theme, keymap, command-list, config) into a `FrontendState` event so a
+/// VM-less frontend can render the user's customizations over the wire. Boots a
+/// real ExtensionManager from a temp config dir whose `init.lua` sets a theme
+/// color, a banner, and registers a command, then asserts the event carries them.
+#[tokio::test]
+async fn frontend_state_carries_theme_banner_and_commands() {
+    let config_dir = std::env::temp_dir().join(format!(
+        "bone-frontend-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&config_dir).unwrap();
+    // init.lua: a theme color, a banner, and a registered command.
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r##"
+bone.theme = bone.theme or {}
+bone.theme.tool_call = "#FF0000"
+function bone.banner() return { "hello from the daemon" } end
+bone.register_command("ping", {
+  description = "pong",
+  handler = function(_i, _c) return { submit = false } end,
+})
+"##,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = bone_core::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        true,
+        bone_core::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let extensions = booted.manager;
+
+    let ev = bone_core::rpc::frontend_state(&extensions);
+    std::fs::remove_dir_all(&config_dir).ok();
+
+    let RuntimeEvent::FrontendState { banner, theme, commands, .. } = ev else {
+        panic!("expected FrontendState");
+    };
+    assert!(
+        banner.contains("hello from the daemon"),
+        "banner from bone.banner() must cross the wire, got {banner:?}"
+    );
+    assert_eq!(
+        theme.get("tool_call").and_then(|v| v.as_str()),
+        Some("#FF0000"),
+        "theme color must be serialized into the event"
+    );
+    assert!(
+        commands.iter().any(|(n, d)| n == "ping" && d == "pong"),
+        "registered command must be listed for autocomplete, got {commands:?}"
+    );
+}
