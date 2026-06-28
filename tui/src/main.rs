@@ -741,8 +741,7 @@ async fn main() -> std::io::Result<()> {
         })?;
         let (read_half, write_half) = tokio::io::split(stream);
         let client = bone::rpc::RemoteClient::connect(read_half, write_half);
-        let mut app =
-            App::with_daemon(provider, cfg, custom, bone::ui::app::DaemonSource::Remote(client))?;
+        let mut app = App::with_daemon(provider, cfg, custom, client)?;
         app.run().await?;
         return Ok(());
     }
@@ -753,43 +752,22 @@ async fn main() -> std::io::Result<()> {
 
     // Default (Phase 3-pure): spawn a local `bone serve` and attach the TUI to
     // it as a client — the same protocol path as `--connect`, just against an
-    // auto-managed local daemon. The daemon owns turns/commands/hooks; the TUI
-    // keeps its own VM for display (theme/keymap/banner/autocomplete) until that
-    // state is carried over the protocol. Falls back to the in-process runtime
-    // if the daemon can't be spawned or reached, so a sandbox without subprocess
-    // spawning still works.
-    let daemon_client = match spawn_local_daemon(&provider_id, model_override.as_deref()) {
-        Ok((daemon, addr)) => match connect_with_retry(&addr, std::time::Duration::from_secs(8))
-            .await
-        {
-            Ok(stream) => {
-                let (read_half, write_half) = tokio::io::split(stream);
-                Some((daemon, bone::rpc::RemoteClient::connect(read_half, write_half)))
-            }
-            Err(e) => {
-                eprintln!("bone: local daemon unreachable ({e}); using in-process runtime");
-                None
-            }
-        },
-        Err(e) => {
-            eprintln!("bone: could not spawn local daemon ({e}); using in-process runtime");
-            None
-        }
-    };
-
-    if let Some((daemon, client)) = daemon_client {
-        let mut app =
-            App::with_daemon(provider, cfg, custom, bone::ui::app::DaemonSource::Remote(client))?;
-        let result = app.run().await;
-        // Explicitly tear down the spawned daemon after the UI exits (Drop also
-        // kills it, but keep the lifetime obvious and ordered after run()).
-        drop(daemon);
-        return result;
-    }
-
-    let mut app = App::new(provider, cfg, custom)?;
-    app.run().await?;
-    Ok(())
+    // auto-managed local daemon. The daemon is the sole Lua-VM owner; the TUI is
+    // a pure Rust frontend that renders the daemon's state from the wire. There
+    // is no in-process fallback — `bone` requires a spawnable local daemon.
+    let (daemon, addr) = spawn_local_daemon(&provider_id, model_override.as_deref())
+        .map_err(|e| std::io::Error::other(format!("could not spawn local daemon: {e}")))?;
+    let stream = connect_with_retry(&addr, std::time::Duration::from_secs(8))
+        .await
+        .map_err(|e| std::io::Error::other(format!("local daemon unreachable: {e}")))?;
+    let (read_half, write_half) = tokio::io::split(stream);
+    let client = bone::rpc::RemoteClient::connect(read_half, write_half);
+    let mut app = App::with_daemon(provider, cfg, custom, client)?;
+    let result = app.run().await;
+    // Tear down the spawned daemon after the UI exits (Drop also kills it, but
+    // keep the lifetime obvious and ordered after run()).
+    drop(daemon);
+    result
 }
 
 #[cfg(test)]

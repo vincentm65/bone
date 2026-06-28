@@ -11,7 +11,6 @@ use crate::chat::Message;
 use crate::config::{self, UserConfig};
 use crate::llm::{ChatMessage, LlmProvider};
 
-use crate::ext::ExtensionManager;
 use crate::tools::{ApprovalMode, CallOutcome, ToolCall, ToolResult};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -49,15 +48,6 @@ pub struct WireTools {
 }
 
 impl WireTools {
-    /// Build from the local VM's tool handler (the in-process / boot path, before
-    /// any `FrontendState` arrives).
-    fn from_handler(handler: &crate::tools::registry::ToolHandler) -> Self {
-        Self {
-            defs: handler.definitions(),
-            display: handler.display_map().clone(),
-        }
-    }
-
     /// Custom display config for a tool call, if the tool registered one.
     pub fn display_for_call(
         &self,
@@ -77,28 +67,19 @@ pub struct App {
     /// Channel to send commands (SubmitPrompt, lifecycle, approvals) to the
     /// in-process daemon that owns the RuntimeSession.
     pub command_tx: tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeCommand>,
-    /// In-process hand-off for `ReloadExtensions`: the TUI boots the extensions
-    /// once and drops the cloned result here, so the daemon (which shares the
-    /// Lua VM) adopts it instead of re-booting a second VM from disk. `None` in
-    /// remote (`--connect`) mode — the remote daemon has its own VM and
-    /// disk-boots on reload.
-    pub reload_inbox: Option<std::sync::Arc<std::sync::Mutex<Option<crate::ext::BootedTools>>>>,
     /// Broadcast receiver for RuntimeEvents from the daemon.
     pub events_rx: tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
-    /// Keeps a remote socket bridge alive for exactly as long as the App. Its
-    /// `Drop` implementation terminates the bridge's forwarding/writer tasks.
+    /// Keeps the socket bridge to the daemon alive for the App's lifetime. Its
+    /// `Drop` terminates the bridge's forwarding/writer tasks.
     _remote_client: Option<crate::rpc::RemoteClient>,
     /// Read-only session DB handle for stats queries (the daemon owns the
     /// authoritative connection through its own RuntimeSession).
     pub session_db: Option<crate::session_db::SessionDb>,
-    /// Read-only clone of the tool handler for display metadata and
-    /// definitions (the daemon owns the authoritative, mutable copy).
-    pub tools: crate::tools::registry::ToolHandler,
     pub input: InputState,
     pub streaming: bool,
-    /// A live Lua command is running through `drive_live`. This needs the same
-    /// cancellation plumbing as streaming, but it is not a model turn and
-    /// should not show the thinking spinner.
+    /// A live Lua command is running through `run_remote_command`. This needs
+    /// the same cancellation plumbing as streaming, but it is not a model turn
+    /// and should not show the thinking spinner.
     pub live_command: bool,
     pub should_quit: bool,
     pub renderer: Renderer,
@@ -157,18 +138,18 @@ pub struct App {
     turn_pause_start: Option<Instant>,
     /// Active autocomplete state (shown when typing `/`).
     autocomplete: Option<AutocompleteState>,
-    /// Lua extension manager.
-    extensions: ExtensionManager,
-    /// Lua keymap snapshot for custom bindings.
+    /// Keymap snapshot for custom bindings, supplied by the daemon's
+    /// `FrontendState`.
     lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
     /// Slash commands `(name, description)` the daemon advertised via
-    /// `FrontendState`, for autocomplete. Empty until a remote daemon sends them;
-    /// when empty, autocomplete falls back to the local VM's `commands()`.
+    /// `FrontendState`, for autocomplete.
     wire_commands: Vec<(String, String)>,
     /// Tool definitions + display configs the daemon advertised via
-    /// `FrontendState`, used to render tool rows + estimate context size. Seeded
-    /// from the local VM at boot and overwritten when a remote daemon sends its.
+    /// `FrontendState`, used to render tool rows + estimate context size.
     wire_tools: WireTools,
+    /// Whether the boot banner (daemon `bone.banner()` + client hints) has been
+    /// shown — it arrives with the first `FrontendState`, not at construction.
+    banner_shown: bool,
     /// Lua status lines keyed by id (`bone.api.ui.set_statusline`), in
     /// registration order. Each id's segments are appended to the native
     /// status bar; re-setting the same id updates it in place.
@@ -182,174 +163,47 @@ pub struct App {
     /// Set after the user was warned that quitting kills running sub-agent
     /// jobs; the next quit request goes through.
     quit_despite_jobs: bool,
-    /// True when attached to a remote `bone serve` daemon (`bone --connect`).
-    /// Slash commands then run on the daemon's Lua VM over the protocol
-    /// (`RunCommand`) instead of the TUI's local VM; in-process mode (`false`)
-    /// runs them locally via `run_lua_command`.
-    is_remote: bool,
-}
-
-/// Where the App's turn-running daemon lives.
-pub enum DaemonSource {
-    /// Spawn an in-process daemon that owns the session (default TUI mode).
-    InProcess,
-    /// Attach to a remote `bone serve` daemon over a connected bridge
-    /// (`bone --connect <addr>`). The local App keeps its own Lua VM for
-    /// display + interactive slash commands; turns run on the remote daemon.
-    Remote(crate::rpc::RemoteClient),
 }
 
 impl App {
-    /// Construct the TUI with an in-process daemon (the normal entry point).
-    pub fn new(
+    /// Construct the TUI as a pure client of a `bone serve` daemon reached over
+    /// `client`. The daemon is the sole Lua-VM owner; the TUI boots no VM and
+    /// renders the daemon's state from the wire — theme/keymap/banner/commands/
+    /// tools all arrive in the on-connect `FrontendState`, the session in
+    /// `StateSnapshot`. `llm` is used only for initial provider display strings
+    /// (the daemon's snapshot corrects them).
+    pub fn with_daemon(
         llm: Box<dyn LlmProvider>,
         user_config: UserConfig,
         custom_configs: config::custom::CustomConfigs,
+        client: crate::rpc::RemoteClient,
     ) -> io::Result<Self> {
-        Self::with_daemon(llm, user_config, custom_configs, DaemonSource::InProcess)
-    }
-
-    /// Construct the TUI against a chosen [`DaemonSource`]. The Lua VM, renderer,
-    /// banner, and view-model are identical across modes; only how the App
-    /// reaches the daemon (in-process spawn vs. remote bridge) differs.
-    pub fn with_daemon(
-        llm: Box<dyn LlmProvider>,
-        mut user_config: UserConfig,
-        mut custom_configs: config::custom::CustomConfigs,
-        daemon: DaemonSource,
-    ) -> io::Result<Self> {
-        // The provider is shared (via Arc) with the per-turn runtime Driver.
         let llm: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(llm);
-        let provider = format!("{} ({})", llm.name(), llm.id());
         let model = llm.model().to_string();
         let approval_mode = user_config.approval_mode;
-        // Boot Lua extension system and build tool handler.
-        let opts = crate::ext::BootOptions {
-            agent_depth: 0,
-            headless: false,
-            model: model.clone(),
-            provider: provider.clone(),
-            tool_allowlist: None,
-        };
-        let booted = crate::ext::boot_with_tools(
-            &crate::config::bone_dir(),
-            &std::env::current_dir().unwrap_or_default(),
-            &mut custom_configs,
-            true,
-            opts,
-            &model,
-            &provider,
-        );
-        let extensions = booted.manager;
-        let tools = booted.tools;
-        // Seed the render-time tool metadata from the boot VM; a remote daemon
-        // overwrites it via `FrontendState`. Built before `tools` is moved.
-        let wire_tools = WireTools::from_handler(&tools);
 
-        // Set model/provider on the Lua table (for banner and other Lua code).
-        let lua = extensions.lua_handle();
-        let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
-        let bone = lua.globals().get::<mlua::Table>("bone").ok();
-        if let Some(bone) = bone {
-            let _ = bone.set("model", model.clone());
-            let _ = bone.set("provider", provider.clone());
-        }
-        drop(lua);
-
-        // Collect banner text from `bone.banner()` (empty if undefined).
-        let banner = Self::collect_banner(&extensions);
-
-        // Create renderer with Lua theme applied over defaults.
-        let mut renderer = Renderer::new();
-        renderer.theme.apply_snapshot(extensions.theme_snapshot());
-
-        // Apply Lua config snapshot — overrides YAML config values.
-        apply_lua_config_snapshot(&mut user_config, extensions.config_snapshot());
-
-        // Capture keymap snapshot before `extensions` is moved into the struct.
-        let lua_keymap = extensions.keymap_snapshot().clone();
-
+        // Renderer starts on the default theme; the daemon's `FrontendState`
+        // applies the user's theme over the wire on attach.
+        let renderer = Renderer::new();
         let mut messages = Vec::new();
-        if !banner.is_empty() {
-            messages.push(Message::system(banner));
-        }
-        messages.push(Message::system(format!(
-            "bone v{} — type /help for commands. Ctrl+C twice to quit.",
-            env!("CARGO_PKG_VERSION")
-        )));
 
-        // ── Connect to the daemon (in-process spawn or remote bridge) ──
-        // Both arms yield the same channel pair the App's event loop consumes:
-        // a command sender and a broadcast event receiver.
-        let is_remote = matches!(daemon, DaemonSource::Remote(_));
-        let (command_tx, events_rx, initial_conversation_id, reload_inbox, remote_client) =
-            match daemon {
-                DaemonSource::InProcess => {
-                    let runtime = std::sync::Arc::new(std::sync::Mutex::new(
-                        crate::runtime::RuntimeSession::new(tools.clone()),
-                    ));
-                    let (hub, commands_rx) = crate::rpc::Hub::new();
-                    let command_tx = hub.command_sender();
-                    let events_rx = hub.subscribe();
-                    let publisher = hub.publisher();
-
-                    // Init the session DB inside the runtime. Snapshot the
-                    // conversation_id before moving the runtime into the daemon.
-                    if let Some(warning) = runtime.lock().unwrap().init_db(&*llm) {
-                        messages.push(Message::system(warning));
-                    }
-                    let initial_conversation_id = runtime.lock().unwrap().conversation_id;
-
-                    let reload_inbox: std::sync::Arc<
-                        std::sync::Mutex<Option<crate::ext::BootedTools>>,
-                    > = std::sync::Arc::new(std::sync::Mutex::new(None));
-                    tokio::spawn(crate::rpc::run_daemon(
-                        publisher,
-                        commands_rx,
-                        llm.clone(),
-                        extensions.clone(),
-                        runtime,
-                        approval_mode,
-                        Some(reload_inbox.clone()),
-                        // In-process: the TUI shares this VM and drains the UiState
-                        // itself, so the daemon must not also drain/forward.
-                        false,
-                    ));
-                    (
-                        command_tx,
-                        events_rx,
-                        initial_conversation_id,
-                        Some(reload_inbox),
-                        None,
-                    )
-                }
-                DaemonSource::Remote(client) => {
-                    // Subscribe before any `.await` so the daemon's on-connect
-                    // StateSnapshot isn't missed; the conversation id arrives with
-                    // it. No reload inbox — the remote daemon owns its own Lua VM.
-                    let command_tx = client.command_sender();
-                    let events_rx = client.subscribe();
-                    // Sync our configured approval mode to the daemon up front.
-                    // `bone serve` boots its gate at `Safe` regardless of config,
-                    // and the client otherwise only pushes the mode when the user
-                    // *cycles* it — so a `danger`-configured client would display
-                    // Danger while the daemon silently gated at Safe until the
-                    // first toggle. The in-process path doesn't need this: it
-                    // hands `approval_mode` straight to `run_daemon`.
-                    let _ = command_tx.send(crate::runtime::RuntimeCommand::SetApprovalMode {
-                        mode: match approval_mode {
-                            crate::tools::ApprovalMode::Danger => "danger",
-                            crate::tools::ApprovalMode::Safe => "safe",
-                        }
-                        .to_string(),
-                    });
-                    (command_tx, events_rx, None, None, Some(client))
-                }
-            };
+        // Subscribe before any `.await` so the on-connect `FrontendState` /
+        // `StateSnapshot` aren't missed.
+        let command_tx = client.command_sender();
+        let events_rx = client.subscribe();
+        // Sync our configured approval mode to the daemon up front: `bone serve`
+        // boots its gate at `Safe` regardless of config, and the client otherwise
+        // only pushes the mode when the user *cycles* it.
+        let _ = command_tx.send(crate::runtime::RuntimeCommand::SetApprovalMode {
+            mode: match approval_mode {
+                crate::tools::ApprovalMode::Danger => "danger",
+                crate::tools::ApprovalMode::Safe => "safe",
+            }
+            .to_string(),
+        });
 
         // Read-only DB handle for the App's stats queries (sqlite WAL supports
-        // concurrent readers). For a local daemon this is the same file the
-        // daemon writes; for a remote host stats reflect the local DB.
+        // concurrent readers); the daemon owns the authoritative connection.
         let session_db = match crate::session_db::SessionDb::open(&crate::session_db::db_path()) {
             Ok(db) => Some(db),
             Err(err) => {
@@ -360,22 +214,21 @@ impl App {
             }
         };
 
-        // Seed the frontend view from the empty session + active provider.
+        // Seed the frontend view from the active provider; the daemon's
+        // `StateSnapshot` fills in the conversation id and token totals.
         let view = crate::runtime::SessionSnapshot {
             provider_id: llm.id().to_string(),
             provider_model: model.clone(),
-            conversation_id: initial_conversation_id,
+            conversation_id: None,
             ..Default::default()
         };
 
         Ok(Self {
             messages,
             command_tx,
-            reload_inbox,
             events_rx,
-            _remote_client: remote_client,
+            _remote_client: Some(client),
             session_db,
-            tools,
             input: InputState::default(),
             streaming: false,
             live_command: false,
@@ -392,7 +245,7 @@ impl App {
             last_ctrl_c: None,
             stream_estimated_received: None,
             view,
-            conversation_id: initial_conversation_id,
+            conversation_id: None,
             token_stats: crate::llm::TokenStats::default(),
             usage_by_provider: Vec::new(),
             pages: Vec::new(),
@@ -406,45 +259,22 @@ impl App {
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
             autocomplete: None,
-            extensions,
-            lua_keymap,
+            lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot::default(),
             wire_commands: Vec::new(),
-            wire_tools,
+            wire_tools: WireTools::default(),
+            banner_shown: false,
             lua_status: Vec::new(),
             shown_tool_rows: std::collections::HashSet::new(),
             jobs_seen_version: u64::MAX,
             jobs_last_refresh: std::time::Instant::now(),
             quit_despite_jobs: false,
-            is_remote,
         })
     }
-    /// Collect banner text from `bone.banner()` Lua function.
-    /// Returns lines joined with newlines, or empty if undefined/nothing.
-    fn collect_banner(extensions: &crate::ext::ExtensionManager) -> String {
-        let mut lines = Vec::new();
-        if let Ok(g) = extensions.lua_handle().lock()
-            && let Ok(bone) = g.globals().get::<mlua::Table>("bone")
-            && let Ok(banner_fn) = bone.get::<mlua::Function>("banner")
-        {
-            match banner_fn.call::<mlua::Table>(()) {
-                Ok(tbl) => {
-                    for item in tbl.sequence_values::<mlua::String>() {
-                        if let Ok(item_str) = item
-                            && let Ok(s) = item_str.to_str()
-                        {
-                            lines.push(s.to_string());
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("bone: warning: banner() call failed: {e}");
-                }
-            }
-        }
 
-        // Append a release hint if a newer version was seen (cached, local
-        // read — never blocks on network). Channel-agnostic: the releases
-        // page covers every install method.
+    /// Client-side banner hints (release + catalog update notices) appended below
+    /// the daemon's `bone.banner()` text. These are local cached reads, not Lua.
+    fn banner_client_hints() -> Vec<String> {
+        let mut lines = Vec::new();
         if crate::update_check::update_available()
             && let Some(latest) = crate::update_check::latest_seen()
         {
@@ -452,8 +282,6 @@ impl App {
                 "bone {latest} available — https://github.com/vincentm65/bone/releases"
             ));
         }
-
-        // Append a catalog-update hint (cached/local read — never blocks).
         let updates = crate::ext::catalog::updates_available();
         if updates > 0 {
             lines.push(format!(
@@ -461,8 +289,7 @@ impl App {
                 if updates == 1 { "" } else { "s" }
             ));
         }
-
-        lines.join("\n")
+        lines
     }
 
     /// Drain daemon events during the idle loop (between turns). Updates local
@@ -489,10 +316,10 @@ impl App {
             // and after a remote `ReloadExtensions`. The local VM (still present)
             // remains the fallback for anything not carried here.
             RuntimeEvent::FrontendState {
-                theme, keymap, config, commands, tool_defs, tool_display, ..
+                banner, theme, keymap, config, commands, tool_defs, tool_display,
             } => {
                 self.apply_frontend_state(
-                    theme, keymap, config, commands, tool_defs, tool_display,
+                    banner, theme, keymap, config, commands, tool_defs, tool_display,
                 );
             }
             // Pane/UI diff from a remote daemon (e.g. a command's pane between
@@ -513,6 +340,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn apply_frontend_state(
         &mut self,
+        banner: String,
         theme: serde_json::Value,
         keymap: serde_json::Value,
         config: serde_json::Value,
@@ -520,6 +348,24 @@ impl App {
         tool_defs: Vec<crate::tools::ToolDefinition>,
         tool_display: serde_json::Value,
     ) {
+        // First receipt carries the boot banner — the daemon's `bone.banner()`
+        // text plus client-side update/catalog hints — followed by the greeting.
+        // (The VM-less client can't build the banner itself; it arrives here.)
+        if !self.banner_shown {
+            self.banner_shown = true;
+            let mut lines: Vec<String> = Vec::new();
+            if !banner.is_empty() {
+                lines.push(banner.clone());
+            }
+            lines.extend(Self::banner_client_hints());
+            if !lines.is_empty() {
+                self.messages.push(Message::system(lines.join("\n")));
+            }
+            self.messages.push(Message::system(format!(
+                "bone v{} — type /help for commands. Ctrl+C twice to quit.",
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
         if let Ok(snap) =
             serde_json::from_value::<crate::ext::snapshots::LuaThemeSnapshot>(theme)
         {
@@ -544,17 +390,12 @@ impl App {
         };
     }
 
-    /// Dispatch a `session_end` event to Lua handlers.
+    /// Dispatch a `session_end` hook on the daemon's Lua VM.
     pub fn dispatch_session_end(&self) {
-        if self.is_remote {
-            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
-                name: "session_end".into(),
-                payload: serde_json::json!({}),
-            });
-        } else {
-            self.extensions
-                .dispatch_simple("session_end", serde_json::json!({}));
-        }
+        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
+            name: "session_end".into(),
+            payload: serde_json::json!({}),
+        });
     }
 
     /// Apply a generic action returned by a Lua command or hook.
@@ -758,7 +599,6 @@ impl App {
         self.cancel_streaming = true;
         self.pages.clear();
         self.active_page = 0;
-        self.tools.state_map.clear();
         self.jobs_seen_version = u64::MAX;
         self.queue.clear();
         self.active_prompt = None;
@@ -813,15 +653,10 @@ impl App {
         };
         self.custom_configs
             .set_value("general", "approval_mode", mode.to_string());
-        if self.is_remote {
-            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
-                name: "mode_change".into(),
-                payload: serde_json::json!({ "mode": mode }),
-            });
-        } else {
-            self.extensions
-                .dispatch_simple("mode_change", serde_json::json!({ "mode": mode }));
-        }
+        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
+            name: "mode_change".into(),
+            payload: serde_json::json!({ "mode": mode }),
+        });
         // Push the mode to the daemon's authoritative `SharedApprovalMode` — the
         // atomic the gate actually reads. Without this, cycling Safe/Danger only
         // changes the UI while the daemon keeps gating at its startup mode.
@@ -899,9 +734,18 @@ impl App {
                 self.force_redraw(&mut terminal)?;
             }
 
-            // Drain daemon events between turns (StateSnapshot, Status, etc.).
+            // Drain daemon events between turns (StateSnapshot, Status,
+            // FrontendState, etc.).
+            let before = self.messages.len();
             while let Ok(ev) = self.events_rx.try_recv() {
                 self.apply_idle_event(ev);
+            }
+            // Commit any scrollback an idle event added (banner, Status notices)
+            // so it renders promptly rather than waiting for the next keystroke.
+            if self.messages.len() != before {
+                self.renderer
+                    .flush_new_to_scrollback(&self.messages, &mut terminal)?;
+                self.redraw(&mut terminal)?;
             }
 
             // Tick background jobs: refresh pane + auto-inject finished results.
@@ -945,15 +789,12 @@ impl App {
         // counted in the viewport height.
         self.apply_view_diffs();
         let size = terminal.size()?;
-        // Publish the live terminal width so Lua panes (`ctx.ui.width`) can wrap
-        // text to the current width. Re-read each frame so it tracks resizes.
-        if self.is_remote {
-            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SetTerminalWidth {
-                width: size.width,
-            });
-        } else if let Ok(mut ui) = self.extensions.ui_handle().lock() {
-            ui.terminal_width = size.width;
-        }
+        // Publish the live terminal width to the daemon so its Lua panes
+        // (`ctx.ui.width`) wrap text to the current width. Re-read each frame so
+        // it tracks resizes.
+        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SetTerminalWidth {
+            width: size.width,
+        });
         let desired = Renderer::desired_height(
             &self.input,
             // Approval prompt is a pane now (counted via `visible_pages`), so the
@@ -1091,8 +932,8 @@ impl App {
         // A pending tool-approval is interactive too — it now lives in the pane
         // region like Lua menus, so pause the spinner/timer the same way.
         let interacting = self.has_lua_menu_pane() || self.active_prompt.is_some();
-        // A live Lua command (e.g. /shotgun) runs through `drive_live` without
-        // setting `streaming`, but it's still working — keep the spinner/timer
+        // A live Lua command (e.g. /shotgun) runs through `run_remote_command`
+        // without setting `streaming`, but it's still working — keep spinner/timer
         // alive so the UI doesn't look frozen during long multi-model runs.
         let spinner_active = (self.streaming || self.live_command) && !interacting;
         let elapsed = if interacting {
@@ -1259,18 +1100,12 @@ impl App {
     /// `Component::as_pane_content`; `StatusLine` segments append to the native
     /// status bar; `SetHighlight` recolors the live theme. Returns `true` when
     /// anything changed (so the caller redraws).
+    ///
+    /// No-op now that the TUI owns no Lua VM: pane/UI diffs arrive from the
+    /// daemon as `RuntimeEvent::ViewDiff` and are applied via [`apply_view_diff`]
+    /// in the event pumps, not drained from a local `UiState`.
     pub(crate) fn apply_view_diffs(&mut self) -> bool {
-        let diffs = self.extensions.drain_view_diffs();
-        if diffs.is_empty() {
-            return false;
-        }
-        let mut changed = false;
-        for diff in diffs {
-            if self.apply_view_diff(diff) {
-                changed = true;
-            }
-        }
-        changed
+        false
     }
 
     /// Refresh the background-jobs live-pane from the job registry.
@@ -1487,19 +1322,12 @@ impl App {
         }
     }
 
-    /// Collect all available slash commands with descriptions (builtins + Lua).
-    /// Prefers the daemon-advertised list (`wire_commands`) when present — the
-    /// authoritative source for a remote host — and otherwise falls back to the
-    /// local VM's registered commands.
+    /// Collect all available slash commands with descriptions: native builtins
+    /// plus the daemon-advertised Lua commands (`wire_commands` from
+    /// `FrontendState`).
     fn collect_commands(&self) -> Vec<(String, String)> {
         let mut cmds = crate::ui::autocomplete::builtin_commands();
-        if !self.wire_commands.is_empty() {
-            cmds.extend(self.wire_commands.iter().cloned());
-        } else if self.extensions.is_available() {
-            for cmd in self.extensions.commands() {
-                cmds.push((cmd.name.clone(), cmd.description.clone()));
-            }
-        }
+        cmds.extend(self.wire_commands.iter().cloned());
         cmds
     }
 
@@ -2019,11 +1847,7 @@ impl App {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0].to_string();
         let arg = parts.get(1).copied().unwrap_or("").to_string();
-        let has_lua_config = self
-            .extensions
-            .commands()
-            .iter()
-            .any(|registered| registered.name == "config");
+        let has_lua_config = self.wire_commands.iter().any(|(name, _)| name == "config");
 
         if has_lua_config
             && cmd == "provider"
@@ -2057,15 +1881,14 @@ impl App {
         }
 
         // Protected built-ins always win over Lua commands.
-        if !commands::is_protected_builtin(cmd.as_str()) && self.extensions.is_available() {
+        if !commands::is_protected_builtin(cmd.as_str()) && !self.wire_commands.is_empty() {
             // Check if the lua command is enabled in commands config.
             // If the commands page is absent or empty, treat all registered commands as enabled
             // (same fallback semantics as tools).
             let all_command_names: Vec<String> = self
-                .extensions
-                .commands()
+                .wire_commands
                 .iter()
-                .map(|c| c.name.clone())
+                .map(|(name, _)| name.clone())
                 .collect();
             let enabled_commands = self.custom_configs.enabled_command_names();
             let enabled = if enabled_commands.is_empty() {
@@ -2096,15 +1919,7 @@ impl App {
         let prev_provider = self.view.provider_id.clone();
         let prev_model = self.view.provider_model.clone();
 
-        let lua_cmds: Vec<(String, String)> = if self.extensions.is_available() {
-            self.extensions
-                .commands()
-                .iter()
-                .map(|c| (c.name.clone(), c.description.clone()))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let lua_cmds: Vec<(String, String)> = self.wire_commands.clone();
 
         // Handle /provider and /model by telling the daemon to switch, then
         // reading the authoritative provider info from the StateSnapshot.
@@ -2176,156 +1991,15 @@ impl App {
         Ok(())
     }
 
-    /// Run a Lua-registered command. Returns `Some(())` if the command was found and handled.
-    /// Snapshot the app-derived `ctx` fields for the current conversation.
-    /// Shared by the command runner, the tool dispatch path, and `before_turn`
-    /// so every Lua entry point sees an identical `ctx`.
-    pub(super) fn app_ctx_state(&self) -> crate::ext::ctx::AppCtxState {
-        crate::ext::ctx::AppCtxState::new(
-            &self.tools,
-            &self.token_stats,
-            &self.approval_mode,
-            self.conversation_id,
-            &self.view.provider_id,
-            &self.view.provider_model,
-            self.usage_by_provider.clone(),
-            self.messages
-                .iter()
-                .map(|m| ChatMessage::new(m.role, &m.content))
-                .collect(),
-        )
-    }
-
+    /// Run a Lua slash command on the daemon's VM over the protocol. Returns
+    /// `Some(())` if handled, `None` if the daemon reported the command unknown.
     async fn run_lua_command(
         &mut self,
         cmd: &str,
         arg: &str,
         term: &mut BoneTerminal,
     ) -> Option<()> {
-        // Attached to a remote daemon: run the command on its Lua VM over the
-        // protocol instead of the local one. Every `run_lua_command` call site
-        // in `handle_command` routes through here, so this is the single switch.
-        if self.is_remote {
-            return self.run_remote_command(cmd, arg, term).await;
-        }
-        let lua = self.extensions.lua_handle();
-        let shared_ui = self.extensions.ui_handle();
-        let cmd_owned = cmd.to_string();
-        let arg_owned = arg.to_string();
-        let app_state = self.app_ctx_state();
-        // Shared cancel flag: wired into the command's ctx (so Lua can observe
-        // cancellation) and flipped by `drive_live` when the user hits Esc.
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        self.live_command = true;
-        self.cancel_streaming = false;
-        // Seed the turn timer so the status bar shows elapsed time while the
-        // command works (mirrors a normal streamed turn).
-        self.turn_start = Some(std::time::Instant::now());
-        self.turn_paused_duration = std::time::Duration::ZERO;
-        self.turn_pause_start = None;
-
-        // Run the command through the shared live-driver loop so it gets the
-        // same capabilities as tools, including `ctx.ui.key()`, which needs
-        // the loop to pump pane events and deliver keystrokes to Lua.
-        let cancel_for_ctx = cancel.clone();
-        let reply = self
-            .drive_live(
-                move |events| async move {
-                    tokio::task::spawn_blocking(move || {
-                        let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
-
-                        // Find the command handler using the shared lookup.
-                        let handler = match crate::ext::ops_commands::find_handler(&lua, &cmd_owned)
-                        {
-                            Some(f) => f,
-                            None => return Some(None),
-                        };
-
-                        let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
-                        let shared_state = crate::ext::ctx::process_shared_state();
-                        let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
-                        app_state.apply_to(&mut ctx_cfg);
-                        ctx_cfg.pane_sender = Some(events);
-                        ctx_cfg.ui = Some(shared_ui.clone());
-                        ctx_cfg.cancelled = Some(cancel_for_ctx);
-                        let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
-
-                        // Release the project Lua mutex before calling into Lua: a
-                        // nested LuaTool invocation via ctx.tools.call runs inline on
-                        // this thread and must re-acquire it (std::sync::Mutex is not
-                        // reentrant).
-                        drop(lua);
-
-                        let result = handler.call::<mlua::Value>((arg_owned, ctx_table));
-
-                        let reply = match result {
-                            Ok(value) => crate::ext::types::parse_lua_command_return(value)
-                                .map(|ret| (ret.output, ret.submit, ret.action, ret.display_role)),
-                            Err(e) => {
-                                eprintln!("bone-lua error: command '{cmd_owned}': {e}");
-                                Some((format!("Lua command error: {e}"), false, None, None))
-                            }
-                        };
-                        Some(reply)
-                    })
-                    .await
-                    .ok()
-                    .flatten()
-                },
-                term,
-                cancel.clone(),
-                || None,
-            )
-            .await
-            .ok()
-            .flatten();
-
-        self.live_command = false;
-        self.cancel_streaming = false;
-        // Tear down the turn timer seeded above; otherwise the status bar keeps
-        // ticking after the command returns (mirrors the streaming teardown).
-        self.turn_start = None;
-        self.turn_paused_duration = std::time::Duration::ZERO;
-        self.turn_pause_start = None;
-
-        if let Some(Some((mut reply, mut submit, action, display_role))) = reply {
-            // A reply-bearing action (config_action) yields a status reply
-            // that must be displayed, not submitted as a user turn. Force
-            // submit=false so the local path can't diverge from RPC.
-            submit &= action
-                .as_ref()
-                .and_then(|a| a.config_action.as_ref())
-                .is_none();
-            if let Some(action) = action
-                && let Ok(Some(action_reply)) = self.apply_lua_action(action, term).await
-            {
-                reply = action_reply;
-            }
-            if submit {
-                let display = format!(
-                    "/{cmd}{}",
-                    if arg.is_empty() {
-                        "".to_string()
-                    } else {
-                        format!(" {arg}")
-                    }
-                );
-                self.submit_user_turn(reply, Some(display), Vec::new(), term)
-                    .await
-                    .ok();
-            } else {
-                if display_role.as_deref() == Some("assistant") {
-                    self.show_assistant_reply(reply, term).ok();
-                } else {
-                    self.show_reply(reply, term).ok();
-                }
-            }
-        } else {
-            self.redraw(term).ok();
-        }
-
-        Some(())
+        self.run_remote_command(cmd, arg, term).await
     }
 
     fn show_reply(&mut self, reply: impl Into<String>, term: &mut BoneTerminal) -> io::Result<()> {
@@ -2379,12 +2053,9 @@ impl App {
     }
 
     fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        if self.is_remote {
-            return self.show_reply(
-                "Stats dashboard is not available in remote mode.".to_string(),
-                term,
-            );
-        }
+        // Reads the local session DB — the same file the local daemon writes.
+        // (A truly remote `--connect` host would reflect the local DB instead;
+        // acceptable, and no worse than the previous "unavailable" block.)
         if let Some(status) = self.try_tmux_popup("stats-popup", "96%", "92%", term)?
             && status.success()
         {
@@ -2413,49 +2084,21 @@ impl App {
         Ok(())
     }
 
-    /// Rebuild the Lua VM and tool registry from disk in place (the
-    /// `/tools reload` and post-`/catalog` hot-reload path). Returns a summary
-    /// line. Lets catalog installs/removes take effect without restarting bone.
+    /// Ask the daemon to rebuild its Lua VM and tool registry from disk (the
+    /// `/tools reload` and post-`/catalog` hot-reload path). The daemon disk-boots
+    /// and broadcasts a fresh `FrontendState` (new theme/keymap/commands/tools)
+    /// plus a `Status` summary, which the event loop applies. Also refresh the
+    /// local config-derived state from disk so settings tracked client-side
+    /// (e.g. approval mode) stay in sync.
     fn reload_extensions(&mut self) -> String {
-        let config_dir = crate::config::bone_dir();
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let mut custom = config::custom::CustomConfigs::load();
-        let booted = crate::ext::boot_with_tools(
-            &config_dir,
-            &cwd,
-            &mut custom,
-            true,
-            crate::ext::BootOptions {
-                agent_depth: 0,
-                headless: false,
-                model: self.view.provider_model.clone(),
-                provider: self.view.provider_id.clone(),
-                tool_allowlist: None,
-            },
-            &self.view.provider_model,
-            &self.view.provider_id,
-        );
-        self.extensions = booted.manager;
-        self.tools = booted.tools;
+        let custom = config::custom::CustomConfigs::load();
         self.user_config.apply_custom_configs(&custom);
         self.approval_mode = self.user_config.approval_mode;
         self.custom_configs = custom;
-        self.user_config.enabled_tools = self.tools.enabled_names();
-        let count = self.tools.definitions().len();
-        // In-process: hand the daemon a clone of what we just booted (shared
-        // Lua VM) via the inbox so it adopts it instead of re-reading disk. In
-        // remote mode there's no inbox — the remote daemon disk-boots on the
-        // command (it's a separate process with its own VM).
-        if let Some(inbox) = &self.reload_inbox {
-            *inbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::ext::BootedTools {
-                manager: self.extensions.clone(),
-                tools: self.tools.clone(),
-            });
-        }
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::ReloadExtensions);
-        format!("Tools and Lua extensions reloaded. {count} tools enabled.")
+        "Reloading tools and Lua extensions…".to_string()
     }
 
     fn open_catalog(&mut self, term: &mut BoneTerminal) -> io::Result<()> {

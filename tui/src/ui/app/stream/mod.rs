@@ -3,31 +3,23 @@
 use crate::chat::Message;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
-use crate::tools::types::ToolLiveEvent;
 use crate::tools::{ApprovalMode, Tool, ToolCall};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use futures_util::pin_mut;
 use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
-use tokio::sync::mpsc;
-use tokio::time::{self, Duration};
+use tokio::time::Duration;
 
 use super::{App, apply_input_key_with_paste_burst};
 
-/// One place that resolves a `KeyEvent` to whichever caller is blocked
-/// waiting for one. A pending key request can come from two sources:
-///   - `Direct`: a `ctx.ui.key()` call inside a blocking Lua tool, delivered
-///     via the `ToolLiveEvent` channel (the future holds a `oneshot` sender).
-///   - `Daemon`: the daemon requested a key via `RuntimeEvent::KeyRequest`,
-///     answered with `RuntimeCommand::KeyReply` through the command channel.
-///
-/// Both code paths (`drive_live`, `stream_runtime`) own a `KeySink` and pass
-/// it to `drain_keys`; a key event from the terminal is delivered here.
+/// One place that resolves a `KeyEvent` to a blocked `ctx.ui.key()` request.
+/// The daemon asks for a key via `RuntimeEvent::KeyRequest`, and the reply goes
+/// back as `RuntimeCommand::KeyReply` over the command channel. The event pumps
+/// own a `KeySink` and pass it to `drain_keys`; a terminal key is delivered here.
 pub(crate) struct KeySink {
     pending: Option<PendingKeyReply>,
     /// Keys read from the terminal while no reply slot was registered, held for
@@ -41,15 +33,12 @@ pub(crate) struct KeySink {
     owns_input: bool,
 }
 
-enum PendingKeyReply {
-    Direct(tokio::sync::oneshot::Sender<crate::pane_content::KeyEvent>),
-    /// A `ctx.ui.key()` request from the daemon, delivered via
-    /// `RuntimeEvent::KeyRequest`. The reply uses the runtime command channel
-    /// for both the in-process Hub and a remote socket bridge.
-    Daemon {
-        id: u64,
-        command_tx: tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeCommand>,
-    },
+/// A pending `ctx.ui.key()` request from the daemon, delivered via
+/// `RuntimeEvent::KeyRequest`; the reply goes back over the runtime command
+/// channel as `KeyReply`.
+struct PendingKeyReply {
+    id: u64,
+    command_tx: tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeCommand>,
 }
 
 impl KeySink {
@@ -73,22 +62,13 @@ impl KeySink {
     fn arm(&mut self, reply: PendingKeyReply) {
         self.owns_input = true;
         match self.buffer.pop_front() {
-            Some(key) => match reply {
-                PendingKeyReply::Direct(tx) => {
-                    let _ = tx.send(key);
-                }
-                PendingKeyReply::Daemon { id, command_tx } => {
-                    let _ = command_tx.send(crate::runtime::RuntimeCommand::KeyReply { id, key });
-                }
-            },
+            Some(key) => {
+                let _ = reply
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::KeyReply { id: reply.id, key });
+            }
             None => self.pending = Some(reply),
         }
-    }
-
-    /// Register a direct oneshot channel (from `ctx.ui.key()` via the
-    /// `ToolLiveEvent` channel transport).
-    pub fn set_direct(&mut self, tx: tokio::sync::oneshot::Sender<crate::pane_content::KeyEvent>) {
-        self.arm(PendingKeyReply::Direct(tx));
     }
 
     /// Register a daemon key request (from `RuntimeEvent::KeyRequest`).
@@ -97,7 +77,7 @@ impl KeySink {
         id: u64,
         command_tx: tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeCommand>,
     ) {
-        self.arm(PendingKeyReply::Daemon { id, command_tx });
+        self.arm(PendingKeyReply { id, command_tx });
     }
 
     /// Route `key` to the tool. Delivers to the pending reply slot if armed;
@@ -106,12 +86,10 @@ impl KeySink {
     /// fall through to the main chat input.
     pub fn deliver(&mut self, key: crate::pane_content::KeyEvent) -> bool {
         match self.pending.take() {
-            Some(PendingKeyReply::Direct(tx)) => {
-                let _ = tx.send(key);
-                true
-            }
-            Some(PendingKeyReply::Daemon { id, command_tx }) => {
-                let _ = command_tx.send(crate::runtime::RuntimeCommand::KeyReply { id, key });
+            Some(reply) => {
+                let _ = reply
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::KeyReply { id: reply.id, key });
                 true
             }
             None if self.owns_input => {
@@ -138,7 +116,7 @@ impl KeySink {
 /// Tracks which pane component ids a blocking tool has opened, so they can be
 /// removed if the tool is cancelled mid-block (its future is dropped, so it
 /// can't emit its own removal `ViewDiff::Remove`). Fed by `track` from the
-/// `drain_view_diffs` loop in `drive_live`; cleaned up by `drain_for_cancel`.
+/// remote command pump (`run_remote_command`); cleaned up by `drain_for_cancel`.
 pub(crate) struct PaneOwnership {
     sources: std::collections::HashSet<String>,
 }
@@ -781,7 +759,7 @@ impl App {
                 // the id is recorded in `shown_tool_rows` so the later
                 // `ToolResult` event doesn't render a duplicate.
                 if self
-                    .tools
+                    .wire_tools
                     .display_for_call(&call)
                     .and_then(|d| d.eager)
                     .unwrap_or(false)
@@ -1026,7 +1004,7 @@ impl App {
 
     /// Render the bottom pane during a live turn or tool run: spinner-animated,
     /// current panes (when visible), no autocomplete. Shared by the model-turn
-    /// tick and the Lua `drive_live` loop so both paint identically.
+    /// tick and the remote-command pump so both paint identically.
     fn render_streaming(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         // During streaming/tool loops the main event loop is not running, so
         // physical resizes must be handled here too. A plain ratatui draw after
@@ -1091,101 +1069,6 @@ impl App {
 
         self.redraw(term)?;
         Ok(())
-    }
-
-    /// Dispatch the `before_turn` hook on a blocking thread while keeping the
-    /// UI responsive (spinner animation, input draining, Esc-to-cancel).
-    ///
-    /// Handlers may block on LLM calls (e.g. auto-compaction via
-    /// `ctx.agent.run`), so running them on the event-loop thread would freeze
-    /// the whole app for the duration. A cancel flag is threaded into the ctx
-    /// so pressing Esc aborts an in-flight compaction promptly.
-    /// Drive a blocking-Lua future to completion while keeping the UI live:
-    /// deliver keystrokes to any pending `ctx.ui.key()` call (the channel now
-    /// carries only `Key` events — pane diffs go through the shared UiState
-    /// handle), drain UI diffs each tick, render, and clean up panes on cancel.
-    ///
-    /// Generic over the future's output `T` so both model-invoked tools and
-    /// slash commands share one execution loop. `on_cancel` produces the
-    /// return value when the user cancels with Esc.
-    pub(super) async fn drive_live<T, F, Fut>(
-        &mut self,
-        make_future: F,
-        term: &mut BoneTerminal,
-        cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        on_cancel: impl FnOnce() -> T,
-    ) -> io::Result<T>
-    where
-        F: FnOnce(mpsc::UnboundedSender<ToolLiveEvent>) -> Fut,
-        Fut: std::future::Future<Output = T>,
-    {
-        let mut spinner = time::interval(Duration::from_millis(70));
-        let (tx, mut rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
-        let future = make_future(tx);
-        pin_mut!(future);
-        // Pane sources currently shown by the running tool. Used only to clean
-        // up lingering panes if the tool is cancelled before emitting its own
-        // removal event.
-        let mut live_sources = PaneOwnership::new();
-        let mut pending_key = KeySink::new();
-
-        loop {
-            tokio::select! {
-                results = &mut future => {
-                    // Drain trailing key requests before returning.
-                    while let Ok(ToolLiveEvent::Key(req)) = rx.try_recv() {
-                        pending_key.set_direct(req.reply);
-                    }
-                    return Ok(results);
-                }
-                Some(ToolLiveEvent::Key(req)) = rx.recv() => {
-                    pending_key.set_direct(req.reply);
-                }
-                _ = spinner.tick() => {
-                    if Self::drain_keys(
-                        &mut self.input,
-                        &mut self.queue,
-                        &mut self.approval_mode,
-                        &mut self.cancel_streaming,
-                        &mut self.panes_visible,
-                        &mut self.pages,
-                        &mut self.active_page,
-                        &mut pending_key,
-                    ) {
-                        self.user_config.approval_mode = self.approval_mode;
-                        self.persist_runtime_config();
-                    }
-                    if self.cancel_streaming {
-                        // Signal cancellation to any running subagents.
-                        cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
-                        // Remove any panes the cancelled tool left behind — its
-                        // future was dropped, so it can't emit its own removal.
-                        live_sources.drain_for_cancel(&mut self.pages, &mut self.active_page);
-                        return Ok(on_cancel());
-                    }
-
-                    // Drain UI-state diffs (v2: safe even while the VM is
-                    // busy). Track ownership for cancel cleanup.
-                    let diffs = self.extensions.drain_view_diffs();
-                    for diff in &diffs {
-                        live_sources.track(diff);
-                    }
-                    for diff in diffs {
-                        self.apply_view_diff(diff);
-                    }
-
-                    // Refresh subagent pane on registry change or ~1s ticker.
-                    self.maybe_refresh_jobs_pane();
-
-                    // Drain any key requests sent during drain_keys.
-                    while let Ok(ToolLiveEvent::Key(req)) = rx.try_recv() {
-                        pending_key.set_direct(req.reply);
-                    }
-
-                    self.render_streaming(term)?;
-                }
-            }
-        }
     }
 
     /// Drain pending key events into input edits or queue. Used during streaming.
@@ -1343,6 +1226,8 @@ impl App {
 mod keysink_tests {
     use super::KeySink;
     use crate::pane_content::KeyEvent;
+    use crate::runtime::RuntimeCommand;
+    use tokio::sync::mpsc::{self, UnboundedReceiver};
 
     fn key(c: &str) -> KeyEvent {
         KeyEvent {
@@ -1354,33 +1239,22 @@ mod keysink_tests {
         }
     }
 
-    #[test]
-    fn key_routes_to_armed_reply_slot() {
-        let mut sink = KeySink::new();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sink.set_direct(tx);
-        assert!(sink.wants_key());
-        assert!(sink.deliver(key("a")));
-        assert_eq!(rx.blocking_recv().unwrap(), key("a"));
+    /// Pull the `(id, key)` from the next `KeyReply` the sink emitted.
+    fn next_reply(rx: &mut UnboundedReceiver<RuntimeCommand>) -> (u64, KeyEvent) {
+        match rx.try_recv().expect("a KeyReply command") {
+            RuntimeCommand::KeyReply { id, key } => (id, key),
+            other => panic!("expected KeyReply, got {other:?}"),
+        }
     }
 
     #[test]
-    fn daemon_request_replies_with_key_reply_command() {
-        // A daemon `KeyRequest{id}` resolves by sending a `KeyReply` carrying
-        // the same id + key back over the command channel in either transport.
-        use crate::runtime::RuntimeCommand;
+    fn key_routes_to_armed_reply_slot() {
         let mut sink = KeySink::new();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeCommand>();
-        sink.set_daemon(42, tx);
+        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
+        sink.set_daemon(1, tx);
         assert!(sink.wants_key());
-        assert!(sink.deliver(key("z")));
-        match rx.try_recv().expect("a KeyReply command") {
-            RuntimeCommand::KeyReply { id, key: k } => {
-                assert_eq!(id, 42);
-                assert_eq!(k, key("z"));
-            }
-            other => panic!("expected KeyReply, got {other:?}"),
-        }
+        assert!(sink.deliver(key("a")));
+        assert_eq!(next_reply(&mut rx), (1, key("a")));
     }
 
     #[test]
@@ -1388,17 +1262,17 @@ mod keysink_tests {
         // Between a tool's successive requests the slot is empty but the tool
         // still owns input, so keys buffer rather than leaking to chat.
         let mut sink = KeySink::new();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sink.set_direct(tx);
+        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
+        sink.set_daemon(1, tx);
         sink.deliver(key("a")); // resolves the slot, owns_input stays latched
-        assert_eq!(rx.blocking_recv().unwrap(), key("a"));
+        assert_eq!(next_reply(&mut rx), (1, key("a")));
         assert!(sink.wants_key()); // still owned
         assert!(sink.deliver(key("b"))); // buffered, consumed (not leaked)
 
         // Next request drains the buffered key instead of blocking.
-        let (tx2, rx2) = tokio::sync::oneshot::channel();
-        sink.set_direct(tx2);
-        assert_eq!(rx2.blocking_recv().unwrap(), key("b"));
+        let (tx2, mut rx2) = mpsc::unbounded_channel::<RuntimeCommand>();
+        sink.set_daemon(2, tx2);
+        assert_eq!(next_reply(&mut rx2), (2, key("b")));
     }
 
     #[test]
@@ -1406,10 +1280,10 @@ mod keysink_tests {
         // After the owning tool finishes, keys must fall through to chat input
         // instead of staying latched/buffered for the rest of the turn.
         let mut sink = KeySink::new();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sink.set_direct(tx);
+        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
+        sink.set_daemon(1, tx);
         sink.deliver(key("a"));
-        assert_eq!(rx.blocking_recv().unwrap(), key("a"));
+        assert_eq!(next_reply(&mut rx), (1, key("a")));
 
         sink.clear_owner();
         assert!(!sink.wants_key());
@@ -1421,16 +1295,16 @@ mod keysink_tests {
         // Buffered keys belong to the finished tool and must not bleed into a
         // later tool's first key request.
         let mut sink = KeySink::new();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        sink.set_direct(tx);
+        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
+        sink.set_daemon(1, tx);
         sink.deliver(key("a"));
-        let _ = rx.blocking_recv();
+        let _ = next_reply(&mut rx);
         sink.deliver(key("buffered")); // buffered for next request
         sink.clear_owner();
 
-        let (tx2, rx2) = tokio::sync::oneshot::channel();
-        sink.set_direct(tx2);
+        let (tx2, mut rx2) = mpsc::unbounded_channel::<RuntimeCommand>();
+        sink.set_daemon(2, tx2);
         sink.deliver(key("fresh"));
-        assert_eq!(rx2.blocking_recv().unwrap(), key("fresh"));
+        assert_eq!(next_reply(&mut rx2), (2, key("fresh")));
     }
 }
