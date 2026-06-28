@@ -121,8 +121,8 @@ impl CustomConfigs {
         migrate_old_values_file();
         migrate_status_values_from_general();
         migrate_providers_file();
-        backfill_general_fields();
-        backfill_status_fields();
+        backfill_fields("general.yaml", GENERAL_YAML);
+        backfill_fields("status.yaml", STATUS_YAML);
 
         let dir = config_dir();
         let mut configs = CustomConfigs::default();
@@ -739,61 +739,36 @@ fn is_status_toggle_key(key: &str) -> bool {
     UserConfig::STATUS_TOGGLE_KEYS.contains(&key)
 }
 
-/// Append field *definitions* added to the seed `general.yaml` after a user's
-/// file was first written, so new built-in toggles (e.g. `show_thinking`)
-/// become reachable from `/config` without clobbering existing user values.
+/// Append field *definitions* added to a bundled seed page after a user's file
+/// was first written, so new built-in toggles (e.g. `show_thinking`) become
+/// reachable from `/config` without clobbering existing user values/order.
 /// No-op when the file is absent (fresh installs get the full seed) or already
 /// current.
-fn backfill_general_fields() {
-    let general_path = config_dir().join("general.yaml");
-    if !general_path.exists() {
+fn backfill_fields(file: &str, seed_yaml: &str) {
+    let path = config_dir().join(file);
+    if !path.exists() {
         return;
     }
-    let Some(mut general) = load_yaml::<CustomConfigPage>(&general_path) else {
+    let Some(mut page) = load_yaml::<CustomConfigPage>(&path) else {
         return;
     };
-    let Some(seed) = serde_yaml::from_str::<CustomConfigPage>(GENERAL_YAML).ok() else {
-        return;
-    };
-
-    let mut changed = false;
-    for seed_field in seed.fields {
-        if !general.fields.iter().any(|f| f.key == seed_field.key) {
-            general.fields.push(seed_field);
-            changed = true;
-        }
-    }
-
-    if changed && let Ok(yaml) = serde_yaml::to_string(&general) {
-        let _ = std::fs::write(general_path, yaml);
-    }
-}
-
-/// Merge any new fields from the bundled seed into the user's on-disk
-/// `status.yaml`, preserving their existing values/order. Mirrors
-/// [`backfill_general_fields`].
-fn backfill_status_fields() {
-    let status_path = config_dir().join("status.yaml");
-    if !status_path.exists() {
-        return;
-    }
-    let Some(mut status) = load_yaml::<CustomConfigPage>(&status_path) else {
-        return;
-    };
-    let Some(seed) = serde_yaml::from_str::<CustomConfigPage>(STATUS_YAML).ok() else {
+    let Some(seed) = serde_yaml::from_str::<CustomConfigPage>(seed_yaml).ok() else {
         return;
     };
 
     let mut changed = false;
     for seed_field in seed.fields {
-        if !status.fields.iter().any(|f| f.key == seed_field.key) {
-            status.fields.push(seed_field);
+        if !page.fields.iter().any(|f| f.key == seed_field.key) {
+            page.fields.push(seed_field);
             changed = true;
         }
     }
 
-    if changed && let Ok(yaml) = serde_yaml::to_string(&status) {
-        let _ = std::fs::write(status_path, yaml);
+    if changed
+        && let Ok(yaml) = serde_yaml::to_string(&page)
+        && let Err(e) = std::fs::write(&path, yaml)
+    {
+        eprintln!("bone: warning: could not write {}: {e}", path.display());
     }
 }
 

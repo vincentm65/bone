@@ -18,7 +18,7 @@ use crate::pane_content::{KeyEvent, KeyRequest};
 use crate::tools::{ApprovalGate, CallOutcome, ToolCall, decide_call};
 
 // Re-export wire-format types from protocol.
-pub use bone_protocol::{RuntimeCommand, RuntimeEvent, SessionSnapshot};
+pub use bone_protocol::{CommandAction, RuntimeCommand, RuntimeEvent, SessionSnapshot};
 
 /// Routes key replies from the frontend back to blocked callers.
 #[derive(Clone, Default)]
