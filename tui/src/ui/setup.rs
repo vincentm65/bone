@@ -9,7 +9,7 @@
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -644,61 +644,25 @@ fn summary(head: &str, value: String) -> Line<'static> {
 }
 
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State) {
-    let mut keys: Vec<Span> = Vec::new();
-    let mut push = |k: &str, label: &str| {
-        keys.push(Span::styled(
-            format!(" {k} "),
-            Style::default()
-                .fg(BG)
-                .bg(MUTED)
-                .add_modifier(Modifier::BOLD),
-        ));
-        keys.push(Span::styled(
-            format!(" {label}   "),
-            Style::default().fg(DIM),
-        ));
-    };
-
     let cancel_label = if state.fresh { "skip" } else { "cancel" };
-    match state.step {
-        Step::Welcome => {
-            push("→/enter", "start");
-            push("esc", cancel_label);
-        }
-        Step::Provider => {
-            push("↑↓", "choose");
-            push("type", "key");
-            push("→", "next");
-            push("←", "back");
-            push("esc", cancel_label);
-        }
-        Step::Catalog => {
-            push("↑↓", "move");
-            push("space", "toggle");
-            push("a/n", "all/none");
-            push("→", "next");
-            push("←", "back");
-        }
-        Step::Init => {
-            push("↑↓", "choose");
-            push("→", "next");
-            push("←", "back");
-        }
-        Step::Confirm => {
-            push("enter", "apply");
-            push("←", "back");
-            push("esc", cancel_label);
-        }
-    }
-
-    frame.render_widget(
-        Paragraph::new(Line::from(keys))
-            .alignment(Alignment::Left)
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(BORDER)),
-            ),
-        area,
-    );
+    let keys: &[(&str, &str)] = match state.step {
+        Step::Welcome => &[("→/enter", "start"), ("esc", cancel_label)],
+        Step::Provider => &[
+            ("↑↓", "choose"),
+            ("type", "key"),
+            ("→", "next"),
+            ("←", "back"),
+            ("esc", cancel_label),
+        ],
+        Step::Catalog => &[
+            ("↑↓", "move"),
+            ("space", "toggle"),
+            ("a/n", "all/none"),
+            ("→", "next"),
+            ("←", "back"),
+        ],
+        Step::Init => &[("↑↓", "choose"), ("→", "next"), ("←", "back")],
+        Step::Confirm => &[("enter", "apply"), ("←", "back"), ("esc", cancel_label)],
+    };
+    picker::draw_footer(frame, area, keys);
 }

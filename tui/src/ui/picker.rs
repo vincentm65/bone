@@ -3,7 +3,7 @@
 //! two-column list/detail renderer. Keeping these in one place means both
 //! screens look and behave identically.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -188,5 +188,35 @@ pub fn draw_list(
                     .padding(ratatui::widgets::Padding::horizontal(2)),
             ),
         detail,
+    );
+}
+
+/// Render a one-line key-bindings footer under a top border. Each `(key, label)`
+/// pair is shown as a highlighted key token followed by its label. Shared by the
+/// onboarding wizard and `/catalog` so both screens share an identical footer.
+pub fn draw_footer(frame: &mut ratatui::Frame, area: Rect, keys: &[(&str, &str)]) {
+    let mut spans: Vec<Span> = Vec::new();
+    for (k, label) in keys {
+        spans.push(Span::styled(
+            format!(" {k} "),
+            Style::default()
+                .fg(BG)
+                .bg(MUTED)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}   "),
+            Style::default().fg(DIM),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .alignment(Alignment::Left)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(BORDER)),
+            ),
+        area,
     );
 }

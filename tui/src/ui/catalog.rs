@@ -10,7 +10,7 @@
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -417,39 +417,16 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
 }
 
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, applied: bool) {
-    let mut keys: Vec<Span> = Vec::new();
-    let mut push = |k: &str, label: &str| {
-        keys.push(Span::styled(
-            format!(" {k} "),
-            Style::default()
-                .fg(BG)
-                .bg(MUTED)
-                .add_modifier(Modifier::BOLD),
-        ));
-        keys.push(Span::styled(
-            format!(" {label}   "),
-            Style::default().fg(DIM),
-        ));
-    };
-    if applied {
-        push("↑↓", "move");
-        push("enter/esc", "close");
+    let keys: &[(&str, &str)] = if applied {
+        &[("↑↓", "move"), ("enter/esc", "close")]
     } else {
-        push("↑↓", "move");
-        push("space", "toggle");
-        push("a/n", "all/none");
-        push("enter", "apply");
-        push("esc", "close");
-    }
-
-    frame.render_widget(
-        Paragraph::new(Line::from(keys))
-            .alignment(Alignment::Left)
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(BORDER)),
-            ),
-        area,
-    );
+        &[
+            ("↑↓", "move"),
+            ("space", "toggle"),
+            ("a/n", "all/none"),
+            ("enter", "apply"),
+            ("esc", "close"),
+        ]
+    };
+    picker::draw_footer(frame, area, keys);
 }
