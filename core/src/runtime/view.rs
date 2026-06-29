@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 // Re-export wire-format types from protocol.
 pub use bone_protocol::view::{
-    view_diff_from_pane_content, Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec,
-    StatusSegment, ViewDiff,
+    Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec, StatusSegment, ViewDiff,
+    view_diff_from_pane_content,
 };
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

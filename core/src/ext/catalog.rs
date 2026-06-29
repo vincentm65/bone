@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default catalog location (raw GitHub content). Override with `BONE_CATALOG_URL`
 /// — an `http(s)://` base or a local filesystem path (used by tests / dev).
-const DEFAULT_URL: &str = "https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main";
+const DEFAULT_URL: &str =
+    "https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main";
 
 /// How often the background refresh actually hits the network.
 const REFRESH_THROTTLE: Duration = Duration::from_secs(6 * 60 * 60);

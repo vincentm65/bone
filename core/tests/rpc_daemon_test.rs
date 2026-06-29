@@ -69,7 +69,9 @@ impl LlmProvider for MockProvider {
 /// TCP listener serving every client against the hub. Returns the bound address.
 async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, Hub) {
     let (hub, commands_rx) = Hub::new();
-    let session = std::sync::Arc::new(std::sync::Mutex::new(RuntimeSession::new(ToolHandler::new(builtin_tools()))));
+    let session = std::sync::Arc::new(std::sync::Mutex::new(RuntimeSession::new(
+        ToolHandler::new(builtin_tools()),
+    )));
     tokio::spawn(run_daemon(
         hub.publisher(),
         commands_rx,
@@ -274,7 +276,10 @@ async fn two_clients_both_see_the_turn() {
     wait_for_clients(&hub, 2).await;
     write_message(
         &mut a_write,
-        &RuntimeCommand::SubmitPrompt { text: "go".into(), images: vec![] },
+        &RuntimeCommand::SubmitPrompt {
+            text: "go".into(),
+            images: vec![],
+        },
     )
     .await
     .unwrap();
@@ -316,7 +321,9 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
     // Session starts with the full builtin tool set (non-empty).
-    let session = Arc::new(Mutex::new(RuntimeSession::new(ToolHandler::new(builtin_tools()))));
+    let session = Arc::new(Mutex::new(RuntimeSession::new(ToolHandler::new(
+        builtin_tools(),
+    ))));
     assert!(
         !session.lock().unwrap().tools.definitions().is_empty(),
         "precondition: session boots with builtin tools",
@@ -377,7 +384,9 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
 #[tokio::test]
 async fn remote_client_bridges_commands_and_events() {
     let provider: Arc<dyn LlmProvider> =
-        Arc::new(MockProvider::single(vec![ChatEvent::TextDelta("bridged".into())]));
+        Arc::new(MockProvider::single(vec![ChatEvent::TextDelta(
+            "bridged".into(),
+        )]));
     let (addr, _hub) = spawn_daemon(provider).await;
 
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -387,7 +396,10 @@ async fn remote_client_bridges_commands_and_events() {
     let mut events = client.subscribe();
     client
         .command_sender()
-        .send(RuntimeCommand::SubmitPrompt { text: "go".into(), images: vec![] })
+        .send(RuntimeCommand::SubmitPrompt {
+            text: "go".into(),
+            images: vec![],
+        })
         .unwrap();
 
     let finished = tokio::time::timeout(Duration::from_secs(20), async {
@@ -400,7 +412,10 @@ async fn remote_client_bridges_commands_and_events() {
     })
     .await
     .expect("bridged turn timed out");
-    assert_eq!(finished, "bridged", "prompt ran on the daemon and streamed back");
+    assert_eq!(
+        finished, "bridged",
+        "prompt ran on the daemon and streamed back"
+    );
 }
 
 /// A `SwitchProvider` to an unknown id fails inside the daemon, but it must
@@ -434,7 +449,10 @@ async fn failed_provider_switch_still_publishes_snapshot() {
     })
     .await
     .expect("daemon never published a snapshot after a failed switch");
-    assert!(got_snapshot, "a failed switch must still unblock the frontend");
+    assert!(
+        got_snapshot,
+        "a failed switch must still unblock the frontend"
+    );
 }
 
 /// Phase 3-bridge: a fresh client receives the daemon's on-connect full-state
@@ -449,7 +467,10 @@ async fn remote_client_receives_initial_state_replay() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let initial = vec![RuntimeEvent::StateSnapshot {
-        snapshot: SessionSnapshot { conversation_id: Some(42), ..Default::default() },
+        snapshot: SessionSnapshot {
+            conversation_id: Some(42),
+            ..Default::default()
+        },
     }];
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -483,14 +504,20 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
     use bone_core::runtime::view::ViewDiff;
 
     let provider: Arc<dyn LlmProvider> =
-        Arc::new(MockProvider::single(vec![ChatEvent::TextDelta("ok".into())]));
+        Arc::new(MockProvider::single(vec![ChatEvent::TextDelta(
+            "ok".into(),
+        )]));
     let (hub, commands_rx) = Hub::new();
-    let session = Arc::new(Mutex::new(RuntimeSession::new(ToolHandler::new(builtin_tools()))));
+    let session = Arc::new(Mutex::new(RuntimeSession::new(ToolHandler::new(
+        builtin_tools(),
+    ))));
     let extensions = ExtensionManager::unloaded();
     {
         let ui = extensions.ui_handle();
-        bone_core::ext::api_ui::lock_shared(&ui)
-            .apply(ViewDiff::SetHighlight { name: "marker".into(), fg: Some("#abcdef".into()) });
+        bone_core::ext::api_ui::lock_shared(&ui).apply(ViewDiff::SetHighlight {
+            name: "marker".into(),
+            fg: Some("#abcdef".into()),
+        });
     }
     tokio::spawn(run_daemon(
         hub.publisher(),
@@ -517,7 +544,10 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
     let mut events = client.subscribe();
     client
         .command_sender()
-        .send(RuntimeCommand::SubmitPrompt { text: "go".into(), images: vec![] })
+        .send(RuntimeCommand::SubmitPrompt {
+            text: "go".into(),
+            images: vec![],
+        })
         .unwrap();
 
     let diff = tokio::time::timeout(Duration::from_secs(5), async {
@@ -607,12 +637,16 @@ bone.register_command("echo", {
     let mut events = client.subscribe();
     client
         .command_sender()
-        .send(RuntimeCommand::RunCommand { name: "echo".into(), input: "hi".into() })
+        .send(RuntimeCommand::RunCommand {
+            name: "echo".into(),
+            input: "hi".into(),
+        })
         .unwrap();
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let RuntimeEvent::CommandComplete { output, submit, .. } = events.recv().await.unwrap()
+            if let RuntimeEvent::CommandComplete { output, submit, .. } =
+                events.recv().await.unwrap()
             {
                 break (output, submit);
             }
@@ -698,7 +732,10 @@ bone.register_command("noop", {
     let mut events = client.subscribe();
     client
         .command_sender()
-        .send(RuntimeCommand::RunCommand { name: "noop".into(), input: String::new() })
+        .send(RuntimeCommand::RunCommand {
+            name: "noop".into(),
+            input: String::new(),
+        })
         .unwrap();
 
     // Collect events until the command completes; assert no "unknown command"
@@ -772,7 +809,14 @@ bone.register_command("ping", {
     let ev = bone_core::rpc::frontend_state(&extensions, &tools);
     std::fs::remove_dir_all(&config_dir).ok();
 
-    let RuntimeEvent::FrontendState { banner, theme, commands, tool_defs, .. } = ev else {
+    let RuntimeEvent::FrontendState {
+        banner,
+        theme,
+        commands,
+        tool_defs,
+        ..
+    } = ev
+    else {
         panic!("expected FrontendState");
     };
     // Builtin tools (e.g. read_file) must reach a VM-less frontend for context

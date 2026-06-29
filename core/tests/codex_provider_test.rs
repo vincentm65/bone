@@ -99,12 +99,10 @@ fn test_build_codex_messages_reasoning_items() {
     use bone_core::llm::provider::ReasoningItem;
 
     let mut msg = ChatMessage::new(ChatRole::Assistant, "answer");
-    msg.reasoning_items = vec![
-        ReasoningItem {
-            id: "rs_abc".to_string(),
-            encrypted_content: "enc123".to_string(),
-        },
-    ];
+    msg.reasoning_items = vec![ReasoningItem {
+        id: "rs_abc".to_string(),
+        encrypted_content: "enc123".to_string(),
+    }];
 
     let items = build_codex_messages(vec![msg]);
     let json = serde_json::to_value(&items).unwrap();

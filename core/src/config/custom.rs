@@ -191,6 +191,18 @@ impl CustomConfigs {
         false
     }
 
+    /// Persist the named page; if saving fails, revert the field to its prior value
+    /// so the UI does not show a change that was never written to disk.
+    fn save_or_revert(&mut self, namespace: &str, key: &str, old_value: Option<serde_yaml::Value>) {
+        let page_path = config_dir().join(format!("{namespace}.yaml"));
+        if page_path.exists()
+            && !self.save_page(namespace)
+            && let Some(page) = self.page_mut(namespace)
+            && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
+        {
+            field.value = old_value;
+        }
+    }
     // ── Deny-list page helpers ──────────────────────────────────────────────
 
     /// Scan a Lua directory for .lua file stems.
@@ -465,18 +477,7 @@ impl CustomConfigs {
         };
         let old_value = field.value.clone();
         field.value = Some(yaml_val);
-        // Only persist if the page file actually exists on disk.
-        // Pages that exist only in memory (e.g. test fixtures) must not
-        // leak to the user's config directory.
-        let page_path = config_dir().join(format!("{namespace}.yaml"));
-        if page_path.exists() && !self.save_page(namespace) {
-            // Revert on failure so UI doesn't show a change that wasn't persisted.
-            if let Some(page) = self.page_mut(namespace)
-                && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
-            {
-                field.value = old_value;
-            }
-        }
+        self.save_or_revert(namespace, key, old_value);
     }
 
     /// Find a field definition by namespace and key.
@@ -540,15 +541,7 @@ impl CustomConfigs {
         if let Ok(nested) = serde_yaml::to_value(entry) {
             field.value = Some(nested);
         }
-        let page_path = config_dir().join(format!("{namespace}.yaml"));
-        if page_path.exists() && !self.save_page(namespace) {
-            // Revert on failure.
-            if let Some(page) = self.page_mut(namespace)
-                && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
-            {
-                field.value = old_value;
-            }
-        }
+        self.save_or_revert(namespace, key, old_value);
     }
 
     /// Derive a ProvidersConfig from the providers page fields.

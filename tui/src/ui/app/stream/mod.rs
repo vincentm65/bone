@@ -207,7 +207,8 @@ impl App {
             if cmd.trim() == "q" || cmd.trim() == "q!" {
                 if let Some(notice) = self.request_quit() {
                     self.messages.push(Message::system(notice));
-                    self.renderer.flush_new_to_scrollback(&self.messages, term)?;
+                    self.renderer
+                        .flush_new_to_scrollback(&self.messages, term)?;
                     self.redraw(term)?;
                 }
                 self.input.reset();
@@ -265,10 +266,12 @@ impl App {
         self.turn_pause_start = None;
 
         // Send the turn to the daemon (it handles message push, Driver, and persistence).
-        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SubmitPrompt {
-            text: text.clone(),
-            images,
-        });
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::SubmitPrompt {
+                text: text.clone(),
+                images,
+            });
 
         self.run_event_pump(term).await
     }
@@ -596,7 +599,9 @@ impl App {
                 format!("/{cmd} {arg}")
             };
             self.messages.push(Message::user(display));
-            self.renderer.flush_new_to_scrollback(&self.messages, term).ok();
+            self.renderer
+                .flush_new_to_scrollback(&self.messages, term)
+                .ok();
             self.input.reset();
             self.streaming = true;
             self.shown_tool_rows.clear();

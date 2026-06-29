@@ -28,7 +28,10 @@ fn boot(config_dir: &std::path::Path) -> bone_core::ext::BootedTools {
     )
 }
 
-fn run(booted: &bone_core::ext::BootedTools, args: serde_json::Value) -> bone_core::tools::types::ToolResult {
+fn run(
+    booted: &bone_core::ext::BootedTools,
+    args: serde_json::Value,
+) -> bone_core::tools::types::ToolResult {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

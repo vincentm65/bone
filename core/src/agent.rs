@@ -541,10 +541,7 @@ fn opt_str_chars(s: Option<&str>) -> usize {
     s.map(str::chars).map(Iterator::count).unwrap_or(0)
 }
 
-pub fn estimate_context_chars(
-    history: &[ChatMessage],
-    tool_defs_json_chars: usize,
-) -> usize {
+pub fn estimate_context_chars(history: &[ChatMessage], tool_defs_json_chars: usize) -> usize {
     let message_chars: usize = history
         .iter()
         .map(|msg| {

@@ -536,8 +536,10 @@ impl Tool for KeyTool {
             return Ok(ToolOutput::text("no events".into()));
         };
         let (reply, rx) = tokio::sync::oneshot::channel();
-        tx.send(ToolLiveEvent::Key(bone_core::pane_content::KeyRequest { reply }))
-            .unwrap();
+        tx.send(ToolLiveEvent::Key(bone_core::pane_content::KeyRequest {
+            reply,
+        }))
+        .unwrap();
         let key = rx.await.unwrap();
         Ok(ToolOutput::text(key.code))
     }

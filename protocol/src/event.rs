@@ -17,10 +17,18 @@ pub enum RuntimeEvent {
         task: String,
         model: String,
     },
-    Status { message: String },
-    Notice { message: String },
-    TextDelta { text: String },
-    ReasoningDelta { text: String },
+    Status {
+        message: String,
+    },
+    Notice {
+        message: String,
+    },
+    TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -40,7 +48,9 @@ pub enum RuntimeEvent {
         received: u64,
         context_length: u64,
     },
-    KeyRequest { id: u64 },
+    KeyRequest {
+        id: u64,
+    },
     ApprovalRequest {
         id: u64,
         call_id: String,
@@ -52,9 +62,15 @@ pub enum RuntimeEvent {
         blocked: Option<String>,
         auto_allows: bool,
     },
-    Finished { content: String },
-    Failed { message: String },
-    StateSnapshot { snapshot: SessionSnapshot },
+    Finished {
+        content: String,
+    },
+    Failed {
+        message: String,
+    },
+    StateSnapshot {
+        snapshot: SessionSnapshot,
+    },
     /// Boot-time display state the daemon's Lua VM produced (theme/keymap/banner/
     /// command-list/config), so a frontend can render the user's customizations
     /// without running Lua itself. Sent on connect and re-sent after a
@@ -83,7 +99,9 @@ pub enum RuntimeEvent {
         snapshot: SessionSnapshot,
     },
     TurnComplete,
-    ViewDiff { diff: ViewDiff },
+    ViewDiff {
+        diff: ViewDiff,
+    },
     CommandComplete {
         output: String,
         submit: bool,
@@ -142,34 +160,57 @@ pub enum RuntimeCommand {
         #[serde(default)]
         images: Vec<ImageData>,
     },
-    ApprovalReply { id: u64, outcome: CallOutcome },
-    KeyReply { id: u64, key: KeyEvent },
+    ApprovalReply {
+        id: u64,
+        outcome: CallOutcome,
+    },
+    KeyReply {
+        id: u64,
+        key: KeyEvent,
+    },
     Cancel,
-    RunCommand { name: String, input: String },
+    RunCommand {
+        name: String,
+        input: String,
+    },
     NewConversation,
-    LoadConversation { id: i64 },
+    LoadConversation {
+        id: i64,
+    },
     ClearConversation,
     ReplaceConversation {
         messages: Vec<ChatMessage>,
     },
-    SwitchProvider { provider_id: String },
+    SwitchProvider {
+        provider_id: String,
+    },
     ReloadExtensions,
     /// Set the daemon's authoritative approval mode (`"safe"` / `"danger"`).
     /// The frontend sends this whenever the user cycles Safe/Danger so the
     /// daemon's `SharedApprovalMode` — which actually gates tool calls — tracks
     /// the UI instead of staying pinned at its startup value.
-    SetApprovalMode { mode: String },
+    SetApprovalMode {
+        mode: String,
+    },
     /// Append a message to the daemon's transcript without running a turn. Used
     /// for context the frontend produces locally (e.g. inline `!command` output)
     /// so a subsequent model turn can still see it now that the daemon owns the
     /// transcript.
-    AppendMessage { role: String, content: String },
+    AppendMessage {
+        role: String,
+        content: String,
+    },
     /// Fire a fire-and-forget Lua hook (`session_end`, `mode_change`, …) on the
     /// daemon's VM. Used by a remote frontend that has no local VM of its own.
-    DispatchHook { name: String, payload: serde_json::Value },
+    DispatchHook {
+        name: String,
+        payload: serde_json::Value,
+    },
     /// Publish the live terminal width so Lua panes (`ctx.ui.width`) wrap text
     /// correctly on the daemon's VM. Sent on startup and on every resize.
-    SetTerminalWidth { width: u16 },
+    SetTerminalWidth {
+        width: u16,
+    },
 }
 
 #[cfg(test)]
