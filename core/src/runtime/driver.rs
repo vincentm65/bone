@@ -255,6 +255,25 @@ impl Driver {
             remit(event);
         };
 
+        let report_usage = |token_stats: &TokenStats| {
+            if let Some(cb) = &on_token_usage {
+                cb(token_stats.sent, token_stats.received);
+            }
+            emit_runtime(RuntimeEvent::TokenUsage {
+                sent: token_stats.sent,
+                received: token_stats.received,
+                context_length: token_stats.context_length,
+            });
+            extensions.dispatch_simple(
+                "token_usage",
+                serde_json::json!({
+                    "sent": token_stats.sent,
+                    "received": token_stats.received,
+                    "context_length": token_stats.context_length,
+                }),
+            );
+        };
+
         emit_runtime(RuntimeEvent::Started {
             approval: approval_label.to_string(),
             task: prompt.to_string(),
@@ -515,22 +534,7 @@ impl Driver {
                             cost,
                             is_estimated: false,
                         });
-                        if let Some(cb) = &on_token_usage {
-                            cb(token_stats.sent, token_stats.received);
-                        }
-                        emit_runtime(RuntimeEvent::TokenUsage {
-                            sent: token_stats.sent,
-                            received: token_stats.received,
-                            context_length: token_stats.context_length,
-                        });
-                        extensions.dispatch_simple(
-                            "token_usage",
-                            serde_json::json!({
-                                "sent": token_stats.sent,
-                                "received": token_stats.received,
-                                "context_length": token_stats.context_length,
-                            }),
-                        );
+                        report_usage(&token_stats);
                     }
                     Err(e) => {
                         emit_runtime(RuntimeEvent::Status {
@@ -571,22 +575,7 @@ impl Driver {
                     cost: None,
                     is_estimated: true,
                 });
-                if let Some(cb) = &on_token_usage {
-                    cb(token_stats.sent, token_stats.received);
-                }
-                emit_runtime(RuntimeEvent::TokenUsage {
-                    sent: token_stats.sent,
-                    received: token_stats.received,
-                    context_length: token_stats.context_length,
-                });
-                extensions.dispatch_simple(
-                    "token_usage",
-                    serde_json::json!({
-                        "sent": token_stats.sent,
-                        "received": token_stats.received,
-                        "context_length": token_stats.context_length,
-                    }),
-                );
+                report_usage(&token_stats);
             }
 
             if stream_error {
