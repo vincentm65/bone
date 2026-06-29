@@ -7,7 +7,7 @@ All file paths below are relative to the bone config directory. The resolved pat
 ```
 init.lua              — Lua configuration and customization (optional)
 lua/tools/            — Custom + catalog Lua tools (installed via /catalog)
-lua/commands/         — Custom + bundled Lua commands
+lua/commands/         — Custom + bundled/catalog Lua commands
 lua/plugins/          — Lua plugins (optional)
 lua/lib/              — Lua library modules (optional, bundled: history.lua, ui/)
 providers.yaml        — LLM provider entries
@@ -313,13 +313,13 @@ These are compiled into bone and do not require any seeding or installation:
 
 Optional Lua tools live in the [`bone-catalog`](https://github.com/vincentm65/bone-catalog) repository. They are fetched from raw GitHub content at `https://raw.githubusercontent.com/vincentm65/bone-catalog/main` (overridable via `BONE_CATALOG_URL`) and installed into `~/.bone-rust/lua/tools/` on demand — during onboarding or via the `/catalog` command. Once on disk they are loaded by the normal Lua loader like any user file.
 
-Installed catalog tools:
+Available catalog tools include:
 
 - **web_search** — Search the web via DuckDuckGo
 - **ask_user** — Ask the user a question with selectable options
 - **task_list** — Maintain a visible checklist with TUI pane rendering
 - **cron** — Manage scheduled bone jobs via crontab
-- **browser** — Delegate a web task to an autonomous browser agent (browser-use via uv)
+- **browser** — Drive a persistent browser through observe/target actions
 
 To browse and install catalog tools interactively, run `/catalog` in the TUI. To override the catalog source URL, set the `BONE_CATALOG_URL` environment variable to an `http(s)://` base or a local filesystem path.
 
@@ -694,8 +694,8 @@ For lower-level input, `ctx.ui.key()` blocks until the next key and returns a
 table such as `{ code = "Up", char = nil, ctrl = false, alt = false, shift = false }`.
 Ctrl+C remains host-owned cancellation; Esc is delivered to Lua.
 
-The bundled `ask_user` tool (`lua/tools/ask_user.lua`) is built on `ui.menu`;
-read it for a worked example of multi-question flows.
+The catalog `ask_user` tool is built on `ui.menu`; install it with `/catalog`
+for a worked example of multi-question flows.
 
 #### Lifecycle & cancellation
 
@@ -1055,21 +1055,22 @@ Plugins do not auto-run. Repeated `load` is a no-op.
     tools.yaml                 -- tool enable/disable toggles
   lua/
     tools/
-      web_search.lua           -- seeded default
-      ask_user.lua             -- seeded default
-      task_list.lua            -- seeded default
-      cron.lua                 -- seeded default
-      browser.lua             -- seeded default
-      my_custom_tool.lua       -- user-created
+      my_custom_tool.lua       -- user-created or installed via /catalog
     commands/
-      memory.lua               -- seeded default
+      compact.lua              -- seeded default
+      config.lua               -- seeded default
+      usage.lua                -- seeded default
+      memory.lua               -- optional catalog command
       my_custom_command.lua    -- user-created
+    lib/
+      history.lua              -- seeded default
+      ui/                      -- seeded default UI helpers
     plugins/
       tokyonight/
         init.lua
 ```
 
-Default Lua files are seeded on first launch and never overwrite existing files.
+Seeded Lua files are created on first launch and never overwrite existing files. Catalog tools/commands are installed only when selected during onboarding or via `/catalog`.
 
 ## Tool vs Command
 
