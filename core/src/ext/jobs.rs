@@ -215,7 +215,16 @@ impl JobRegistry {
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        finish_job(&mut jobs, id, result, result_file, status, now, token_sent, token_received);
+        finish_job(
+            &mut jobs,
+            id,
+            result,
+            result_file,
+            status,
+            now,
+            token_sent,
+            token_received,
+        );
         self.completed.notify_all();
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);

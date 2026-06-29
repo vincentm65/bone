@@ -193,14 +193,10 @@ impl CustomConfigs {
 
     /// Persist the named page; if saving fails, revert the field to its prior value
     /// so the UI does not show a change that was never written to disk.
-    fn save_or_revert(
-        &mut self,
-        namespace: &str,
-        key: &str,
-        old_value: Option<serde_yaml::Value>,
-    ) {
+    fn save_or_revert(&mut self, namespace: &str, key: &str, old_value: Option<serde_yaml::Value>) {
         let page_path = config_dir().join(format!("{namespace}.yaml"));
-        if page_path.exists() && !self.save_page(namespace)
+        if page_path.exists()
+            && !self.save_page(namespace)
             && let Some(page) = self.page_mut(namespace)
             && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
         {

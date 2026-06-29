@@ -14,9 +14,15 @@ use bone_core::runtime::{RuntimeCommand, RuntimeEvent, RuntimeSession};
 struct MockProvider;
 #[async_trait::async_trait]
 impl LlmProvider for MockProvider {
-    fn id(&self) -> &str { "mock" }
-    fn name(&self) -> &str { "Mock" }
-    fn model(&self) -> &str { "mock-1" }
+    fn id(&self) -> &str {
+        "mock"
+    }
+    fn name(&self) -> &str {
+        "Mock"
+    }
+    fn model(&self) -> &str {
+        "mock-1"
+    }
     fn set_model(&mut self, _: String) {}
     async fn chat_stream(
         &self,
@@ -46,7 +52,12 @@ async fn reply_next_key(
     loop {
         match events.recv().await.unwrap() {
             RuntimeEvent::KeyRequest { id } => {
-                cmd_tx.send(RuntimeCommand::KeyReply { id, key: key_event(code) }).unwrap();
+                cmd_tx
+                    .send(RuntimeCommand::KeyReply {
+                        id,
+                        key: key_event(code),
+                    })
+                    .unwrap();
                 return;
             }
             _ => {}
@@ -176,5 +187,8 @@ bone.register_command("picker", {
     .await;
 
     std::fs::remove_dir_all(&config_dir).ok();
-    assert!(result.is_ok(), "interactive command did not complete after Esc — likely frozen");
+    assert!(
+        result.is_ok(),
+        "interactive command did not complete after Esc — likely frozen"
+    );
 }

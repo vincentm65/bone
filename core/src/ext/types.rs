@@ -916,17 +916,24 @@ mod tests {
     fn command_action_round_trips_through_wire_type() {
         let action = LuaReturnAction {
             conversation_load: Some(ConversationLoad {
-                messages: vec![crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "past")],
+                messages: vec![crate::llm::ChatMessage::new(
+                    crate::llm::ChatRole::User,
+                    "past",
+                )],
                 conversation_id: Some(9),
             }),
-            config_action: Some(ConfigAction::SwitchProvider { id: "anthropic".into() }),
+            config_action: Some(ConfigAction::SwitchProvider {
+                id: "anthropic".into(),
+            }),
             // before_turn-only fields must be dropped on the way to the wire.
             system_prompt_append: Some("ignored".into()),
             tool_filter: Some(vec!["read_file".into()]),
             ..Default::default()
         };
 
-        let wire = action.to_command_action().expect("command-relevant fields set");
+        let wire = action
+            .to_command_action()
+            .expect("command-relevant fields set");
         let back: LuaReturnAction = wire.into();
 
         let load = back.conversation_load.expect("load survived");

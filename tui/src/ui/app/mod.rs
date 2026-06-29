@@ -336,10 +336,22 @@ impl App {
             // and after a remote `ReloadExtensions`. The local VM (still present)
             // remains the fallback for anything not carried here.
             RuntimeEvent::FrontendState {
-                banner, theme, keymap, config, commands, tool_defs, tool_display,
+                banner,
+                theme,
+                keymap,
+                config,
+                commands,
+                tool_defs,
+                tool_display,
             } => {
                 self.apply_frontend_state(
-                    banner, theme, keymap, config, commands, tool_defs, tool_display,
+                    banner,
+                    theme,
+                    keymap,
+                    config,
+                    commands,
+                    tool_defs,
+                    tool_display,
                 );
             }
             // Pane/UI diff from a remote daemon (e.g. a command's pane between
@@ -386,18 +398,14 @@ impl App {
                 env!("CARGO_PKG_VERSION")
             )));
         }
-        if let Ok(snap) =
-            serde_json::from_value::<crate::ext::snapshots::LuaThemeSnapshot>(theme)
-        {
+        if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaThemeSnapshot>(theme) {
             self.renderer.theme.apply_snapshot(&snap);
         }
-        if let Ok(snap) =
-            serde_json::from_value::<crate::ext::snapshots::LuaKeymapSnapshot>(keymap)
+        if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaKeymapSnapshot>(keymap)
         {
             self.lua_keymap = snap;
         }
-        if let Ok(snap) =
-            serde_json::from_value::<crate::ext::snapshots::LuaConfigSnapshot>(config)
+        if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaConfigSnapshot>(config)
         {
             apply_lua_config_snapshot(&mut self.user_config, &snap);
         }
@@ -412,10 +420,12 @@ impl App {
 
     /// Dispatch a `session_end` hook on the daemon's Lua VM.
     pub fn dispatch_session_end(&self) {
-        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
-            name: "session_end".into(),
-            payload: serde_json::json!({}),
-        });
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::DispatchHook {
+                name: "session_end".into(),
+                payload: serde_json::json!({}),
+            });
     }
 
     /// Apply a generic action returned by a Lua command or hook.
@@ -427,9 +437,11 @@ impl App {
         let mut action_reply = None;
         if let Some(new_messages) = action.conversation_replace {
             // Send the replacement to the daemon (idempotent).
-            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ReplaceConversation {
-                messages: new_messages,
-            });
+            let _ = self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::ReplaceConversation {
+                    messages: new_messages,
+                });
         }
 
         if let Some(load) = action.conversation_load {
@@ -449,9 +461,11 @@ impl App {
                 self.apply_custom_configs_to_runtime(custom);
                 // Notify the daemon to rebuild its provider from updated config.
                 let active_id = self.view.provider_id.clone();
-                let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SwitchProvider {
-                    provider_id: active_id.clone(),
-                });
+                let _ = self
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::SwitchProvider {
+                        provider_id: active_id.clone(),
+                    });
                 // Await the daemon's StateSnapshot with new provider info.
                 self.await_state_snapshot().await;
                 "Configuration applied.".to_string()
@@ -462,12 +476,17 @@ impl App {
                 custom.set_last_provider(&id);
                 self.custom_configs = custom;
                 // Tell the daemon to switch providers.
-                let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SwitchProvider {
-                    provider_id: id.clone(),
-                });
+                let _ = self
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::SwitchProvider {
+                        provider_id: id.clone(),
+                    });
                 // Await the daemon's StateSnapshot with new provider info.
                 self.await_state_snapshot().await;
-                format!("Switched to {} ({})", self.view.provider_model, self.view.provider_id)
+                format!(
+                    "Switched to {} ({})",
+                    self.view.provider_model, self.view.provider_id
+                )
             }
         }
     }
@@ -536,7 +555,9 @@ impl App {
         // The daemon publishes ConversationLoaded with authoritative state,
         // which the idle loop picks up on the next poll.
         if let Some(conv_id) = load.conversation_id {
-            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::LoadConversation { id: conv_id });
+            let _ = self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::LoadConversation { id: conv_id });
         }
 
         Ok(())
@@ -623,7 +644,9 @@ impl App {
     }
 
     async fn start_new_conversation(&mut self) {
-        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::NewConversation);
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::NewConversation);
         // Await the daemon's StateSnapshot for authority.
         self.await_state_snapshot().await;
     }
@@ -634,17 +657,16 @@ impl App {
         self.reset_transient_ui_state();
 
         let summary = if self.token_stats.request_count > 0 {
-            format!(
-                "Session: {}. Chat cleared.",
-                self.token_stats.one_liner()
-            )
+            format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
         } else {
             "Chat cleared.".to_string()
         };
 
         // Tell the daemon to start a new conversation. It publishes a
         // StateSnapshot with the new conversation_id and reset stats.
-        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::NewConversation);
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::NewConversation);
 
         // Await the daemon's StateSnapshot for authority.
         self.await_state_snapshot().await;
@@ -670,10 +692,12 @@ impl App {
         };
         self.custom_configs
             .set_value("general", "approval_mode", mode.to_string());
-        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::DispatchHook {
-            name: "mode_change".into(),
-            payload: serde_json::json!({ "mode": mode }),
-        });
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::DispatchHook {
+                name: "mode_change".into(),
+                payload: serde_json::json!({ "mode": mode }),
+            });
         // Push the mode to the daemon's authoritative `SharedApprovalMode` — the
         // atomic the gate actually reads. Without this, cycling Safe/Danger only
         // changes the UI while the daemon keeps gating at its startup mode.
@@ -808,9 +832,9 @@ impl App {
         // Publish the live terminal width to the daemon so its Lua panes
         // (`ctx.ui.width`) wrap text to the current width. Re-read each frame so
         // it tracks resizes.
-        let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SetTerminalWidth {
-            width: size.width,
-        });
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::SetTerminalWidth { width: size.width });
         let desired = Renderer::desired_height(
             &self.input,
             // Approval prompt is a pane now (counted via `visible_pages`), so the
@@ -1932,45 +1956,71 @@ impl App {
                 } else {
                     let provider_id = self.view.provider_id.clone();
                     // Update the model in custom config for this provider.
-                    if let Some(mut entry) = self.custom_configs.get_provider_entry("providers", &provider_id) {
+                    if let Some(mut entry) = self
+                        .custom_configs
+                        .get_provider_entry("providers", &provider_id)
+                    {
                         entry.model = arg.to_string();
-                        self.custom_configs.set_provider_entry("providers", &provider_id, &entry);
+                        self.custom_configs
+                            .set_provider_entry("providers", &provider_id, &entry);
                     }
-                    let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SwitchProvider {
-                        provider_id,
-                    });
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::SwitchProvider { provider_id });
                     self.await_state_snapshot().await;
-                    format!("Switched to {} ({})", self.view.provider_model, self.view.provider_id)
+                    format!(
+                        "Switched to {} ({})",
+                        self.view.provider_model, self.view.provider_id
+                    )
                 }
             }
             "provider" => {
                 if arg.is_empty() {
-                    let mut lines = vec![format!("Current: {} ({})", self.view.provider_model, self.view.provider_id)];
+                    let mut lines = vec![format!(
+                        "Current: {} ({})",
+                        self.view.provider_model, self.view.provider_id
+                    )];
                     let providers = self.custom_configs.derive_providers_config().providers;
                     if providers.is_empty() {
-                        lines.push("No providers configured. Edit ~/.bone-rust/config/providers.yaml".to_string());
+                        lines.push(
+                            "No providers configured. Edit ~/.bone-rust/config/providers.yaml"
+                                .to_string(),
+                        );
                     } else {
                         lines.push("Available:".to_string());
                         for (id, entry) in &providers {
-                            let marker = if id == &self.view.provider_id { " *" } else { "" };
-                            lines.push(format!("  {} — {} ({}){}", id, entry.label, entry.model, marker));
+                            let marker = if id == &self.view.provider_id {
+                                " *"
+                            } else {
+                                ""
+                            };
+                            lines.push(format!(
+                                "  {} — {} ({}){}",
+                                id, entry.label, entry.model, marker
+                            ));
                         }
                     }
                     lines.join("\n")
                 } else {
                     self.custom_configs.set_last_provider(&arg);
-                    let _ = self.command_tx.send(crate::runtime::RuntimeCommand::SwitchProvider {
-                        provider_id: arg.to_string(),
-                    });
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::SwitchProvider {
+                            provider_id: arg.to_string(),
+                        });
                     self.await_state_snapshot().await;
-                    format!("Switched to {} ({})", self.view.provider_model, self.view.provider_id)
+                    format!(
+                        "Switched to {} ({})",
+                        self.view.provider_model, self.view.provider_id
+                    )
                 }
             }
             "help" => commands::help(&lua_cmds),
             "quit" | "exit" => {
                 if let Some(notice) = self.request_quit() {
                     self.messages.push(Message::system(notice));
-                    self.renderer.flush_new_to_scrollback(&self.messages, term)?;
+                    self.renderer
+                        .flush_new_to_scrollback(&self.messages, term)?;
                     self.redraw(term)?;
                 }
                 return Ok(());

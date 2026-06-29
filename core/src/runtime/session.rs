@@ -32,11 +32,11 @@ use crate::llm::provider::LlmProvider;
 use crate::llm::{ChatMessage, TokenStats};
 use crate::runtime::driver::{Driver, DriverOutcome};
 use crate::runtime::{KeyReplyRegistry, RuntimeEvent};
-use bone_protocol::SessionSnapshot;
 use crate::session_db::SessionDb;
 use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalGate, SharedApprovalMode};
+use bone_protocol::SessionSnapshot;
 
 /// Owns the agent turn-truth for one conversation.
 pub struct RuntimeSession {

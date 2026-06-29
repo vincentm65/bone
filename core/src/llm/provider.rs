@@ -11,7 +11,9 @@ use std::{error::Error, fmt, pin::Pin};
 use crate::tools::ToolDefinition;
 
 // Re-export wire-format types from protocol.
-pub use bone_protocol::{ChatMessage, ChatRole, ImageData, OutputItem, Reasoning, ReasoningItem, ToolCall, ToolResult};
+pub use bone_protocol::{
+    ChatMessage, ChatRole, ImageData, OutputItem, Reasoning, ReasoningItem, ToolCall, ToolResult,
+};
 
 /// A boxed async stream of provider events from an LLM provider.
 pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>;
