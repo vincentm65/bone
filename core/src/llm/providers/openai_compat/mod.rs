@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
-    http_status_to_error_kind,
+    http_error, streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -39,16 +39,7 @@ impl OpenAiCompatProvider {
             entry.label.clone()
         };
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                // Idle (between-chunks) timeout, NOT a total-request timeout. A
-                // reasoning model on a long prompt can legitimately stream for
-                // many minutes; a total `.timeout()` would kill the whole turn
-                // mid-think. `read_timeout` instead only trips when the stream
-                // genuinely stalls (dropped connection), which is what we want.
-                .read_timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            client: streaming_client(),
             id: id.to_string(),
             label,
             base_url: entry.base_url.trim_end_matches('/').to_string(),
@@ -494,16 +485,7 @@ impl LlmProvider for OpenAiCompatProvider {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            let details = error_body.trim();
-            let message = if details.is_empty() {
-                format!("HTTP {} from {}", status, self.chat_url())
-            } else {
-                format!("HTTP {} from {}: {}", status, self.chat_url(), details)
-            };
-            return Err(LlmError::new_with_kind(
-                http_status_to_error_kind(status),
-                message,
-            ));
+            return Err(http_error(status, &self.chat_url(), &error_body));
         }
 
         let events = response.bytes_stream().eventsource();

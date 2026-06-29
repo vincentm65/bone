@@ -112,6 +112,31 @@ pub fn http_status_to_error_kind(status: reqwest::StatusCode) -> LlmErrorKind {
     }
 }
 
+/// Build a `reqwest::Client` tuned for SSE streaming: a 10s connect timeout
+/// and a 120s idle/read timeout (NOT a total-request timeout, so a long
+/// reasoning stream is never killed mid-turn).
+pub fn streaming_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Build a user-facing error message from a failed HTTP response, surfacing
+/// the backend's body (capped at 2000 chars) so the *why* isn't hidden behind
+/// a bare status code.
+pub fn http_error(status: reqwest::StatusCode, url: &str, body: &str) -> LlmError {
+    let detail = body.trim();
+    let msg = if detail.is_empty() {
+        format!("HTTP {status} from {url}")
+    } else {
+        let capped: String = detail.chars().take(2000).collect();
+        format!("HTTP {status} from {url}: {capped}")
+    };
+    LlmError::new_with_kind(http_status_to_error_kind(status), msg)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRequestContext {
     pub conversation_id: Option<i64>,
