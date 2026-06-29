@@ -60,6 +60,7 @@ pub enum RuntimeEvent {
         arguments: serde_json::Value,
         #[serde(default)]
         blocked: Option<String>,
+        #[serde(default)]
         auto_allows: bool,
     },
     Finished {

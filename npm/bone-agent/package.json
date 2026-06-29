@@ -9,11 +9,11 @@
     "bin"
   ],
   "optionalDependencies": {
-    "bone-agent-linux-x64": "2.0.0",
-    "bone-agent-linux-arm64": "2.0.0",
-    "bone-agent-darwin-x64": "2.0.0",
-    "bone-agent-darwin-arm64": "2.0.0",
-    "bone-agent-windows-x64": "2.0.0"
+    "bone-agent-linux-x64": "2.0.9",
+    "bone-agent-linux-arm64": "2.0.9",
+    "bone-agent-darwin-x64": "2.0.9",
+    "bone-agent-darwin-arm64": "2.0.9",
+    "bone-agent-windows-x64": "2.0.9"
   },
   "engines": {
     "node": ">=18"

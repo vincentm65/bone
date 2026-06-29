@@ -169,7 +169,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::Tool,
             content: result.content,
-            images: Vec::new(),
+            images: result.images,
             tool_calls: Vec::new(),
             tool_call_id: Some(result.call_id),
             name: Some(result.name),

@@ -820,6 +820,7 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
         let pane_sender = cfg.pane_sender.clone();
         let depth = cfg.tool_call_depth;
         let agent_depth = cfg.agent_depth;
+        let inherited_approval = cfg.approval_mode;
         // Wire parent cancellation flag so tools stop if user cancels.
         handler.cancel_token = cfg.cancelled.clone();
 
@@ -845,8 +846,8 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                 let mode = match mode_str.as_deref() {
                     Some("safe") | Some("read_only") => crate::tools::ApprovalMode::Safe,
                     Some("danger") => crate::tools::ApprovalMode::Danger,
-                    _ => {
-                        let mode_str = mode_str.as_deref().unwrap_or("(none)");
+                    None => inherited_approval,
+                    Some(mode_str) => {
                         return tool_err(
                             lua,
                             name,
