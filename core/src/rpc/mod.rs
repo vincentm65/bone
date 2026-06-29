@@ -313,12 +313,7 @@ impl DaemonCtx {
         self.hub.publish(RuntimeEvent::StateSnapshot {
             snapshot: {
                 let s = self.session.lock().unwrap();
-                let mut snap = s.snapshot(self.llm.id(), self.llm.model());
-                snap.usage_by_provider = crate::ext::ctx::usage_by_provider_context(
-                    s.session_db.as_ref(),
-                    s.conversation_id,
-                );
-                snap
+                s.snapshot(self.llm.id(), self.llm.model())
             },
         });
     }
@@ -559,15 +554,7 @@ impl DaemonCtx {
                             .unwrap_or(0);
                         s.transcript = messages.clone();
                         s.token_stats.reset();
-                        let mut snap = s.snapshot(self.llm.id(), self.llm.model());
-                        // `snapshot` leaves usage_by_provider empty; fill it from
-                        // the DB so the client's /usage table isn't blanked on
-                        // load (mirrors `publish_snapshot`).
-                        snap.usage_by_provider = crate::ext::ctx::usage_by_provider_context(
-                            s.session_db.as_ref(),
-                            s.conversation_id,
-                        );
-                        snap
+                        s.snapshot(self.llm.id(), self.llm.model())
                     };
                     self.hub
                         .publish(RuntimeEvent::ConversationLoaded { messages, snapshot });

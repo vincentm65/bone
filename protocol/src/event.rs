@@ -249,7 +249,6 @@ mod tests {
                     session_seq: 15,
                     provider_id: "openai".into(),
                     provider_model: "gpt-4o".into(),
-                    usage_by_provider: vec![],
                 },
             },
             RuntimeEvent::ConversationLoaded {

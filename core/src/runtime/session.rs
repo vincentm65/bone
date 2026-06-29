@@ -224,7 +224,6 @@ impl RuntimeSession {
             session_seq: self.session_seq,
             provider_id: provider_id.to_string(),
             provider_model: provider_model.to_string(),
-            usage_by_provider: Vec::new(),
         }
     }
 }

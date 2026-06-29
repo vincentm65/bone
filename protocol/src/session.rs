@@ -29,8 +29,6 @@ pub struct SessionSnapshot {
     pub session_seq: i64,
     pub provider_id: String,
     pub provider_model: String,
-    #[serde(default)]
-    pub usage_by_provider: Vec<UsageProviderContext>,
 }
 
 impl SessionSnapshot {

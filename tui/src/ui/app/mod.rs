@@ -110,8 +110,6 @@ pub struct App {
     pub conversation_id: Option<i64>,
     /// Accumulated token stats, synced from `StateSnapshot` events.
     pub token_stats: crate::llm::TokenStats,
-    /// Accumulated per-provider usage, synced from `StateSnapshot` events.
-    pub usage_by_provider: Vec<crate::ext::ctx::UsageProviderContext>,
 
     /// Active pane pages displayed between input and status bar.
     pub pages: Vec<PanePage>,
@@ -244,7 +242,6 @@ impl App {
             view,
             conversation_id: None,
             token_stats: crate::llm::TokenStats::default(),
-            usage_by_provider: Vec::new(),
             pages: Vec::new(),
             active_page: 0,
             panes_visible: true,
@@ -476,13 +473,10 @@ impl App {
     }
 
     /// Adopt a daemon `SessionSnapshot` as the local view-model: the single
-    /// place the frontend mirrors authoritative state. Moves the snapshot in to
-    /// avoid cloning the whole struct (only `usage_by_provider` is duplicated,
-    /// since `to_token_stats` borrows the snapshot before it lands in `view`).
+    /// place the frontend mirrors authoritative state.
     pub(crate) fn apply_snapshot(&mut self, snapshot: crate::runtime::SessionSnapshot) {
         self.conversation_id = snapshot.conversation_id;
         self.token_stats = snapshot.to_token_stats();
-        self.usage_by_provider = snapshot.usage_by_provider.clone();
         self.view = snapshot;
     }
 
