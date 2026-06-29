@@ -997,7 +997,6 @@ impl App {
         if self.thinking_clear_at.is_some_and(|d| Instant::now() >= d) {
             self.clear_thinking_pane();
         }
-        self.apply_view_diffs();
         self.maybe_refresh_jobs_pane();
         self.render_streaming(term)
     }

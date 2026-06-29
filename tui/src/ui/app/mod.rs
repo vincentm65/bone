@@ -810,7 +810,6 @@ impl App {
         // Apply any Lua-driven UI updates (floats from bone.api.ui, ctx.ui.pane,
         // or ctx.emit_pane) before measuring, so a newly opened float is
         // counted in the viewport height.
-        self.apply_view_diffs();
         let size = terminal.size()?;
         // Publish the live terminal width to the daemon so its Lua panes
         // (`ctx.ui.width`) wrap text to the current width. Re-read each frame so
@@ -1115,20 +1114,6 @@ impl App {
                 self.renderer.theme.set_highlight(&name, fg.as_deref())
             }
         }
-    }
-
-    /// Drain UI diffs emitted by `bone.api.ui.*` and apply them. Mirrors
-    /// `maybe_refresh_jobs_pane`: called on the render tick and the live
-    /// ticks so Lua UI appears and updates. `Float` components map to panes via
-    /// `Component::as_pane_content`; `StatusLine` segments append to the native
-    /// status bar; `SetHighlight` recolors the live theme. Returns `true` when
-    /// anything changed (so the caller redraws).
-    ///
-    /// No-op now that the TUI owns no Lua VM: pane/UI diffs arrive from the
-    /// daemon as `RuntimeEvent::ViewDiff` and are applied via [`apply_view_diff`]
-    /// in the event pumps, not drained from a local `UiState`.
-    pub(crate) fn apply_view_diffs(&mut self) -> bool {
-        false
     }
 
     /// Refresh the background-jobs live-pane from the job registry.

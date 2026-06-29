@@ -172,45 +172,23 @@ pub fn boot_with_tools(
     }
 }
 
-/// Seed bundled default Lua tools into the config directory.
-/// Existing files are not overwritten except for bundled files that still use
-/// the removed Rust interaction API.
-/// `allow` filters which bundled tools are seeded: `None` seeds all (default /
-/// upgrade behavior), `Some(set)` seeds only the named files. The setup wizard
-/// persists the chosen set so both seed paths (startup + Lua boot) agree.
-/// `force` unconditionally overwrites existing files (used by the /setup
-/// re-seed action to pull in this build's defaults).
-pub fn seed_default_lua_tools(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
+/// Seed bundled default Lua files from `bundled` into `dir`.
+///
+/// Creates `dir` (and each file's parent) as needed. `allow == Some(set)` seeds
+/// only the named files; `None` seeds all. `force` unconditionally overwrites.
+/// Existing files are refreshed when [`should_refresh_seeded_lua`] says so
+/// (e.g. they still use a removed Rust interaction API).
+fn seed_default_lua(
+    dir: &Path,
+    bundled: &[(&'static str, &'static str)],
+    allow: Option<&HashSet<String>>,
+    force: bool,
+) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("bone: warning: could not create {}: {e}", dir.display());
         return;
     }
-    for (name, content) in DEFAULT_LUA_TOOLS {
-        if let Some(allow) = allow
-            && !allow.contains(*name)
-        {
-            continue;
-        }
-        let path = dir.join(name);
-        if (force || !path.exists() || should_refresh_seeded_lua(&path, name))
-            && let Err(e) = std::fs::write(&path, content)
-        {
-            eprintln!("bone: warning: could not write {}: {e}", path.display());
-        }
-    }
-}
-
-/// Seed bundled default Lua libraries into the config directory.
-/// Existing files are not overwritten except for stale bundled menu modules
-/// from the Rust-to-Lua menu migration.
-/// `allow` filters which bundled libs are seeded; `force` unconditionally
-/// overwrites existing files. See [`seed_default_lua_tools`] for semantics.
-pub fn seed_default_lua_libs(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("bone: warning: could not create {}: {e}", dir.display());
-        return;
-    }
-    for (name, content) in DEFAULT_LUA_LIBS {
+    for (name, content) in bundled {
         if let Some(allow) = allow
             && !allow.contains(*name)
         {
@@ -231,29 +209,19 @@ pub fn seed_default_lua_libs(dir: &Path, allow: Option<&HashSet<String>>, force:
     }
 }
 
-/// Seed bundled default Lua commands into the config directory.
-/// Existing files are not overwritten except for bundled files that still use
-/// the removed Rust interaction API.
-/// `allow` filters which bundled commands are seeded; `force` unconditionally
-/// overwrites existing files. See [`seed_default_lua_tools`] for semantics.
+/// Seed bundled default Lua tools. See [`seed_default_lua`].
+pub fn seed_default_lua_tools(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
+    seed_default_lua(dir, DEFAULT_LUA_TOOLS, allow, force)
+}
+
+/// Seed bundled default Lua libraries. See [`seed_default_lua`].
+pub fn seed_default_lua_libs(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
+    seed_default_lua(dir, DEFAULT_LUA_LIBS, allow, force)
+}
+
+/// Seed bundled default Lua commands. See [`seed_default_lua`].
 pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("bone: warning: could not create {}: {e}", dir.display());
-        return;
-    }
-    for (name, content) in DEFAULT_LUA_COMMANDS {
-        if let Some(allow) = allow
-            && !allow.contains(*name)
-        {
-            continue;
-        }
-        let path = dir.join(name);
-        if (force || !path.exists() || should_refresh_seeded_lua(&path, name))
-            && let Err(e) = std::fs::write(&path, content)
-        {
-            eprintln!("bone: warning: could not write {}: {e}", path.display());
-        }
-    }
+    seed_default_lua(dir, DEFAULT_LUA_COMMANDS, allow, force)
 }
 
 /// Execute all Lua files from a directory.
