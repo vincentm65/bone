@@ -12,7 +12,7 @@
 //! cached/installed and never errors out the app.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -231,24 +231,17 @@ fn last_refresh_path() -> PathBuf {
     cache_dir().join("last_refresh")
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn refresh_due() -> bool {
     let last = std::fs::read_to_string(last_refresh_path())
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
-    now_secs().saturating_sub(last) >= REFRESH_THROTTLE.as_secs()
+    crate::util::now_secs().saturating_sub(last) >= REFRESH_THROTTLE.as_secs()
 }
 
 fn mark_refreshed() {
     let _ = std::fs::create_dir_all(cache_dir());
-    let _ = std::fs::write(last_refresh_path(), now_secs().to_string());
+    let _ = std::fs::write(last_refresh_path(), crate::util::now_secs().to_string());
 }
 
 /// Refresh the cached index so update detection and the startup hint reflect

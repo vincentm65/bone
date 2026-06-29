@@ -18,3 +18,11 @@
 pub fn errstr<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
+
+/// Current Unix timestamp in seconds (best-effort; 0 on clock skew).
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}

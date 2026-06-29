@@ -9,7 +9,7 @@
 //! git, pkg) has its own command, so we suggest none.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const THROTTLE: Duration = Duration::from_secs(24 * 3600);
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -19,25 +19,18 @@ fn cache_dir() -> PathBuf {
     crate::config::bone_dir()
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn check_due() -> bool {
     let last = std::fs::read_to_string(cache_dir().join("update_checked_at"))
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
-    now_secs().saturating_sub(last) >= THROTTLE.as_secs()
+    crate::util::now_secs().saturating_sub(last) >= THROTTLE.as_secs()
 }
 
 fn mark_checked() {
     let _ = std::fs::write(
         cache_dir().join("update_checked_at"),
-        now_secs().to_string(),
+        crate::util::now_secs().to_string(),
     );
 }
 
