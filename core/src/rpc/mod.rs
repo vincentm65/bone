@@ -189,8 +189,7 @@ where
     let mut sessions = std::collections::HashMap::<i64, ManagedEntry>::new();
     // Tag each actor future with its conversation id so we can evict the map
     // entry when the actor exits (panic, command channel closed, etc.).
-    let mut actors =
-        FuturesUnordered::<LocalBoxFuture<'static, (i64, ())>>::new();
+    let mut actors = FuturesUnordered::<LocalBoxFuture<'static, (i64, ())>>::new();
     let mut latest_id = None;
 
     loop {
@@ -777,7 +776,7 @@ impl DaemonCtx {
                 let messages = {
                     let s = self.session.lock().unwrap();
                     s.session_db.as_ref().and_then(|db| {
-                        db.list_messages(id, 1000).ok().map(|rows| {
+                        db.load_messages(id).ok().map(|rows| {
                             rows.into_iter()
                                 .map(crate::session_db::stored_to_chat_message)
                                 .collect::<Vec<_>>()
@@ -802,7 +801,7 @@ impl DaemonCtx {
                             .and_then(|db| db.max_message_seq(id).ok())
                             .unwrap_or(0);
                         s.transcript = messages.clone();
-                        s.token_stats.reset();
+                        s.restore_usage_and_context();
                         s.snapshot(self.llm.id(), self.llm.model())
                     };
                     self.hub
@@ -849,7 +848,6 @@ impl DaemonCtx {
                 {
                     let mut s = self.session.lock().unwrap();
                     s.transcript = messages;
-                    s.token_stats.reset();
                     let history = crate::chat::build_chat_history(&s.transcript, None);
                     let tool_defs_json_chars = serde_json::to_value(s.tools.definitions())
                         .map(|v| v.to_string().chars().count())
@@ -1049,10 +1047,9 @@ impl DaemonCtx {
             rt_tx.clone(),
             self.approval_registry.clone(),
         ));
-        let (persist_from, driver) = {
+        let driver = {
             let s = self.session.lock().unwrap();
-            let pf = s.transcript.len();
-            let d = s.build_driver(
+            s.build_driver(
                 self.llm.clone(),
                 self.extensions.clone(),
                 self.mode.clone(),
@@ -1061,8 +1058,7 @@ impl DaemonCtx {
                 self.key_registry.clone(),
                 cancel.clone(),
                 Arc::new(crate::session_sink::NullSessionSink),
-            );
-            (pf, d)
+            )
         };
         let mut conn = LocalConn::new(
             rt_rx,
@@ -1123,11 +1119,7 @@ impl DaemonCtx {
         }
 
         if let Some(outcome) = conn.take_outcome() {
-            let _ = self
-                .session
-                .lock()
-                .unwrap()
-                .apply_outcome(outcome, persist_from);
+            let _ = self.session.lock().unwrap().apply_outcome(outcome);
         }
         // Publish the post-turn state so clients can sync their view-model.
         self.publish_snapshot();

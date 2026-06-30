@@ -2,7 +2,7 @@
 
 use crate::llm::{ChatMessage, ChatRole};
 use crate::runtime::UsageRecord;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::path::Path;
 
 /// Returns the path to the conversations database.
@@ -384,7 +384,9 @@ impl SessionDb {
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
+        )?;
         let db = Self { conn };
         db.setup_schema()?;
         Ok(db)
@@ -401,7 +403,7 @@ impl SessionDb {
             .map(|count| count > 0)
         }
 
-        const SCHEMA_VERSION: u32 = 6;
+        const SCHEMA_VERSION: u32 = 8;
 
         let current_version: u32 = self
             .conn
@@ -424,10 +426,8 @@ impl SessionDb {
             // user_version defaults to 0 for BOTH a brand-new database and a
             // pre-versioning legacy database. Distinguish them by checking
             // whether our tables already exist. A truly empty database gets the
-            // latest schema; a populated unversioned database is left entirely
-            // untouched and the user is asked to recreate it — we never silently
-            // stamp it current (which would skip the is_estimated column) and we
-            // never drop their data.
+            // latest schema. A populated unversioned database is upgraded in
+            // place by adding only missing tables, columns, and indexes.
             let has_app_tables: bool = tx.query_row(
                 "SELECT EXISTS(
                      SELECT 1 FROM sqlite_master
@@ -437,18 +437,29 @@ impl SessionDb {
                 |row| row.get(0),
             )?;
             if has_app_tables {
-                // Refuse to proceed; the transaction rolls back on drop, so the
-                // database is left exactly as it was.
-                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
-                    std::io::Error::other(
-                        "session database predates schema versioning (user_version = 0) \
-                         and cannot be migrated automatically. Back up and remove the \
-                         database file so a fresh one can be created.",
-                    ),
-                )));
+                tx.execute_batch(FULL_SCHEMA)?;
+                if !column_exists(&tx, "usage_events", "is_estimated")? {
+                    tx.execute_batch(
+                        "ALTER TABLE usage_events
+                             ADD COLUMN is_estimated INTEGER NOT NULL DEFAULT 0;",
+                    )?;
+                }
+                if !column_exists(&tx, "messages", "tool_calls")? {
+                    tx.execute_batch("ALTER TABLE messages ADD COLUMN tool_calls TEXT;")?;
+                }
+                if !column_exists(&tx, "messages", "images")? {
+                    tx.execute_batch("ALTER TABLE messages ADD COLUMN images TEXT;")?;
+                }
+                if !column_exists(&tx, "messages", "is_error")? {
+                    tx.execute_batch(
+                        "ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0;",
+                    )?;
+                }
+                version = 6;
+            } else {
+                tx.execute_batch(FULL_SCHEMA)?;
+                version = 6;
             }
-            tx.execute_batch(FULL_SCHEMA)?;
-            version = SCHEMA_VERSION;
         }
 
         if version == 1 {
@@ -497,6 +508,56 @@ impl SessionDb {
                 )?;
             }
             version = 6;
+        }
+
+        if version == 6 {
+            // Rebuild only the derived search index. Older writers could leave
+            // missing/stale FTS rowids; authoritative conversation data is not
+            // deleted or rewritten by this migration.
+            tx.execute_batch(
+                "DELETE FROM messages_fts;
+                 INSERT INTO messages_fts (rowid, content, role, conversation_id)
+                 SELECT id,
+                        CASE WHEN tool_calls IS NOT NULL
+                             THEN content || ' TOOL_CALL ' || tool_calls
+                             ELSE content END,
+                        role, conversation_id
+                 FROM messages;",
+            )?;
+            version = 7;
+        }
+
+        if version == 7 {
+            // Preserve every message while repairing historical sequence
+            // collisions. `id` is the stable insertion-order tie-breaker used
+            // by replay, so renumbering only affected conversations makes that
+            // order explicit. The unique index then prevents any writer from
+            // reintroducing ambiguous sequence values.
+            tx.execute_batch(
+                "CREATE TEMP TABLE message_seq_repair (
+                     id INTEGER PRIMARY KEY,
+                     new_seq INTEGER NOT NULL
+                 );
+                 INSERT INTO message_seq_repair (id, new_seq)
+                 SELECT id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY conversation_id ORDER BY seq, id
+                        )
+                 FROM messages
+                 WHERE conversation_id IN (
+                     SELECT conversation_id FROM messages
+                     GROUP BY conversation_id
+                     HAVING COUNT(*) != COUNT(DISTINCT seq)
+                 );
+                 UPDATE messages
+                 SET seq = (SELECT new_seq FROM message_seq_repair
+                            WHERE message_seq_repair.id = messages.id)
+                 WHERE id IN (SELECT id FROM message_seq_repair);
+                 DROP TABLE message_seq_repair;
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_conversation_seq_unique
+                     ON messages(conversation_id, seq);",
+            )?;
+            version = 8;
         }
 
         if version != current_version {
@@ -590,8 +651,18 @@ impl SessionDb {
         is_error: bool,
         seq: i64,
     ) -> rusqlite::Result<i64> {
+        // Allocate the sequence while holding the write lock. More than one
+        // process can open a conversation, so a cached in-memory sequence is
+        // only a hint and must not be allowed to create duplicate ordering.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let db_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        let allocated_seq = seq.max(db_seq.saturating_add(1));
         Self::insert_message_row(
-            &self.conn,
+            &tx,
             conversation_id,
             role,
             content,
@@ -600,9 +671,11 @@ impl SessionDb {
             tool_calls,
             images,
             is_error,
-            seq,
+            allocated_seq,
             &now_iso(),
-        )
+        )?;
+        tx.commit()?;
+        Ok(allocated_seq)
     }
 
     /// Append every new message and usage record from a completed turn in a
@@ -617,7 +690,13 @@ impl SessionDb {
         messages: &[ChatMessage],
         usage: &[UsageRecord],
     ) -> rusqlite::Result<i64> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let db_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        seq = seq.max(db_seq);
         let now = now_iso();
         for msg in messages {
             let (role, tool_name, tool_call_id, tool_calls_json, images_json) = match msg.role {
@@ -651,7 +730,7 @@ impl SessionDb {
                         .then(|| serde_json::to_string(&msg.images).ok())
                         .flatten(),
                 ),
-                _ => continue,
+                ChatRole::System => ("system", None, None, None, None),
             };
             // Only tool results carry an error flag; other roles persist `false`.
             let is_error = msg.role == ChatRole::Tool && msg.is_error;
@@ -741,6 +820,15 @@ impl SessionDb {
         Ok(())
     }
 
+    /// Aggregate token usage recorded for a single conversation. Used to
+    /// restore the running token totals when a conversation is reloaded, so
+    /// the meter reflects that chat's history instead of resetting to zero.
+    pub fn conversation_usage(&self, conversation_id: i64) -> rusqlite::Result<UsageSummary> {
+        let sql = format!("SELECT {SUM_COLS} FROM usage_events WHERE conversation_id = ?1");
+        self.conn
+            .query_row(&sql, params![conversation_id], Self::read_summary_row)
+    }
+
     /// Highest `seq` stored for a conversation, or 0 if it has no messages.
     /// Used to continue seq numbering when resuming a conversation.
     #[cfg_attr(not(feature = "tui"), allow(dead_code))]
@@ -792,7 +880,7 @@ impl SessionDb {
         let daily = self.usage_today_by_hour()?;
         let weekly = self.usage_recent_days(7)?;
         let monthly = self.usage_recent_weeks(4)?;
-        let all_time = self.usage_buckets(36)?;
+        let all_time = self.usage_all_months()?;
         let yearly = self.usage_by_year()?;
         let hourly_today = self.usage_by_hour_since(TimeWindow::Today)?;
         let hourly_7d = self.usage_by_hour_since(TimeWindow::SinceDaysAgo(6))?;
@@ -962,15 +1050,19 @@ impl SessionDb {
         )
     }
 
-    fn usage_buckets(&self, limit: i64) -> rusqlite::Result<Vec<UsageBucket>> {
-        let modifier = format!("-{} months", limit.saturating_sub(1));
+    fn usage_all_months(&self) -> rusqlite::Result<Vec<UsageBucket>> {
         self.query_buckets(
             &format!(
-                "WITH RECURSIVE series(n, month) AS (
-                VALUES(0, strftime('%Y-%m', date('now', 'localtime', ?1)))
+                "WITH RECURSIVE bounds(first_month, current_month) AS (
+                SELECT COALESCE(strftime('%Y-%m', MIN(created_at), 'localtime'),
+                                strftime('%Y-%m', 'now', 'localtime')),
+                       strftime('%Y-%m', 'now', 'localtime')
+                FROM usage_events
+             ), series(month) AS (
+                SELECT first_month FROM bounds
                 UNION ALL
-                SELECT n + 1, strftime('%Y-%m', date(month || '-01', '+1 month'))
-                FROM series WHERE n + 1 < ?2
+                SELECT strftime('%Y-%m', date(month || '-01', '+1 month'))
+                FROM series, bounds WHERE month < current_month
              ), usage AS (
                 SELECT strftime('%Y-%m', created_at, 'localtime') AS month, {BUCKET_AGG_COLS}
                 FROM usage_events
@@ -981,7 +1073,7 @@ impl SessionDb {
              LEFT JOIN usage ON usage.month = series.month
              ORDER BY series.month ASC"
             ),
-            params![modifier, limit],
+            [],
         )
     }
 
@@ -1010,8 +1102,10 @@ impl SessionDb {
         let hourly_today = self.usage_by_hour_range(start, end)?;
 
         let (started_at, ended_at): (Option<String>, Option<String>) = self.conn.query_row(
-            "SELECT datetime(MIN(created_at), 'localtime'), datetime(MAX(created_at), 'localtime') FROM usage_events",
-            [],
+            "SELECT datetime(MIN(created_at), 'localtime'), datetime(MAX(created_at), 'localtime')
+             FROM usage_events
+             WHERE date(created_at, 'localtime') BETWEEN ?1 AND ?2",
+            params![start, end],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let total = self.conn.query_row(
@@ -1135,12 +1229,30 @@ impl SessionDb {
         limit: usize,
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let limit = limit.clamp(1, 1000);
+        self.query_messages(conversation_id, Some(limit))
+    }
+
+    /// Load a complete durable transcript. Runtime replay must not silently
+    /// truncate long conversations at the public history-query limit.
+    pub(crate) fn load_messages(
+        &self,
+        conversation_id: i64,
+    ) -> rusqlite::Result<Vec<StoredMessage>> {
+        self.query_messages(conversation_id, None)
+    }
+
+    fn query_messages(
+        &self,
+        conversation_id: i64,
+        limit: Option<usize>,
+    ) -> rusqlite::Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, role, content, tool_name, tool_call_id, tool_calls, images, is_error \
              FROM messages WHERE conversation_id = ?1 \
-             ORDER BY seq ASC LIMIT ?2",
+             ORDER BY seq ASC, id ASC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![conversation_id, limit as i64], |row| {
+        let sql_limit = limit.map(|value| value as i64).unwrap_or(-1);
+        let rows = stmt.query_map(params![conversation_id, sql_limit], |row| {
             Ok(StoredMessage {
                 seq: row.get(0)?,
                 role: row.get(1)?,

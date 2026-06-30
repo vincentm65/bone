@@ -35,7 +35,39 @@ const state = {
   snapshot: {},
   toolDefs: [],
   toolInfo: new Map(),   // call id -> { name, arguments }
+  // The conversation switch in flight, or null when none. Each browser tab
+  // multiplexes one daemon connection across conversations, so the previous
+  // actor's in-flight events can still be buffered in the socket when we switch.
+  // We drop those strays until the *target* conversation is established. The
+  // token records which target so we only resolve on it (not on a stray snapshot
+  // from the actor we just left, nor on an out-of-order load from a quick A→B
+  // double switch):
+  //   { mode: "load", id }   — waiting for conversation `id`.
+  //   { mode: "new", from }  — waiting for a fresh conversation, any id != `from`.
+  awaitingLoad: null,
 };
+
+// Does this snapshot/conversation_loaded satisfy the pending switch? With nothing
+// pending, everything passes. A specific load resolves only on its own id. A
+// new-chat request resolves on the fresh conversation, which the daemon either
+// mints under a new id or — when we were already on an empty chat — reuses under
+// the same id; either way it is empty, so resolve on a different id OR an empty
+// transcript. A stray snapshot from the non-empty actor we left (same id,
+// transcript_len > 0) is still ignored.
+function switchSatisfiedBy(snapshot) {
+  const w = state.awaitingLoad;
+  if (!w) return true;
+  const cid = snapshot ? snapshot.conversation_id : null;
+  if (cid == null) return false;
+  if (w.mode === "load") return cid === w.id;
+  return cid !== w.from || !(snapshot.transcript_len > 0);
+}
+
+// Per-conversation task lists, keyed by conversation id. The daemon emits a
+// conversation's task pane as live `view_diff`s during its turn and never
+// replays them on re-attach, so switching away would lose the list. We cache
+// each conversation's latest list here and restore it on switch/return.
+const taskCache = new Map();
 
 // ── connection ──────────────────────────────────────────────────────────────
 
@@ -57,6 +89,7 @@ function onBridge(msg) {
     // A reconnect creates a fresh TCP connection, which initially attaches to
     // the daemon's latest conversation. Restore this tab's own selection.
     if (desiredConversationId != null) {
+      state.awaitingLoad = { mode: "load", id: desiredConversationId };
       send({ load_conversation: { id: desiredConversationId } });
     }
   }
@@ -86,7 +119,16 @@ async function send(command) {
 
 // ── event handling ───────────────────────────────────────────────────────────
 
+// Streaming/turn events belong to whichever actor this connection is currently
+// attached to. While a switch is in flight (`awaitingLoad`), they may still be
+// strays from the conversation we just left — drop them until the target is
+// established. Routing/identity events pass through so the switch can resolve:
+// `state_snapshot` and `conversation_loaded` carry the conversation id we match
+// against, `status` lets a failed switch recover, and `frontend_state` is global.
 function onEvent(ev) {
+  const routing = ev.type === "conversation_loaded" || ev.type === "state_snapshot" ||
+                  ev.type === "status" || ev.type === "frontend_state";
+  if (state.awaitingLoad && !routing) return;
   switch (ev.type) {
     case "frontend_state": return onFrontendState(ev);
     case "state_snapshot": return onSnapshot(ev.snapshot);
@@ -116,6 +158,14 @@ function onFrontendState(ev) {
 
 function onSnapshot(s) {
   if (!s) return;
+  // While switching, only the target conversation's snapshot is authoritative;
+  // a snapshot from the actor we just left would clobber state.conversationId.
+  // The matching snapshot resolves the switch — this is the only signal a fresh
+  // conversation produces (NewConversation emits no `conversation_loaded`).
+  if (state.awaitingLoad) {
+    if (!switchSatisfiedBy(s)) return;
+    state.awaitingLoad = null;
+  }
   state.snapshot = s;
   state.model = s.provider_model || state.model;
   state.providerId = s.provider_id || state.providerId;
@@ -127,7 +177,7 @@ function onSnapshot(s) {
     if (changed) highlightActiveChat();
   }
   renderModelLabel();
-  updateMeter(s.context_length, s.sent + s.received, s.cost);
+  updateMeter(s.context_length, s.sent, s.received, s.cost);
   renderSettingsStats();
 }
 
@@ -137,15 +187,23 @@ function renderModelLabel() {
   $("model-label").textContent = state.model ? `${name} · ${state.model}` : name;
 }
 
-function onTokenUsage(ev) { updateMeter(ev.context_length, ev.sent + ev.received, null); }
+function onTokenUsage(ev) { updateMeter(ev.context_length, ev.sent, ev.received, null); }
 
 let lastCost = 0;
-function updateMeter(contextLen, total, cost) {
+function updateMeter(contextLen, sent, received, cost) {
   if (cost != null) lastCost = cost;
+  sent = sent || 0; received = received || 0;
+  const total = sent + received;
   const ctx = contextLen || total || 0;
   $("meter-fill").style.width = Math.min(100, (ctx / 200000) * 100) + "%";
   const costStr = lastCost > 0 ? ` · $${lastCost.toFixed(4)}` : "";
   $("meter-text").textContent = `${fmt(ctx)} tok${costStr}`;
+  // Composer readout: context · in / out / total.
+  $("composer-tokens").innerHTML =
+    `<span class="ct-ctx">${fmt(ctx)} ctx</span>` +
+    `<span class="ct-sep">·</span><span class="ct-in">↑${fmt(sent)}</span>` +
+    `<span class="ct-out">↓${fmt(received)}</span>` +
+    `<span class="ct-sep">·</span><span class="ct-tot">${fmt(total)} tot</span>`;
 }
 
 function fmt(n) {
@@ -175,6 +233,10 @@ function userMessage(text) {
 }
 
 function ensureAssistant() {
+  // Streaming output implies a live turn. When we re-attach to a chat that is
+  // already mid-turn we may miss its `started` event, so infer running here to
+  // keep the Stop button (and composer state) correct.
+  if (!state.running) setRunning(true);
   if (state.asstEl) return;
   const t = turn("assistant");
   t.appendChild(el("div", "role-tag", "bone"));
@@ -527,16 +589,13 @@ function renderTaskList() {
   const titleEl = expanded.querySelector(".task-list-title");
   const countEl = expanded.querySelector(".task-list-count");
   const itemsEl = $("task-list-items");
-  const empty = $("task-list-empty");
 
   if (!taskState.active || taskState.items.length === 0) {
     wrap.classList.add("hidden");
-    empty.classList.remove("hidden");
     return;
   }
 
   wrap.classList.remove("hidden");
-  empty.classList.add("hidden");
 
   // Collapsed bar: "Refactor auth module  3/7"
   const done = taskState.items.filter((t) => t.status === "done").length;
@@ -564,14 +623,53 @@ function renderTaskList() {
 
 function toggleTaskPopup() {
   taskState.expanded = !taskState.expanded;
-  const collapsed = $("task-popup-collapsed");
-  const expanded = $("task-popup-expanded");
-  collapsed.classList.toggle("hidden", taskState.expanded);
-  expanded.classList.toggle("hidden", !taskState.expanded);
+  $("task-popup-wrap").classList.toggle("expanded", taskState.expanded);
+  $("task-popup-expanded").classList.toggle("hidden", !taskState.expanded);
+}
+
+// Reset the sidebar task list — called when creating a fresh chat so no stale
+// tasks linger.
+function clearTaskList() {
+  taskState.active = false;
+  taskState.items = [];
+  taskState.expanded = false;
+  $("task-popup-expanded").classList.add("hidden");
+  $("task-popup-wrap").classList.remove("expanded");
+  renderTaskList();
+}
+
+// Persist the live task list under a conversation id so it survives a switch.
+// A conversation's actor emits its task pane only as live diffs and never
+// replays them on re-attach, so without this cache the list vanishes the moment
+// you look at another chat.
+function cacheTasks(convId) {
+  if (convId == null) return;
+  if (taskState.active && taskState.items.length) {
+    taskCache.set(convId, { title: taskState.title, items: taskState.items.map((t) => ({ ...t })) });
+  } else {
+    taskCache.delete(convId);
+  }
+}
+
+// Restore (or clear) the sidebar task list for the conversation now in view.
+function restoreTasks(convId) {
+  const cached = convId != null ? taskCache.get(convId) : null;
+  if (cached) {
+    taskState.active = true;
+    taskState.title = cached.title;
+    taskState.items = cached.items.map((t) => ({ ...t }));
+  } else {
+    taskState.active = false;
+    taskState.items = [];
+  }
+  taskState.expanded = false;
+  $("task-popup-expanded").classList.add("hidden");
+  $("task-popup-wrap").classList.remove("expanded");
+  renderTaskList();
 }
 
 $("task-popup-toggle").addEventListener("click", (e) => { e.stopPropagation(); toggleTaskPopup(); });
-$("task-popup-collapsed").addEventListener("click", () => { if (!taskState.expanded) toggleTaskPopup(); });
+$("task-popup-collapsed").addEventListener("click", () => toggleTaskPopup());
 
 // ── inline approvals ────────────────────────────────────────────────────────
 
@@ -660,6 +758,18 @@ function denyPending(beacon) {
 //    status bar, which is why the runtime still emits it).
 function onStatus(message) {
   if (!message) return;
+  // A switch that can't complete resolves here instead of via `conversation_loaded`
+  // (the daemon reports load/create failures as a Status). Clear the pending gate
+  // so the tab recovers rather than silently dropping every later event.
+  if (state.awaitingLoad) {
+    if (/failed to (load|create) conversation/i.test(message)) {
+      state.awaitingLoad = null;
+      return systemLine(message, true);
+    }
+    // Other statuses mid-switch are strays from the actor we left; don't bleed
+    // them into the chat we're opening.
+    return;
+  }
   if (message.startsWith("busy:")) return onBusy();
   if (message.startsWith("ignored (idle)")) return;
   if (message.startsWith("running ")) return;
@@ -727,23 +837,45 @@ function clearArtifacts() {
 }
 
 function onConversationLoaded(ev) {
+  // A quick A→B double switch produces two loads (A then B); only the one we
+  // last asked for is authoritative. Ignore a load for any other conversation so
+  // it can't render over, or clear the gate ahead of, the target we want.
+  if (state.awaitingLoad && !switchSatisfiedBy(ev.snapshot)) return;
+  // The target conversation's view is now authoritative — stop dropping events.
+  state.awaitingLoad = null;
   $("thread").innerHTML = "";
   finalizeTurn();
   // Conversation routing is independent: leaving a running chat must not keep
   // this tab's composer disabled while another chat continues in its actor.
   setRunning(false);
   clearArtifacts();
-  for (const m of ev.messages || []) renderStoredMessage(m);
+  // The DB stores each LLM round as its own assistant message, but a single
+  // turn often spans several tool-call rounds. Group consecutive assistant
+  // messages into one visual turn (one "bone" tag) to match the live layout.
+  let asstTurn = null;
+  let rendered = 0;
+  for (const m of ev.messages || []) {
+    if (m.role === "user") asstTurn = null;
+    asstTurn = renderStoredMessage(m, asstTurn);
+    rendered++;
+  }
   if (ev.snapshot) onSnapshot(ev.snapshot);
+  // Restore this conversation's task list from the per-chat cache (the actor
+  // won't re-emit it on attach). Uses the id from the snapshot we just applied.
+  restoreTasks(state.conversationId);
+  // An empty conversation (fresh chat) shows the welcome rather than a blank pane.
+  if (!rendered) { $("thread").appendChild(buildWelcome()); }
   scrollDown();
 }
 
-function renderStoredMessage(m) {
-  if (m.role === "user") return userMessage(m.content);
+function renderStoredMessage(m, asstTurn) {
+  if (m.role === "user") { userMessage(m.content); return null; }
   if (m.role === "assistant") {
-    const t = turn("assistant");
-    t.appendChild(el("div", "role-tag", "bone"));
-    t.appendChild(el("div", "prose", renderMarkdown(m.content || "")));
+    const t = asstTurn || turn("assistant");
+    if (!asstTurn) t.appendChild(el("div", "role-tag", "bone"));
+    // Only emit a prose block when there's actual text — empty assistant
+    // messages (tool-call-only rounds) shouldn't add blank separation.
+    if ((m.content || "").trim()) t.appendChild(el("div", "prose", renderMarkdown(m.content)));
     for (const tc of m.tool_calls || []) {
       const { verb, arg } = toolMeta(tc.name, tc.arguments);
       const card = el("div", "tool");
@@ -758,23 +890,27 @@ function renderStoredMessage(m) {
       card.querySelector(".tool-head").onclick = () => card.classList.toggle("open");
       t.appendChild(card);
     }
+    return t;
   }
+  return asstTurn;
 }
 
 // The runtime may push an accent colour, but an explicit theme choice wins;
 // only "auto" defers to the runtime.
 function onViewDiff(diff) {
-  if (prefs.theme !== "auto") return;
-  if (diff && diff.set_highlight && diff.set_highlight.name === "accent" && diff.set_highlight.fg)
+  // Runtime-pushed accent colour: only honoured when the theme defers to it.
+  if (prefs.theme === "auto" && diff && diff.set_highlight &&
+      diff.set_highlight.name === "accent" && diff.set_highlight.fg)
     document.documentElement.style.setProperty("--accent", diff.set_highlight.fg);
 
-  // Task list pane (source="task_list") — render in sidebar.
+  // Task list pane (source="task_list") — render in sidebar. Theme-independent.
   if (diff && diff.upsert && diff.upsert.component) {
     const comp = diff.upsert.component;
     if (comp.id === "task_list" && comp.lines) {
       taskState.active = true;
       taskState.title = comp.title || "Tasks";
       taskState.items = parseTaskLines(comp.lines);
+      cacheTasks(state.conversationId);
       renderTaskList();
       return;
     }
@@ -783,6 +919,7 @@ function onViewDiff(diff) {
   if (diff && diff.remove && diff.remove.id === "task_list") {
     taskState.active = false;
     taskState.items = [];
+    cacheTasks(state.conversationId);
     renderTaskList();
   }
 }
@@ -851,6 +988,11 @@ async function loadChats() {
 function openChat(id) {
   if (id === state.conversationId) return;
   denyPending();
+  // Stash the chat we're leaving so its task list is there when we come back,
+  // then ask the daemon to switch. Strays from the old actor are gated out
+  // until the target's `conversation_loaded` lands (see `awaitingLoad`).
+  cacheTasks(state.conversationId);
+  state.awaitingLoad = { mode: "load", id };
   send({ load_conversation: { id } });
   state.conversationId = id;
   desiredConversationId = id;
@@ -873,6 +1015,9 @@ function relTime(iso) {
 }
 function newChat() {
   denyPending();
+  cacheTasks(state.conversationId);
+  clearTaskList();
+  state.awaitingLoad = { mode: "new", from: state.conversationId };
   send("new_conversation");
   $("thread").innerHTML = "";
   $("thread").appendChild(buildWelcome());

@@ -188,7 +188,6 @@ async fn runtime_session_accumulates_state_across_turns() {
     async fn run_turn(session: &mut RuntimeSession, llm: Arc<dyn LlmProvider>, prompt: &str) {
         // The Driver appends the user message itself; mark where this turn's new
         // messages begin, then drive the turn through a LocalConn.
-        let persist_from = session.transcript.len();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
         let driver = session.build_driver(
             llm,
@@ -213,9 +212,7 @@ async fn runtime_session_accumulates_state_across_turns() {
         });
         while conn.next_event().await.is_some() {}
         let outcome = conn.take_outcome().expect("turn produced an outcome");
-        session
-            .apply_outcome(outcome, persist_from)
-            .expect("turn ok");
+        session.apply_outcome(outcome).expect("turn ok");
     }
 
     run_turn(&mut session, llm.clone(), "hi").await;

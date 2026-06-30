@@ -76,6 +76,10 @@ pub struct DriverOutcome {
     pub tools: ToolHandler,
     pub transcript: Vec<ChatMessage>,
     pub token_stats: TokenStats,
+    /// Messages produced during this turn that still need durable persistence.
+    /// Kept separately because a `conversation.replace` compaction can shorten
+    /// or reshape `transcript`, making a pre-turn transcript index invalid.
+    pub persist_messages: Vec<ChatMessage>,
     /// Per-request usage captured during the turn. The Driver also reports these
     /// to its `session` sink, but a frontend that runs with a `NullSessionSink`
     /// (the TUI persists with its own continuous `session_seq`) reads them from
@@ -158,6 +162,7 @@ impl Driver {
                     tools,
                     transcript,
                     token_stats,
+                    persist_messages: Vec::new(),
                     usage: Vec::new(),
                 }
             }
@@ -225,6 +230,7 @@ impl Driver {
 
         let mut session_seq = 0i64;
         let mut usage_records: Vec<UsageRecord> = Vec::new();
+        let mut persist_messages: Vec<ChatMessage> = Vec::new();
         // The initiating user turn is already present in history/transcript:
         // headless `agent_setup` seeds it, and the TUI pushes it before
         // building the driver. Only insert when it is NOT already the last
@@ -240,7 +246,8 @@ impl Driver {
         if !prompt_already_last {
             let message = ChatMessage::new(crate::llm::ChatRole::User, prompt);
             history.push(message.clone());
-            transcript.push(message);
+            transcript.push(message.clone());
+            persist_messages.push(message);
         }
         session.append_message("user", prompt, None, None, None, None, session_seq);
 
@@ -628,7 +635,8 @@ impl Driver {
                     assistant.reasoning_items = std::mem::take(&mut reasoning_items);
                 }
                 assistant.output_sequence = std::mem::take(&mut output_sequence);
-                transcript.push(assistant);
+                transcript.push(assistant.clone());
+                persist_messages.push(assistant);
                 session_seq += 1;
                 session.append_message(
                     "assistant",
@@ -656,7 +664,8 @@ impl Driver {
             }
             assistant.output_sequence = std::mem::take(&mut output_sequence);
             history.push(assistant.clone());
-            transcript.push(assistant);
+            transcript.push(assistant.clone());
+            persist_messages.push(assistant);
             session_seq += 1;
             let tool_calls_json = serde_json::to_string(&tool_calls).ok();
             session.append_message(
@@ -729,7 +738,8 @@ impl Driver {
                 );
                 let message = ChatMessage::tool(result.clone());
                 history.push(message.clone());
-                transcript.push(message);
+                transcript.push(message.clone());
+                persist_messages.push(message);
 
                 // The OpenAI wire format cannot carry images in a tool-role
                 // message, so relay any tool-returned images to vision-capable
@@ -749,7 +759,8 @@ impl Driver {
                     );
                     let relay = ChatMessage::user_with_images(note, result.images.clone());
                     history.push(relay.clone());
-                    transcript.push(relay);
+                    transcript.push(relay.clone());
+                    persist_messages.push(relay);
                 }
             }
         };
@@ -776,6 +787,7 @@ impl Driver {
             tools,
             transcript,
             token_stats,
+            persist_messages,
             usage: usage_records,
         }
     }

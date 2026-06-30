@@ -93,7 +93,7 @@ impl RuntimeSession {
             // Resume the last conversation in place.
             Ok(Some((conv_id, has_messages))) => {
                 if has_messages {
-                    match db.list_messages(conv_id, 1000) {
+                    match db.load_messages(conv_id) {
                         Ok(rows) => {
                             self.transcript = rows
                                 .into_iter()
@@ -109,7 +109,7 @@ impl RuntimeSession {
                 self.session_seq = db.max_message_seq(conv_id).unwrap_or(0);
                 self.conversation_id = Some(conv_id);
                 self.session_db = Some(db);
-                self.recompute_context_estimate();
+                self.restore_usage_and_context();
                 None
             }
             // Empty database: mint the first conversation.
@@ -168,7 +168,7 @@ impl RuntimeSession {
             }
             Ok(true) => {}
         }
-        match db.list_messages(conversation_id, 1000) {
+        match db.load_messages(conversation_id) {
             Ok(rows) => {
                 self.transcript = rows
                     .into_iter()
@@ -185,8 +185,24 @@ impl RuntimeSession {
         self.session_seq = db.max_message_seq(conversation_id).unwrap_or(0);
         self.conversation_id = Some(conversation_id);
         self.session_db = Some(db);
-        self.recompute_context_estimate();
+        self.restore_usage_and_context();
         None
+    }
+
+    /// Restore cumulative persisted usage and recompute the current context
+    /// estimate after loading a durable conversation.
+    pub(crate) fn restore_usage_and_context(&mut self) {
+        self.token_stats.reset();
+        if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id)
+            && let Ok(usage) = db.conversation_usage(conv_id)
+        {
+            self.token_stats.sent = usage.prompt_tokens.max(0) as u64;
+            self.token_stats.received = usage.completion_tokens.max(0) as u64;
+            self.token_stats.cached = usage.cached_tokens.max(0) as u64;
+            self.token_stats.cost = usage.cost.max(0.0);
+            self.token_stats.request_count = usage.request_count.max(0) as u64;
+        }
+        self.recompute_context_estimate();
     }
 
     /// Re-estimate the prompt context size from the current transcript + tool
@@ -219,8 +235,8 @@ impl RuntimeSession {
         let Some(db) = self.session_db.as_ref() else {
             return;
         };
-        self.session_seq += 1;
-        db.append_message(
+        let requested_seq = self.session_seq.saturating_add(1);
+        if let Ok(allocated_seq) = db.append_message(
             conv_id,
             role,
             content,
@@ -229,9 +245,10 @@ impl RuntimeSession {
             tool_calls_json,
             images_json,
             false,
-            self.session_seq,
-        )
-        .ok();
+            requested_seq,
+        ) {
+            self.session_seq = allocated_seq;
+        }
     }
 
     /// Append a user message (optionally with image attachments) to the DB. The
@@ -281,22 +298,21 @@ impl RuntimeSession {
     }
 
     /// Fold a completed turn's [`DriverOutcome`] back into the session: adopt the
-    /// authoritative transcript/token-stats/tool-state and persist the turn's new
-    /// messages + usage in one transaction. `persist_from` is the transcript
-    /// index where this turn's new (assistant/tool) messages began.
+    /// authoritative transcript/token-stats/tool-state and persist the turn's
+    /// explicit new-message list + usage in one transaction.
     ///
     /// Returns the turn's `result` so the frontend can surface a failure —
     /// persistence and state adoption happen regardless of success.
     pub fn apply_outcome(
         &mut self,
         outcome: DriverOutcome,
-        persist_from: usize,
     ) -> Result<crate::agent::AgentResponse, String> {
         let DriverOutcome {
             result,
             tools,
             transcript,
             token_stats,
+            persist_messages,
             usage,
         } = outcome;
         self.transcript = transcript;
@@ -305,14 +321,9 @@ impl RuntimeSession {
 
         // Persist the turn's new messages + usage in one atomic transaction (a
         // single WAL sync) instead of one commit per row.
-        let new_msgs: Vec<ChatMessage> = self
-            .transcript
-            .get(persist_from..)
-            .map(<[ChatMessage]>::to_vec)
-            .unwrap_or_default();
         if let Some(ref db) = self.session_db
             && let Some(conv_id) = self.conversation_id
-            && let Ok(next) = db.append_turn(conv_id, self.session_seq, &new_msgs, &usage)
+            && let Ok(next) = db.append_turn(conv_id, self.session_seq, &persist_messages, &usage)
         {
             self.session_seq = next;
         }
@@ -338,5 +349,57 @@ impl RuntimeSession {
             provider_id: provider_id.to_string(),
             provider_model: provider_model.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::ChatRole;
+    use crate::tools::builtin_tools;
+
+    #[test]
+    fn apply_outcome_persists_explicit_turn_messages_after_transcript_replacement() {
+        let path = std::env::temp_dir().join(format!(
+            "bone_compaction_persist_{}_{}.db",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = SessionDb::open(&path).unwrap();
+        let conv = db.create_conversation("test", "model").unwrap();
+        let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+        session.session_db = Some(db);
+        session.conversation_id = Some(conv);
+        session.transcript = (0..10)
+            .map(|i| ChatMessage::new(ChatRole::User, format!("old {i}")))
+            .collect();
+
+        let current = ChatMessage::new(ChatRole::Assistant, "current answer");
+        let outcome = DriverOutcome {
+            result: Ok(crate::agent::AgentResponse {
+                content: "current answer".into(),
+            }),
+            tools: ToolHandler::new(builtin_tools()),
+            // Simulate compaction replacing a ten-message transcript with a
+            // shorter summary before this turn completed.
+            transcript: vec![ChatMessage::new(ChatRole::User, "summary"), current.clone()],
+            token_stats: Default::default(),
+            persist_messages: vec![current],
+            usage: Vec::new(),
+        };
+
+        session.apply_outcome(outcome).unwrap();
+        let stored = session
+            .session_db
+            .as_ref()
+            .unwrap()
+            .load_messages(conv)
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].content, "current answer");
+
+        drop(session);
+        let _ = std::fs::remove_file(path);
     }
 }

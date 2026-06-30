@@ -180,13 +180,17 @@ function usageRecentWeeks(db, weeks) {
   }
 }
 
-function usageBuckets(db, limit) {
-  const modifier = `-${limit - 1} months`;
-  const sql = `WITH RECURSIVE series(n, month) AS (
-    VALUES(0, strftime('%Y-%m', date('now', 'localtime', '${modifier}')))
+function usageAllMonths(db) {
+  const sql = `WITH RECURSIVE bounds(first_month, current_month) AS (
+    SELECT COALESCE(strftime('%Y-%m', MIN(created_at), 'localtime'),
+                    strftime('%Y-%m', 'now', 'localtime')),
+           strftime('%Y-%m', 'now', 'localtime')
+    FROM usage_events
+  ), series(month) AS (
+    SELECT first_month FROM bounds
     UNION ALL
-    SELECT n + 1, strftime('%Y-%m', date(month || '-01', '+1 month'))
-    FROM series WHERE n + 1 < ${limit}
+    SELECT strftime('%Y-%m', date(month || '-01', '+1 month'))
+    FROM series, bounds WHERE month < current_month
   ), usage AS (
     SELECT strftime('%Y-%m', created_at, 'localtime') AS month, ${BUCKET_AGG_COLS}
     FROM usage_events
@@ -266,7 +270,7 @@ function loadStatsSnapshot() {
       daily: usageTodayByHour(db),
       weekly: usageRecentDays(db, 7),
       monthly: usageRecentWeeks(db, 4),
-      all_time: usageBuckets(db, 36),
+      all_time: usageAllMonths(db),
       yearly: usageByYear(db),
       hourly_today: usageByHourSince(db, " WHERE date(created_at, 'localtime') = date('now', 'localtime')"),
       hourly_7d: usageByHourSince(db, " WHERE date(created_at, 'localtime') >= date('now', 'localtime', '-6 days')"),
@@ -452,7 +456,7 @@ function listConversations() {
          JOIN messages first_user ON first_user.id = (
            SELECT m.id FROM messages m
            WHERE m.conversation_id = c.id AND m.role = 'user'
-           ORDER BY m.seq ASC LIMIT 1
+           ORDER BY m.seq ASC, m.id ASC LIMIT 1
          )
          WHERE first_user.content NOT LIKE 'unique-task-%'
          ORDER BY c.id DESC LIMIT 80`,
@@ -605,7 +609,13 @@ const server = http.createServer(async (req, res) => {
   const file = join(PUBLIC, p.replace(/\.\./g, ""));
   try {
     const body = await readFile(file);
-    res.writeHead(200, { "content-type": MIME[extname(file)] || "application/octet-stream" });
+    // No caching: this is a local dev UI whose assets change often. Without
+    // this the browser heuristically caches app.js/styles.css and silently
+    // runs stale code after edits.
+    res.writeHead(200, {
+      "content-type": MIME[extname(file)] || "application/octet-stream",
+      "cache-control": "no-cache, no-store, must-revalidate",
+    });
     res.end(body);
   } catch {
     res.writeHead(404).end("not found");

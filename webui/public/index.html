@@ -40,10 +40,22 @@
         <div id="chat-list" class="chat-list"></div>
 
         <div class="sidebar-foot">
-        <button id="task-list-empty" class="foot-btn hidden" title="Task list">
-          <svg viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2"/><path d="M9 12l2 2 4-4"/></svg>
-          <span>Tasks</span>
-        </button>
+        <div id="task-popup-wrap" class="task-foot hidden">
+          <div id="task-popup-expanded" class="task-popup-expanded hidden">
+            <div class="task-popup-head">
+              <div class="task-list-title"></div>
+              <div class="task-list-count"></div>
+            </div>
+            <div id="task-list-items" class="task-list-items"></div>
+          </div>
+          <div id="task-popup-collapsed" class="task-popup-collapsed">
+            <svg class="task-foot-icon" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2"/><path d="M9 12l2 2 4-4"/></svg>
+            <span id="task-popup-label" class="task-popup-label"></span>
+            <button id="task-popup-toggle" class="ghost-btn task-popup-toggle-btn" title="Toggle task list">
+              <svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg>
+            </button>
+          </div>
+        </div>
         <button id="stats-btn" class="foot-btn" title="Token stats">
             <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-6"/></svg>
             <span>Stats</span>
@@ -93,27 +105,13 @@
 
             <!-- floating, bottom-pinned composer -->
             <div id="composer-wrap">
-              <div id="task-popup-wrap" class="task-popup-wrap hidden">
-              <div id="task-popup-collapsed" class="task-popup-collapsed">
-                <span id="task-popup-label" class="task-popup-label"></span>
-                <button id="task-popup-toggle" class="ghost-btn task-popup-toggle-btn" title="Toggle task list">
-                  <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
-                </button>
-              </div>
-              <div id="task-popup-expanded" class="task-popup-expanded hidden">
-                <div class="task-popup-head">
-                  <div class="task-list-title"></div>
-                  <div class="task-list-count"></div>
-                </div>
-                <div id="task-list-items" class="task-list-items"></div>
-              </div>
-            </div>
             <div id="composer" class="composer">
                 <textarea id="input" rows="1" placeholder="Message bone…" autocomplete="off"></textarea>
                 <div class="composer-bar">
                   <button id="mode-toggle" class="pill mode-safe" title="Tool-approval mode">
                     <span id="mode-label">Safe</span>
                   </button>
+                  <span id="composer-tokens" class="composer-tokens" title="Context · in / out / total tokens"></span>
                   <span class="grow"></span>
                   <span id="hint" class="hint">↵ send</span>
                   <button id="stop" class="round-btn stop-btn hidden" title="Stop">

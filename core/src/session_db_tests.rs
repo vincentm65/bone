@@ -53,7 +53,7 @@ fn migrate_v1_preserves_user_data() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6, "schema should be migrated to latest version");
+    assert_eq!(version, 8, "schema should be migrated to latest version");
 
     // Pre-existing rows survive the migration.
     let conversations: i64 = db
@@ -112,11 +112,10 @@ fn migrate_v1_preserves_user_data() {
     assert_eq!(has_is_error, 1);
 }
 
-/// A non-empty database left at the pre-versioning default (user_version 0)
-/// must NOT be silently stamped current — that would skip the is_estimated
-/// column. It must error without touching version, data, or schema.
+/// A populated pre-versioning database is migrated in place. This must retain
+/// every conversation row while adding the columns old schemas lack.
 #[test]
-fn legacy_unversioned_database_is_not_stamped_current() {
+fn legacy_unversioned_database_migrates_without_data_loss() {
     let conn = Connection::open_in_memory().unwrap();
     // V1_SCHEMA has no is_estimated column; leaving user_version at 0 simulates
     // a database created before schema versioning existed.
@@ -128,15 +127,13 @@ fn legacy_unversioned_database_is_not_stamped_current() {
     .unwrap();
 
     let db = SessionDb { conn };
-    let result = db.setup_schema();
-    assert!(result.is_err(), "legacy v0 DB must not migrate silently");
+    db.setup_schema().unwrap();
 
-    // Version untouched.
     let version: u32 = db
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 0);
+    assert_eq!(version, 8);
 
     // Data untouched.
     let count: i64 = db
@@ -145,7 +142,6 @@ fn legacy_unversioned_database_is_not_stamped_current() {
         .unwrap();
     assert_eq!(count, 1);
 
-    // Schema untouched: is_estimated was NOT added.
     let has_is_estimated: i64 = db
         .conn
         .query_row(
@@ -154,7 +150,7 @@ fn legacy_unversioned_database_is_not_stamped_current() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(has_is_estimated, 0);
+    assert_eq!(has_is_estimated, 1);
 }
 
 /// A fresh database initializes straight to the latest schema.
@@ -168,7 +164,7 @@ fn fresh_database_initializes_at_latest_version() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 8);
 
     // record_usage relies on the is_estimated column being present.
     db.create_conversation("openai", "gpt-4").unwrap();
@@ -193,6 +189,162 @@ fn max_message_seq_tracks_highest_seq() {
     // A different conversation is unaffected.
     let other = db.create_conversation("openai", "gpt-4").unwrap();
     assert_eq!(db.max_message_seq(other).unwrap(), 0);
+}
+
+#[test]
+fn append_message_repairs_stale_or_duplicate_sequence_hints() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+
+    assert_eq!(
+        db.append_message(conv, "user", "one", None, None, None, None, false, 1)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.append_message(conv, "assistant", "two", None, None, None, None, false, 1)
+            .unwrap(),
+        2
+    );
+    let seqs: Vec<i64> = db
+        .list_messages(conv, 10)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.seq)
+        .collect();
+    assert_eq!(seqs, vec![1, 2]);
+}
+
+#[test]
+fn append_turn_persists_system_messages() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    let messages = vec![crate::llm::ChatMessage::new(
+        crate::llm::ChatRole::System,
+        "durable context",
+    )];
+
+    assert_eq!(db.append_turn(conv, 0, &messages, &[]).unwrap(), 1);
+    let stored = db.list_messages(conv, 10).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].role, "system");
+    assert_eq!(stored[0].content, "durable context");
+}
+
+#[test]
+fn runtime_load_is_not_truncated_at_history_query_limit() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    let messages: Vec<_> = (0..1001)
+        .map(|i| crate::llm::ChatMessage::new(crate::llm::ChatRole::User, format!("message {i}")))
+        .collect();
+    db.append_turn(conv, 0, &messages, &[]).unwrap();
+
+    assert_eq!(db.list_messages(conv, 2000).unwrap().len(), 1000);
+    assert_eq!(db.load_messages(conv).unwrap().len(), 1001);
+}
+
+#[test]
+fn v6_migration_rebuilds_drifted_fts_index_without_changing_messages() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.append_message(conv, "user", "searchable", None, None, None, None, false, 1)
+        .unwrap();
+    db.conn.execute("DELETE FROM messages_fts", []).unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO messages_fts(rowid, content, role, conversation_id)
+             VALUES (999, 'stale', 'user', 999)",
+            [],
+        )
+        .unwrap();
+    db.conn.pragma_update(None, "user_version", 6u32).unwrap();
+
+    db.setup_schema().unwrap();
+
+    let messages: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    let indexed: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages m JOIN messages_fts f ON f.rowid = m.id
+             WHERE f.content = m.content AND f.role = m.role",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stale: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages_fts WHERE rowid = 999",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((messages, indexed, stale), (1, 1, 0));
+}
+
+#[test]
+fn v7_migration_repairs_duplicate_sequences_without_deleting_messages() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.conn
+        .execute("DROP INDEX idx_messages_conversation_seq_unique", [])
+        .unwrap();
+    for (id, content) in [(1, "first"), (2, "second"), (3, "third")] {
+        db.conn
+            .execute(
+                "INSERT INTO messages
+                 (id, conversation_id, role, content, seq, created_at)
+                 VALUES (?1, ?2, 'user', ?3, 1, '2026-01-01T00:00:00Z')",
+                rusqlite::params![id, conv, content],
+            )
+            .unwrap();
+    }
+    db.conn.pragma_update(None, "user_version", 7u32).unwrap();
+
+    db.setup_schema().unwrap();
+
+    let rows: Vec<(String, i64)> = {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT content, seq FROM messages ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        rows,
+        vec![
+            ("first".into(), 1),
+            ("second".into(), 2),
+            ("third".into(), 3)
+        ]
+    );
+    let duplicate_insert = db.conn.execute(
+        "INSERT INTO messages
+         (conversation_id, role, content, seq, created_at)
+         VALUES (?1, 'user', 'duplicate', 3, '2026-01-01T00:00:01Z')",
+        rusqlite::params![conv],
+    );
+    assert!(
+        duplicate_insert.is_err(),
+        "unique sequence index must enforce ordering"
+    );
 }
 
 #[test]
@@ -339,6 +491,11 @@ fn usage_stats_queries_aggregate_recorded_usage() {
     let model = &snap.by_model_today[0];
     assert_eq!(model.prompt_tokens, 100);
     assert_eq!(model.completion_tokens, 50);
+    let conversation = db.conversation_usage(conv).unwrap();
+    assert_eq!(conversation.prompt_tokens, 100);
+    assert_eq!(conversation.completion_tokens, 50);
+    assert_eq!(conversation.cached_tokens, 10);
+    assert_eq!(conversation.request_count, 1);
 
     // Custom range covering today aggregates the same event.
     let today: String = db
@@ -349,6 +506,69 @@ fn usage_stats_queries_aggregate_recorded_usage() {
     assert_eq!(range.total.prompt_tokens, 100);
     assert_eq!(range.daily.len(), 1, "single-day range yields one bucket");
     assert_eq!(range.daily[0].prompt_tokens, 100);
+}
+
+#[test]
+fn custom_range_metadata_is_scoped_to_the_requested_dates() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    for (id, created_at) in [
+        (1, "2025-01-01T12:00:00Z"),
+        (2, "2026-02-03T10:00:00Z"),
+        (3, "2026-02-04T11:00:00Z"),
+    ] {
+        db.conn
+            .execute(
+                "INSERT INTO usage_events
+                 (id, conversation_id, provider, model, prompt_tokens, created_at)
+                 VALUES (?1, ?2, 'openai', 'gpt-4', 10, ?3)",
+                rusqlite::params![id, conv, created_at],
+            )
+            .unwrap();
+    }
+
+    let range = db.usage_stats_range("2026-02-03", "2026-02-04").unwrap();
+    assert!(
+        range
+            .started_at
+            .as_deref()
+            .is_some_and(|value| value.starts_with("2026-02-03 "))
+    );
+    assert!(
+        range
+            .ended_at
+            .as_deref()
+            .is_some_and(|value| value.starts_with("2026-02-04 "))
+    );
+    assert_eq!(range.total.prompt_tokens, 20);
+}
+
+#[test]
+fn all_time_months_include_usage_older_than_three_years() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO usage_events
+             (conversation_id, provider, model, prompt_tokens, created_at)
+             VALUES (?1, 'openai', 'gpt-4', 42, '2020-01-15T12:00:00Z')",
+            rusqlite::params![conv],
+        )
+        .unwrap();
+
+    let snapshot = db.usage_stats_snapshot().unwrap();
+    assert_eq!(snapshot.all_time.first().unwrap().label, "2020-01");
+    assert_eq!(
+        snapshot
+            .range_summary(super::ViewMode::Months)
+            .prompt_tokens,
+        42
+    );
+    assert_eq!(snapshot.total.prompt_tokens, 42);
 }
 
 /// `latest_conversation` underpins resume-on-boot: it returns the most recent
