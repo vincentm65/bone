@@ -100,6 +100,47 @@ fn cancel_sets_flag_and_completes() {
 }
 
 #[test]
+fn cancel_all_signals_only_running_jobs() {
+    let reg = fresh_registry();
+    let flag1 = Arc::new(AtomicBool::new(false));
+    let flag2 = Arc::new(AtomicBool::new(false));
+    let done_flag = Arc::new(AtomicBool::new(false));
+    let id1 = reg
+        .create(NewJob {
+            cancel_flag: flag1.clone(),
+            ..new_job("a", "t1")
+        })
+        .unwrap();
+    reg.create(NewJob {
+        cancel_flag: flag2.clone(),
+        ..new_job("b", "t2")
+    })
+    .unwrap();
+    // A finished job must not be re-signalled.
+    let done = reg
+        .create(NewJob {
+            cancel_flag: done_flag.clone(),
+            ..new_job("c", "t3")
+        })
+        .unwrap();
+    reg.complete(&done, Ok("ok".into()));
+
+    assert_eq!(reg.cancel_all(), 2);
+    assert!(flag1.load(Ordering::Relaxed));
+    assert!(flag2.load(Ordering::Relaxed));
+    assert!(!done_flag.load(Ordering::Relaxed));
+
+    // The two running jobs still report Running (cancel is cooperative; the
+    // task flips them to Error when it observes the flag). id1 is one of them.
+    assert!(reg.running_ids().contains(&id1));
+
+    // Nothing left running once both complete: cancel_all returns 0.
+    reg.complete(&id1, Err("cancelled".into()));
+    reg.complete("job-2", Err("cancelled".into()));
+    assert_eq!(reg.cancel_all(), 0);
+}
+
+#[test]
 fn complete_sets_done() {
     let reg = fresh_registry();
     create_default(&reg, "coder", "write code");

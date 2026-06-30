@@ -392,17 +392,25 @@ impl Driver {
                 }
             }
 
-            // Request stream with retry.
+            // Request stream with retry. Both the request itself and the
+            // backoff sleep race the cancel flag: establishing the connection
+            // (and waiting on the provider's response headers) can park for
+            // seconds while the model "thinks" server-side, and a Ctrl+C in
+            // that window must return control now rather than waiting out the
+            // request or the 2s backoff.
             let mut stream = None;
-            for attempt in 1..=3 {
-                match llm
-                    .chat_stream_with_context(
-                        history.clone(),
-                        turn_tool_defs.clone(),
-                        ProviderRequestContext { conversation_id },
-                    )
-                    .await
-                {
+            'request: for attempt in 1..=3 {
+                let send = llm.chat_stream_with_context(
+                    history.clone(),
+                    turn_tool_defs.clone(),
+                    ProviderRequestContext { conversation_id },
+                );
+                let result = tokio::select! {
+                    biased;
+                    _ = await_cancel() => break 'request,
+                    result = send => result,
+                };
+                match result {
                     Ok(s) => {
                         stream = Some(s);
                         break;
@@ -411,7 +419,11 @@ impl Driver {
                         emit_runtime(RuntimeEvent::Status {
                             message: format!("retry {attempt}/3: {e}"),
                         });
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        tokio::select! {
+                            biased;
+                            _ = await_cancel() => break 'request,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                        }
                     }
                     Err(e) => {
                         emit_runtime(RuntimeEvent::Failed {
@@ -421,7 +433,10 @@ impl Driver {
                     }
                 }
             }
-            let mut stream = stream.unwrap();
+            // Cancelled while connecting/backing off: discard this turn.
+            let Some(mut stream) = stream else {
+                break 'turn Ok(String::new());
+            };
 
             // Consume stream.
             let mut assistant_text = String::new();

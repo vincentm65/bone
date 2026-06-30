@@ -461,13 +461,10 @@ impl App {
                 self.apply_custom_configs_to_runtime(custom);
                 // Notify the daemon to rebuild its provider from updated config.
                 let active_id = self.view.provider_id.clone();
-                let _ = self
-                    .command_tx
-                    .send(crate::runtime::RuntimeCommand::SwitchProvider {
-                        provider_id: active_id.clone(),
-                    });
-                // Await the daemon's StateSnapshot with new provider info.
-                self.await_state_snapshot().await;
+                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
+                    provider_id: active_id,
+                })
+                .await;
                 "Configuration applied.".to_string()
             }
             crate::ext::types::ConfigAction::ReloadTools => self.reload_extensions(),
@@ -475,18 +472,22 @@ impl App {
                 let mut custom = config::custom::CustomConfigs::load();
                 custom.set_last_provider(&id);
                 self.custom_configs = custom;
-                // Tell the daemon to switch providers.
-                let _ = self
-                    .command_tx
-                    .send(crate::runtime::RuntimeCommand::SwitchProvider {
-                        provider_id: id.clone(),
-                    });
-                // Await the daemon's StateSnapshot with new provider info.
-                self.await_state_snapshot().await;
-                format!(
-                    "Switched to {} ({})",
-                    self.view.provider_model, self.view.provider_id
-                )
+                let prev = self.view.provider_id.clone();
+                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
+                    provider_id: id,
+                })
+                .await;
+                if self.view.provider_id == prev {
+                    format!(
+                        "No change — still {} ({}). Provider may not be valid.",
+                        self.view.provider_model, self.view.provider_id
+                    )
+                } else {
+                    format!(
+                        "Switched to {} ({})",
+                        self.view.provider_model, self.view.provider_id
+                    )
+                }
             }
         }
     }
@@ -499,21 +500,50 @@ impl App {
         self.view = snapshot;
     }
 
-    /// Block until the daemon publishes a StateSnapshot, then adopt it.
+    /// Block until the daemon publishes a `StateSnapshot`, then adopt it.
+    ///
+    /// Other events seen while waiting (notably an error `Status` the daemon
+    /// emits *before* the snapshot — e.g. "failed to switch provider: …") are
+    /// applied via [`apply_idle_event`], not discarded: a swallowed `Status`
+    /// makes a failed switch look like a successful one and the post-failure
+    /// snapshot (which keeps the *old* provider) the only thing the caller sees.
+    /// A `Lagged` receiver is retried rather than treated as terminal.
     async fn await_state_snapshot(&mut self) {
         loop {
             // Bind first so the recv future temporary is dropped before
-            // `apply_snapshot` borrows `self` again.
+            // `apply_snapshot` / `apply_idle_event` borrows `self` again.
             let ev = self.events_rx.recv().await;
             match ev {
                 Ok(crate::runtime::RuntimeEvent::StateSnapshot { snapshot }) => {
                     self.apply_snapshot(snapshot);
                     break;
                 }
-                Ok(_) => continue,
-                Err(_) => break,
+                Ok(other) => self.apply_idle_event(other),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
+    }
+
+    /// Drain buffered events, send a state-mutating command, then block for the
+    /// daemon's authoritative `StateSnapshot` reply.
+    ///
+    /// Draining *before* the send is what fixes the "one switch behind" bug:
+    /// every command (and turn) ends with a published snapshot, and one can
+    /// still be sitting in the broadcast buffer (not yet drained by the idle
+    /// loop) when the next `/provider` / `/model` / `/new` runs. Without the
+    /// pre-drain, `await_state_snapshot` would adopt that *previous* snapshot
+    /// and return before the daemon ever processed this command — so the view
+    /// always trailed by one. The daemon publishes nothing until it receives
+    /// `cmd`, so after draining + sending, the only snapshot that can arrive is
+    /// this command's. There is no await point between the drain and the send,
+    /// so the daemon cannot slip a publish in between.
+    async fn send_and_await_snapshot(&mut self, cmd: crate::runtime::RuntimeCommand) {
+        while let Ok(ev) = self.events_rx.try_recv() {
+            self.apply_idle_event(ev);
+        }
+        let _ = self.command_tx.send(cmd);
+        self.await_state_snapshot().await;
     }
 
     /// Load a past conversation as the active chat (the `conversation.load`
@@ -644,11 +674,8 @@ impl App {
     }
 
     async fn start_new_conversation(&mut self) {
-        let _ = self
-            .command_tx
-            .send(crate::runtime::RuntimeCommand::NewConversation);
-        // Await the daemon's StateSnapshot for authority.
-        self.await_state_snapshot().await;
+        self.send_and_await_snapshot(crate::runtime::RuntimeCommand::NewConversation)
+            .await;
     }
 
     /// Clear chat history, end the current DB conversation, start a fresh one,
@@ -664,12 +691,8 @@ impl App {
 
         // Tell the daemon to start a new conversation. It publishes a
         // StateSnapshot with the new conversation_id and reset stats.
-        let _ = self
-            .command_tx
-            .send(crate::runtime::RuntimeCommand::NewConversation);
-
-        // Await the daemon's StateSnapshot for authority.
-        self.await_state_snapshot().await;
+        self.send_and_await_snapshot(crate::runtime::RuntimeCommand::NewConversation)
+            .await;
 
         self.messages.clear();
         self.messages.push(Message::system(format!(
@@ -1624,7 +1647,13 @@ impl App {
         self.last_ctrl_c = Some(now);
 
         if self.streaming || self.live_command {
+            // The pump (run_event_pump / remote command loop) sends Cancel,
+            // which the daemon now also routes to its background sub-agents.
             self.cancel_streaming = true;
+        } else {
+            // Idle: no turn to cancel, but background sub-agent jobs may be
+            // running. Ask the daemon to terminate them (a no-op if none).
+            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::Cancel);
         }
         self.queue.clear();
 
@@ -1964,14 +1993,24 @@ impl App {
                         self.custom_configs
                             .set_provider_entry("providers", &provider_id, &entry);
                     }
-                    let _ = self
-                        .command_tx
-                        .send(crate::runtime::RuntimeCommand::SwitchProvider { provider_id });
-                    self.await_state_snapshot().await;
-                    format!(
-                        "Switched to {} ({})",
-                        self.view.provider_model, self.view.provider_id
-                    )
+                    self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
+                        provider_id,
+                    })
+                    .await;
+                    // The snapshot is authoritative: if the model didn't actually
+                    // change, the switch failed (the daemon also emits the precise
+                    // reason as a Status, surfaced by `await_state_snapshot`).
+                    if self.view.provider_model == prev_model {
+                        format!(
+                            "No change — model is still {} ({}). '{arg}' may not be valid for this provider.",
+                            self.view.provider_model, self.view.provider_id
+                        )
+                    } else {
+                        format!(
+                            "Switched to {} ({})",
+                            self.view.provider_model, self.view.provider_id
+                        )
+                    }
                 }
             }
             "provider" => {
@@ -2003,16 +2042,23 @@ impl App {
                     lines.join("\n")
                 } else {
                     self.custom_configs.set_last_provider(&arg);
-                    let _ = self
-                        .command_tx
-                        .send(crate::runtime::RuntimeCommand::SwitchProvider {
-                            provider_id: arg.to_string(),
-                        });
-                    self.await_state_snapshot().await;
-                    format!(
-                        "Switched to {} ({})",
-                        self.view.provider_model, self.view.provider_id
-                    )
+                    self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
+                        provider_id: arg.to_string(),
+                    })
+                    .await;
+                    // If the provider id didn't change, the switch failed (e.g.
+                    // unknown id); the daemon's Status carries the exact reason.
+                    if self.view.provider_id == prev_provider {
+                        format!(
+                            "No change — still {} ({}). '{arg}' is not an available provider; run /provider to list them.",
+                            self.view.provider_model, self.view.provider_id
+                        )
+                    } else {
+                        format!(
+                            "Switched to {} ({})",
+                            self.view.provider_model, self.view.provider_id
+                        )
+                    }
                 }
             }
             "help" => commands::help(&lua_cmds),

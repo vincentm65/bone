@@ -350,3 +350,27 @@ fn usage_stats_queries_aggregate_recorded_usage() {
     assert_eq!(range.daily.len(), 1, "single-day range yields one bucket");
     assert_eq!(range.daily[0].prompt_tokens, 100);
 }
+
+/// `latest_conversation` underpins resume-on-boot: it returns the most recent
+/// conversation and whether it holds any messages, so `init_db` can reload a
+/// non-empty conversation, recycle a trailing empty one, or mint the first.
+#[test]
+fn latest_conversation_reports_id_and_emptiness() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    // Empty database: nothing to resume.
+    assert_eq!(db.latest_conversation().unwrap(), None);
+
+    // A conversation with a message resumes as non-empty.
+    let c1 = db.create_conversation("local", "local").unwrap();
+    db.append_message(c1, "user", "hi", None, None, None, None, false, 1)
+        .unwrap();
+    assert_eq!(db.latest_conversation().unwrap(), Some((c1, true)));
+
+    // A newer, message-less conversation is reported as empty (recyclable).
+    let c2 = db.create_conversation("local", "local").unwrap();
+    assert_eq!(db.latest_conversation().unwrap(), Some((c2, false)));
+    assert!(c2 > c1, "latest is the highest id");
+}

@@ -7,14 +7,16 @@
 //! ([`build_driver`]) and folding its [`DriverOutcome`] back in
 //! ([`apply_outcome`]) — which also persists the turn.
 //!
-//! This is what makes the frontend a *client*: the interactive TUI embeds a
-//! `RuntimeSession` today, and the `bone serve` daemon (Phase 3) owns one
-//! persistently, so a remote client needs no `DriverOutcome` — it only renders
-//! the event stream while the session keeps the truth.
+//! This is what makes every frontend a *client*: the daemon (`run_daemon`)
+//! owns the `RuntimeSession` — both the in-process `bone` daemon (on the same
+//! `LocalSet` as the TUI) and the standalone `bone serve`. The TUI never holds
+//! one; it pushes commands and renders the event stream while the session keeps
+//! the truth, so a frontend never needs the `DriverOutcome`.
 //!
-//! `llm` and `extensions` are *not* owned here: the interactive App shares them
-//! pervasively with its command/render code, and the daemon owns its own. They
-//! are passed into [`build_driver`] per turn.
+//! `llm` and `extensions` are *not* owned here: the daemon that runs the turns
+//! owns them and passes them into [`build_driver`] per turn. (The in-process
+//! TUI also keeps a provider handle for display strings, and shares the daemon's
+//! Lua VM, but the session itself does not own either.)
 //!
 //! Part of core — no `crate::ui`, compiles ratatui-free.
 //!
@@ -68,15 +70,50 @@ impl RuntimeSession {
         }
     }
 
-    /// Open the session database and start a conversation for `llm`'s
+    /// Open the session database and make a conversation active for `llm`'s
     /// provider/model. Idempotent; returns a human-readable warning on failure.
+    ///
+    /// Boot resumes the **most recent** conversation in place rather than minting
+    /// a fresh one every launch: a non-empty conversation has its transcript
+    /// reloaded (so a restarted TUI / `bone serve` picks up where it left off
+    /// instead of opening an empty chat), a trailing empty conversation is
+    /// recycled, and only a truly empty database mints a new row. This is what
+    /// makes the conversation survive a runtime restart — the data was always
+    /// persisted, it just wasn't being reattached.
     pub fn init_db(&mut self, llm: &dyn LlmProvider) -> Option<String> {
         if self.session_db.is_some() {
             return None;
         }
         let db_path = crate::session_db::db_path();
-        match SessionDb::open(&db_path) {
-            Ok(db) => match db.create_conversation(llm.id(), llm.model()) {
+        let db = match SessionDb::open(&db_path) {
+            Ok(db) => db,
+            Err(err) => return Some(format!("warning: failed to open session database: {err}")),
+        };
+        match db.latest_conversation() {
+            // Resume the last conversation in place.
+            Ok(Some((conv_id, has_messages))) => {
+                if has_messages {
+                    match db.list_messages(conv_id, 1000) {
+                        Ok(rows) => {
+                            self.transcript = rows
+                                .into_iter()
+                                .map(crate::session_db::stored_to_chat_message)
+                                .collect();
+                        }
+                        Err(err) => {
+                            return Some(format!("warning: failed to load conversation: {err}"));
+                        }
+                    }
+                }
+                let _ = db.reopen_conversation(conv_id);
+                self.session_seq = db.max_message_seq(conv_id).unwrap_or(0);
+                self.conversation_id = Some(conv_id);
+                self.session_db = Some(db);
+                self.recompute_context_estimate();
+                None
+            }
+            // Empty database: mint the first conversation.
+            Ok(None) => match db.create_conversation(llm.id(), llm.model()) {
                 Ok(conv_id) => {
                     self.conversation_id = Some(conv_id);
                     self.session_db = Some(db);
@@ -84,8 +121,84 @@ impl RuntimeSession {
                 }
                 Err(err) => Some(format!("warning: failed to create conversation: {err}")),
             },
-            Err(err) => Some(format!("warning: failed to open session database: {err}")),
+            Err(err) => Some(format!("warning: failed to read conversations: {err}")),
         }
+    }
+
+    /// Open a fresh durable conversation for an independently managed runtime.
+    pub fn init_db_new(&mut self, llm: &dyn LlmProvider) -> Option<String> {
+        if self.session_db.is_some() {
+            return None;
+        }
+        let db = match SessionDb::open(&crate::session_db::db_path()) {
+            Ok(db) => db,
+            Err(err) => return Some(format!("warning: failed to open session database: {err}")),
+        };
+        match db.create_conversation(llm.id(), llm.model()) {
+            Ok(conv_id) => {
+                self.conversation_id = Some(conv_id);
+                self.session_db = Some(db);
+                None
+            }
+            Err(err) => Some(format!("warning: failed to create conversation: {err}")),
+        }
+    }
+
+    /// Open one existing durable conversation for an independently managed
+    /// runtime. This does not end any other conversation: multiple actors may
+    /// remain active at the same time.
+    pub fn init_db_conversation(
+        &mut self,
+        _llm: &dyn LlmProvider,
+        conversation_id: i64,
+    ) -> Option<String> {
+        if self.session_db.is_some() {
+            return None;
+        }
+        let db = match SessionDb::open(&crate::session_db::db_path()) {
+            Ok(db) => db,
+            Err(err) => return Some(format!("warning: failed to open session database: {err}")),
+        };
+        match db.conversation_exists(conversation_id) {
+            Ok(false) => return Some(format!("conversation {conversation_id} does not exist")),
+            Err(err) => {
+                return Some(format!(
+                    "failed to read conversation {conversation_id}: {err}"
+                ));
+            }
+            Ok(true) => {}
+        }
+        match db.list_messages(conversation_id, 1000) {
+            Ok(rows) => {
+                self.transcript = rows
+                    .into_iter()
+                    .map(crate::session_db::stored_to_chat_message)
+                    .collect();
+            }
+            Err(err) => {
+                return Some(format!(
+                    "failed to load conversation {conversation_id}: {err}"
+                ));
+            }
+        }
+        let _ = db.reopen_conversation(conversation_id);
+        self.session_seq = db.max_message_seq(conversation_id).unwrap_or(0);
+        self.conversation_id = Some(conversation_id);
+        self.session_db = Some(db);
+        self.recompute_context_estimate();
+        None
+    }
+
+    /// Re-estimate the prompt context size from the current transcript + tool
+    /// definitions so the token meter reflects a resumed conversation before the
+    /// next turn refreshes it. Cheap; no-op-safe on an empty transcript.
+    fn recompute_context_estimate(&mut self) {
+        let history = build_chat_history(&self.transcript, None);
+        let tool_defs_json_chars = serde_json::to_value(self.tools.definitions())
+            .map(|v| v.to_string().chars().count())
+            .unwrap_or(0);
+        let prompt_chars = crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
+        self.token_stats.set_context_estimate(prompt_chars);
     }
 
     /// Append one message to the active conversation, allocating the next

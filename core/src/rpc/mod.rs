@@ -20,8 +20,10 @@ pub mod codec;
 
 use std::sync::{Arc, Mutex};
 
+use futures_util::future::LocalBoxFuture;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::llm::ChatMessage;
 use crate::runtime::{RuntimeCommand, RuntimeEvent};
@@ -100,6 +102,234 @@ impl Hub {
     /// Current attached-client count (event subscribers).
     pub fn client_count(&self) -> usize {
         self.events_tx.receiver_count()
+    }
+}
+
+/// Which durable conversation a managed TCP connection should attach to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionTarget {
+    /// Attach to the daemon's most recently selected conversation.
+    Latest,
+    /// Create a new durable conversation and attach to it.
+    New,
+    /// Attach to an existing conversation row.
+    Conversation(i64),
+}
+
+/// One independently-running conversation created by a session-manager factory.
+///
+/// The manager retains `hub`, so the actor stays alive when its last browser
+/// disconnects. `initial` is evaluated for every attachment, allowing a new
+/// client to receive the actor's current transcript/snapshot rather than only
+/// its boot-time state.
+pub struct ManagedRuntime {
+    pub conversation_id: i64,
+    pub hub: Hub,
+    pub initial: Arc<dyn Fn() -> Vec<RuntimeEvent> + Send + Sync>,
+    pub task: LocalBoxFuture<'static, ()>,
+}
+
+struct ManagedEntry {
+    hub: Hub,
+    initial: Arc<dyn Fn() -> Vec<RuntimeEvent> + Send + Sync>,
+}
+
+struct SessionAttachment {
+    commands: mpsc::UnboundedSender<RuntimeCommand>,
+    events: broadcast::Receiver<RuntimeEvent>,
+    initial: Vec<RuntimeEvent>,
+}
+
+enum SessionRequest {
+    Attach {
+        target: SessionTarget,
+        reply: oneshot::Sender<Result<SessionAttachment, String>>,
+    },
+}
+
+/// Sendable handle used by TCP connection tasks to attach to conversation
+/// actors owned by [`run_session_manager`].
+#[derive(Clone)]
+pub struct SessionManager {
+    requests: mpsc::UnboundedSender<SessionRequest>,
+}
+
+impl SessionManager {
+    pub fn new() -> (Self, SessionManagerReceiver) {
+        let (requests, receiver) = mpsc::unbounded_channel();
+        (Self { requests }, SessionManagerReceiver { receiver })
+    }
+
+    async fn attach(&self, target: SessionTarget) -> Result<SessionAttachment, String> {
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .send(SessionRequest::Attach { target, reply })
+            .map_err(|_| "session manager stopped".to_string())?;
+        response
+            .await
+            .map_err(|_| "session manager stopped".to_string())?
+    }
+}
+
+/// Runtime-side request receiver. Kept as a distinct type so the public handle
+/// remains `Send` while the manager loop may own `!Send` conversation futures.
+pub struct SessionManagerReceiver {
+    receiver: mpsc::UnboundedReceiver<SessionRequest>,
+}
+
+/// Own and concurrently poll one daemon actor per active conversation.
+///
+/// A factory is called only on the manager's task, so it may construct isolated
+/// Lua runtimes and return `!Send` futures. Conversations are keyed by their
+/// durable SQLite id; attaching another client to the same id reuses the actor.
+pub async fn run_session_manager<F>(mut receiver: SessionManagerReceiver, mut factory: F)
+where
+    F: FnMut(SessionTarget) -> Result<ManagedRuntime, String>,
+{
+    let mut sessions = std::collections::HashMap::<i64, ManagedEntry>::new();
+    // Tag each actor future with its conversation id so we can evict the map
+    // entry when the actor exits (panic, command channel closed, etc.).
+    let mut actors =
+        FuturesUnordered::<LocalBoxFuture<'static, (i64, ())>>::new();
+    let mut latest_id = None;
+
+    loop {
+        tokio::select! {
+            request = receiver.receiver.recv() => {
+                let Some(SessionRequest::Attach { target, reply }) = request else {
+                    break;
+                };
+
+                let requested_id = match target {
+                    SessionTarget::Conversation(id) => Some(id),
+                    SessionTarget::Latest => latest_id,
+                    SessionTarget::New => None,
+                };
+                if let Some(id) = requested_id
+                    && let Some(entry) = sessions.get(&id)
+                {
+                    let _ = reply.send(Ok(SessionAttachment {
+                        commands: entry.hub.command_sender(),
+                        events: entry.hub.subscribe(),
+                        initial: (entry.initial)(),
+                    }));
+                    latest_id = Some(id);
+                    continue;
+                }
+
+                match factory(target) {
+                    Ok(runtime) => {
+                        let id = runtime.conversation_id;
+                        // A `Latest` factory may resolve to an actor already in
+                        // memory. Prefer the existing owner to prevent two
+                        // writers from advancing the same message sequence.
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            sessions.entry(id)
+                        {
+                            actors.push(Box::pin(async move { (id, runtime.task.await) }));
+                            entry.insert(ManagedEntry {
+                                hub: runtime.hub,
+                                initial: runtime.initial,
+                            });
+                        }
+                        latest_id = Some(id);
+                        let entry = sessions.get(&id).expect("managed session inserted");
+                        let _ = reply.send(Ok(SessionAttachment {
+                            commands: entry.hub.command_sender(),
+                            events: entry.hub.subscribe(),
+                            initial: (entry.initial)(),
+                        }));
+                    }
+                    Err(err) => { let _ = reply.send(Err(err)); }
+                }
+            }
+            Some((id, _)) = actors.next(), if !actors.is_empty() => {
+                // Actor exited (panic, channel closed, etc.). Evict the stale
+                // map entry so a future attach can create a fresh actor for
+                // this conversation instead of hitting a dead hub.
+                sessions.remove(&id);
+            }
+        }
+    }
+}
+
+/// Serve a TCP client whose active event/command channels follow the durable
+/// conversation it selects. `LoadConversation` and `NewConversation` are
+/// transport-level routing operations here; all other commands go only to the
+/// attached conversation actor.
+pub async fn serve_managed_connection<S>(
+    stream: S,
+    manager: SessionManager,
+    initial_target: SessionTarget,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = codec::MessageReader::new(read_half);
+    let mut attachment = manager
+        .attach(initial_target)
+        .await
+        .map_err(std::io::Error::other)?;
+
+    for event in attachment.initial.drain(..) {
+        codec::write_message(&mut write_half, &event).await?;
+    }
+
+    loop {
+        tokio::select! {
+            incoming = reader.read::<RuntimeCommand>() => match incoming {
+                Some(Ok(RuntimeCommand::LoadConversation { id })) => {
+                    match manager.attach(SessionTarget::Conversation(id)).await {
+                        Ok(mut next) => {
+                            for event in next.initial.drain(..) {
+                                codec::write_message(&mut write_half, &event).await?;
+                            }
+                            attachment = next;
+                        }
+                        Err(message) => codec::write_message(
+                            &mut write_half,
+                            &RuntimeEvent::Status { message },
+                        ).await?,
+                    }
+                }
+                Some(Ok(RuntimeCommand::NewConversation)) => {
+                    match manager.attach(SessionTarget::New).await {
+                        Ok(mut next) => {
+                            for event in next.initial.drain(..) {
+                                codec::write_message(&mut write_half, &event).await?;
+                            }
+                            attachment = next;
+                        }
+                        Err(message) => codec::write_message(
+                            &mut write_half,
+                            &RuntimeEvent::Status { message },
+                        ).await?,
+                    }
+                }
+                Some(Ok(command)) => {
+                    if attachment.commands.send(command).is_err() {
+                        codec::write_message(
+                            &mut write_half,
+                            &RuntimeEvent::Status { message: "conversation runtime stopped".into() },
+                        ).await?;
+                    }
+                }
+                Some(Err(codec::ReadError::Decode(_))) => continue,
+                Some(Err(codec::ReadError::Io(err))) => return Err(err),
+                None => return Ok(()),
+            },
+            event = attachment.events.recv() => match event {
+                Ok(event) => codec::write_message(&mut write_half, &event).await?,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    codec::write_message(
+                        &mut write_half,
+                        &RuntimeEvent::Status { message: "conversation runtime stopped".into() },
+                    ).await?;
+                }
+            }
+        }
     }
 }
 
@@ -346,6 +576,18 @@ impl DaemonCtx {
         self.extensions.dispatch_simple(&name, payload);
     }
 
+    /// Terminate every running background sub-agent for this session, surfacing
+    /// a notice when any were actually cancelled. Called on turn cancel (Ctrl+C)
+    /// and on conversation reset (`/new`, `/clear`).
+    fn cancel_jobs(&self) {
+        let cancelled = crate::ext::jobs::registry().cancel_all();
+        if cancelled > 0 {
+            self.hub.publish(RuntimeEvent::Status {
+                message: format!("cancelled {cancelled} background sub-agent job(s)"),
+            });
+        }
+    }
+
     /// Run a registered Lua slash command inside the daemon, forwarding its pane
     /// diffs (`ViewDiff`) and key requests (`KeyRequest`) to clients and pumping
     /// `KeyReply`/`Cancel` back, exactly like a turn.
@@ -499,9 +741,16 @@ impl DaemonCtx {
             }
             // ── Lifecycle commands (idle only) ──────────────────────────
             RuntimeCommand::NewConversation => {
+                // Resetting the conversation also ends its background
+                // sub-agents — they belong to the conversation being left.
+                self.cancel_jobs();
                 {
                     let mut s = self.session.lock().unwrap();
-                    if let Some(db) = s.session_db.as_ref() {
+                    // Already on an empty conversation? Reuse it instead of
+                    // stacking another empty row (and publish a fresh snapshot
+                    // below so the client still resets its view).
+                    let already_empty = s.transcript.is_empty() && s.session_seq == 0;
+                    if !already_empty && let Some(db) = s.session_db.as_ref() {
                         if let Some(conv_id) = s.conversation_id {
                             let _ = db.end_conversation(conv_id);
                         }
@@ -587,6 +836,7 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::ClearConversation => {
+                self.cancel_jobs();
                 {
                     let mut s = self.session.lock().unwrap();
                     s.transcript.clear();
@@ -767,13 +1017,17 @@ impl DaemonCtx {
                 self.set_width(width);
                 Flow::Continue
             }
+            // A cancel while idle has no turn to stop, but background
+            // sub-agents may still be running — terminate them.
+            RuntimeCommand::Cancel => {
+                self.cancel_jobs();
+                Flow::Continue
+            }
             // Acknowledge other non-turn commands so a client isn't left waiting.
             other => {
-                if !matches!(other, RuntimeCommand::Cancel) {
-                    self.hub.publish(RuntimeEvent::Status {
-                        message: format!("ignored (idle): {other:?}"),
-                    });
-                }
+                self.hub.publish(RuntimeEvent::Status {
+                    message: format!("ignored (idle): {other:?}"),
+                });
                 Flow::Continue
             }
         }
@@ -835,9 +1089,16 @@ impl DaemonCtx {
                 },
                 _ = diff_timer.tick(), if self.forward_view_diffs => self.drain_diffs(),
                 cmd = commands.recv() => match cmd {
+                    // A turn cancel also terminates the session's background
+                    // sub-agents: they were spawned by this conversation, so
+                    // Ctrl+C should stop them too rather than leave them running
+                    // and injecting results into a turn the user abandoned.
+                    Some(cmd @ RuntimeCommand::Cancel) => {
+                        self.cancel_jobs();
+                        conn.send(cmd);
+                    }
                     Some(cmd @ (RuntimeCommand::ApprovalReply { .. }
-                    | RuntimeCommand::KeyReply { .. }
-                    | RuntimeCommand::Cancel)) => conn.send(cmd),
+                    | RuntimeCommand::KeyReply { .. })) => conn.send(cmd),
                     // Mid-turn Safe/Danger toggle: applies to the rest of the turn
                     // (the gate reads the shared atomic per call).
                     Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.set_mode(&mode_str),
@@ -1036,5 +1297,150 @@ mod tests {
 
         let cmd = commands_rx.recv().await.unwrap();
         assert!(matches!(cmd, RuntimeCommand::Cancel));
+    }
+
+    fn fake_managed_runtime(
+        id: i64,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max_active: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> ManagedRuntime {
+        use std::sync::atomic::Ordering;
+
+        let (hub, mut commands) = Hub::new();
+        let publisher = hub.publisher();
+        let initial = Arc::new(move || {
+            let snapshot = bone_protocol::SessionSnapshot {
+                conversation_id: Some(id),
+                ..Default::default()
+            };
+            vec![RuntimeEvent::ConversationLoaded {
+                messages: Vec::new(),
+                snapshot,
+            }]
+        });
+        let task = Box::pin(async move {
+            while let Some(command) = commands.recv().await {
+                if let RuntimeCommand::SubmitPrompt { text, .. } = command {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now, Ordering::SeqCst);
+                    publisher.publish(RuntimeEvent::Started {
+                        approval: "safe".into(),
+                        task: String::new(),
+                        model: "test".into(),
+                    });
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    publisher.publish(RuntimeEvent::Finished {
+                        content: format!("session-{id}:{text}"),
+                    });
+                    publisher.publish(RuntimeEvent::TurnComplete);
+                    active.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+        });
+        ManagedRuntime {
+            conversation_id: id,
+            hub,
+            initial,
+            task,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_connections_isolate_events_and_run_concurrently() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let (manager, receiver) = SessionManager::new();
+                let factory_active = active.clone();
+                let factory_max = max_active.clone();
+                let runner =
+                    tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                        let id = match target {
+                            SessionTarget::Latest => 1,
+                            SessionTarget::New => 3,
+                            SessionTarget::Conversation(id) => id,
+                        };
+                        Ok(fake_managed_runtime(
+                            id,
+                            factory_active.clone(),
+                            factory_max.clone(),
+                        ))
+                    }));
+
+                let (client_a, server_a) = tokio::io::duplex(4096);
+                let (client_b, server_b) = tokio::io::duplex(4096);
+                let serve_a = tokio::task::spawn_local(serve_managed_connection(
+                    server_a,
+                    manager.clone(),
+                    SessionTarget::Latest,
+                ));
+                let serve_b = tokio::task::spawn_local(serve_managed_connection(
+                    server_b,
+                    manager,
+                    SessionTarget::Latest,
+                ));
+                let (read_a, mut write_a) = tokio::io::split(client_a);
+                let (read_b, mut write_b) = tokio::io::split(client_b);
+                let mut read_a = codec::MessageReader::new(read_a);
+                let mut read_b = codec::MessageReader::new(read_b);
+
+                // Both initially attach to actor 1. Move only B to actor 2.
+                let _: RuntimeEvent = read_a.read().await.unwrap().unwrap();
+                let _: RuntimeEvent = read_b.read().await.unwrap().unwrap();
+                codec::write_message(&mut write_b, &RuntimeCommand::LoadConversation { id: 2 })
+                    .await
+                    .unwrap();
+                let switched: RuntimeEvent = read_b.read().await.unwrap().unwrap();
+                assert!(matches!(
+                    switched,
+                    RuntimeEvent::ConversationLoaded { snapshot, .. }
+                        if snapshot.conversation_id == Some(2)
+                ));
+
+                codec::write_message(
+                    &mut write_a,
+                    &RuntimeCommand::SubmitPrompt {
+                        text: "alpha".into(),
+                        images: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+                codec::write_message(
+                    &mut write_b,
+                    &RuntimeCommand::SubmitPrompt {
+                        text: "beta".into(),
+                        images: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+
+                async fn finished<R: AsyncRead + Unpin>(
+                    reader: &mut codec::MessageReader<R>,
+                ) -> String {
+                    loop {
+                        match reader.read::<RuntimeEvent>().await.unwrap().unwrap() {
+                            RuntimeEvent::Finished { content } => return content,
+                            _ => continue,
+                        }
+                    }
+                }
+                let (a, b) = tokio::join!(finished(&mut read_a), finished(&mut read_b));
+                assert_eq!(a, "session-1:alpha");
+                assert_eq!(b, "session-2:beta");
+                assert_eq!(
+                    max_active.load(std::sync::atomic::Ordering::SeqCst),
+                    2,
+                    "different conversation actors should overlap"
+                );
+
+                serve_a.abort();
+                serve_b.abort();
+                runner.abort();
+            })
+            .await;
     }
 }

@@ -10,7 +10,9 @@
 //! four operations the loop performs (`conv_id`, `append_message`,
 //! `record_usage`, `end`). `agent_setup` now accepts an
 //! `Option<Arc<dyn SessionSink>>` on `AgentRequest`: when present it is used
-//! verbatim; when absent a real `SessionWriter` is constructed as before.
+//! verbatim. Without one, top-level headless runs construct a real
+//! `SessionWriter`; delegated agents use [`NullSessionSink`] so internal work
+//! does not appear as a separate top-level conversation.
 //!
 //! `NullSessionSink` is a no-op implementation (matching the `conv_id == None`
 //! fast-path `SessionWriter` already had internally), letting tests and a

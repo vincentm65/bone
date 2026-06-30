@@ -2,7 +2,7 @@
 
 use crate::llm::{ChatMessage, ChatRole};
 use crate::runtime::UsageRecord;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 /// Returns the path to the conversations database.
@@ -505,6 +505,30 @@ impl SessionDb {
         tx.commit()?;
 
         Ok(())
+    }
+
+    /// The most recent conversation and whether it holds any messages, or
+    /// `None` when the database is empty. Used at boot to resume the last
+    /// conversation in place (a non-empty one) or recycle a trailing empty row
+    /// instead of minting a fresh conversation on every launch.
+    pub fn latest_conversation(&self) -> rusqlite::Result<Option<(i64, bool)>> {
+        self.conn
+            .query_row(
+                "SELECT c.id, EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id = c.id) \
+                 FROM conversations c ORDER BY c.id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+    }
+
+    /// Whether a durable conversation row exists.
+    pub fn conversation_exists(&self, id: i64) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )
     }
 
     /// Create a new conversation and return its id.

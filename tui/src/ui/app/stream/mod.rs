@@ -293,6 +293,14 @@ impl App {
         let mut cancel_sent = false;
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Separate the render cadence (90ms spinner) from key responsiveness.
+        // Keys are drained at the top of the loop, but the loop only re-runs
+        // when a `select!` branch wakes — so without this a Ctrl+C lands up to
+        // 90ms late whenever the model is "thinking" and no events are flowing.
+        // This branch wakes the loop ~60x/s to drain keys (cheap: a `poll(0)`),
+        // without paying for a full repaint each time.
+        let mut key_poll = tokio::time::interval(std::time::Duration::from_millis(16));
+        key_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             // Always drain keys before polling events. A fast stream can
@@ -374,6 +382,8 @@ impl App {
                 _ = ticker.tick() => {
                     self.pump_tick(term)?;
                 }
+                // Wake to drain keys promptly (esp. Ctrl+C); no repaint here.
+                _ = key_poll.tick() => {}
             }
         }
 
@@ -464,6 +474,11 @@ impl App {
         let mut live_sources = PaneOwnership::new();
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // See `run_event_pump`: wake fast to drain keys (incl. Ctrl+C) so a
+        // cancel isn't delayed until the next 90ms render tick when the command
+        // is busy and emitting no events.
+        let mut key_poll = tokio::time::interval(std::time::Duration::from_millis(16));
+        key_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Captured from `CommandComplete`; rendered after the interactive phase.
         let mut completion: Option<(
@@ -556,6 +571,8 @@ impl App {
                     self.maybe_refresh_jobs_pane();
                     self.render_streaming(term).ok();
                 }
+                // Wake to drain keys promptly (esp. Ctrl+C); no repaint here.
+                _ = key_poll.tick() => {}
             }
         }
 

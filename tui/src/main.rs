@@ -221,7 +221,7 @@ fn ensure_deps() {
 }
 
 fn usage() -> String {
-    "Usage: bone [--provider <id>] [--model <name>]\n       bone --connect <addr>          # run the TUI against a remote `bone serve`\n       bone agent [--provider <id>] [--model <name>] ...\n       bone serve [--listen <addr>]   # run as a daemon (default 127.0.0.1:7878)\n       bone connect [--listen <addr>] # line-oriented RPC client".to_string()
+    "Usage: bone [--provider <id>] [--model <name>]\n       bone --connect <addr>          # run the TUI against a remote `bone serve`\n       bone agent [--provider <id>] [--model <name>] ...\n       bone serve [--listen <addr>]   # run as a daemon (default 127.0.0.1:7878)\n       bone connect [--listen <addr>] # line-oriented RPC client\n       bone web                       # launch the web UI (http://localhost:4577)".to_string()
 }
 
 /// Parse `--listen <addr>` from args, falling back to the default.
@@ -281,10 +281,13 @@ struct RuntimeHostBoot {
 }
 
 /// Boot the runtime host: create tools, init the session DB, and return
-/// the pieces a daemon (in-process or serve) needs.
-fn boot_runtime_host(
+/// the pieces a daemon (in-process or serve) needs. `target` selects which
+/// durable conversation the session attaches to (fresh, latest, or a specific
+/// id).
+fn boot_runtime_host_for(
     provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
     custom: &mut CustomConfigs,
+    target: bone::rpc::SessionTarget,
 ) -> std::io::Result<RuntimeHostBoot> {
     let model = provider.model().to_string();
     let provider_label = format!("{} ({})", provider.name(), provider.id());
@@ -304,8 +307,13 @@ fn boot_runtime_host(
         &provider_label,
     );
     let mut session = bone::runtime::RuntimeSession::new(booted.tools);
-    if let Some(warning) = session.init_db(&*provider) {
-        eprintln!("bone: {warning}");
+    let warning = match target {
+        bone::rpc::SessionTarget::Latest => session.init_db(&*provider),
+        bone::rpc::SessionTarget::New => session.init_db_new(&*provider),
+        bone::rpc::SessionTarget::Conversation(id) => session.init_db_conversation(&*provider, id),
+    };
+    if let Some(warning) = warning {
+        return Err(std::io::Error::other(warning));
     }
     Ok(RuntimeHostBoot {
         provider,
@@ -342,57 +350,82 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider> =
         std::sync::Arc::from(provider);
 
-    let RuntimeHostBoot {
-        provider,
-        manager,
-        session,
-    } = boot_runtime_host(provider, &mut custom)?;
-
-    let (hub, commands_rx) = bone::rpc::Hub::new();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");
 
-    // The turn future is `!Send` (it owns the Lua VM), so the daemon can't be
-    // `tokio::spawn`ed; run it on this task and concurrently accept clients
-    // (whose per-connection I/O *is* spawnable).
-    let accept_hub = hub.clone();
-    let accept_session = session.clone();
-    let accept_provider = provider.clone();
-    // Boot-time display state (theme/keymap/banner/commands/config/tools) the VM
-    // produced, captured once and replayed to every client so a VM-less frontend
-    // can render the user's customizations. Re-published on reload by run_daemon.
-    let frontend_ev = bone::rpc::frontend_state(&manager, &session.lock().unwrap().tools);
+    let approval_mode = match custom.get_value("general", "approval_mode").as_str() {
+        "danger" => bone::tools::ApprovalMode::Danger,
+        _ => bone::tools::ApprovalMode::Safe,
+    };
+    let (session_manager, manager_rx) = bone::rpc::SessionManager::new();
+    let factory_provider = provider.clone();
+    let factory = move |target: bone::rpc::SessionTarget| {
+        // Each actor gets an independent Lua VM/tool state and RuntimeSession.
+        // The provider HTTP client is safe to share and each actor may still
+        // switch its own provider later through the existing command.
+        let mut custom = CustomConfigs::load();
+        let boot = boot_runtime_host_for(factory_provider.clone(), &mut custom, target)
+            .map_err(|err| err.to_string())?;
+        let conversation_id = boot
+            .session
+            .lock()
+            .unwrap()
+            .conversation_id
+            .ok_or_else(|| "runtime has no durable conversation id".to_string())?;
+        let frontend =
+            bone::rpc::frontend_state(&boot.manager, &boot.session.lock().unwrap().tools);
+        let sync_session = boot.session.clone();
+        let sync_provider = boot.provider.clone();
+        let initial = std::sync::Arc::new(move || {
+            let session = sync_session.lock().unwrap();
+            let snapshot = session.snapshot(sync_provider.id(), sync_provider.model());
+            vec![
+                frontend.clone(),
+                bone::runtime::RuntimeEvent::StateSnapshot {
+                    snapshot: snapshot.clone(),
+                },
+                // Always send this, including for an empty new conversation,
+                // so switching actors clears stale frontend scrollback.
+                bone::runtime::RuntimeEvent::ConversationLoaded {
+                    messages: session.transcript.clone(),
+                    snapshot,
+                },
+            ]
+        });
+        let (hub, commands_rx) = bone::rpc::Hub::new();
+        let task = Box::pin(bone::rpc::run_daemon(
+            hub.publisher(),
+            commands_rx,
+            boot.provider,
+            boot.manager,
+            boot.session,
+            approval_mode,
+            None,
+            true,
+        ));
+        Ok(bone::rpc::ManagedRuntime {
+            conversation_id,
+            hub,
+            initial,
+            task,
+        })
+    };
+
+    let accept_manager = session_manager.clone();
     let accept_loop = async move {
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
                     eprintln!("bone: client attached: {peer}");
-                    let hub = accept_hub.clone();
-                    // Full-state sync so a fresh client renders the conversation
-                    // id / token totals immediately instead of waiting for the
-                    // next turn's snapshot. When a transcript already exists,
-                    // also replay it (via ConversationLoaded) so a late-joining
-                    // client reconstructs the in-progress conversation instead of
-                    // starting with empty scrollback.
-                    let initial = {
-                        let s = accept_session.lock().unwrap();
-                        let snapshot = s.snapshot(accept_provider.id(), accept_provider.model());
-                        let mut events = vec![
-                            frontend_ev.clone(),
-                            bone::runtime::RuntimeEvent::StateSnapshot {
-                                snapshot: snapshot.clone(),
-                            },
-                        ];
-                        if !s.transcript.is_empty() {
-                            events.push(bone::runtime::RuntimeEvent::ConversationLoaded {
-                                messages: s.transcript.clone(),
-                                snapshot,
-                            });
-                        }
-                        events
-                    };
+                    let manager = accept_manager.clone();
                     tokio::spawn(panic_guard("client", async move {
-                        if let Err(e) = bone::rpc::serve_connection(stream, hub, initial).await {
+                        if let Err(e) = bone::rpc::serve_managed_connection(
+                            stream,
+                            manager,
+                            bone::rpc::SessionTarget::Latest,
+                        )
+                        .await
+                        {
                             eprintln!("bone: client {peer} ended: {e}");
                         }
                     }));
@@ -406,21 +439,62 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     };
 
     tokio::select! {
-        _ = bone::rpc::run_daemon(
-            hub.publisher(),
-            commands_rx,
-            provider,
-            manager,
-            session,
-            bone::tools::ApprovalMode::Safe,
-            None,
-            true, // forward view diffs: remote clients can't drain our UiState
-        ) => eprintln!("bone: daemon exited; shutting down server"),
+        _ = bone::rpc::run_session_manager(manager_rx, factory) => {
+            eprintln!("bone: session manager exited; shutting down server")
+        },
         _ = accept_loop => eprintln!("bone: accept loop ended; shutting down server"),
         _ = wait_stdin_eof(), if shutdown_on_eof => {
             eprintln!("bone: parent stdin closed; shutting down server")
         }
     }
+    Ok(())
+}
+
+/// `bone web` — launch the web UI bridge and open the browser.
+async fn run_web(_args: &[String]) -> std::io::Result<()> {
+    // Find bridge.mjs: prefer CWD, then binary's sibling.
+    let bridge_path = {
+        let cwd = std::env::current_dir()?;
+        let bin_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        let repo_root = bin_dir
+            .as_ref()
+            .and_then(|d| d.parent().map(|p| p.to_path_buf())); // target/release/.. = repo
+
+        [
+            Some(cwd.join("webui/bridge.mjs")),
+            repo_root.as_ref().map(|r| r.join("webui/bridge.mjs")),
+        ]
+        .into_iter()
+        .find(|p| p.as_ref().map(|x| x.exists()).unwrap_or(false))
+        .flatten()
+        .ok_or_else(|| {
+            std::io::Error::other("webui/bridge.mjs not found — run `bone web` from the repo root")
+        })?
+    };
+
+    // Check node is available
+    if std::process::Command::new("node")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        return Err(std::io::Error::other(
+            "node not found — install Node.js to use the web UI",
+        ));
+    }
+
+    let mut child = tokio::process::Command::new("node")
+        .arg(&bridge_path)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+
+    child.wait().await?;
     Ok(())
 }
 
@@ -593,7 +667,12 @@ async fn main() -> std::io::Result<()> {
     // they seed everything (or honor a prior selection) and proceed.
     let interactive = !matches!(
         args.first().map(String::as_str),
-        Some("run") | Some("serve") | Some("connect") | Some("stats-popup") | Some("install")
+        Some("run")
+            | Some("serve")
+            | Some("connect")
+            | Some("stats-popup")
+            | Some("install")
+            | Some("web")
     );
     if interactive && bone::config::needs_onboarding() {
         // Fresh install: seed the always-safe base so the wizard can `require`
@@ -638,6 +717,11 @@ async fn main() -> std::io::Result<()> {
     // Install: symlink bone binary into PATH
     if args.first().map(String::as_str) == Some("install") {
         return do_install();
+    }
+
+    // `bone web` — launch the web UI bridge (http://localhost:4577).
+    if args.first().map(String::as_str) == Some("web") {
+        return run_web(&args[1..]).await;
     }
 
     // Throttled, non-blocking catalog refresh: pulls the latest index on a
@@ -707,7 +791,10 @@ async fn main() -> std::io::Result<()> {
     // The TUI is a pure client pushing RuntimeCommands and rendering
     // RuntimeEvents over in-process channels.
     let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(provider);
-    let boot = boot_runtime_host(provider, &mut custom)?;
+    // The interactive TUI starts a fresh conversation each launch (clean slate);
+    // past chats remain in the DB and are reachable via /history. Only the
+    // multi-chat `bone serve` / web UI resumes the latest conversation on attach.
+    let boot = boot_runtime_host_for(provider, &mut custom, bone::rpc::SessionTarget::New)?;
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
     let command_tx = hub.command_sender();

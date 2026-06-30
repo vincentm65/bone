@@ -1,19 +1,24 @@
-//! The frontend ↔ core transport seam.
+//! How the turn protocol is pumped at a transport edge.
 //!
-//! A frontend renders a turn purely by pulling [`RuntimeEvent`]s and pushing
-//! [`RuntimeCommand`]s through a [`RuntimeConn`]. Two implementations carry the
-//! exact same protocol:
+//! A [`RuntimeConn`] pushes [`RuntimeCommand`]s in and pulls [`RuntimeEvent`]s
+//! back out for one agent turn. Two implementations carry the exact same
+//! protocol, but they sit on *opposite* sides of it:
 //!
-//! - [`LocalConn`] — the runtime runs in-process: it owns the in-flight
-//!   `Driver` future and polls it on the frontend's own task, so there is no
-//!   spawn and the Lua VM is never touched by the render path while a tool runs.
-//!   This is what `bone` uses with no `--listen`.
-//! - `SocketConn` (Phase 3) — the runtime is a separate `bone serve` daemon and
-//!   the same events/commands cross a socket via the JSONL `rpc::codec`.
+//! - [`LocalConn`] — the runtime side. It owns the in-flight `Driver` future
+//!   and polls it on the runtime's own task, so there is no spawn and the Lua
+//!   VM is never touched while a tool runs. `run_daemon` uses this for every
+//!   turn — including the in-process `bone`, whose daemon runs on the same
+//!   `LocalSet` as the TUI.
+//! - [`SocketConn`] — the remote-client side. The same events/commands cross a
+//!   socket via the JSONL `rpc::codec`. Used by `rpc::RemoteClient` (the TUI's
+//!   transport in `--connect` mode) and the `bone connect` reference client.
 //!
-//! The TUI is therefore a *client* either way; "local" just means the server
-//! lives in the same process. This is the Neovim model — even the built-in UI
-//! talks the protocol.
+//! Note this is **not** the seam the TUI talks through. A frontend pushes
+//! commands and pulls events over the `rpc::Hub` (in-process) or `RemoteClient`
+//! (remote) channels; `RuntimeConn` lives one layer below — between the daemon
+//! and the Driver, and between a remote client and its socket. The shared
+//! protocol is what makes the TUI a *client* either way (the Neovim model);
+//! `RuntimeConn` is just how that protocol is moved at the transport edges.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,8 +32,10 @@ use crate::rpc::codec;
 use crate::runtime::driver::{Driver, DriverOutcome};
 use crate::runtime::{ApprovalReplyRegistry, KeyReplyRegistry, RuntimeCommand, RuntimeEvent};
 
-/// The transport a frontend renders a turn through. Frontend-neutral: the same
-/// trait backs the in-process [`LocalConn`] and the socket client.
+/// Pumps the turn protocol at a transport edge: push commands, pull events.
+/// The same trait backs the runtime-side [`LocalConn`] (which drives the
+/// `Driver`) and the client-side [`SocketConn`] (which talks to a remote
+/// daemon). It is not what the TUI holds — see the module docs.
 pub trait RuntimeConn {
     /// Push a command to the runtime (submit a prompt, answer an approval/key
     /// request, cancel the turn).
@@ -38,17 +45,18 @@ pub trait RuntimeConn {
     /// (the runtime is idle) — the frontend loop should stop pumping events.
     ///
     /// Not `Send`: the in-process [`LocalConn`] holds the Driver future, which
-    /// owns the Lua VM handle and is polled on the frontend's own task (never
+    /// owns the Lua VM handle and is polled on the runtime's own task (never
     /// spawned), so it need not cross threads.
     fn next_event(&mut self) -> impl Future<Output = Option<RuntimeEvent>>;
 }
 
 /// In-process runtime connection: owns the `Driver` future and drives it on the
-/// frontend's task.
+/// runtime's own task (the `run_daemon` loop, or the in-process `bone`'s
+/// `LocalSet`).
 ///
 /// `send(SubmitPrompt)` starts the turn; `next_event()` interleaves the Driver's
 /// streamed events with the future's completion. When the future finishes its
-/// [`DriverOutcome`] is stashed for the frontend to reabsorb via
+/// [`DriverOutcome`] is stashed for the runtime to reabsorb via
 /// [`take_outcome`]. Approval/key replies resolve the shared registries the
 /// turn's `ChannelApprovalGate` / `ctx.ui.key` block on; `Cancel` flips the flag
 /// the Driver and its tools observe.

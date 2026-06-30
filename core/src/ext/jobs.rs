@@ -354,6 +354,28 @@ impl JobRegistry {
         true
     }
 
+    /// Cancel every running job by setting its cancel flag. Returns the number
+    /// of jobs signalled. Each running task observes the flag and aborts at its
+    /// next await (the agent watchdog's `select!` races it). Used when the user
+    /// cancels the turn (Ctrl+C) or resets the conversation (`/new`, `/clear`):
+    /// background sub-agents belong to the session, so they die with it.
+    pub fn cancel_all(&self) -> usize {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cancelled = 0;
+        for job in jobs.iter_mut() {
+            if job.status == JobStatus::Running {
+                job.cancel_flag.store(true, Ordering::Relaxed);
+                cancelled += 1;
+            }
+        }
+        if cancelled > 0 {
+            self.completed.notify_all();
+            drop(jobs);
+            self.version.fetch_add(1, Ordering::Relaxed);
+        }
+        cancelled
+    }
+
     /// Mark the given job ids as consumed. Bumps the version if any changed.
     pub fn mark_consumed(&self, ids: &[String]) {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());

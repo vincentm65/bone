@@ -213,8 +213,9 @@ pub struct AgentRequest {
     /// Injected provider. When set, `agent_setup` reuses it as-is instead of
     /// constructing one from config.
     pub llm: Option<Arc<dyn crate::llm::provider::LlmProvider>>,
-    /// Injected session sink. When set, `agent_setup` reuses it as-is instead
-    /// of constructing a `SessionWriter` backed by SQLite.
+    /// Injected session sink. When set, `agent_setup` reuses it as-is. Without
+    /// one, top-level runs persist to SQLite while delegated runs stay within
+    /// their parent conversation and use a no-op sink.
     pub session_sink: Option<Arc<dyn SessionSink>>,
     /// Optional tool allowlist. When set, the agent only sees tools whose
     /// names appear in this list. When `None` (the default), all tools are
@@ -446,10 +447,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     };
     let history = build_chat_history(&transcript, system_prompt_override.as_deref());
 
-    let session: Arc<dyn SessionSink> = request
-        .session_sink
-        .clone()
-        .unwrap_or_else(|| Arc::new(open_headless_session(llm.id(), llm.model())));
+    let session = session_sink_for_request(request, llm.id(), llm.model());
 
     Ok(AgentSetup {
         llm,
@@ -461,6 +459,28 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         transcript,
         system_prompt_override,
     })
+}
+
+/// Select persistence for a headless run.
+///
+/// Top-level `bone run` invocations are user conversations and retain their
+/// SQLite history. Delegated agents are implementation details of their parent
+/// conversation; persisting each one as a top-level chat pollutes history and
+/// lets test-only subagent prompts leak into the user's database. An explicitly
+/// injected sink always wins, including for nested agents.
+fn session_sink_for_request(
+    request: &AgentRequest,
+    provider: &str,
+    model: &str,
+) -> Arc<dyn SessionSink> {
+    if let Some(session) = request.session_sink.as_ref() {
+        return session.clone();
+    }
+    if request.agent_depth > 0 {
+        Arc::new(crate::session_sink::NullSessionSink)
+    } else {
+        Arc::new(open_headless_session(provider, model))
+    }
 }
 
 pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
@@ -623,8 +643,72 @@ pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::summarize_call_args;
+    use super::{AgentRequest, session_sink_for_request, summarize_call_args};
+    use crate::session_sink::SessionSink;
+    use crate::tools::ApprovalMode;
     use crate::tools::ToolCall;
+    use std::sync::Arc;
+
+    fn nested_request(session_sink: Option<Arc<dyn SessionSink>>) -> AgentRequest {
+        AgentRequest {
+            prompt: "internal task".into(),
+            approval_mode: ApprovalMode::Safe,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            events: false,
+            event_sender: None,
+            agent_depth: 1,
+            on_token_usage: None,
+            activity: None,
+            llm: None,
+            session_sink,
+            tool_allowlist: None,
+            max_tokens: None,
+        }
+    }
+
+    #[test]
+    fn delegated_agents_do_not_open_top_level_conversations() {
+        let sink = session_sink_for_request(&nested_request(None), "test", "test");
+        assert_eq!(sink.conv_id(), None);
+    }
+
+    #[test]
+    fn delegated_agents_honor_an_explicit_session_sink() {
+        struct Sink;
+        impl SessionSink for Sink {
+            fn conv_id(&self) -> Option<i64> {
+                Some(42)
+            }
+            fn append_message(
+                &self,
+                _: &str,
+                _: &str,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: i64,
+            ) {
+            }
+            fn record_usage(
+                &self,
+                _: &str,
+                _: &str,
+                _: u32,
+                _: u32,
+                _: Option<u32>,
+                _: Option<f64>,
+                _: bool,
+            ) {
+            }
+            fn end(&self) {}
+        }
+
+        let sink = session_sink_for_request(&nested_request(Some(Arc::new(Sink))), "test", "test");
+        assert_eq!(sink.conv_id(), Some(42));
+    }
 
     #[test]
     fn summarize_call_args_truncates_json_on_char_boundary() {
