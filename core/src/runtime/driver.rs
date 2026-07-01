@@ -80,6 +80,9 @@ pub struct DriverOutcome {
     /// Kept separately because a `conversation.replace` compaction can shorten
     /// or reshape `transcript`, making a pre-turn transcript index invalid.
     pub persist_messages: Vec<ChatMessage>,
+    /// True when a `conversation.replace` action changed the model-facing
+    /// transcript and the resulting view needs a durable checkpoint.
+    pub transcript_replaced: bool,
     /// Per-request usage captured during the turn. The Driver also reports these
     /// to its `session` sink, but a frontend that runs with a `NullSessionSink`
     /// (the TUI persists with its own continuous `session_seq`) reads them from
@@ -163,6 +166,7 @@ impl Driver {
                     transcript,
                     token_stats,
                     persist_messages: Vec::new(),
+                    transcript_replaced: false,
                     usage: Vec::new(),
                 }
             }
@@ -231,6 +235,7 @@ impl Driver {
         let mut session_seq = 0i64;
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut persist_messages: Vec<ChatMessage> = Vec::new();
+        let mut transcript_replaced = false;
         // The initiating user turn is already present in history/transcript:
         // headless `agent_setup` seeds it, and the TUI pushes it before
         // building the driver. Only insert when it is NOT already the last
@@ -359,6 +364,7 @@ impl Driver {
                 for action in actions {
                     if let Some(new_messages) = action.conversation_replace {
                         transcript = new_messages;
+                        transcript_replaced = true;
                         history =
                             build_chat_history(&transcript, system_prompt_override.as_deref());
                         let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
@@ -788,6 +794,7 @@ impl Driver {
             transcript,
             token_stats,
             persist_messages,
+            transcript_replaced,
             usage: usage_records,
         }
     }

@@ -81,6 +81,7 @@ async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, 
         ApprovalMode::Safe,
         None,
         false,
+        false,
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -126,6 +127,7 @@ async fn daemon_stops_when_last_command_sender_is_dropped() {
         session.clone(),
         ApprovalMode::Safe,
         None,
+        false,
         false,
     ));
 
@@ -345,6 +347,7 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
         ApprovalMode::Safe,
         Some(inbox.clone()),
         false,
+        false,
     ));
 
     let mut events = hub.subscribe();
@@ -528,6 +531,7 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
         ApprovalMode::Safe,
         None,
         true, // forward view diffs
+        false,
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -621,6 +625,7 @@ bone.register_command("echo", {
         ApprovalMode::Safe,
         None,
         true,
+        false,
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -716,6 +721,7 @@ bone.register_command("noop", {
         ApprovalMode::Safe,
         None,
         true,
+        false,
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

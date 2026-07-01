@@ -1189,57 +1189,8 @@ impl App {
     /// the generic job registry, independent of which tool dispatched them.
     /// Returns `(turn_text, display_text)` or `None` when no finished jobs.
     fn format_job_results(jobs: &[crate::ext::jobs::Job]) -> Option<(String, String)> {
-        if jobs.is_empty() {
-            return None;
-        }
-        let mut lines = Vec::with_capacity(jobs.len());
-        for job in jobs {
-            let status_sym = job_status_sym(job.status);
-            let mut truncated = crate::ext::jobs::truncate_for_injection(
-                job.result.as_deref().unwrap_or(""),
-                crate::ext::jobs::MAX_INJECT_CHARS,
-            );
-            if let Some(file) = &job.result_file {
-                truncated.push_str(&format!("\n[full output saved to: {file}]"));
-            }
-            lines.push(format!(
-                "## {} ({}) — {}\n{}",
-                job.agent, job.id, status_sym, truncated
-            ));
-        }
         let still_running = crate::ext::jobs::registry().running_jobs();
-        if !still_running.is_empty() {
-            let names: Vec<String> = still_running
-                .iter()
-                .map(|j| format!("{} ({})", j.agent, j.id))
-                .collect();
-            lines.push(format!(
-                "Note: still running: {}. Their results will arrive automatically in a later message — do not assume their outcome.",
-                names.join(", ")
-            ));
-        }
-        let turn_text = format!(
-            "[automated message] Results from background jobs you dispatched earlier are now ready. \
-             Review them and continue the task they were dispatched for; if nothing remains to be done, \
-             summarize the outcomes for the user.\n\n{}",
-            lines.join("\n\n")
-        );
-        let display: String = jobs
-            .iter()
-            .map(|j| format!("{} {}", j.agent, job_status_sym(j.status)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let display_text = format!("[job results: {}]", display);
-        Some((turn_text, display_text))
-    }
-}
-
-/// Status glyph for a subagent job (done / error / running).
-fn job_status_sym(status: crate::ext::jobs::JobStatus) -> &'static str {
-    match status {
-        crate::ext::jobs::JobStatus::Done => "✓",
-        crate::ext::jobs::JobStatus::Error => "✗",
-        crate::ext::jobs::JobStatus::Running => "◑",
+        crate::ext::jobs::format_results_for_injection(jobs, &still_running)
     }
 }
 

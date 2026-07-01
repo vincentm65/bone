@@ -11,6 +11,7 @@ fn new_job(agent: &str, task: &str) -> NewJob {
         task: task.to_string(),
         title: String::new(),
         max_concurrency: 1,
+        scope: None,
         cancel_flag: Arc::new(AtomicBool::new(false)),
     }
 }
@@ -160,6 +161,77 @@ fn complete_sets_error() {
     let snap = reg.snapshot();
     assert_eq!(snap[0]["status"], "error");
     assert_eq!(snap[0]["result"], "boom");
+}
+
+/// A job created with a `scope` is only cancelled / peeked by the matching
+/// scope — the guard that keeps a multi-conversation `bone serve` from
+/// injecting or killing another conversation's sub-agents.
+#[test]
+fn scoped_cancel_and_peek_isolate_conversations() {
+    let reg = fresh_registry();
+    let flag_a = Arc::new(AtomicBool::new(false));
+    let flag_b = Arc::new(AtomicBool::new(false));
+    let a = reg
+        .create(NewJob {
+            scope: Some(1),
+            cancel_flag: flag_a.clone(),
+            ..new_job("a", "conv-1 work")
+        })
+        .unwrap();
+    let b = reg
+        .create(NewJob {
+            scope: Some(2),
+            cancel_flag: flag_b.clone(),
+            ..new_job("b", "conv-2 work")
+        })
+        .unwrap();
+
+    // Cancelling conversation 1 leaves conversation 2's job untouched.
+    assert_eq!(reg.cancel_all_scoped(Some(1)), 1);
+    assert!(flag_a.load(Ordering::Relaxed));
+    assert!(!flag_b.load(Ordering::Relaxed));
+
+    // Finished results are only visible to their own scope.
+    reg.complete(&a, Ok("a done".into()));
+    reg.complete(&b, Ok("b done".into()));
+    let for_1 = reg.peek_finished_unconsumed_scoped(Some(1));
+    assert_eq!(for_1.len(), 1);
+    assert_eq!(for_1[0].id, a);
+    let for_2 = reg.peek_finished_unconsumed_scoped(Some(2));
+    assert_eq!(for_2.len(), 1);
+    assert_eq!(for_2[0].id, b);
+    // A scope with no jobs sees nothing.
+    assert!(reg.peek_finished_unconsumed_scoped(Some(99)).is_empty());
+}
+
+#[test]
+fn format_results_for_injection_batches_and_notes_running() {
+    let reg = fresh_registry();
+    let done = reg
+        .create(NewJob {
+            scope: Some(7),
+            ..new_job("researcher", "search")
+        })
+        .unwrap();
+    reg.complete(&done, Ok("found it".into()));
+    reg.create(NewJob {
+        scope: Some(7),
+        ..new_job("watcher", "keep watching")
+    })
+    .unwrap();
+
+    let finished = reg.peek_finished_unconsumed_scoped(Some(7));
+    let running = reg.running_jobs_scoped(Some(7));
+    let (turn_text, display_text) =
+        format_results_for_injection(&finished, &running).expect("finished job present");
+
+    assert!(turn_text.contains("found it"));
+    assert!(turn_text.contains(&done)); // job id appears in the batch header
+    assert!(turn_text.contains("still running")); // the outstanding watcher is noted
+    assert!(display_text.starts_with("[job results:"));
+
+    // No finished jobs → nothing to inject.
+    assert!(format_results_for_injection(&[], &running).is_none());
 }
 
 #[test]

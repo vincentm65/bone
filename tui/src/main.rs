@@ -387,7 +387,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
                 // Always send this, including for an empty new conversation,
                 // so switching actors clears stale frontend scrollback.
                 bone::runtime::RuntimeEvent::ConversationLoaded {
-                    messages: session.transcript.clone(),
+                    messages: session.display_transcript(),
                     snapshot,
                 },
             ]
@@ -401,6 +401,9 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             boot.session,
             approval_mode,
             None,
+            true,
+            // Remote clients of `bone serve` cannot self-inject background
+            // sub-agent results / `bone.api.submit` prompts, so the daemon does.
             true,
         ));
         Ok(bone::rpc::ManagedRuntime {
@@ -834,6 +837,9 @@ async fn main() -> std::io::Result<()> {
                 bone::tools::ApprovalMode::Safe,
                 None,
                 true, // forward view diffs: the TUI is a pure client
+                // The in-process TUI drains background jobs / inbox itself
+                // (`tick_jobs` / `tick_inbox`), so the daemon must not also.
+                false,
             ));
             let result = app.run().await;
             daemon.abort();

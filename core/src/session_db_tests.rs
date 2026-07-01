@@ -53,7 +53,7 @@ fn migrate_v1_preserves_user_data() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8, "schema should be migrated to latest version");
+    assert_eq!(version, 9, "schema should be migrated to latest version");
 
     // Pre-existing rows survive the migration.
     let conversations: i64 = db
@@ -133,7 +133,7 @@ fn legacy_unversioned_database_migrates_without_data_loss() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
 
     // Data untouched.
     let count: i64 = db
@@ -164,10 +164,43 @@ fn fresh_database_initializes_at_latest_version() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
 
     // record_usage relies on the is_estimated column being present.
     db.create_conversation("openai", "gpt-4").unwrap();
+}
+
+#[test]
+fn v8_migration_adds_context_checkpoints_without_touching_messages() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.append_message(conv, "user", "preserved", None, None, None, None, false, 1)
+        .unwrap();
+    db.conn
+        .execute("DROP TABLE conversation_context_checkpoints", [])
+        .unwrap();
+    db.conn.pragma_update(None, "user_version", 8u32).unwrap();
+
+    db.setup_schema().unwrap();
+
+    let version: u32 = db
+        .conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let checkpoint_table: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'conversation_context_checkpoints'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 9);
+    assert_eq!(checkpoint_table, 1);
+    assert_eq!(db.load_messages(conv).unwrap()[0].content, "preserved");
 }
 
 #[test]
@@ -248,6 +281,107 @@ fn runtime_load_is_not_truncated_at_history_query_limit() {
 
     assert_eq!(db.list_messages(conv, 2000).unwrap().len(), 1000);
     assert_eq!(db.load_messages(conv).unwrap().len(), 1001);
+}
+
+#[test]
+fn context_checkpoint_survives_reload_without_rewriting_full_history() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    let original = vec![
+        crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "old question"),
+        crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "old answer"),
+    ];
+    db.append_turn(conv, 0, &original, &[]).unwrap();
+
+    let answer = crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "new answer");
+    let compacted = vec![
+        crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "summary of old context"),
+        answer.clone(),
+    ];
+    db.append_turn_with_checkpoint(conv, 2, &[answer], &[], Some(&compacted))
+        .unwrap();
+    db.append_message(
+        conv,
+        "user",
+        "after restart",
+        None,
+        None,
+        None,
+        None,
+        false,
+        4,
+    )
+    .unwrap();
+
+    let full = db.load_messages(conv).unwrap();
+    assert_eq!(full.len(), 4);
+    assert_eq!(full[0].content, "old question");
+    let effective = db.load_effective_transcript(conv).unwrap();
+    assert_eq!(effective.len(), 3);
+    assert_eq!(effective[0].content, "summary of old context");
+    assert_eq!(effective[1].content, "new answer");
+    assert_eq!(effective[2].content, "after restart");
+}
+
+#[test]
+fn checkpoint_rejected_at_save_when_newer_messages_exist() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.append_message(conv, "user", "one", None, None, None, None, false, 1)
+        .unwrap();
+    db.append_message(conv, "user", "concurrent", None, None, None, None, false, 2)
+        .unwrap();
+
+    let stale = vec![crate::llm::ChatMessage::new(
+        crate::llm::ChatRole::User,
+        "summary that missed concurrent",
+    )];
+    assert!(!db.save_context_checkpoint(conv, 1, &stale).unwrap());
+    let effective = db.load_effective_transcript(conv).unwrap();
+    assert_eq!(effective.len(), 2);
+    assert_eq!(effective[1].content, "concurrent");
+}
+
+#[test]
+fn malformed_latest_checkpoint_falls_back_to_an_older_revision() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.append_message(conv, "user", "original", None, None, None, None, false, 1)
+        .unwrap();
+    let valid = vec![crate::llm::ChatMessage::new(
+        crate::llm::ChatRole::User,
+        "valid summary",
+    )];
+    assert!(db.save_context_checkpoint(conv, 1, &valid).unwrap());
+    // Explicitly set a high rowid so the malformed checkpoint is ordered first
+    // by the `ORDER BY id DESC` query — makes the test deterministic regardless
+    // of insertion timing or `created_at` values.
+    let valid_id: i64 = db
+        .conn
+        .query_row(
+            "SELECT id FROM conversation_context_checkpoints WHERE conversation_id = ?1",
+            rusqlite::params![conv],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO conversation_context_checkpoints
+             (id, conversation_id, through_seq, messages_json, created_at)
+             VALUES (?1, ?2, 1, 'not json', '2026-01-01T00:00:00Z')",
+            rusqlite::params![valid_id + 1, conv],
+        )
+        .unwrap();
+
+    let effective = db.load_effective_transcript(conv).unwrap();
+    assert_eq!(effective.len(), 1);
+    assert_eq!(effective[0].content, "valid summary");
 }
 
 #[test]

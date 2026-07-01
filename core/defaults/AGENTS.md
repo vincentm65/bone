@@ -371,7 +371,7 @@ Auto-compaction announces itself to the attached frontend via `ctx.ui.notice` (a
 
 **Disable:** clear `auto_compact_tokens`, clear `auto_compact_keep_messages`, or remove `lua/commands/compact.lua` from the config directory. Removing the file stops both manual `/compact` and auto-compaction.
 
-**Implementation:** entirely in Lua. Rust provides only the generic APIs (`ctx.conversation`, `before_turn`, `conversation.replace` action).
+**Implementation:** summarization policy is entirely in Lua. Rust provides the generic APIs (`ctx.conversation`, `before_turn`, `conversation.replace` action) and durably checkpoints the resulting model-facing context without rewriting full history.
 
 ### /config
 
@@ -611,7 +611,7 @@ return {
 }
 ```
 
-**`conversation.replace`** — Replaces the active in-memory transcript with the given `messages` array. Each message must have `role` (`"user"`, `"assistant"`, or `"tool"`) and `content`. Optional fields: `tool_calls`, `name`, `tool_call_id`. Invalid/unknown roles are skipped; if no valid messages remain, the action is ignored. The SQLite session history is never altered.
+**`conversation.replace`** — Replaces the active model-facing transcript with the given `messages` array. Each message must have `role` (`"user"`, `"assistant"`, or `"tool"`) and `content`. Optional fields: `tool_calls`, `name`, `tool_call_id`. Invalid/unknown roles are skipped; if no valid messages remain, the action is ignored. The replacement is stored as a context checkpoint so it survives restart; the complete SQLite message history is retained unchanged for display, search, and export.
 
 When `conversation.replace` is applied:
 - The transcript is replaced with the validated messages.

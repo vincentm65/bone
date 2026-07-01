@@ -296,6 +296,14 @@ const FULL_SCHEMA: &str = "
         created_at        TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS conversation_context_checkpoints (
+        id              INTEGER PRIMARY KEY,
+        conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+        through_seq     INTEGER NOT NULL,
+        messages_json   TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    );
+
     CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         content,
         role UNINDEXED,
@@ -311,6 +319,9 @@ const FULL_SCHEMA: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
         ON messages(conversation_id, seq);
+
+    CREATE INDEX IF NOT EXISTS idx_context_checkpoints_conversation
+        ON conversation_context_checkpoints(conversation_id, id DESC);
 ";
 
 /// A time range applied to `usage_events.created_at` (interpreted in local time).
@@ -403,7 +414,7 @@ impl SessionDb {
             .map(|count| count > 0)
         }
 
-        const SCHEMA_VERSION: u32 = 8;
+        const SCHEMA_VERSION: u32 = 9;
 
         let current_version: u32 = self
             .conn
@@ -560,6 +571,23 @@ impl SessionDb {
             version = 8;
         }
 
+        if version == 8 {
+            // Keep the immutable transcript in `messages`, while making the
+            // derived, model-facing context durable across process restarts.
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS conversation_context_checkpoints (
+                     id              INTEGER PRIMARY KEY,
+                     conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                     through_seq     INTEGER NOT NULL,
+                     messages_json   TEXT NOT NULL,
+                     created_at      TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_context_checkpoints_conversation
+                     ON conversation_context_checkpoints(conversation_id, id DESC);",
+            )?;
+            version = 9;
+        }
+
         if version != current_version {
             tx.pragma_update(None, "user_version", version)?;
         }
@@ -686,9 +714,22 @@ impl SessionDb {
     pub fn append_turn(
         &self,
         conversation_id: i64,
+        seq: i64,
+        messages: &[ChatMessage],
+        usage: &[UsageRecord],
+    ) -> rusqlite::Result<i64> {
+        self.append_turn_with_checkpoint(conversation_id, seq, messages, usage, None)
+    }
+
+    /// Append a turn and, when supplied, atomically persist the resulting
+    /// model-facing context checkpoint at the turn's final sequence.
+    pub(crate) fn append_turn_with_checkpoint(
+        &self,
+        conversation_id: i64,
         mut seq: i64,
         messages: &[ChatMessage],
         usage: &[UsageRecord],
+        context_checkpoint: Option<&[ChatMessage]>,
     ) -> rusqlite::Result<i64> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let db_seq: i64 = tx.query_row(
@@ -696,6 +737,7 @@ impl SessionDb {
             params![conversation_id],
             |row| row.get(0),
         )?;
+        let checkpoint_source_is_current = seq == db_seq;
         seq = seq.max(db_seq);
         let now = now_iso();
         for msg in messages {
@@ -765,8 +807,50 @@ impl SessionDb {
                 ],
             )?;
         }
+        // A checkpoint produced from stale state must not cover messages
+        // written by another actor. In that case retain the full transcript
+        // fallback; a later compaction can establish a fresh checkpoint.
+        if checkpoint_source_is_current && let Some(checkpoint) = context_checkpoint {
+            let messages_json = serde_json::to_string(checkpoint)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+            tx.execute(
+                "INSERT INTO conversation_context_checkpoints
+                 (conversation_id, through_seq, messages_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![conversation_id, seq, messages_json, now],
+            )?;
+        }
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// Persist an explicit `conversation.replace` performed while idle. The
+    /// sequence comparison prevents a stale actor from hiding concurrent rows.
+    pub(crate) fn save_context_checkpoint(
+        &self,
+        conversation_id: i64,
+        through_seq: i64,
+        messages: &[ChatMessage],
+    ) -> rusqlite::Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let db_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        if db_seq != through_seq {
+            return Ok(false);
+        }
+        let messages_json = serde_json::to_string(messages)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+        tx.execute(
+            "INSERT INTO conversation_context_checkpoints
+             (conversation_id, through_seq, messages_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![conversation_id, through_seq, messages_json, now_iso()],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Record a usage event.
@@ -1239,6 +1323,65 @@ impl SessionDb {
         conversation_id: i64,
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         self.query_messages(conversation_id, None)
+    }
+
+    /// Load the durable model-facing context. The immutable message log remains
+    /// authoritative for history/search; a checkpoint replaces only the prefix
+    /// it summarizes, and later durable messages are replayed verbatim.
+    pub(crate) fn load_effective_transcript(
+        &self,
+        conversation_id: i64,
+    ) -> rusqlite::Result<Vec<ChatMessage>> {
+        let max_seq = self.max_message_seq(conversation_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT through_seq, messages_json
+             FROM conversation_context_checkpoints
+             WHERE conversation_id = ?1 AND through_seq <= ?2
+             ORDER BY id DESC",
+        )?;
+        let checkpoints = stmt.query_map(params![conversation_id, max_seq], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        // Skip a malformed newest revision and recover from the latest older
+        // valid one. Checkpoints are a derived projection, never the only copy.
+        for checkpoint in checkpoints {
+            let (through_seq, json) = checkpoint?;
+            let Ok(mut transcript) = serde_json::from_str::<Vec<ChatMessage>>(&json) else {
+                continue;
+            };
+            let mut tail = self.query_messages_after(conversation_id, through_seq)?;
+            transcript.extend(tail.drain(..).map(stored_to_chat_message));
+            return Ok(transcript);
+        }
+
+        self.load_messages(conversation_id)
+            .map(|rows| rows.into_iter().map(stored_to_chat_message).collect())
+    }
+
+    fn query_messages_after(
+        &self,
+        conversation_id: i64,
+        after_seq: i64,
+    ) -> rusqlite::Result<Vec<StoredMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls, images, is_error
+             FROM messages WHERE conversation_id = ?1 AND seq > ?2
+             ORDER BY seq ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, after_seq], |row| {
+            Ok(StoredMessage {
+                seq: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                tool_name: row.get(3)?,
+                tool_call_id: row.get(4)?,
+                tool_calls: row.get(5)?,
+                images: row.get(6)?,
+                is_error: row.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        rows.collect()
     }
 
     fn query_messages(

@@ -1395,6 +1395,9 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // Dispatch a non-blocking background agent run. Results are queryable
     // via ctx.agent.jobs() or delivered through the TUI peek/mark flow.
     let inherited_spawn = inherited.clone();
+    // Scope spawned jobs to the current conversation so the daemon only cancels
+    // / auto-injects results into the conversation that dispatched them.
+    let spawn_scope = cfg.session_id;
     let spawn_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         // Sub-agents (depth > 0) cannot spawn background jobs — their results
         // would inject into the wrong conversation. They can still use blocking
@@ -1435,6 +1438,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             task: prompt,
             title,
             max_concurrency,
+            scope: spawn_scope,
             cancel_flag: job_cancel.clone(),
         }) {
             Ok(id) => id,

@@ -44,8 +44,8 @@ use bone_protocol::SessionSnapshot;
 pub struct RuntimeSession {
     /// Tool handler; its `state_map` carries cross-round stateful-tool state.
     pub tools: ToolHandler,
-    /// The full conversation transcript (what the next turn's history is built
-    /// from, and what `/history` renders).
+    /// The model-facing transcript. It may begin with a durable compaction
+    /// checkpoint while SQLite retains the complete conversation history.
     pub transcript: Vec<ChatMessage>,
     /// Cumulative token accounting across the conversation.
     pub token_stats: TokenStats,
@@ -68,6 +68,20 @@ impl RuntimeSession {
             conversation_id: None,
             session_seq: 0,
         }
+    }
+
+    /// Complete durable history for frontend scrollback. Falls back to the
+    /// effective transcript for a not-yet-persisted session.
+    pub fn display_transcript(&self) -> Vec<ChatMessage> {
+        if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id)
+            && let Ok(rows) = db.load_messages(conv_id)
+        {
+            return rows
+                .into_iter()
+                .map(crate::session_db::stored_to_chat_message)
+                .collect();
+        }
+        self.transcript.clone()
     }
 
     /// Open the session database and make a conversation active for `llm`'s
@@ -93,13 +107,8 @@ impl RuntimeSession {
             // Resume the last conversation in place.
             Ok(Some((conv_id, has_messages))) => {
                 if has_messages {
-                    match db.load_messages(conv_id) {
-                        Ok(rows) => {
-                            self.transcript = rows
-                                .into_iter()
-                                .map(crate::session_db::stored_to_chat_message)
-                                .collect();
-                        }
+                    match db.load_effective_transcript(conv_id) {
+                        Ok(messages) => self.transcript = messages,
                         Err(err) => {
                             return Some(format!("warning: failed to load conversation: {err}"));
                         }
@@ -168,13 +177,8 @@ impl RuntimeSession {
             }
             Ok(true) => {}
         }
-        match db.load_messages(conversation_id) {
-            Ok(rows) => {
-                self.transcript = rows
-                    .into_iter()
-                    .map(crate::session_db::stored_to_chat_message)
-                    .collect();
-            }
+        match db.load_effective_transcript(conversation_id) {
+            Ok(messages) => self.transcript = messages,
             Err(err) => {
                 return Some(format!(
                     "failed to load conversation {conversation_id}: {err}"
@@ -313,6 +317,7 @@ impl RuntimeSession {
             transcript,
             token_stats,
             persist_messages,
+            transcript_replaced,
             usage,
         } = outcome;
         self.transcript = transcript;
@@ -323,7 +328,13 @@ impl RuntimeSession {
         // single WAL sync) instead of one commit per row.
         if let Some(ref db) = self.session_db
             && let Some(conv_id) = self.conversation_id
-            && let Ok(next) = db.append_turn(conv_id, self.session_seq, &persist_messages, &usage)
+            && let Ok(next) = db.append_turn_with_checkpoint(
+                conv_id,
+                self.session_seq,
+                &persist_messages,
+                &usage,
+                transcript_replaced.then_some(self.transcript.as_slice()),
+            )
         {
             self.session_seq = next;
         }
@@ -386,6 +397,7 @@ mod tests {
             transcript: vec![ChatMessage::new(ChatRole::User, "summary"), current.clone()],
             token_stats: Default::default(),
             persist_messages: vec![current],
+            transcript_replaced: true,
             usage: Vec::new(),
         };
 

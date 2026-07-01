@@ -579,12 +579,41 @@ impl DaemonCtx {
     /// a notice when any were actually cancelled. Called on turn cancel (Ctrl+C)
     /// and on conversation reset (`/new`, `/clear`).
     fn cancel_jobs(&self) {
-        let cancelled = crate::ext::jobs::registry().cancel_all();
+        // Scope to this session's conversation so a process hosting several
+        // conversations (`bone serve`) doesn't kill another one's sub-agents.
+        let scope = self.session.lock().unwrap().conversation_id;
+        let cancelled = crate::ext::jobs::registry().cancel_all_scoped(scope);
         if cancelled > 0 {
             self.hub.publish(RuntimeEvent::Status {
                 message: format!("cancelled {cancelled} background sub-agent job(s)"),
             });
         }
+    }
+
+    /// Next queued background prompt to inject as a turn when the daemon is idle,
+    /// or `None` when nothing is pending. Lua-submitted prompts (`bone.api.submit`)
+    /// go first, one per idle tick; otherwise a batch of this conversation's
+    /// finished sub-agent jobs is formatted into a single turn and marked
+    /// consumed so it is never injected twice. Only called when
+    /// `inject_background` is set (i.e. `bone serve`).
+    fn next_background_prompt(&self) -> Option<String> {
+        // `bone.api.submit` prompts first — steering should win over passively
+        // arriving job results.
+        if let Some(text) = crate::ext::inbox::pop() {
+            return Some(text);
+        }
+        let scope = self.session.lock().unwrap().conversation_id;
+        let registry = crate::ext::jobs::registry();
+        let finished = registry.peek_finished_unconsumed_scoped(scope);
+        if finished.is_empty() {
+            return None;
+        }
+        let running = registry.running_jobs_scoped(scope);
+        let (turn_text, _display) =
+            crate::ext::jobs::format_results_for_injection(&finished, &running)?;
+        let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
+        registry.mark_consumed(&ids);
+        Some(turn_text)
     }
 
     /// Run a registered Lua slash command inside the daemon, forwarding its pane
@@ -773,17 +802,19 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::LoadConversation { id } => {
-                let messages = {
+                let loaded = {
                     let s = self.session.lock().unwrap();
                     s.session_db.as_ref().and_then(|db| {
-                        db.load_messages(id).ok().map(|rows| {
-                            rows.into_iter()
-                                .map(crate::session_db::stored_to_chat_message)
-                                .collect::<Vec<_>>()
-                        })
+                        let full = db.load_messages(id).ok()?;
+                        let effective = db.load_effective_transcript(id).ok()?;
+                        Some((full, effective))
                     })
                 };
-                if let Some(messages) = messages {
+                if let Some((rows, effective)) = loaded {
+                    let messages = rows
+                        .into_iter()
+                        .map(crate::session_db::stored_to_chat_message)
+                        .collect::<Vec<_>>();
                     let snapshot = {
                         let mut s = self.session.lock().unwrap();
                         if let Some(db) = s.session_db.as_ref() {
@@ -800,7 +831,7 @@ impl DaemonCtx {
                             .as_ref()
                             .and_then(|db| db.max_message_seq(id).ok())
                             .unwrap_or(0);
-                        s.transcript = messages.clone();
+                        s.transcript = effective;
                         s.restore_usage_and_context();
                         s.snapshot(self.llm.id(), self.llm.model())
                     };
@@ -848,6 +879,9 @@ impl DaemonCtx {
                 {
                     let mut s = self.session.lock().unwrap();
                     s.transcript = messages;
+                    if let (Some(db), Some(conv_id)) = (s.session_db.as_ref(), s.conversation_id) {
+                        let _ = db.save_context_checkpoint(conv_id, s.session_seq, &s.transcript);
+                    }
                     let history = crate::chat::build_chat_history(&s.transcript, None);
                     let tool_defs_json_chars = serde_json::to_value(s.tools.definitions())
                         .map(|v| v.to_string().chars().count())
@@ -1157,6 +1191,10 @@ pub async fn run_daemon(
     // drains the `UiState` itself, so it passes `false` to avoid a double-drain
     // race; `bone serve` passes `true`.
     forward_view_diffs: bool,
+    // Inject background sub-agent results / Lua-submitted prompts as turns from
+    // the daemon when idle. `true` for `bone serve` (remote clients cannot
+    // self-inject); `false` for the in-process TUI (it injects locally).
+    inject_background: bool,
 ) {
     let mut ctx = DaemonCtx {
         hub: hub.into(),
@@ -1172,9 +1210,34 @@ pub async fn run_daemon(
 
     // Each command is serviced by `handle_idle_command`; the two that run a model
     // turn (`SubmitPrompt` / a submitting `RunCommand`) return `StartTurn(text)`,
-    // which `run_turn` builds and pumps to completion.
-    while let Some(cmd) = commands.recv().await {
-        if let Flow::StartTurn(text) = ctx.handle_idle_command(cmd, &mut commands).await {
+    // which `run_turn` builds and pumps to completion. When `inject_background`
+    // is set, an idle poll also drains background sub-agent results and
+    // Lua-submitted prompts and runs them as turns — the daemon-side equivalent
+    // of the TUI's `tick_jobs` / `tick_inbox`, so remote clients reach parity.
+    let mut inject_timer = tokio::time::interval(std::time::Duration::from_millis(200));
+    loop {
+        let flow = tokio::select! {
+            biased;
+            cmd = commands.recv() => match cmd {
+                Some(cmd) => ctx.handle_idle_command(cmd, &mut commands).await,
+                None => break,
+            },
+            _ = inject_timer.tick(), if inject_background => {
+                match ctx.next_background_prompt() {
+                    // Route through the same `SubmitPrompt` handling as a typed
+                    // prompt (transcript push, DB persist, `message` hook).
+                    Some(text) => {
+                        ctx.handle_idle_command(
+                            RuntimeCommand::SubmitPrompt { text, images: vec![] },
+                            &mut commands,
+                        )
+                        .await
+                    }
+                    None => Flow::Continue,
+                }
+            }
+        };
+        if let Flow::StartTurn(text) = flow {
             ctx.run_turn(text, &mut commands).await;
         }
     }

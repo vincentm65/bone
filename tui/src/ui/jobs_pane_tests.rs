@@ -15,6 +15,7 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
         token_received: 0,
         result_file: None,
         max_concurrency: 1,
+        scope: None,
         cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }

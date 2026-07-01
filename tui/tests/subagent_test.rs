@@ -20,6 +20,7 @@ fn test_job(agent: &str, task: &str) -> bone::ext::jobs::NewJob {
         task: task.into(),
         title: String::new(),
         max_concurrency: 1,
+        scope: None,
         cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
@@ -596,6 +597,7 @@ fn cancel_running_job_via_lua_tool() {
             task: "unique-task-cancel-via-lua".into(),
             title: String::new(),
             max_concurrency: 1,
+            scope: None,
             cancel_flag: cancel_flag.clone(),
         })
         .expect("cancel-target job should be created");

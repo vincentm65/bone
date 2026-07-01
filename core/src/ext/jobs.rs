@@ -47,6 +47,13 @@ pub struct Job {
     pub result_file: Option<String>,
     /// Maximum concurrent jobs allowed for this agent template.
     pub max_concurrency: usize,
+    /// Conversation the job belongs to (the `conversation_id` active when it was
+    /// spawned). The daemon scopes cancellation and auto-injection by this so a
+    /// process hosting several conversations (`bone serve`) can never cancel or
+    /// inject another conversation's jobs. `None` = unscoped (single-conversation
+    /// callers, and the global query methods, treat every job as in scope).
+    #[serde(skip)]
+    pub scope: Option<i64>,
     /// Per-job cancellation flag, settable by [`JobRegistry::cancel`].
     #[serde(skip)]
     pub cancel_flag: Arc<AtomicBool>,
@@ -64,6 +71,9 @@ pub struct NewJob {
     pub title: String,
     /// How many jobs may run concurrently for this agent template.
     pub max_concurrency: usize,
+    /// Conversation the job belongs to (used to scope cancel/inject); `None`
+    /// for single-conversation callers.
+    pub scope: Option<i64>,
     /// Per-job cancellation flag, shared with the running task.
     pub cancel_flag: Arc<AtomicBool>,
 }
@@ -112,6 +122,11 @@ impl JobRegistry {
         self.version.load(Ordering::Relaxed)
     }
 
+    /// Lock the jobs mutex, panicking on poison (same as `unwrap_or_else`).
+    fn lock_jobs(&self) -> std::sync::MutexGuard<'_, Vec<Job>> {
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Create a new running job. Returns its ID, or an error if the named
     /// agent is at its concurrency cap (checked atomically under the lock).
     pub fn create(&self, job: NewJob) -> Result<String, String> {
@@ -120,10 +135,11 @@ impl JobRegistry {
             task,
             title,
             max_concurrency,
+            scope,
             cancel_flag,
         } = job;
         let now = current_unix_seconds();
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         let running_for_agent = jobs
             .iter()
             .filter(|j| j.status == JobStatus::Running && j.agent == agent)
@@ -148,6 +164,7 @@ impl JobRegistry {
             token_received: 0,
             result_file: None,
             max_concurrency,
+            scope,
             cancel_flag,
         });
         // Prune oldest finished-and-consumed jobs to cap memory growth.
@@ -178,7 +195,7 @@ impl JobRegistry {
         };
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         finish_job(&mut jobs, id, result, result_file, status, now, 0, 0);
         self.completed.notify_all();
         drop(jobs);
@@ -187,7 +204,7 @@ impl JobRegistry {
 
     /// Update token counts for a running job.
     pub fn update_tokens(&self, id: &str, sent: u64, received: u64) {
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         if let Some(job) = jobs.iter_mut().find(|j| j.id == id)
             && (job.token_sent != sent || job.token_received != received)
         {
@@ -214,7 +231,7 @@ impl JobRegistry {
         };
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         finish_job(
             &mut jobs,
             id,
@@ -232,7 +249,7 @@ impl JobRegistry {
 
     /// IDs of all currently running jobs.
     pub fn running_ids(&self) -> Vec<String> {
-        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs = self.lock_jobs();
         jobs.iter()
             .filter(|j| j.status == JobStatus::Running)
             .map(|j| j.id.clone())
@@ -241,9 +258,18 @@ impl JobRegistry {
 
     /// Clones of all currently running jobs.
     pub fn running_jobs(&self) -> Vec<Job> {
-        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs = self.lock_jobs();
         jobs.iter()
             .filter(|j| j.status == JobStatus::Running)
+            .cloned()
+            .collect()
+    }
+
+    /// Clones of currently running jobs in `scope` (see [`Job::scope`]).
+    pub fn running_jobs_scoped(&self, scope: Option<i64>) -> Vec<Job> {
+        let jobs = self.lock_jobs();
+        jobs.iter()
+            .filter(|j| j.status == JobStatus::Running && j.scope == scope)
             .cloned()
             .collect()
     }
@@ -261,7 +287,7 @@ impl JobRegistry {
         cancelled: Option<&AtomicBool>,
     ) -> WaitOutcome {
         let deadline = Instant::now() + timeout;
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         loop {
             let pending: Vec<String> = jobs
                 .iter()
@@ -311,21 +337,21 @@ impl JobRegistry {
 
     /// Snapshot of all jobs as a JSON array.
     pub fn snapshot(&self) -> serde_json::Value {
-        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs = self.lock_jobs();
         let array: Vec<_> = jobs.iter().cloned().collect();
         serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
     }
 
     /// Clones of all jobs (e.g. for the Rust-side pane renderer).
     pub fn all_jobs(&self) -> Vec<Job> {
-        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.lock_jobs().clone()
     }
 
     /// Peek at all unconsumed finished jobs without marking them consumed.
     /// Call [`JobRegistry::mark_consumed`] after the results have actually
     /// been delivered (e.g. injected into the conversation).
     pub fn peek_finished_unconsumed(&self) -> Vec<Job> {
-        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs = self.lock_jobs();
         let mut finished: Vec<Job> = jobs
             .iter()
             .filter(|j| {
@@ -337,10 +363,28 @@ impl JobRegistry {
         finished
     }
 
+    /// Like [`peek_finished_unconsumed`](Self::peek_finished_unconsumed) but
+    /// limited to jobs in `scope` (see [`Job::scope`]), so a daemon only injects
+    /// results from its own conversation.
+    pub fn peek_finished_unconsumed_scoped(&self, scope: Option<i64>) -> Vec<Job> {
+        let jobs = self.lock_jobs();
+        let mut finished: Vec<Job> = jobs
+            .iter()
+            .filter(|j| {
+                j.scope == scope
+                    && (j.status == JobStatus::Done || j.status == JobStatus::Error)
+                    && !j.consumed
+            })
+            .cloned()
+            .collect();
+        finished.sort_by_key(|j| j.started_at);
+        finished
+    }
+
     /// Cancel a job by setting its cancel flag. Returns `true` if the id was
     /// found. The running task observes the flag and aborts at its next await.
     pub fn cancel(&self, id: &str) -> bool {
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
             return false;
         };
@@ -360,7 +404,7 @@ impl JobRegistry {
     /// cancels the turn (Ctrl+C) or resets the conversation (`/new`, `/clear`):
     /// background sub-agents belong to the session, so they die with it.
     pub fn cancel_all(&self) -> usize {
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         let mut cancelled = 0;
         for job in jobs.iter_mut() {
             if job.status == JobStatus::Running {
@@ -376,9 +420,29 @@ impl JobRegistry {
         cancelled
     }
 
+    /// Cancel every running job in `scope` (see [`Job::scope`]). Returns the
+    /// number signalled. Used by a daemon's conversation-reset / turn-cancel so
+    /// it only stops its own conversation's sub-agents, not those of another
+    /// conversation sharing the process (`bone serve`).
+    pub fn cancel_all_scoped(&self, scope: Option<i64>) -> usize {
+        let mut jobs = self.lock_jobs();
+        let mut cancelled = 0;
+        for job in jobs.iter_mut() {
+            if job.status == JobStatus::Running && job.scope == scope {
+                job.cancel_flag.store(true, Ordering::Relaxed);
+                cancelled += 1;
+            }
+        }
+        if cancelled > 0 {
+            self.completed.notify_all();
+            self.version.fetch_add(1, Ordering::Relaxed);
+        }
+        cancelled
+    }
+
     /// Mark the given job ids as consumed. Bumps the version if any changed.
     pub fn mark_consumed(&self, ids: &[String]) {
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jobs = self.lock_jobs();
         let mut any = false;
         for job in jobs.iter_mut() {
             if !job.consumed && ids.contains(&job.id) {
@@ -445,6 +509,69 @@ fn spill_result(id: &str, result: &str) -> Option<String> {
         Ok(()) => Some(path.to_string_lossy().to_string()),
         Err(_) => None,
     }
+}
+
+/// Status glyph for a subagent job (done / error / running).
+pub fn status_sym(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Done => "✓",
+        JobStatus::Error => "✗",
+        JobStatus::Running => "◑",
+    }
+}
+
+/// Build the injected turn for a batch of finished background jobs: the full
+/// prompt handed to the model (`turn_text`) and a short label for the frontend
+/// scrollback (`display_text`). `None` when `finished` is empty.
+///
+/// Shared by the interactive TUI (`tick_jobs`) and the daemon's background
+/// injection so both frontends deliver identical job results. `still_running`
+/// is appended as a note so the model doesn't assume outstanding jobs failed.
+pub fn format_results_for_injection(
+    finished: &[Job],
+    still_running: &[Job],
+) -> Option<(String, String)> {
+    if finished.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(finished.len());
+    for job in finished {
+        let mut truncated =
+            truncate_for_injection(job.result.as_deref().unwrap_or(""), MAX_INJECT_CHARS);
+        if let Some(file) = &job.result_file {
+            truncated.push_str(&format!("\n[full output saved to: {file}]"));
+        }
+        lines.push(format!(
+            "## {} ({}) — {}\n{}",
+            job.agent,
+            job.id,
+            status_sym(job.status),
+            truncated
+        ));
+    }
+    if !still_running.is_empty() {
+        let names: Vec<String> = still_running
+            .iter()
+            .map(|j| format!("{} ({})", j.agent, j.id))
+            .collect();
+        lines.push(format!(
+            "Note: still running: {}. Their results will arrive automatically in a later message — do not assume their outcome.",
+            names.join(", ")
+        ));
+    }
+    let turn_text = format!(
+        "[automated message] Results from background jobs you dispatched earlier are now ready. \
+         Review them and continue the task they were dispatched for; if nothing remains to be done, \
+         summarize the outcomes for the user.\n\n{}",
+        lines.join("\n\n")
+    );
+    let display: String = finished
+        .iter()
+        .map(|j| format!("{} {}", j.agent, status_sym(j.status)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let display_text = format!("[job results: {display}]");
+    Some((turn_text, display_text))
 }
 
 /// Marker appended to truncated job results.
