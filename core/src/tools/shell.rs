@@ -53,7 +53,7 @@ fn which(name: &str) -> bool {
 }
 
 pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
-    let timeout_ms = request.timeout_ms.max(1_000);
+    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
     let (shell, shell_arg, _) = shell_command();
     let mut cmd = Command::new(shell);
     cmd.arg(shell_arg)
@@ -178,7 +178,7 @@ impl Tool for ShellTool {
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
         let _ = args.classification;
-        let timeout_ms = args.timeout_ms.unwrap_or(120_000).max(1_000);
+        let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
 
         let output = run_script(ScriptRequest {
             command: args.command,
