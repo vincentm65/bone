@@ -620,6 +620,37 @@ impl SessionDb {
         )
     }
 
+    /// The provider id and model a conversation was created with.
+    pub fn conversation_provider_model(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT provider, model FROM conversations WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+    }
+
+    /// Point a conversation's stored provider/model at the currently active
+    /// provider. Called when switching provider so the sidebar and reopen path
+    /// reflect the provider a chat is actually using, not the boot default it
+    /// was minted with.
+    pub fn set_conversation_provider(
+        &self,
+        id: i64,
+        provider: &str,
+        model: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE conversations SET provider = ?2, model = ?3 WHERE id = ?1",
+            params![id, provider, model],
+        )?;
+        Ok(())
+    }
+
     /// Create a new conversation and return its id.
     pub fn create_conversation(&self, provider: &str, model: &str) -> rusqlite::Result<i64> {
         let now = now_iso();

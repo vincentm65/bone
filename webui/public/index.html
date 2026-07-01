@@ -71,6 +71,7 @@
           </button>
         </div>
       </aside>
+      <div id="sidebar-resize" class="sidebar-resize" title="Drag to resize · double-click to reset" role="separator" aria-orientation="vertical"></div>
       <button id="sidebar-backdrop" class="sidebar-backdrop hidden" aria-label="Close sidebar"></button>
 
       <!-- ── Main column ───────────────────────────────────────────── -->
@@ -78,13 +79,6 @@
         <header id="topbar">
           <button id="show-sidebar" class="ghost-btn hidden" title="Show sidebar" aria-label="Show sidebar">
             <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
-          </button>
-
-          <button id="model-chip" class="chip" title="Change model">
-            <span class="dot" id="conn-dot"></span>
-            <span id="conn-label" class="conn-label">Connecting</span>
-            <span id="model-label">connecting…</span>
-            <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
           </button>
 
           <div class="topbar-right">
@@ -113,9 +107,28 @@
 
             <!-- floating, bottom-pinned composer -->
             <div id="composer-wrap">
+            <!-- ask_user interactive question (source="interact" pane) — grows
+                 out of the composer, sharing its width -->
+            <div id="interact" class="interact hidden" role="dialog" aria-modal="false" aria-labelledby="interact-q">
+              <div class="interact-card">
+                <div class="interact-head">
+                  <span class="interact-kicker">Question</span>
+                </div>
+                <div id="interact-q" class="interact-q"></div>
+                <div id="interact-options" class="interact-options"></div>
+                <div id="interact-foot" class="interact-foot"></div>
+                <div id="interact-hint" class="interact-hint"></div>
+              </div>
+            </div>
             <div id="composer" class="composer">
                 <textarea id="input" rows="1" placeholder="Message bone…" autocomplete="off"></textarea>
                 <div class="composer-bar">
+                  <button id="model-chip" class="pill model-pill" title="Change model" aria-haspopup="dialog" aria-expanded="false">
+                    <span class="dot" id="conn-dot"></span>
+                    <span id="conn-label" class="conn-label">Connecting</span>
+                    <span id="model-label" class="model-pill-label">connecting…</span>
+                    <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
                   <button id="mode-toggle" class="pill mode-safe" title="Tool approval mode">
                     <span id="mode-label">Confirm tools</span>
                   </button>
@@ -138,6 +151,7 @@
           <aside id="canvas" class="canvas hidden">
             <div class="canvas-head">
               <div id="canvas-tabs" class="canvas-tabs"></div>
+              <button id="canvas-all" class="ghost-btn canvas-all hidden" title="Show all edits">All edits</button>
               <button id="canvas-close" class="ghost-btn" title="Close canvas" aria-label="Close file canvas">
                 <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
               </button>
@@ -149,8 +163,11 @@
     </div>
 
     <!-- ── Model picker popover ──────────────────────────────────────── -->
-    <div id="model-pop" class="popover hidden">
-      <div class="pop-head">Switch model</div>
+    <div id="model-pop" class="popover model-popover hidden" role="dialog" aria-modal="false" aria-label="Provider and model switcher">
+      <div class="pop-head">
+        <span>Provider and model</span>
+        <span class="pop-head-hint">Select to switch · expand to edit</span>
+      </div>
       <div id="provider-list" class="provider-list"></div>
     </div>
 
@@ -223,7 +240,7 @@
         <div class="stats-body" id="stats-body">
           <section class="stats-section">
             <div class="stats-section-title">Token usage <span class="stats-section-sub" id="stats-chart-sub"></span></div>
-            <div class="stats-chart-wrap"><div class="stats-chart" id="stats-chart"></div></div>
+            <div class="stats-chart-wrap"><div id="stats-chart"></div></div>
             <div class="stats-chart-legend"><span><span class="swatch prompt"></span> Prompt</span><span><span class="swatch comp"></span> Completion</span></div>
           </section>
           <section class="stats-section">

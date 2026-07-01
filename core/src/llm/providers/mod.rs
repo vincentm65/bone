@@ -6,6 +6,19 @@ use crate::config::ProvidersConfig;
 pub mod codex;
 pub mod openai_compat;
 
+/// Construct a provider by stable id, set its model, and return it.
+pub fn build_provider(
+    id: &str,
+    model: &str,
+    config: &ProvidersConfig,
+) -> Result<Box<dyn LlmProvider>, LlmError> {
+    let mut p = create_provider_with_config(id, config)?;
+    if !model.is_empty() && p.model() != model {
+        p.set_model(model.to_string());
+    }
+    Ok(p)
+}
+
 /// Construct a provider by stable id, using a pre-loaded config.
 pub fn create_provider_with_config(
     id: &str,

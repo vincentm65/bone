@@ -11,6 +11,11 @@
 //                                 connection and streams every RuntimeEvent.
 //   POST /api/command?session=ID  body is one RuntimeCommand; written to the
 //                                 daemon socket for that session.
+//   POST /api/watch?session=ID    body { conversation_id }; opens an extra
+//                                 read-only daemon socket pinned to a background
+//                                 conversation so its live events keep flowing
+//                                 while another chat is on screen. /api/unwatch
+//                                 closes it. Events arrive tagged kind:"watch".
 //
 // Each browser tab gets its own daemon connection. The daemon's session manager
 // routes that connection to one conversation actor and replays full state
@@ -20,7 +25,7 @@
 import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname } from "node:path";
 import { existsSync } from "node:fs";
@@ -328,7 +333,7 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
-// session id -> { socket, sse: res, buffer: string }
+// session id -> { sse: res, link, watches: Map<convId, link> }
 const sessions = new Map();
 
 // ── daemon lifecycle ────────────────────────────────────────────────────────
@@ -452,7 +457,8 @@ function listConversations() {
         `SELECT c.id AS id, c.provider AS provider, c.model AS model,
                 c.started_at AS started_at, c.ended_at AS ended_at,
                 COALESCE(meta.title, first_user.content) AS title,
-                (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) AS n
+                (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) AS n,
+                (SELECT MAX(created_at) FROM messages WHERE conversation_id = c.id) AS last_at
          FROM conversations c
          LEFT JOIN webui_conversations meta ON meta.conversation_id = c.id
          JOIN messages first_user ON first_user.id = (
@@ -462,7 +468,7 @@ function listConversations() {
          )
          WHERE first_user.content NOT LIKE 'unique-task-%'
            AND COALESCE(meta.archived, 0) = 0
-         ORDER BY c.id DESC LIMIT 80`,
+         ORDER BY COALESCE(last_at, c.started_at) DESC, c.id DESC LIMIT 80`,
       )
       .all()
       .filter((r) => r.n > 0 && r.title)
@@ -471,6 +477,7 @@ function listConversations() {
         provider: r.provider,
         model: r.model,
         started_at: r.started_at,
+        last_at: r.last_at || r.started_at,
         title: String(r.title).replace(/\s+/g, " ").trim().slice(0, 80),
       }));
   } finally {
@@ -518,21 +525,199 @@ function handleConversationWrite(req, res, id) {
   });
 }
 
-// Minimal targeted parse of providers.yaml's regular `- key:` blocks — enough
-// for a picker (key, label, model) without pulling a YAML dependency.
-async function listProviders() {
+// ── providers.yaml CRUD ─────────────────────────────────────────────────────
+//
+// Reads the CustomConfigPage-format providers.yaml (title + fields array).
+// Each provider field has a `value:` map with label/base_url/model/api_key/
+// endpoint/handler. We parse it into a flat list for the API, and support
+// full CRUD (read, update, add, delete) with proper YAML round-tripping.
+
+// Atomic write: the daemon re-reads providers.yaml on every turn (auto-compact
+// before_turn → CustomConfigs::load) and on each provider switch, so a plain
+// truncate+write can be caught mid-flight and parsed as empty. Write to a temp
+// file and rename() so readers only ever see a complete file.
+async function writeFileAtomic(path, data) {
+  const tmp = `${path}.tmp.${process.pid}`;
+  await writeFile(tmp, data);
+  await rename(tmp, path);
+}
+
+const PROVIDER_FIELDS = ["label", "base_url", "model", "api_key", "endpoint", "handler"];
+const DEFAULT_PROVIDER = {
+  label: "", base_url: "", model: "", api_key: "", endpoint: "/chat/completions", handler: "openai",
+};
+
+// Parse a field block (everything after the `- key:` delimiter) into
+// { key, label, type, default, value }. `value` is a nested map for provider
+// entries, or a scalar string for plain entries like `_last_provider`.
+function parseProviderField(block) {
+  const key = (block.match(/^\s*([^\n]+)/) || [])[1]?.trim();
+  if (!key) return null;
+  const labelRaw = (block.match(/\n\s*label:\s*([^\n]+)/) || [])[1]?.trim();
+  const label = labelRaw === undefined ? undefined : parseYamlValue(labelRaw);
+  const type = (block.match(/\n\s*type:\s*([^\n]+)/) || [])[1]?.trim();
+  const def = (block.match(/\n\s*default:\s*([^\n]+)/) || [])[1]?.trim();
+  // A scalar `value:` (e.g. `value: deepseek`) has content on the same line;
+  // preserve it verbatim so round-tripping doesn't clobber it into a map.
+  const scalar = block.match(/\n\s*value:[ \t]+(\S[^\n]*)$/m);
+  if (scalar) {
+    return { key, label: label ?? key, type, default: def, value: parseYamlValue(scalar[1]) };
+  }
+  // Extract the nested value: map lines (between `value:` and the next field).
+  const valueLines = [];
+  let inValue = false;
+  for (const line of block.split("\n")) {
+    if (/^\s+value:\s*$/.test(line) || /^\s+value:\s*\{/.test(line)) { inValue = true; continue; }
+    if (inValue) valueLines.push(line);
+  }
+  const value = {};
+  for (const line of valueLines) {
+    const m = line.match(/^\s+(\w+):\s*(.*)$/);
+    if (m) value[m[1]] = parseYamlValue(m[2]);
+  }
+  return { key, label: label ?? key, type, default: def, value };
+}
+
+function parseYamlValue(raw) {
+  const v = raw.trim();
+  if (v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1).replace(/''/g, "'");
+  if (v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1);
+  return v;
+}
+
+function serializeValueBlock(value) {
+  const lines = [];
+  for (const field of PROVIDER_FIELDS) {
+    if (value[field] !== undefined) {
+      lines.push(`    ${field}: ${serializeYamlValue(value[field])}`);
+    }
+  }
+  return `  value:\n${lines.join("\n")}`;
+}
+
+function serializeYamlValue(v) {
+  const s = String(v);
+  // Quote only when YAML actually requires it: empty, a leading indicator char,
+  // a colon/hash that would start a comment or mapping, or edge whitespace.
+  // Plain URLs (`https://…`) and keys (`sk-…`) stay unquoted, matching serde.
+  const needsQuote =
+    s === "" ||
+    /^[\s>|*&!%@`"'\[\]{},#?:-]/.test(s) ||
+    /[:#]\s/.test(s) ||
+    /:$/.test(s) ||
+    /\s$/.test(s) ||
+    /["\n]/.test(s);
+  if (needsQuote) return `'${s.replace(/'/g, "''")}'`;
+  return s;
+}
+
+// Parse the full providers.yaml into a list of provider objects.
+async function readProviders() {
   if (!existsSync(PROVIDERS_PATH)) return [];
   const text = await readFile(PROVIDERS_PATH, "utf8");
+  const fields = parseProviderBlocks(text);
+  return fields
+    .filter(f => f.key && !f.key.startsWith("_"))
+    .map(f => ({ key: f.key, label: f.label, ...f.value }));
+}
+
+function parseProviderBlocks(text) {
   const out = [];
-  const blocks = text.split(/\n-\s+key:/).slice(1);
-  for (const b of blocks) {
-    const key = (b.match(/^\s*([^\n]+)/) || [])[1]?.trim();
-    const label = (b.match(/\n\s*label:\s*([^\n]+)/) || [])[1]?.trim();
-    const model = (b.match(/\n\s*model:\s*([^\n]+)/) || [])[1]?.trim();
-    // Skip internal bookkeeping keys like `_last_provider`.
-    if (key && !key.startsWith("_")) out.push({ key, label: label || key, model: model || "" });
+  // Each entry starts with a `- key:` line (column-0, as serde_yaml emits it,
+  // or indented). Split on that delimiter; block 0 is the header, so skip it.
+  const blocks = text.split(/\n[ \t]*-\s+key:/);
+  for (let i = 1; i < blocks.length; i++) {
+    const parsed = parseProviderField(blocks[i]);
+    if (parsed) out.push(parsed);
   }
   return out;
+}
+
+// Update a single field on an existing provider.
+async function updateProvider(key, updates) {
+  if (!existsSync(PROVIDERS_PATH)) throw new Error("providers.yaml missing");
+  const text = await readFile(PROVIDERS_PATH, "utf8");
+  const fields = parseProviderBlocks(text);
+  const idx = fields.findIndex(f => f.key === key);
+  if (idx < 0) throw new Error(`provider "${key}" not found`);
+
+  Object.assign(fields[idx].value, updates);
+
+  const header = extractHeader(text);
+  const yaml = rebuildProvidersYaml(header, fields);
+  await writeFileAtomic(PROVIDERS_PATH, yaml);
+}
+
+function rebuildProvidersYaml(header, fields) {
+  const lines = [header, "fields:"];
+  for (const f of fields) {
+    lines.push(`- key: ${f.key}`);
+    lines.push(`  label: ${serializeYamlValue(f.label)}`);
+    if (f.type) lines.push(`  type: ${f.type}`);
+    if (f.default !== undefined) lines.push(`  default: ${f.default}`);
+    // Scalar entries (e.g. `_last_provider`) keep their value inline; provider
+    // entries serialize their field map as a nested block.
+    if (f.value && typeof f.value === "object") {
+      lines.push(serializeValueBlock(f.value));
+    } else {
+      lines.push(`  value: ${serializeYamlValue(f.value ?? "")}`);
+    }
+  }
+  // Remove trailing blank lines
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n") + "\n";
+}
+
+// Add a new provider.
+async function addProvider(key, value) {
+  if (!existsSync(PROVIDERS_PATH)) throw new Error("providers.yaml missing");
+  const text = await readFile(PROVIDERS_PATH, "utf8");
+  const fields = parseProviderBlocks(text);
+  if (fields.find(f => f.key === key)) throw new Error(`provider "${key}" already exists`);
+
+  const header = extractHeader(text);
+  const newField = { key, label: value.label || key, type: "provider", value: { ...DEFAULT_PROVIDER, ...value } };
+  fields.push(newField);
+  const yaml = rebuildProvidersYaml(header, fields);
+  await writeFileAtomic(PROVIDERS_PATH, yaml);
+  return newField;
+}
+
+// Delete a provider.
+async function deleteProvider(key) {
+  if (!existsSync(PROVIDERS_PATH)) throw new Error("providers.yaml missing");
+  const text = await readFile(PROVIDERS_PATH, "utf8");
+  const fields = parseProviderBlocks(text);
+  const idx = fields.findIndex(f => f.key === key);
+  if (idx < 0) throw new Error(`provider "${key}" not found`);
+  fields.splice(idx, 1);
+  const header = extractHeader(text);
+  const yaml = rebuildProvidersYaml(header, fields);
+  await writeFileAtomic(PROVIDERS_PATH, yaml);
+}
+
+// Everything above the `fields:` list (i.e. the `title:` line). rebuild adds
+// its own `fields:` line, so stop before it.
+// Persist the last-used provider id into the scalar `_last_provider` entry so
+// the daemon resumes it on next boot (its `derive_providers_config` reads it).
+async function setLastProvider(id) {
+  if (!existsSync(PROVIDERS_PATH)) return;
+  const text = await readFile(PROVIDERS_PATH, "utf8");
+  const fields = parseProviderBlocks(text);
+  const f = fields.find((x) => x.key === "_last_provider");
+  if (f && f.value === id) return; // already current — skip the rewrite
+  if (f) f.value = id;
+  else fields.push({ key: "_last_provider", label: "", type: "string", default: "null", value: id });
+  await writeFileAtomic(PROVIDERS_PATH, rebuildProvidersYaml(extractHeader(text), fields));
+}
+
+function extractHeader(text) {
+  const lines = text.split("\n");
+  let headerEnd = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*fields:\s*$/.test(lines[i]) || /^\s*-\s+key:/.test(lines[i])) { headerEnd = i; break; }
+  }
+  return lines.slice(0, headerEnd).join("\n").replace(/\n+$/, "");
 }
 
 async function sendJson(res, fn) {
@@ -644,11 +829,17 @@ const server = http.createServer(async (req, res) => {
   const conversationMatch = url.pathname.match(/^\/api\/conversations\/(\d+)$/);
   if (conversationMatch && (req.method === "PATCH" || req.method === "DELETE"))
     return handleConversationWrite(req, res, Number(conversationMatch[1]));
-  if (url.pathname === "/api/providers") return sendJson(res, listProviders);
+  if (url.pathname === "/api/providers" && req.method === "GET") return sendJson(res, readProviders);
+  const providerMatch = url.pathname.match(/^\/api\/providers\/([^/]+)$/);
+  if (providerMatch && req.method === "PATCH") return handleProviderPatch(req, res, providerMatch[1]);
+  if (providerMatch && req.method === "DELETE") return handleProviderDelete(req, res, providerMatch[1]);
+  if (url.pathname === "/api/providers" && req.method === "POST") return handleProviderPost(req, res);
   if (url.pathname === "/api/stats") return sendJson(res, loadStatsSnapshot);
   if (url.pathname === "/api/config" && req.method === "GET") return sendJson(res, getConfig);
   if (url.pathname === "/api/config" && req.method === "POST") return handleConfigWrite(req, res);
   if (url.pathname === "/api/restart-daemon" && req.method === "POST") { restartDaemon(); return res.writeHead(204).end(); }
+  if (url.pathname === "/api/watch" && req.method === "POST") return handleWatch(url, req, res, true);
+  if (url.pathname === "/api/unwatch" && req.method === "POST") return handleWatch(url, req, res, false);
 
   // static files
   let p = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -685,6 +876,53 @@ function handleConfigWrite(req, res) {
   });
 }
 
+// ── provider endpoints ──────────────────────────────────────────────────────
+
+// PATCH /api/providers/:key — body { field, value } or { fields: { ... } }
+function handleProviderPatch(req, res, key) {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", async () => {
+    try {
+      const data = JSON.parse(body);
+      if (data.fields) {
+        await updateProvider(key, data.fields);
+      } else {
+        await updateProvider(key, { [data.field]: data.value });
+      }
+      res.writeHead(204).end();
+    } catch (e) {
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end(String(e));
+    }
+  });
+}
+
+// DELETE /api/providers/:key
+function handleProviderDelete(req, res, key) {
+  deleteProvider(key)
+    .then(() => res.writeHead(204).end())
+    .catch(e => res.writeHead(400, { "content-type": "text/plain" }).end(String(e)));
+}
+
+// POST /api/providers — body { key, label, ...field values }
+function handleProviderPost(req, res) {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", async () => {
+    try {
+      const data = JSON.parse(body);
+      const key = data.key;
+      const { label, base_url, model, api_key, endpoint, handler } = data;
+      await addProvider(key, { label, base_url, model, api_key, endpoint, handler });
+      res.writeHead(201).end();
+    } catch (e) {
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end(String(e));
+    }
+  });
+}
+
 function handleEvents(url, req, res) {
   const id = url.searchParams.get("session") || Math.random().toString(36).slice(2);
   res.writeHead(200, {
@@ -708,7 +946,7 @@ function handleEvents(url, req, res) {
     (status) => send({ kind: "bridge", status }),
   );
 
-  const sess = { sse: res, link };
+  const sess = { sse: res, link, watches: new Map() };
   sessions.set(id, sess);
 
   // First thing the browser learns is its assigned session id.
@@ -721,8 +959,75 @@ function handleEvents(url, req, res) {
   req.on("close", () => {
     clearInterval(ping);
     link.close();
+    for (const w of sess.watches.values()) w.link.close();
+    sess.watches.clear();
     sessions.delete(id);
     log(`session ${id} closed`);
+  });
+}
+
+// A background "watch" link: a second daemon connection pinned to a conversation
+// the browser isn't currently viewing, so that conversation's live events (task
+// list, turn lifecycle) keep flowing while another chat is on screen. The daemon
+// runs an independent actor per conversation and accepts many connections, so
+// this simply attaches to that actor's broadcast. Watch links are read-only — the
+// browser never routes commands to them — so they can never wedge the turn loop.
+// Events are tagged with the conversation id (the bridge knows it, since it chose
+// which conversation to pin) because the wire protocol itself carries none.
+function openWatch(sess, convId) {
+  const existing = sess.watches.get(convId);
+  if (existing) return existing.ready;
+  const send = (obj) => { if (!sess.sse.writableEnded) sess.sse.write(`data: ${JSON.stringify(obj)}\n\n`); };
+  let resolveReady;
+  const ready = new Promise((resolve) => { resolveReady = resolve; });
+  let link;
+  link = createDaemonLink(
+    (line) => {
+      try {
+        const payload = JSON.parse(line);
+        send({ kind: "watch", conversation_id: convId, payload });
+        // Do not acknowledge /api/watch until the daemon confirms this socket is
+        // attached to the requested actor. This makes the subsequent primary
+        // repin a lossless hand-off rather than a best-effort race.
+        const body = payload && typeof payload === "object"
+          ? (payload.state_snapshot || payload.conversation_loaded)
+          : null;
+        const snapshot = body && (body.snapshot || body);
+        if (snapshot && snapshot.conversation_id === convId) resolveReady(true);
+      } catch {}
+    },
+    // A fresh connection attaches to the daemon's latest conversation; pin it to
+    // the one we want to watch. Re-pins automatically after a reconnect too.
+    (status) => { if (status === "connected") link.write({ load_conversation: { id: convId } }); },
+  );
+  sess.watches.set(convId, { link, ready });
+  return ready;
+}
+
+function closeWatch(sess, convId) {
+  const watch = sess.watches.get(convId);
+  if (watch) { watch.link.close(); sess.watches.delete(convId); }
+}
+
+// POST /api/watch|/api/unwatch — body { conversation_id }. Open/close a background
+// watch link for the given conversation on this SSE session.
+function handleWatch(url, req, res, on) {
+  const id = url.searchParams.get("session");
+  const sess = sessions.get(id);
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", async () => {
+    if (!sess) { res.writeHead(409).end("no session"); return; }
+    let convId;
+    try { convId = JSON.parse(body).conversation_id; } catch { res.writeHead(400).end("bad body"); return; }
+    if (!Number.isInteger(convId)) { res.writeHead(400).end("bad conversation_id"); return; }
+    if (!on) { closeWatch(sess, convId); res.writeHead(204).end(); return; }
+    const attached = await Promise.race([
+      openWatch(sess, convId),
+      new Promise((resolve) => setTimeout(() => resolve(false), 5000)),
+    ]);
+    if (attached) res.writeHead(204).end();
+    else { closeWatch(sess, convId); res.writeHead(504).end("watch attach timed out"); }
   });
 }
 
@@ -738,6 +1043,11 @@ function handleCommand(url, req, res) {
     }
     try {
       const cmd = JSON.parse(body);
+      // Remember the user's provider choice so the next daemon boot resumes it,
+      // mirroring the TUI which persists `_last_provider` on switch. The daemon
+      // itself only swaps its in-memory provider; nothing writes it to disk.
+      const pid = cmd?.switch_provider?.provider_id;
+      if (pid) setLastProvider(pid).catch((e) => log(`last_provider write failed: ${e.message}`));
       if (sess.link.write(cmd)) res.writeHead(204).end();
       else res.writeHead(409).end("daemon not connected");
     } catch (e) {

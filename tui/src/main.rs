@@ -364,7 +364,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         // The provider HTTP client is safe to share and each actor may still
         // switch its own provider later through the existing command.
         let mut custom = CustomConfigs::load();
-        let boot = boot_runtime_host_for(factory_provider.clone(), &mut custom, target)
+        let mut boot = boot_runtime_host_for(factory_provider.clone(), &mut custom, target)
             .map_err(|err| err.to_string())?;
         let conversation_id = boot
             .session
@@ -372,6 +372,32 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             .unwrap()
             .conversation_id
             .ok_or_else(|| "runtime has no durable conversation id".to_string())?;
+        // Each conversation actor should report and use the provider/model this
+        // conversation was created with, not the daemon's boot default. Look up
+        // the stored pair and rebuild the provider when it differs. (A brand-new
+        // conversation was just minted with the boot provider, so it matches and
+        // this is a no-op.)
+        if let Some((want_provider, want_model)) = bone::session_db::SessionDb::open(
+            &bone::session_db::db_path(),
+        )
+        .ok()
+        .and_then(|db| db.conversation_provider_model(conversation_id).ok().flatten())
+        {
+            let matches = want_provider == boot.provider.id()
+                && want_model == boot.provider.model();
+            if !matches {
+                let providers_config = custom.derive_providers_config();
+                match bone::llm::providers::build_provider(&want_provider, &want_model, &providers_config) {
+                    Ok(p) => boot.provider = std::sync::Arc::from(p),
+                    Err(err) => eprintln!(
+                        "bone: warning: conversation {conversation_id} wants provider \
+                         `{want_provider}` but it could not be built ({err}); \
+                         using {}",
+                        boot.provider.id()
+                    ),
+                }
+            }
+        }
         let frontend =
             bone::rpc::frontend_state(&boot.manager, &boot.session.lock().unwrap().tools);
         let sync_session = boot.session.clone();

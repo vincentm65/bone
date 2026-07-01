@@ -538,6 +538,24 @@ struct DaemonCtx {
 
 impl DaemonCtx {
     /// Publish a `StateSnapshot` derived from the current session + provider.
+    /// Swap the active provider (and model) to the given ids, e.g. when loading
+    /// a conversation that was created with a different provider. A no-op when
+    /// already matching. Failure keeps the current provider — the caller still
+    /// snapshots so the frontend proceeds with the old provider label.
+    fn restore_provider(&mut self, provider_id: &str, model: &str) {
+        if self.llm.id() == provider_id && self.llm.model() == model {
+            return;
+        }
+        let custom = crate::config::custom::CustomConfigs::load();
+        let providers_config = custom.derive_providers_config();
+        match crate::llm::providers::build_provider(provider_id, model, &providers_config) {
+            Ok(new_provider) => self.llm = Arc::from(new_provider),
+            Err(err) => self.hub.publish(RuntimeEvent::Status {
+                message: format!("failed to restore provider `{provider_id}`: {err}"),
+            }),
+        }
+    }
+
     fn publish_snapshot(&self) {
         self.hub.publish(RuntimeEvent::StateSnapshot {
             snapshot: {
@@ -807,10 +825,18 @@ impl DaemonCtx {
                     s.session_db.as_ref().and_then(|db| {
                         let full = db.load_messages(id).ok()?;
                         let effective = db.load_effective_transcript(id).ok()?;
-                        Some((full, effective))
+                        let provider_model =
+                            db.conversation_provider_model(id).ok().flatten();
+                        Some((full, effective, provider_model))
                     })
                 };
-                if let Some((rows, effective)) = loaded {
+                if let Some((rows, effective, provider_model)) = loaded {
+                    // Restore the provider/model this conversation was created
+                    // with, so the label, cost accounting, and the next turn all
+                    // use its provider rather than whatever was last active.
+                    if let Some((provider_id, model)) = provider_model {
+                        self.restore_provider(&provider_id, &model);
+                    }
                     let messages = rows
                         .into_iter()
                         .map(crate::session_db::stored_to_chat_message)
@@ -900,7 +926,23 @@ impl DaemonCtx {
                     &provider_id,
                     &providers_config,
                 ) {
-                    Ok(new_provider) => self.llm = Arc::from(new_provider),
+                    Ok(new_provider) => {
+                        self.llm = Arc::from(new_provider);
+                        // Keep the current conversation's stored provider/model in
+                        // step with the active provider, so the sidebar and the
+                        // reopen path (restore_provider) reflect this choice rather
+                        // than the default the row was minted with.
+                        let s = self.session.lock().unwrap();
+                        if let (Some(db), Some(conv_id)) =
+                            (s.session_db.as_ref(), s.conversation_id)
+                        {
+                            let _ = db.set_conversation_provider(
+                                conv_id,
+                                self.llm.id(),
+                                self.llm.model(),
+                            );
+                        }
+                    }
                     Err(err) => self.hub.publish(RuntimeEvent::Status {
                         message: format!("failed to switch provider: {err}"),
                     }),

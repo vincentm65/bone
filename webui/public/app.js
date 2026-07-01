@@ -47,6 +47,24 @@ const state = {
   //   { mode: "load", id }   — waiting for conversation `id`.
   //   { mode: "new", from }  — waiting for a fresh conversation, any id != `from`.
   awaitingLoad: null,
+  // Background conversations kept live while we view another (see watch links in
+  // bridge.mjs): `watched` is the set the bridge holds an extra socket for,
+  // `runningConvs` the subset still mid-turn (drives the sidebar "running" dot).
+  watched: new Set(),
+  runningConvs: new Set(),
+  // conversation id -> Date.now() when its current turn started; drives the
+  // live elapsed timer next to each running chat in the sidebar.
+  runStart: new Map(),
+  // Did we observe this turn's `started`? A page refresh mid-response reconnects
+  // partway through a turn: the DB replay only reaches the last user message and
+  // the streamed head is already gone, so we catch only the tail. The daemon
+  // persists the whole turn before `turn_complete`, so when we join mid-turn we
+  // reload from the DB on completion to recover the full response.
+  sawStarted: false,
+  // A "New chat" was clicked but not yet used. Shows an ephemeral placeholder row
+  // at the top of the sidebar as a visual hint; cleared when the chat gains
+  // messages (becomes a real listed conversation) or the user opens another chat.
+  draftChat: false,
 };
 
 // Does this snapshot/conversation_loaded satisfy the pending switch? With nothing
@@ -70,7 +88,44 @@ function switchSatisfiedBy(snapshot) {
 // replays them on re-attach, so switching away would lose the list. We cache
 // each conversation's latest list here and restore it on switch/return.
 const taskCache = new Map();
+// In-flight runtime events are not persisted until a turn completes. Keep the
+// complete live tail per conversation so navigating away and back can rebuild
+// the transcript from: DB replay + this tail. Completed turns drop their tail;
+// the next load then comes entirely from the authoritative database.
+const liveEventCache = new Map();
+let replayingLiveEvents = false;
 let conversations = [];
+
+const LIVE_EVENT_TYPES = new Set([
+  "started", "notice", "reasoning_delta", "text_delta", "tool_call",
+  "tool_result", "token_usage", "approval_request", "key_request",
+  "finished", "failed", "view_diff",
+]);
+
+function cacheLiveEvent(convId, ev) {
+  if (replayingLiveEvents || convId == null || !LIVE_EVENT_TYPES.has(ev.type)) return;
+  if (ev.type === "started") liveEventCache.set(convId, []);
+  const events = liveEventCache.get(convId) || [];
+  events.push(ev);
+  liveEventCache.set(convId, events);
+}
+
+function replayLiveTail(convId) {
+  const events = liveEventCache.get(convId);
+  if (!events || !events.length) return;
+  state.sawStarted = false;
+  replayingLiveEvents = true;
+  try { for (const ev of events) dispatchEvent(ev); }
+  finally { replayingLiveEvents = false; }
+}
+
+function dropCachedApproval(convId, approvalId) {
+  const events = liveEventCache.get(convId);
+  if (!events) return;
+  liveEventCache.set(convId, events.filter(
+    (ev) => ev.type !== "approval_request" || ev.id !== approvalId,
+  ));
+}
 
 // ── connection ──────────────────────────────────────────────────────────────
 
@@ -80,6 +135,7 @@ function connect() {
   es.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.kind === "bridge") return onBridge(msg);
+    if (msg.kind === "watch") return onWatchEvent(msg.conversation_id, normalize(msg.payload));
     if (msg.kind === "event") return onEvent(normalize(msg.payload));
   };
   es.onerror = () => setConnectionState("reconnecting");
@@ -96,6 +152,11 @@ function onBridge(msg) {
       state.awaitingLoad = { mode: "load", id: desiredConversationId };
       send({ load_conversation: { id: desiredConversationId } });
     }
+    // A reconnect is a fresh bridge session with no watch links — re-open one for
+    // each background conversation still running (except the one now in view).
+    state.watched.clear();
+    for (const id of state.runningConvs)
+      if (id !== state.conversationId) watchConversation(id);
   }
   if (msg.status === "disconnected") { setConnectionState("reconnecting"); toast("Daemon disconnected — reconnecting…"); }
 }
@@ -134,6 +195,126 @@ async function send(command) {
   }
 }
 
+// ── background watches ────────────────────────────────────────────────────────
+//
+// Each tab multiplexes one primary daemon connection for the chat on screen. To
+// keep a chat we've navigated away from live (its task list updating, its running
+// dot lit), we ask the bridge to hold an extra read-only socket pinned to it. The
+// bridge tags those events `kind:"watch"` with the conversation id; onWatchEvent
+// folds them into the sidebar/cache only — they never touch the on-screen thread.
+
+async function watchConversation(id) {
+  if (id == null || !state.session) return false;
+  if (state.watched.has(id)) return true;
+  state.watched.add(id);
+  try {
+    const response = await fetch(`/api/watch?session=${state.session}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversation_id: id }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return true;
+  } catch {
+    state.watched.delete(id);
+    return false;
+  }
+}
+
+async function unwatchConversation(id) {
+  if (id == null || !state.watched.has(id)) return;
+  state.watched.delete(id);
+  await fetch(`/api/unwatch?session=${state.session}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ conversation_id: id }),
+  }).catch(() => {});
+}
+
+// Events from a background conversation are retained as its live, unpersisted
+// tail. They never mutate the visible thread until that conversation is opened.
+function onWatchEvent(convId, ev) {
+  if (convId == null || (convId === state.conversationId && !state.awaitingLoad)) return;
+  cacheLiveEvent(convId, ev);
+  switch (ev.type) {
+    case "started":
+      state.runningConvs.add(convId);
+      markRunning(convId, true);
+      updateRunningIndicators();
+      return;
+    case "turn_complete":
+      state.runningConvs.delete(convId);
+      markRunning(convId, false);
+      unwatchConversation(convId);
+      liveEventCache.delete(convId);
+      updateRunningIndicators();
+      loadChats();
+      return;
+    case "failed":
+      state.runningConvs.delete(convId);
+      markRunning(convId, false);
+      unwatchConversation(convId);
+      updateRunningIndicators();
+      loadChats();
+      return;
+    case "view_diff":
+      cacheWatchDiff(convId, ev.diff);
+      return;
+    default:
+      return;
+  }
+}
+
+// Fold a background conversation's task-pane diff straight into taskCache so
+// restoreTasks() shows the up-to-date list the moment we switch back to it.
+function cacheWatchDiff(convId, diff) {
+  if (!diff) return;
+  const up = diff.upsert && diff.upsert.component;
+  if (up && up.id === "task_list" && up.lines) {
+    taskCache.set(convId, { title: up.title || "Tasks", items: parseTaskLines(up.lines) });
+  } else if (diff.remove && diff.remove.id === "task_list") {
+    taskCache.delete(convId);
+  }
+}
+
+// A conversation is "running" if it's the active turn or a watched background turn.
+function isConvRunning(id) {
+  return state.runningConvs.has(id) || (state.running && id === state.conversationId);
+}
+// Record/clear the turn-start time that the sidebar elapsed timer counts from.
+function markRunning(convId, on) {
+  if (convId == null) return;
+  if (on) { if (!state.runStart.has(convId)) state.runStart.set(convId, Date.now()); }
+  else state.runStart.delete(convId);
+}
+function updateRunningIndicators() {
+  for (const item of document.querySelectorAll(".chat-item")) {
+    const id = Number(item.dataset.id);
+    const running = isConvRunning(id);
+    item.classList.toggle("running", running);
+    // A chat we rejoined mid-turn has no recorded start; count from now so the
+    // timer shows something sensible rather than staying blank.
+    if (running && !state.runStart.has(id)) state.runStart.set(id, Date.now());
+  }
+  tickRunningTimers();
+}
+function formatElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60), sec = String(s % 60).padStart(2, "0");
+  if (m < 60) return `${m}:${sec}`;
+  return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${sec}`;
+}
+// Refresh every running row's elapsed timer; ticked once a second.
+function tickRunningTimers() {
+  for (const item of document.querySelectorAll(".chat-item.running")) {
+    const timer = item.querySelector(".chat-timer");
+    if (!timer) continue;
+    const start = state.runStart.get(Number(item.dataset.id));
+    timer.textContent = start ? formatElapsed(Date.now() - start) : "";
+  }
+}
+setInterval(tickRunningTimers, 1000);
+
 // ── event handling ───────────────────────────────────────────────────────────
 
 // Streaming/turn events belong to whichever actor this connection is currently
@@ -145,12 +326,23 @@ async function send(command) {
 function onEvent(ev) {
   const routing = ev.type === "conversation_loaded" || ev.type === "state_snapshot" ||
                   ev.type === "status" || ev.type === "frontend_state";
-  if (state.awaitingLoad && !routing) return;
+  if (state.awaitingLoad && !routing) {
+    // Frames already queued by the actor we just left still belong to its live
+    // tail. Preserve them instead of either bleeding them into the target or
+    // losing them during the hand-off to its watch connection.
+    cacheLiveEvent(state.awaitingLoad.from, ev);
+    return;
+  }
+  if (!routing) cacheLiveEvent(state.conversationId, ev);
+  return dispatchEvent(ev);
+}
+
+function dispatchEvent(ev) {
   switch (ev.type) {
     case "frontend_state": return onFrontendState(ev);
     case "state_snapshot": return onSnapshot(ev.snapshot);
     case "conversation_loaded": return onConversationLoaded(ev);
-    case "started": return setRunning(true);
+    case "started": state.sawStarted = true; markRunning(state.conversationId, true); setRunning(true); showThinking(); return;
     case "status": return onStatus(ev.message);
     case "notice": return systemLine(ev.message);
     case "reasoning_delta": return appendReasoning(ev.text);
@@ -249,6 +441,22 @@ function userMessage(text) {
   return t;
 }
 
+// A lightweight "bone is working" placeholder shown from the moment a turn starts
+// until the first real output (prose, a tool call, or visible reasoning) lands, so
+// there's never a silent gap. Kept distinct from the reasoning block: when
+// reasoning is hidden by preference this is the only sign the agent is thinking.
+function showThinking() {
+  if ($("thinking")) return;
+  clearWelcome();
+  const t = el("div", "turn msg-assistant thinking-turn");
+  t.id = "thinking";
+  t.innerHTML = `<div class="role-tag">bone</div>
+    <div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span class="thinking-label">Thinking…</span></div>`;
+  $("thread").appendChild(t);
+  scrollDown();
+}
+function hideThinking() { const n = $("thinking"); if (n) n.remove(); }
+
 function ensureAssistant() {
   // Streaming output implies a live turn. When we re-attach to a chat that is
   // already mid-turn we may miss its `started` event, so infer running here to
@@ -269,6 +477,7 @@ function activeContainer() {
 }
 
 function appendText(text) {
+  hideThinking();
   // Remove thinking once prose starts — it's no longer relevant.
   if (state.reasonDetails) { state.reasonDetails.remove(); state.reasonDetails = null; state.reasonEl = null; }
   ensureAssistant();
@@ -279,6 +488,9 @@ function appendText(text) {
 }
 
 function appendReasoning(text) {
+  // The reasoning block is itself a thinking indicator — retire the generic one,
+  // unless reasoning is hidden by preference (then the generic one is all we have).
+  if (!document.body.classList.contains("hide-thinking")) hideThinking();
   ensureAssistant();
   if (!state.reasonEl) {
     const d = el("details", "reasoning");
@@ -342,6 +554,7 @@ function toolMeta(name, args) {
 }
 
 function onToolCall(ev) {
+  hideThinking();
   // Snapshot any text accumulated so far — it belongs chronologically
   // before this tool call. Start a fresh prose segment for text that
   // comes after.
@@ -425,8 +638,7 @@ function onToolResult(ev) {
   card.querySelector(".tool-title").appendChild(summary);
   if (info && info.name === "edit_file" && !ev.is_error) {
     const path = info.arguments && (info.arguments.path || info.arguments.file_path);
-    if (path) {
-      captureDiff(path, content);
+    if (path && captureDiff(path, content)) {
       // Reveal the "Open in canvas" button now that we have the diff.
       const open = card.querySelector(".tool-open");
       if (open) {
@@ -457,6 +669,7 @@ function formatToolOutput(s) {
 
 const artifacts = new Map(); // path -> { path, name, kind, content, lines, add, del }
 let activeArtifact = null;
+let showingAllEdits = false;
 
 function baseName(p) { return String(p).split("/").pop() || p; }
 
@@ -467,8 +680,9 @@ function captureDoc(path, content) {
 
 function captureDiff(path, resultContent) {
   const { lines, add, del } = parseDiff(resultContent);
-  if (!lines.length) return; // "no changes" — nothing to show
+  if (!lines.length) return false; // "no changes" or an unrecognised result
   upsertArtifact({ path, name: baseName(path), kind: "diff", lines, add, del });
+  return true;
 }
 
 // Parse bone's numbered unified diff. Lines look like:
@@ -476,10 +690,24 @@ function captureDiff(path, resultContent) {
 function parseDiff(text) {
   const lines = [];
   let add = 0, del = 0, prevNum = null;
+  let oldNum = null, newNum = null;
   for (const raw of String(text).split("\n")) {
     const m = raw.match(/^\s*(\d+)\s([-+ ])\s(.*)$/);
-    if (!m) continue;
-    const num = Number(m[1]), sign = m[2], txt = m[3];
+    const hunk = raw.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
+    if (hunk) {
+      if (lines.length) lines.push({ type: "hunk" });
+      oldNum = Number(hunk[1]); newNum = Number(hunk[2]); prevNum = null;
+      continue;
+    }
+    let num, sign, txt;
+    if (m) {
+      num = Number(m[1]); sign = m[2]; txt = m[3];
+    } else if (oldNum != null && newNum != null && /^[ +\-]/.test(raw) && !/^(---|\+\+\+)\s/.test(raw)) {
+      sign = raw[0]; txt = raw.slice(1);
+      num = sign === "+" ? newNum : oldNum;
+      if (sign !== "+") oldNum++;
+      if (sign !== "-") newNum++;
+    } else continue;
     // A drop in line number between hunks marks a gap; show a separator.
     if (prevNum != null && num < prevNum) lines.push({ type: "hunk" });
     if (sign === "+") { lines.push({ type: "add", ln: num, text: txt }); add++; }
@@ -493,6 +721,7 @@ function parseDiff(text) {
 function upsertArtifact(art) {
   artifacts.set(art.path, { ...(artifacts.get(art.path) || {}), ...art });
   activeArtifact = art.path;
+  showingAllEdits = false;
   $("canvas-toggle").classList.remove("hidden");
   openCanvas();
   renderTabs();
@@ -502,6 +731,7 @@ function upsertArtifact(art) {
 function focusArtifact(path) {
   if (!artifacts.has(path)) { toast("nothing to show yet"); return; }
   activeArtifact = path;
+  showingAllEdits = false;
   openCanvas();
   renderTabs();
   renderArtifact();
@@ -510,6 +740,10 @@ function focusArtifact(path) {
 function closeArtifact(path) {
   artifacts.delete(path);
   if (activeArtifact === path) activeArtifact = [...artifacts.keys()].pop() || null;
+  if (showingAllEdits && [...artifacts.values()].filter((a) => a.kind === "diff").length < 2) {
+    showingAllEdits = false;
+    activeArtifact = [...artifacts.keys()].pop() || null;
+  }
   if (!artifacts.size) { closeCanvas(); $("canvas-toggle").classList.add("hidden"); }
   renderTabs();
   renderArtifact();
@@ -520,6 +754,15 @@ function closeCanvas() { $("canvas").classList.add("hidden"); $("divider").class
 function toggleCanvas() {
   if (!artifacts.size) return;
   $("canvas").classList.contains("hidden") ? openCanvas() : closeCanvas();
+}
+
+function showAllEdits() {
+  if (![...artifacts.values()].some((a) => a.kind === "diff")) return;
+  showingAllEdits = true;
+  activeArtifact = null;
+  openCanvas();
+  renderTabs();
+  renderArtifact();
 }
 
 const KIND_LABEL = { doc: "md", file: "file", diff: "diff" };
@@ -538,6 +781,9 @@ function renderTabs() {
     tab.querySelector(".ct-x").onclick = (e) => { e.stopPropagation(); closeArtifact(a.path); };
     tabs.appendChild(tab);
   }
+  const diffCount = [...artifacts.values()].filter((a) => a.kind === "diff").length;
+  $("canvas-all").classList.toggle("hidden", diffCount < 2);
+  $("canvas-all").classList.toggle("active", showingAllEdits);
 }
 
 function artifactMeta(a) {
@@ -557,6 +803,17 @@ function artifactMeta(a) {
 function renderArtifact() {
   const body = $("canvas-body");
   body.innerHTML = "";
+  if (showingAllEdits) {
+    for (const a of artifacts.values()) {
+      if (a.kind !== "diff") continue;
+      const section = el("section", "canvas-edit-section");
+      section.appendChild(artifactMeta(a));
+      section.appendChild(renderDiffView(a.lines));
+      body.appendChild(section);
+    }
+    body.scrollTop = 0;
+    return;
+  }
   const a = artifacts.get(activeArtifact);
   if (!a) { body.appendChild(el("div", "canvas-empty", "Nothing open")); return; }
   body.appendChild(artifactMeta(a));
@@ -706,6 +963,7 @@ function onApproval(ev) {
     send({ approval_reply: { id: ev.id, outcome: "approve" } });
     return;
   }
+  hideThinking();
   const cont = activeContainer();
   const card = el("div", "approval");
   card.innerHTML = `
@@ -750,6 +1008,7 @@ function onApproval(ev) {
 
 function resolveApproval(id, outcome, card, label) {
   send({ approval_reply: { id, outcome } });
+  dropCachedApproval(state.conversationId, id);
   state.approvals.delete(id);
   const ok = outcome === "approve";
   const guided = typeof outcome === "object";
@@ -767,6 +1026,7 @@ function denyPending(beacon) {
     const body = JSON.stringify({ approval_reply: { id, outcome: "denied" } });
     if (beacon && navigator.sendBeacon) navigator.sendBeacon(`/api/command?session=${state.session}`, body);
     else send({ approval_reply: { id, outcome: "denied" } });
+    dropCachedApproval(state.conversationId, id);
     if (card) card.innerHTML = `<div class="approval-resolved no"><span>✗</span><span>Dismissed</span></div>`;
     state.approvals.delete(id);
   }
@@ -834,31 +1094,260 @@ async function restartEngine() {
   }, 1800);
 }
 
-function onKeyRequest(ev) { state.keyId = ev.id; toast("press any key…"); }
+// ── interactive key input (ask_user / any ctx.ui.key pane) ───────────────────
+//
+// The runtime blocks a tool on `ctx.ui.key()` and emits a `key_request`; we
+// reply with a `key_reply` carrying a KeyEvent. The Lua menu is keyboard-driven
+// (Up/Down/Enter/Space/Tab/Esc/Char), so `interact` panes (see onViewDiff) also
+// render clickable controls that translate into the same keystrokes: clicks push
+// keys onto `interactState.queue`, which drains one-per-`key_request` since each
+// keystroke makes the tool re-render and ask for the next key.
+
+// Browser `e.key` → the code names the runtime uses (crossterm-style, see the
+// TUI's stream key encoder). Anything else printable becomes a `Char`.
+const KEY_CODE_MAP = {
+  ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+  Escape: "Esc", Enter: "Enter", Tab: "Tab", Backspace: "Backspace",
+  Delete: "Delete", Insert: "Insert", Home: "Home", End: "End",
+  PageUp: "PageUp", PageDown: "PageDown",
+};
+function mapBrowserKey(e) {
+  if (KEY_CODE_MAP[e.key]) return keyEvent(KEY_CODE_MAP[e.key], null, e);
+  if (e.key && e.key.length === 1) return keyEvent("Char", e.key, e);
+  return null; // modifier-only / F-keys / unknown: ignore
+}
+function keyEvent(code, char, e) {
+  return { code, char, ctrl: !!(e && e.ctrlKey), alt: !!(e && e.altKey), shift: !!(e && e.shiftKey) };
+}
+const K = (code, char = null) => ({ code, char, ctrl: false, alt: false, shift: false });
+
+function onKeyRequest(ev) {
+  state.keyId = ev.id;
+  if (interactState.queue.length) return pumpKeyQueue();
+  if (!interactState.active) toast("press any key…");
+}
+// Send the next queued (click-derived) key, if the tool is currently waiting.
+function pumpKeyQueue() {
+  if (state.keyId == null || !interactState.queue.length) return;
+  const key = interactState.queue.shift();
+  const id = state.keyId;
+  state.keyId = null;
+  send({ key_reply: { id, key } });
+}
+function enqueueKeys(keys) {
+  if (!keys || !keys.length) return;
+  interactState.queue.push(...keys);
+  pumpKeyQueue();
+}
 function captureKey(e) {
   if (state.keyId == null) return;
+  // While a click-driven burst is still draining, swallow raw keystrokes so they
+  // don't interleave with the queued sequence.
+  if (interactState.queue.length) { e.preventDefault(); return; }
+  const key = mapBrowserKey(e);
+  if (!key) return;
   e.preventDefault();
-  const key = { code: e.key.length === 1 ? "Char" : e.key, char: e.key.length === 1 ? e.key : null, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
-  send({ key_reply: { id: state.keyId, key } });
+  const id = state.keyId;
   state.keyId = null;
+  send({ key_reply: { id, key } });
+}
+
+// ── interact pane (ask_user) rendering ───────────────────────────────────────
+
+const interactState = { active: false, multi: false, queue: [], model: null, total: 0, hasCustom: false };
+
+// Parse the `interact` pane's styled lines back into a small semantic model so
+// we can render real buttons instead of the TUI's cursor/checkbox glyphs.
+function parseInteractPane(comp) {
+  const model = { title: comp.title || "", question: "", options: [], custom: null, text: null,
+                  multi: false, scrollAbove: 0, scrollBelow: 0, hint: "", notice: "" };
+  let seenInteractive = false;
+  for (const raw of (comp.lines || [])) {
+    const t = paneLineText(raw);
+    if (!t) continue;
+    let m = t.match(/^\s*↑\s+(\d+)\s+more/);
+    if (m) { model.scrollAbove = +m[1]; continue; }
+    m = t.match(/^\s*↓\s+(\d+)\s+more/);
+    if (m) { model.scrollBelow = +m[1]; continue; }
+    if (/·/.test(t) && /(move|submit|select|cancel|toggle)/i.test(t)) { model.hint = t.trim(); continue; }
+    // Interactive rows: " > label" / "   label" (space, cursor, space, then a
+    // non-space so wrapped continuation lines are excluded).
+    m = t.match(/^ ([ >]) (\S.*)$/);
+    if (m) {
+      seenInteractive = true;
+      const selected = m[1] === ">";
+      const rest = m[2];
+      const cm = rest.match(/^Custom:\s?(.*)$/);
+      if (cm) { model.custom = { value: cm[1].replace(/█$/, ""), selected }; continue; }
+      const chk = rest.match(/^\[([ x])\]\s(.*)$/);
+      if (chk) { model.multi = true; model.options.push({ label: chk[2], checked: chk[1] === "x", selected }); continue; }
+      model.options.push({ label: rest, checked: false, selected });
+      continue;
+    }
+    // text_input value line: "> value█"
+    m = t.match(/^> (.*)$/);
+    if (m && !seenInteractive) { model.text = { value: m[1].replace(/█$/, "") }; continue; }
+    // First remaining line is the question; any further one is a transient notice.
+    if (!model.question) model.question = t.trim();
+    else model.notice = t.trim();
+  }
+  return model;
+}
+function paneLineText(line) {
+  if (typeof line === "string") return line;
+  if (!line || !line.spans) return "";
+  return line.spans.map((s) => s.text || "").join("");
+}
+
+function renderInteractPane(model) {
+  interactState.active = true;
+  interactState.multi = model.multi;
+  interactState.model = model;
+  interactState.total = model.scrollAbove + model.options.length + model.scrollBelow;
+  interactState.hasCustom = !!model.custom;
+
+  $("interact").classList.remove("hidden");
+  $("interact-q").textContent = model.question || model.title || "Choose an option";
+
+  const opts = $("interact-options");
+  opts.innerHTML = "";
+  if (model.scrollAbove) opts.appendChild(moreRow("↑ " + model.scrollAbove + " more", K("PageUp")));
+  model.options.forEach((o, p) => {
+    const b = el("button", "interact-opt" + (o.selected ? " selected" : ""));
+    if (model.multi) b.appendChild(el("span", "interact-check" + (o.checked ? " on" : ""), o.checked ? "✓" : ""));
+    const lbl = el("span", "interact-opt-label");
+    lbl.textContent = o.label;
+    b.appendChild(lbl);
+    b.onclick = () => clickInteractOption(p);
+    opts.appendChild(b);
+  });
+  if (model.scrollBelow) opts.appendChild(moreRow("↓ " + model.scrollBelow + " more", K("PageDown")));
+
+  if (model.custom) {
+    const b = el("button", "interact-opt interact-custom" + (model.custom.selected ? " selected" : ""));
+    const lbl = el("span", "interact-opt-label");
+    lbl.textContent = model.custom.value ? model.custom.value : "Type a custom answer…";
+    if (!model.custom.value) lbl.classList.add("placeholder");
+    b.appendChild(lbl);
+    if (model.custom.selected) b.appendChild(el("span", "interact-caret"));
+    b.onclick = clickInteractCustom;
+    opts.appendChild(b);
+  }
+  if (model.text) {
+    const t = el("div", "interact-text");
+    if (model.text.value) t.textContent = model.text.value;
+    else { t.textContent = "Type your answer…"; t.classList.add("placeholder"); }
+    t.appendChild(el("span", "interact-caret"));
+    opts.appendChild(t);
+  }
+
+  // Submit is always explicit (Enter commits the highlighted option / checked
+  // set / typed answer); a click never auto-submits.
+  const foot = $("interact-foot");
+  foot.innerHTML = "";
+  const cancel = el("button", "btn interact-cancel", "Cancel");
+  cancel.onclick = cancelInteract;
+  foot.appendChild(cancel);
+  const submit = el("button", "btn btn-approve interact-submit", "Submit");
+  submit.onclick = () => enqueueKeys([K("Enter")]);
+  foot.appendChild(submit);
+
+  $("interact-hint").textContent = model.hint || "";
+}
+function moreRow(label, key) {
+  const d = el("div", "interact-more");
+  d.textContent = label;
+  d.onclick = () => enqueueKeys([key]);
+  return d;
+}
+function closeInteract() {
+  interactState.active = false;
+  interactState.queue = [];
+  interactState.model = null;
+  $("interact").classList.add("hidden");
+}
+function cancelInteract() {
+  interactState.queue = [];
+  enqueueKeys([K("Esc")]);
+}
+
+// The cyclic list the Lua menu walks with Up/Down: options first, then the
+// custom row (when present). Absolute index of the currently-selected row.
+function interactSelectedIndex(model) {
+  const vis = model.options.findIndex((o) => o.selected);
+  if (vis >= 0) return model.scrollAbove + vis;
+  if (model.custom && model.custom.selected) return interactState.total;
+  return model.scrollAbove;
+}
+// Fewest Up/Down presses to move the cursor from → to around the cyclic list.
+function interactMoveKeys(from, to) {
+  const L = interactState.total + (interactState.hasCustom ? 1 : 0);
+  if (L <= 0 || from === to) return [];
+  const down = (((to - from) % L) + L) % L;
+  const up = (((from - to) % L) + L) % L;
+  const keys = [];
+  const [code, n] = down <= up ? ["Down", down] : ["Up", up];
+  for (let i = 0; i < n; i++) keys.push(K(code));
+  return keys;
+}
+function clickInteractOption(p) {
+  const model = interactState.model;
+  if (!model) return;
+  // A click only moves the cursor (multi also toggles the checkbox in place).
+  // Committing is always an explicit Enter / Submit — never on selection.
+  const keys = interactMoveKeys(interactSelectedIndex(model), model.scrollAbove + p);
+  if (model.multi) keys.push(K("Char", " "));
+  enqueueKeys(keys);
+}
+function clickInteractCustom() {
+  const model = interactState.model;
+  if (!model) return;
+  enqueueKeys(interactMoveKeys(interactSelectedIndex(model), interactState.total));
 }
 
 // ── turn lifecycle ──────────────────────────────────────────────────────────
 
 function onFinished() {
+  hideThinking();
   if (state.asstEl) {
     state.asstEl.innerHTML = renderMarkdown(state.asstRaw);
     enhanceContent(state.asstEl);
   }
   finalizeTurn();
 }
-function onFailed(ev) { systemLine(ev.message || "turn failed", true); finalizeTurn(); setRunning(false); }
-function onTurnComplete() { setRunning(false); loadChats(); }
+function onFailed(ev) { hideThinking(); closeInteract(); markRunning(state.conversationId, false); systemLine(ev.message || "turn failed", true); finalizeTurn(); setRunning(false); }
+function onTurnComplete() {
+  hideThinking();
+  // The turn is over — stop this conversation's elapsed timer.
+  markRunning(state.conversationId, false);
+  setRunning(false);
+  // If we joined this turn after it began (e.g. a mid-response page refresh), the
+  // rendered thread is missing the streamed head. The full turn is now persisted,
+  // so reload the conversation from the DB to render the authoritative transcript.
+  const joinedMidTurn = !state.sawStarted;
+  state.sawStarted = false;
+  liveEventCache.delete(state.conversationId);
+  if (joinedMidTurn && state.conversationId != null && !state.awaitingLoad) {
+    reloadActiveFromDb();
+  }
+  loadChats();
+}
+
+// Re-fetch the active conversation from the DB and re-render it. Used to recover
+// the full transcript after joining a turn partway through; the `awaitingLoad`
+// gate makes the incoming `conversation_loaded` authoritative over any strays.
+function reloadActiveFromDb() {
+  const id = state.conversationId;
+  if (id == null) return;
+  state.awaitingLoad = { mode: "load", id, from: id };
+  send({ load_conversation: { id } });
+}
 function finalizeTurn() { state.asstEl = null; state.asstRaw = ""; state.reasonEl = null; state.reasonDetails = null; state.tools.clear(); state.toolInfo.clear(); }
 
 function clearArtifacts() {
   artifacts.clear();
   activeArtifact = null;
+  showingAllEdits = false;
   closeCanvas();
   $("canvas-toggle").classList.add("hidden");
   renderTabs();
@@ -893,7 +1382,11 @@ function onConversationLoaded(ev) {
   restoreTasks(state.conversationId);
   // An empty conversation (fresh chat) shows the welcome rather than a blank pane.
   if (!rendered) { $("thread").appendChild(buildWelcome()); }
-  scrollDown();
+  // A running turn's assistant/tool output is absent from the DB replay until
+  // commit. Re-apply the cached live tail after the persisted transcript.
+  replayLiveTail(state.conversationId);
+  // Open on the latest exchange, not the first message.
+  scrollToBottom();
 }
 
 function renderStoredMessage(m, asstTurn) {
@@ -946,6 +1439,11 @@ function onViewDiff(diff) {
       renderTaskList();
       return;
     }
+    // Interactive question pane (source="interact", e.g. the ask_user tool).
+    if (comp.id === "interact" && comp.lines) {
+      renderInteractPane(parseInteractPane(comp));
+      return;
+    }
   }
   // Task list removed (empty pane → Remove diff).
   if (diff && diff.remove && diff.remove.id === "task_list") {
@@ -954,6 +1452,8 @@ function onViewDiff(diff) {
     cacheTasks(state.conversationId);
     renderTaskList();
   }
+  // Interact pane cleared (menu.clear / answered / cancelled → Remove diff).
+  if (diff && diff.remove && diff.remove.id === "interact") closeInteract();
 }
 
 // Parse a pane's styled lines into { text, status } task items.
@@ -1000,6 +1500,14 @@ function scrollDown() {
   if (atBottom) t.scrollTop = t.scrollHeight;
   updateJumpLatest();
 }
+// Unconditional jump to the newest message — used when opening a conversation so
+// it lands on the latest exchange rather than the first (scrollDown would refuse
+// because a freshly-rendered thread is scrolled to the top, not near the bottom).
+function scrollToBottom() {
+  const t = $("thread");
+  t.scrollTop = t.scrollHeight;
+  updateJumpLatest();
+}
 function updateJumpLatest() {
   const t = $("thread");
   const away = t.scrollHeight - t.scrollTop - t.clientHeight > 220;
@@ -1027,13 +1535,22 @@ function renderChats() {
   const chats = conversations.filter((c) => !query || `${c.title} ${c.provider} ${c.model || ""}`.toLowerCase().includes(query));
   const list = $("chat-list");
   list.innerHTML = "";
+
+  // Ephemeral "New chat" placeholder — a visual hint that you're in a fresh,
+  // unsent conversation. Shown only while the draft hasn't become a real (listed)
+  // conversation yet; it vanishes once the chat gains messages and is listed, or
+  // when the user opens another chat (openChat clears the flag).
+  const draftListed = state.conversationId != null && conversations.some((c) => c.id === state.conversationId);
+  const showDraft = state.draftChat && !draftListed && !query;
+  if (showDraft) list.appendChild(buildDraftRow());
+
   for (const c of chats) {
     const row = el("div", "chat-row");
     const item = el("button", "chat-item");
     item.type = "button";
     item.dataset.id = c.id;
-    item.innerHTML = `<div class="chat-title"></div>
-      <div class="chat-meta"><span>${c.provider}</span><span>${relTime(c.started_at)}</span></div>`;
+    item.innerHTML = `<div class="chat-title-row"><span class="chat-run-dot" aria-hidden="true"></span><div class="chat-title"></div><span class="chat-timer" aria-hidden="true"></span></div>
+      <div class="chat-meta"><span>${c.provider}</span><span>${relTime(c.last_at || c.started_at)}</span></div>`;
     item.querySelector(".chat-title").textContent = c.title || "Untitled";
     item.onclick = () => openChat(c.id);
     const menu = el("button", "ghost-btn chat-menu-btn", "•••");
@@ -1043,8 +1560,21 @@ function renderChats() {
     row.append(item, menu);
     list.appendChild(row);
   }
-  if (!chats.length) list.appendChild(el("div", "chat-empty", query ? "No matching chats" : "No conversations yet"));
+  if (!chats.length && !showDraft) list.appendChild(el("div", "chat-empty", query ? "No matching chats" : "No conversations yet"));
   highlightActiveChat();
+  updateRunningIndicators();
+}
+// The unsent "New chat" hint row. It has no conversation id (nothing to open,
+// rename, or archive yet); clicking it just focuses the composer.
+function buildDraftRow() {
+  const row = el("div", "chat-row");
+  const item = el("button", "chat-item draft active");
+  item.type = "button";
+  item.innerHTML = `<div class="chat-title-row"><span class="chat-draft-mark" aria-hidden="true">+</span><div class="chat-title">New chat</div></div>
+    <div class="chat-meta"><span>Draft — send a message to save</span></div>`;
+  item.onclick = () => input.focus();
+  row.appendChild(item);
+  return row;
 }
 function toggleChatActions(row, conversation) {
   const existing = row.querySelector(".chat-actions");
@@ -1075,24 +1605,45 @@ async function archiveConversation(conversation) {
   toast("Conversation archived");
   loadChats();
 }
-function openChat(id) {
+async function openChat(id) {
   if (id === state.conversationId) return;
+  const leaving = state.conversationId;
+  const leavingRunning = state.running;
   denyPending();
   // Stash the chat we're leaving so its task list is there when we come back,
   // then ask the daemon to switch. Strays from the old actor are gated out
   // until the target's `conversation_loaded` lands (see `awaitingLoad`).
   cacheTasks(state.conversationId);
-  state.awaitingLoad = { mode: "load", id };
+  state.awaitingLoad = { mode: "load", id, from: leaving };
+  // Start the old chat's watch before repinning the primary link. Issuing these
+  // requests in this order closes the hand-off gap where neither socket would
+  // be subscribed to the actor's broadcast.
+  if (leavingRunning && leaving != null && leaving !== id) {
+    state.runningConvs.add(leaving); // its dot/timer keep going while off-screen
+    if (!await watchConversation(leaving)) {
+      state.runningConvs.delete(leaving);
+      state.awaitingLoad = null;
+      toast("Could not keep this running chat attached");
+      updateRunningIndicators();
+      return;
+    }
+  }
+  state.runningConvs.delete(id);
+  unwatchConversation(id);
   send({ load_conversation: { id } });
   state.conversationId = id;
   desiredConversationId = id;
   sessionStorage.setItem("bone-active-conversation", String(id));
-  highlightActiveChat();
+  // Leaving the fresh chat unused — drop its placeholder hint.
+  state.draftChat = false;
+  renderChats();
   closeMobileSidebar();
 }
 function highlightActiveChat() {
-  for (const item of document.querySelectorAll(".chat-item"))
+  for (const item of document.querySelectorAll(".chat-item")) {
+    if (item.classList.contains("draft")) continue; // draft owns its own active state
     item.classList.toggle("active", Number(item.dataset.id) === state.conversationId);
+  }
 }
 function relTime(iso) {
   if (!iso) return "";
@@ -1104,11 +1655,24 @@ function relTime(iso) {
   if (s < 604800) return Math.floor(s / 86400) + "d";
   return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-function newChat() {
+async function newChat() {
+  const leaving = state.conversationId;
+  const leavingRunning = state.running;
   denyPending();
   cacheTasks(state.conversationId);
   clearTaskList();
   state.awaitingLoad = { mode: "new", from: state.conversationId };
+  // Keep the chat we're leaving live in the background if it's still mid-turn.
+  if (leavingRunning && leaving != null) {
+    state.runningConvs.add(leaving);
+    if (!await watchConversation(leaving)) {
+      state.runningConvs.delete(leaving);
+      state.awaitingLoad = null;
+      toast("Could not keep this running chat attached");
+      updateRunningIndicators();
+      return;
+    }
+  }
   send("new_conversation");
   $("thread").innerHTML = "";
   $("thread").appendChild(buildWelcome());
@@ -1118,58 +1682,302 @@ function newChat() {
   state.conversationId = null;
   desiredConversationId = null;
   sessionStorage.removeItem("bone-active-conversation");
-  highlightActiveChat();
+  // Surface the ephemeral placeholder row for the fresh chat.
+  state.draftChat = true;
+  renderChats();
   closeMobileSidebar();
 }
 
 // ── providers / model picker ─────────────────────────────────────────────────
 
+const PROVIDER_FIELDS = [
+  { key: "label",    label: "Label",       placeholder: "Display name",   type: "text" },
+  { key: "base_url", label: "Base URL",    placeholder: "https://...",    type: "text" },
+  { key: "model",    label: "Model",       placeholder: "gpt-4o-mini",    type: "text" },
+  { key: "api_key",  label: "API Key",     placeholder: "sk-...",         type: "text" },
+  { key: "endpoint", label: "Endpoint",    placeholder: "/chat/completions", type: "text" },
+  { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex"] },
+];
+
+let _provExpanded = null;   // key of expanded card (null = collapsed)
+let _provShowKey = null;    // key whose API key is revealed
+
 async function loadProviders() {
   state.providers = await fetch("/api/providers").then((r) => r.json()).catch(() => []);
+  // Restore last-selected provider if it still exists in the provider list.
+  if (prefs.providerId && state.providers.some((p) => p.key === prefs.providerId)) {
+    state.providerId = prefs.providerId;
+    const p = state.providers.find((x) => x.key === prefs.providerId);
+    if (p && p.model) state.model = p.model;
+  }
   renderModelLabel();
   renderProviderPicker();
 }
+
 function renderProviderPicker() {
   const list = $("provider-list");
   list.innerHTML = "";
+
   for (const p of state.providers) {
+    const expanded = p.key === _provExpanded;
+    const card = el("div", "prov-card" + (p.key === state.providerId ? " prov-active" : "") + (expanded ? " prov-expanded" : ""));
+    card.dataset.key = p.key;
+
+    // Compact row
+    const rowWrap = el("div", "prov-row-wrap");
     const row = el("button", "provider-row");
+    row.classList.add("prov-row");
     row.type = "button";
-    row.dataset.key = p.key;
-    row.innerHTML = `<span class="pr-check">✓</span><span class="pr-name"></span><span class="pr-model"></span>`;
-    row.querySelector(".pr-name").textContent = p.label;
-    row.querySelector(".pr-model").textContent = p.model;
+    row.setAttribute("aria-label", `Switch to ${p.label || p.key}`);
+
+    // Expand chevron
+    const chev = el("button", "prov-chevron", "");
+    chev.innerHTML = expanded ? "▾" : "▸";
+    chev.type = "button";
+    chev.title = expanded ? "Collapse provider settings" : "Edit provider settings";
+    chev.setAttribute("aria-label", chev.title);
+    chev.onclick = (e) => { e.stopPropagation(); toggleProvExpand(p.key); };
+    rowWrap.appendChild(chev);
+
+    // Label
+    const title = el("span", "prov-title");
+    title.textContent = p.label || p.key;
+    row.appendChild(title);
+
+    // Model
+    const model = el("span", "prov-model");
+    model.textContent = p.model || "No model configured";
+    row.appendChild(model);
+
+    // Handler badge
+    if (p.handler) {
+      const badge = el("span", "prov-badge", p.handler);
+      row.appendChild(badge);
+    }
+
+    rowWrap.appendChild(row);
+    card.appendChild(rowWrap);
+
+    // Expanded editor (hidden by default)
+    const editor = el("div", "prov-editor");
+    for (const fd of PROVIDER_FIELDS) {
+      const field = el("div", "prov-field");
+      const lbl = el("label", null, fd.label);
+      const input = fd.type === "select"
+        ? createProvSelect(p.key, fd.key, p[fd.key] || fd.options[0], fd.options)
+        : createProvInput(p.key, fd.key, p[fd.key] || "", fd.placeholder, fd.type, fd.key === "api_key");
+      field.appendChild(lbl);
+      field.appendChild(input);
+      editor.appendChild(field);
+    }
+    card.appendChild(editor);
+
+    // Delete button (only on expanded)
+    if (p.key !== "_last_provider") {
+      const del = el("button", "prov-del-btn");
+      del.type = "button";
+      del.textContent = "Delete";
+      del.onclick = (e) => { e.stopPropagation(); deleteProvider(p.key); };
+      card.appendChild(del);
+    }
+
+    // Click row to select (not chevron)
     row.onclick = () => pickProvider(p.key);
-    list.appendChild(row);
+
+    list.appendChild(card);
   }
-  markActiveProvider();
+
+  // Add provider form (inline)
+  renderAddForm(list);
 }
+
+function toggleProvExpand(key) {
+  _provExpanded = _provExpanded === key ? null : key;
+  _provShowKey = null;
+  renderProviderPicker();
+  if (!$("model-pop").classList.contains("hidden")) positionModelPop();
+}
+
+function createProvInput(providerKey, fieldKey, value, placeholder, type, isApiKey) {
+  const wrap = el("div", "prov-input-wrap");
+  const input = document.createElement("input");
+  input.className = "prov-input";
+  input.type = isApiKey ? "password" : type || "text";
+  input.value = value;
+  input.placeholder = placeholder;
+  input.onchange = () => saveProviderField(providerKey, fieldKey, input.value);
+  input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
+  wrap.appendChild(input);
+
+  // Reveal/hide API key toggle
+  if (isApiKey) {
+    const toggle = el("button", "prov-key-toggle");
+    toggle.type = "button";
+    toggle.textContent = "show";
+    toggle.title = "Reveal API key";
+    toggle.onclick = () => {
+      input.type = input.type === "password" ? "text" : "password";
+      toggle.title = input.type === "password" ? "Reveal API key" : "Hide API key";
+      toggle.textContent = input.type === "password" ? "show" : "hide";
+    };
+    wrap.appendChild(toggle);
+  }
+  return wrap;
+}
+
+function createProvSelect(providerKey, fieldKey, value, options) {
+  const sel = document.createElement("select");
+  sel.className = "prov-select";
+  for (const opt of options) {
+    const o = document.createElement("option");
+    o.value = opt;
+    o.textContent = opt;
+    if (opt === value) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.onchange = () => saveProviderField(providerKey, fieldKey, sel.value);
+  return sel;
+}
+
+function saveProviderField(providerKey, fieldKey, value) {
+  const prov = state.providers.find((p) => p.key === providerKey);
+  if (!prov) return;
+  const oldVal = prov[fieldKey];
+  prov[fieldKey] = value;
+  if (providerKey === state.providerId && fieldKey === "model") state.model = value;
+  renderModelLabel();
+  renderProviderPicker();
+  if (!$("model-pop").classList.contains("hidden")) positionModelPop();
+  fetch(`/api/providers/${providerKey}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ field: fieldKey, value }),
+  }).catch(() => {
+    prov[fieldKey] = oldVal;
+    toast("failed to save");
+    renderProviderPicker();
+  });
+}
+
+async function deleteProvider(key) {
+  if (!confirm(`Delete provider "${key}"?`)) return;
+  try {
+    await fetch(`/api/providers/${key}`, { method: "DELETE" });
+    state.providers = state.providers.filter((p) => p.key !== key);
+    if (_provExpanded === key) _provExpanded = null;
+    renderProviderPicker();
+    if (!$("model-pop").classList.contains("hidden")) positionModelPop();
+    toast("provider deleted");
+  } catch (e) {
+    toast("failed to delete: " + e.message);
+  }
+}
+
+// Inline add-provider form
+function renderAddForm(list) {
+  const form = el("div", "prov-add-form");
+  form.innerHTML = `
+    <div class="prov-add-label">Add provider</div>
+    <div class="prov-add-row">
+      <input class="prov-add-input" id="add-prov-key" placeholder="key" />
+      <input class="prov-add-input" id="add-prov-label" placeholder="label" />
+    </div>
+    <div class="prov-add-row">
+      <input class="prov-add-input" id="add-prov-model" placeholder="model" value="gpt-4o-mini" />
+      <input class="prov-add-input" id="add-prov-url" placeholder="base URL" value="https://api.openai.com/v1" />
+    </div>
+    <div class="prov-add-actions">
+      <button class="prov-add-submit" id="add-prov-submit">Add</button>
+    </div>`;
+  form.querySelector("#add-prov-submit").onclick = submitAddProvider;
+  // Enter key submits
+  form.querySelectorAll(".prov-add-input").forEach((inp) => {
+    inp.onkeydown = (e) => { if (e.key === "Enter") submitAddProvider(); };
+  });
+  list.appendChild(form);
+}
+
+async function submitAddProvider() {
+  const keyInput = $("add-prov-key");
+  const labelInput = $("add-prov-label");
+  const modelInput = $("add-prov-model");
+  const urlInput = $("add-prov-url");
+  const key = keyInput.value.trim();
+  if (!key || !/^[a-zA-Z0-9_-]+$/.test(key)) {
+    toast("key must be alphanumeric (a-z, 0-9, -, _)");
+    return;
+  }
+  const label = labelInput.value.trim() || key;
+  const model = modelInput.value.trim() || "gpt-4o-mini";
+  const base_url = urlInput.value.trim() || "https://api.openai.com/v1";
+  try {
+    await fetch("/api/providers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key, label, model, base_url }),
+    });
+    keyInput.value = "";
+    labelInput.value = "";
+    modelInput.value = "gpt-4o-mini";
+    urlInput.value = "https://api.openai.com/v1";
+    await loadProviders();
+    toast(`added "${label}"`);
+  } catch (e) {
+    toast("failed to add: " + e.message);
+  }
+}
+
 function markActiveProvider() {
-  for (const r of document.querySelectorAll(".provider-row")) r.classList.toggle("active", r.dataset.key === state.providerId);
+  for (const c of document.querySelectorAll(".prov-card")) {
+    c.classList.toggle("prov-active", c.dataset.key === state.providerId);
+  }
 }
+
 function pickProvider(key) {
   if (key !== state.providerId) {
     send({ switch_provider: { provider_id: key } });
     state.providerId = key;
+    prefs.providerId = key;
+    savePrefs();
     const p = state.providers.find((x) => x.key === key);
     if (p && p.model) state.model = p.model;
     renderModelLabel();
     markActiveProvider();
     toast(`switched to ${p ? p.label : key}`);
   }
-  $("model-pop").classList.add("hidden");
+  closeModelPop();
 }
+
 function toggleModelPop() {
   const pop = $("model-pop");
   const hidden = pop.classList.contains("hidden");
-  pop.classList.toggle("hidden", !hidden);
-  if (hidden) {
-    // Anchor the dropdown just under the model chip that triggered it.
-    const r = $("model-chip").getBoundingClientRect();
-    pop.style.top = `${r.bottom + 6}px`;
-    pop.style.left = `${r.left}px`;
-    markActiveProvider();
-  }
+  hidden ? openModelPop() : closeModelPop();
+}
+
+function openModelPop() {
+  const pop = $("model-pop");
+  pop.classList.remove("hidden");
+  $("model-chip").setAttribute("aria-expanded", "true");
+  positionModelPop();
+  markActiveProvider();
+}
+
+function closeModelPop() {
+  $("model-pop").classList.add("hidden");
+  $("model-chip").setAttribute("aria-expanded", "false");
+}
+
+function positionModelPop() {
+  const pop = $("model-pop");
+  const composer = $("composer").getBoundingClientRect();
+  const gap = 10;
+  const margin = 10;
+  const width = Math.min(740, window.innerWidth - margin * 2, Math.max(320, composer.width));
+  const left = Math.min(window.innerWidth - width - margin, Math.max(margin, composer.left + (composer.width - width) / 2));
+  pop.style.width = `${width}px`;
+  pop.style.left = `${left}px`;
+  pop.style.top = "auto";
+  pop.style.bottom = `${Math.max(margin, window.innerHeight - composer.top + gap)}px`;
 }
 
 // ── settings: behavior / display / tools ─────────────────────────────────────
@@ -1352,7 +2160,7 @@ function setMode(d) {
   const btn = $("mode-toggle");
   btn.classList.toggle("mode-safe", !danger);
   btn.classList.toggle("mode-danger", danger);
-  $("mode-label").textContent = danger ? "Run freely" : "Confirm tools";
+  $("mode-label").textContent = danger ? "Danger" : "Safe";
   send({ set_approval_mode: { mode: danger ? "danger" : "safe" } });
   const seg = $("behavior-approval-seg");
   if (seg) for (const b of seg.children) b.classList.toggle("active", b.dataset.mode === (danger ? "danger" : "safe"));
@@ -1363,12 +2171,16 @@ function setMode(d) {
 function loadPrefs() {
   let p = {};
   try { p = JSON.parse(localStorage.getItem("bone-studio-prefs") || "{}"); } catch {}
-  return { showThinking: p.showThinking !== false, expandTools: !!p.expandTools, showMeter: p.showMeter !== false, theme: p.theme || "codex-mono" };
+  return { showThinking: p.showThinking !== false, expandTools: !!p.expandTools, showMeter: p.showMeter !== false, theme: p.theme || "codex-mono", sidebarW: clampSidebarW(p.sidebarW), providerId: p.providerId || null };
 }
 function savePrefs() { localStorage.setItem("bone-studio-prefs", JSON.stringify(prefs)); }
+// Sidebar width is user-draggable; keep it within a sane range and fall back to
+// the CSS default (280) when unset.
+function clampSidebarW(w) { return w ? Math.max(240, Math.min(420, w)) : 0; }
 function applyPrefs() {
   document.body.classList.toggle("hide-thinking", !prefs.showThinking);
   document.body.classList.toggle("hide-meter", !prefs.showMeter);
+  if (prefs.sidebarW) document.documentElement.style.setProperty("--sidebar-w", prefs.sidebarW + "px");
   applyThemePref();
 }
 function applyThemePref() {
@@ -1387,6 +2199,11 @@ function setRunning(on) {
   $("stop").classList.toggle("hidden", !on);
   $("send").classList.toggle("hidden", on);
   $("send").disabled = on || !input.value.trim();
+  // NB: the elapsed timer is deliberately NOT driven from here. setRunning(false)
+  // fires transiently on every chat switch (onConversationLoaded), so clearing
+  // runStart here would reset the timer each time you click into a running chat.
+  // The timer is tied to the turn lifecycle instead (started → turn_complete).
+  updateRunningIndicators();
   announce(on ? "Agent is responding" : "Agent is ready");
 }
 
@@ -1399,7 +2216,10 @@ function autosize() {
   $("send").disabled = state.sending || !input.value.trim();
 }
 async function submit(textOverride) {
-  const text = (textOverride ?? input.value).trim();
+  // Guard: wired as both `send.onclick` (receives a PointerEvent) and a direct
+  // call with a string. Only honour a string override; anything else uses the
+  // composer's value.
+  const text = (typeof textOverride === "string" ? textOverride : input.value).trim();
   if (!text || state.running || state.sending) return;
   state.sending = true;
   // Remember the message so we can restore it if the daemon rejects it as busy.
@@ -1492,7 +2312,7 @@ function trapDialogFocus(e) {
 
 // ── markdown (compact, escaped-first) ────────────────────────────────────────
 
-function escapeHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function escapeHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function inlineMd(s) {
   const t = escapeHtml(s);
   return t
@@ -1583,7 +2403,7 @@ $("stop").onclick = async () => {
   await send("cancel");
   $("stop").disabled = false;
 };
-  window.addEventListener("keydown", (e) => { if (e.key === "Escape") { $("model-pop").classList.add("hidden"); closeSettings(); } });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModelPop(); closeSettings(); } });
   // ── Stats ───────────────────────────────────────────────────────────────────
 
 const statsState = {
@@ -1639,38 +2459,52 @@ function money(x) {
 
 // Vertical column chart: each bar stacks completion (accent) over prompt (dim).
 // `rows` may be time buckets or hourly rows; both carry prompt/completion tokens.
-function renderColChart(rows, { height = 150, labelFn } = {}) {
+// Per-bar detail is surfaced through a shared hover tooltip (see showStatsTip),
+// keyed off the data-* attributes rather than a native `title`.
+function renderColChart(rows, { height = 150, labelFn, axis = false } = {}) {
   if (!rows || !rows.length) return '<div class="stats-empty">No data</div>';
   const totals = rows.map((r) => r.prompt_tokens + r.completion_tokens);
   const max = Math.max(...totals, 1);
   const step = Math.max(1, Math.ceil(rows.length / 10));
   const cls = height !== 150 ? "stats-chart stats-chart-sm" : "stats-chart";
-  return `<div class="${cls}" style="height:${height}px">${rows.map((r, i) => {
+  const cols = rows.map((r, i) => {
     const total = totals[i];
-    const pct = (total / max) * 100;
+    // Floor non-zero buckets to a visible sliver so a busy period sitting next
+    // to a large spike still reads as activity instead of a hairline.
+    const MIN_BAR_PCT = 4;
+    const pct = total > 0 ? Math.max(MIN_BAR_PCT, (total / max) * 100) : 0;
     const pr = r.prompt_tokens, cp = r.completion_tokens;
     const lbl = labelFn ? labelFn(r, i) : r.label;
-    return `<div class="stats-col" title="${escapeHtml(lbl)} · ${fmt(total)} (prompt ${fmt(pr)} · completion ${fmt(cp)})">
+    const data = `data-label="${escapeHtml(String(lbl))}" data-total="${total}" data-prompt="${pr}" data-comp="${cp}" data-cached="${r.cached_tokens || 0}"`;
+    return `<div class="stats-col" ${data}>
       <div class="stats-col-stack" style="height:${pct}%">
         ${cp > 0 ? `<div class="stats-col-seg seg-comp" style="flex-grow:${cp}"></div>` : ""}
         ${pr > 0 ? `<div class="stats-col-seg seg-prompt" style="flex-grow:${pr}"></div>` : ""}
       </div>
       <div class="stats-col-label">${i % step === 0 ? escapeHtml(String(lbl)) : ""}</div>
     </div>`;
-  }).join("")}</div>`;
+  }).join("");
+  // A single faint peak label anchors the scale without cluttering the plot.
+  const axisEl = axis ? `<div class="stats-axis-max">${fmt(max)}</div>` : "";
+  return `<div class="${cls}" style="height:${height}px">${axisEl}${cols}</div>`;
 }
 
 function renderModelsTable(models, total) {
+  const totalTokens = (total.prompt_tokens + total.completion_tokens) || 1;
   const head = `<div class="stats-row stats-table-head">
     <span class="provider">Provider / Model</span>
+    <span class="num">Requests</span>
     <span class="num">Prompt</span>
     <span class="num">Completion</span>
     <span class="num cost">Cost</span>
   </div>`;
   const rows = models.map((m) => {
-    const cached = m.cached_tokens > 0 ? `<span style="color:var(--text-faint);font-size:11px"> +${fmt(m.cached_tokens)} cached</span>` : '';
-    return `<div class="stats-row stats-table-row">
+    // Faint background fill = this model's share of total tokens for the window.
+    const share = ((m.prompt_tokens + m.completion_tokens) / totalTokens) * 100;
+    const cached = m.cached_tokens > 0 ? `<span class="stats-cached"> +${fmt(m.cached_tokens)} cached</span>` : '';
+    return `<div class="stats-row stats-table-row" style="--share:${share.toFixed(1)}%">
     <span class="provider"><span class="prov-badge">${escapeHtml(m.provider)}</span><span class="prov-model" title="${escapeHtml(m.model)}">${escapeHtml(m.model)}</span></span>
+    <span class="num">${fmt(m.request_count)}</span>
     <span class="num" title="${fmt(m.prompt_tokens)} prompt${m.cached_tokens ? ' · ' + fmt(m.cached_tokens) + ' cached' : ''}">${fmt(m.prompt_tokens)}${cached}</span>
     <span class="num">${fmt(m.completion_tokens)}</span>
     <span class="num cost">${money(m.cost)}</span>
@@ -1678,6 +2512,7 @@ function renderModelsTable(models, total) {
   }).join("");
   const foot = `<div class="stats-row stats-table-foot">
     <span class="provider"><span class="prov-badge">Total</span></span>
+    <span class="num">${fmt(total.request_count)}</span>
     <span class="num">${fmt(total.prompt_tokens)}</span>
     <span class="num">${fmt(total.completion_tokens)}</span>
     <span class="num cost">${money(total.cost)}</span>
@@ -1708,30 +2543,32 @@ function renderStats() {
     `<b>${fmt(t.request_count)}</b> requests · <b>${money(t.cost)}</b> · ` +
     `<b>${models.length}</b> model${models.length === 1 ? "" : "s"} · since ${escapeHtml(since)}`;
 
-  // KPI cards — hero row (cost + total tokens) + metric row
+  // KPI cards — hero row (tokens + requests) + metric row. Cost lives as a plain
+  // metric card (and in the summary line), not a hero, since it's frequently $0.
   const tokens = t.prompt_tokens + t.completion_tokens;
   const cachePct = t.prompt_tokens > 0 ? Math.round((t.cached_tokens / t.prompt_tokens) * 100) : 0;
+  const perReq = fmt(Math.round(tokens / (t.request_count || 1)));
   $("stats-cards").innerHTML =
     `<div class="stats-card-item hero">
-      <div class="stats-card-label">Total cost</div>
-      <div class="stats-card-value">${money(t.cost)}</div>
-      <div class="stats-card-sub">${fmt(t.request_count)} requests · ${fmt(tokens)} tokens</div>
-    </div>
-    <div class="stats-card-item hero">
       <div class="stats-card-label">Total tokens</div>
       <div class="stats-card-value">${fmt(tokens)}</div>
       <div class="stats-card-sub">${fmt(t.prompt_tokens)} prompt · ${fmt(t.completion_tokens)} completion</div>
+    </div>
+    <div class="stats-card-item hero">
+      <div class="stats-card-label">Requests</div>
+      <div class="stats-card-value">${fmt(t.request_count)}</div>
+      <div class="stats-card-sub">${perReq} tokens / request</div>
     </div>`;
   $("stats-cards-row").innerHTML =
-    `<div class="stats-card-item"><div class="stats-card-value">${fmt(t.request_count)}</div><div class="stats-card-label">Requests</div></div>
-    <div class="stats-card-item"><div class="stats-card-value">${fmt(t.prompt_tokens)}</div><div class="stats-card-label">Prompt tokens</div></div>
+    `<div class="stats-card-item"><div class="stats-card-value">${fmt(t.prompt_tokens)}</div><div class="stats-card-label">Prompt tokens</div></div>
     <div class="stats-card-item"><div class="stats-card-value">${fmt(t.completion_tokens)}</div><div class="stats-card-label">Completion</div></div>
-    <div class="stats-card-item"><div class="stats-card-value">${fmt(t.cached_tokens)}<span style="font-size:12px;color:var(--text-faint);font-weight:400;margin-left:4px">${cachePct}%</span></div><div class="stats-card-label">Cached</div></div>`;
+    <div class="stats-card-item"><div class="stats-card-value">${fmt(t.cached_tokens)}<span style="font-size:12px;color:var(--text-faint);font-weight:400;margin-left:4px">${cachePct}%</span></div><div class="stats-card-label">Cached</div></div>
+    <div class="stats-card-item"><div class="stats-card-value">${money(t.cost)}</div><div class="stats-card-label">Cost</div></div>`;
 
   // Time-series chart
   const buckets = d[keys.buckets] || [];
   $("stats-chart-sub").textContent = `· ${MODE_LABELS[mode]}`;
-  $("stats-chart").innerHTML = renderColChart(buckets, { labelFn: (b) => chartLabel(mode, b) });
+  $("stats-chart").innerHTML = renderColChart(buckets, { axis: true, labelFn: (b) => chartLabel(mode, b) });
 
   // Models table
   $("stats-models").innerHTML = models.length
@@ -1764,11 +2601,8 @@ function openStats() {
 
 function closeStats() {
   statsState.open = false;
+  hideStatsTip();
   closeDialog("stats-overlay");
-}
-
-function toggleStats() {
-  statsState.open ? closeStats() : openStats();
 }
 
 // Stats event listeners
@@ -1782,6 +2616,52 @@ for (const b of document.querySelectorAll(".stats-mode")) {
     document.querySelectorAll(".stats-mode").forEach((m) => m.classList.toggle("active", m === b));
     renderStats();
   };
+}
+
+// Shared hover tooltip for the usage charts — one element reused across every
+// bar, positioned next to the cursor and flipped near the viewport edges.
+let statsTipEl = null;
+let statsTipKey = null;  // cache: skip DOM update when data hasn't changed
+function hideStatsTip() { if (statsTipEl && statsTipEl.style.display !== "none") statsTipEl.style.display = "none"; statsTipKey = null; }
+function showStatsTip(col, x, y) {
+  const d = col.dataset;
+  const total = +d.total;
+  if (!total) return hideStatsTip();
+  // Build a stable key from the bar's data attributes.
+  const key = `${d.label}|${d.prompt}|${d.comp}|${d.cached}|${d.total}`;
+  if (!statsTipEl) { statsTipEl = el("div", "stats-tip"); document.body.appendChild(statsTipEl); }
+  if (key === statsTipKey) {
+    // Content unchanged — only reposition.
+    let left = x + 14, top = y + 14;
+    if (left + statsTipEl.offsetWidth + 12 > innerWidth) left = x - statsTipEl.offsetWidth - 14;
+    if (top + statsTipEl.offsetHeight + 12 > innerHeight) top = y - statsTipEl.offsetHeight - 14;
+    statsTipEl.style.left = Math.max(8, left) + "px";
+    statsTipEl.style.top = Math.max(8, top) + "px";
+    return;
+  }
+  statsTipKey = key;
+  const row = (k, v) => `<div class="stats-tip-row"><span>${k}</span><b>${fmt(v)}</b></div>`;
+  statsTipEl.innerHTML =
+    `<div class="stats-tip-head">${escapeHtml(d.label)}</div>` +
+    row("Prompt", +d.prompt) + row("Completion", +d.comp) +
+    (+d.cached ? row("Cached", +d.cached) : "") +
+    `<div class="stats-tip-row total"><span>Total</span><b>${fmt(total)}</b></div>`;
+  statsTipEl.style.display = "block";
+  const r = statsTipEl.getBoundingClientRect();
+  let left = x + 14, top = y + 14;
+  if (left + r.width + 12 > innerWidth) left = x - r.width - 14;
+  if (top + r.height + 12 > innerHeight) top = y - r.height - 14;
+  statsTipEl.style.left = Math.max(8, left) + "px";
+  statsTipEl.style.top = Math.max(8, top) + "px";
+}
+for (const id of ["stats-chart", "stats-hourly"]) {
+  const host = $(id);
+  if (!host) continue;
+  host.addEventListener("mousemove", (e) => {
+    const col = e.target.closest(".stats-col");
+    col ? showStatsTip(col, e.clientX, e.clientY) : hideStatsTip();
+  });
+  host.addEventListener("mouseleave", hideStatsTip);
 }
 
 // Keyboard shortcuts for stats
@@ -1809,6 +2689,7 @@ $("collapse-btn").onclick = () => { $("app").classList.add("sidebar-hidden"); $(
 $("show-sidebar").onclick = openMobileSidebar;
 $("sidebar-backdrop").onclick = closeMobileSidebar;
 $("canvas-toggle").onclick = toggleCanvas;
+$("canvas-all").onclick = showAllEdits;
 $("canvas-close").onclick = closeCanvas;
 for (const b of document.querySelectorAll(".stab")) b.onclick = () => switchTab(b.dataset.tab);
 
@@ -1834,11 +2715,43 @@ $("divider").addEventListener("mousedown", (e) => {
   document.addEventListener("mouseup", onUp);
 });
 
+// Draggable sidebar edge: resize the sidebar by dragging its right border.
+// Double-click resets to the CSS default width.
+$("sidebar-resize").addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  const handle = $("sidebar-resize");
+  const sidebar = $("sidebar");
+  handle.classList.add("dragging");
+  document.body.style.cursor = "col-resize";
+  const onMove = (ev) => {
+    const w = clampSidebarW(ev.clientX - sidebar.getBoundingClientRect().left);
+    document.documentElement.style.setProperty("--sidebar-w", w + "px");
+  };
+  const onUp = (ev) => {
+    handle.classList.remove("dragging");
+    document.body.style.cursor = "";
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    prefs.sidebarW = clampSidebarW(ev.clientX - sidebar.getBoundingClientRect().left);
+    savePrefs();
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+});
+$("sidebar-resize").addEventListener("dblclick", () => {
+  document.documentElement.style.removeProperty("--sidebar-w");
+  prefs.sidebarW = 0;
+  savePrefs();
+});
+
 document.addEventListener("click", (e) => {
   const pop = $("model-pop");
-  if (!pop.classList.contains("hidden") && !pop.contains(e.target) && !e.target.closest("#model-chip")) pop.classList.add("hidden");
+  if (!pop.classList.contains("hidden") && !pop.contains(e.target) && !e.target.closest("#model-chip")) closeModelPop();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { $("model-pop").classList.add("hidden"); closeSettings(); } });
+window.addEventListener("resize", () => {
+  if (!$("model-pop").classList.contains("hidden")) positionModelPop();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModelPop(); closeSettings(); } });
 document.addEventListener("keydown", trapDialogFocus);
 $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
 window.addEventListener("keydown", captureKey, true);
