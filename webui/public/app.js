@@ -22,12 +22,14 @@ let desiredConversationId = Number.isInteger(storedConversationId) && storedConv
 const state = {
   session: null,
   running: false,
+  sending: false,
   asstEl: null,
   asstRaw: "",
   reasonEl: null,
   reasonDetails: null,
   tools: new Map(),
   approvals: new Map(),
+  connected: false,
   conversationId: null,
   providers: [],
   providerId: null,
@@ -68,23 +70,25 @@ function switchSatisfiedBy(snapshot) {
 // replays them on re-attach, so switching away would lose the list. We cache
 // each conversation's latest list here and restore it on switch/return.
 const taskCache = new Map();
+let conversations = [];
 
 // ── connection ──────────────────────────────────────────────────────────────
 
 function connect() {
+  setConnectionState("connecting");
   const es = new EventSource("/api/events");
   es.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.kind === "bridge") return onBridge(msg);
     if (msg.kind === "event") return onEvent(normalize(msg.payload));
   };
-  es.onerror = () => setConn(false);
+  es.onerror = () => setConnectionState("reconnecting");
 }
 
 function onBridge(msg) {
   if (msg.session) state.session = msg.session;
   if (msg.status === "connected") {
-    setConn(true);
+    setConnectionState("connected");
     clearRecovery();
     // A reconnect creates a fresh TCP connection, which initially attaches to
     // the daemon's latest conversation. Restore this tab's own selection.
@@ -93,13 +97,19 @@ function onBridge(msg) {
       send({ load_conversation: { id: desiredConversationId } });
     }
   }
-  if (msg.status === "disconnected") { setConn(false); toast("daemon disconnected — retrying…"); }
+  if (msg.status === "disconnected") { setConnectionState("reconnecting"); toast("Daemon disconnected — reconnecting…"); }
 }
 
-function setConn(online) {
+function setConnectionState(status) {
+  state.connected = status === "connected";
   const dot = $("conn-dot");
-  dot.classList.toggle("online", online);
-  dot.classList.toggle("offline", !online);
+  dot.classList.toggle("online", status === "connected");
+  dot.classList.toggle("offline", status === "offline");
+  dot.classList.toggle("connecting", status === "connecting" || status === "reconnecting");
+  const label = status[0].toUpperCase() + status.slice(1);
+  $("conn-label").textContent = label;
+  $("model-chip").title = `${label} · Change model`;
+  announce(label);
 }
 
 function normalize(payload) {
@@ -109,12 +119,19 @@ function normalize(payload) {
 }
 
 async function send(command) {
-  if (!state.session) return;
-  await fetch(`/api/command?session=${state.session}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(command),
-  }).catch(() => toast("command failed"));
+  try {
+    if (!state.session || !state.connected) return false;
+    const response = await fetch(`/api/command?session=${state.session}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(command),
+    });
+    if (!response.ok) throw new Error((await response.text()) || "Command failed");
+    return true;
+  } catch (error) {
+    toast(error.message || "Command failed");
+    return false;
+  }
 }
 
 // ── event handling ───────────────────────────────────────────────────────────
@@ -335,11 +352,11 @@ function onToolCall(ev) {
     hadText = true;
   }
   const cont = activeContainer();
-  state.toolInfo.set(ev.id, { name: ev.name, arguments: ev.arguments });
+  state.toolInfo.set(ev.id, { name: ev.name, arguments: ev.arguments, startedAt: performance.now() });
   const { verb, arg } = toolMeta(ev.name, ev.arguments);
   const card = el("div", "tool running" + (prefs.expandTools ? " open" : ""));
   card.innerHTML = `
-    <div class="tool-head">
+    <div class="tool-head" role="button" tabindex="0" aria-expanded="${prefs.expandTools ? "true" : "false"}">
       <div class="tool-main">
         <div class="tool-title"><span class="tool-verb"></span> <span class="tool-arg"></span></div>
       </div>
@@ -354,7 +371,10 @@ function onToolCall(ev) {
   card.querySelector(".tool-arg").textContent = arg;
   const body = card.querySelector(".tool-body");
   fillToolArgs(body, ev.arguments);
-  card.querySelector(".tool-head").onclick = () => card.classList.toggle("open");
+  const head = card.querySelector(".tool-head");
+  const toggleTool = () => { card.classList.toggle("open"); head.setAttribute("aria-expanded", card.classList.contains("open")); };
+  head.onclick = toggleTool;
+  head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleTool(); } };
 
   // File-writing tools get an "open in canvas" affordance. write_file content is
   // available right now; edit_file's diff arrives with the result — defer the
@@ -399,6 +419,10 @@ function onToolResult(ev) {
   // Surface an edit's diff in the canvas. The result content embeds bone's
   // numbered unified diff (see core/src/tools/edit_file/diff.rs).
   const info = state.toolInfo.get(ev.call_id);
+  const elapsed = info?.startedAt ? Math.max(0, performance.now() - info.startedAt) : null;
+  const summary = el("span", "tool-summary");
+  summary.textContent = `${ev.is_error ? "Failed" : "Done"}${elapsed == null ? "" : ` · ${elapsed < 1000 ? Math.round(elapsed) + "ms" : (elapsed / 1000).toFixed(1) + "s"}`}`;
+  card.querySelector(".tool-title").appendChild(summary);
   if (info && info.name === "edit_file" && !ev.is_error) {
     const path = info.arguments && (info.arguments.path || info.arguments.file_path);
     if (path) {
@@ -777,6 +801,7 @@ function onStatus(message) {
 }
 
 function onBusy() {
+  state.sending = false;
   // Put the rejected message back in the composer and drop its orphaned bubble.
   if (state.lastBubble) { state.lastBubble.remove(); state.lastBubble = null; }
   if (state.lastText && !input.value.trim()) { input.value = state.lastText; autosize(); }
@@ -821,7 +846,10 @@ function captureKey(e) {
 // ── turn lifecycle ──────────────────────────────────────────────────────────
 
 function onFinished() {
-  if (state.asstEl) state.asstEl.innerHTML = renderMarkdown(state.asstRaw);
+  if (state.asstEl) {
+    state.asstEl.innerHTML = renderMarkdown(state.asstRaw);
+    enhanceContent(state.asstEl);
+  }
   finalizeTurn();
 }
 function onFailed(ev) { systemLine(ev.message || "turn failed", true); finalizeTurn(); setRunning(false); }
@@ -879,7 +907,7 @@ function renderStoredMessage(m, asstTurn) {
     for (const tc of m.tool_calls || []) {
       const { verb, arg } = toolMeta(tc.name, tc.arguments);
       const card = el("div", "tool");
-      card.innerHTML = `<div class="tool-head">
+      card.innerHTML = `<div class="tool-head" role="button" tabindex="0" aria-expanded="false">
         <div class="tool-main"><div class="tool-title"><span class="tool-verb"></span> <span class="tool-arg"></span></div></div>
         <span class="tool-status done"></span>
         <svg class="tool-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
@@ -887,9 +915,13 @@ function renderStoredMessage(m, asstTurn) {
       card.querySelector(".tool-verb").textContent = verb;
       card.querySelector(".tool-arg").textContent = arg;
       fillToolArgs(card.querySelector(".tool-body"), tc.arguments);
-      card.querySelector(".tool-head").onclick = () => card.classList.toggle("open");
+      const head = card.querySelector(".tool-head");
+      const toggle = () => { card.classList.toggle("open"); head.setAttribute("aria-expanded", card.classList.contains("open")); };
+      head.onclick = toggle;
+      head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
       t.appendChild(card);
     }
+    enhanceContent(t);
     return t;
   }
   return asstTurn;
@@ -966,24 +998,82 @@ function scrollDown() {
   const t = $("thread");
   const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 160;
   if (atBottom) t.scrollTop = t.scrollHeight;
+  updateJumpLatest();
 }
+function updateJumpLatest() {
+  const t = $("thread");
+  const away = t.scrollHeight - t.scrollTop - t.clientHeight > 220;
+  $("jump-latest").classList.toggle("hidden", !away);
+}
+function jumpToLatest() {
+  const t = $("thread");
+  t.scrollTo({ top: t.scrollHeight, behavior: "smooth" });
+  $("jump-latest").classList.add("hidden");
+}
+function openMobileSidebar() {
+  if (window.matchMedia("(max-width: 760px)").matches) $("app").classList.add("mobile-sidebar-open");
+  else { $("app").classList.remove("sidebar-hidden"); $("show-sidebar").classList.add("hidden"); }
+}
+function closeMobileSidebar() { $("app").classList.remove("mobile-sidebar-open"); }
 
 // ── chat sidebar ────────────────────────────────────────────────────────────
 
 async function loadChats() {
-  const chats = await fetch("/api/conversations").then((r) => r.json()).catch(() => []);
+  conversations = await fetch("/api/conversations").then((r) => r.json()).catch(() => []);
+  renderChats();
+}
+function renderChats() {
+  const query = $("chat-search").value.trim().toLowerCase();
+  const chats = conversations.filter((c) => !query || `${c.title} ${c.provider} ${c.model || ""}`.toLowerCase().includes(query));
   const list = $("chat-list");
   list.innerHTML = "";
   for (const c of chats) {
-    const item = el("div", "chat-item");
+    const row = el("div", "chat-row");
+    const item = el("button", "chat-item");
+    item.type = "button";
     item.dataset.id = c.id;
     item.innerHTML = `<div class="chat-title"></div>
       <div class="chat-meta"><span>${c.provider}</span><span>${relTime(c.started_at)}</span></div>`;
     item.querySelector(".chat-title").textContent = c.title || "Untitled";
     item.onclick = () => openChat(c.id);
-    list.appendChild(item);
+    const menu = el("button", "ghost-btn chat-menu-btn", "•••");
+    menu.type = "button";
+    menu.setAttribute("aria-label", `Actions for ${c.title || "Untitled"}`);
+    menu.onclick = () => toggleChatActions(row, c);
+    row.append(item, menu);
+    list.appendChild(row);
   }
+  if (!chats.length) list.appendChild(el("div", "chat-empty", query ? "No matching chats" : "No conversations yet"));
   highlightActiveChat();
+}
+function toggleChatActions(row, conversation) {
+  const existing = row.querySelector(".chat-actions");
+  document.querySelectorAll(".chat-actions").forEach((n) => n.remove());
+  if (existing) return;
+  const actions = el("div", "chat-actions");
+  const rename = el("button", null, "Rename");
+  const archive = el("button", "danger", "Archive");
+  rename.onclick = () => renameConversation(conversation);
+  archive.onclick = () => archiveConversation(conversation);
+  actions.append(rename, archive);
+  row.appendChild(actions);
+  rename.focus();
+}
+async function renameConversation(conversation) {
+  const title = window.prompt("Conversation title", conversation.title || "");
+  if (title == null || !title.trim()) return;
+  const response = await fetch(`/api/conversations/${conversation.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) });
+  if (!response.ok) return toast("Could not rename conversation");
+  toast("Conversation renamed");
+  loadChats();
+}
+async function archiveConversation(conversation) {
+  if (!window.confirm(`Archive “${conversation.title || "Untitled"}”?`)) return;
+  const response = await fetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
+  if (!response.ok) return toast("Could not archive conversation");
+  if (conversation.id === state.conversationId) newChat();
+  toast("Conversation archived");
+  loadChats();
 }
 function openChat(id) {
   if (id === state.conversationId) return;
@@ -998,6 +1088,7 @@ function openChat(id) {
   desiredConversationId = id;
   sessionStorage.setItem("bone-active-conversation", String(id));
   highlightActiveChat();
+  closeMobileSidebar();
 }
 function highlightActiveChat() {
   for (const item of document.querySelectorAll(".chat-item"))
@@ -1028,6 +1119,7 @@ function newChat() {
   desiredConversationId = null;
   sessionStorage.removeItem("bone-active-conversation");
   highlightActiveChat();
+  closeMobileSidebar();
 }
 
 // ── providers / model picker ─────────────────────────────────────────────────
@@ -1041,7 +1133,8 @@ function renderProviderPicker() {
   const list = $("provider-list");
   list.innerHTML = "";
   for (const p of state.providers) {
-    const row = el("div", "provider-row");
+    const row = el("button", "provider-row");
+    row.type = "button";
     row.dataset.key = p.key;
     row.innerHTML = `<span class="pr-check">✓</span><span class="pr-name"></span><span class="pr-model"></span>`;
     row.querySelector(".pr-name").textContent = p.label;
@@ -1229,9 +1322,9 @@ function openSettings() {
   renderBehavior();
   renderTools();
   renderSettingsStats();
-  $("settings-overlay").classList.remove("hidden");
+  openDialog("settings-overlay", ".settings-card");
 }
-function closeSettings() { $("settings-overlay").classList.add("hidden"); }
+function closeSettings() { closeDialog("settings-overlay"); }
 
 function switchTab(tab) {
   for (const b of document.querySelectorAll(".stab")) b.classList.toggle("active", b.dataset.tab === tab);
@@ -1259,7 +1352,7 @@ function setMode(d) {
   const btn = $("mode-toggle");
   btn.classList.toggle("mode-safe", !danger);
   btn.classList.toggle("mode-danger", danger);
-  $("mode-label").textContent = danger ? "Danger" : "Safe";
+  $("mode-label").textContent = danger ? "Run freely" : "Confirm tools";
   send({ set_approval_mode: { mode: danger ? "danger" : "safe" } });
   const seg = $("behavior-approval-seg");
   if (seg) for (const b of seg.children) b.classList.toggle("active", b.dataset.mode === (danger ? "danger" : "safe"));
@@ -1290,8 +1383,11 @@ function applyThemePref() {
 
 function setRunning(on) {
   state.running = on;
+  state.sending = false;
   $("stop").classList.toggle("hidden", !on);
   $("send").classList.toggle("hidden", on);
+  $("send").disabled = on || !input.value.trim();
+  announce(on ? "Agent is responding" : "Agent is ready");
 }
 
 // ── composer ───────────────────────────────────────────────────────────────
@@ -1300,17 +1396,36 @@ const input = $("input");
 function autosize() {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 240) + "px";
-  $("send").disabled = !input.value.trim();
+  $("send").disabled = state.sending || !input.value.trim();
 }
-function submit() {
-  const text = input.value.trim();
-  if (!text || state.running) return;
+async function submit(textOverride) {
+  const text = (textOverride ?? input.value).trim();
+  if (!text || state.running || state.sending) return;
+  state.sending = true;
   // Remember the message so we can restore it if the daemon rejects it as busy.
   state.lastBubble = userMessage(text);
   state.lastText = text;
-  send({ submit_prompt: { text, images: [] } });
   input.value = "";
   autosize();
+  $("send").disabled = true;
+  $("app-status").textContent = "Sending message";
+  const ok = await send({ submit_prompt: { text, images: [] } });
+  if (!ok) {
+    state.sending = false;
+    if (state.lastBubble) { state.lastBubble.remove(); state.lastBubble = null; }
+    input.value = text;
+    autosize();
+    showRetry(text);
+  }
+}
+
+function showRetry(text) {
+  $("retry-bar")?.remove();
+  const bar = el("div", "retry-bar");
+  bar.id = "retry-bar";
+  bar.innerHTML = `<span>Message wasn’t sent. Your draft has been restored.</span><button class="btn">Retry</button>`;
+  bar.querySelector("button").onclick = () => { bar.remove(); submit(text); };
+  $("composer-wrap").prepend(bar);
 }
 
 // ── welcome / suggestions ────────────────────────────────────────────────────
@@ -1328,7 +1443,8 @@ function buildWelcome() {
     <p>A calm, elegant front-end for your bone agent.</p><div class="suggestions"></div>`;
   const wrap = w.querySelector(".suggestions");
   for (const s of SUGGESTIONS) {
-    const card = el("div", "suggestion", `<div class="s-title">${s.title}</div><div class="s-sub">${s.sub}</div>`);
+    const card = el("button", "suggestion", `<div class="s-title">${s.title}</div><div class="s-sub">${s.sub}</div>`);
+    card.type = "button";
     card.onclick = () => { input.value = s.text; autosize(); input.focus(); };
     wrap.appendChild(card);
   }
@@ -1338,6 +1454,7 @@ function buildWelcome() {
 // ── toast ──────────────────────────────────────────────────────────────────
 
 let toastTimer;
+let dialogReturnFocus = null;
 function toast(msg) {
   const t = $("toast");
   t.textContent = msg;
@@ -1345,6 +1462,32 @@ function toast(msg) {
   requestAnimationFrame(() => t.classList.add("show"));
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.classList.add("hidden"), 250); }, 2200);
+}
+function announce(message) { $("app-status").textContent = message; }
+function openDialog(overlayId, cardSelector) {
+  dialogReturnFocus = document.activeElement;
+  const overlay = $(overlayId);
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => overlay.querySelector(cardSelector)?.focus());
+}
+function closeDialog(overlayId) {
+  const overlay = $(overlayId);
+  if (overlay.classList.contains("hidden")) return;
+  overlay.classList.add("hidden");
+  overlay.setAttribute("aria-hidden", "true");
+  dialogReturnFocus?.focus?.();
+  dialogReturnFocus = null;
+}
+function trapDialogFocus(e) {
+  if (e.key !== "Tab") return;
+  const dialog = document.querySelector('.overlay:not(.hidden) [role="dialog"]');
+  if (!dialog) return;
+  const focusable = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')];
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable.at(-1);
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 }
 
 // ── markdown (compact, escaped-first) ────────────────────────────────────────
@@ -1400,12 +1543,46 @@ function renderMarkdown(src) {
   return html;
 }
 
+function enhanceContent(root) {
+  for (const pre of root.querySelectorAll("pre:not([data-enhanced])")) {
+    pre.dataset.enhanced = "true";
+    const button = el("button", "copy-btn", "Copy");
+    button.type = "button";
+    button.setAttribute("aria-label", "Copy code");
+    button.onclick = async () => {
+      const text = pre.querySelector("code")?.textContent || pre.textContent.replace(/^Copy/, "");
+      await navigator.clipboard.writeText(text);
+      button.textContent = "Copied";
+      setTimeout(() => (button.textContent = "Copy"), 1200);
+    };
+    pre.prepend(button);
+  }
+  const turnEl = root.classList?.contains("msg-assistant") ? root : root.closest?.(".msg-assistant");
+  if (turnEl && !turnEl.querySelector(":scope > .response-copy")) {
+    const button = el("button", "response-copy", "Copy response");
+    button.type = "button";
+    button.onclick = async () => {
+      const text = [...turnEl.querySelectorAll(":scope > .prose")].map((n) => n.innerText).join("\n\n");
+      await navigator.clipboard.writeText(text);
+      button.textContent = "Copied";
+      setTimeout(() => (button.textContent = "Copy response"), 1200);
+    };
+    turnEl.appendChild(button);
+  }
+}
+
 // ── wiring ──────────────────────────────────────────────────────────────────
 
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
 $("send").onclick = submit;
-$("stop").onclick = () => { denyPending(); send("cancel"); };
+$("stop").onclick = async () => {
+  denyPending();
+  $("stop").disabled = true;
+  announce("Canceling response");
+  await send("cancel");
+  $("stop").disabled = false;
+};
   window.addEventListener("keydown", (e) => { if (e.key === "Escape") { $("model-pop").classList.add("hidden"); closeSettings(); } });
   // ── Stats ───────────────────────────────────────────────────────────────────
 
@@ -1581,13 +1758,13 @@ function renderStats() {
 
 function openStats() {
   statsState.open = true;
-  $("stats-overlay").classList.remove("hidden");
+  openDialog("stats-overlay", ".stats-card");
   loadStats();
 }
 
 function closeStats() {
   statsState.open = false;
-  $("stats-overlay").classList.add("hidden");
+  closeDialog("stats-overlay");
 }
 
 function toggleStats() {
@@ -1621,12 +1798,16 @@ window.addEventListener("keydown", (e) => {
 });
 window.addEventListener("beforeunload", () => denyPending(true));
 $("new-chat").onclick = newChat;
+$("chat-search").addEventListener("input", renderChats);
+$("thread").addEventListener("scroll", updateJumpLatest, { passive: true });
+$("jump-latest").onclick = jumpToLatest;
 $("settings-btn").onclick = openSettings;
 $("settings-close").onclick = closeSettings;
 $("model-chip").onclick = toggleModelPop;
 $("mode-toggle").onclick = () => setMode(!danger);
 $("collapse-btn").onclick = () => { $("app").classList.add("sidebar-hidden"); $("show-sidebar").classList.remove("hidden"); };
-$("show-sidebar").onclick = () => { $("app").classList.remove("sidebar-hidden"); $("show-sidebar").classList.add("hidden"); };
+$("show-sidebar").onclick = openMobileSidebar;
+$("sidebar-backdrop").onclick = closeMobileSidebar;
 $("canvas-toggle").onclick = toggleCanvas;
 $("canvas-close").onclick = closeCanvas;
 for (const b of document.querySelectorAll(".stab")) b.onclick = () => switchTab(b.dataset.tab);
@@ -1658,6 +1839,7 @@ document.addEventListener("click", (e) => {
   if (!pop.classList.contains("hidden") && !pop.contains(e.target) && !e.target.closest("#model-chip")) pop.classList.add("hidden");
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { $("model-pop").classList.add("hidden"); closeSettings(); } });
+document.addEventListener("keydown", trapDialogFocus);
 $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
 window.addEventListener("keydown", captureKey, true);
 

@@ -444,21 +444,24 @@ function createDaemonLink(onLine, onStatus) {
 
 function listConversations() {
   if (!existsSync(DB_PATH)) return [];
-  const db = new DatabaseSync(DB_PATH, { readOnly: true });
+  const db = new DatabaseSync(DB_PATH);
   try {
+    ensureWebuiMetadata(db);
     return db
       .prepare(
         `SELECT c.id AS id, c.provider AS provider, c.model AS model,
                 c.started_at AS started_at, c.ended_at AS ended_at,
-                first_user.content AS title,
+                COALESCE(meta.title, first_user.content) AS title,
                 (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) AS n
          FROM conversations c
+         LEFT JOIN webui_conversations meta ON meta.conversation_id = c.id
          JOIN messages first_user ON first_user.id = (
            SELECT m.id FROM messages m
            WHERE m.conversation_id = c.id AND m.role = 'user'
            ORDER BY m.seq ASC, m.id ASC LIMIT 1
          )
          WHERE first_user.content NOT LIKE 'unique-task-%'
+           AND COALESCE(meta.archived, 0) = 0
          ORDER BY c.id DESC LIMIT 80`,
       )
       .all()
@@ -473,6 +476,46 @@ function listConversations() {
   } finally {
     db.close();
   }
+}
+
+function ensureWebuiMetadata(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS webui_conversations (
+    conversation_id INTEGER PRIMARY KEY,
+    title TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`);
+}
+
+function updateConversation(id, changes) {
+  if (!Number.isInteger(id) || id < 1) throw new Error("invalid conversation id");
+  if (!existsSync(DB_PATH)) throw new Error("conversation database missing");
+  const db = new DatabaseSync(DB_PATH);
+  try {
+    ensureWebuiMetadata(db);
+    if (Object.hasOwn(changes, "title")) {
+      const title = String(changes.title || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      db.prepare(`INSERT INTO webui_conversations(conversation_id, title, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(conversation_id) DO UPDATE SET title=excluded.title, updated_at=CURRENT_TIMESTAMP`).run(id, title || null);
+    }
+    if (changes.archived === true) {
+      db.prepare(`INSERT INTO webui_conversations(conversation_id, archived, updated_at)
+        VALUES (?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(conversation_id) DO UPDATE SET archived=1, updated_at=CURRENT_TIMESTAMP`).run(id);
+    }
+  } finally { db.close(); }
+}
+
+function handleConversationWrite(req, res, id) {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    try {
+      updateConversation(id, req.method === "DELETE" ? { archived: true } : JSON.parse(body));
+      res.writeHead(204).end();
+    } catch (e) { res.writeHead(400).end(String(e)); }
+  });
 }
 
 // Minimal targeted parse of providers.yaml's regular `- key:` blocks — enough
@@ -597,7 +640,10 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/events") return handleEvents(url, req, res);
   if (url.pathname === "/api/command" && req.method === "POST") return handleCommand(url, req, res);
-  if (url.pathname === "/api/conversations") return sendJson(res, listConversations);
+  if (url.pathname === "/api/conversations" && req.method === "GET") return sendJson(res, listConversations);
+  const conversationMatch = url.pathname.match(/^\/api\/conversations\/(\d+)$/);
+  if (conversationMatch && (req.method === "PATCH" || req.method === "DELETE"))
+    return handleConversationWrite(req, res, Number(conversationMatch[1]));
   if (url.pathname === "/api/providers") return sendJson(res, listProviders);
   if (url.pathname === "/api/stats") return sendJson(res, loadStatsSnapshot);
   if (url.pathname === "/api/config" && req.method === "GET") return sendJson(res, getConfig);
