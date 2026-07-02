@@ -41,6 +41,11 @@ fn truncate_line(line: &str) -> String {
     out
 }
 
+/// Plural suffix: "" for 1, "s" otherwise.
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
 #[derive(Deserialize)]
 struct Args {
     path: String,
@@ -91,30 +96,36 @@ impl Tool for ReadFileTool {
         let start = args.start_line.unwrap_or(1).saturating_sub(1);
         let max = args.max_lines.unwrap_or(500).min(1000);
 
-        let all_lines: Vec<&str> = content.lines().collect();
-        let total = all_lines.len();
-
-        // Bound per-line byte cost so a single minified multi-MB line can't
-        // consume the whole context window.
-        let shown: Vec<String> = all_lines
-            .iter()
-            .skip(start)
-            .take(max)
-            .map(|line| truncate_line(line))
-            .collect();
+        // Single pass over the file's lines: count the total and keep only the
+        // requested window, so slicing a large file never materializes every
+        // line (the old `lines().collect()` allocated a Vec of every &str).
+        let mut total = 0;
+        let mut shown: Vec<String> = Vec::with_capacity(max);
+        for (i, line) in content.lines().enumerate() {
+            total = i + 1;
+            if i >= start && shown.len() < max {
+                // Bound per-line byte cost so a single minified multi-MB line
+                // can't consume the whole context window.
+                shown.push(truncate_line(line));
+            }
+        }
 
         let first = start + 1; // 1-based first line shown
         let end = start + shown.len(); // 1-based last line shown
-        let mut out = shown.join("\n");
 
         if shown.is_empty() {
             // Nothing in range (e.g. start_line past EOF): still report totals.
-            if total > 0 {
-                out.push_str(&format!("\n\n[no lines in range; file has {total} lines]"));
-            }
-            return Ok(out);
+            return Ok(if total > 0 {
+                format!(
+                    "[no lines in range; file has {total} line{}]",
+                    plural(total)
+                )
+            } else {
+                String::new()
+            });
         }
 
+        let mut out = shown.join("\n");
         if end < total {
             // Partial view: tell the model exactly where it is and how to page.
             out.push_str(&format!(
@@ -123,7 +134,7 @@ impl Tool for ReadFileTool {
             ));
         } else {
             // Complete view: give size awareness.
-            out.push_str(&format!("\n\n[{total} lines total]"));
+            out.push_str(&format!("\n\n[{total} line{} total]", plural(total)));
         }
         Ok(out)
     }

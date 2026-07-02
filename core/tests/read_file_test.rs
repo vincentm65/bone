@@ -80,7 +80,7 @@ async fn start_line_beyond_file_returns_empty() {
         .expect("read should succeed");
 
     // Empty range still reports total size so the model can recover.
-    assert_eq!(result, "\n\n[no lines in range; file has 1 lines]");
+    assert_eq!(result, "[no lines in range; file has 1 line]");
     let _ = fs::remove_file(&path).await;
 }
 

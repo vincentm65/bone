@@ -204,7 +204,11 @@ async fn build_candidate_content(args: &Args) -> Result<(String, String), String
 }
 
 fn ensure_no_edit_fields_for_rewrite(args: &Args) -> Result<(), String> {
-    if args.search.is_some() || args.replace.is_some() || args.edits.is_some() {
+    if args.search.is_some()
+        || args.replace.is_some()
+        || args.edits.is_some()
+        || args.replace_all.is_some()
+    {
         return Err("mode=rewrite cannot be combined with search/replace or edits".to_string());
     }
     Ok(())

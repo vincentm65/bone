@@ -38,7 +38,7 @@ fn block_takes_precedence_over_deny() {
 }
 
 #[test]
-fn denied_message_matches_original_format_exactly() {
+fn denied_message_has_stable_format() {
     // Stable format for a mode-denied call (no shell-specific exit_code prefix).
     let msg = denied_message(ApprovalMode::Safe, CommandSafety::Danger);
     assert_eq!(
