@@ -342,7 +342,12 @@ function dispatchEvent(ev) {
     case "frontend_state": return onFrontendState(ev);
     case "state_snapshot": return onSnapshot(ev.snapshot);
     case "conversation_loaded": return onConversationLoaded(ev);
-    case "started": state.sawStarted = true; markRunning(state.conversationId, true); setRunning(true); showThinking(); return;
+    case "started":
+      state.sawStarted = true;
+      // A turn we didn't submit ourselves is a daemon-injected one — typically
+      // background sub-agent results being handed to the model.
+      if (!state.sending && !replayingLiveEvents) resolveBackgroundAgents();
+      markRunning(state.conversationId, true); setRunning(true); showThinking(); return;
     case "status": return onStatus(ev.message);
     case "notice": return systemLine(ev.message);
     case "reasoning_delta": return appendReasoning(ev.text);
@@ -450,12 +455,14 @@ function showThinking() {
   clearWelcome();
   const t = el("div", "turn msg-assistant thinking-turn");
   t.id = "thinking";
-  t.innerHTML = `<div class="role-tag">bone</div>
-    <div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span class="thinking-label">Thinking…</span></div>`;
+  t.setAttribute("aria-label", "Thinking");
+  t.innerHTML = `<div class="thinking"><span class="thinking-spinner" aria-hidden="true"></span><span>Thinking…</span></div>`;
   $("thread").appendChild(t);
   scrollDown();
 }
-function hideThinking() { const n = $("thinking"); if (n) n.remove(); }
+function hideThinking() {
+  const n = $("thinking"); if (n) n.remove();
+}
 
 function ensureAssistant() {
   // Streaming output implies a live turn. When we re-attach to a chat that is
@@ -464,7 +471,7 @@ function ensureAssistant() {
   if (!state.running) setRunning(true);
   if (state.asstEl) return;
   const t = turn("assistant");
-  t.appendChild(el("div", "role-tag", "bone"));
+  t.appendChild(el("div", "role-tag", ""));
   state.asstEl = el("div", "prose");
   state.asstRaw = "";
   t.appendChild(state.asstEl);
@@ -494,7 +501,7 @@ function appendReasoning(text) {
   ensureAssistant();
   if (!state.reasonEl) {
     const d = el("details", "reasoning");
-    d.appendChild(el("summary", null, "Thinking"));
+    d.appendChild(el("summary", null, `<span class="reasoning-spark" aria-hidden="true"></span><span class="reasoning-title">Thinking</span><span class="reasoning-preview"></span><svg class="reasoning-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>`));
     const body = el("div", "body");
     d.appendChild(body);
     state.asstEl.parentElement.insertBefore(d, state.asstEl);
@@ -506,7 +513,7 @@ function appendReasoning(text) {
   const raw = state.reasonEl.textContent;
   const preview = raw.replace(/\n/g, " ").slice(0, 72);
   const dots = raw.length > 72 ? "…" : "";
-  state.reasonDetails.querySelector("summary").textContent = "Thinking: " + preview + dots;
+  state.reasonDetails.querySelector(".reasoning-preview").textContent = preview + dots;
   // Never auto-scroll for reasoning tokens — user may be reading above.
 }
 
@@ -545,6 +552,7 @@ function fillToolArgs(body, args) {
 
 function toolMeta(name, args) {
   args = args || {};
+  if (name === "subagent") return { verb: "Agents", arg: subagentSummary(args) };
   const verb = TOOL_VERBS[name] || name.replace(/_/g, " ");
   const argKeys = ["command", "cmd", "path", "file_path", "file", "query", "pattern", "url", "name"];
   let arg = "";
@@ -584,6 +592,10 @@ function onToolCall(ev) {
   card.querySelector(".tool-arg").textContent = arg;
   const body = card.querySelector(".tool-body");
   fillToolArgs(body, ev.arguments);
+  if (ev.name === "subagent") {
+    const rows = buildAgentRows(ev.arguments, false);
+    if (rows.childElementCount) card.insertBefore(rows, body);
+  }
   const head = card.querySelector(".tool-head");
   const toggleTool = () => { card.classList.toggle("open"); head.setAttribute("aria-expanded", card.classList.contains("open")); };
   head.onclick = toggleTool;
@@ -636,6 +648,7 @@ function onToolResult(ev) {
   const summary = el("span", "tool-summary");
   summary.textContent = `${ev.is_error ? "Failed" : "Done"}${elapsed == null ? "" : ` · ${elapsed < 1000 ? Math.round(elapsed) + "ms" : (elapsed / 1000).toFixed(1) + "s"}`}`;
   card.querySelector(".tool-title").appendChild(summary);
+  if (info && info.name === "subagent" && !ev.is_error) applySubagentResult(card, content);
   if (info && info.name === "edit_file" && !ev.is_error) {
     const path = info.arguments && (info.arguments.path || info.arguments.file_path);
     if (path && captureDiff(path, content)) {
@@ -658,6 +671,145 @@ function formatToolOutput(s) {
     try { return JSON.stringify(JSON.parse(t), null, 2); } catch { /* not json */ }
   }
   return s;
+}
+
+// ── sub-agents ────────────────────────────────────────────────────────────────
+//
+// The runtime's `subagent` tool dispatches tasks to agents registered via
+// bone.register_subagent in init.lua. There is no dedicated protocol: calls
+// arrive as ordinary tool_call/tool_result events, and results of background
+// (non-blocking) dispatches are injected by the daemon as an automated turn.
+// We give the call a dedicated card — one row per dispatched task with a live
+// status dot — and resolve each row from the result text (blocking dispatch /
+// wait) or when the injected results turn begins (background dispatch).
+
+// Rows from non-blocking dispatches whose jobs are still running in the
+// background. Cleared on conversation switch (the thread DOM is rebuilt).
+let bgAgentRows = [];
+
+// Compact head-line summary for a subagent call.
+function subagentSummary(args) {
+  const action = (args && args.action) || "status";
+  if (action === "dispatch") {
+    const n = ((args && args.tasks) || []).length;
+    return `dispatch · ${n} task${n === 1 ? "" : "s"}${args.wait ? "" : " · background"}`;
+  }
+  const ids = (args && args.ids) || [];
+  return ids.length ? `${action} · ${ids.join(", ")}` : action;
+}
+
+// One status row per dispatched task. `resolved` renders neutral done dots for
+// transcript replay, where the per-job outcome isn't stored with the call.
+function buildAgentRows(args, resolved) {
+  const rows = el("div", "agent-rows");
+  for (const t of (args && args.tasks) || []) {
+    const row = el("div", "agent-row");
+    row.innerHTML = `<span class="tool-status ${resolved ? "done" : "running"}"></span><span class="agent-name"></span><span class="agent-task"></span>`;
+    row.dataset.agent = t.agent || "";
+    if (resolved) row.dataset.resolved = "1";
+    row.querySelector(".agent-name").textContent = t.agent || "agent";
+    row.querySelector(".agent-task").textContent = t.title || t.task || "";
+    rows.appendChild(row);
+  }
+  return rows;
+}
+
+function markAgentRow(row, cls) {
+  row.dataset.resolved = "1";
+  row.querySelector(".tool-status").className = "tool-status " + cls;
+}
+
+// Resolve a subagent card's rows from the tool result text.
+function applySubagentResult(card, content) {
+  const rows = [...card.querySelectorAll(".agent-row")];
+  // Per-task dispatch lines are only listed when something was rejected; they
+  // map 1:1 to the tasks (and therefore rows) in order (see subagent.lua).
+  const lines = content.split("\n");
+  if (/^Dispatched \d+, rejected [1-9]/.test(lines[0] || "")) {
+    rows.forEach((row, i) => { if (/^REJECTED/.test(lines[i + 1] || "")) markAgentRow(row, "error"); });
+  }
+  // Blocking dispatch/wait results carry one "## agent (job-N) — done|ERROR"
+  // section per finished job. Resolve this card's rows first, then any rows
+  // still in the background from an earlier non-blocking dispatch (a later
+  // `wait` call returns those jobs' results).
+  for (const m of content.matchAll(/^## (.+?) \([^)]*\) — (done|ERROR)/gm)) {
+    const row = rows.find((r) => !r.dataset.resolved && r.dataset.agent === m[1])
+      || bgAgentRows.find((r) => !r.dataset.resolved && r.dataset.agent === m[1]);
+    if (row) markAgentRow(row, m[2] === "done" ? "done" : "error");
+  }
+  bgAgentRows = bgAgentRows.filter((r) => !r.dataset.resolved && r.isConnected);
+  // Anything left on a dispatch card runs in the background; the daemon injects
+  // its result as an automated turn later (see resolveBackgroundAgents).
+  for (const row of rows) {
+    if (!row.dataset.resolved) {
+      row.querySelector(".tool-status").className = "tool-status bg";
+      row.title = "Running in background — results are delivered automatically";
+      bgAgentRows.push(row);
+    }
+  }
+}
+
+// The daemon injects finished background job results as an automated turn (see
+// rpc's next_background_prompt). No dedicated event exists, but an injected
+// turn is the only turn this client didn't submit itself — use that to flip
+// lingering background rows to done. (A bone.api.submit prompt also matches;
+// resolving on it is harmless since those rows' jobs report via injection too.)
+function resolveBackgroundAgents() {
+  if (!bgAgentRows.length) return;
+  for (const row of bgAgentRows) if (row.isConnected) markAgentRow(row, "done");
+  bgAgentRows = [];
+  systemLine("Sub-agent results delivered — agent continuing");
+}
+
+// Injected background-results turns are persisted as user messages with a
+// recognizable header (jobs.rs format_results_for_injection). On replay,
+// render them as a compact agent-results card instead of a giant "You" bubble.
+const BG_RESULTS_PREFIX = "[automated message] Results from background jobs";
+
+function jobResultsCard(content) {
+  clearWelcome();
+  const card = el("div", "tool agent-results");
+  card.innerHTML = `<div class="tool-head" role="button" tabindex="0" aria-expanded="false">
+      <div class="tool-main"><div class="tool-title"><span class="tool-verb">Agents</span> <span class="tool-arg">results delivered</span></div></div>
+      <span class="tool-status done"></span>
+      <svg class="tool-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>
+    <div class="tool-body"></div>`;
+  const rows = el("div", "agent-rows");
+  // Sections look like "## agent (job-N) — ✓|✗|◑" (glyphs from status_sym).
+  for (const m of content.matchAll(/^## (.+?) \(([^)]*)\) — (✓|✗|◑|done|ERROR)/gm)) {
+    const ok = m[3] === "✓" || m[3] === "done";
+    const row = el("div", "agent-row");
+    row.innerHTML = `<span class="tool-status ${ok ? "done" : m[3] === "◑" ? "bg" : "error"}"></span><span class="agent-name"></span><span class="agent-task"></span>`;
+    row.querySelector(".agent-name").textContent = m[1];
+    row.querySelector(".agent-task").textContent = m[2];
+    rows.appendChild(row);
+  }
+  const body = card.querySelector(".tool-body");
+  if (rows.childElementCount) card.insertBefore(rows, body);
+  body.appendChild(el("div", "tool-section-label", "Results"));
+  body.appendChild(el("pre", null)).textContent = content;
+  const head = card.querySelector(".tool-head");
+  const toggle = () => { card.classList.toggle("open"); head.setAttribute("aria-expanded", card.classList.contains("open")); };
+  head.onclick = toggle;
+  head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+  $("thread").appendChild(card);
+}
+
+// Registered sub-agents, parsed from the subagent tool's dynamic description
+// ("Registered agents:" list) so no extra endpoint is needed.
+function registeredAgents() {
+  const def = state.toolDefs.find((t) => t.name === "subagent");
+  if (!def) return [];
+  const out = [];
+  let inList = false;
+  for (const line of (def.description || "").split("\n")) {
+    if (/^Registered agents:/.test(line)) { inList = true; continue; }
+    if (!inList) continue;
+    const m = line.match(/^\s+-\s+([^:]+):\s+(.*)$/);
+    if (!m) break;
+    out.push({ name: m[1], description: m[2].replace(/\s*\[[^\]]*\]$/, "") });
+  }
+  return out;
 }
 
 // ── canvas: split-screen artifact / diff viewer ──────────────────────────────
@@ -1361,6 +1513,7 @@ function onConversationLoaded(ev) {
   // The target conversation's view is now authoritative — stop dropping events.
   state.awaitingLoad = null;
   $("thread").innerHTML = "";
+  bgAgentRows = []; // rows live in the DOM we just discarded
   finalizeTurn();
   // Conversation routing is independent: leaving a running chat must not keep
   // this tab's composer disabled while another chat continues in its actor.
@@ -1390,10 +1543,16 @@ function onConversationLoaded(ev) {
 }
 
 function renderStoredMessage(m, asstTurn) {
-  if (m.role === "user") { userMessage(m.content); return null; }
+  if (m.role === "user") {
+    // Daemon-injected background job results — render as an agent card, not a
+    // wall-of-text "You" bubble the user never typed.
+    if ((m.content || "").startsWith(BG_RESULTS_PREFIX)) { jobResultsCard(m.content); return null; }
+    userMessage(m.content);
+    return null;
+  }
   if (m.role === "assistant") {
     const t = asstTurn || turn("assistant");
-    if (!asstTurn) t.appendChild(el("div", "role-tag", "bone"));
+    if (!asstTurn) t.appendChild(el("div", "role-tag", ""));
     // Only emit a prose block when there's actual text — empty assistant
     // messages (tool-call-only rounds) shouldn't add blank separation.
     if ((m.content || "").trim()) t.appendChild(el("div", "prose", renderMarkdown(m.content)));
@@ -1408,6 +1567,11 @@ function renderStoredMessage(m, asstTurn) {
       card.querySelector(".tool-verb").textContent = verb;
       card.querySelector(".tool-arg").textContent = arg;
       fillToolArgs(card.querySelector(".tool-body"), tc.arguments);
+      if (tc.name === "subagent") {
+        // Per-job outcomes aren't stored with the call; show neutral done rows.
+        const rows = buildAgentRows(tc.arguments, true);
+        if (rows.childElementCount) card.insertBefore(rows, card.querySelector(".tool-body"));
+      }
       const head = card.querySelector(".tool-head");
       const toggle = () => { card.classList.toggle("open"); head.setAttribute("aria-expanded", card.classList.contains("open")); };
       head.onclick = toggle;
@@ -1488,6 +1652,9 @@ function applyTheme(theme) {
 }
 
 function systemLine(text, isError) {
+  // The active turn already has a spinner and label. Avoid duplicating runtime
+  // "thinking" notices as a second, centered status line in the thread.
+  if (!isError && /^thinking(?:\.{3}|…)?$/i.test((text || "").trim())) return;
   clearWelcome();
   const line = el("div", "system-line" + (isError ? " error" : ""));
   line.textContent = text;
@@ -1675,6 +1842,7 @@ async function newChat() {
   }
   send("new_conversation");
   $("thread").innerHTML = "";
+  bgAgentRows = [];
   $("thread").appendChild(buildWelcome());
   finalizeTurn();
   setRunning(false);
@@ -2116,6 +2284,15 @@ function renderTools() {
   wrap.innerHTML = "";
   if (!state.toolDefs.length) { wrap.appendChild(el("div", "set-desc", "Tool list loads once connected.")); return; }
   const disabled = new Set(configCache.toolsDisabled || []);
+  // Registered sub-agents (from the subagent tool's dynamic description).
+  // Read-only here — they're defined in init.lua via bone.register_subagent;
+  // the subagent entry in the tool list below toggles the whole feature.
+  const agents = registeredAgents();
+  if (agents.length) {
+    wrap.appendChild(el("div", "set-group-label", "Sub-agents"));
+    for (const a of agents) wrap.appendChild(setRow(a.name, a.description, el("span", "agent-chip", "agent")));
+    wrap.appendChild(el("div", "set-group-label", "Tools"));
+  }
   for (const t of state.toolDefs) {
     const desc = (t.description || "").split("\n")[0].slice(0, 70);
     wrap.appendChild(setRow(t.name, desc, switchEl(!disabled.has(t.name), (on) => {
@@ -2259,7 +2436,7 @@ const SUGGESTIONS = [
 function buildWelcome() {
   const w = el("div", "welcome");
   w.id = "welcome";
-  w.innerHTML = `<div class="welcome-mark">⠿</div><h1>bone studio</h1>
+  w.innerHTML = `<h1>bone studio</h1>
     <p>A calm, elegant front-end for your bone agent.</p><div class="suggestions"></div>`;
   const wrap = w.querySelector(".suggestions");
   for (const s of SUGGESTIONS) {
@@ -2313,13 +2490,42 @@ function trapDialogFocus(e) {
 // ── markdown (compact, escaped-first) ────────────────────────────────────────
 
 function escapeHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+function safeHref(raw) {
+  const href = raw.trim();
+  return /^(https?:|mailto:|\/|#)/i.test(href) ? escapeHtml(href) : "#";
+}
 function inlineMd(s) {
-  const t = escapeHtml(s);
-  return t
-    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+  const code = [];
+  const breaks = [];
+  let raw = s.replace(/`([^`]+)`/g, (_, c) => { code.push(`<code>${escapeHtml(c)}</code>`); return `\u0000C${code.length - 1}\u0000`; });
+  raw = raw.replace(/<br\s*\/?>/gi, () => { breaks.push("<br/>"); return `\u0000B${breaks.length - 1}\u0000`; });
+  let t = escapeHtml(raw);
+  t = t
+    .replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+["']([^"']*)["'])?\)/g, (_, alt, url, title) => `<img src="${safeHref(url)}" alt="${alt}"${title ? ` title="${title}"` : ""} loading="lazy" />`)
+    .replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+["']([^"']*)["'])?\)/g, (_, label, url, title) => `<a href="${safeHref(url)}"${title ? ` title="${title}"` : ""} target="_blank" rel="noreferrer">${label}</a>`)
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    .replace(/(^|[^_])_([^_]+)_/g, "$1<em>$2</em>");
+  return t
+    .replace(/\u0000C(\d+)\u0000/g, (_, i) => code[Number(i)])
+    .replace(/\u0000B(\d+)\u0000/g, (_, i) => breaks[Number(i)]);
+}
+
+const CODE_WORDS = new Set(("as async await break case catch class const continue crate def default delete do else enum export extends false finally fn for from function if impl import in interface let match mod move mut new None null of pub raise return self Some static struct super switch this throw trait true try type typeof undefined use var void while with yield").split(" "));
+function highlightCode(source, lang = "") {
+  const escaped = escapeHtml(source);
+  const stash = [];
+  const keep = (cls, value) => { stash.push(`<span class="tok-${cls}">${value}</span>`); return `\u0000T${stash.length - 1}\u0000`; };
+  let out = escaped
+    .replace(/(&quot;|'|&#39;)(?:\\.|(?!\1).)*?\1/g, (m) => keep("string", m))
+    .replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, (m) => keep("comment", m))
+    .replace(/(^|\n)(\s*#[^\n]*)/g, (_, lead, comment) => lead + keep("comment", comment))
+    .replace(/\b(0x[\da-f]+|\d+(?:\.\d+)?)\b/gi, (m) => keep("number", m))
+    .replace(/\b[A-Za-z_$][\w$]*\b/g, (m) => CODE_WORDS.has(m) ? keep("keyword", m) : m);
+  out = out.replace(/\u0000T(\d+)\u0000/g, (_, i) => stash[Number(i)]);
+  return out;
 }
 function renderMarkdown(src) {
   const lines = src.split("\n");
@@ -2328,12 +2534,12 @@ function renderMarkdown(src) {
   while (i < lines.length) {
     const line = lines[i];
     const fence = line.match(/^\s*```(\w*)/);
-    if (fence) { closeList(); const buf = []; i++; while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]); i++; html += `<pre><code>${escapeHtml(buf.join("\n"))}</code></pre>`; continue; }
+    if (fence) { closeList(); const buf = []; const lang = fence[1].toLowerCase(); i++; while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]); if (i < lines.length) i++; html += `<pre class="code-block" data-language="${escapeHtml(lang)}"><code class="language-${escapeHtml(lang)}">${highlightCode(buf.join("\n"), lang)}</code></pre>`; continue; }
     if (/^\s*$/.test(line)) { closeList(); i++; continue; }
     const h = line.match(/^(#{1,3})\s+(.*)/);
     if (h) { closeList(); html += `<h${h[1].length}>${inlineMd(h[2])}</h${h[1].length}>`; i++; continue; }
-    const ul = line.match(/^\s*[-*]\s+(.*)/);
-    if (ul) { if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; } html += `<li>${inlineMd(ul[1])}</li>`; i++; continue; }
+    const ul = line.match(/^\s*[-*+]\s+(.*)/);
+    if (ul) { if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; } const task = ul[1].match(/^\[([ xX])\]\s+(.*)/); html += task ? `<li class="task-item"><input type="checkbox" disabled ${task[1] !== " " ? "checked" : ""} /><span>${inlineMd(task[2])}</span></li>` : `<li>${inlineMd(ul[1])}</li>`; i++; continue; }
     const ol = line.match(/^\s*\d+\.\s+(.*)/);
     if (ol) { if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; } html += `<li>${inlineMd(ol[1])}</li>`; i++; continue; }
     const bq = line.match(/^\s*>\s?(.*)/);
@@ -2357,7 +2563,7 @@ function renderMarkdown(src) {
     closeList();
     const para = [line]; i++;
     while (i < lines.length && lines[i].trim() && !/^\s*(#{1,3}\s|[-*]\s|\d+\.\s|>|```)/.test(lines[i])) para.push(lines[i++]);
-    html += `<p>${inlineMd(para.join("<br/>"))}</p>`;
+    html += `<p>${para.map(inlineMd).join("<br/>")}</p>`;
   }
   closeList();
   return html;
@@ -2366,6 +2572,8 @@ function renderMarkdown(src) {
 function enhanceContent(root) {
   for (const pre of root.querySelectorAll("pre:not([data-enhanced])")) {
     pre.dataset.enhanced = "true";
+    const language = pre.dataset.language;
+    if (language) pre.prepend(el("span", "code-language", language));
     const button = el("button", "copy-btn", "Copy");
     button.type = "button";
     button.setAttribute("aria-label", "Copy code");

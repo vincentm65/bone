@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>bone studio</title>
     <link rel="stylesheet" href="/styles.css" />
     <script>
@@ -22,10 +22,6 @@
       <!-- ── Sidebar ───────────────────────────────────────────────── -->
       <aside id="sidebar">
         <div class="sidebar-head">
-          <div class="brand">
-            <span class="brand-mark">⠿</span>
-            <span class="brand-name">bone<span class="brand-sub">studio</span></span>
-          </div>
           <button id="collapse-btn" class="ghost-btn" title="Hide sidebar" aria-label="Hide sidebar">
             <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
           </button>
@@ -97,7 +93,6 @@
           <div id="chat-col">
             <main id="thread" aria-live="polite">
               <div id="welcome" class="welcome">
-                <div class="welcome-mark">⠿</div>
                 <h1>bone studio</h1>
                 <p>A calm, elegant front-end for your bone agent.</p>
                 <div id="suggestions" class="suggestions"></div>
@@ -121,7 +116,7 @@
               </div>
             </div>
             <div id="composer" class="composer">
-                <textarea id="input" rows="1" placeholder="Message bone…" autocomplete="off"></textarea>
+                <textarea id="input" rows="1" placeholder="Message…" autocomplete="off"></textarea>
                 <div class="composer-bar">
                   <button id="model-chip" class="pill model-pill" title="Change model" aria-haspopup="dialog" aria-expanded="false">
                     <span class="dot" id="conn-dot"></span>
