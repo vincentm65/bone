@@ -204,6 +204,7 @@ impl LuaTool {
         ctx_cfg.tool_call_depth = context.tool_call_depth;
         ctx_cfg.agent_depth = context.agent_depth;
         ctx_cfg.cancelled = context.cancelled.clone();
+        ctx_cfg.approval_gate = context.approval_gate.clone();
         let ctx_table = ctx::create_ctx_table(&lua, &ctx_cfg)
             .map_err(|e| format!("lua tool '{name}': failed to create ctx: {e}"))?;
 

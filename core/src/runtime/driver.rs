@@ -741,6 +741,7 @@ impl Driver {
 
             // Let running tools observe cancellation.
             tools.cancel_token = cancel.clone();
+            tools.approval_gate = Some(crate::tools::SharedGate(gate.clone()));
             // Re-read each round so a mid-turn Safe/Danger toggle takes effect
             // on the very next tool batch.
             let results = execute_tool_calls(
@@ -837,7 +838,10 @@ impl Driver {
         extensions.dispatch_simple("session_end", serde_json::json!({}));
 
         DriverOutcome {
-            result: result.map(|content| AgentResponse { content }),
+            result: result.map(|content| AgentResponse {
+                content,
+                transcript: transcript.clone(),
+            }),
             tools,
             transcript,
             token_stats,

@@ -267,19 +267,18 @@ fn apply_state(state: &mut State) {
         b
     };
 
-    // Rebuild rows from fresh on-disk state so checkboxes and "update" tags
-    // reflect reality (successfully updated items lose their tag), then overlay
-    // per-item status tags keyed by name.
+    // Rebuild rows from the same catalog entries used for this apply pass.
+    // A fresh fetch here can overwrite the cache with a newer index than the
+    // files just installed, making the next startup banner report an update
+    // immediately after a successful apply.
     let name_results: Vec<(String, ItemResult)> = state
         .entries
         .iter()
         .map(|e| e.name.clone())
         .zip(results)
         .collect();
-    let entries = catalog::sync_quiet();
-    let mut items = build_items(&entries);
+    let mut items = build_items(&state.entries);
     overlay_results(&mut items, &name_results);
-    state.entries = entries;
     state.items = items;
     state.cursor = state.cursor.min(state.items.len().saturating_sub(1));
     state.result = Some(banner);

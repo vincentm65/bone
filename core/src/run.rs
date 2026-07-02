@@ -116,6 +116,8 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             session_sink: None,
             tool_allowlist: None,
             max_tokens: None,
+            approval_gate: None,
+            transcript: None,
         })
         .await;
     }
@@ -136,6 +138,8 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         session_sink: None,
         tool_allowlist: None,
         max_tokens: None,
+        approval_gate: None,
+        transcript: None,
     })
     .await
 }

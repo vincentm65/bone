@@ -35,22 +35,32 @@ pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
         .map_err(crate::util::errstr)?;
 
     let on_fn = lua
-        .create_function(|lua, (event_name, handler): (String, mlua::Function)| {
-            let bone: Table = lua.globals().get("bone")?;
-            let handlers: Table = bone.get("_handlers")?;
-            match handlers.get::<Option<Table>>(&*event_name)? {
-                Some(event_handlers) => {
-                    event_handlers.push(handler)?;
+        .create_function(
+            |lua, (event_name, handler, opts): (String, mlua::Function, Option<Table>)| {
+                let bone: Table = lua.globals().get("bone")?;
+                let depth = bone.get::<Option<usize>>("agent_depth")?.unwrap_or(0);
+                let allow_subagents = opts
+                    .as_ref()
+                    .and_then(|opts| opts.get::<Option<bool>>("subagents").ok().flatten())
+                    .unwrap_or(false);
+                if depth > 0 && !allow_subagents {
+                    return Ok(());
                 }
-                None => {
-                    // Unknown event name → create the array on demand (autocmd).
-                    let array = lua.create_table()?;
-                    array.push(handler)?;
-                    handlers.set(&*event_name, array)?;
+                let handlers: Table = bone.get("_handlers")?;
+                match handlers.get::<Option<Table>>(&*event_name)? {
+                    Some(event_handlers) => {
+                        event_handlers.push(handler)?;
+                    }
+                    None => {
+                        // Unknown event name → create the array on demand (autocmd).
+                        let array = lua.create_table()?;
+                        array.push(handler)?;
+                        handlers.set(&*event_name, array)?;
+                    }
                 }
-            }
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .map_err(crate::util::errstr)?;
 
     bone.set("on", on_fn).map_err(crate::util::errstr)?;

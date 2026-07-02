@@ -173,6 +173,8 @@ fn resolve_provider_uses_injected_provider_and_shares_arc() {
         tool_allowlist: None,
         session_sink: None,
         max_tokens: None,
+        approval_gate: None,
+        transcript: None,
     };
     let mut custom = CustomConfigs::default();
     let mut pc = custom.derive_providers_config();
@@ -212,6 +214,8 @@ fn resolve_provider_short_circuits_without_any_config() {
         tool_allowlist: None,
         session_sink: None,
         max_tokens: None,
+        approval_gate: None,
+        transcript: None,
     };
     let mut custom = CustomConfigs::default();
     let mut pc = custom.derive_providers_config();
@@ -244,6 +248,8 @@ fn resolve_provider_rejects_max_tokens_with_injected_provider() {
         tool_allowlist: None,
         session_sink: None,
         max_tokens: Some(1),
+        approval_gate: None,
+        transcript: None,
     };
     let mut custom = CustomConfigs::default();
     let mut pc = custom.derive_providers_config();

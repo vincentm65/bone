@@ -9,7 +9,7 @@
 
 pub use bone_core::commands::{BUILTINS, is_protected_builtin};
 
-pub fn help(lua_commands: &[(String, String)]) -> String {
+pub fn help(downloaded_commands: &[(String, String)]) -> String {
     let bold = "\x1b[1m";
     let reset = "\x1b[0m";
     let mut lines: Vec<String> = BUILTINS
@@ -18,16 +18,16 @@ pub fn help(lua_commands: &[(String, String)]) -> String {
         .collect();
     lines.insert(0, format!("{bold}Commands{reset}"));
     lines.push("  :           — run a shell command inline (: <command>)".to_string());
-    if !lua_commands.is_empty() {
+    if !downloaded_commands.is_empty() {
         lines.push(String::new());
-        lines.push(format!("{bold}Lua commands{reset}"));
-        let max_name = lua_commands
+        lines.push(format!("{bold}Downloaded commands{reset}"));
+        let max_name = downloaded_commands
             .iter()
             .map(|(n, _)| n.len())
             .max()
             .unwrap_or(0)
             .max(10);
-        for (name, desc) in lua_commands {
+        for (name, desc) in downloaded_commands {
             lines.push(format!("  /{name:<max_name$} — {desc}"));
         }
     }

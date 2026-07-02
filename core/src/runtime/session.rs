@@ -390,6 +390,7 @@ mod tests {
         let outcome = DriverOutcome {
             result: Ok(crate::agent::AgentResponse {
                 content: "current answer".into(),
+                transcript: Vec::new(),
             }),
             tools: ToolHandler::new(builtin_tools()),
             // Simulate compaction replacing a ten-message transcript with a

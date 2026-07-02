@@ -32,20 +32,20 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
 
     for agent in &agents {
         let agent_jobs: Vec<&Job> = jobs.iter().filter(|j| j.agent == *agent).collect();
-        let running: Vec<&Job> = agent_jobs
+        let active: Vec<&Job> = agent_jobs
             .iter()
-            .filter(|j| j.status == JobStatus::Running)
+            .filter(|j| !j.is_finished())
             .copied()
             .collect();
 
-        if running.is_empty() {
+        if active.is_empty() {
             continue;
         }
         active_agent_count += 1;
 
         let visible_jobs: Vec<&Job> = agent_jobs
             .iter()
-            .filter(|j| j.status == JobStatus::Running || !j.consumed)
+            .filter(|j| !j.is_finished() || !j.consumed)
             .copied()
             .collect();
 
@@ -55,11 +55,8 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 format!(
                     " ◑ {} ({} active, {} done)",
                     agent,
-                    running.len(),
-                    visible_jobs
-                        .iter()
-                        .filter(|j| j.status != JobStatus::Running)
-                        .count()
+                    active.len(),
+                    visible_jobs.iter().filter(|j| j.is_finished()).count()
                 ),
                 Style::default()
                     .fg(Color::White)
@@ -69,6 +66,12 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 let mut task = job_label(job).replace(['\n', '\r'], " ");
                 if task.chars().count() > 36 {
                     task = format!("{}...", task.chars().take(33).collect::<String>());
+                }
+                if let Some(activity) = &job.activity {
+                    task = activity.replace(['\n', '\r'], " ");
+                    if task.chars().count() > 36 {
+                        task = format!("{}...", task.chars().take(33).collect::<String>());
+                    }
                 }
                 let total = job.token_sent + job.token_received;
                 let mut parts = vec![
@@ -96,7 +99,7 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 lines.push(Line::from(parts));
             }
         } else {
-            let job = running[0];
+            let job = active[0];
             let (icon, status) = job_status(job, now);
             lines.push(Line::from(vec![
                 Span::styled(
@@ -151,13 +154,14 @@ fn job_label(job: &Job) -> &str {
 fn icon_fg(job: &Job) -> Color {
     match job.status {
         JobStatus::Running => Color::White,
+        JobStatus::Queued => Color::Yellow,
         JobStatus::Done => Color::DarkGray,
         JobStatus::Error => Color::Red,
     }
 }
 
 fn name_fg(job: &Job) -> Color {
-    if job.status == JobStatus::Running {
+    if !job.is_finished() {
         Color::White
     } else {
         Color::DarkGray
@@ -167,6 +171,7 @@ fn name_fg(job: &Job) -> Color {
 fn job_status_icon(job: &Job) -> &'static str {
     match job.status {
         JobStatus::Running => "◑",
+        JobStatus::Queued => "⧗",
         JobStatus::Done => "✓",
         JobStatus::Error => "✗",
     }
@@ -175,9 +180,14 @@ fn job_status_icon(job: &Job) -> &'static str {
 /// Build `(icon, status-text)` for a single job.
 fn job_status(job: &Job, now: u64) -> (&'static str, String) {
     match job.status {
+        JobStatus::Queued => ("⧗", "queued".to_string()),
         JobStatus::Running => {
             let elapsed = now.saturating_sub(job.started_at);
-            let mut task = job_label(job).replace(['\n', '\r'], " ");
+            let mut task = job
+                .activity
+                .as_deref()
+                .unwrap_or_else(|| job_label(job))
+                .replace(['\n', '\r'], " ");
             if task.chars().count() > 40 {
                 task = format!("{}...", task.chars().take(37).collect::<String>());
             }

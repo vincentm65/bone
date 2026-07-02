@@ -225,6 +225,8 @@ pub struct AgentRequest {
     /// constructed provider (not an injected one). Used by context compaction
     /// to bound the summarization model's output.
     pub max_tokens: Option<u32>,
+    pub approval_gate: Option<crate::tools::SharedGate>,
+    pub transcript: Option<Vec<ChatMessage>>,
 }
 
 /// Current time in epoch milliseconds.
@@ -244,6 +246,7 @@ pub(crate) fn touch_activity(activity: &Option<Arc<std::sync::atomic::AtomicU64>
 
 pub struct AgentResponse {
     pub content: String,
+    pub transcript: Vec<ChatMessage>,
 }
 
 // ── JSONL event helpers ─────────────────────────────────────────────────────
@@ -430,7 +433,8 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     let extensions = booted.manager;
     let tools = booted.tools;
 
-    let transcript = vec![ChatMessage::new(ChatRole::User, &request.prompt)];
+    let mut transcript = request.transcript.clone().unwrap_or_default();
+    transcript.push(ChatMessage::new(ChatRole::User, &request.prompt));
     extensions.dispatch_simple(
         "message",
         serde_json::json!({ "role": "user", "content": &request.prompt }),
@@ -518,7 +522,11 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         extensions,
         tools,
         session,
-        gate: Arc::new(crate::tools::AutoApprovalGate),
+        gate: request
+            .approval_gate
+            .as_ref()
+            .map(|gate| gate.0.clone())
+            .unwrap_or_else(|| Arc::new(crate::tools::AutoApprovalGate)),
         approval_mode: crate::tools::SharedApprovalMode::new(request.approval_mode),
         agent_depth: request.agent_depth,
         activity: request.activity.clone(),
@@ -665,6 +673,8 @@ mod tests {
             session_sink,
             tool_allowlist: None,
             max_tokens: None,
+            approval_gate: None,
+            transcript: None,
         }
     }
 

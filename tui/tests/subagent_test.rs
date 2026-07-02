@@ -370,12 +370,10 @@ fn wait_action_collects_dispatched_job() {
     // Create a known finished job directly so this test only exercises the
     // subagent wait action and does not race another real background run.
     let registry = bone::ext::jobs::registry();
-    let job_id = registry
-        .create(test_job(
-            "waiter-collect",
-            "unique-task-wait-action-collect",
-        ))
-        .expect("wait-action job should be created");
+    let job_id = registry.create(test_job(
+        "waiter-collect",
+        "unique-task-wait-action-collect",
+    ));
     registry.complete(&job_id, Ok("collected job result".into()));
 
     // Wait on it via the tool.
@@ -508,12 +506,8 @@ fn rust_jobs_pane_returns_valid_panepage() {
     // The pane is driven purely by the job registry — no registered-agent list
     // is consulted, so the agent labels come from the jobs themselves.
     let registry = bone::ext::jobs::registry();
-    let id1 = registry
-        .create(test_job("render-researcher", "search query"))
-        .expect("render-researcher job should be created");
-    let _id2 = registry
-        .create(test_job("render-coder", "fix bug in module"))
-        .expect("render-coder job should be created");
+    let id1 = registry.create(test_job("render-researcher", "search query"));
+    let _id2 = registry.create(test_job("render-coder", "fix bug in module"));
     // Complete one job so only one is running (pane should still show).
     registry.complete(&id1, Ok("found 3 relevant papers".into()));
 
@@ -591,16 +585,14 @@ fn cancel_running_job_via_lua_tool() {
     // A running job whose cancel flag we can inspect afterwards.
     let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let registry = bone::ext::jobs::registry();
-    let job_id = registry
-        .create(bone::ext::jobs::NewJob {
-            agent: "cancel-target".into(),
-            task: "unique-task-cancel-via-lua".into(),
-            title: String::new(),
-            max_concurrency: 1,
-            scope: None,
-            cancel_flag: cancel_flag.clone(),
-        })
-        .expect("cancel-target job should be created");
+    let job_id = registry.create(bone::ext::jobs::NewJob {
+        agent: "cancel-target".into(),
+        task: "unique-task-cancel-via-lua".into(),
+        title: String::new(),
+        max_concurrency: 1,
+        scope: None,
+        cancel_flag: cancel_flag.clone(),
+    });
 
     // 1. Cancel the running job through the Lua tool at depth 0.
     let results = rt

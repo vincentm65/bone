@@ -95,6 +95,11 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         // an `[e] edit` action key; refresh older seeded copies that predate the
         // `action_keys` wiring so `e` opens the provider editor again.
         || (name == "config.lua" && !existing.contains("action_keys"))
+        // memory moved from a visible follow-up prompt to a self-contained
+        // quiet command with scoped global/project files.
+        || (name == "memory.lua"
+            && existing.contains("incremental memory builder")
+            && !existing.contains("Quietly update global and project memory"))
 }
 
 /// Boot the Lua extension system.

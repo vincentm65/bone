@@ -78,3 +78,40 @@ pub trait ApprovalGate: Send + Sync {
 pub struct AutoApprovalGate;
 
 impl ApprovalGate for AutoApprovalGate {}
+
+/// A cloneable, Debug-friendly handle to a gate, so it can ride along in
+/// context structs (`ToolExecutionContext`, `AgentRequest`) that derive
+/// `Debug`/`Clone`. This is what lets a spawned sub-agent inherit its parent
+/// conversation's interactive gate.
+#[derive(Clone)]
+pub struct SharedGate(pub std::sync::Arc<dyn ApprovalGate>);
+
+impl std::fmt::Debug for SharedGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedGate")
+    }
+}
+
+/// Escalating gate for delegated agents: auto-resolves everything the agent's
+/// own approval mode already decides, and forwards only would-be-denied calls
+/// to `inner` (the parent conversation's gate) so the user can approve them
+/// interactively. With a non-interactive `inner` the fallback re-denies, so
+/// headless behavior is unchanged.
+pub struct EscalatingGate {
+    pub inner: std::sync::Arc<dyn ApprovalGate>,
+}
+
+#[async_trait::async_trait]
+impl ApprovalGate for EscalatingGate {
+    async fn decide(
+        &self,
+        blocked: Option<String>,
+        auto_allows: bool,
+        call: &crate::tools::ToolCall,
+    ) -> CallOutcome {
+        match decide_call(blocked.clone(), auto_allows) {
+            CallOutcome::Denied => self.inner.decide(blocked, auto_allows, call).await,
+            outcome => outcome,
+        }
+    }
+}

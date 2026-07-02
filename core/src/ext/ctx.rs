@@ -118,6 +118,7 @@ pub struct CtxConfig {
     pub call_id: Option<String>,
     pub tool_handler: Option<crate::tools::registry::ToolHandler>,
     pub approval_mode: crate::tools::ApprovalMode,
+    pub approval_gate: Option<crate::tools::SharedGate>,
     pub tool_call_depth: usize,
     pub session_id: Option<i64>,
     pub provider: Option<String>,
@@ -150,6 +151,7 @@ impl CtxConfig {
             call_id: None,
             tool_handler: None,
             approval_mode: crate::tools::ApprovalMode::Safe,
+            approval_gate: None,
             tool_call_depth: 0,
             session_id: None,
             provider: None,
@@ -1339,6 +1341,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         agent_depth: cfg.agent_depth,
+        approval_gate: cfg.approval_gate.clone(),
     };
     let cancelled_flag = cfg.cancelled.clone();
 
@@ -1478,7 +1481,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
         // Build the request first so a bad-opts error never leaves an orphan
         // job in the registry.
-        let mut built = match build_agent_request(
+        let built = match build_agent_request(
             prompt.clone(),
             &opts,
             &inherited_spawn,
@@ -1489,53 +1492,15 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             Ok(b) => b,
             Err(e) => return agent_result_to_lua(lua, Err(e)),
         };
-
-        let job_cancel = Arc::new(AtomicBool::new(false));
-        let id = match crate::ext::jobs::registry().create(crate::ext::jobs::NewJob {
-            agent: agent_name,
-            task: prompt,
+        let id = launch_background_job(
+            handle,
+            built,
+            agent_name,
+            prompt,
             title,
             max_concurrency,
-            scope: spawn_scope,
-            cancel_flag: job_cancel.clone(),
-        }) {
-            Ok(id) => id,
-            Err(e) => return agent_err(lua, e),
-        };
-
-        // Token tracking: shared counters mirrored into the registry as the
-        // job streams, and read out once more when it completes.
-        let token_sent = Arc::new(AtomicU64::new(0));
-        let token_received = Arc::new(AtomicU64::new(0));
-        let (ts_cb, tr_cb, id_for_task) = (token_sent.clone(), token_received.clone(), id.clone());
-        built.request.on_token_usage = Some(Arc::new(move |sent: u64, received: u64| {
-            ts_cb.store(sent, Ordering::Relaxed);
-            tr_cb.store(received, Ordering::Relaxed);
-            crate::ext::jobs::registry().update_tokens(&id_for_task, sent, received);
-        }));
-
-        let BuiltAgent {
-            request,
-            activity,
-            timeout_ms,
-            wall_timeout_ms,
-        } = built;
-        let id_for_spawn = id.clone();
-        handle.spawn(async move {
-            let outcome = run_agent_with_watchdog(
-                request,
-                activity,
-                timeout_ms,
-                wall_timeout_ms,
-                Some(job_cancel),
-                Some(&id_for_spawn),
-            )
-            .await
-            .map(|resp| resp.content);
-            let ts = token_sent.load(Ordering::Relaxed);
-            let tr = token_received.load(Ordering::Relaxed);
-            crate::ext::jobs::registry().complete_with_tokens(&id_for_spawn, outcome, ts, tr);
-        });
+            spawn_scope,
+        );
 
         let result = lua.create_table()?;
         result.set("ok", true)?;
@@ -1544,6 +1509,57 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         Ok(Value::Table(result))
     })?;
     agent_table.set("spawn", spawn_fn)?;
+
+    // Continue a completed job with its saved conversation transcript.
+    let inherited_followup = inherited.clone();
+    let followup_scope = cfg.session_id;
+    let followup_fn = lua.create_function(
+        move |lua, (prior_id, prompt, opts): (String, String, Option<Table>)| {
+            if inherited_followup.agent_depth > 0 {
+                return agent_err(lua, "sub-agents cannot follow up background jobs");
+            }
+            let Some(transcript) =
+                crate::ext::jobs::registry().transcript_of(&prior_id, followup_scope)
+            else {
+                return agent_err(lua, "job not found or has no saved transcript");
+            };
+            let agent_name: String = opt_str(&opts, "agent").unwrap_or_default();
+            let title: String = opt_str(&opts, "title").unwrap_or_default();
+            let max_concurrency = opt_u64(&opts, "max_concurrency")
+                .map(|n| n.max(1) as usize)
+                .unwrap_or(1);
+            let handle = tokio::runtime::Handle::try_current().map_err(|e| {
+                mlua::Error::external(format!("followup requires a tokio runtime: {e}"))
+            })?;
+            let mut built = match build_agent_request(
+                prompt.clone(),
+                &opts,
+                &inherited_followup,
+                SPAWN_OPT_KEYS,
+                None,
+                extract_tool_allowlist(&opts),
+            ) {
+                Ok(b) => b,
+                Err(e) => return agent_result_to_lua(lua, Err(e)),
+            };
+            built.request.transcript = Some(transcript);
+            let id = launch_background_job(
+                handle,
+                built,
+                agent_name,
+                prompt,
+                title,
+                max_concurrency,
+                followup_scope,
+            );
+            let result = lua.create_table()?;
+            result.set("ok", true)?;
+            result.set("id", id)?;
+            result.set("error", Value::Nil)?;
+            Ok(Value::Table(result))
+        },
+    )?;
+    agent_table.set("followup", followup_fn)?;
 
     // --- ctx.agent.jobs() ---
     // Return a JSON array of all jobs (snapshot).
@@ -1637,6 +1653,7 @@ struct InheritedCtx {
     provider: Option<String>,
     model: Option<String>,
     agent_depth: usize,
+    approval_gate: Option<crate::tools::SharedGate>,
 }
 
 /// A ready-to-run `AgentRequest` plus the handles the dispatch loops need: the
@@ -1647,6 +1664,104 @@ struct BuiltAgent {
     activity: Arc<AtomicU64>,
     timeout_ms: u64,
     wall_timeout_ms: Option<u64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_background_job(
+    handle: tokio::runtime::Handle,
+    mut built: BuiltAgent,
+    agent: String,
+    task: String,
+    title: String,
+    max_concurrency: usize,
+    scope: Option<i64>,
+) -> String {
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
+    built.request.event_sender = Some(event_tx);
+    let job_cancel = Arc::new(AtomicBool::new(false));
+    let id = crate::ext::jobs::registry().create(crate::ext::jobs::NewJob {
+        agent,
+        task,
+        title,
+        max_concurrency,
+        scope,
+        cancel_flag: job_cancel.clone(),
+    });
+    let token_sent = Arc::new(AtomicU64::new(0));
+    let token_received = Arc::new(AtomicU64::new(0));
+    let (ts_cb, tr_cb, token_job_id) = (token_sent.clone(), token_received.clone(), id.clone());
+    built.request.on_token_usage = Some(Arc::new(move |sent, received| {
+        ts_cb.store(sent, Ordering::Relaxed);
+        tr_cb.store(received, Ordering::Relaxed);
+        crate::ext::jobs::registry().update_tokens(&token_job_id, sent, received);
+    }));
+    let BuiltAgent {
+        request,
+        activity,
+        timeout_ms,
+        wall_timeout_ms,
+    } = built;
+    let spawned_id = id.clone();
+    handle.spawn(async move {
+        while !crate::ext::jobs::registry().try_start(&spawned_id) {
+            if job_cancel.load(Ordering::Relaxed) {
+                crate::ext::jobs::registry().complete_with_tokens(
+                    &spawned_id,
+                    Err("cancelled while queued".into()),
+                    0,
+                    0,
+                    None,
+                );
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        activity.store(crate::agent::now_epoch_ms(), Ordering::Relaxed);
+        let event_job_id = spawned_id.clone();
+        let event_task = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    crate::runtime::RuntimeEvent::ToolCall { summary, .. } => {
+                        crate::ext::jobs::registry().note_activity(&event_job_id, &summary);
+                    }
+                    crate::runtime::RuntimeEvent::ToolResult { is_error, .. } => {
+                        crate::ext::jobs::registry().note_activity_done(&event_job_id, is_error);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let response = run_agent_with_watchdog(
+            request,
+            activity,
+            timeout_ms,
+            wall_timeout_ms,
+            Some(job_cancel),
+            Some(&spawned_id),
+        )
+        .await;
+        let _ = event_task.await;
+        let (outcome, transcript) = match response {
+            Ok(response) => (Ok(response.content), Some(response.transcript)),
+            Err(mut error) => {
+                let trace = crate::ext::jobs::registry().trace_of(&spawned_id);
+                if !trace.is_empty() {
+                    error.push_str("\n\nRecent activity:\n");
+                    error.push_str(&trace.join("\n"));
+                }
+                (Err(error), None)
+            }
+        };
+        crate::ext::jobs::registry().complete_with_tokens(
+            &spawned_id,
+            outcome,
+            token_sent.load(Ordering::Relaxed),
+            token_received.load(Ordering::Relaxed),
+            transcript,
+        );
+    });
+    id
 }
 
 /// Shared setup for all three dispatch paths: enforce the depth limit, parse
@@ -1680,6 +1795,15 @@ fn build_agent_request(
     let wall_timeout_ms =
         opt_u64(opts, "wall_timeout_ms").map(|n| n.clamp(1_000, MAX_AGENT_WALL_TIMEOUT_MS));
     let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
+    // Inherit the driving conversation's approval gate so delegated agents
+    // (blocking `run`/`run_stream` or background `spawn`) escalate would-be-
+    // denied calls to the user via `EscalatingGate`. With no inherited gate
+    // (headless) this stays `None` and the agent falls back to its own mode.
+    let approval_gate = inherited.approval_gate.as_ref().map(|gate| {
+        crate::tools::SharedGate(Arc::new(crate::tools::EscalatingGate {
+            inner: gate.0.clone(),
+        }))
+    });
     let request = crate::agent::AgentRequest {
         prompt,
         approval_mode: approval,
@@ -1695,6 +1819,8 @@ fn build_agent_request(
         session_sink: None,
         tool_allowlist,
         max_tokens,
+        approval_gate,
+        transcript: None,
     };
     Ok(BuiltAgent {
         request,

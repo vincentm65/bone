@@ -17,7 +17,7 @@ fn new_job(agent: &str, task: &str) -> NewJob {
 }
 
 fn create_default(reg: &JobRegistry, agent: &str, task: &str) -> String {
-    reg.create(new_job(agent, task)).unwrap()
+    reg.create(new_job(agent, task))
 }
 
 #[test]
@@ -36,19 +36,23 @@ fn create_and_snapshot() {
 }
 
 #[test]
-fn create_rejects_at_concurrency_cap() {
+fn create_queues_at_concurrency_cap() {
     let reg = fresh_registry();
     let id1 = create_default(&reg, "coder", "task one");
-    // Default max_concurrency=1 rejects second spawn.
-    let err = reg.create(new_job("coder", "task two")).unwrap_err();
-    assert!(
-        err.contains("at its concurrency cap"),
-        "unexpected error: {err}"
+    let id2 = reg.create(new_job("coder", "task two"));
+    assert_eq!(
+        reg.all_jobs()
+            .into_iter()
+            .find(|j| j.id == id2)
+            .unwrap()
+            .status,
+        JobStatus::Queued
     );
+    assert!(!reg.try_start(&id2));
 
     // Once the first job finishes, the agent is free again.
     reg.complete(&id1, Ok("done".into()));
-    assert!(reg.create(new_job("coder", "task three")).is_ok());
+    assert!(reg.try_start(&id2));
 }
 
 #[test]
@@ -59,18 +63,18 @@ fn create_respects_concurrency_cap() {
     reg.create(NewJob {
         max_concurrency: 2,
         ..new_job("parallel", "task two")
-    })
-    .unwrap();
-    // Third is rejected.
-    let err = reg
-        .create(NewJob {
-            max_concurrency: 2,
-            ..new_job("parallel", "task three")
-        })
-        .unwrap_err();
-    assert!(
-        err.contains("at its concurrency cap (2)"),
-        "unexpected error: {err}"
+    });
+    let third = reg.create(NewJob {
+        max_concurrency: 2,
+        ..new_job("parallel", "task three")
+    });
+    assert_eq!(
+        reg.all_jobs()
+            .into_iter()
+            .find(|j| j.id == third)
+            .unwrap()
+            .status,
+        JobStatus::Queued
     );
 }
 
@@ -78,19 +82,17 @@ fn create_respects_concurrency_cap() {
 fn create_allows_different_agents_concurrently() {
     let reg = fresh_registry();
     create_default(&reg, "a", "t1");
-    assert!(reg.create(new_job("b", "t2")).is_ok());
+    assert_eq!(reg.all_jobs().last().unwrap().status, JobStatus::Running);
 }
 
 #[test]
 fn cancel_sets_flag_and_completes() {
     let reg = fresh_registry();
     let cancel_flag = Arc::new(AtomicBool::new(false));
-    let id = reg
-        .create(NewJob {
-            cancel_flag: cancel_flag.clone(),
-            ..new_job("cancellable", "task")
-        })
-        .unwrap();
+    let id = reg.create(NewJob {
+        cancel_flag: cancel_flag.clone(),
+        ..new_job("cancellable", "task")
+    });
 
     // Cancel the job.
     assert!(reg.cancel(&id));
@@ -106,24 +108,19 @@ fn cancel_all_signals_only_running_jobs() {
     let flag1 = Arc::new(AtomicBool::new(false));
     let flag2 = Arc::new(AtomicBool::new(false));
     let done_flag = Arc::new(AtomicBool::new(false));
-    let id1 = reg
-        .create(NewJob {
-            cancel_flag: flag1.clone(),
-            ..new_job("a", "t1")
-        })
-        .unwrap();
+    let id1 = reg.create(NewJob {
+        cancel_flag: flag1.clone(),
+        ..new_job("a", "t1")
+    });
     reg.create(NewJob {
         cancel_flag: flag2.clone(),
         ..new_job("b", "t2")
-    })
-    .unwrap();
+    });
     // A finished job must not be re-signalled.
-    let done = reg
-        .create(NewJob {
-            cancel_flag: done_flag.clone(),
-            ..new_job("c", "t3")
-        })
-        .unwrap();
+    let done = reg.create(NewJob {
+        cancel_flag: done_flag.clone(),
+        ..new_job("c", "t3")
+    });
     reg.complete(&done, Ok("ok".into()));
 
     assert_eq!(reg.cancel_all(), 2);
@@ -171,20 +168,16 @@ fn scoped_cancel_and_peek_isolate_conversations() {
     let reg = fresh_registry();
     let flag_a = Arc::new(AtomicBool::new(false));
     let flag_b = Arc::new(AtomicBool::new(false));
-    let a = reg
-        .create(NewJob {
-            scope: Some(1),
-            cancel_flag: flag_a.clone(),
-            ..new_job("a", "conv-1 work")
-        })
-        .unwrap();
-    let b = reg
-        .create(NewJob {
-            scope: Some(2),
-            cancel_flag: flag_b.clone(),
-            ..new_job("b", "conv-2 work")
-        })
-        .unwrap();
+    let a = reg.create(NewJob {
+        scope: Some(1),
+        cancel_flag: flag_a.clone(),
+        ..new_job("a", "conv-1 work")
+    });
+    let b = reg.create(NewJob {
+        scope: Some(2),
+        cancel_flag: flag_b.clone(),
+        ..new_job("b", "conv-2 work")
+    });
 
     // Cancelling conversation 1 leaves conversation 2's job untouched.
     assert_eq!(reg.cancel_all_scoped(Some(1)), 1);
@@ -205,20 +198,36 @@ fn scoped_cancel_and_peek_isolate_conversations() {
 }
 
 #[test]
+fn transcript_of_respects_scope() {
+    let reg = fresh_registry();
+    let id = reg.create(NewJob {
+        scope: Some(1),
+        ..new_job("researcher", "conv-1 work")
+    });
+    let transcript = vec![crate::llm::ChatMessage::new(
+        crate::llm::ChatRole::Assistant,
+        "done",
+    )];
+    reg.complete_with_tokens(&id, Ok("done".into()), 0, 0, Some(transcript.clone()));
+
+    let saved = reg.transcript_of(&id, Some(1)).expect("matching scope");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].content, "done");
+    assert!(reg.transcript_of(&id, Some(2)).is_none());
+}
+
+#[test]
 fn format_results_for_injection_batches_and_notes_running() {
     let reg = fresh_registry();
-    let done = reg
-        .create(NewJob {
-            scope: Some(7),
-            ..new_job("researcher", "search")
-        })
-        .unwrap();
+    let done = reg.create(NewJob {
+        scope: Some(7),
+        ..new_job("researcher", "search")
+    });
     reg.complete(&done, Ok("found it".into()));
     reg.create(NewJob {
         scope: Some(7),
         ..new_job("watcher", "keep watching")
-    })
-    .unwrap();
+    });
 
     let finished = reg.peek_finished_unconsumed_scoped(Some(7));
     let running = reg.running_jobs_scoped(Some(7));
@@ -272,7 +281,7 @@ fn update_tokens_bumps_version_on_change() {
 #[test]
 fn cancel_bumps_version() {
     let reg = fresh_registry();
-    let id = reg.create(new_job("a", "t")).unwrap();
+    let id = reg.create(new_job("a", "t"));
     let v = reg.version();
     assert!(reg.cancel(&id));
     assert_eq!(reg.version(), v + 1);
@@ -321,7 +330,7 @@ fn peek_skips_running() {
 fn pruning_caps_registry_size() {
     let reg = fresh_registry();
     for i in 0..(MAX_RETAINED_JOBS + 10) {
-        let id = reg.create(new_job(&format!("agent-{i}"), "t")).unwrap();
+        let id = reg.create(new_job(&format!("agent-{i}"), "t"));
         reg.complete(&id, Ok("r".into()));
         reg.mark_consumed(std::slice::from_ref(&id));
     }
@@ -336,7 +345,7 @@ fn pruning_keeps_unconsumed_jobs() {
     let keep = create_default(&reg, "keeper", "t");
     reg.complete(&keep, Ok("important".into()));
     for i in 0..(MAX_RETAINED_JOBS + 10) {
-        let id = reg.create(new_job(&format!("agent-{i}"), "t")).unwrap();
+        let id = reg.create(new_job(&format!("agent-{i}"), "t"));
         reg.complete(&id, Ok("r".into()));
         reg.mark_consumed(std::slice::from_ref(&id));
     }

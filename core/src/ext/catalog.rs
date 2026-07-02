@@ -151,6 +151,32 @@ pub fn is_installed(entry: &CatalogEntry) -> bool {
     lua_dir(entry).join(&entry.name).exists()
 }
 
+/// Installed catalog commands that are not bundled defaults.
+pub fn installed_command_names() -> std::collections::HashSet<String> {
+    let bundled: std::collections::HashSet<&str> = super::DEFAULT_LUA_COMMANDS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    cached_index()
+        .into_iter()
+        .filter(|entry| entry.is_command() && !bundled.contains(entry.name.as_str()))
+        .filter(is_installed)
+        .map(|entry| entry.name.trim_end_matches(".lua").to_string())
+        .collect()
+}
+
+fn bundled_sha256(entry: &CatalogEntry) -> Option<String> {
+    let bundled = if entry.is_command() {
+        super::DEFAULT_LUA_COMMANDS
+    } else {
+        super::DEFAULT_LUA_TOOLS
+    };
+    bundled
+        .iter()
+        .find(|(name, _)| *name == entry.name)
+        .map(|(_, content)| sha256_hex(content.as_bytes()))
+}
+
 /// True if the on-disk copy differs from the catalog's current content.
 ///
 /// Detection is purely content-based: the catalog publishes the sha256 of each
@@ -163,7 +189,12 @@ pub fn needs_update(entry: &CatalogEntry) -> bool {
     }
     let path = lua_dir(entry).join(&entry.name);
     match std::fs::read(&path) {
-        Ok(bytes) => !sha256_hex(&bytes).eq_ignore_ascii_case(&entry.sha256),
+        Ok(bytes) => {
+            let installed = sha256_hex(&bytes);
+            !installed.eq_ignore_ascii_case(&entry.sha256)
+                && bundled_sha256(entry)
+                    .is_none_or(|bundled| !installed.eq_ignore_ascii_case(&bundled))
+        }
         Err(_) => false,
     }
 }

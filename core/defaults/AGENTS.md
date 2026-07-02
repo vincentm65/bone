@@ -56,6 +56,7 @@ bone.register_command("name", function(args, ctx) ... end)  -- short form
 
 -- Event hooks
 bone.on("event_name", function(event, ctx) ... end)
+bone.on("event_name", function(event, ctx) ... end, { subagents = true })  -- also register inside sub-agents
 ```
 
 ### `cjson` Global
@@ -118,6 +119,7 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.agent.run(prompt, opts?)` | `table` | `{ok, content, error}` |
 | `ctx.agent.run_stream(prompt, opts?)` | `table` | Same with event callbacks |
 | `ctx.agent.spawn(prompt, opts?)` | `table` | `{ok, id, error}` — non-blocking background job |
+| `ctx.agent.followup(id, prompt, opts?)` | `table` | `{ok, id, error}` — continue a completed job from its saved transcript |
 | `ctx.agent.jobs()` | `array` | Snapshot of all jobs (`{id, agent, task, status, result, started_at}`) |
 | `ctx.agent.wait(ids?, opts?)` | `table` | `{ok, jobs, pending, timed_out, cancelled}` — block until jobs finish |
 | **`ctx.config.*`** | | Config access |
@@ -263,7 +265,19 @@ Query all jobs:
 local jobs = ctx.agent.jobs()
 -- jobs: array of { id, agent, task, status, result, started_at, finished_at,
 --                  consumed, token_sent, token_received, result_file }
+-- status is one of: "queued", "running", "done", "error"
 ```
+
+Continue a completed job from its saved transcript:
+```lua
+local next = ctx.agent.followup("job-1", "Now implement the best option", {
+    agent = "researcher",
+    timeout_ms = 300000,
+})
+-- next: { ok = true, id = "job-2", error = nil }
+```
+
+`followup` is scoped to the current conversation: it can only resume jobs spawned in the same session, and only jobs that completed with a saved transcript.
 
 Block until jobs finish:
 ```lua
@@ -379,9 +393,18 @@ Open the interactive config editor. See [Config, Theme, and Keymaps](#config-the
 
 ### /memory
 
-Incremental memory builder. Processes all conversations since last run and updates `memory.md`. If `memory.md` exists in the config directory, its contents are loaded into every conversation's system prompt.
+Incremental memory builder. Processes new conversations and queued explicit preference signals, then quietly updates scoped memory files without submitting a follow-up chat turn. Global memory lives in `memory/global.md`; current-project memory lives in `memory/projects/<cwd-key>.md`; pending cheap captures live in `memory/inbox.jsonl`; checkpoints live in `memory/state.json`. A legacy `memory.md` is still read as a fallback until scoped memory exists.
 
-Available via the `bone-catalog` repo — install with `/catalog` or manually fetch from `https://raw.githubusercontent.com/vincentm65/bone-catalog/main/commands/memory.lua` into `~/.bone-rust/lua/commands/`.
+Usage:
+- `/memory` — process new conversations and queued preference signals.
+- `/memory show`, `/memory view`, `/memory list` — display global and current-project memory.
+- `/memory remember <text>` — queue an explicit memory signal and run the normal merge.
+- `/memory remember --global <text>` — force the signal into global memory.
+- `/memory remember --project <text>` — force the signal into current-project memory.
+
+If scoped memory exists in the config directory, global memory plus the current project's memory are loaded into the system prompt with size caps.
+
+Bundled as `lua/commands/memory.lua` and seeded into the config directory when enabled by setup.
 
 Run manually with `/memory`, or schedule daily:
 ```
@@ -652,7 +675,7 @@ return {
 Both reset every turn, so a handler that reads a flag (e.g. from `ctx.state`)
 can implement a toggled "plan mode" entirely in Lua.
 
-Protected built-ins (`/help`, `/quit`, `/exit`, `/new`, `/clear`, `/model`, `/provider`, `/config`, `/tools`, `/edit`, `/e`, `/stats`) cannot be overridden.
+Protected built-ins (`/catalog`, `/clear`, `/config`, `/edit`, `/e`, `/exit`, `/help`, `/model`, `/new`, `/provider`, `/quit`, `/setup`, `/stats`, `/tools`) cannot be overridden.
 
 ## Event Hooks
 
@@ -690,6 +713,8 @@ end)
 | `before_turn` | After user message, before provider request | no | **yes** |
 
 Handlers run in registration order. First `block` stops the chain. Handler runtime errors do not block (fail-open).
+
+By default, `bone.on` calls inside sub-agents are ignored so sub-agent prompts do not accidentally duplicate host hooks. Pass `{ subagents = true }` as the third argument to register a handler from sub-agent contexts too.
 
 The turn-lifecycle events carry these payloads:
 

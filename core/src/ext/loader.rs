@@ -25,6 +25,7 @@ pub fn boot(
     model: &str,
     provider: &str,
 ) -> BootResult {
+    let subagent = opts.agent_depth > 0;
     let version = env!("CARGO_PKG_VERSION");
     let config_dir_str = config_dir.to_string_lossy().to_string();
     // Standalone shared UI-state handle — lives outside the Lua VM mutex so the
@@ -51,7 +52,9 @@ pub fn boot(
     };
 
     // Seed libraries before init.lua so user startup code can `require` them.
-    super::seed_default_lua_libs(&config_dir.join("lua/lib"), None, false);
+    if !subagent {
+        super::seed_default_lua_libs(&config_dir.join("lua/lib"), None, false);
+    }
 
     let loaded = match engine::run_init(&lua, config_dir) {
         Ok(loaded) => loaded,
@@ -71,8 +74,14 @@ pub fn boot(
     let cmd_allow = selection
         .as_ref()
         .map(crate::config::SetupSelection::command_set);
-    super::seed_default_lua_tools(&config_dir.join("lua/tools"), tool_allow.as_ref(), false);
-    super::seed_default_lua_commands(&config_dir.join("lua/commands"), cmd_allow.as_ref(), false);
+    if !subagent {
+        super::seed_default_lua_tools(&config_dir.join("lua/tools"), tool_allow.as_ref(), false);
+        super::seed_default_lua_commands(
+            &config_dir.join("lua/commands"),
+            cmd_allow.as_ref(),
+            false,
+        );
+    }
 
     // Run tool and command files from lua/{tools,commands}/ directories. The
     // onboarding selection is enforced here too, not just at seed time: a
@@ -83,8 +92,9 @@ pub fn boot(
     {
         eprintln!("bone: warning: Lua tools failed: {e}");
     }
-    if let Err(e) =
-        super::run_lua_command_files(&lua, &config_dir.join("lua/commands"), cmd_allow.as_ref())
+    if !subagent
+        && let Err(e) =
+            super::run_lua_command_files(&lua, &config_dir.join("lua/commands"), cmd_allow.as_ref())
     {
         eprintln!("bone: warning: Lua commands failed: {e}");
     }

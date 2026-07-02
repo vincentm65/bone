@@ -257,6 +257,7 @@ impl App {
         self.input.reset();
         self.redraw(term)?;
         self.streaming = true;
+        self.cancel_streaming = false;
         self.shown_tool_rows.clear();
         // Seed the live output-token estimate from the running total so the
         // status bar ticks up from where it left off as text/tools stream in.
@@ -987,7 +988,7 @@ impl App {
     /// doesn't render a duplicate row. (The Driver executes the edit itself, so
     /// unlike the old path we can't inject `expected_hash` — the preview here is
     /// purely for display.)
-    async fn pump_show_edit_preview(
+    pub(crate) async fn pump_show_edit_preview(
         &mut self,
         call: &ToolCall,
         term: &mut BoneTerminal,

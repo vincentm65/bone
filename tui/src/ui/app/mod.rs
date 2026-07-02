@@ -747,45 +747,49 @@ impl App {
 
         while !self.should_quit {
             if event::poll(std::time::Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        // Coalesce a non-bracketed paste burst (Windows conhost
-                        // delivers a paste as a flood of Char events) into one
-                        // insert_paste so large pastes collapse to a placeholder
-                        // and cost a single redraw.
-                        if let Some(c) = plain_char(&key)
-                            && self.active_prompt.is_none()
-                        {
-                            let burst = collect_paste_burst(c)?;
-                            if is_paste_burst(&burst.text) {
-                                self.input.history_index = None;
-                                self.input.insert_paste(&burst.text);
-                                self.update_autocomplete();
-                                self.redraw(&mut terminal)?;
+                if self.pending_approval.is_some() {
+                    self.drain_approval_keys(&mut terminal)?;
+                } else {
+                    match event::read()? {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            // Coalesce a non-bracketed paste burst (Windows conhost
+                            // delivers a paste as a flood of Char events) into one
+                            // insert_paste so large pastes collapse to a placeholder
+                            // and cost a single redraw.
+                            if let Some(c) = plain_char(&key)
+                                && self.active_prompt.is_none()
+                            {
+                                let burst = collect_paste_burst(c)?;
+                                if is_paste_burst(&burst.text) {
+                                    self.input.history_index = None;
+                                    self.input.insert_paste(&burst.text);
+                                    self.update_autocomplete();
+                                    self.redraw(&mut terminal)?;
+                                } else {
+                                    self.handle_key(key.code, key.modifiers, &mut terminal)
+                                        .await?;
+                                }
+                                if let Some(trailing) = burst.trailing {
+                                    self.handle_trailing_input_event(trailing, &mut terminal)
+                                        .await?;
+                                }
                             } else {
                                 self.handle_key(key.code, key.modifiers, &mut terminal)
                                     .await?;
                             }
-                            if let Some(trailing) = burst.trailing {
-                                self.handle_trailing_input_event(trailing, &mut terminal)
-                                    .await?;
-                            }
-                        } else {
-                            self.handle_key(key.code, key.modifiers, &mut terminal)
-                                .await?;
                         }
+                        Event::Paste(text) => {
+                            self.input.insert_paste(&text);
+                            self.update_autocomplete();
+                            self.redraw(&mut terminal)?;
+                        }
+                        Event::Resize(_, _) | Event::Key(_) => {
+                            // Resize or non-press key: force a full redraw to
+                            // re-sync the inline viewport position.
+                            self.force_redraw(&mut terminal)?;
+                        }
+                        _ => {}
                     }
-                    Event::Paste(text) => {
-                        self.input.insert_paste(&text);
-                        self.update_autocomplete();
-                        self.redraw(&mut terminal)?;
-                    }
-                    Event::Resize(_, _) | Event::Key(_) => {
-                        // Resize or non-press key: force a full redraw to
-                        // re-sync the inline viewport position.
-                        self.force_redraw(&mut terminal)?;
-                    }
-                    _ => {}
                 }
             }
 
@@ -802,7 +806,36 @@ impl App {
             // FrontendState, etc.).
             let before = self.messages.len();
             while let Ok(ev) = self.events_rx.try_recv() {
-                self.apply_idle_event(ev);
+                if let crate::runtime::RuntimeEvent::ApprovalRequest {
+                    id,
+                    call_id,
+                    name,
+                    arguments,
+                    auto_allows,
+                    ..
+                } = ev
+                {
+                    let call = ToolCall {
+                        id: call_id,
+                        name,
+                        arguments,
+                    };
+                    if call.name == "edit_file" {
+                        self.pump_show_edit_preview(&call, &mut terminal).await?;
+                    }
+                    if auto_allows {
+                        let _ =
+                            self.command_tx
+                                .send(crate::runtime::RuntimeCommand::ApprovalReply {
+                                    id,
+                                    outcome: crate::tools::CallOutcome::Approve,
+                                });
+                    } else {
+                        self.begin_approval(&call, id, &mut terminal)?;
+                    }
+                } else {
+                    self.apply_idle_event(ev);
+                }
             }
             // Commit any scrollback an idle event added (banner, Status notices)
             // so it renders promptly rather than waiting for the next keystroke.
@@ -1925,8 +1958,6 @@ impl App {
         let prev_provider = self.view.provider_id.clone();
         let prev_model = self.view.provider_model.clone();
 
-        let lua_cmds: Vec<(String, String)> = self.wire_commands.clone();
-
         // Handle /provider and /model by telling the daemon to switch, then
         // reading the authoritative provider info from the StateSnapshot.
         let reply = match cmd.as_str() {
@@ -2012,7 +2043,16 @@ impl App {
                     }
                 }
             }
-            "help" => commands::help(&lua_cmds),
+            "help" => {
+                let downloaded = crate::ext::catalog::installed_command_names();
+                let downloaded_commands: Vec<(String, String)> = self
+                    .wire_commands
+                    .iter()
+                    .filter(|(name, _)| downloaded.contains(name))
+                    .cloned()
+                    .collect();
+                commands::help(&downloaded_commands)
+            }
             "quit" | "exit" => {
                 if let Some(notice) = self.request_quit() {
                     self.messages.push(Message::system(notice));

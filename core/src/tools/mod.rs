@@ -14,7 +14,10 @@ pub mod write_file;
 use registry::ToolRegistry;
 
 use crate::ext::lua_tool::LuaTool;
-pub use approval::{ApprovalGate, AutoApprovalGate, CallOutcome, decide_call, denied_message};
+pub use approval::{
+    ApprovalGate, AutoApprovalGate, CallOutcome, EscalatingGate, SharedGate, decide_call,
+    denied_message,
+};
 pub use command_policy::CommandSafety;
 pub use shell::{ScriptOutput, ScriptRequest, run_script, truncate_output};
 use std::collections::HashMap;

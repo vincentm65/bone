@@ -36,6 +36,9 @@ pub struct ToolExecutionContext {
     pub tool_call_depth: usize,
     pub tool_handler: Option<crate::tools::registry::ToolHandler>,
     pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
+    /// The driving conversation's approval gate, so tools that delegate
+    /// (`ctx.agent.spawn`) can escalate would-be-denied calls to the user.
+    pub approval_gate: Option<crate::tools::SharedGate>,
 }
 
 #[derive(Debug)]

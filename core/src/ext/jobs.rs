@@ -19,9 +19,14 @@ const MAX_RETAINED_JOBS: usize = 200;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
+/// Maximum recent-activity entries retained per job.
+const MAX_TRACE_LINES: usize = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
+    /// Waiting for a concurrency slot on its agent template.
+    Queued,
     Running,
     Done,
     Error,
@@ -47,6 +52,15 @@ pub struct Job {
     pub result_file: Option<String>,
     /// Maximum concurrent jobs allowed for this agent template.
     pub max_concurrency: usize,
+    /// What the job is doing right now (last tool-call summary), for live UI.
+    pub activity: Option<String>,
+    /// Recent tool-call summaries (up to [`MAX_TRACE_LINES`]), appended to
+    /// error results so a failed job is diagnosable.
+    pub trace: Vec<String>,
+    /// Full conversation transcript, kept on successful completion so
+    /// `ctx.agent.followup` can resume this agent with its context intact.
+    #[serde(skip)]
+    pub transcript: Option<Vec<crate::llm::ChatMessage>>,
     /// Conversation the job belongs to (the `conversation_id` active when it was
     /// spawned). The daemon scopes cancellation and auto-injection by this so a
     /// process hosting several conversations (`bone serve`) can never cancel or
@@ -57,6 +71,13 @@ pub struct Job {
     /// Per-job cancellation flag, settable by [`JobRegistry::cancel`].
     #[serde(skip)]
     pub cancel_flag: Arc<AtomicBool>,
+}
+
+impl Job {
+    /// Done or Error — the job will never make further progress.
+    pub fn is_finished(&self) -> bool {
+        matches!(self.status, JobStatus::Done | JobStatus::Error)
+    }
 }
 
 /// Parameters for [`JobRegistry::create`]. Bundled into a struct so the call
@@ -127,9 +148,10 @@ impl JobRegistry {
         self.jobs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Create a new running job. Returns its ID, or an error if the named
-    /// agent is at its concurrency cap (checked atomically under the lock).
-    pub fn create(&self, job: NewJob) -> Result<String, String> {
+    /// Create a new job. Starts Running when the agent has a free concurrency
+    /// slot, otherwise Queued — the spawner's runner task starts it via
+    /// [`JobRegistry::try_start`] when a slot frees. Never rejects.
+    pub fn create(&self, job: NewJob) -> String {
         let NewJob {
             agent,
             task,
@@ -144,18 +166,18 @@ impl JobRegistry {
             .iter()
             .filter(|j| j.status == JobStatus::Running && j.agent == agent)
             .count();
-        if running_for_agent >= max_concurrency {
-            return Err(format!(
-                "agent '{agent}' is at its concurrency cap ({max_concurrency})"
-            ));
-        }
+        let status = if running_for_agent >= max_concurrency {
+            JobStatus::Queued
+        } else {
+            JobStatus::Running
+        };
         let id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         jobs.push(Job {
             id: id.clone(),
             agent,
             task,
             title,
-            status: JobStatus::Running,
+            status,
             result: None,
             started_at: now,
             finished_at: None,
@@ -164,6 +186,9 @@ impl JobRegistry {
             token_received: 0,
             result_file: None,
             max_concurrency,
+            activity: None,
+            trace: Vec::new(),
+            transcript: None,
             scope,
             cancel_flag,
         });
@@ -172,7 +197,7 @@ impl JobRegistry {
             let excess = jobs.len() - MAX_RETAINED_JOBS;
             let mut removed = 0;
             jobs.retain(|j| {
-                if removed < excess && j.status != JobStatus::Running && j.consumed {
+                if removed < excess && j.is_finished() && j.consumed {
                     removed += 1;
                     false
                 } else {
@@ -182,7 +207,90 @@ impl JobRegistry {
         }
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);
-        Ok(id)
+        id
+    }
+
+    /// Transition a Queued job to Running if it is the oldest queued job for
+    /// its agent and the agent has a free slot. Returns `true` when started
+    /// (or when the job is already Running); the caller polls until then.
+    /// FIFO per agent: insertion order in the vec is dispatch order.
+    pub fn try_start(&self, id: &str) -> bool {
+        let now = current_unix_seconds();
+        let mut jobs = self.lock_jobs();
+        let Some(idx) = jobs.iter().position(|j| j.id == id) else {
+            return false;
+        };
+        match jobs[idx].status {
+            JobStatus::Running => return true,
+            JobStatus::Queued => {}
+            _ => return false,
+        }
+        let agent = jobs[idx].agent.clone();
+        let running = jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Running && j.agent == agent)
+            .count();
+        let head = jobs
+            .iter()
+            .position(|j| j.status == JobStatus::Queued && j.agent == agent);
+        if running >= jobs[idx].max_concurrency || head != Some(idx) {
+            return false;
+        }
+        jobs[idx].status = JobStatus::Running;
+        jobs[idx].started_at = now;
+        drop(jobs);
+        self.version.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Record what a running job is doing (tool-call summary): sets the live
+    /// activity label and appends to the bounded trace.
+    pub fn note_activity(&self, id: &str, summary: &str) {
+        let mut jobs = self.lock_jobs();
+        if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
+            job.activity = Some(summary.to_string());
+            if job.trace.len() >= MAX_TRACE_LINES {
+                job.trace.remove(0);
+            }
+            job.trace.push(summary.to_string());
+            drop(jobs);
+            self.version.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Clear the live activity label when a tool call finishes; a failed call
+    /// marks its trace entry so error reports show where things went wrong.
+    pub fn note_activity_done(&self, id: &str, is_error: bool) {
+        let mut jobs = self.lock_jobs();
+        if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
+            job.activity = None;
+            if is_error && let Some(last) = job.trace.last_mut() {
+                last.push_str(" ✗");
+            }
+            drop(jobs);
+            self.version.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Recent tool-call summaries for a job (for error reports).
+    pub fn trace_of(&self, id: &str) -> Vec<String> {
+        let jobs = self.lock_jobs();
+        jobs.iter()
+            .find(|j| j.id == id)
+            .map(|j| j.trace.clone())
+            .unwrap_or_default()
+    }
+
+    /// The saved transcript of a finished job, or `None` when the job is
+    /// unknown, still running, or completed without one (errors).
+    pub fn transcript_of(
+        &self,
+        id: &str,
+        scope: Option<i64>,
+    ) -> Option<Vec<crate::llm::ChatMessage>> {
+        let jobs = self.lock_jobs();
+        let job = jobs.iter().find(|j| j.id == id && j.scope == scope)?;
+        job.transcript.clone()
     }
 
     /// Mark a job as finished (Ok or Error).
@@ -196,7 +304,7 @@ impl JobRegistry {
         let result = result.unwrap_or_else(|e| e);
         let result_file = spill_result(id, &result);
         let mut jobs = self.lock_jobs();
-        finish_job(&mut jobs, id, result, result_file, status, now, 0, 0);
+        finish_job(&mut jobs, id, result, result_file, status, now, 0, 0, None);
         self.completed.notify_all();
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);
@@ -216,12 +324,14 @@ impl JobRegistry {
     }
 
     /// Update token counts from shared atomics when a job completes.
+    /// `transcript`, when `Some`, is retained for `ctx.agent.followup`.
     pub fn complete_with_tokens(
         &self,
         id: &str,
         result: Result<String, String>,
         token_sent: u64,
         token_received: u64,
+        transcript: Option<Vec<crate::llm::ChatMessage>>,
     ) {
         let now = current_unix_seconds();
         let status = if result.is_ok() {
@@ -241,35 +351,33 @@ impl JobRegistry {
             now,
             token_sent,
             token_received,
+            transcript,
         );
         self.completed.notify_all();
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// IDs of all currently running jobs.
+    /// IDs of all active (running or queued) jobs.
     pub fn running_ids(&self) -> Vec<String> {
         let jobs = self.lock_jobs();
         jobs.iter()
-            .filter(|j| j.status == JobStatus::Running)
+            .filter(|j| !j.is_finished())
             .map(|j| j.id.clone())
             .collect()
     }
 
-    /// Clones of all currently running jobs.
+    /// Clones of all active (running or queued) jobs.
     pub fn running_jobs(&self) -> Vec<Job> {
         let jobs = self.lock_jobs();
-        jobs.iter()
-            .filter(|j| j.status == JobStatus::Running)
-            .cloned()
-            .collect()
+        jobs.iter().filter(|j| !j.is_finished()).cloned().collect()
     }
 
-    /// Clones of currently running jobs in `scope` (see [`Job::scope`]).
+    /// Clones of active jobs in `scope` (see [`Job::scope`]).
     pub fn running_jobs_scoped(&self, scope: Option<i64>) -> Vec<Job> {
         let jobs = self.lock_jobs();
         jobs.iter()
-            .filter(|j| j.status == JobStatus::Running && j.scope == scope)
+            .filter(|j| !j.is_finished() && j.scope == scope)
             .cloned()
             .collect()
     }
@@ -291,7 +399,7 @@ impl JobRegistry {
         loop {
             let pending: Vec<String> = jobs
                 .iter()
-                .filter(|j| j.status == JobStatus::Running && ids.contains(&j.id))
+                .filter(|j| !j.is_finished() && ids.contains(&j.id))
                 .map(|j| j.id.clone())
                 .collect();
             let was_cancelled = cancelled
@@ -303,7 +411,7 @@ impl JobRegistry {
                 let mut any_consumed = false;
                 let mut finished: Vec<Job> = jobs
                     .iter_mut()
-                    .filter(|j| j.status != JobStatus::Running && ids.contains(&j.id))
+                    .filter(|j| j.is_finished() && ids.contains(&j.id))
                     .map(|j| {
                         if !j.consumed {
                             j.consumed = true;
@@ -388,7 +496,7 @@ impl JobRegistry {
         let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
             return false;
         };
-        if job.status != JobStatus::Running {
+        if job.is_finished() {
             return false;
         }
         job.cancel_flag.store(true, Ordering::Relaxed);
@@ -407,7 +515,7 @@ impl JobRegistry {
         let mut jobs = self.lock_jobs();
         let mut cancelled = 0;
         for job in jobs.iter_mut() {
-            if job.status == JobStatus::Running {
+            if !job.is_finished() {
                 job.cancel_flag.store(true, Ordering::Relaxed);
                 cancelled += 1;
             }
@@ -428,7 +536,7 @@ impl JobRegistry {
         let mut jobs = self.lock_jobs();
         let mut cancelled = 0;
         for job in jobs.iter_mut() {
-            if job.status == JobStatus::Running && job.scope == scope {
+            if !job.is_finished() && job.scope == scope {
                 job.cancel_flag.store(true, Ordering::Relaxed);
                 cancelled += 1;
             }
@@ -466,6 +574,7 @@ pub fn registry() -> &'static JobRegistry {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Apply finished-job state under the lock: update status/result/tokens.
+#[allow(clippy::too_many_arguments)]
 fn finish_job(
     jobs: &mut Vec<Job>,
     id: &str,
@@ -475,6 +584,7 @@ fn finish_job(
     now: u64,
     token_sent: u64,
     token_received: u64,
+    transcript: Option<Vec<crate::llm::ChatMessage>>,
 ) {
     if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
         job.status = status;
@@ -483,6 +593,8 @@ fn finish_job(
         job.result_file = result_file;
         job.token_sent = token_sent;
         job.token_received = token_received;
+        job.activity = None;
+        job.transcript = transcript;
     }
 }
 
@@ -511,12 +623,13 @@ fn spill_result(id: &str, result: &str) -> Option<String> {
     }
 }
 
-/// Status glyph for a subagent job (done / error / running).
+/// Status glyph for a subagent job (done / error / running / queued).
 pub fn status_sym(status: JobStatus) -> &'static str {
     match status {
         JobStatus::Done => "✓",
         JobStatus::Error => "✗",
         JobStatus::Running => "◑",
+        JobStatus::Queued => "⧗",
     }
 }
 

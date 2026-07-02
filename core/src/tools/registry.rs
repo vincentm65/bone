@@ -48,6 +48,7 @@ impl ToolRegistry {
         tool_call_depth: usize,
         tool_handler: Option<ToolHandler>,
         app_state: Option<crate::ext::ctx::AppCtxState>,
+        approval_gate: Option<crate::tools::SharedGate>,
     ) -> ToolResult {
         let name = call.name.clone();
         let call_id = call.id.clone();
@@ -65,6 +66,7 @@ impl ToolRegistry {
                         tool_call_depth,
                         tool_handler,
                         app_state,
+                        approval_gate,
                     },
                 )
                 .await
@@ -98,6 +100,7 @@ pub struct ToolHandler {
     host_state_keys: HashMap<String, String>,
     /// Cancellation token set by TUI when user cancels streaming.
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub approval_gate: Option<crate::tools::SharedGate>,
     /// App-derived ctx snapshot, refreshed per turn by the TUI before dispatch.
     /// Propagated to nested/subagent calls via the recursive `self.clone()` in
     /// `execute_one_live`, so tools see the same `ctx` as slash commands.
@@ -135,6 +138,7 @@ impl ToolHandler {
             dynamic_safety: HashMap::new(),
             host_state_keys: HashMap::new(),
             cancel_token: None,
+            approval_gate: None,
             app_state: None,
         }
     }
@@ -155,6 +159,7 @@ impl ToolHandler {
             state_map: ToolStateMap::default(),
             owner: String::new(),
             cancel_token: None,
+            approval_gate: None,
             app_state: None,
         }
     }
@@ -321,6 +326,7 @@ impl ToolHandler {
                     tool_call_depth,
                     Some(self.clone()),
                     self.app_state.clone(),
+                    self.approval_gate.clone(),
                 )
                 .await
         } else {
