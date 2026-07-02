@@ -3,7 +3,7 @@
 //! These verify the policy in isolation — no `ToolHandler`, no
 //! `ExtensionManager`, no Lua, no SQLite — confirming the extraction is a
 //! faithful, injectable seam. They also pin the exact "Tool skipped" message
-//! so the refactor preserves behavior byte-for-byte.
+//! so the format stays stable.
 
 use bone_core::tools::ApprovalMode;
 use bone_core::tools::approval::{CallOutcome, decide_call, denied_message};
@@ -39,11 +39,11 @@ fn block_takes_precedence_over_deny() {
 
 #[test]
 fn denied_message_matches_original_format_exactly() {
-    // Byte-for-byte match with the inline format! that lived in agent.rs.
+    // Stable format for a mode-denied call (no shell-specific exit_code prefix).
     let msg = denied_message(ApprovalMode::Safe, CommandSafety::Danger);
     assert_eq!(
         msg,
-        "[exit_code=1] Tool skipped. Approval mode safe does not allow Danger; \
+        "Tool skipped. Approval mode safe does not allow Danger; \
          continue using allowed read-only tools or report the limitation."
     );
 
@@ -54,5 +54,5 @@ fn denied_message_matches_original_format_exactly() {
 #[test]
 fn denied_message_uses_mode_str() {
     let danger_mode = denied_message(ApprovalMode::Danger, CommandSafety::ReadOnly);
-    assert!(danger_mode.starts_with("[exit_code=1] Tool skipped. Approval mode danger "));
+    assert!(danger_mode.starts_with("Tool skipped. Approval mode danger "));
 }

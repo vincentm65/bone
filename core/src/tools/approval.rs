@@ -35,11 +35,11 @@ pub fn decide_call(blocked: Option<String>, allows: bool) -> CallOutcome {
 /// The "Tool skipped" error text for a mode-denied call.
 ///
 /// Centralized as the single source of truth for this message (it was
-/// duplicated inline). Uses `CommandSafety`'s `Debug` form — matching the
-/// original byte-for-byte — and the mode's string label.
+/// duplicated inline). Uses `CommandSafety`'s `Debug` form and the mode's
+/// string label.
 pub fn denied_message(mode: ApprovalMode, safety: CommandSafety) -> String {
     format!(
-        "[exit_code=1] Tool skipped. Approval mode {} does not allow {:?}; continue using allowed read-only tools or report the limitation.",
+        "Tool skipped. Approval mode {} does not allow {:?}; continue using allowed read-only tools or report the limitation.",
         mode.mode_str(),
         safety
     )

@@ -496,3 +496,61 @@ async fn preserves_permissions() {
     assert_eq!(mode, 0o755);
     let _ = fs::remove_file(&path).await;
 }
+
+#[tokio::test]
+async fn replace_all_top_level_replaces_every_occurrence() {
+    let path = temp_path("replace-all-top.txt");
+    fs::write(&path, "foo bar foo baz foo")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "path": path, "search": "foo", "replace": "qux", "replace_all": true }))
+        .await
+        .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "qux bar qux baz qux"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn replace_all_in_edits_array_replaces_every_occurrence() {
+    let path = temp_path("replace-all-edits.txt");
+    fs::write(&path, "alpha beta alpha gamma alpha")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "edits": [
+            { "search": "alpha", "replace": "one", "replace_all": true }
+        ]
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one beta one gamma one"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn replace_all_errors_on_zero_matches() {
+    let path = temp_path("replace-all-zero.txt");
+    fs::write(&path, "nothing here").await.expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "search": "ghost", "replace": "x", "replace_all": true }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("matched 0 times"));
+    let _ = fs::remove_file(&path).await;
+}

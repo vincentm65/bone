@@ -23,6 +23,24 @@ fn image_media_type(path: &str) -> Option<&'static str> {
     }
 }
 
+/// Cap an individual line's length so a single minified multi-MB line can't
+/// consume the whole context window. Truncates on a UTF-8 char boundary.
+const MAX_LINE_CHARS: usize = 2000;
+fn truncate_line(line: &str) -> String {
+    if line.chars().count() <= MAX_LINE_CHARS {
+        return line.to_string();
+    }
+    // Byte offset of the char at index MAX_LINE_CHARS is a valid boundary.
+    let end = line
+        .char_indices()
+        .nth(MAX_LINE_CHARS)
+        .map(|(offset, _)| offset)
+        .unwrap_or(line.len());
+    let mut out = line[..end].to_string();
+    out.push_str("…[truncated]");
+    out
+}
+
 #[derive(Deserialize)]
 struct Args {
     path: String,
@@ -72,8 +90,42 @@ impl Tool for ReadFileTool {
 
         let start = args.start_line.unwrap_or(1).saturating_sub(1);
         let max = args.max_lines.unwrap_or(500).min(1000);
-        let lines: Vec<&str> = content.lines().skip(start).take(max).collect();
-        Ok(lines.join("\n"))
+
+        let all_lines: Vec<&str> = content.lines().collect();
+        let total = all_lines.len();
+
+        // Bound per-line byte cost so a single minified multi-MB line can't
+        // consume the whole context window.
+        let shown: Vec<String> = all_lines
+            .iter()
+            .skip(start)
+            .take(max)
+            .map(|line| truncate_line(line))
+            .collect();
+
+        let first = start + 1; // 1-based first line shown
+        let end = start + shown.len(); // 1-based last line shown
+        let mut out = shown.join("\n");
+
+        if shown.is_empty() {
+            // Nothing in range (e.g. start_line past EOF): still report totals.
+            if total > 0 {
+                out.push_str(&format!("\n\n[no lines in range; file has {total} lines]"));
+            }
+            return Ok(out);
+        }
+
+        if end < total {
+            // Partial view: tell the model exactly where it is and how to page.
+            out.push_str(&format!(
+                "\n\n[showing lines {first}-{end} of {total}; call again with start_line={next} to continue]",
+                next = end + 1,
+            ));
+        } else {
+            // Complete view: give size awareness.
+            out.push_str(&format!("\n\n[{total} lines total]"));
+        }
+        Ok(out)
     }
 
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {

@@ -23,6 +23,7 @@ struct Args {
     mode: Option<String>,
     content: Option<String>,
     expected_hash: Option<String>,
+    replace_all: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,16 +34,29 @@ struct RawEditOperation {
     insert_before: Option<String>,
     insert_after: Option<String>,
     text: Option<String>,
+    replace_all: Option<bool>,
     #[serde(rename = "match")]
     match_mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 enum EditOperation {
-    Replace { search: String, replace: String },
-    Delete { search: String },
-    InsertBefore { anchor: String, text: String },
-    InsertAfter { anchor: String, text: String },
+    Replace {
+        search: String,
+        replace: String,
+        replace_all: bool,
+    },
+    Delete {
+        search: String,
+    },
+    InsertBefore {
+        anchor: String,
+        text: String,
+    },
+    InsertAfter {
+        anchor: String,
+        text: String,
+    },
 }
 
 pub struct EditPreview {
@@ -55,7 +69,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit an existing UTF-8 file. Use one of: search+replace (single change), edits[] (multiple changes), or mode=\"rewrite\"+content (full rewrite). Anchors must match one location.".to_string(),
+            description: "Edit an existing UTF-8 file. Exactly one mode per call: (a) top-level search+replace for a single change, (b) edits[] for multiple changes (each item must contain exactly one operation: search+replace, delete, insert_before+text, or insert_after+text), or (c) mode=\"rewrite\"+content for a full rewrite. Anchors must match exactly one location unless replace_all=true (exact global replace). On success a unified diff is returned; on failure the error names the valid shapes and closest candidates.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -83,6 +97,7 @@ impl Tool for EditFileTool {
                                 "insert_before": { "type": "string", "description": "Insert text before this anchor." },
                                 "insert_after": { "type": "string", "description": "Insert text after this anchor." },
                                 "text": { "type": "string", "description": "Text to insert." },
+                                "replace_all": { "type": "boolean", "description": "For a search+replace item: replace every exact occurrence instead of requiring a unique match." },
                                 "match": { "type": "string", "enum": ["exact"], "description": "Match mode: \"exact\"." }
                             },
                             "additionalProperties": false
@@ -100,6 +115,10 @@ impl Tool for EditFileTool {
                     "expected_hash": {
                         "type": "string",
                         "description": "SHA-256 hash. Fails if file changed since preview."
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "For the top-level search+replace: replace every exact occurrence instead of requiring a unique match. Use for renames."
                     }
                 },
                 "required": ["path"],
@@ -210,7 +229,11 @@ fn parse_operations(args: &Args) -> Result<Vec<EditOperation>, String> {
             if search.is_empty() {
                 return Err("search must not be empty".to_string());
             }
-            Ok(vec![EditOperation::Replace { search, replace }])
+            Ok(vec![EditOperation::Replace {
+                search,
+                replace,
+                replace_all: args.replace_all.unwrap_or(false),
+            }])
         }
         (false, true) => {
             let raw = args.edits.as_ref().expect("checked above");
@@ -263,7 +286,11 @@ fn parse_operation(raw: &RawEditOperation) -> Result<EditOperation, String> {
         if search.is_empty() {
             return Err("search must not be empty".to_string());
         }
-        return Ok(EditOperation::Replace { search, replace });
+        return Ok(EditOperation::Replace {
+            search,
+            replace,
+            replace_all: raw.replace_all.unwrap_or(false),
+        });
     }
 
     if let Some(search) = raw.delete.clone() {
@@ -302,10 +329,21 @@ fn parse_operation(raw: &RawEditOperation) -> Result<EditOperation, String> {
 }
 
 fn apply_one_operation(content: &str, operation: &EditOperation) -> Result<String, String> {
+    // Replace-all is exact global replacement; it deliberately bypasses the
+    // unique-anchor rule used for every other operation.
+    if let EditOperation::Replace {
+        search,
+        replace,
+        replace_all: true,
+    } = operation
+    {
+        return replace_all_spans(content, search, replace);
+    }
+
     let (needle, replacement, label) = match operation {
-        EditOperation::Replace { search, replace } => {
-            (search.as_str(), replace.clone(), "search text")
-        }
+        EditOperation::Replace {
+            search, replace, ..
+        } => (search.as_str(), replace.clone(), "search text"),
         EditOperation::Delete { search } => (search.as_str(), String::new(), "delete text"),
         EditOperation::InsertBefore { anchor, text } => (
             anchor.as_str(),
@@ -319,6 +357,18 @@ fn apply_one_operation(content: &str, operation: &EditOperation) -> Result<Strin
         ),
     };
     replace_matched_span(content, needle, &replacement, label)
+}
+
+/// Exact global replacement for rename-style edits (replace_all=true). Unlike
+/// the single-match path, this does not require a unique anchor.
+fn replace_all_spans(content: &str, needle: &str, replacement: &str) -> Result<String, String> {
+    if needle.is_empty() {
+        return Err("search text must not be empty".to_string());
+    }
+    if !content.contains(needle) {
+        return Err("search text matched 0 times; expected at least 1".to_string());
+    }
+    Ok(content.replace(needle, replacement))
 }
 
 fn replace_matched_span(
