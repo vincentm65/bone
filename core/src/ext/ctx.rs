@@ -1271,10 +1271,14 @@ const MAX_TOOL_CALL_DEPTH: usize = 4;
 /// tool results) for this long — not after a hard wall-clock cutoff.
 const DEFAULT_AGENT_TIMEOUT_MS: u64 = 300_000;
 const MAX_AGENT_TIMEOUT_MS: u64 = 900_000;
+/// Maximum wall-clock timeout for subagent calls (`wall_timeout_ms`).
+/// Unlike the inactivity watchdog, this fires regardless of progress.
+const MAX_AGENT_WALL_TIMEOUT_MS: u64 = 3_600_000;
 
-/// Resolves once the shared activity timestamp has been stale for
-/// `timeout_ms` milliseconds. Used as an inactivity watchdog alongside
-/// `run_agent` in a `select!`.
+/// Inactivity watchdog: resolves when the activity timestamp has been stale
+/// for `timeout_ms`. Only fires on true idleness (no stream chunks / tool
+/// results for the entire window); a slow-but-moving agent never trips it.
+/// For a hard deadline regardless of progress use `wall_timeout_ms`.
 async fn inactivity_elapsed(activity: Arc<AtomicU64>, timeout_ms: u64) {
     loop {
         let last = activity.load(Ordering::Relaxed);
@@ -1285,6 +1289,16 @@ async fn inactivity_elapsed(activity: Arc<AtomicU64>, timeout_ms: u64) {
         }
         let remaining = timeout_ms - idle;
         tokio::time::sleep(std::time::Duration::from_millis(remaining.min(1_000))).await;
+    }
+}
+
+/// Wall-clock backstop: resolves after `ms` milliseconds. Unlike the
+/// inactivity watchdog, fires regardless of progress. `None` never resolves
+/// (infinite pending future, to be used as a no-op in `select!`).
+async fn wall_elapsed(ms: Option<u64>) {
+    match ms {
+        Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1307,8 +1321,9 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let inherited_run = inherited.clone();
     let cancelled_run = cancelled_flag.clone();
     let run_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
+        let tool_allowlist = extract_tool_allowlist(&opts);
         let built =
-            match build_agent_request(prompt, &opts, &inherited_run, RUN_OPT_KEYS, None, None) {
+            match build_agent_request(prompt, &opts, &inherited_run, RUN_OPT_KEYS, None, tool_allowlist) {
                 Ok(b) => b,
                 Err(e) => return agent_result_to_lua(lua, Err(e)),
             };
@@ -1316,11 +1331,12 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             request,
             activity,
             timeout_ms,
+            wall_timeout_ms,
         } = built;
 
         let cancelled = cancelled_run.clone();
         let response = block_on(run_agent_with_watchdog(
-            request, activity, timeout_ms, cancelled, None,
+            request, activity, timeout_ms, wall_timeout_ms, cancelled, None,
         ));
 
         agent_result_to_lua(lua, response)
@@ -1338,13 +1354,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
+            let tool_allowlist = extract_tool_allowlist(&opts);
             let built = match build_agent_request(
                 prompt,
                 &opts,
                 &inherited_stream,
                 RUN_STREAM_OPT_KEYS,
                 Some(tx),
-                None,
+                tool_allowlist,
             ) {
                 Ok(b) => b,
                 Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -1353,6 +1370,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 request,
                 activity,
                 timeout_ms,
+                wall_timeout_ms,
             } = built;
 
             let cancelled = cancelled_stream.clone();
@@ -1382,6 +1400,9 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                         }
                         _ = inactivity_elapsed(activity.clone(), timeout_ms) => {
                             break Err(prefix_err(None, &inactivity_message(timeout_ms)));
+                        }
+                        _ = wall_elapsed(wall_timeout_ms) => {
+                            break Err(prefix_err(None, &wall_message(wall_timeout_ms)));
                         }
                     }
                 }
@@ -1460,6 +1481,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             request,
             activity,
             timeout_ms,
+            wall_timeout_ms,
         } = built;
         let id_for_spawn = id.clone();
         handle.spawn(async move {
@@ -1467,6 +1489,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 request,
                 activity,
                 timeout_ms,
+                wall_timeout_ms,
                 Some(job_cancel),
                 Some(&id_for_spawn),
             )
@@ -1580,12 +1603,13 @@ struct InheritedCtx {
 }
 
 /// A ready-to-run `AgentRequest` plus the handles the dispatch loops need: the
-/// shared activity timestamp (for the inactivity watchdog) and the resolved
-/// inactivity timeout.
+/// shared activity timestamp (for the inactivity watchdog), the resolved
+/// inactivity timeout, and an optional wall-clock deadline.
 struct BuiltAgent {
     request: crate::agent::AgentRequest,
     activity: Arc<AtomicU64>,
     timeout_ms: u64,
+    wall_timeout_ms: Option<u64>,
 }
 
 /// Shared setup for all three dispatch paths: enforce the depth limit, parse
@@ -1616,6 +1640,8 @@ fn build_agent_request(
         Some(n) if n <= u32::MAX as u64 => Some(n as u32),
         Some(_) => return Err("max_tokens is too large".to_string()),
     };
+    let wall_timeout_ms = opt_u64(opts, "wall_timeout_ms")
+        .map(|n| n.clamp(1_000, MAX_AGENT_WALL_TIMEOUT_MS));
     let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
     let request = crate::agent::AgentRequest {
         prompt,
@@ -1637,6 +1663,7 @@ fn build_agent_request(
         request,
         activity,
         timeout_ms,
+        wall_timeout_ms,
     })
 }
 
@@ -1649,6 +1676,8 @@ const RUN_OPT_KEYS: &[&str] = &[
     "system_prompt",
     "timeout_ms",
     "max_tokens",
+    "tools",
+    "wall_timeout_ms",
 ];
 const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "approval",
@@ -1664,6 +1693,8 @@ const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "on_token_usage",
     "on_finished",
     "on_failed",
+    "tools",
+    "wall_timeout_ms",
 ];
 const SPAWN_OPT_KEYS: &[&str] = &[
     "approval",
@@ -1671,6 +1702,7 @@ const SPAWN_OPT_KEYS: &[&str] = &[
     "model",
     "system_prompt",
     "timeout_ms",
+    "wall_timeout_ms",
     "agent",
     "title",
     "max_concurrency",
@@ -1685,6 +1717,12 @@ fn inactivity_message(timeout_ms: u64) -> String {
     )
 }
 
+/// Human-readable wall-clock timeout message.
+fn wall_message(ms: Option<u64>) -> String {
+    let secs = ms.map(|n| n / 1000).unwrap_or(0);
+    format!("agent exceeded wall-clock limit of {secs}s")
+}
+
 /// Format a watchdog error string, optionally prefixed with a job id (used
 /// by `spawn` so background-job results name the offending job).
 fn prefix_err(prefix: Option<&str>, msg: &str) -> String {
@@ -1694,19 +1732,19 @@ fn prefix_err(prefix: Option<&str>, msg: &str) -> String {
     }
 }
 
-/// Run `run_agent` to completion under the cancel-flag + inactivity watchdog.
-/// Shared core of `ctx.agent.run` and `ctx.agent.spawn`: both drive the agent
-/// future to completion unless `cancel` is set or the agent goes idle for
-/// `timeout_ms`. `err_prefix`, when `Some`, is prepended to the cancel /
-/// inactivity error strings (background `spawn` jobs tag results with their id).
+/// Run `run_agent` to completion under the cancel-flag, inactivity watchdog,
+/// and optional wall-clock backstop. Shared core of `ctx.agent.run` and
+/// `ctx.agent.spawn`: both drive the agent future to completion unless `cancel`
+/// is set, the agent goes idle for `timeout_ms`, or the wall clock expires.
+/// `err_prefix`, when `Some`, is prepended to error strings.
 ///
-/// `ctx.agent.run_stream` keeps its own streaming loop (it must interleave
-/// live event dispatch with the agent future) but routes its error strings
-/// through `prefix_err` so all three paths agree on formatting.
+/// `ctx.agent.run_stream` keeps its own streaming loop but mirrors the same
+/// three guard arms inline.
 async fn run_agent_with_watchdog(
     request: crate::agent::AgentRequest,
     activity: Arc<AtomicU64>,
     timeout_ms: u64,
+    wall_timeout_ms: Option<u64>,
     cancel: Option<Arc<AtomicBool>>,
     err_prefix: Option<&str>,
 ) -> Result<crate::agent::AgentResponse, String> {
@@ -1715,6 +1753,9 @@ async fn run_agent_with_watchdog(
         _ = await_cancelled(&cancel) => Err(prefix_err(err_prefix, "cancelled")),
         _ = inactivity_elapsed(activity, timeout_ms) => {
             Err(prefix_err(err_prefix, &inactivity_message(timeout_ms)))
+        }
+        _ = wall_elapsed(wall_timeout_ms) => {
+            Err(prefix_err(err_prefix, &wall_message(wall_timeout_ms)))
         }
     }
 }
@@ -1814,10 +1855,11 @@ fn opt_usize(opts: &Option<Table>, key: &str) -> Option<usize> {
         .and_then(|t| t.get::<Option<usize>>(key).ok().flatten())
 }
 
-/// Read the per-agent tool allowlist (`opts.tools`) for `ctx.agent.spawn`.
-/// Returns the named tools in order, or `None` when the key is absent so the
-/// spawned agent inherits the full enabled set. Non-string entries are
-/// silently skipped (the Lua iterator yields only well-formed strings).
+/// Read the per-agent tool allowlist (`opts.tools`) for `ctx.agent.run`,
+/// `run_stream`, and `spawn`. Returns the named tools in order, or `None`
+/// when the key is absent so the agent inherits the full enabled set.
+/// An empty table `tools = {}` means zero tools — the agent runs toolless.
+/// Non-string entries are silently skipped.
 fn extract_tool_allowlist(opts: &Option<Table>) -> Option<Vec<String>> {
     opts.as_ref()
         .and_then(|t| t.get::<Option<Table>>("tools").ok().flatten())

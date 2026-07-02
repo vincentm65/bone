@@ -63,7 +63,7 @@ end
 --- Build a summary prompt for the model to condense older messages.
 local function summarization_prompt(older, recent_count)
     local parts = {
-        "You are a context summarizer. Summarize the conversation below into a compact description.",
+        "Summarize the conversation below into a compact description.",
         "",
         "Instructions:",
         "- Capture key facts, decisions, and user preferences.",
@@ -222,7 +222,13 @@ local function compact(history, ctx, keep_messages)
     -- runaway/looping model can't emit a "summary" larger than the context it is
     -- meant to shrink. The new_context guard in the caller is the final backstop.
     local prompt = summarization_prompt(older, keep_messages)
-    local run_result = ctx.agent.run(prompt, { timeout_ms = 120000, max_tokens = 2048 })
+    local run_result = ctx.agent.run(prompt, {
+        tools = {},
+        system_prompt = "You are a context summarizer. Respond with only the summary text.",
+        timeout_ms = 120000,
+        wall_timeout_ms = 180000,
+        max_tokens = 2048,
+    })
     if not run_result.ok then
         ctx.ui.notice("compact: summarization failed: " .. (run_result.error or "unknown"))
         return nil
@@ -230,7 +236,7 @@ local function compact(history, ctx, keep_messages)
 
     local summary = (run_result.content or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if #summary == 0 then
-        ctx.ui.notify("compact: empty summary, skipping", "warn")
+        ctx.ui.notice("compact: empty summary, skipping")
         return nil
     end
 
@@ -364,9 +370,9 @@ bone.on("before_turn", function(event, ctx)
     -- installing it would push the next request past the model's context window
     -- (an unrecoverable 400). Discard and leave the transcript untouched.
     if new_context >= context_length then
-        ctx.ui.notify(string.format(
+        ctx.ui.notice(string.format(
             "compact: summary did not shrink context (~%d ≥ ~%d), discarding",
-            new_context, context_length), "warn")
+            new_context, context_length))
         return nil
     end
 
