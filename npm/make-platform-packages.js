@@ -38,12 +38,21 @@ for (const [os, cpu, triple, exe, packageTarget] of targets) {
   fs.copyFileSync(source, dest);
   if (os !== 'win32') fs.chmodSync(dest, 0o755);
 
+  // Bundle web UI assets so `bone web` works when installed via npm.
+  const webuiSrc = path.join(root, 'webui');
+  const webuiDst = path.join(dir, 'webui');
+  if (fs.existsSync(webuiSrc)) {
+    fs.cpSync(webuiSrc, webuiDst, { recursive: true });
+  } else {
+    console.error('warning: webui/ not found, `bone web` may not work');
+  }
+
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
     name,
     version,
     description: `Native binary for bone-agent on ${os} ${cpu}`,
     bin: { bone: `bin/${exe}` },
-    files: ['bin'],
+    files: ['bin', 'webui'],
     os: [os],
     cpu: [cpu],
     engines: { node: '>=18' },

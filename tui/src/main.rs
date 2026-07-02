@@ -377,17 +377,24 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         // the stored pair and rebuild the provider when it differs. (A brand-new
         // conversation was just minted with the boot provider, so it matches and
         // this is a no-op.)
-        if let Some((want_provider, want_model)) = bone::session_db::SessionDb::open(
-            &bone::session_db::db_path(),
-        )
-        .ok()
-        .and_then(|db| db.conversation_provider_model(conversation_id).ok().flatten())
+        if let Some((want_provider, want_model)) =
+            bone::session_db::SessionDb::open(&bone::session_db::db_path())
+                .ok()
+                .and_then(|db| {
+                    db.conversation_provider_model(conversation_id)
+                        .ok()
+                        .flatten()
+                })
         {
-            let matches = want_provider == boot.provider.id()
-                && want_model == boot.provider.model();
+            let matches =
+                want_provider == boot.provider.id() && want_model == boot.provider.model();
             if !matches {
                 let providers_config = custom.derive_providers_config();
-                match bone::llm::providers::build_provider(&want_provider, &want_model, &providers_config) {
+                match bone::llm::providers::build_provider(
+                    &want_provider,
+                    &want_model,
+                    &providers_config,
+                ) {
                     Ok(p) => boot.provider = std::sync::Arc::from(p),
                     Err(err) => eprintln!(
                         "bone: warning: conversation {conversation_id} wants provider \
@@ -481,26 +488,31 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
 
 /// `bone web` — launch the web UI bridge and open the browser.
 async fn run_web(_args: &[String]) -> std::io::Result<()> {
-    // Find bridge.mjs: prefer CWD, then binary's sibling.
+    // Find bridge.mjs: CWD first, then walk up from the binary's directory.
     let bridge_path = {
         let cwd = std::env::current_dir()?;
-        let bin_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-        let repo_root = bin_dir
-            .as_ref()
-            .and_then(|d| d.parent().map(|p| p.to_path_buf())); // target/release/.. = repo
-
-        [
-            Some(cwd.join("webui/bridge.mjs")),
-            repo_root.as_ref().map(|r| r.join("webui/bridge.mjs")),
-        ]
-        .into_iter()
-        .find(|p| p.as_ref().map(|x| x.exists()).unwrap_or(false))
-        .flatten()
-        .ok_or_else(|| {
-            std::io::Error::other("webui/bridge.mjs not found — run `bone web` from the repo root")
-        })?
+        if cwd.join("webui/bridge.mjs").exists() {
+            cwd.join("webui/bridge.mjs")
+        } else {
+            let mut dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+            let mut found = None;
+            for _ in 0..5 {
+                if let Some(ref d) = dir {
+                    if d.join("webui/bridge.mjs").exists() {
+                        found = Some(d.join("webui/bridge.mjs"));
+                        break;
+                    }
+                    dir = d.parent().map(|p| p.to_path_buf());
+                }
+            }
+            found.ok_or_else(|| {
+                std::io::Error::other(
+                    "webui/bridge.mjs not found — place it in ./webui/ or install bone via git/npm",
+                )
+            })?
+        }
     };
 
     // Check node is available

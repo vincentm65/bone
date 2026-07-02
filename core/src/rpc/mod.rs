@@ -825,8 +825,7 @@ impl DaemonCtx {
                     s.session_db.as_ref().and_then(|db| {
                         let full = db.load_messages(id).ok()?;
                         let effective = db.load_effective_transcript(id).ok()?;
-                        let provider_model =
-                            db.conversation_provider_model(id).ok().flatten();
+                        let provider_model = db.conversation_provider_model(id).ok().flatten();
                         Some((full, effective, provider_model))
                     })
                 };
