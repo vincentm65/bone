@@ -24,6 +24,11 @@ use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult};
 
+/// Maximum turns a sub-agent (agent_depth > 0) may take before the driver
+/// breaks the loop with an error. This is a hard backstop against tool-looping;
+/// the top-level agent (depth 0) is uncapped.
+const SUBAGENT_MAX_TURNS: usize = 30;
+
 /// The runtime engine: owns everything a turn needs and runs the agent loop.
 ///
 /// Construct it from the pieces produced by `agent::agent_setup` (provider,
@@ -305,10 +310,17 @@ impl Driver {
         });
 
         let mut consecutive_errors = 0u32;
+        let mut turns: usize = 0;
         let result: Result<String, String> = 'turn: loop {
             if is_cancelled() {
                 break Ok(String::new());
             }
+            // Defensive sub-agent turn cap: a tool-looping sub-agent must not
+            // run forever. The top-level agent is uncapped.
+            if agent_depth > 0 && turns >= SUBAGENT_MAX_TURNS {
+                break Err(format!("sub-agent exceeded {SUBAGENT_MAX_TURNS} turns"));
+            }
+            turns += 1;
             // Dispatch before_turn hook so Lua can compact the conversation
             // and shape the turn (system prompt + tool visibility) before each
             // provider request. `turn_tool_defs` defaults to the full set and is

@@ -72,6 +72,7 @@
 
       <!-- ── Main column ───────────────────────────────────────────── -->
       <div id="main">
+        <div id="global-error" class="global-error hidden" role="alert"><span id="global-error-text"></span><button id="global-error-retry" class="btn">Retry</button><button id="global-error-close" class="ghost-btn" aria-label="Dismiss error">×</button></div>
         <header id="topbar">
           <button id="show-sidebar" class="ghost-btn hidden" title="Show sidebar" aria-label="Show sidebar">
             <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
@@ -102,6 +103,7 @@
 
             <!-- floating, bottom-pinned composer -->
             <div id="composer-wrap">
+            <div id="command-menu" class="command-menu hidden" role="listbox" aria-label="Commands"></div>
             <!-- ask_user interactive question (source="interact" pane) — grows
                  out of the composer, sharing its width -->
             <div id="interact" class="interact hidden" role="dialog" aria-modal="false" aria-labelledby="interact-q">
@@ -116,8 +118,14 @@
               </div>
             </div>
             <div id="composer" class="composer">
+                <div id="attachment-list" class="attachment-list" aria-live="polite"></div>
                 <textarea id="input" rows="1" placeholder="Message…" autocomplete="off"></textarea>
                 <div class="composer-bar">
+                  <input id="attachment-input" class="sr-only" type="file" multiple accept="image/*,.txt,.md,.json,.yaml,.yml,.toml,.csv,.js,.mjs,.ts,.tsx,.jsx,.css,.html,.rs,.py,.go,.java,.c,.h,.cpp,.hpp,.sh,.sql" />
+                  <button id="attachment-button" class="ghost-btn attach-btn" title="Attach images or text files" aria-label="Attach images or text files">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5 12.5 20a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 1 1-2.8-2.8l8.4-8.4"/></svg>
+                  </button>
+                  <button id="command-button" class="ghost-btn command-btn" title="Commands" aria-label="Open command menu" aria-haspopup="listbox" aria-expanded="false">/</button>
                   <button id="model-chip" class="pill model-pill" title="Change model" aria-haspopup="dialog" aria-expanded="false">
                     <span class="dot" id="conn-dot"></span>
                     <span id="conn-label" class="conn-label">Connecting</span>
@@ -142,10 +150,15 @@
           </div>
 
           <!-- draggable divider + canvas (artifact / diff viewer) -->
-          <div id="divider" class="divider hidden"></div>
-          <aside id="canvas" class="canvas hidden">
+          <div id="divider" class="divider hidden" role="separator" aria-label="Resize file canvas" aria-orientation="vertical" tabindex="0"></div>
+          <aside id="canvas" class="canvas hidden" aria-label="File canvas">
             <div class="canvas-head">
-              <div id="canvas-tabs" class="canvas-tabs"></div>
+              <div id="canvas-tabs" class="canvas-tabs" role="tablist" aria-label="Open files"></div>
+              <label class="canvas-search"><span class="sr-only">Search open file</span><input id="canvas-search" type="search" placeholder="Find" /></label>
+              <span id="canvas-match" class="canvas-match" aria-live="polite"></span>
+              <button id="canvas-full-file" class="ghost-btn" title="Load current file from workspace" aria-label="Load current file from workspace">Full</button>
+              <button id="canvas-editor" class="ghost-btn" title="Open in VS Code" aria-label="Open current file in VS Code">Editor</button>
+              <button id="canvas-download" class="ghost-btn" title="Download file" aria-label="Download open file">↓</button>
               <button id="canvas-all" class="ghost-btn canvas-all hidden" title="Show all edits">All edits</button>
               <button id="canvas-close" class="ghost-btn" title="Close canvas" aria-label="Close file canvas">
                 <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -177,10 +190,10 @@
         </div>
 
         <nav class="settings-tabs">
-          <button class="stab active" data-tab="behavior">Behavior</button>
-          <button class="stab" data-tab="display">Appearance</button>
-          <button class="stab" data-tab="tools">Tools</button>
-          <button class="stab" data-tab="session">Session</button>
+          <button class="stab active" role="tab" aria-selected="true" data-tab="behavior">Behavior</button>
+          <button class="stab" role="tab" aria-selected="false" data-tab="display">Appearance</button>
+          <button class="stab" role="tab" aria-selected="false" data-tab="tools">Tools</button>
+          <button class="stab" role="tab" aria-selected="false" data-tab="session">Session</button>
         </nav>
 
         <section class="settings-pane" data-pane="behavior">

@@ -627,7 +627,38 @@ fn extract_tool_allowlist_none_when_key_absent() {
     assert_eq!(extract_tool_allowlist(&None), None);
 }
 
-// ── ctx.state is one process-wide map ───────────────────────────────────────
+#[test]
+fn extract_tool_allowlist_empty_table_means_zero_tools() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    let tools = lua.create_table().unwrap();
+    opts.set("tools", tools).unwrap();
+    assert_eq!(extract_tool_allowlist(&Some(opts)), Some(vec![]));
+}
+
+// ── wall_elapsed / wall_timeout_ms ────────────────────────────────────────
+
+#[test]
+fn wall_elapsed_some_completes() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(2), wall_elapsed(Some(10)))
+            .await
+            .expect("wall_elapsed(Some(10)) must complete quickly");
+    });
+}
+
+#[test]
+fn wall_elapsed_none_stays_pending() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_millis(100), wall_elapsed(None)).await
+    });
+    assert!(
+        result.is_err(),
+        "wall_elapsed(None) must never resolve (timeout expected)"
+    );
+}
 
 // Regression: `ctx.state` must resolve to a single process-wide map so a value
 // written by one context (e.g. the `task_list` tool) is readable from another

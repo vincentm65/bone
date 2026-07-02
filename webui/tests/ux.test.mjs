@@ -2,17 +2,18 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { renderMarkdown } from "../public/markdown.js";
 
-const [html, css, js, bridge] = await Promise.all([
+const [html, css, js, bridge, markdown, canvasCore] = await Promise.all([
   readFile(new URL("../public/index.html", import.meta.url), "utf8"),
   readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
   readFile(new URL("../public/app.js", import.meta.url), "utf8"),
   readFile(new URL("../bridge.mjs", import.meta.url), "utf8"),
+  readFile(new URL("../public/markdown.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/canvas-core.js", import.meta.url), "utf8"),
 ]);
 
-const markdownSource = js.slice(js.indexOf("function escapeHtml"), js.indexOf("function enhanceContent"));
-const markdownContext = {};
-vm.runInNewContext(`${markdownSource};globalThis.render = renderMarkdown`, markdownContext);
+const markdownContext = { render: renderMarkdown };
 
 test("dialogs expose modal semantics and managed focus", () => {
   assert.match(html, /role="dialog" aria-modal="true"/);
@@ -58,11 +59,11 @@ test("streaming conversations expose reading and recovery controls", () => {
 });
 
 test("chat rendering supports rich markdown and highlighted code", () => {
-  assert.match(js, /function safeHref/);
-  assert.match(js, /function highlightCode/);
-  assert.match(js, /data-language=/);
-  assert.match(js, /class="task-item"/);
-  assert.match(js, /loading="lazy"/);
+  assert.match(markdown, /function safeHref/);
+  assert.match(markdown, /function highlightCode/);
+  assert.match(markdown, /data-language=/);
+  assert.match(markdown, /class="task-item"/);
+  assert.match(markdown, /loading="lazy"/);
   assert.match(css, /\.tok-keyword/);
   assert.match(css, /\.code-language/);
   assert.match(css, /\.prose \.task-item/);
@@ -149,5 +150,57 @@ test("edit canvas only exposes captured diffs and can show all edits", () => {
   assert.match(html, /id="canvas-all"/);
   assert.match(js, /path && captureDiff\(path, content\)/);
   assert.match(js, /function showAllEdits/);
-  assert.match(js, /const hunk = raw\.match/);
+  assert.match(canvasCore, /const hunk = raw\.match/);
+});
+
+test("composer supports persistent drafts and accessible attachments", () => {
+  assert.match(html, /id="attachment-input"[^>]*multiple/);
+  assert.match(html, /id="attachment-button"[^>]*aria-label=/);
+  assert.match(js, /new DraftStore\(localStorage\)/);
+  assert.match(js, /addEventListener\("paste"/);
+  assert.match(js, /addEventListener\("drop"/);
+  assert.match(js, /buildSubmission\(text, attachments\)/);
+});
+
+test("composer exposes capability-aware slash commands", () => {
+  assert.match(html, /id="command-menu"[^>]*role="listbox"/);
+  assert.match(html, /id="command-button"[^>]*aria-label="Open command menu"/);
+  assert.match(js, /if \(Array\.isArray\(ev\.commands\)\) state\.commands = ev\.commands/);
+  assert.match(js, /const NATIVE_COMMANDS = new Map/);
+  assert.match(js, /const HIDDEN_COMMANDS = new Set/);
+  assert.match(js, /\.sort\(\(a, b\) => a\.name\.localeCompare\(b\.name\)\)/);
+  assert.match(js, /run_command: \{ name: command\.name, input: command\.input \}/);
+  assert.match(js, /if \(!exact && highlighted\)/);
+  assert.match(js, /if \(commands\[state\.commandIndex\]\).*selectCommand/s);
+  assert.match(js, /case "command_complete": return onCommandComplete/);
+  assert.match(css, /\.command-option\.active/);
+});
+
+test("canvas exposes search, download, full-file loading, and keyboard resizing", () => {
+  assert.match(html, /id="divider"[^>]*role="separator"[^>]*tabindex="0"/);
+  assert.match(html, /id="canvas-search"/);
+  assert.match(html, /id="canvas-download"/);
+  assert.match(html, /id="canvas-full-file"/);
+  assert.match(html, /id="canvas-editor"/);
+  assert.match(js, /function updateCanvasSearch/);
+  assert.match(js, /function loadFullArtifact/);
+  assert.match(js, /prefs\.canvasW/);
+  assert.match(js, /\$\("divider"\)\.addEventListener\("keydown"/);
+});
+
+test("settings tabs expose selected state", () => {
+  assert.match(html, /role="tab" aria-selected="true"/);
+  assert.match(js, /setAttribute\("aria-selected", active\)/);
+  assert.match(js, /e\.key !== "ArrowLeft" && e\.key !== "ArrowRight"/);
+});
+
+test("recoverable data failures expose a persistent retry action", () => {
+  assert.match(html, /id="global-error"[^>]*role="alert"/);
+  assert.match(html, /id="global-error-retry"/);
+  assert.match(js, /function reportError/);
+  assert.match(js, /reportError\("Could not load conversations"/);
+});
+
+test("stats charts have keyboard-accessible spoken values", () => {
+  assert.match(js, /tabindex="0" role="img" aria-label=/);
 });

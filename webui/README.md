@@ -4,14 +4,16 @@ A simple, elegant web front-end for [bone](../) — modeled after the Codex / Cu
 chat experience. It connects to a `bone serve` daemon over bone's runtime protocol
 and surfaces the agent's full feature set: streaming responses, reasoning,
 live tool calls, tool-approval prompts, slash commands, Safe/Danger mode,
-token/cost usage, and conversation history.
+token/cost usage, conversation history, persistent per-chat drafts, and image or
+text-file attachments through the picker, clipboard, or drag and drop.
 
 The layout is three columns — **sidebar │ chat │ canvas**. The canvas is a
 resizable split-screen panel that opens automatically as the agent works:
 `write_file` of a Markdown plan renders live as a document, other writes show
 as a file view, and `edit_file` renders a colour-coded diff parsed from the
 result. Each touched file becomes a tab so you can step back through them; drag
-the divider to resize, or toggle the panel from the header.
+the divider to resize, or toggle the panel from the header. The canvas can also
+search, load the current workspace file, download it, or open it in VS Code.
 
 ```
   browser ──HTTP / SSE──▶ bridge.mjs ──TCP (newline-JSON)──▶ bone serve
@@ -54,11 +56,13 @@ If no daemon is listening on `127.0.0.1:7878`, the bridge starts one for you
 | `BONE_ADDR` | `127.0.0.1:7878` | address of the `bone serve` daemon |
 | `BONE_BIN`  | _(auto-detect)_  | path to the `bone` binary to spawn |
 
-There are **no typed slash commands** — every affordance is a UI element:
-a chat sidebar (history), a tabbed Settings modal (config/themes/usage), and a
-model picker. The sidebar, provider list, and config toggles are read from bone's
-own local data (`conversations.db`, `providers.yaml`, `general.yaml`, `tools.yaml`)
-via extra bridge endpoints, since the runtime protocol has no list/config commands.
+Common commands are native UI affordances: chat history, settings, usage, and the
+model picker. The composer also provides a searchable slash-command menu for
+daemon-advertised custom commands. Commands with a native web equivalent are
+redirected to it; terminal-only commands are omitted. The sidebar, provider list,
+and config toggles are read from bone's own local data (`conversations.db`,
+`providers.yaml`, `general.yaml`, `tools.yaml`) via extra bridge endpoints, since
+the runtime protocol has no list/config commands.
 
 ## Features mapped to the protocol
 

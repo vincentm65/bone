@@ -1322,11 +1322,17 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let cancelled_run = cancelled_flag.clone();
     let run_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         let tool_allowlist = extract_tool_allowlist(&opts);
-        let built =
-            match build_agent_request(prompt, &opts, &inherited_run, RUN_OPT_KEYS, None, tool_allowlist) {
-                Ok(b) => b,
-                Err(e) => return agent_result_to_lua(lua, Err(e)),
-            };
+        let built = match build_agent_request(
+            prompt,
+            &opts,
+            &inherited_run,
+            RUN_OPT_KEYS,
+            None,
+            tool_allowlist,
+        ) {
+            Ok(b) => b,
+            Err(e) => return agent_result_to_lua(lua, Err(e)),
+        };
         let BuiltAgent {
             request,
             activity,
@@ -1336,7 +1342,12 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
         let cancelled = cancelled_run.clone();
         let response = block_on(run_agent_with_watchdog(
-            request, activity, timeout_ms, wall_timeout_ms, cancelled, None,
+            request,
+            activity,
+            timeout_ms,
+            wall_timeout_ms,
+            cancelled,
+            None,
         ));
 
         agent_result_to_lua(lua, response)
@@ -1640,8 +1651,8 @@ fn build_agent_request(
         Some(n) if n <= u32::MAX as u64 => Some(n as u32),
         Some(_) => return Err("max_tokens is too large".to_string()),
     };
-    let wall_timeout_ms = opt_u64(opts, "wall_timeout_ms")
-        .map(|n| n.clamp(1_000, MAX_AGENT_WALL_TIMEOUT_MS));
+    let wall_timeout_ms =
+        opt_u64(opts, "wall_timeout_ms").map(|n| n.clamp(1_000, MAX_AGENT_WALL_TIMEOUT_MS));
     let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
     let request = crate::agent::AgentRequest {
         prompt,

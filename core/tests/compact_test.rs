@@ -1097,6 +1097,169 @@ fn auto_compact_no_notice_when_nothing_older_than_keep_window() {
 
 // ── 7. compact command is NOT a protected builtin ───────────────────────────
 
+// ── 6e. agent.run opts include tools={}, system_prompt, wall_timeout_ms ─────
+
+#[test]
+fn compact_passes_tools_eq_empty_and_wall_timeout_to_agent_run() {
+    let config_dir = common::temp_dir("compact-agent-opts");
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = bone_core::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone_core::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(
+        r#"
+        _RUN_OPTS = nil
+        local ctx = {
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "1" end
+                    if key == "auto_compact_keep_messages" then return "2" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
+            usage = { snapshot = function() return { context_length = 100 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "older" },
+                { role = "assistant", content = "older answer" },
+                { role = "user", content = "continue" },
+                { role = "assistant", content = "ok" },
+            } end },
+            agent = { run = function(prompt, opts)
+                _RUN_OPTS = opts
+                return { ok = true, content = "summary" }
+            end },
+            ui = { notify = function() end, status = function() end, notice = function() end },
+        }
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then break end
+        end
+        _TOOLS_IS_EMPTY = "no"
+        _HAS_SYSTEM_PROMPT = "no"
+        _WALL_TIMEOUT_SET = "no"
+        if type(_RUN_OPTS) == "table" then
+            local tools = _RUN_OPTS.tools
+            if type(tools) == "table" then
+                local count = 0
+                for _ in pairs(tools) do count = count + 1 end
+                if count == 0 then _TOOLS_IS_EMPTY = "yes" end
+            end
+            if type(_RUN_OPTS.system_prompt) == "string" then _HAS_SYSTEM_PROMPT = "yes" end
+            if type(_RUN_OPTS.wall_timeout_ms) == "number" then _WALL_TIMEOUT_SET = "yes" end
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    let tools_empty: String = lua.globals().get("_TOOLS_IS_EMPTY").unwrap();
+    let has_system_prompt: String = lua.globals().get("_HAS_SYSTEM_PROMPT").unwrap();
+    let wall_timeout_set: String = lua.globals().get("_WALL_TIMEOUT_SET").unwrap();
+
+    assert_eq!(tools_empty, "yes", "tools must be an empty table");
+    assert_eq!(has_system_prompt, "yes", "system_prompt must be set");
+    assert_eq!(wall_timeout_set, "yes", "wall_timeout_ms must be set");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+// ── 6f. empty summary produces a persistent notice (not transient notify) ────
+
+#[test]
+fn compact_empty_summary_uses_notice_not_notify() {
+    let config_dir = common::temp_dir("compact-empty-notice");
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = bone_core::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone_core::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(
+        r#"
+        _NOTICES = {}
+        _NOTIFIES = {}
+        local ctx = {
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "1" end
+                    if key == "auto_compact_keep_messages" then return "2" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
+            usage = { snapshot = function() return { context_length = 100 } end },
+            conversation = { history = function() return {
+                { role = "user", content = "older" },
+                { role = "assistant", content = "older answer" },
+                { role = "user", content = "continue" },
+                { role = "assistant", content = "ok" },
+            } end },
+            agent = { run = function() return { ok = true, content = "   " } end },
+            ui = {
+                notify = function(msg, level) _NOTIFIES[#_NOTIFIES + 1] = msg end,
+                status = function() end,
+                notice = function(msg) _NOTICES[#_NOTICES + 1] = msg end,
+            },
+        }
+        ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then break end
+        end
+        _EMPTY_NOTICE_FOUND = "no"
+        for _, m in ipairs(_NOTICES) do
+            if type(m) == "string" and m:find("empty summary") then
+                _EMPTY_NOTICE_FOUND = "yes"
+            end
+        end
+        _EMPTY_NOTIFY_FOUND = "no"
+        for _, m in ipairs(_NOTIFIES) do
+            if type(m) == "string" and m:find("empty summary") then
+                _EMPTY_NOTIFY_FOUND = "yes"
+            end
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    let notice_found: String = lua.globals().get("_EMPTY_NOTICE_FOUND").unwrap();
+    let notify_found: String = lua.globals().get("_EMPTY_NOTIFY_FOUND").unwrap();
+
+    assert_eq!(
+        notice_found, "yes",
+        "empty summary must produce a persistent notice"
+    );
+    assert_eq!(
+        notify_found, "no",
+        "empty summary must NOT produce a transient notify"
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+// ── 7. compact command is NOT a protected builtin ───────────────────────────
+
 #[test]
 fn compact_is_not_a_protected_builtin() {
     // The builtin list is in src/ui/commands/mod.rs BUILTINS.

@@ -1,3 +1,7 @@
+import { DraftStore, MAX_ATTACHMENTS, buildSubmission, downloadText, fileToAttachment, requestJson } from "./ui-core.js";
+import { escapeHtml, highlightCode, renderMarkdown } from "./markdown.js";
+import { artifactText, parseDiff } from "./canvas-core.js";
+
 // bone studio — browser client for the bone runtime protocol.
 //
 // Daemon → us over SSE (RuntimeEvent), us → daemon over POST (RuntimeCommand).
@@ -14,6 +18,8 @@ const el = (tag, cls, html) => {
 };
 
 const prefs = loadPrefs();
+const drafts = new DraftStore(localStorage);
+let attachments = [];
 const storedConversationId = Number(sessionStorage.getItem("bone-active-conversation"));
 let desiredConversationId = Number.isInteger(storedConversationId) && storedConversationId > 0
   ? storedConversationId
@@ -36,6 +42,9 @@ const state = {
   model: null,
   snapshot: {},
   toolDefs: [],
+  commands: [],
+  commandIndex: -1,
+  commandRunning: false,
   toolInfo: new Map(),   // call id -> { name, arguments }
   // The conversation switch in flight, or null when none. Each browser tab
   // multiplexes one daemon connection across conversations, so the previous
@@ -361,13 +370,54 @@ function dispatchEvent(ev) {
     case "failed": return onFailed(ev);
     case "turn_complete": return onTurnComplete();
     case "view_diff": return onViewDiff(ev.diff);
+    case "command_complete": return onCommandComplete(ev);
     default: return;
   }
 }
 
 function onFrontendState(ev) {
   if (Array.isArray(ev.tool_defs)) state.toolDefs = ev.tool_defs;
+  if (Array.isArray(ev.commands)) state.commands = ev.commands;
   applyTheme(ev.theme);
+}
+
+function plainTerminalText(text) {
+  return String(text || "").replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+}
+
+async function applyCommandAction(action) {
+  if (!action) return;
+  if (action.conversation_replace) {
+    await send({ replace_conversation: { messages: action.conversation_replace } });
+  }
+  if (action.conversation_load?.conversation_id != null) {
+    await openChat(action.conversation_load.conversation_id);
+  }
+  const config = action.config_action;
+  if (config === "reload_tools") await send("reload_extensions");
+  else if (config === "apply") await send({ switch_provider: { provider_id: state.providerId } });
+  else if (config?.switch_provider?.id) await send({ switch_provider: { provider_id: config.switch_provider.id } });
+}
+
+async function onCommandComplete(ev) {
+  setCommandRunning(false);
+  state.lastBubble = null;
+  await applyCommandAction(ev.action);
+  const output = plainTerminalText(ev.output).trim();
+  // Submitting commands feed their output to the model; the daemon's normal
+  // started/delta events render that turn. Display-only commands need a result.
+  if (output && !ev.submit) {
+    if (ev.display_role === "assistant") {
+      const t = turn("assistant");
+      const prose = el("div", "prose");
+      prose.innerHTML = renderMarkdown(output); t.appendChild(prose); enhanceContent(t); scrollDown();
+    } else {
+      clearWelcome();
+      const line = el("div", "system-line command-result");
+      line.textContent = output; $("thread").appendChild(line); scrollDown();
+    }
+  }
+  autosize();
 }
 
 function onSnapshot(s) {
@@ -384,10 +434,12 @@ function onSnapshot(s) {
   state.model = s.provider_model || state.model;
   state.providerId = s.provider_id || state.providerId;
   if (s.conversation_id != null) {
+    const previousConversationId = state.conversationId;
     const changed = state.conversationId !== s.conversation_id;
     state.conversationId = s.conversation_id;
     desiredConversationId = s.conversation_id;
     sessionStorage.setItem("bone-active-conversation", String(s.conversation_id));
+    if (previousConversationId == null && drafts.get(null) && !drafts.get(s.conversation_id)) drafts.move(null, s.conversation_id);
     if (changed) highlightActiveChat();
   }
   renderModelLabel();
@@ -438,10 +490,19 @@ function turn(role) {
   return t;
 }
 
-function userMessage(text) {
+function userMessage(text, images = []) {
   const t = turn("user");
   t.appendChild(el("div", "role-tag", "You"));
   t.appendChild(el("div", "bubble")).textContent = text;
+  if (images.length) {
+    const gallery = el("div", "message-images");
+    for (const image of images) {
+      const img = document.createElement("img");
+      img.src = image.preview || `data:${image.media_type};base64,${image.data}`;
+      img.alt = image.name || "Attached image"; img.loading = "lazy"; gallery.appendChild(img);
+    }
+    t.appendChild(gallery);
+  }
   scrollDown();
   return t;
 }
@@ -839,37 +900,6 @@ function captureDiff(path, resultContent) {
 
 // Parse bone's numbered unified diff. Lines look like:
 //   "   12   context"   "   13 - removed"   "   13 + added"
-function parseDiff(text) {
-  const lines = [];
-  let add = 0, del = 0, prevNum = null;
-  let oldNum = null, newNum = null;
-  for (const raw of String(text).split("\n")) {
-    const m = raw.match(/^\s*(\d+)\s([-+ ])\s(.*)$/);
-    const hunk = raw.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
-    if (hunk) {
-      if (lines.length) lines.push({ type: "hunk" });
-      oldNum = Number(hunk[1]); newNum = Number(hunk[2]); prevNum = null;
-      continue;
-    }
-    let num, sign, txt;
-    if (m) {
-      num = Number(m[1]); sign = m[2]; txt = m[3];
-    } else if (oldNum != null && newNum != null && /^[ +\-]/.test(raw) && !/^(---|\+\+\+)\s/.test(raw)) {
-      sign = raw[0]; txt = raw.slice(1);
-      num = sign === "+" ? newNum : oldNum;
-      if (sign !== "+") oldNum++;
-      if (sign !== "-") newNum++;
-    } else continue;
-    // A drop in line number between hunks marks a gap; show a separator.
-    if (prevNum != null && num < prevNum) lines.push({ type: "hunk" });
-    if (sign === "+") { lines.push({ type: "add", ln: num, text: txt }); add++; }
-    else if (sign === "-") { lines.push({ type: "del", ln: num, text: txt }); del++; }
-    else lines.push({ type: "ctx", ln: num, text: txt });
-    prevNum = num;
-  }
-  return { lines, add, del };
-}
-
 function upsertArtifact(art) {
   artifacts.set(art.path, { ...(artifacts.get(art.path) || {}), ...art });
   activeArtifact = art.path;
@@ -901,8 +931,8 @@ function closeArtifact(path) {
   renderArtifact();
 }
 
-function openCanvas() { $("canvas").classList.remove("hidden"); $("divider").classList.remove("hidden"); }
-function closeCanvas() { $("canvas").classList.add("hidden"); $("divider").classList.add("hidden"); }
+function openCanvas() { $("canvas").classList.remove("hidden"); $("divider").classList.remove("hidden"); $("canvas-toggle").setAttribute("aria-expanded", "true"); }
+function closeCanvas() { $("canvas").classList.add("hidden"); $("divider").classList.add("hidden"); $("canvas-toggle").setAttribute("aria-expanded", "false"); }
 function toggleCanvas() {
   if (!artifacts.size) return;
   $("canvas").classList.contains("hidden") ? openCanvas() : closeCanvas();
@@ -926,10 +956,12 @@ function renderTabs() {
     const tab = el("div", "canvas-tab" + (a.path === activeArtifact ? " active" : ""));
     tab.title = a.path;
     tab.innerHTML = `<span class="ct-kind"></span><span class="ct-name"></span>
-      <span class="ct-x"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></span>`;
+      <button type="button" class="ct-x" aria-label="Close ${escapeHtml(a.name)}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>`;
     tab.querySelector(".ct-kind").textContent = KIND_LABEL[a.kind] || "file";
     tab.querySelector(".ct-name").textContent = a.name;
+    tab.tabIndex = 0; tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(a.path === activeArtifact));
     tab.onclick = (e) => { if (e.target.closest(".ct-x")) return; focusArtifact(a.path); };
+    tab.onkeydown = (e) => { if ((e.key === "Enter" || e.key === " ") && !e.target.closest(".ct-x")) { e.preventDefault(); focusArtifact(a.path); } };
     tab.querySelector(".ct-x").onclick = (e) => { e.stopPropagation(); closeArtifact(a.path); };
     tabs.appendChild(tab);
   }
@@ -974,9 +1006,45 @@ function renderArtifact() {
   } else if (a.kind === "diff") {
     body.appendChild(renderDiffView(a.lines));
   } else {
-    body.appendChild(renderCodeView(a.content || ""));
+    body.appendChild(renderCodeView(a.content || "", a.path));
   }
   body.scrollTop = 0;
+  updateCanvasSearch();
+}
+
+function updateCanvasSearch() {
+  const query = $("canvas-search").value.trim().toLocaleLowerCase();
+  const rows = [...$("canvas-body").querySelectorAll(".lt, .prose p, .prose li")];
+  let count = 0;
+  for (const row of rows) {
+    const hit = !!query && row.textContent.toLocaleLowerCase().includes(query);
+    row.classList.toggle("search-hit", hit); if (hit) count++;
+  }
+  $("canvas-match").textContent = query ? `${count} match${count === 1 ? "" : "es"}` : "";
+  if (count) $("canvas-body").querySelector(".search-hit")?.scrollIntoView({ block: "center" });
+}
+function downloadArtifact() {
+  const a = artifacts.get(activeArtifact);
+  if (!a) return;
+  downloadText(a.name, artifactText(a));
+}
+async function loadFullArtifact() {
+  const a = artifacts.get(activeArtifact);
+  if (!a) return;
+  const button = $("canvas-full-file"); button.disabled = true;
+  try {
+    const file = await requestJson(`/api/file?path=${encodeURIComponent(a.path)}`);
+    upsertArtifact({ path: a.path, absolutePath: file.absolute_path, name: a.name, kind: /\.(md|markdown|mdx)$/i.test(a.path) ? "doc" : "file", content: file.content, add: 0, del: 0 });
+    toast("Loaded current workspace file");
+  } catch (error) { toast(`Could not load file: ${error.message}`); }
+  finally { button.disabled = false; }
+}
+async function openArtifactInEditor() {
+  const a = artifacts.get(activeArtifact); if (!a) return;
+  try {
+    const file = a.absolutePath ? { absolute_path: a.absolutePath } : await requestJson(`/api/file?path=${encodeURIComponent(a.path)}`);
+    location.href = `vscode://file/${file.absolute_path}`;
+  } catch (error) { toast(`Could not open editor: ${error.message}`); }
 }
 
 function renderDiffView(lines) {
@@ -994,14 +1062,14 @@ function renderDiffView(lines) {
   return wrap;
 }
 
-function renderCodeView(content) {
+function renderCodeView(content, path = "") {
   const wrap = el("div", "codeview");
   const lines = content.split("\n");
   lines.forEach((text, i) => {
     const row = el("div", "code-line");
     row.innerHTML = `<span class="ln"></span><span class="lt"></span>`;
     row.querySelector(".ln").textContent = i + 1;
-    row.querySelector(".lt").textContent = text;
+    row.querySelector(".lt").innerHTML = highlightCode(text, path.split(".").pop() || "");
     wrap.appendChild(row);
   });
   return wrap;
@@ -1530,6 +1598,7 @@ function onConversationLoaded(ev) {
     rendered++;
   }
   if (ev.snapshot) onSnapshot(ev.snapshot);
+  restoreDraft();
   // Restore this conversation's task list from the per-chat cache (the actor
   // won't re-emit it on attach). Uses the id from the snapshot we just applied.
   restoreTasks(state.conversationId);
@@ -1547,7 +1616,7 @@ function renderStoredMessage(m, asstTurn) {
     // Daemon-injected background job results — render as an agent card, not a
     // wall-of-text "You" bubble the user never typed.
     if ((m.content || "").startsWith(BG_RESULTS_PREFIX)) { jobResultsCard(m.content); return null; }
-    userMessage(m.content);
+    userMessage(m.content, m.images || []);
     return null;
   }
   if (m.role === "assistant") {
@@ -1694,7 +1763,9 @@ function closeMobileSidebar() { $("app").classList.remove("mobile-sidebar-open")
 // ── chat sidebar ────────────────────────────────────────────────────────────
 
 async function loadChats() {
-  conversations = await fetch("/api/conversations").then((r) => r.json()).catch(() => []);
+  clearError();
+  try { conversations = await requestJson("/api/conversations"); }
+  catch (error) { conversations = []; reportError("Could not load conversations", error, loadChats); }
   renderChats();
 }
 function renderChats() {
@@ -1774,6 +1845,7 @@ async function archiveConversation(conversation) {
 }
 async function openChat(id) {
   if (id === state.conversationId) return;
+  saveDraft();
   const leaving = state.conversationId;
   const leavingRunning = state.running;
   denyPending();
@@ -1823,6 +1895,7 @@ function relTime(iso) {
   return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 async function newChat() {
+  saveDraft();
   const leaving = state.conversationId;
   const leavingRunning = state.running;
   denyPending();
@@ -1852,6 +1925,7 @@ async function newChat() {
   sessionStorage.removeItem("bone-active-conversation");
   // Surface the ephemeral placeholder row for the fresh chat.
   state.draftChat = true;
+  restoreDraft();
   renderChats();
   closeMobileSidebar();
 }
@@ -1871,7 +1945,9 @@ let _provExpanded = null;   // key of expanded card (null = collapsed)
 let _provShowKey = null;    // key whose API key is revealed
 
 async function loadProviders() {
-  state.providers = await fetch("/api/providers").then((r) => r.json()).catch(() => []);
+  clearError();
+  try { state.providers = await requestJson("/api/providers"); }
+  catch (error) { state.providers = []; reportError("Could not load providers", error, loadProviders); }
   // Restore last-selected provider if it still exists in the provider list.
   if (prefs.providerId && state.providers.some((p) => p.key === prefs.providerId)) {
     state.providerId = prefs.providerId;
@@ -2007,7 +2083,7 @@ function createProvSelect(providerKey, fieldKey, value, options) {
   return sel;
 }
 
-function saveProviderField(providerKey, fieldKey, value) {
+async function saveProviderField(providerKey, fieldKey, value) {
   const prov = state.providers.find((p) => p.key === providerKey);
   if (!prov) return;
   const oldVal = prov[fieldKey];
@@ -2016,21 +2092,21 @@ function saveProviderField(providerKey, fieldKey, value) {
   renderModelLabel();
   renderProviderPicker();
   if (!$("model-pop").classList.contains("hidden")) positionModelPop();
-  fetch(`/api/providers/${providerKey}`, {
+  try { await requestJson(`/api/providers/${providerKey}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ field: fieldKey, value }),
-  }).catch(() => {
+  }); toast("Saved"); } catch (error) {
     prov[fieldKey] = oldVal;
-    toast("failed to save");
+    toast(`Save failed: ${error.message}`);
     renderProviderPicker();
-  });
+  }
 }
 
 async function deleteProvider(key) {
   if (!confirm(`Delete provider "${key}"?`)) return;
   try {
-    await fetch(`/api/providers/${key}`, { method: "DELETE" });
+    await requestJson(`/api/providers/${key}`, { method: "DELETE" });
     state.providers = state.providers.filter((p) => p.key !== key);
     if (_provExpanded === key) _provExpanded = null;
     renderProviderPicker();
@@ -2079,7 +2155,7 @@ async function submitAddProvider() {
   const model = modelInput.value.trim() || "gpt-4o-mini";
   const base_url = urlInput.value.trim() || "https://api.openai.com/v1";
   try {
-    await fetch("/api/providers", {
+    await requestJson("/api/providers", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ key, label, model, base_url }),
@@ -2128,6 +2204,7 @@ function openModelPop() {
   $("model-chip").setAttribute("aria-expanded", "true");
   positionModelPop();
   markActiveProvider();
+  requestAnimationFrame(() => pop.querySelector("button, input, select")?.focus());
 }
 
 function closeModelPop() {
@@ -2153,7 +2230,9 @@ function positionModelPop() {
 let configCache = { general: [], toolsDisabled: [] };
 
 async function loadConfig() {
-  configCache = await fetch("/api/config").then((r) => r.json()).catch(() => ({ general: [], toolsDisabled: [] }));
+  clearError();
+  try { configCache = await requestJson("/api/config"); }
+  catch (error) { configCache = { general: [], toolsDisabled: [] }; reportError("Could not load settings", error, loadConfig); }
   // Sync approval mode from persisted config so the UI matches the daemon's
   // actual state (the daemon may have been toggled before a page refresh).
   const am = findField("approval_mode");
@@ -2165,11 +2244,13 @@ async function loadConfig() {
 function findField(key) { return configCache.general.find((f) => f.key === key) || {}; }
 
 async function writeConfig(namespace, key, value, type, reload) {
-  await fetch("/api/config", {
+  try { await requestJson("/api/config", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ namespace, key, value, type }),
-  }).catch(() => {});
-  if (reload) { send("reload_extensions"); toast("applied — reloading"); }
+  });
+    if (reload) { send("reload_extensions"); toast("Applied — reloading"); }
+    else toast("Saved");
+  } catch (error) { toast(`Save failed: ${error.message}`); await loadConfig(); }
 }
 
 function setRow(label, desc, control) {
@@ -2312,7 +2393,7 @@ function openSettings() {
 function closeSettings() { closeDialog("settings-overlay"); }
 
 function switchTab(tab) {
-  for (const b of document.querySelectorAll(".stab")) b.classList.toggle("active", b.dataset.tab === tab);
+  for (const b of document.querySelectorAll(".stab")) { const active = b.dataset.tab === tab; b.classList.toggle("active", active); b.setAttribute("aria-selected", active); }
   for (const p of document.querySelectorAll(".settings-pane")) p.classList.toggle("hidden", p.dataset.pane !== tab);
 }
 
@@ -2348,16 +2429,18 @@ function setMode(d) {
 function loadPrefs() {
   let p = {};
   try { p = JSON.parse(localStorage.getItem("bone-studio-prefs") || "{}"); } catch {}
-  return { showThinking: p.showThinking !== false, expandTools: !!p.expandTools, showMeter: p.showMeter !== false, theme: p.theme || "codex-mono", sidebarW: clampSidebarW(p.sidebarW), providerId: p.providerId || null };
+  return { showThinking: p.showThinking !== false, expandTools: !!p.expandTools, showMeter: p.showMeter !== false, theme: p.theme || "codex-mono", sidebarW: clampSidebarW(p.sidebarW), canvasW: clampCanvasW(p.canvasW), providerId: p.providerId || null };
 }
 function savePrefs() { localStorage.setItem("bone-studio-prefs", JSON.stringify(prefs)); }
 // Sidebar width is user-draggable; keep it within a sane range and fall back to
 // the CSS default (280) when unset.
 function clampSidebarW(w) { return w ? Math.max(240, Math.min(420, w)) : 0; }
+function clampCanvasW(w) { return w ? Math.max(320, Math.min(innerWidth * .7, w)) : 0; }
 function applyPrefs() {
   document.body.classList.toggle("hide-thinking", !prefs.showThinking);
   document.body.classList.toggle("hide-meter", !prefs.showMeter);
   if (prefs.sidebarW) document.documentElement.style.setProperty("--sidebar-w", prefs.sidebarW + "px");
+  if (prefs.canvasW) document.documentElement.style.setProperty("--canvas-w", prefs.canvasW + "px");
   applyThemePref();
 }
 function applyThemePref() {
@@ -2387,30 +2470,190 @@ function setRunning(on) {
 // ── composer ───────────────────────────────────────────────────────────────
 
 const input = $("input");
+const NATIVE_COMMANDS = new Map([
+  ["history", { description: "Open conversation history", run: () => { openMobileSidebar(); $("chat-search").focus(); } }],
+  ["clear", { description: "Clear this chat", run: newChat }],
+  ["new", { description: "Start a new chat", run: newChat }],
+  ["usage", { description: "Show usage for this session", run: () => { switchTab("session"); openSettings(); } }],
+  ["stats", { description: "Open token statistics", run: openStats }],
+  ["model", { description: "Choose a model", run: openModelPop }],
+  ["provider", { description: "Choose a provider", run: openModelPop }],
+  ["config", { description: "Open settings", run: openSettings }],
+  ["tools", { description: "Configure tools", run: () => { switchTab("tools"); openSettings(); } }],
+  ["help", { description: "Show available commands", run: () => openCommandMenu(true) }],
+]);
+const HIDDEN_COMMANDS = new Set(["quit", "exit", "edit", "e", "setup", "catalog"]);
+
+function availableCommands() {
+  const commands = new Map(NATIVE_COMMANDS);
+  for (const item of state.commands) {
+    const name = Array.isArray(item) ? item[0] : item?.name;
+    const description = Array.isArray(item) ? item[1] : item?.description;
+    if (!name || HIDDEN_COMMANDS.has(name) || commands.has(name)) continue;
+    commands.set(name, { description: description || "Custom command", remote: true });
+  }
+  return [...commands]
+    .map(([name, command]) => ({ name, ...command }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function commandQuery() {
+  const match = input.value.match(/^\/([^\s]*)$/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function matchingCommands() {
+  const query = commandQuery();
+  if (query == null) return [];
+  return availableCommands().filter((c) =>
+    c.name.toLowerCase().includes(query) || c.description.toLowerCase().includes(query));
+}
+
+function renderCommandMenu(force = false) {
+  const menu = $("command-menu");
+  const query = force ? "" : commandQuery();
+  if (query == null) return closeCommandMenu();
+  const matches = matchingCommands();
+  state.commandIndex = matches.length ? Math.max(0, Math.min(state.commandIndex, matches.length - 1)) : -1;
+  menu.innerHTML = "";
+  for (const [index, command] of matches.entries()) {
+    const option = el("button", "command-option" + (index === state.commandIndex ? " active" : ""));
+    option.type = "button";
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", index === state.commandIndex ? "true" : "false");
+    option.innerHTML = `<span class="command-name"></span><span class="command-desc"></span>`;
+    option.querySelector(".command-name").textContent = `/${command.name}`;
+    option.querySelector(".command-desc").textContent = command.description;
+    option.onmousedown = (e) => e.preventDefault();
+    option.onclick = () => selectCommand(command);
+    menu.appendChild(option);
+  }
+  if (!matches.length) menu.appendChild(el("div", "command-empty", "No matching commands"));
+  menu.classList.remove("hidden");
+  $("command-button").setAttribute("aria-expanded", "true");
+}
+
+function openCommandMenu(resetInput = false) {
+  closeModelPop();
+  if (resetInput || commandQuery() == null) input.value = "/";
+  state.commandIndex = 0;
+  autosize(); saveDraft(); renderCommandMenu(); input.focus();
+}
+
+function closeCommandMenu() {
+  $("command-menu").classList.add("hidden");
+  $("command-button").setAttribute("aria-expanded", "false");
+  state.commandIndex = -1;
+}
+
+function selectCommand(command) {
+  input.value = `/${command.name} `;
+  closeCommandMenu(); autosize(); saveDraft(); input.focus();
+}
+
+function moveCommandSelection(delta) {
+  const options = [...$("command-menu").querySelectorAll(".command-option")];
+  if (!options.length) return;
+  state.commandIndex = (state.commandIndex + delta + options.length) % options.length;
+  options.forEach((option, index) => {
+    option.classList.toggle("active", index === state.commandIndex);
+    option.setAttribute("aria-selected", index === state.commandIndex ? "true" : "false");
+  });
+  options[state.commandIndex].scrollIntoView({ block: "nearest" });
+}
+
+function parseCommand(text) {
+  const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  const name = match[1];
+  const native = NATIVE_COMMANDS.get(name);
+  if (native) return { name, input: match[2] || "", ...native };
+  const remote = availableCommands().find((c) => c.remote && c.name === name);
+  return remote ? { ...remote, input: match[2] || "" } : null;
+}
+
+async function runComposerCommand(command, sourceText) {
+  closeCommandMenu();
+  input.value = ""; drafts.set(state.conversationId, ""); autosize();
+  if (command.run) { await command.run(command.input); return true; }
+  setCommandRunning(true);
+  state.lastBubble = userMessage(sourceText);
+  state.lastText = sourceText;
+  $("send").disabled = true;
+  const ok = await send({ run_command: { name: command.name, input: command.input } });
+  if (!ok) {
+    setCommandRunning(false);
+    state.lastBubble?.remove(); state.lastBubble = null;
+    input.value = sourceText; saveDraft(); autosize();
+  }
+  return ok;
+}
+
+function setCommandRunning(on) {
+  state.commandRunning = on;
+  if (!state.running) {
+    $("stop").classList.toggle("hidden", !on);
+    $("send").classList.toggle("hidden", on);
+  }
+  if (!on) autosize();
+}
+
 function autosize() {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 240) + "px";
-  $("send").disabled = state.sending || !input.value.trim();
+  $("send").disabled = state.sending || (!input.value.trim() && !attachments.length);
+}
+function saveDraft() { drafts.set(state.conversationId, input.value); }
+function restoreDraft() { input.value = drafts.get(state.conversationId); autosize(); }
+
+function renderAttachments() {
+  const host = $("attachment-list");
+  host.innerHTML = "";
+  for (const item of attachments) {
+    const chip = el("div", "attachment-chip");
+    if (item.preview) { const img = document.createElement("img"); img.src = item.preview; img.alt = ""; chip.appendChild(img); }
+    const name = el("span", "attachment-chip-name"); name.textContent = item.name; chip.appendChild(name);
+    const remove = el("button", "attachment-remove", "×"); remove.type = "button"; remove.setAttribute("aria-label", `Remove ${item.name}`);
+    remove.onclick = () => { attachments = attachments.filter((a) => a.id !== item.id); renderAttachments(); autosize(); };
+    chip.appendChild(remove); host.appendChild(chip);
+  }
+  announce(attachments.length ? `${attachments.length} attachment${attachments.length === 1 ? "" : "s"} selected` : "Attachments cleared");
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    if (attachments.length >= MAX_ATTACHMENTS) { toast(`Up to ${MAX_ATTACHMENTS} attachments are allowed`); break; }
+    try { attachments.push(await fileToAttachment(file)); }
+    catch (error) { toast(error.message); }
+  }
+  renderAttachments(); autosize();
 }
 async function submit(textOverride) {
   // Guard: wired as both `send.onclick` (receives a PointerEvent) and a direct
   // call with a string. Only honour a string override; anything else uses the
   // composer's value.
   const text = (typeof textOverride === "string" ? textOverride : input.value).trim();
-  if (!text || state.running || state.sending) return;
+  if ((!text && !attachments.length) || state.running || state.sending || state.commandRunning) return;
+  const command = attachments.length ? null : parseCommand(text);
+  if (command) return runComposerCommand(command, text);
+  const submission = buildSubmission(text, attachments);
   state.sending = true;
   // Remember the message so we can restore it if the daemon rejects it as busy.
-  state.lastBubble = userMessage(text);
+  state.lastBubble = userMessage(text || attachments.map((a) => a.name).join(", "), attachments.filter((a) => a.kind === "image"));
   state.lastText = text;
   input.value = "";
+  drafts.set(state.conversationId, "");
   autosize();
   $("send").disabled = true;
   $("app-status").textContent = "Sending message";
-  const ok = await send({ submit_prompt: { text, images: [] } });
+  const sentAttachments = attachments;
+  attachments = []; renderAttachments();
+  const ok = await send({ submit_prompt: submission });
   if (!ok) {
     state.sending = false;
     if (state.lastBubble) { state.lastBubble.remove(); state.lastBubble = null; }
     input.value = text;
+    attachments = sentAttachments; renderAttachments(); saveDraft();
     autosize();
     showRetry(text);
   }
@@ -2460,6 +2703,15 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.classList.add("hidden"), 250); }, 2200);
 }
+let errorRetry = null;
+function reportError(context, error, retry) {
+  $("global-error-text").textContent = `${context}: ${error.message || error}`;
+  errorRetry = retry || null;
+  $("global-error-retry").classList.toggle("hidden", !retry);
+  $("global-error").classList.remove("hidden");
+  announce(`${context} failed`);
+}
+function clearError() { $("global-error").classList.add("hidden"); errorRetry = null; }
 function announce(message) { $("app-status").textContent = message; }
 function openDialog(overlayId, cardSelector) {
   dialogReturnFocus = document.activeElement;
@@ -2488,86 +2740,6 @@ function trapDialogFocus(e) {
 }
 
 // ── markdown (compact, escaped-first) ────────────────────────────────────────
-
-function escapeHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-function safeHref(raw) {
-  const href = raw.trim();
-  return /^(https?:|mailto:|\/|#)/i.test(href) ? escapeHtml(href) : "#";
-}
-function inlineMd(s) {
-  const code = [];
-  const breaks = [];
-  let raw = s.replace(/`([^`]+)`/g, (_, c) => { code.push(`<code>${escapeHtml(c)}</code>`); return `\u0000C${code.length - 1}\u0000`; });
-  raw = raw.replace(/<br\s*\/?>/gi, () => { breaks.push("<br/>"); return `\u0000B${breaks.length - 1}\u0000`; });
-  let t = escapeHtml(raw);
-  t = t
-    .replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+["']([^"']*)["'])?\)/g, (_, alt, url, title) => `<img src="${safeHref(url)}" alt="${alt}"${title ? ` title="${title}"` : ""} loading="lazy" />`)
-    .replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+["']([^"']*)["'])?\)/g, (_, label, url, title) => `<a href="${safeHref(url)}"${title ? ` title="${title}"` : ""} target="_blank" rel="noreferrer">${label}</a>`)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
-    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
-    .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
-    .replace(/(^|[^_])_([^_]+)_/g, "$1<em>$2</em>");
-  return t
-    .replace(/\u0000C(\d+)\u0000/g, (_, i) => code[Number(i)])
-    .replace(/\u0000B(\d+)\u0000/g, (_, i) => breaks[Number(i)]);
-}
-
-const CODE_WORDS = new Set(("as async await break case catch class const continue crate def default delete do else enum export extends false finally fn for from function if impl import in interface let match mod move mut new None null of pub raise return self Some static struct super switch this throw trait true try type typeof undefined use var void while with yield").split(" "));
-function highlightCode(source, lang = "") {
-  const escaped = escapeHtml(source);
-  const stash = [];
-  const keep = (cls, value) => { stash.push(`<span class="tok-${cls}">${value}</span>`); return `\u0000T${stash.length - 1}\u0000`; };
-  let out = escaped
-    .replace(/(&quot;|'|&#39;)(?:\\.|(?!\1).)*?\1/g, (m) => keep("string", m))
-    .replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, (m) => keep("comment", m))
-    .replace(/(^|\n)(\s*#[^\n]*)/g, (_, lead, comment) => lead + keep("comment", comment))
-    .replace(/\b(0x[\da-f]+|\d+(?:\.\d+)?)\b/gi, (m) => keep("number", m))
-    .replace(/\b[A-Za-z_$][\w$]*\b/g, (m) => CODE_WORDS.has(m) ? keep("keyword", m) : m);
-  out = out.replace(/\u0000T(\d+)\u0000/g, (_, i) => stash[Number(i)]);
-  return out;
-}
-function renderMarkdown(src) {
-  const lines = src.split("\n");
-  let html = "", i = 0, listType = null;
-  const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
-  while (i < lines.length) {
-    const line = lines[i];
-    const fence = line.match(/^\s*```(\w*)/);
-    if (fence) { closeList(); const buf = []; const lang = fence[1].toLowerCase(); i++; while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]); if (i < lines.length) i++; html += `<pre class="code-block" data-language="${escapeHtml(lang)}"><code class="language-${escapeHtml(lang)}">${highlightCode(buf.join("\n"), lang)}</code></pre>`; continue; }
-    if (/^\s*$/.test(line)) { closeList(); i++; continue; }
-    const h = line.match(/^(#{1,3})\s+(.*)/);
-    if (h) { closeList(); html += `<h${h[1].length}>${inlineMd(h[2])}</h${h[1].length}>`; i++; continue; }
-    const ul = line.match(/^\s*[-*+]\s+(.*)/);
-    if (ul) { if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; } const task = ul[1].match(/^\[([ xX])\]\s+(.*)/); html += task ? `<li class="task-item"><input type="checkbox" disabled ${task[1] !== " " ? "checked" : ""} /><span>${inlineMd(task[2])}</span></li>` : `<li>${inlineMd(ul[1])}</li>`; i++; continue; }
-    const ol = line.match(/^\s*\d+\.\s+(.*)/);
-    if (ol) { if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; } html += `<li>${inlineMd(ol[1])}</li>`; i++; continue; }
-    const bq = line.match(/^\s*>\s?(.*)/);
-    if (bq) { closeList(); html += `<blockquote>${inlineMd(bq[1])}</blockquote>`; i++; continue; }
-    if (/^\s*([-*_])\1\1+\s*$/.test(line)) { closeList(); html += "<hr/>"; i++; continue; }
-
-    // tables: a `| … |` header row followed by a `|---|---|` separator
-    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])) {
-      closeList();
-      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-      const head = cells(line);
-      i += 2;
-      let body = "";
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
-        body += "<tr>" + cells(lines[i]).map((c) => `<td>${inlineMd(c)}</td>`).join("") + "</tr>";
-        i++;
-      }
-      html += `<table><thead><tr>${head.map((c) => `<th>${inlineMd(c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
-      continue;
-    }
-    closeList();
-    const para = [line]; i++;
-    while (i < lines.length && lines[i].trim() && !/^\s*(#{1,3}\s|[-*]\s|\d+\.\s|>|```)/.test(lines[i])) para.push(lines[i++]);
-    html += `<p>${para.map(inlineMd).join("<br/>")}</p>`;
-  }
-  closeList();
-  return html;
-}
 
 function enhanceContent(root) {
   for (const pre of root.querySelectorAll("pre:not([data-enhanced])")) {
@@ -2601,14 +2773,47 @@ function enhanceContent(root) {
 
 // ── wiring ──────────────────────────────────────────────────────────────────
 
-input.addEventListener("input", autosize);
-input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
+input.addEventListener("input", () => { autosize(); state.commandIndex = 0; renderCommandMenu(); });
+input.addEventListener("input", saveDraft);
+input.addEventListener("keydown", (e) => {
+  const menuOpen = !$("command-menu").classList.contains("hidden");
+  if (menuOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault(); moveCommandSelection(e.key === "ArrowDown" ? 1 : -1); return;
+  }
+  if (menuOpen && e.key === "Tab") {
+    const commands = matchingCommands();
+    if (commands[state.commandIndex]) { e.preventDefault(); selectCommand(commands[state.commandIndex]); }
+    return;
+  }
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    const exact = parseCommand(input.value.trim());
+    const highlighted = menuOpen ? matchingCommands()[state.commandIndex] : null;
+    if (!exact && highlighted) {
+      const text = `/${highlighted.name}`;
+      const command = parseCommand(text);
+      if (command) runComposerCommand(command, text);
+    } else submit();
+  }
+  if (e.key === "Escape" && menuOpen) { e.preventDefault(); closeCommandMenu(); }
+});
+$("attachment-button").onclick = () => $("attachment-input").click();
+$("command-button").onclick = () => $("command-menu").classList.contains("hidden") ? openCommandMenu() : closeCommandMenu();
+$("attachment-input").onchange = (e) => { addFiles(e.target.files); e.target.value = ""; };
+input.addEventListener("paste", (e) => {
+  const files = [...e.clipboardData.files];
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+for (const type of ["dragenter", "dragover"]) $("composer").addEventListener(type, (e) => { e.preventDefault(); $("composer").classList.add("drag-over"); });
+for (const type of ["dragleave", "drop"]) $("composer").addEventListener(type, (e) => { e.preventDefault(); $("composer").classList.remove("drag-over"); });
+$("composer").addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
 $("send").onclick = submit;
 $("stop").onclick = async () => {
   denyPending();
   $("stop").disabled = true;
   announce("Canceling response");
   await send("cancel");
+  if (state.commandRunning) setCommandRunning(false);
   $("stop").disabled = false;
 };
 window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModelPop(); closeSettings(); } });
@@ -2684,7 +2889,8 @@ function renderColChart(rows, { height = 150, labelFn, axis = false } = {}) {
     const pr = r.prompt_tokens, cp = r.completion_tokens;
     const lbl = labelFn ? labelFn(r, i) : r.label;
     const data = `data-label="${escapeHtml(String(lbl))}" data-total="${total}" data-prompt="${pr}" data-comp="${cp}" data-cached="${r.cached_tokens || 0}"`;
-    return `<div class="stats-col" ${data}>
+    const spoken = `${lbl}: ${total} tokens, ${pr} prompt, ${cp} completion`;
+    return `<div class="stats-col" ${data} tabindex="0" role="img" aria-label="${escapeHtml(spoken)}">
       <div class="stats-col-stack" style="height:${pct}%">
         ${cp > 0 ? `<div class="stats-col-seg seg-comp" style="flex-grow:${cp}"></div>` : ""}
         ${pr > 0 ? `<div class="stats-col-seg seg-prompt" style="flex-grow:${pr}"></div>` : ""}
@@ -2891,6 +3097,8 @@ $("thread").addEventListener("scroll", updateJumpLatest, { passive: true });
 $("jump-latest").onclick = jumpToLatest;
 $("settings-btn").onclick = openSettings;
 $("settings-close").onclick = closeSettings;
+$("global-error-retry").onclick = () => { const retry = errorRetry; clearError(); retry?.(); };
+$("global-error-close").onclick = clearError;
 $("model-chip").onclick = toggleModelPop;
 $("mode-toggle").onclick = () => setMode(!danger);
 $("collapse-btn").onclick = () => { $("app").classList.add("sidebar-hidden"); $("show-sidebar").classList.remove("hidden"); };
@@ -2898,8 +3106,20 @@ $("show-sidebar").onclick = openMobileSidebar;
 $("sidebar-backdrop").onclick = closeMobileSidebar;
 $("canvas-toggle").onclick = toggleCanvas;
 $("canvas-all").onclick = showAllEdits;
+$("canvas-search").addEventListener("input", updateCanvasSearch);
+$("canvas-full-file").onclick = loadFullArtifact;
+$("canvas-editor").onclick = openArtifactInEditor;
+$("canvas-download").onclick = downloadArtifact;
 $("canvas-close").onclick = closeCanvas;
-for (const b of document.querySelectorAll(".stab")) b.onclick = () => switchTab(b.dataset.tab);
+for (const b of document.querySelectorAll(".stab")) {
+  b.onclick = () => switchTab(b.dataset.tab);
+  b.onkeydown = (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault(); const tabs = [...document.querySelectorAll(".stab")];
+    const next = tabs[(tabs.indexOf(b) + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    switchTab(next.dataset.tab); next.focus();
+  };
+}
 
 // Draggable divider: resize the canvas by dragging its left edge.
 $("divider").addEventListener("mousedown", (e) => {
@@ -2918,9 +3138,18 @@ $("divider").addEventListener("mousedown", (e) => {
     document.body.style.cursor = "";
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
+    prefs.canvasW = clampCanvasW(parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--canvas-w")));
+    savePrefs();
   };
   document.addEventListener("mousemove", onMove);
   document.addEventListener("mouseup", onUp);
+});
+$("divider").addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  const current = $("canvas").getBoundingClientRect().width;
+  prefs.canvasW = clampCanvasW(current + (e.key === "ArrowLeft" ? 24 : -24));
+  document.documentElement.style.setProperty("--canvas-w", prefs.canvasW + "px"); savePrefs();
 });
 
 // Draggable sidebar edge: resize the sidebar by dragging its right border.
@@ -2951,15 +3180,28 @@ $("sidebar-resize").addEventListener("dblclick", () => {
   prefs.sidebarW = 0;
   savePrefs();
 });
+$("sidebar-resize").tabIndex = 0;
+$("sidebar-resize").setAttribute("aria-label", "Resize conversation sidebar");
+$("sidebar-resize").addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  prefs.sidebarW = clampSidebarW($("sidebar").getBoundingClientRect().width + (e.key === "ArrowRight" ? 24 : -24));
+  document.documentElement.style.setProperty("--sidebar-w", prefs.sidebarW + "px"); savePrefs();
+});
 
 document.addEventListener("click", (e) => {
   const pop = $("model-pop");
   if (!pop.classList.contains("hidden") && !pop.contains(e.target) && !e.target.closest("#model-chip")) closeModelPop();
+  const commands = $("command-menu");
+  if (!commands.classList.contains("hidden") && !commands.contains(e.target) && !e.target.closest("#command-button") && e.target !== input) closeCommandMenu();
 });
 window.addEventListener("resize", () => {
   if (!$("model-pop").classList.contains("hidden")) positionModelPop();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModelPop(); closeSettings(); } });
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openCommandMenu(true); }
+});
 document.addEventListener("keydown", trapDialogFocus);
 $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
 window.addEventListener("keydown", captureKey, true);

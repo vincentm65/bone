@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod chat;
+pub mod commands;
 pub mod config;
 pub mod ext;
 pub mod llm;

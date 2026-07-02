@@ -27,7 +27,7 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join, extname } from "node:path";
+import { dirname, join, extname, resolve, relative } from "node:path";
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
@@ -835,6 +835,15 @@ const server = http.createServer(async (req, res) => {
   if (providerMatch && req.method === "DELETE") return handleProviderDelete(req, res, providerMatch[1]);
   if (url.pathname === "/api/providers" && req.method === "POST") return handleProviderPost(req, res);
   if (url.pathname === "/api/stats") return sendJson(res, loadStatsSnapshot);
+  if (url.pathname === "/api/file" && req.method === "GET") return sendJson(res, async () => {
+    const requested = url.searchParams.get("path");
+    if (!requested) throw new Error("path is required");
+    const root = process.cwd();
+    const file = resolve(root, requested);
+    const rel = relative(root, file);
+    if (rel.startsWith("..") || rel === "") throw new Error("path must be a workspace file");
+    return { path: rel, absolute_path: file, content: await readFile(file, "utf8") };
+  });
   if (url.pathname === "/api/config" && req.method === "GET") return sendJson(res, getConfig);
   if (url.pathname === "/api/config" && req.method === "POST") return handleConfigWrite(req, res);
   if (url.pathname === "/api/restart-daemon" && req.method === "POST") { restartDaemon(); return res.writeHead(204).end(); }

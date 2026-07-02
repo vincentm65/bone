@@ -1,29 +1,13 @@
 //! Slash-command metadata (built-ins, /help text). Dispatch lives in
 //! `App::handle_command`, which routes turns/lifecycle through the daemon.
+//!
+//! The canonical built-in list and `is_protected_builtin` live in
+//! [`bone_core::commands`] (shared with the config page builder, which skips
+//! protected built-ins so they never appear as no-op toggles). Re-exported here
+//! so existing `commands::BUILTINS` / `commands::is_protected_builtin` call
+//! sites keep resolving.
 
-/// Built-in slash commands as (name, description) pairs.
-/// Single source of truth for autocomplete, /help, and override protection.
-pub const BUILTINS: &[(&str, &str)] = &[
-    ("catalog", "browse & install optional tools and commands"),
-    ("clear", "clear chat history"),
-    ("config", "change application settings"),
-    ("edit", "open system editor for input"),
-    ("e", "open system editor for input"),
-    ("exit", "exit bone"),
-    ("help", "show this message"),
-    ("model", "set or show model (/model <name>)"),
-    ("new", "clear chat history (alias for /clear)"),
-    ("provider", "pick or switch provider (/provider <name>)"),
-    ("quit", "exit bone"),
-    ("setup", "re-run the onboarding setup wizard"),
-    ("stats", "open full-screen token stats dashboard"),
-    ("tools", "enable or disable tools, /tools reload to rescan"),
-];
-
-/// Built-in slash commands that Lua commands cannot override.
-pub fn is_protected_builtin(cmd: &str) -> bool {
-    BUILTINS.iter().any(|(name, _)| *name == cmd)
-}
+pub use bone_core::commands::{BUILTINS, is_protected_builtin};
 
 pub fn help(lua_commands: &[(String, String)]) -> String {
     let bold = "\x1b[1m";

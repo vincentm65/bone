@@ -285,6 +285,13 @@ impl CustomConfigs {
                 disabled.iter().map(|s| s.as_str()).collect();
 
             for name in &lua_commands {
+                // Protected built-ins (e.g. /config) can't actually be
+                // disabled — the dispatch bypass and `is_protected_builtin`
+                // guard run before the deny-list branch, so a toggle would be
+                // a silent no-op. Don't offer one.
+                if crate::commands::is_protected_builtin(name.as_str()) {
+                    continue;
+                }
                 let is_disabled = disabled_set.contains(name.as_str());
                 fields.push(ConfigField {
                     key: name.clone(),
