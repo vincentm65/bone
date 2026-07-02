@@ -356,14 +356,18 @@ bone.on("before_turn", function(event, ctx)
         return nil
     end
 
-    -- The replacement transcript is only part of the context window; the
-    -- system prompt and tool schemas are fixed overhead that survives
-    -- compaction. Estimate that overhead so the reported new context length
-    -- reflects what the user will actually see, not just the transcript size.
+    -- Ask the host for the same estimate it installs in token_stats when the
+    -- replacement is applied. This keeps the notice and status-bar `curr`
+    -- value identical. Retain the old calculation for older/custom hosts.
     local transcript_tokens = estimate_tokens(cjson.encode(messages))
-    local history_tokens = estimate_tokens(cjson.encode(history))
-    local overhead = math.max(0, context_length - history_tokens)
-    local new_context = overhead + transcript_tokens
+    local new_context
+    if ctx.conversation.context_tokens then
+        new_context = ctx.conversation.context_tokens(messages)
+    else
+        local history_tokens = estimate_tokens(cjson.encode(history))
+        local overhead = math.max(0, context_length - history_tokens)
+        new_context = overhead + transcript_tokens
+    end
 
     -- Refuse to apply a "compaction" that didn't actually shrink the context.
     -- A small local model can loop and return a summary larger than its input;
@@ -437,9 +441,14 @@ bone.register_command("compact", {
         local display
         local snapshot = ctx.usage and ctx.usage.snapshot and ctx.usage.snapshot()
         if snapshot and snapshot.context_length then
-            local history_tokens = estimate_tokens(cjson.encode(history))
-            local overhead = math.max(0, snapshot.context_length - history_tokens)
-            local new_context = overhead + transcript_tokens
+            local new_context
+            if ctx.conversation.context_tokens then
+                new_context = ctx.conversation.context_tokens(messages)
+            else
+                local history_tokens = estimate_tokens(cjson.encode(history))
+                local overhead = math.max(0, snapshot.context_length - history_tokens)
+                new_context = overhead + transcript_tokens
+            end
             -- Same backstop as auto-compaction: never install a summary that
             -- grew the context (a looping model can return more than it ate).
             if new_context >= snapshot.context_length then

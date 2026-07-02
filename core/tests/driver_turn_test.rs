@@ -749,6 +749,145 @@ end)
     std::fs::remove_dir_all(&config_dir).ok();
 }
 
+/// Records the exact message list of every `chat_stream` call while replaying
+/// a scripted stream per call — for asserting what the provider actually sees.
+struct CapturingProvider {
+    model: String,
+    script: Mutex<Vec<Vec<ChatEvent>>>,
+    captured: Mutex<Vec<Vec<ChatMessage>>>,
+}
+
+#[async_trait]
+impl LlmProvider for CapturingProvider {
+    fn id(&self) -> &str {
+        "mock"
+    }
+    fn name(&self) -> &str {
+        "Capturing Provider"
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+    async fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
+        self.captured.lock().unwrap().push(messages);
+        let events = self.script.lock().unwrap().pop().unwrap_or_default();
+        Ok(futures_util::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
+}
+
+// A `before_turn` hook can return `turn_message`: a transient nudge sent as the
+// *last* input item of that round's request only. Unlike `system_prompt_append`
+// it may change every round without invalidating the provider's prefix cache —
+// so it must (a) always sit at the prompt tail, and (b) never persist into the
+// history, where a stale copy mid-conversation would break the cached prefix.
+#[tokio::test]
+async fn driver_turn_message_is_trailing_and_not_persisted() {
+    let config_dir = common::temp_dir("driver-turn-message");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    // The marker changes every round (like a live task list) so persistence of
+    // an old round's message into the next request is detectable.
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"
+_N = 0
+bone.on("before_turn", function(_event, _ctx)
+    _N = _N + 1
+    return { turn_message = "TM-MARKER-" .. _N }
+end)
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+
+    // Round 1 requests a tool call, round 2 finishes — two provider requests.
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-1".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![ChatEvent::ToolCall(ToolCall {
+                id: "c1".into(),
+                name: "big_tool".into(),
+                arguments: serde_json::json!({}),
+            })],
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: booted.manager,
+        tools: ToolHandler::new(builtin_tools().register(BigTool)),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Danger),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: Some(tx),
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+    };
+
+    driver.run(prompt).await.expect("driver run");
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2, "two provider requests expected");
+    for (round, messages) in captured.iter().enumerate() {
+        let marker = format!("TM-MARKER-{}", round + 1);
+        let last = messages.last().expect("request has messages");
+        assert_eq!(last.role, ChatRole::User, "turn message is a user item");
+        assert!(
+            last.content.contains(&marker) && last.content.contains("<system-reminder>"),
+            "round {} must end with this round's wrapped turn message; got {:?}",
+            round + 1,
+            last.content,
+        );
+        // Exactly one occurrence in the whole request: earlier rounds' markers
+        // must not have leaked into the persistent history.
+        let occurrences: usize = messages
+            .iter()
+            .filter(|m| m.content.contains("TM-MARKER-"))
+            .count();
+        assert_eq!(
+            occurrences,
+            1,
+            "round {}: turn messages must not accumulate in history",
+            round + 1,
+        );
+    }
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
 /// Tool that returns a very large result, to prove compaction sees the *current*
 /// pending context mid-loop (including appended tool results), not a stale
 /// last-request size.

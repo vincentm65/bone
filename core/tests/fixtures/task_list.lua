@@ -193,7 +193,10 @@ bone.register_tool({
 
 -- ---------------------------------------------------------------------------
 -- before_turn: keep the list salient and nudge the model to maintain it.
--- Root agent only (the pane renders only at depth 0).
+-- Root agent only (the pane renders only at depth 0). Uses turn_message (a
+-- transient trailing input item), not system_prompt_append: this text changes
+-- as the list changes, and a mutating system prompt busts the provider's
+-- prefix cache for the whole conversation.
 -- ---------------------------------------------------------------------------
 
 bone.on("before_turn", function(_event, ctx)
@@ -209,7 +212,7 @@ bone.on("before_turn", function(_event, ctx)
     -- No active list → brief suggestion to use one for multi-step work.
     if not state or type(state.tasks) ~= "table" or #state.tasks == 0 then
         return {
-            system_prompt_append =
+            turn_message =
                 "For any task with ~3+ steps or multi-file work, call task_list (action=write) to track progress in a visible checklist.",
         }
     end
@@ -228,7 +231,7 @@ bone.on("before_turn", function(_event, ctx)
     -- All done → no reminder needed (offer to clear).
     if done >= #tasks then
         return {
-            system_prompt_append =
+            turn_message =
                 "Your task list is complete. Call task_list (action=clear) once the user has confirmed you're finished.",
         }
     end
@@ -237,7 +240,7 @@ bone.on("before_turn", function(_event, ctx)
         and string.format(" Current in-progress item: \"%s\".", current)
         or " No item is marked in_progress — mark the one you're working on now."
     return {
-        system_prompt_append = string.format(
+        turn_message = string.format(
             "Active task list: %d/%d done.%s As you work, call task_list (action=write) with the full list to mark items in_progress/done. Keep exactly one item in_progress.",
             done, #tasks, current_line),
     }

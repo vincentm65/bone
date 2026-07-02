@@ -395,12 +395,10 @@ fn resolve_event_type<'a>(raw: &'a Value, sse_event: &'a str) -> &'a str {
 }
 
 fn prompt_cache_key(context: &ProviderRequestContext) -> Option<String> {
-    context
-        .conversation_id
-        .map(|id| format!("bone-codex-thread-{id}"))
+    context.conversation_id.map(codex_session_id)
 }
 
-/// Stable per-conversation `session_id` for the Codex routing headers, in
+/// Stable per-conversation session/thread id for the Codex routing headers, in
 /// UUIDv4 shape. The chatgpt backend proxy routes on a hash of this value, so
 /// only stability per conversation matters; deriving it from the DB
 /// conversation id also keeps it stable across process restarts, so a resumed
@@ -555,7 +553,14 @@ impl LlmProvider for CodexProvider {
         // rate on most turns (the oscillating per-turn cache miss we measured).
         req = req.header("originator", "codex_cli_rs");
         if let Some(conv_id) = context.conversation_id {
-            req = req.header("session_id", codex_session_id(conv_id));
+            let session_id = codex_session_id(conv_id);
+            req = req
+                .header("session-id", &session_id)
+                .header("thread-id", &session_id)
+                .header("x-client-request-id", &session_id);
+        }
+        if let Some(turn_state) = context.turn_state.as_ref().and_then(|state| state.get()) {
+            req = req.header("x-codex-turn-state", turn_state);
         }
 
         let response = req.send().await?;
@@ -564,6 +569,17 @@ impl LlmProvider for CodexProvider {
             let url = self.chat_url();
             let body = response.text().await.unwrap_or_default();
             return Err(http_error(status, &url, &body));
+        }
+
+        // Capture before consuming the response body. OnceLock deliberately
+        // keeps the first value if a retry or later tool round returns another.
+        if let (Some(turn_state), Some(value)) = (
+            context.turn_state.as_ref(),
+            response.headers().get("x-codex-turn-state"),
+        ) {
+            if let Ok(value) = value.to_str() {
+                let _ = turn_state.set(value.to_owned());
+            }
         }
 
         let events = response.bytes_stream().eventsource();

@@ -122,6 +122,7 @@ pub struct CtxConfig {
     pub session_id: Option<i64>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub system_prompt_override: Option<String>,
     pub agent_depth: usize,
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
@@ -153,6 +154,7 @@ impl CtxConfig {
             session_id: None,
             provider: None,
             model: None,
+            system_prompt_override: None,
             agent_depth: 0,
             cancelled: None,
             usage: None,
@@ -173,6 +175,7 @@ pub struct AppCtxState {
     pub session_id: Option<i64>,
     pub provider: String,
     pub model: String,
+    pub system_prompt_override: Option<String>,
     pub approval_mode: crate::tools::ApprovalMode,
     // Boxed to break the `ToolHandler` -> `AppCtxState` -> `ToolHandler` type
     // cycle (ToolHandler carries an `Option<AppCtxState>` snapshot).
@@ -193,6 +196,7 @@ impl AppCtxState {
         session_id: Option<i64>,
         provider: &str,
         model: &str,
+        system_prompt_override: Option<String>,
         by_provider: Vec<UsageProviderContext>,
         history: Vec<crate::llm::ChatMessage>,
     ) -> Self {
@@ -201,6 +205,7 @@ impl AppCtxState {
             session_id,
             provider: provider.to_string(),
             model: model.to_string(),
+            system_prompt_override,
             approval_mode: *approval_mode,
             tool_handler: Box::new(tools.clone()),
             usage: build_usage_context(stats, &est, by_provider),
@@ -214,6 +219,7 @@ impl AppCtxState {
         cfg.session_id = self.session_id;
         cfg.provider = Some(self.provider.clone());
         cfg.model = Some(self.model.clone());
+        cfg.system_prompt_override = self.system_prompt_override.clone();
         cfg.approval_mode = self.approval_mode;
         cfg.tool_handler = Some((*self.tool_handler).clone());
         cfg.usage = Some(self.usage.clone());
@@ -707,6 +713,26 @@ fn build_usage_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
 /// in-memory turn history. Both return nil when no history is attached.
 fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let conversation_table = lua.create_table()?;
+
+    // Use the same estimator as RuntimeCommand::ReplaceConversation and the
+    // driver's post-before_turn replacement path.  Compaction can therefore
+    // report the exact estimate that the status bar will receive instead of
+    // maintaining a second JSON-size heuristic in Lua.
+    if let Some(tools) = cfg.tool_handler.as_ref() {
+        let tool_defs_json_chars = serde_json::to_string(&tools.definitions())
+            .map(|json| json.chars().count())
+            .unwrap_or(0);
+        let system_prompt_override = cfg.system_prompt_override.clone();
+        let context_tokens_fn = lua.create_function(move |_, messages: Table| {
+            let messages = super::types::parse_messages_table(&messages);
+            let history =
+                crate::chat::build_chat_history(&messages, system_prompt_override.as_deref());
+            let prompt_chars = crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
+            Ok((prompt_chars as f64 / crate::llm::token_tracker::CHARS_PER_TOKEN).ceil() as u64)
+        })?;
+        conversation_table.set("context_tokens", context_tokens_fn)?;
+    }
+
     if let Some(ref history) = cfg.conversation_history {
         let current_fn =
             build_current_fn(lua, cfg.session_id, cfg.provider.clone(), cfg.model.clone())?;

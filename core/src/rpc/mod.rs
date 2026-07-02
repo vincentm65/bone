@@ -676,6 +676,7 @@ impl DaemonCtx {
                 s.conversation_id,
                 self.llm.id(),
                 self.llm.model(),
+                None,
                 by_provider,
                 s.transcript.clone(),
             )

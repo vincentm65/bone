@@ -7,6 +7,7 @@
 //! [`AutoApprovalGate`] and calls [`Driver::run`].
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
 use futures_util::StreamExt;
@@ -311,6 +312,10 @@ impl Driver {
 
         let mut consecutive_errors = 0u32;
         let mut turns: usize = 0;
+        // The Codex backend returns routing state on the first request of a
+        // user turn. Keep it across retries and tool rounds in this run, but
+        // create a fresh cell for every later submitted user message/run.
+        let turn_state = Arc::new(OnceLock::new());
         let result: Result<String, String> = 'turn: loop {
             if is_cancelled() {
                 break Ok(String::new());
@@ -326,6 +331,12 @@ impl Driver {
             // provider request. `turn_tool_defs` defaults to the full set and is
             // narrowed only when a handler returns a `tool_filter`.
             let mut turn_tool_defs = tool_defs.clone();
+            // Transient per-turn messages from `before_turn` handlers. Sent as
+            // the *last* input item of this turn's requests and never persisted
+            // to the transcript: at the prompt tail, turn-varying content costs
+            // only its own tokens instead of invalidating the provider's prefix
+            // cache for the entire history (as a mutating system prompt would).
+            let mut turn_messages: Vec<String> = Vec::new();
             {
                 // Refresh context_length from the *current* pending history so
                 // the before_turn snapshot reflects what this request will
@@ -343,6 +354,7 @@ impl Driver {
                     conversation_id,
                     llm.id(),
                     llm.model(),
+                    system_prompt_override.clone(),
                     Vec::new(),
                     transcript.clone(),
                 );
@@ -386,6 +398,9 @@ impl Driver {
                     if let Some(s) = action.system_prompt_append {
                         sys_appends.push(s);
                     }
+                    if let Some(s) = action.turn_message {
+                        turn_messages.push(s);
+                    }
                     if let Some(t) = action.tool_filter {
                         tool_filter = Some(t);
                     }
@@ -424,11 +439,32 @@ impl Driver {
             // that window must return control now rather than waiting out the
             // request or the 2s backoff.
             let mut stream = None;
+            // Request-only copy of the history: the transient turn message is
+            // appended here (wrapped so the model doesn't mistake it for the
+            // human) and re-derived fresh each turn, so it never lands in
+            // `history`/`transcript` where it would sit mid-conversation on
+            // later turns and break the cached prefix.
+            let request_history = if turn_messages.is_empty() {
+                history.clone()
+            } else {
+                let mut h = history.clone();
+                h.push(crate::llm::ChatMessage::new(
+                    crate::llm::ChatRole::User,
+                    format!(
+                        "<system-reminder>\n{}\n</system-reminder>",
+                        turn_messages.join("\n\n")
+                    ),
+                ));
+                h
+            };
             'request: for attempt in 1..=3 {
                 let send = llm.chat_stream_with_context(
-                    history.clone(),
+                    request_history.clone(),
                     turn_tool_defs.clone(),
-                    ProviderRequestContext { conversation_id },
+                    ProviderRequestContext {
+                        conversation_id,
+                        turn_state: Some(Arc::clone(&turn_state)),
+                    },
                 );
                 let result = tokio::select! {
                     biased;
@@ -587,7 +623,7 @@ impl Driver {
             }
 
             if !had_usage && !stream_error {
-                let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
+                let prompt_chars = estimate_context_chars(&request_history, tool_defs_json_chars);
                 let completion_chars = assistant_text.chars().count()
                     + reasoning_text.chars().count()
                     + tool_calls

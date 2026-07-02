@@ -50,7 +50,18 @@ pub struct LuaReturnAction {
     pub conversation_load: Option<ConversationLoad>,
     /// Text appended to the system prompt for this turn (e.g. a "plan mode"
     /// instruction). Returned by `before_turn`; stacks after the base prompt.
+    ///
+    /// Use only for text that is stable for the life of a conversation: the
+    /// system prompt renders *before* the whole message history, so any
+    /// turn-to-turn variation here invalidates the provider's prefix cache for
+    /// every request. Turn-varying state belongs in `turn_message`.
     pub system_prompt_append: Option<String>,
+    /// Transient message appended as the *last* input item of this turn's
+    /// provider requests (not persisted to the transcript). Returned by
+    /// `before_turn`. Because it sits at the tail of the prompt, its content
+    /// can change every turn without breaking the provider's prefix cache —
+    /// use it for turn-varying nudges (task-list state, goal iteration, etc.).
+    pub turn_message: Option<String>,
     /// When set, only these tool names are exposed to the model for this turn
     /// (a per-turn allow-list). Returned by `before_turn`; an empty list hides
     /// every tool. Filters what the model *sees*, not the approval policy.
@@ -79,8 +90,8 @@ impl LuaReturnAction {
     /// Project the command-relevant fields onto the wire type so the daemon can
     /// forward this action to a remote client (`RuntimeEvent::CommandComplete`).
     /// Returns `None` when no command-relevant field is set (the
-    /// `before_turn`-only `system_prompt_append`/`tool_filter` fields are
-    /// dropped — they never reach the command path).
+    /// `before_turn`-only `system_prompt_append`/`turn_message`/`tool_filter`
+    /// fields are dropped — they never reach the command path).
     pub fn to_command_action(&self) -> Option<bone_protocol::CommandAction> {
         if self.conversation_replace.is_none()
             && self.conversation_load.is_none()
@@ -626,6 +637,15 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
         out.system_prompt_append = Some(s);
         any = true;
     }
+    if let Some(s) = table
+        .get::<Option<String>>("turn_message")
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+    {
+        out.turn_message = Some(s);
+        any = true;
+    }
     if let Some(t) = table
         .get::<Option<Vec<String>>>("tool_filter")
         .ok()
@@ -641,7 +661,7 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
 /// Parse a Lua array of message tables into `ChatMessage`s. Entries with an
 /// unrecognized role are skipped. Shared by `conversation.replace` and
 /// `conversation.load`.
-fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::llm::ChatMessage> {
+pub(crate) fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::llm::ChatMessage> {
     let mut messages = Vec::new();
     for entry in messages_table.sequence_values::<mlua::Table>() {
         let entry = match entry {
@@ -888,6 +908,7 @@ mod tests {
         let t = lua.create_table().unwrap();
         t.set("system_prompt_append", "Plan only; do not edit.")
             .unwrap();
+        t.set("turn_message", "Task list: 1/3 done.").unwrap();
         let tools = lua.create_table().unwrap();
         tools.push("read_file").unwrap();
         tools.push("shell").unwrap();
@@ -898,6 +919,7 @@ mod tests {
             parsed.system_prompt_append.as_deref(),
             Some("Plan only; do not edit.")
         );
+        assert_eq!(parsed.turn_message.as_deref(), Some("Task list: 1/3 done."));
         assert_eq!(
             parsed.tool_filter,
             Some(vec!["read_file".to_string(), "shell".to_string()])

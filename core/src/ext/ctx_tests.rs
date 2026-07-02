@@ -477,6 +477,7 @@ fn sample_app_state() -> AppCtxState {
         Some(42),
         "openrouter",
         "gemini",
+        None,
         Vec::new(),
         history,
     )

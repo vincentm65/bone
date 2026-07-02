@@ -6,7 +6,12 @@
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use std::{error::Error, fmt, pin::Pin};
+use std::{
+    error::Error,
+    fmt,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+};
 
 use crate::tools::ToolDefinition;
 
@@ -142,6 +147,10 @@ pub fn http_error(status: reqwest::StatusCode, url: &str, body: &str) -> LlmErro
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRequestContext {
     pub conversation_id: Option<i64>,
+    /// Backend routing state scoped to one submitted user turn. Providers may
+    /// capture it from the first response and replay it for retries and tool
+    /// rounds, but it must not be reused by a later user turn.
+    pub turn_state: Option<Arc<OnceLock<String>>>,
 }
 
 #[async_trait]
