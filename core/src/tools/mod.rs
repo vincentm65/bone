@@ -21,6 +21,23 @@ pub use approval::{
 pub use command_policy::CommandSafety;
 pub use shell::{ScriptOutput, ScriptRequest, run_script, truncate_output};
 use std::collections::HashMap;
+
+/// Cap an individual line's length so a single minified multi-MB line can't
+/// consume the whole context window. Truncates on a UTF-8 char boundary.
+pub const MAX_TOOL_LINE_CHARS: usize = 2000;
+pub fn truncate_line(line: &str) -> String {
+    if line.chars().count() <= MAX_TOOL_LINE_CHARS {
+        return line.to_string();
+    }
+    let end = line
+        .char_indices()
+        .nth(MAX_TOOL_LINE_CHARS)
+        .map(|(offset, _)| offset)
+        .unwrap_or(line.len());
+    let mut out = line[..end].to_string();
+    out.push_str("…[truncated]");
+    out
+}
 pub use types::{Tool, ToolCall, ToolDefinition, ToolResult};
 
 /// Result of loading all tools (builtins + Lua) in a single pass.
@@ -57,7 +74,7 @@ pub fn register_lua_tools(loaded: &mut LoadedTools, lua_tools: Vec<LuaTool>) {
         if let Some(key) = tool.state_key() {
             loaded.dynamic_state.insert(name, key.to_string());
         }
-        loaded.registry = loaded.registry.clone().register(tool);
+        loaded.registry.register_mut(tool);
     }
 }
 

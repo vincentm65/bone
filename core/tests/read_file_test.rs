@@ -175,3 +175,30 @@ async fn long_single_line_is_capped() {
     assert!(result.contains("[1 line total]"));
     let _ = fs::remove_file(&path).await;
 }
+
+#[tokio::test]
+async fn refuses_oversized_text_file_before_reading() {
+    let path = temp_path("oversized.txt");
+    let file = fs::File::create(&path).await.expect("setup");
+    file.set_len(51 * 1024 * 1024).await.expect("set len");
+    let tool = ReadFileTool;
+
+    let result = tool.execute(json!({ "path": path })).await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("too large to read directly"));
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn invalid_utf8_gets_instructive_error() {
+    let path = temp_path("binary.bin");
+    fs::write(&path, [0xff, 0xfe, 0xfd]).await.expect("setup");
+    let tool = ReadFileTool;
+
+    let result = tool.execute(json!({ "path": path })).await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not valid UTF-8"));
+    let _ = fs::remove_file(&path).await;
+}

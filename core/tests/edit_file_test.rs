@@ -213,6 +213,20 @@ async fn insert_before_and_after_and_delete_work() {
     let _ = fs::remove_file(&path).await;
 }
 
+#[test]
+fn edit_schema_advertises_only_search_replace_operations() {
+    let schema = EditFileTool.definition().input_schema;
+    let props = &schema["properties"]["edits"]["items"]["properties"];
+    assert!(props.get("search").is_some());
+    assert!(props.get("replace").is_some());
+    assert!(props.get("replace_all").is_some());
+    assert!(props.get("delete").is_none());
+    assert!(props.get("insert_before").is_none());
+    assert!(props.get("insert_after").is_none());
+    assert!(props.get("text").is_none());
+    assert!(props.get("match").is_none());
+}
+
 #[tokio::test]
 async fn rewrite_replaces_whole_file() {
     let path = temp_path("rewrite.txt");
@@ -224,6 +238,27 @@ async fn rewrite_replaces_whole_file() {
         .expect("success");
 
     assert_eq!(fs::read_to_string(&path).await.unwrap(), "new\nfile\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn large_rewrite_truncates_returned_diff() {
+    let path = temp_path("large-rewrite.txt");
+    fs::write(&path, "old\n").await.expect("setup");
+    let content = (1..=400)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "mode": "rewrite", "content": content }))
+        .await
+        .expect("success");
+
+    assert!(result.starts_with("edited file (+400, -1)"));
+    assert!(result.contains("lines truncated"));
+    assert!(result.lines().count() <= 202);
     let _ = fs::remove_file(&path).await;
 }
 

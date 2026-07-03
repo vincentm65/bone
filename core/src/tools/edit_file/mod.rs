@@ -69,7 +69,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit an existing UTF-8 file. Exactly one mode per call: (a) top-level search+replace for a single change, (b) edits[] for multiple changes (each item must contain exactly one operation: search+replace, delete, insert_before+text, or insert_after+text), or (c) mode=\"rewrite\"+content for a full rewrite. Anchors must match exactly one location unless replace_all=true (exact global replace). On success a unified diff is returned; on failure the error names the valid shapes and closest candidates.".to_string(),
+            description: "Edit an existing UTF-8 file. Exactly one mode per call: (a) top-level search+replace for a single change, (b) edits[] for multiple search/replace changes, or (c) mode=\"rewrite\"+content for a full rewrite. Anchors must match exactly one location unless replace_all=true (exact global replace). On success a unified diff is returned; on failure the error names the valid shapes and closest candidates.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -87,19 +87,15 @@ impl Tool for EditFileTool {
                     },
                     "edits": {
                         "type": "array",
-                        "description": "List of edit operations. Each item: search+replace, delete, insert_before+text, or insert_after+text.",
+                        "description": "List of edit operations. Each item: search+replace with optional replace_all.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "search": { "type": "string", "description": "Text to find and replace." },
                                 "replace": { "type": "string", "description": "Replacement text." },
-                                "delete": { "type": "string", "description": "Text to delete." },
-                                "insert_before": { "type": "string", "description": "Insert text before this anchor." },
-                                "insert_after": { "type": "string", "description": "Insert text after this anchor." },
-                                "text": { "type": "string", "description": "Text to insert." },
-                                "replace_all": { "type": "boolean", "description": "For a search+replace item: replace every exact occurrence instead of requiring a unique match." },
-                                "match": { "type": "string", "enum": ["exact"], "description": "Match mode: \"exact\"." }
+                                "replace_all": { "type": "boolean", "description": "Replace every exact occurrence instead of requiring a unique match." }
                             },
+                            "required": ["search", "replace"],
                             "additionalProperties": false
                         }
                     },
@@ -162,8 +158,15 @@ pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
         write_atomic(path, &next, permissions).await?;
     }
     let summary = diff::summarize_change(&original, &next);
-    let diff = diff::build_unified_diff("edit_file", &args.path, &original, &next);
+    let diff = truncate_diff(
+        &diff::build_unified_diff("edit_file", &args.path, &original, &next),
+        200,
+    );
     Ok(format!("edited file ({summary}){diff}"))
+}
+
+fn truncate_diff(diff: &str, max_lines: usize) -> String {
+    crate::tools::shell::truncate_output(diff, max_lines)
 }
 
 async fn build_candidate_content(args: &Args) -> Result<(String, String), String> {

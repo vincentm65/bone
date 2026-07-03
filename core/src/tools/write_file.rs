@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::ErrorKind;
 use std::path::Path;
 use tokio::fs;
 
@@ -51,13 +52,18 @@ impl Tool for WriteFileTool {
                 .map_err(crate::util::errstr)?;
         }
         let path = Path::new(&args.path);
-        // Reject if the destination already exists — we use create_new on a temp
-        // file, but rename will silently overwrite on Unix.  Check up-front so
-        // the caller gets a clear error.
-        if path.exists() {
-            return Err(
-                "file already exists; use edit_file for targeted modifications".to_string(),
-            );
+        // Reject if the destination already exists. `rename` will silently
+        // overwrite on Unix, and `exists()` misses dangling symlinks, so use
+        // symlink_metadata. A create-between-check-and-rename race remains but
+        // is acceptable for this tool's local convenience threat model.
+        match fs::symlink_metadata(path).await {
+            Ok(_) => {
+                return Err(
+                    "file already exists; use edit_file for targeted modifications".to_string(),
+                );
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(crate::util::errstr(e)),
         }
         write_atomic(path, &args.content, None).await?;
         Ok(format!("wrote {} bytes", args.content.len()))

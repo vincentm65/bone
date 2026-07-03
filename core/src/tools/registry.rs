@@ -30,6 +30,11 @@ impl ToolRegistry {
         self
     }
 
+    pub fn register_mut<T: Tool + 'static>(&mut self, tool: T) {
+        let name = tool.definition().name;
+        self.tools.insert(name, Arc::new(tool));
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
         definitions.sort_by(|a, b| a.name.cmp(&b.name));

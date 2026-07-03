@@ -1,6 +1,7 @@
 //! The `shell` / `bash` tool: runs commands with streaming output and timeouts.
 
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -9,6 +10,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
+use crate::tools::truncate_line;
 use crate::tools::types::{Tool, ToolDefinition};
 
 // ── Script execution (formerly script_runner.rs) ────────────────────────────
@@ -26,12 +28,18 @@ pub struct ScriptRequest {
 
 pub struct ScriptOutput {
     pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
 }
 
 /// Returns the shell program, its argument flag, and a label for descriptions.
 pub fn shell_command() -> (&'static str, &'static str, &'static str) {
+    static SHELL: OnceLock<(&'static str, &'static str, &'static str)> = OnceLock::new();
+    *SHELL.get_or_init(detect_shell_command)
+}
+
+fn detect_shell_command() -> (&'static str, &'static str, &'static str) {
     if cfg!(windows) {
         if which("pwsh") {
             ("pwsh", "-Command", "pwsh -Command")
@@ -98,6 +106,7 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
             let err = stderr_task.await.unwrap_or_default();
             Ok(ScriptOutput {
                 exit_code: status.code(),
+                signal: exit_signal(&status),
                 stdout: truncate_output(&String::from_utf8_lossy(&out), 500),
                 stderr: truncate_output(&String::from_utf8_lossy(&err), 100),
             })
@@ -126,17 +135,50 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
 /// Truncate output to `max_lines`, keeping the first half and last half with a
 /// marker showing how many lines were omitted.
 pub fn truncate_output(output: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = output.lines().collect();
+    let mut lines = Vec::new();
+    let mut line_truncated = false;
+    for line in output.lines() {
+        let truncated = truncate_line(line);
+        line_truncated |= truncated.len() != line.len();
+        lines.push(truncated);
+    }
     if lines.len() <= max_lines {
-        return output.to_string();
+        return if line_truncated {
+            lines.join("\n")
+        } else {
+            output.to_string()
+        };
     }
     let head = max_lines / 2;
     let tail = max_lines - head;
-    let mut out: Vec<&str> = lines[..head].to_vec();
     let truncated = format!("... {} lines truncated ...", lines.len() - max_lines);
-    out.push(&truncated);
-    out.extend_from_slice(&lines[lines.len() - tail..]);
+    let mut out = Vec::with_capacity(max_lines + 1);
+    out.extend(lines.drain(..head));
+    out.push(truncated);
+    let keep_from = lines.len().saturating_sub(tail);
+    out.extend(lines.into_iter().skip(keep_from));
     out.join("\n")
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+fn output_status_label(output: &ScriptOutput) -> String {
+    if let Some(code) = output.exit_code {
+        code.to_string()
+    } else if let Some(signal) = output.signal {
+        format!("killed by signal {signal}")
+    } else {
+        "signal".to_string()
+    }
 }
 
 // ── Shell tool ──────────────────────────────────────────────────────────────
@@ -196,9 +238,7 @@ impl Tool for ShellTool {
         .await?;
         let mut result = format!(
             "exit code: {}\nstdout:\n{stdout_trunc}",
-            output
-                .exit_code
-                .map_or_else(|| "signal".to_string(), |code| code.to_string()),
+            output_status_label(&output),
             stdout_trunc = output.stdout,
         );
         if !output.stderr.is_empty() {

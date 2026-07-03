@@ -711,6 +711,35 @@ impl LlmProvider for CodexProvider {
                             }
                     }
 
+                    // ── Terminal failure events ─────────────────────────
+                    // A response can end with a server-side failure instead
+                    // of `response.completed`. Surface it as a stream error
+                    // instead of silently ending the turn with an empty
+                    // assistant message.
+                    "response.failed" | "error" => {
+                        let msg = raw
+                            .pointer("/response/error/message")
+                            .or_else(|| raw.pointer("/error/message"))
+                            .or_else(|| raw.get("message"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(data);
+                        Err(LlmError::new_with_kind(
+                            LlmErrorKind::Connection,
+                            format!("codex response failed: {msg}"),
+                        ))?;
+                    }
+
+                    "response.incomplete" => {
+                        let reason = raw
+                            .pointer("/response/incomplete_details/reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown reason");
+                        Err(LlmError::new_with_kind(
+                            LlmErrorKind::Config,
+                            format!("codex response incomplete: {reason}"),
+                        ))?;
+                    }
+
                     "response.completed" => {
                         // Flush any remaining partial calls first.
                         for ev in flush_partial_tool_calls(&mut partial_tool_calls) {

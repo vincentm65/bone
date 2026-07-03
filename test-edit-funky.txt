@@ -1,0 +1,11 @@
+alpha Ω start
+        deeper indent → with arrow
+		Tabbed line — doubled
+emoji: 😀 café naïve — jalapeño 🫠
+quotes: “smart” ‘single’ «guillemets»
+math: ∑ λ π ≈ √∞ ÷ ∫ µ
+marker: replaced ✓
+    nested:
+      - weird: "ß∂ƒ©˙∆˚¬…æ"
+      - emoji: 🦀🧪✨
+      - tabs:\tinside\ttext

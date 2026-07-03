@@ -58,3 +58,29 @@ async fn refuses_to_overwrite_existing_file() {
 
     let _ = fs::remove_file(path).await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refuses_dangling_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let path = temp_path("dangling-link.txt");
+    let target = temp_path("missing-target.txt");
+    symlink(&target, &path).expect("setup symlink");
+    let tool = WriteFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "content": "replacement" }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("file already exists"));
+    assert!(
+        fs::symlink_metadata(&path)
+            .await
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let _ = fs::remove_file(path).await;
+}

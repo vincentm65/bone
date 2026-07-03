@@ -3,6 +3,7 @@ mod common;
 use serde_json::json;
 
 use bone_core::tools::shell::ShellTool;
+use bone_core::tools::shell::truncate_output;
 use bone_core::tools::types::Tool;
 
 #[tokio::test]
@@ -35,6 +36,13 @@ async fn successful_command_returns_exit_code_and_stdout() {
 
     assert!(result.contains("exit code: 0"));
     assert!(result.contains("hello"));
+}
+
+#[test]
+fn truncates_single_huge_line() {
+    let output = truncate_output(&"x".repeat(10 * 1024 * 1024), 500);
+    assert!(output.contains("…[truncated]"));
+    assert!(output.len() < 10_000, "output len was {}", output.len());
 }
 
 #[tokio::test]

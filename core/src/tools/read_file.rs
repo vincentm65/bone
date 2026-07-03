@@ -4,9 +4,11 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::ErrorKind;
 use tokio::fs;
 
 use crate::llm::ImageData;
+use crate::tools::truncate_line;
 use crate::tools::types::{Tool, ToolDefinition, ToolOutput};
 
 pub struct ReadFileTool;
@@ -23,22 +25,19 @@ fn image_media_type(path: &str) -> Option<&'static str> {
     }
 }
 
-/// Cap an individual line's length so a single minified multi-MB line can't
-/// consume the whole context window. Truncates on a UTF-8 char boundary.
-const MAX_LINE_CHARS: usize = 2000;
-fn truncate_line(line: &str) -> String {
-    if line.chars().count() <= MAX_LINE_CHARS {
-        return line.to_string();
+const MAX_TEXT_FILE_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_IMAGE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+async fn ensure_size(path: &str, max_bytes: u64) -> Result<(), String> {
+    let metadata = fs::metadata(path).await.map_err(crate::util::errstr)?;
+    let len = metadata.len();
+    if len > max_bytes {
+        return Err(format!(
+            "file is {:.1} MB; too large to read directly — use shell (head/tail/rg)",
+            len as f64 / (1024.0 * 1024.0)
+        ));
     }
-    // Byte offset of the char at index MAX_LINE_CHARS is a valid boundary.
-    let end = line
-        .char_indices()
-        .nth(MAX_LINE_CHARS)
-        .map(|(offset, _)| offset)
-        .unwrap_or(line.len());
-    let mut out = line[..end].to_string();
-    out.push_str("…[truncated]");
-    out
+    Ok(())
 }
 
 /// Plural suffix: "" for 1, "s" otherwise.
@@ -89,9 +88,14 @@ impl Tool for ReadFileTool {
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-        let content = fs::read_to_string(&args.path)
-            .await
-            .map_err(crate::util::errstr)?;
+        ensure_size(&args.path, MAX_TEXT_FILE_BYTES).await?;
+        let content = fs::read_to_string(&args.path).await.map_err(|e| {
+            if e.kind() == ErrorKind::InvalidData {
+                "file is not valid UTF-8 (probably binary); use shell to inspect it".to_string()
+            } else {
+                crate::util::errstr(e)
+            }
+        })?;
 
         let start = args.start_line.unwrap_or(1).saturating_sub(1);
         let max = args.max_lines.unwrap_or(500).min(1000);
@@ -151,6 +155,7 @@ impl Tool for ReadFileTool {
         // vision-capable models, rather than as (binary) text.
         if let Some(media_type) = path.and_then(image_media_type) {
             let path = path.unwrap().to_string();
+            ensure_size(&path, MAX_IMAGE_FILE_BYTES).await?;
             let bytes = fs::read(&path).await.map_err(crate::util::errstr)?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let note = format!("[read image {path} ({media_type}, {} bytes)]", bytes.len());

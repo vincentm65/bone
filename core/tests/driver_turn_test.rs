@@ -1190,6 +1190,24 @@ async fn driver_retries_after_stream_error_and_discards_partial() {
     );
 }
 
+#[tokio::test]
+async fn driver_does_not_retry_non_retryable_stream_error() {
+    let (driver, prompt) = driver_with_raw(
+        vec![
+            MockAttempt::Stream(vec![Err(LlmError::new_with_kind(
+                LlmErrorKind::Config,
+                "codex response incomplete: max_output_tokens",
+            ))]),
+            MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("should not retry".into()))]),
+        ],
+        ApprovalMode::Safe,
+    );
+
+    let result = driver.run(prompt).await;
+    let err = result.err().expect("should fail without retrying");
+    assert!(err.contains("max_output_tokens"), "unexpected error: {err}");
+}
+
 // --- Cancellation ---
 
 #[tokio::test]

@@ -19,7 +19,7 @@ use crate::agent::{
 use crate::chat::build_chat_history;
 use crate::ext::ExtensionManager;
 use crate::llm::provider::{LlmProvider, ProviderRequestContext};
-use crate::llm::{ChatEvent, ChatMessage, ChatRole, TokenStats};
+use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmErrorKind, TokenStats};
 use crate::runtime::RuntimeEvent;
 use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
@@ -29,6 +29,16 @@ use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult
 /// breaks the loop with an error. This is a hard backstop against tool-looping;
 /// the top-level agent (depth 0) is uncapped.
 const SUBAGENT_MAX_TURNS: usize = 30;
+
+fn is_retryable_stream_error(kind: &LlmErrorKind) -> bool {
+    matches!(
+        kind,
+        LlmErrorKind::Connection
+            | LlmErrorKind::Timeout
+            | LlmErrorKind::Server(_)
+            | LlmErrorKind::RateLimit
+    )
+}
 
 fn apply_turn_messages(history: &[ChatMessage], turn_messages: &[String]) -> Vec<ChatMessage> {
     if turn_messages.is_empty() {
@@ -688,6 +698,12 @@ impl Driver {
                         report_usage(&token_stats);
                     }
                     Err(e) => {
+                        if !is_retryable_stream_error(&e.kind) {
+                            emit_runtime(RuntimeEvent::Failed {
+                                message: e.to_string(),
+                            });
+                            break 'turn Err(e.to_string());
+                        }
                         emit_runtime(RuntimeEvent::Status {
                             message: format!("stream error, will retry: {e}"),
                         });
