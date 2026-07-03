@@ -528,8 +528,15 @@ async fn run_web(_args: &[String]) -> std::io::Result<()> {
         ));
     }
 
-    let mut child = tokio::process::Command::new("node")
-        .arg(&bridge_path)
+    let mut command = tokio::process::Command::new("node");
+    command.arg(&bridge_path);
+    if std::env::var_os("BONE_BIN").is_none() {
+        if let Ok(exe) = std::env::current_exe() {
+            command.env("BONE_BIN", exe);
+        }
+    }
+
+    let mut child = command
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())

@@ -340,8 +340,11 @@ const sessions = new Map();
 
 function findBoneBinary() {
   if (process.env.BONE_BIN) return { cmd: process.env.BONE_BIN, args: ["serve"] };
-  const release = join(REPO, "target", "release", "bone");
-  const debug = join(REPO, "target", "debug", "bone");
+  const exe = process.platform === "win32" ? "bone.exe" : "bone";
+  const packaged = join(REPO, "bin", exe);
+  const release = join(REPO, "target", "release", exe);
+  const debug = join(REPO, "target", "debug", exe);
+  if (existsSync(packaged)) return { cmd: packaged, args: ["serve"] };
   if (existsSync(release)) return { cmd: release, args: ["serve"] };
   if (existsSync(debug)) return { cmd: debug, args: ["serve"] };
   return { cmd: "cargo", args: ["run", "-q", "-p", "bone", "--", "serve"] };
@@ -353,6 +356,10 @@ function ensureDaemon() {
   const { cmd, args } = findBoneBinary();
   log(`daemon not reachable — spawning: ${cmd} ${args.join(" ")}`);
   daemonProc = spawn(cmd, args, { cwd: REPO, stdio: ["ignore", "inherit", "inherit"] });
+  daemonProc.on("error", (err) => {
+    log(`failed to spawn daemon: ${err.message}`);
+    daemonProc = null;
+  });
   daemonProc.on("exit", (code) => {
     log(`daemon exited (code ${code})`);
     daemonProc = null;
