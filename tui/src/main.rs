@@ -769,8 +769,8 @@ async fn main() -> std::io::Result<()> {
     // background thread so update flags / the startup hint stay current.
     // Installs nothing — updates are applied only via `/catalog`.
     bone::ext::catalog::refresh_in_background();
-    // Throttled, non-blocking self-update check: fetches the latest GitHub
-    // release tag once per day; the banner surfaces it next launch if newer.
+    // Throttled, non-blocking self-update check: fetches the latest release
+    // for this install source; the banner surfaces it next launch if newer.
     bone::update_check::check_in_background();
 
     // Normal TUI mode

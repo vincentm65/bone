@@ -298,12 +298,8 @@ impl App {
     /// the daemon's `bone.banner()` text. These are local cached reads, not Lua.
     fn banner_client_hints() -> Vec<String> {
         let mut lines = Vec::new();
-        if crate::update_check::update_available()
-            && let Some(latest) = crate::update_check::latest_seen()
-        {
-            lines.push(format!(
-                "bone {latest} available — https://github.com/vincentm65/bone/releases"
-            ));
+        if let Some(notice) = crate::update_check::notice() {
+            lines.push(notice);
         }
         let updates = crate::ext::catalog::updates_available();
         if updates > 0 {
