@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::pane_content::{KeyEvent, KeyRequest};
+use crate::runtime::timer::WorkTimer;
 use crate::tools::{ApprovalGate, CallOutcome, ToolCall, decide_call};
 
 // Re-export wire-format types from protocol.
@@ -24,6 +25,7 @@ pub use bone_protocol::{CommandAction, RuntimeCommand, RuntimeEvent, SessionSnap
 #[derive(Clone, Default)]
 pub struct KeyReplyRegistry {
     inner: Arc<Mutex<RegistryInner>>,
+    timer: Arc<Mutex<Option<WorkTimer>>>,
 }
 
 #[derive(Default)]
@@ -33,6 +35,10 @@ struct RegistryInner {
 }
 
 impl KeyReplyRegistry {
+    pub fn set_timer(&self, timer: Option<WorkTimer>) {
+        *self.timer.lock().unwrap_or_else(|e| e.into_inner()) = timer;
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -42,20 +48,41 @@ impl KeyReplyRegistry {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let id = g.next_id;
         g.next_id = g.next_id.wrapping_add(1);
+        let was_empty = g.pending.is_empty();
         g.pending.insert(id, req.reply);
+        if was_empty {
+            if let Some(timer) = self
+                .timer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                timer.pause();
+            }
+        }
         id
     }
 
     /// Deliver `key` to the caller blocked on request `id`.
     pub fn resolve(&self, id: u64, key: KeyEvent) -> bool {
-        let sender = self
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .remove(&id);
+        let (sender, now_empty) = {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let sender = g.pending.remove(&id);
+            let now_empty = sender.is_some() && g.pending.is_empty();
+            (sender, now_empty)
+        };
         match sender {
             Some(tx) => {
+                if now_empty {
+                    if let Some(timer) = self
+                        .timer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                    {
+                        timer.resume();
+                    }
+                }
                 let _ = tx.send(key);
                 true
             }
@@ -143,14 +170,20 @@ impl ApprovalReplyRegistry {
 pub struct ChannelApprovalGate {
     events: mpsc::UnboundedSender<RuntimeEvent>,
     registry: ApprovalReplyRegistry,
+    timer: Option<WorkTimer>,
 }
 
 impl ChannelApprovalGate {
     pub fn new(
         events: mpsc::UnboundedSender<RuntimeEvent>,
         registry: ApprovalReplyRegistry,
+        timer: Option<WorkTimer>,
     ) -> Self {
-        Self { events, registry }
+        Self {
+            events,
+            registry,
+            timer,
+        }
     }
 }
 
@@ -177,11 +210,18 @@ impl ApprovalGate for ChannelApprovalGate {
             // Frontend detached: fall back without wedging the loop.
             return decide_call(blocked, auto_allows);
         }
-        match reply_rx.await {
+        if let Some(timer) = &self.timer {
+            timer.pause();
+        }
+        let outcome = match reply_rx.await {
             Ok(outcome) => outcome,
             // Frontend dropped the reply (detached/cancelled): fall back.
             Err(_) => decide_call(blocked, auto_allows),
+        };
+        if let Some(timer) = &self.timer {
+            timer.resume();
         }
+        outcome
     }
 }
 

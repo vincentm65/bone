@@ -660,7 +660,13 @@ fn ambiguous_error(
 ) -> String {
     let mut msg = format!("{label} matched {count} times; expected exactly 1\n\nMatches:");
     for start in starts.take(10) {
-        let snippet: String = content[start..].lines().next().unwrap_or("").chars().take(120).collect();
+        let snippet: String = content[start..]
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect();
         msg.push_str(&format!(
             "\n- line {}: {}",
             line_number_for_byte_offset(content, start),

@@ -50,6 +50,19 @@ pub fn shell_row(cmd: &str, output: String, is_error: bool) -> Message {
     }
 }
 
+pub fn shell_output_row(output: String, is_error: bool) -> Message {
+    Message {
+        role: ChatRole::Tool,
+        content: output,
+        tool: Some(crate::chat::ToolDisplay {
+            label: String::new(),
+            is_error,
+            is_shell: true,
+        }),
+        image_count: 0,
+    }
+}
+
 pub fn tool_label(
     call: &ToolCall,
     result: &ToolResult,
@@ -225,12 +238,12 @@ pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {
         .filter(|(_, tail)| tail.ends_with(']') && !tail.contains('\n'))
         .map(|(body, _)| body)
         .unwrap_or(&result.content);
-    let lines_read = if content.starts_with('[') && content.ends_with(']') && !content.contains('\n')
-    {
-        0
-    } else {
-        content.lines().count()
-    };
+    let lines_read =
+        if content.starts_with('[') && content.ends_with(']') && !content.contains('\n') {
+            0
+        } else {
+            content.lines().count()
+        };
     if lines_read == 0 {
         return " (0 lines)".to_string();
     }

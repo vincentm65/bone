@@ -78,9 +78,7 @@ impl TokenStats {
     pub fn anchored_context_estimate(&self, prompt_chars: usize) -> u64 {
         let est = |chars: usize| (chars as f64 / CHARS_PER_TOKEN).ceil() as u64;
         match self.context_anchor {
-            Some((tokens, chars)) if prompt_chars >= chars => {
-                tokens + est(prompt_chars - chars)
-            }
+            Some((tokens, chars)) if prompt_chars >= chars => tokens + est(prompt_chars - chars),
             Some((tokens, chars)) => tokens.saturating_sub(est(chars - prompt_chars)),
             None => est(prompt_chars),
         }

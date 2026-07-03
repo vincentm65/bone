@@ -615,9 +615,12 @@ async fn unicode_quote_mismatch_recovers() {
     // File contains a curly apostrophe; the model reproduces it as a straight
     // quote. Normalization folds typographic characters.
     let path = temp_path("unicode-quote.txt");
-    fs::write(&path, "// it\u{2019}s the \u{201C}main\u{201D} entry\nfn main() {}\n")
-        .await
-        .expect("setup");
+    fs::write(
+        &path,
+        "// it\u{2019}s the \u{201C}main\u{201D} entry\nfn main() {}\n",
+    )
+    .await
+    .expect("setup");
     let tool = EditFileTool;
 
     tool.execute(json!({
@@ -649,8 +652,14 @@ async fn ambiguous_error_includes_match_snippets() {
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.contains("line 1: let x = total;"), "missing snippet: {err}");
-    assert!(err.contains("line 3: let x = total;"), "missing snippet: {err}");
+    assert!(
+        err.contains("line 1: let x = total;"),
+        "missing snippet: {err}"
+    );
+    assert!(
+        err.contains("line 3: let x = total;"),
+        "missing snippet: {err}"
+    );
     assert!(err.contains("surrounding lines"));
     let _ = fs::remove_file(&path).await;
 }

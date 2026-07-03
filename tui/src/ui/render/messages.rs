@@ -975,7 +975,13 @@ pub fn msg_to_lines(
         }
 
         prev_role = Some(msg.role);
-        lines.push(Line::raw(""));
+        let suppress_trailing_blank = msg
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.is_shell && !tool.label.is_empty() && msg.content.is_empty());
+        if !suppress_trailing_blank {
+            lines.push(Line::raw(""));
+        }
     }
 
     if lines.is_empty() {

@@ -1119,9 +1119,12 @@ impl DaemonCtx {
 
         let (rt_tx, rt_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
         let cancel = Arc::new(AtomicBool::new(false));
+        let work_timer = crate::runtime::timer::WorkTimer::start();
+        self.key_registry.set_timer(Some(work_timer.clone()));
         let gate = Arc::new(ChannelApprovalGate::new(
             rt_tx.clone(),
             self.approval_registry.clone(),
+            Some(work_timer.clone()),
         ));
         let driver = {
             let s = self.session.lock().unwrap();
@@ -1198,7 +1201,11 @@ impl DaemonCtx {
             let _ = self.session.lock().unwrap().apply_outcome(outcome);
         }
         // Publish the post-turn state so clients can sync their view-model.
+        self.key_registry.set_timer(None);
         self.publish_snapshot();
+        self.hub.publish(RuntimeEvent::WorkElapsed {
+            elapsed_ms: work_timer.elapsed_ms(),
+        });
         self.hub.publish(RuntimeEvent::TurnComplete);
     }
 }

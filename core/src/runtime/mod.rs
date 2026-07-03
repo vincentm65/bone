@@ -13,6 +13,7 @@ pub mod conn;
 pub mod driver;
 pub mod event;
 pub mod session;
+pub mod timer;
 pub mod view;
 
 pub use conn::{LocalConn, RuntimeConn, SocketConn};

@@ -193,6 +193,13 @@ fn key_event_from_crossterm(
     }
 }
 
+fn format_elapsed_ms(ms: u64) -> String {
+    let total = ms / 1000;
+    let mins = total / 60;
+    let secs = total % 60;
+    format!("{mins}:{secs:02}")
+}
+
 impl App {
     pub(crate) async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         // Expand any collapsed paste placeholders so the model and transcript
@@ -719,6 +726,9 @@ impl App {
             RuntimeEvent::Failed { message } => {
                 self.pump_notice(format!("⚠ turn failed: {message}"), cur_idx, term)?;
             }
+            RuntimeEvent::WorkElapsed { elapsed_ms } => {
+                self.pump_notice(format!("worked for {}", format_elapsed_ms(elapsed_ms)), cur_idx, term)?;
+            }
             RuntimeEvent::Started { .. }
             | RuntimeEvent::Finished { .. }
             // Approval requests are handled in the select loop (they need the
@@ -776,17 +786,17 @@ impl App {
                     name,
                     arguments,
                 };
-                // Tools that declare `display.eager` (e.g. `subagent`, whose
-                // dispatch/wait calls block until the agents finish) would
-                // otherwise only show their row on completion. Render it now;
-                // the id is recorded in `shown_tool_rows` so the later
-                // `ToolResult` event doesn't render a duplicate.
                 if self
                     .wire_tools
                     .display_for_call(&call)
                     .and_then(|d| d.eager)
                     .unwrap_or(false)
                 {
+                    // Tools that declare `display.eager` (e.g. `subagent`, whose
+                    // dispatch/wait calls block until the agents finish) would
+                    // otherwise only show their row on completion. Render it now;
+                    // the id is recorded in `shown_tool_rows` so the later
+                    // `ToolResult` event doesn't render a duplicate.
                     self.pump_show_eager_row(&call, cur_idx, term)?;
                 }
                 pending.insert(id, call);
@@ -816,7 +826,6 @@ impl App {
                     is_error,
                     ..Default::default()
                 };
-                // Skip the row if a preview already showed it (edit_file).
                 if self.shown_tool_rows.remove(&call_id) {
                     // preview already rendered the row + diff
                 } else if let Some(call) = pending.remove(&call_id) {

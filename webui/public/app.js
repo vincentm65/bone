@@ -61,6 +61,7 @@ const state = {
   // `runningConvs` the subset still mid-turn (drives the sidebar "running" dot).
   watched: new Set(),
   runningConvs: new Set(),
+  pendingWorkElapsed: null,
   // conversation id -> Date.now() when its current turn started; drives the
   // live elapsed timer next to each running chat in the sidebar.
   runStart: new Map(),
@@ -108,7 +109,7 @@ let conversations = [];
 const LIVE_EVENT_TYPES = new Set([
   "started", "notice", "reasoning_delta", "text_delta", "tool_call",
   "tool_result", "token_usage", "approval_request", "key_request",
-  "finished", "failed", "view_diff",
+  "finished", "failed", "work_elapsed", "view_diff",
 ]);
 
 function cacheLiveEvent(convId, ev) {
@@ -368,6 +369,7 @@ function dispatchEvent(ev) {
     case "key_request": return onKeyRequest(ev);
     case "finished": return onFinished(ev);
     case "failed": return onFailed(ev);
+    case "work_elapsed": state.pendingWorkElapsed = ev.elapsed_ms; return;
     case "turn_complete": return onTurnComplete();
     case "view_diff": return onViewDiff(ev.diff);
     case "command_complete": return onCommandComplete(ev);
@@ -1527,6 +1529,13 @@ function clickInteractCustom() {
 
 // ── turn lifecycle ──────────────────────────────────────────────────────────
 
+function showWorkElapsed() {
+  const ms = state.pendingWorkElapsed;
+  state.pendingWorkElapsed = null;
+  if (typeof ms !== "number") return;
+  systemLine(`worked for ${formatElapsed(ms)}`);
+}
+
 function onFinished() {
   hideThinking();
   if (state.asstEl) {
@@ -1538,6 +1547,7 @@ function onFinished() {
 function onFailed(ev) { hideThinking(); closeInteract(); markRunning(state.conversationId, false); systemLine(ev.message || "turn failed", true); finalizeTurn(); setRunning(false); }
 function onTurnComplete() {
   hideThinking();
+  showWorkElapsed();
   // The turn is over — stop this conversation's elapsed timer.
   markRunning(state.conversationId, false);
   setRunning(false);

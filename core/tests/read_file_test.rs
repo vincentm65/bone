@@ -45,7 +45,10 @@ async fn start_line_skips_to_given_line() {
         .expect("read should succeed");
 
     // Ranged read to EOF: explicit range so the model knows it hit the end.
-    assert_eq!(result, "gamma\ndelta\n\n[showing lines 3-4 of 4; end of file]");
+    assert_eq!(
+        result,
+        "gamma\ndelta\n\n[showing lines 3-4 of 4; end of file]"
+    );
     let _ = fs::remove_file(&path).await;
 }
 

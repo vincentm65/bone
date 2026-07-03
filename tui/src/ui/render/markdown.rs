@@ -574,8 +574,7 @@ fn highlight_line(line: &str, highlighter: &mut HighlightLines<'_>) -> Line<'sta
             .into_iter()
             .filter_map(|(style, text)| {
                 let text = text.strip_suffix('\n').unwrap_or(text);
-                (!text.is_empty())
-                    .then(|| Span::styled(text.to_string(), syntect_style(style)))
+                (!text.is_empty()).then(|| Span::styled(text.to_string(), syntect_style(style)))
             })
             .collect::<Vec<_>>(),
     )

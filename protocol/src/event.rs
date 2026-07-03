@@ -69,6 +69,9 @@ pub enum RuntimeEvent {
     Failed {
         message: String,
     },
+    WorkElapsed {
+        elapsed_ms: u64,
+    },
     StateSnapshot {
         snapshot: SessionSnapshot,
     },
@@ -278,6 +281,7 @@ mod tests {
             RuntimeEvent::Failed {
                 message: "boom".into(),
             },
+            RuntimeEvent::WorkElapsed { elapsed_ms: 1234 },
             RuntimeEvent::StateSnapshot {
                 snapshot: SessionSnapshot {
                     sent: 100,

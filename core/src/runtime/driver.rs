@@ -350,11 +350,9 @@ impl Driver {
                 // reasoning models, triggering compaction tens of thousands of
                 // tokens early. The real provider-reported value overwrites
                 // this after the request lands.
-                token_stats.context_length = token_stats
-                    .anchored_context_estimate(estimate_context_chars(
-                        &history,
-                        tool_defs_json_chars,
-                    ));
+                token_stats.context_length = token_stats.anchored_context_estimate(
+                    estimate_context_chars(&history, tool_defs_json_chars),
+                );
                 let state = crate::ext::ctx::AppCtxState::new(
                     &tools,
                     &token_stats,

@@ -317,6 +317,9 @@ pub(crate) fn emit_event(
         crate::runtime::RuntimeEvent::Failed { message } => {
             serde_json::json!({ "type": "failed", "message": message })
         }
+        crate::runtime::RuntimeEvent::WorkElapsed { elapsed_ms } => {
+            serde_json::json!({ "type": "work_elapsed", "elapsed_ms": elapsed_ms })
+        }
         crate::runtime::RuntimeEvent::TextDelta { .. }
         | crate::runtime::RuntimeEvent::ReasoningDelta { .. }
         | crate::runtime::RuntimeEvent::KeyRequest { .. }

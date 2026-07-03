@@ -2160,6 +2160,7 @@ fn dispatch_event(
                 cb.call::<()>(message.as_str())?;
             }
         }
+        RuntimeEvent::WorkElapsed { .. } => {}
         RuntimeEvent::TextDelta { .. }
         | RuntimeEvent::ReasoningDelta { .. }
         | RuntimeEvent::KeyRequest { .. }
