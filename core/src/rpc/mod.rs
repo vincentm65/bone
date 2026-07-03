@@ -425,7 +425,7 @@ pub fn frontend_state(
 ) -> RuntimeEvent {
     RuntimeEvent::FrontendState {
         banner: extensions.frontend_banner(),
-        theme: serde_json::to_value(extensions.theme_snapshot()).unwrap_or_default(),
+        theme: serde_json::to_value(extensions.frontend_theme_snapshot()).unwrap_or_default(),
         keymap: serde_json::to_value(extensions.keymap_snapshot()).unwrap_or_default(),
         config: serde_json::to_value(extensions.config_snapshot()).unwrap_or_default(),
         commands: extensions

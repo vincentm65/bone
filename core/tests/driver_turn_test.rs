@@ -843,11 +843,14 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
     assert_eq!(assistant.tool_calls[0].name, "read_file");
 }
 
-// A `before_turn` hook can return `turn_message`: a transient nudge sent as the
-// *last* input item of that round's request only. Unlike `system_prompt_append`
-// it may change every round without invalidating the provider's prefix cache —
-// so it must (a) always sit at the prompt tail, and (b) never persist into the
-// history, where a stale copy mid-conversation would break the cached prefix.
+// A `before_turn` hook can return `turn_message`: a transient nudge sent at
+// the tail of that round's request only. On the first round it is a trailing
+// user item; mid-loop it is appended to the final tool result so no fresh user
+// turn causes provider chat templates to drop echoed in-turn reasoning.
+// Unlike `system_prompt_append` it may change every round without invalidating
+// the provider's prefix cache — so it must (a) always sit at the prompt tail,
+// and (b) never persist into the history, where a stale copy mid-conversation
+// would break the cached prefix.
 #[tokio::test]
 async fn driver_turn_message_is_trailing_and_not_persisted() {
     let config_dir = common::temp_dir("driver-turn-message");
@@ -925,13 +928,30 @@ end)
     for (round, messages) in captured.iter().enumerate() {
         let marker = format!("TM-MARKER-{}", round + 1);
         let last = messages.last().expect("request has messages");
-        assert_eq!(last.role, ChatRole::User, "turn message is a user item");
-        assert!(
-            last.content.contains(&marker) && last.content.contains("<system-reminder>"),
-            "round {} must end with this round's wrapped turn message; got {:?}",
-            round + 1,
-            last.content,
-        );
+        if round == 0 {
+            assert_eq!(
+                last.role,
+                ChatRole::User,
+                "round 1 turn message is a user item"
+            );
+            assert!(
+                last.content.contains(&marker) && last.content.contains("<system-reminder>"),
+                "round 1 must end with this round's wrapped turn message; got {:?}",
+                last.content,
+            );
+        } else {
+            assert_eq!(
+                last.role,
+                ChatRole::Tool,
+                "mid-loop turn message rides in the final tool result"
+            );
+            assert!(
+                last.content.contains(&marker) && last.content.contains("<system-reminder>"),
+                "round {} final tool result must contain this round's wrapped turn message; got {:?}",
+                round + 1,
+                last.content,
+            );
+        }
         // Exactly one occurrence in the whole request: earlier rounds' markers
         // must not have leaked into the persistent history.
         let occurrences: usize = messages

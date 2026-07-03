@@ -2,7 +2,7 @@
 
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -29,6 +29,7 @@ fn run_loop(term: &mut FullscreenTerminal, messages: &[Message], theme: &Theme) 
                 let height = view_height(term.size()?.height);
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
                     KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
                     KeyCode::PageDown => scroll = scroll.saturating_add(height),
@@ -67,7 +68,7 @@ fn draw(term: &mut FullscreenTerminal, lines: &[Line<'static>], scroll: usize) -
         frame.render_widget(Paragraph::new(visible), chunks[0]);
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                "↑/↓ PgUp/PgDn Home/End scroll · q/Esc close",
+                "↑/↓ PgUp/PgDn Home/End scroll · q/Esc/Ctrl+O close",
                 Style::default().fg(Color::DarkGray),
             )])),
             chunks[1],

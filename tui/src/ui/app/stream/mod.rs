@@ -33,6 +33,12 @@ pub(crate) struct KeySink {
     owns_input: bool,
 }
 
+#[derive(Default)]
+struct DrainKeysResult {
+    mode_changed: bool,
+    open_transcript: bool,
+}
+
 /// A pending `ctx.ui.key()` request from the daemon, delivered via
 /// `RuntimeEvent::KeyRequest`; the reply goes back over the runtime command
 /// channel as `KeyReply`.
@@ -317,18 +323,24 @@ impl App {
             // the input field — but the loop keeps pumping the spinner/events.
             if self.pending_approval.is_some() {
                 self.drain_approval_keys(term)?;
-            } else if Self::drain_keys(
-                &mut self.input,
-                &mut self.queue,
-                &mut self.approval_mode,
-                &mut self.cancel_streaming,
-                &mut self.panes_visible,
-                &mut self.pages,
-                &mut self.active_page,
-                &mut pending_key,
-            ) {
-                self.user_config.approval_mode = self.approval_mode;
-                self.persist_runtime_config();
+            } else {
+                let drained = Self::drain_keys(
+                    &mut self.input,
+                    &mut self.queue,
+                    &mut self.approval_mode,
+                    &mut self.cancel_streaming,
+                    &mut self.panes_visible,
+                    &mut self.pages,
+                    &mut self.active_page,
+                    &mut pending_key,
+                );
+                if drained.mode_changed {
+                    self.user_config.approval_mode = self.approval_mode;
+                    self.persist_runtime_config();
+                }
+                if drained.open_transcript {
+                    self.open_transcript_view(term)?;
+                }
             }
             if self.cancel_streaming {
                 // Cancel the in-flight turn via the daemon, then keep pumping
@@ -501,18 +513,24 @@ impl App {
             // a decision), keys drive the prompt instead of the input field.
             if self.pending_approval.is_some() {
                 self.drain_approval_keys(term).ok();
-            } else if Self::drain_keys(
-                &mut self.input,
-                &mut self.queue,
-                &mut self.approval_mode,
-                &mut self.cancel_streaming,
-                &mut self.panes_visible,
-                &mut self.pages,
-                &mut self.active_page,
-                &mut pending_key,
-            ) {
-                self.user_config.approval_mode = self.approval_mode;
-                self.persist_runtime_config();
+            } else {
+                let drained = Self::drain_keys(
+                    &mut self.input,
+                    &mut self.queue,
+                    &mut self.approval_mode,
+                    &mut self.cancel_streaming,
+                    &mut self.panes_visible,
+                    &mut self.pages,
+                    &mut self.active_page,
+                    &mut pending_key,
+                );
+                if drained.mode_changed {
+                    self.user_config.approval_mode = self.approval_mode;
+                    self.persist_runtime_config();
+                }
+                if drained.open_transcript {
+                    self.open_transcript_view(term).ok();
+                }
             }
             if self.cancel_streaming {
                 let _ = self.command_tx.send(crate::runtime::RuntimeCommand::Cancel);
@@ -1115,8 +1133,8 @@ impl App {
         pages: &mut [PanePage],
         active_page: &mut usize,
         pending_key: &mut KeySink,
-    ) -> bool {
-        let mut mode_changed = false;
+    ) -> DrainKeysResult {
+        let mut result = DrainKeysResult::default();
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
             match event::read().unwrap_or(Event::Key(crossterm::event::KeyEvent::new(
                 KeyCode::Null,
@@ -1157,6 +1175,12 @@ impl App {
                     // on a oneshot that was never sent or dropped.
                     if pending_key.wants_key() {
                         pending_key.deliver(key_event_from_crossterm(key.code, key.modifiers));
+                        continue;
+                    }
+                    if key.code == KeyCode::Char('o')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        result.open_transcript = true;
                         continue;
                     }
                     // ── Page navigation (Tab/BackTab/PageUp/PageDown) ─────
@@ -1212,16 +1236,16 @@ impl App {
                         match event {
                             Event::Paste(text) => input.insert_paste(&text),
                             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                                let result = match apply_input_key_with_paste_burst(input, key) {
+                                let applied = match apply_input_key_with_paste_burst(input, key) {
                                     Ok(result) => result,
-                                    Err(_) => return mode_changed,
+                                    Err(_) => return result,
                                 };
-                                next = result.trailing;
-                                match result.action {
+                                next = applied.trailing;
+                                match applied.action {
                                     InputAction::Cancel => {
                                         *cancel = true;
                                         queue.clear();
-                                        return mode_changed;
+                                        return result;
                                     }
                                     InputAction::Submit => {
                                         // Expand placeholders now; the queued string is fed
@@ -1236,7 +1260,7 @@ impl App {
                                     InputAction::CycleMode => {
                                         let new_mode = mode.cycle();
                                         *mode = new_mode;
-                                        mode_changed = true;
+                                        result.mode_changed = true;
                                     }
                                     InputAction::Redraw
                                     | InputAction::Escape
@@ -1251,7 +1275,7 @@ impl App {
                 _ => {}
             }
         }
-        mode_changed
+        result
     }
 }
 

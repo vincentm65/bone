@@ -79,10 +79,9 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
     };
     existing.contains("ctx.ui.interact")
         || (name == "ui/menu.lua" && !existing.contains("require(\"ui.pane\")"))
-        // task_list moved from a hardcoded host name check to a declared
-        // `stateful = true`; refresh older seeded copies that predate the field
-        // so they keep their host-managed state behavior.
-        || (name == "task_list.lua" && !existing.contains("stateful"))
+        // task_list reminders are now deduped per conversation; refresh older
+        // seeded copies that would re-emit identical turn messages every tool round.
+        || (name == "task_list.lua" && !existing.contains("emit_turn_message_once"))
         // subagent's eager-render + dispatch label moved from hardcoded host
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.

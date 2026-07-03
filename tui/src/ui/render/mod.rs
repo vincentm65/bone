@@ -8,6 +8,7 @@ pub mod wrap;
 
 use messages::wrapped_line_count;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::text::Line;
 
 use ratatui::widgets::{Paragraph, Widget, Wrap};
@@ -46,6 +47,29 @@ pub(crate) use bottom_pane::clamped_pane_visible_rows;
 pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
 
 pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
+
+fn terminal_color_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0x00, 0x00, 0x00),
+        Color::Red => (0xCD, 0x31, 0x31),
+        Color::Green => (0x0D, 0xBC, 0x79),
+        Color::Yellow => (0xE5, 0xE5, 0x10),
+        Color::Blue => (0x24, 0x72, 0xC8),
+        Color::Magenta => (0xBC, 0x3F, 0xBC),
+        Color::Cyan => (0x11, 0xA8, 0xCD),
+        Color::Gray => (0xC0, 0xC0, 0xC0),
+        Color::DarkGray => (0x80, 0x80, 0x80),
+        Color::LightRed => (0xF1, 0x4C, 0x4C),
+        Color::LightGreen => (0x23, 0xD1, 0x8B),
+        Color::LightYellow => (0xF5, 0xF5, 0x43),
+        Color::LightBlue => (0x3B, 0x8E, 0xEA),
+        Color::LightMagenta => (0xD6, 0x70, 0xD6),
+        Color::LightCyan => (0x29, 0xB8, 0xDB),
+        Color::White => (0xFF, 0xFF, 0xFF),
+        Color::Indexed(_) | Color::Reset => (0xD4, 0xD4, 0xD4),
+    }
+}
 
 /// Status bar info passed from App to Renderer for each draw.
 pub struct StatusInfo {
@@ -117,6 +141,22 @@ impl Renderer {
             viewport_height: MIN_ROWS,
             scrollback_last_blank: false,
         }
+    }
+
+    pub fn apply_terminal_background(bg: Option<Color>) -> io::Result<bool> {
+        if let Some(color) = bg {
+            let (r, g, b) = terminal_color_rgb(color);
+            print!("\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\");
+            io::stdout().flush()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn reset_terminal_background() -> io::Result<()> {
+        print!("\x1b]111\x1b\\");
+        io::stdout().flush()
     }
 
     /// Drop blank lines that would create a run of two or more consecutive
@@ -490,6 +530,19 @@ pub fn safe_markdown_prefix_end(content: &str, from: usize) -> usize {
     }
 
     safe_end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_color_rgb_maps_truecolor_and_named_colors() {
+        assert_eq!(terminal_color_rgb(Color::Rgb(1, 2, 3)), (1, 2, 3));
+        assert_eq!(terminal_color_rgb(Color::Black), (0, 0, 0));
+        assert_eq!(terminal_color_rgb(Color::White), (255, 255, 255));
+        assert_eq!(terminal_color_rgb(Color::LightBlue), (0x3B, 0x8E, 0xEA));
+    }
 }
 
 fn complete_lines(content: &str, from: usize) -> impl Iterator<Item = (usize, &str)> {

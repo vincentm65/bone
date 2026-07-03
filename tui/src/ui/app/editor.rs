@@ -13,6 +13,7 @@ impl App {
         std::fs::write(&tmp, "")?;
         let editor = editor_command();
 
+        self.reset_terminal_background();
         Renderer::prepare_exit(term)?;
         Renderer::shutdown_terminal()?;
 
@@ -25,6 +26,7 @@ impl App {
         std::fs::remove_file(&tmp).ok();
 
         *term = Renderer::init_terminal(MIN_ROWS)?;
+        self.apply_terminal_background();
         self.renderer.viewport_height = MIN_ROWS;
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;

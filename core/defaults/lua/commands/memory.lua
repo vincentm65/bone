@@ -7,6 +7,8 @@
 local EXTRACT_BUDGET_CHARS = 80000
 local MAX_MSG_CHARS = 4000
 local MAX_INBOX_CHARS = 40000
+local MEMORY_MAX_TOKENS = 500
+local MEMORY_MAX_CHARS = 2000  -- ~4 chars/token approximation
 
 local function trim(s)
     return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -170,7 +172,7 @@ local function merge_prompt(current_global, current_project, findings, inbox, cw
         "- Inbox entries may include scope=global or scope=project; honor explicit scope.",
         "- Add only clear durable signals. Prefer repeated/corrective signals over one-offs.",
         "- Remove contradicted/stale items.",
-        "- Keep each file under 400 tokens.",
+        "- Keep each file under 500 tokens (~" .. MEMORY_MAX_CHARS .. " chars).",
         "- Start each non-empty file with: <!-- last_updated: YYYY-MM-DD -->",
         "- Use concise markdown sections. Drop empty sections.",
         "- If a file should stay empty, leave its marker body empty.",
@@ -190,6 +192,26 @@ local function merge_prompt(current_global, current_project, findings, inbox, cw
         "<project markdown>",
         "---END---",
     }, "\n")
+end
+
+local function enforce_cap(content)
+    if #content <= MEMORY_MAX_CHARS then
+        return content
+    end
+    -- Keep the header comment, trim from the bottom to stay under the cap.
+    local header = "<!-- last_updated: " .. os.date("%Y-%m-%d") .. " -->"
+    local budget = MEMORY_MAX_CHARS - #header - 3  -- space + "..."
+    local body = content:gsub("^<!%-%-.-%-%->\n?", "")
+    if #body > budget then
+        for cut = budget, math.max(budget - 4, 1), -1 do
+            local chunk = body:sub(1, cut)
+            local ok, _ = pcall(utf8.len, chunk)
+            if ok then
+                return header .. "\n" .. chunk:match("(.-)%s*$") .. "..."
+            end
+        end
+    end
+    return header .. "\n" .. body:sub(1, budget) .. "..."
 end
 
 local function parse_merge_output(content)
@@ -216,6 +238,10 @@ local function final_merge(ctx, p, findings_text, inbox_text)
     if new_global == nil then
         return false, "merge output missing markers"
     end
+
+    -- Enforce hard cap per file.
+    new_global = enforce_cap(new_global)
+    new_project = enforce_cap(new_project)
 
     local changed = false
     if trim(current_global) ~= new_global then

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt};
 
-use super::snapshots::{LuaConfigSnapshot, LuaKeymapSnapshot, LuaThemeSnapshot};
+use super::snapshots::{LuaConfigSnapshot, LuaKeymapSnapshot, LuaStyleSpec, LuaThemeSnapshot};
 use crate::tools::ToolCall;
 
 /// Options controlling the Lua boot context.
@@ -278,6 +278,23 @@ impl ExtensionManager {
     /// Get the Lua theme snapshot captured at boot.
     pub fn theme_snapshot(&self) -> &LuaThemeSnapshot {
         &self.theme_snapshot
+    }
+
+    /// Get the boot theme plus any `bone.api.ui.set_highlight` calls emitted
+    /// during init.lua. Theme commands persist by replaying set_highlight at
+    /// startup, so remote/late frontends must receive those values in their
+    /// initial `FrontendState` instead of waiting for already-drained diffs.
+    pub fn frontend_theme_snapshot(&self) -> LuaThemeSnapshot {
+        let mut snapshot = self.theme_snapshot.clone();
+        let view = super::api_ui::snapshot(&self.ui);
+        for (name, color) in view.highlights {
+            if name == "bg" {
+                snapshot.palette.bg = Some(color);
+            } else {
+                snapshot.highlights.insert(name, LuaStyleSpec::Color(color));
+            }
+        }
+        snapshot
     }
 
     /// Get the Lua keymap snapshot captured at boot.

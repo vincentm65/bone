@@ -19,7 +19,7 @@ use crate::agent::{
 use crate::chat::build_chat_history;
 use crate::ext::ExtensionManager;
 use crate::llm::provider::{LlmProvider, ProviderRequestContext};
-use crate::llm::{ChatEvent, ChatMessage, TokenStats};
+use crate::llm::{ChatEvent, ChatMessage, ChatRole, TokenStats};
 use crate::runtime::RuntimeEvent;
 use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
@@ -29,6 +29,77 @@ use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult
 /// breaks the loop with an error. This is a hard backstop against tool-looping;
 /// the top-level agent (depth 0) is uncapped.
 const SUBAGENT_MAX_TURNS: usize = 30;
+
+fn apply_turn_messages(history: &[ChatMessage], turn_messages: &[String]) -> Vec<ChatMessage> {
+    if turn_messages.is_empty() {
+        return history.to_vec();
+    }
+
+    let reminder = format!(
+        "<system-reminder>\n{}\n</system-reminder>",
+        turn_messages.join("\n\n")
+    );
+    let mut request_history = history.to_vec();
+    match request_history.last_mut() {
+        // Mid-loop: keep reminders inside the final tool result. Adding a fresh
+        // trailing user message here makes Qwen-family chat templates discard
+        // echoed reasoning from the in-progress turn and reads like a new user
+        // prompt, causing models to re-plan and repeat themselves.
+        Some(last) if last.role == ChatRole::Tool => {
+            last.content.push_str("\n\n");
+            last.content.push_str(&reminder);
+        }
+        _ => request_history.push(ChatMessage::new(ChatRole::User, reminder)),
+    }
+    request_history
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_messages_empty_clones_history() {
+        let history = vec![ChatMessage::new(ChatRole::User, "hello")];
+        let shaped = apply_turn_messages(&history, &[]);
+
+        assert_eq!(shaped.len(), 1);
+        assert_eq!(shaped[0].role, ChatRole::User);
+        assert_eq!(shaped[0].content, "hello");
+    }
+
+    #[test]
+    fn turn_messages_append_to_last_tool_result_mid_loop() {
+        let history = vec![
+            ChatMessage::new(ChatRole::User, "do it"),
+            ChatMessage::new(ChatRole::Tool, "exit code: 0\nstdout:\nalpha"),
+        ];
+        let shaped = apply_turn_messages(&history, &["remember".to_string()]);
+
+        assert_eq!(shaped.len(), 2);
+        assert_eq!(shaped[1].role, ChatRole::Tool);
+        assert_eq!(
+            shaped[1].content,
+            "exit code: 0\nstdout:\nalpha\n\n<system-reminder>\nremember\n</system-reminder>"
+        );
+        assert_eq!(history[1].content, "exit code: 0\nstdout:\nalpha");
+    }
+
+    #[test]
+    fn turn_messages_after_user_append_trailing_user_message() {
+        let history = vec![ChatMessage::new(ChatRole::User, "do it")];
+        let shaped = apply_turn_messages(&history, &["remember".to_string()]);
+
+        assert_eq!(shaped.len(), 2);
+        assert_eq!(shaped[0].role, ChatRole::User);
+        assert_eq!(shaped[0].content, "do it");
+        assert_eq!(shaped[1].role, ChatRole::User);
+        assert_eq!(
+            shaped[1].content,
+            "<system-reminder>\nremember\n</system-reminder>"
+        );
+    }
+}
 
 /// The runtime engine: owns everything a turn needs and runs the agent loop.
 ///
@@ -448,24 +519,11 @@ impl Driver {
             // that window must return control now rather than waiting out the
             // request or the 2s backoff.
             let mut stream = None;
-            // Request-only copy of the history: the transient turn message is
-            // appended here (wrapped so the model doesn't mistake it for the
-            // human) and re-derived fresh each turn, so it never lands in
-            // `history`/`transcript` where it would sit mid-conversation on
+            // Request-only copy of the history: transient turn messages are
+            // re-derived fresh each provider request, so they never land in
+            // `history`/`transcript` where they would sit mid-conversation on
             // later turns and break the cached prefix.
-            let request_history = if turn_messages.is_empty() {
-                history.clone()
-            } else {
-                let mut h = history.clone();
-                h.push(crate::llm::ChatMessage::new(
-                    crate::llm::ChatRole::User,
-                    format!(
-                        "<system-reminder>\n{}\n</system-reminder>",
-                        turn_messages.join("\n\n")
-                    ),
-                ));
-                h
-            };
+            let request_history = apply_turn_messages(&history, &turn_messages);
             'request: for attempt in 1..=3 {
                 let send = llm.chat_stream_with_context(
                     request_history.clone(),
@@ -821,7 +879,11 @@ impl Driver {
 
                 // The OpenAI wire format cannot carry images in a tool-role
                 // message, so relay any tool-returned images to vision-capable
-                // models as a follow-up user message.
+                // models as a follow-up user message. Note: this persists a
+                // mid-turn user message, which makes Qwen-family chat templates
+                // drop the turn's echoed reasoning (same mechanism
+                // apply_turn_messages avoids) — unavoidable here given the wire
+                // format, but keep it in mind for vision-tool repetition reports.
                 if !result.images.is_empty() {
                     let note = format!("Image output from {}:", result.name);
                     let images_json = serde_json::to_string(&result.images).ok();

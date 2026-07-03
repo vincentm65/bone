@@ -161,6 +161,8 @@ pub struct App {
     /// Set after the user was warned that quitting kills running sub-agent
     /// jobs; the next quit request goes through.
     quit_despite_jobs: bool,
+    /// True after OSC 11 changed the emulator background; reset on TUI handoff/exit.
+    terminal_bg_set: bool,
 }
 
 impl App {
@@ -262,6 +264,7 @@ impl App {
             jobs_seen_version: u64::MAX,
             jobs_last_refresh: std::time::Instant::now(),
             quit_despite_jobs: false,
+            terminal_bg_set: false,
         })
     }
 
@@ -380,6 +383,7 @@ impl App {
         tool_defs: Vec<crate::tools::ToolDefinition>,
         tool_display: serde_json::Value,
     ) {
+        let mut theme_changed = false;
         // First receipt carries the boot banner — the daemon's `bone.banner()`
         // text plus client-side update/catalog hints — followed by the greeting.
         // (The VM-less client can't build the banner itself; it arrives here.)
@@ -400,6 +404,10 @@ impl App {
         }
         if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaThemeSnapshot>(theme) {
             self.renderer.theme.apply_snapshot(&snap);
+            theme_changed = true;
+        }
+        if theme_changed {
+            self.apply_terminal_background();
         }
         if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaKeymapSnapshot>(keymap)
         {
@@ -416,6 +424,23 @@ impl App {
             defs: tool_defs,
             display: serde_json::from_value(tool_display).unwrap_or_default(),
         };
+    }
+
+    fn apply_terminal_background(&mut self) {
+        if self.renderer.theme.palette.bg.is_some() {
+            if Renderer::apply_terminal_background(self.renderer.theme.palette.bg).is_ok() {
+                self.terminal_bg_set = true;
+            }
+        } else {
+            self.reset_terminal_background();
+        }
+    }
+
+    fn reset_terminal_background(&mut self) {
+        if self.terminal_bg_set {
+            let _ = Renderer::reset_terminal_background();
+            self.terminal_bg_set = false;
+        }
     }
 
     /// Dispatch a `session_end` hook on the daemon's Lua VM.
@@ -874,6 +899,7 @@ impl App {
 
         self.dispatch_session_end();
 
+        self.reset_terminal_background();
         Renderer::prepare_exit(&mut terminal)?;
         Renderer::shutdown_terminal()?;
         Ok(())
@@ -948,6 +974,7 @@ impl App {
     /// resize, where reflowed/duplicated viewport rows can't be erased in place.
     fn rebuild_scrollback_after_resize(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
         Renderer::hard_reset_viewport(terminal, self.renderer.viewport_height)?;
+        self.apply_terminal_background();
         self.renderer.reset_scrollback_state();
 
         // The in-progress streamed assistant message (if any) is flushed via the
@@ -1185,7 +1212,11 @@ impl App {
                 true
             }
             ViewDiff::SetHighlight { name, fg } => {
-                self.renderer.theme.set_highlight(&name, fg.as_deref())
+                let changed = self.renderer.theme.set_highlight(&name, fg.as_deref());
+                if changed && name == "bg" {
+                    self.apply_terminal_background();
+                }
+                changed
             }
         }
     }
@@ -1383,6 +1414,12 @@ impl App {
         }
     }
 
+    pub(super) fn open_transcript_view(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let result = crate::ui::transcript_view::run(&self.messages, &self.renderer.theme);
+        self.force_redraw(term)?;
+        result
+    }
+
     async fn handle_key(
         &mut self,
         code: KeyCode,
@@ -1396,9 +1433,7 @@ impl App {
         }
 
         if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
-            let result = crate::ui::transcript_view::run(&self.messages, &self.renderer.theme);
-            self.force_redraw(term)?;
-            return result;
+            return self.open_transcript_view(term);
         }
 
         if self.panes_visible && !self.pages.is_empty() && modifiers.is_empty() {

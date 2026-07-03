@@ -521,7 +521,28 @@ impl Theme {
                 }
             }};
         }
+        macro_rules! set_optional {
+            ($field:ident) => {{
+                match color {
+                    None => {
+                        self.palette.$field = default.palette.$field;
+                        true
+                    }
+                    Some(s) => match crate::ui::color::parse_color(s) {
+                        Some(c) => {
+                            self.palette.$field = Some(c);
+                            true
+                        }
+                        None => {
+                            eprintln!("bone-lua warn: invalid highlight color for {name}: {s}");
+                            false
+                        }
+                    },
+                }
+            }};
+        }
         let changed = match name {
+            "bg" => set_optional!(bg),
             "user_msg" => set!(user_msg),
             "user_msg_bg" => set!(user_msg_bg),
             "status_text" => set!(status_text),

@@ -846,6 +846,7 @@ Most users only need the palette:
 bone.theme = {
     palette = {
         -- bg is optional; omit it to keep your terminal background.
+        -- When set, supported terminals use it while bone is running and reset on exit.
         fg = "#ffffff",
         muted = "#808080",
         subtle = "#303030",
