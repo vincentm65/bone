@@ -44,8 +44,8 @@ async fn start_line_skips_to_given_line() {
         .await
         .expect("read should succeed");
 
-    // Reads to EOF, so it shows the complete-range footer.
-    assert_eq!(result, "gamma\ndelta\n\n[4 lines total]");
+    // Ranged read to EOF: explicit range so the model knows it hit the end.
+    assert_eq!(result, "gamma\ndelta\n\n[showing lines 3-4 of 4; end of file]");
     let _ = fs::remove_file(&path).await;
 }
 
@@ -145,10 +145,10 @@ async fn paging_continues_from_start_line() {
         .await
         .expect("read should succeed");
 
-    // Reading the tail reaches EOF: complete-range footer, no paging prompt.
+    // Reading the tail reaches EOF: explicit range, no paging prompt.
     assert!(result.contains("line 600"));
-    assert!(result.contains("[600 lines total]"));
-    assert!(!result.contains("showing lines"));
+    assert!(result.contains("[showing lines 501-600 of 600; end of file]"));
+    assert!(!result.contains("call again"));
     let _ = fs::remove_file(&path).await;
 }
 

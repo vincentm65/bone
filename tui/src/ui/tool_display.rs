@@ -1,6 +1,7 @@
 //! Builds the tool-call summary rows shown in the transcript.
 
 use crate::chat::Message;
+use crate::llm::ChatRole;
 use crate::tools::types::{ToolCall, ToolDisplayConfig, ToolResult};
 use serde_json::Value;
 
@@ -10,25 +11,42 @@ pub fn build_tool_row(
     display: Option<&ToolDisplayConfig>,
 ) -> Message {
     let show_label = display.and_then(|d| d.show).unwrap_or(true);
+    let is_shell = call.name == "shell";
     let show_result = display.and_then(|d| d.show_result).unwrap_or(false);
     let label = if show_label {
         tool_label(call, result, display)
     } else {
         String::new()
     };
-    let content = if show_result {
+    // ShellTool caps stdout/stderr before returning; retained shell content is
+    // the full post-cap output used by the expanded transcript viewer.
+    let content = if is_shell || show_result {
         result.content.clone()
     } else {
         String::new()
     };
     Message {
-        role: crate::llm::ChatRole::Tool,
+        role: ChatRole::Tool,
         content,
         tool: Some(crate::chat::ToolDisplay {
             label,
             is_error: result.is_error,
+            is_shell,
         }),
         image_count: result.images.len(),
+    }
+}
+
+pub fn shell_row(cmd: &str, output: String, is_error: bool) -> Message {
+    Message {
+        role: ChatRole::Tool,
+        content: output,
+        tool: Some(crate::chat::ToolDisplay {
+            label: format_shell_label(cmd),
+            is_error,
+            is_shell: true,
+        }),
+        image_count: 0,
     }
 }
 
@@ -199,7 +217,20 @@ fn format_display_value(value: &Value) -> String {
 }
 
 pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {
-    let lines_read = result.content.lines().count();
+    // The result ends with a bracketed status footer ("\n\n[...]") that is
+    // not file content; don't count it toward lines read.
+    let content = result
+        .content
+        .rsplit_once("\n\n[")
+        .filter(|(_, tail)| tail.ends_with(']') && !tail.contains('\n'))
+        .map(|(body, _)| body)
+        .unwrap_or(&result.content);
+    let lines_read = if content.starts_with('[') && content.ends_with(']') && !content.contains('\n')
+    {
+        0
+    } else {
+        content.lines().count()
+    };
     if lines_read == 0 {
         return " (0 lines)".to_string();
     }
@@ -225,14 +256,12 @@ pub(crate) fn format_shell_command(command: &str) -> Vec<String> {
     if find_heredoc_marker(command).is_some() {
         return expand_collapsed_heredoc_line(command);
     }
-    crate::shell_split::shell_split(
-        command,
-        &crate::shell_split::ShellSplitOptions {
-            keep_separators: true,
-            split_newlines: false,
-            strip_comments: false,
-        },
-    )
+    command
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn expand_collapsed_heredoc_line(line: &str) -> Vec<String> {

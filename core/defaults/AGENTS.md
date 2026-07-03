@@ -840,25 +840,77 @@ Invalid values warn and fall back to Rust defaults. `init.lua` is the source of 
 
 ### Theme
 
+Most users only need the palette:
+
 ```lua
 bone.theme = {
-    user_msg = "#ffffff",
-    user_msg_bg = "#303030",
-    status_text = "#808080",
-    input_border = "#808080",
-    system_msg = "#ffffff",
-    approval_safe = "#78b373",
-    approval_danger = "#e05050",
-    tool_call = "#808080",
-    tool_error = "#ff0000",
-    diff_removed = "#870101",
-    diff_added = "#005f00",
-    thinking = "#8cdcdc",
-    tab_active = "#00ffff",
+    palette = {
+        -- bg is optional; omit it to keep your terminal background.
+        fg = "#ffffff",
+        muted = "#808080",
+        subtle = "#303030",
+        border = "#808080",
+        accent = "#8cdcdc",
+        good = "#78b373",
+        warn = "#d7ba7d",
+        error = "#e05050",
+        selection = "#303030",
+    },
 }
 ```
 
-Colors: hex (`#RRGGBB`) or named (`white`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`, `darkgray`, `lightred`, `lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`). Missing keys fall back to Rust defaults.
+Shell command and code-block colors are separate so the basic palette stays small:
+
+```lua
+bone.theme = {
+    shell = {
+        program = "#b4c896",
+        separator = "#5a5a5a",
+        redirect = "#787878",
+        flag = "#96b4dc",
+        string = "#c8aa78",
+        variable = "#b4a0dc",
+        comment = "#808080",
+        path = "#8cbebe",
+    },
+
+    syntax = {
+        text = "#d4d4d4",
+        comment = "#6a9955",
+        string = "#ce9178",
+        number = "#b5cea8",
+        constant = "#569cd6",
+        escape = "#d7ba7d",
+        regex = "#646695",
+        keyword = "#569cd6",
+        keyword_control = "#c586c0",
+        type = "#4ec9b0",
+        function_name = "#dcdcaa",
+        variable = "#9cdcfe",
+        tag = "#569cd6",
+        attribute = "#9cdcfe",
+        punctuation = "#d4d4d4",
+        subtle = "#808080",
+        markup = "#569cd6",
+        invalid = "#f44747",
+    },
+}
+```
+
+Advanced exact UI-role overrides use `highlights`. Values can be colors or palette names:
+
+```lua
+bone.theme = {
+    palette = { accent = "#8cdcdc" },
+    highlights = {
+        user_msg = { fg = "fg", bg = "selection" },
+        tool_error = "error",
+        syntax_keyword = "accent",
+    },
+}
+```
+
+Colors: hex (`#RRGGBB`) or named (`white`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`, `darkgray`, `lightred`, `lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`). Missing keys fall back to defaults. Legacy flat keys (`user_msg`, `shell_program`, `syntax_keyword`, etc.) still work.
 
 ### Keymaps
 

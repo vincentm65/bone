@@ -1,12 +1,12 @@
 use bone::tools::types::{ToolCall, ToolDisplayConfig, ToolResult};
-use bone::ui::tool_display::{format_shell_label, tool_label};
+use bone::ui::tool_display::{build_tool_row, format_shell_label, shell_row, tool_label};
 use serde_json::json;
 
 #[test]
-fn shell_label_splits_top_level_shell_chains() {
+fn shell_label_keeps_chains_on_one_line() {
     assert_eq!(
         format_shell_label("cd repo && cargo test"),
-        "shell cd repo &&\n cargo test"
+        "shell cd repo && cargo test"
     );
 }
 
@@ -14,7 +14,7 @@ fn shell_label_splits_top_level_shell_chains() {
 fn shell_label_keeps_quoted_operators_intact() {
     assert_eq!(
         format_shell_label("printf \"a && b\" && echo done"),
-        "shell printf \"a && b\" &&\n echo done"
+        "shell printf \"a && b\" && echo done"
     );
 }
 
@@ -48,6 +48,64 @@ fn shell_label_reflows_basic_code_payload() {
         format_shell_label("cat << EOF// hello fn main(){let x = 1;}EOF"),
         "shell cat << EOF\n  // hello fn main()\n  {\n    let x = 1;\n  }\n EOF"
     );
+}
+
+#[test]
+fn shell_tool_rows_retain_content_and_flag_shell() {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "shell".to_string(),
+        arguments: json!({ "command": "echo hi" }),
+    };
+    let result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "shell".to_string(),
+        content: "hi".to_string(),
+        images: Vec::new(),
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+
+    let row = build_tool_row(&call, &result, None);
+    let tool = row.tool.unwrap();
+    assert_eq!(row.content, "hi");
+    assert!(tool.is_shell);
+    assert_eq!(tool.label, "shell echo hi");
+}
+
+#[test]
+fn non_shell_tool_rows_still_hide_content_by_default() {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: json!({ "path": "src/main.rs" }),
+    };
+    let result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        content: "contents".to_string(),
+        images: Vec::new(),
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+
+    let row = build_tool_row(&call, &result, None);
+    let tool = row.tool.unwrap();
+    assert_eq!(row.content, "");
+    assert!(!tool.is_shell);
+}
+
+#[test]
+fn shell_row_uses_raw_output_and_shell_label() {
+    let row = shell_row("printf hi && echo done", "hi\ndone".to_string(), true);
+    let tool = row.tool.unwrap();
+
+    assert_eq!(row.content, "hi\ndone");
+    assert!(tool.is_error);
+    assert!(tool.is_shell);
+    assert_eq!(tool.label, "shell printf hi && echo done");
 }
 
 #[test]
@@ -202,4 +260,55 @@ fn subagent_non_dispatch_action_uses_generic_display() {
         tool_label(&call, &result, Some(&subagent_display())),
         "subagent action=status"
     );
+}
+
+#[test]
+fn read_file_summary_excludes_status_footer_lines() {
+    // The read_file result appends "\n\n[...]" status footers; those lines
+    // are not file content and must not inflate the read count.
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: json!({ "path": "src/main.rs", "start_line": 501 }),
+    };
+    let result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        content: "line a\nline b\nline c\n\n[showing lines 501-503 of 503; end of file]"
+            .to_string(),
+        images: Vec::new(),
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+
+    let row = build_tool_row(&call, &result, None);
+    let tool = row.tool.unwrap();
+    assert!(
+        tool.label.contains("(lines 501-503, 3 read)"),
+        "label: {}",
+        tool.label
+    );
+}
+
+#[test]
+fn read_file_summary_reports_zero_for_footer_only_result() {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: json!({ "path": "src/main.rs", "start_line": 999 }),
+    };
+    let result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        content: "[no lines in range; file has 10 lines]".to_string(),
+        images: Vec::new(),
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+
+    let row = build_tool_row(&call, &result, None);
+    let tool = row.tool.unwrap();
+    assert!(tool.label.contains("(0 lines)"), "label: {}", tool.label);
 }

@@ -554,3 +554,103 @@ async fn replace_all_errors_on_zero_matches() {
     assert!(result.unwrap_err().contains("matched 0 times"));
     let _ = fs::remove_file(&path).await;
 }
+
+#[tokio::test]
+async fn missing_trailing_newline_with_whitespace_mismatch_recovers() {
+    // The search omits the trailing newline AND uses spaces where the file
+    // has a tab: exact match fails, so the normalized path must handle the
+    // newline asymmetry between the needle and whole-line windows — and the
+    // replacement must not swallow the line's newline.
+    let path = temp_path("no-trailing-newline.txt");
+    fs::write(&path, "fn main() {\n\tlet value = 1;\n}\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "    let value = 1;",
+        "replace": "    let value = 2;"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn main() {\n    let value = 2;\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn dropped_blank_line_recovers() {
+    // The model's search omits a blank line present in the file; window
+    // sizes of needle_lines±1 let fuzzy matching find the real block.
+    let path = temp_path("dropped-blank-line.txt");
+    fs::write(
+        &path,
+        "fn compute() {\n    let alpha = first_value();\n\n    let beta = second_value();\n}\n",
+    )
+    .await
+    .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "fn compute() {\n    let alpha = first_value();\n    let beta = second_value();\n}\n",
+        "replace": "fn compute() {\n    combined_values()\n}\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn compute() {\n    combined_values()\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn unicode_quote_mismatch_recovers() {
+    // File contains a curly apostrophe; the model reproduces it as a straight
+    // quote. Normalization folds typographic characters.
+    let path = temp_path("unicode-quote.txt");
+    fs::write(&path, "// it\u{2019}s the \u{201C}main\u{201D} entry\nfn main() {}\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "// it's the \"main\" entry\n",
+        "replace": "// entry point\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "// entry point\nfn main() {}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn ambiguous_error_includes_match_snippets() {
+    let path = temp_path("ambiguous-snippets.txt");
+    fs::write(&path, "let x = total;\nother line\nlet x = total;\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "search": "let x = total;", "replace": "let x = sum;" }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("line 1: let x = total;"), "missing snippet: {err}");
+    assert!(err.contains("line 3: let x = total;"), "missing snippet: {err}");
+    assert!(err.contains("surrounding lines"));
+    let _ = fs::remove_file(&path).await;
+}

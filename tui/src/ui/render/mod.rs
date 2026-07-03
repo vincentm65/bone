@@ -323,7 +323,8 @@ impl Renderer {
             None
         };
         let terminal_width = term.size()?.width;
-        let rendered = messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width);
+        let rendered =
+            messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width, false);
         // Collapse a leading blank against an already-blank scrollback tail so
         // streamed messages (no trailing blank) and flushed messages keep a
         // single blank of separation.
@@ -407,7 +408,7 @@ impl Renderer {
         }
         let width = term.size()?.width.max(1);
         let fragment = &content[self.streaming_source_flushed..end];
-        let mut rendered = messages::assistant_markdown_to_lines(fragment, width);
+        let mut rendered = messages::assistant_markdown_to_lines(fragment, width, &self.theme);
         if !rendered.is_empty() && self.streaming_source_flushed > 0 {
             // Restore the one blank separator render_markdown trims at the seam.
             // dedup_scrollback_blanks collapses any accidental double.

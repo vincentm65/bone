@@ -394,6 +394,27 @@ struct MatchSpan {
     end: usize,
 }
 
+/// Line-window matches always end at a line boundary, but the needle may
+/// omit the final newline. Keep the file's newline in place rather than
+/// letting the replacement swallow it.
+fn trim_span_newline(content: &str, needle: &str, span: MatchSpan) -> MatchSpan {
+    if needle.ends_with('\n') {
+        return span;
+    }
+    let matched = &content[span.start..span.end];
+    let end = if matched.ends_with("\r\n") {
+        span.end - 2
+    } else if matched.ends_with('\n') {
+        span.end - 1
+    } else {
+        span.end
+    };
+    MatchSpan {
+        start: span.start,
+        end,
+    }
+}
+
 fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan, String> {
     if needle.is_empty() {
         return Err(format!("{label} must not be empty"));
@@ -424,10 +445,14 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
 
     let normalized = normalized_candidates(content, needle);
     if normalized.len() == 1 {
-        return Ok(MatchSpan {
-            start: normalized[0].start,
-            end: normalized[0].end,
-        });
+        return Ok(trim_span_newline(
+            content,
+            needle,
+            MatchSpan {
+                start: normalized[0].start,
+                end: normalized[0].end,
+            },
+        ));
     }
     if normalized.len() > 1 {
         return Err(ambiguous_error(
@@ -440,10 +465,14 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
 
     match fuzzy_candidate(content, needle) {
         Some(best) if best.score >= 0.92 && needle.trim().len() >= 30 && best.margin >= 0.08 => {
-            Ok(MatchSpan {
-                start: best.start,
-                end: best.end,
-            })
+            Ok(trim_span_newline(
+                content,
+                needle,
+                MatchSpan {
+                    start: best.start,
+                    end: best.end,
+                },
+            ))
         }
         Some(best) => Err(no_match_error(
             content,
@@ -475,22 +504,22 @@ struct ClosestHint {
 }
 
 fn normalized_candidates(content: &str, needle: &str) -> Vec<Candidate> {
-    let needle_norm = normalize_for_match(needle);
+    let needle_norm = normalize_for_compare(needle);
     line_window_candidates(content, needle)
         .into_iter()
         .filter(|candidate| {
-            normalize_for_match(&content[candidate.start..candidate.end]) == needle_norm
+            normalize_for_compare(&content[candidate.start..candidate.end]) == needle_norm
         })
         .collect()
 }
 
 fn fuzzy_candidate(content: &str, needle: &str) -> Option<FuzzyCandidate> {
-    let needle_norm = normalize_for_match(needle);
+    let needle_norm = normalize_for_compare(needle);
     let mut ranked: Vec<Candidate> = line_window_candidates(content, needle)
         .into_iter()
         .map(|mut candidate| {
             candidate.score = normalized_levenshtein(
-                &normalize_for_match(&content[candidate.start..candidate.end]),
+                &normalize_for_compare(&content[candidate.start..candidate.end]),
                 &needle_norm,
             );
             candidate
@@ -498,7 +527,15 @@ fn fuzzy_candidate(content: &str, needle: &str) -> Option<FuzzyCandidate> {
         .collect();
     ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
     let best = *ranked.first()?;
-    let second = ranked.get(1).map(|c| c.score).unwrap_or(0.0);
+    // Margin measures ambiguity between distinct locations; windows that
+    // overlap the best span (e.g. the same block one line larger) are the
+    // same location, not a competing candidate.
+    let second = ranked
+        .iter()
+        .skip(1)
+        .find(|c| c.end <= best.start || c.start >= best.end)
+        .map(|c| c.score)
+        .unwrap_or(0.0);
     Some(FuzzyCandidate {
         start: best.start,
         end: best.end,
@@ -514,16 +551,20 @@ fn line_window_candidates(content: &str, needle: &str) -> Vec<Candidate> {
         return Vec::new();
     }
 
+    // Also try windows one line shorter and longer than the needle, so a
+    // search text with a dropped or added blank line can still be recovered.
     let mut candidates = Vec::new();
-    if needle_lines > spans.len() {
-        return Vec::new();
-    }
-    for start_line in 0..=spans.len() - needle_lines {
-        candidates.push(Candidate {
-            start: spans[start_line].0,
-            end: spans[start_line + needle_lines - 1].1,
-            score: 0.0,
-        });
+    for window in needle_lines.saturating_sub(1).max(1)..=needle_lines + 1 {
+        if window > spans.len() {
+            continue;
+        }
+        for start_line in 0..=spans.len() - window {
+            candidates.push(Candidate {
+                start: spans[start_line].0,
+                end: spans[start_line + window - 1].1,
+                score: 0.0,
+            });
+        }
     }
     candidates.sort_by_key(|c| (c.start, c.end));
     candidates.dedup_by_key(|c| (c.start, c.end));
@@ -556,6 +597,17 @@ fn needle_line_count(needle: &str) -> usize {
     }
 }
 
+/// Normalized text with a single trailing newline removed. Line windows
+/// always end in `\n` (except at EOF), so needles that omit the final
+/// newline would otherwise never compare equal to any window.
+fn normalize_for_compare(text: &str) -> String {
+    let mut norm = normalize_for_match(text);
+    if norm.ends_with('\n') {
+        norm.pop();
+    }
+    norm
+}
+
 fn normalize_for_match(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let mut out = String::with_capacity(text.len());
@@ -573,7 +625,19 @@ fn normalize_for_match(text: &str) -> String {
 }
 
 fn push_normalized_line(out: &mut String, line: &str) {
-    let trimmed = line.trim_end_matches([' ', '\t']);
+    // Models often "correct" typographic characters when reproducing file
+    // content; fold the common ones so they don't defeat recovery.
+    let mapped: String = line
+        .chars()
+        .filter_map(|ch| match ch {
+            '\u{2018}' | '\u{2019}' => Some('\''),
+            '\u{201C}' | '\u{201D}' => Some('"'),
+            '\u{00A0}' => Some(' '),
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' => None,
+            _ => Some(ch),
+        })
+        .collect();
+    let trimmed = mapped.trim_end_matches([' ', '\t']);
     let mut in_space = false;
     for ch in trimmed.chars() {
         if ch == ' ' || ch == '\t' {
@@ -596,14 +660,17 @@ fn ambiguous_error(
 ) -> String {
     let mut msg = format!("{label} matched {count} times; expected exactly 1\n\nMatches:");
     for start in starts.take(10) {
+        let snippet: String = content[start..].lines().next().unwrap_or("").chars().take(120).collect();
         msg.push_str(&format!(
-            "\n- line {}",
-            line_number_for_byte_offset(content, start)
+            "\n- line {}: {}",
+            line_number_for_byte_offset(content, start),
+            snippet.trim_end()
         ));
     }
     if count > 10 {
         msg.push_str(&format!("\n- ... and {} more", count - 10));
     }
+    msg.push_str("\n\nInclude more surrounding lines to make the match unique.");
     msg
 }
 

@@ -28,6 +28,7 @@ pub fn build_chat_history(
 pub struct ToolDisplay {
     pub label: String,
     pub is_error: bool,
+    pub is_shell: bool,
 }
 
 /// A single chat message.
@@ -86,7 +87,11 @@ impl Message {
         Self {
             role: ChatRole::Tool,
             content: String::new(),
-            tool: Some(ToolDisplay { label, is_error }),
+            tool: Some(ToolDisplay {
+                label,
+                is_error,
+                is_shell: false,
+            }),
             image_count: 0,
         }
     }
@@ -100,6 +105,7 @@ impl Message {
             tool: Some(ToolDisplay {
                 label: format!("shell: {command}"),
                 is_error,
+                is_shell: true,
             }),
             image_count: 0,
         }

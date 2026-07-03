@@ -13,7 +13,13 @@ fn line_text(line: &Line<'static>) -> String {
 }
 
 fn preview_lines(content: &str, width: u16) -> Vec<Line<'static>> {
-    msg_to_lines(&[Message::system(content)], &Theme::default(), None, width)
+    msg_to_lines(
+        &[Message::system(content)],
+        &Theme::default(),
+        None,
+        width,
+        false,
+    )
 }
 
 #[test]
@@ -27,6 +33,7 @@ fn long_added_and_removed_diff_lines_wrap_with_blank_gutters_and_backgrounds() {
         &theme,
         None,
         width,
+        false,
     );
     let removed = lines
         .iter()

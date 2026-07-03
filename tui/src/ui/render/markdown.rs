@@ -4,19 +4,16 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::borrow::Cow;
-use std::io::Cursor;
 use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SyColor, FontStyle, Theme, ThemeSet};
+use syntect::highlighting::{Color as SyColor, FontStyle, Theme};
 use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Shared syntax set and theme, built once.
+/// Shared syntax set, built once. The highlighting theme comes from the
+/// caller (`crate::ui::theme::Theme::code`), so `syntax_*` color changes
+/// propagate without touching this module.
 static PS: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static THEME: LazyLock<Theme> = LazyLock::new(|| {
-    let theme = include_str!("themes/dark_plus.tmTheme");
-    ThemeSet::load_from_reader(&mut Cursor::new(theme)).expect("embedded Dark+ theme should parse")
-});
 
 const MUTED: Color = Color::DarkGray;
 const INLINE_CODE: Color = Color::Gray;
@@ -46,8 +43,8 @@ struct TableRow {
     is_header: bool,
 }
 
-#[derive(Default)]
-struct MarkdownRenderer {
+struct MarkdownRenderer<'a> {
+    theme: &'a Theme,
     lines: Vec<Line<'static>>,
     current: Vec<Span<'static>>,
     style: InlineStyle,
@@ -62,11 +59,22 @@ struct MarkdownRenderer {
     active_link: Option<(String, bool)>,
 }
 
-impl MarkdownRenderer {
-    fn new(width: u16) -> Self {
+impl<'a> MarkdownRenderer<'a> {
+    fn new(width: u16, theme: &'a Theme) -> Self {
         Self {
+            theme,
+            lines: Vec::new(),
+            current: Vec::new(),
+            style: InlineStyle::default(),
             width: width.max(1) as usize,
-            ..Self::default()
+            list_stack: Vec::new(),
+            quote_depth: 0,
+            in_code: false,
+            code_lang: String::new(),
+            code_lines: Vec::new(),
+            table_rows: Vec::new(),
+            table_alignments: Vec::new(),
+            active_link: None,
         }
     }
 
@@ -259,7 +267,7 @@ impl MarkdownRenderer {
             .or_else(|| PS.find_syntax_by_extension(&self.code_lang))
             .unwrap_or_else(|| PS.find_syntax_plain_text());
         let code_lines = std::mem::take(&mut self.code_lines);
-        let mut highlighter = HighlightLines::new(syntax, &THEME);
+        let mut highlighter = HighlightLines::new(syntax, self.theme);
         for line in code_lines {
             let highlighted = highlight_line(&line, &mut highlighter);
             let mut spans = vec![Span::raw("  ")];
@@ -547,8 +555,16 @@ fn syntect_style(sy_style: syntect::highlighting::Style) -> Style {
 }
 
 /// Highlight a single line of code using syntect -> ratatui spans.
+///
+/// `line` arrives without its terminator, but `PS` is the *newlines* syntax
+/// set, whose grammars only close line-scoped contexts (e.g. `# comments`) on
+/// an actual `\n` — parsing without it leaks those scopes into every following
+/// line. So highlight with the newline appended and strip it from the output.
 fn highlight_line(line: &str, highlighter: &mut HighlightLines<'_>) -> Line<'static> {
-    let ranges = highlighter.highlight_line(line, &PS).unwrap_or_default();
+    let with_newline = format!("{line}\n");
+    let ranges = highlighter
+        .highlight_line(&with_newline, &PS)
+        .unwrap_or_default();
     if ranges.is_empty() {
         return Line::raw(line.to_string());
     }
@@ -556,7 +572,11 @@ fn highlight_line(line: &str, highlighter: &mut HighlightLines<'_>) -> Line<'sta
     Line::from(
         ranges
             .into_iter()
-            .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
+            .filter_map(|(style, text)| {
+                let text = text.strip_suffix('\n').unwrap_or(text);
+                (!text.is_empty())
+                    .then(|| Span::styled(text.to_string(), syntect_style(style)))
+            })
             .collect::<Vec<_>>(),
     )
 }
@@ -653,11 +673,12 @@ fn contains_markdown_table(content: &str) -> bool {
     })
 }
 
-/// Render markdown content into ratatui lines.
-pub fn render_markdown(content: &str, width: u16) -> Vec<Line<'static>> {
+/// Render markdown content into ratatui lines. `theme` is the syntect theme
+/// for code-block highlighting (see `crate::ui::theme::Theme::code`).
+pub fn render_markdown(content: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let normalized = unwrap_markdown_table_fences(content);
     let parser = Parser::new_ext(&normalized, markdown_options());
-    let mut renderer = MarkdownRenderer::new(width);
+    let mut renderer = MarkdownRenderer::new(width, theme);
 
     for event in parser {
         match event {

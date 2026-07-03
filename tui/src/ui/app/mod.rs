@@ -1395,6 +1395,12 @@ impl App {
             return self.redraw(term);
         }
 
+        if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
+            let result = crate::ui::transcript_view::run(&self.messages, &self.renderer.theme);
+            self.force_redraw(term)?;
+            return result;
+        }
+
         if self.panes_visible && !self.pages.is_empty() && modifiers.is_empty() {
             match code {
                 KeyCode::Tab => {

@@ -704,7 +704,9 @@ impl Driver {
                 break Ok(assistant_text);
             }
 
-            // Push assistant message with tool calls into history.
+            // Keep any streamed prose on the assistant/tool-call message.
+            // Dropping it loses the model's record of its own plan and
+            // progress, making it re-derive context every round.
             let mut assistant =
                 ChatMessage::assistant_with_tools(&assistant_text, tool_calls.clone());
             if !reasoning_text.is_empty() {

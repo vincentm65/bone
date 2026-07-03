@@ -154,12 +154,82 @@ impl LuaConfigSnapshot {
 
 // ── Theme snapshot ──────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LuaThemePaletteSnapshot {
+    pub bg: Option<String>,
+    pub fg: Option<String>,
+    pub muted: Option<String>,
+    pub subtle: Option<String>,
+    pub border: Option<String>,
+    pub accent: Option<String>,
+    pub good: Option<String>,
+    pub warn: Option<String>,
+    pub error: Option<String>,
+    pub selection: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LuaThemeShellSnapshot {
+    pub program: Option<String>,
+    pub separator: Option<String>,
+    pub redirect: Option<String>,
+    pub flag: Option<String>,
+    pub string: Option<String>,
+    pub variable: Option<String>,
+    pub comment: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LuaThemeSyntaxSnapshot {
+    pub text: Option<String>,
+    pub comment: Option<String>,
+    pub string: Option<String>,
+    pub number: Option<String>,
+    pub constant: Option<String>,
+    pub escape: Option<String>,
+    pub regex: Option<String>,
+    pub keyword: Option<String>,
+    pub keyword_control: Option<String>,
+    pub r#type: Option<String>,
+    pub function_name: Option<String>,
+    pub variable: Option<String>,
+    pub tag: Option<String>,
+    pub attribute: Option<String>,
+    pub punctuation: Option<String>,
+    pub subtle: Option<String>,
+    pub markup: Option<String>,
+    pub invalid: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum LuaStyleSpec {
+    Color(String),
+    Style {
+        fg: Option<String>,
+        bg: Option<String>,
+        bold: Option<bool>,
+        italic: Option<bool>,
+        underline: Option<bool>,
+    },
+}
+
 /// Subset of `bone.theme` captured after init.lua.
 ///
 /// Colors are stored as raw strings; parsing into `ratatui::style::Color`
 /// happens at the UI boundary in `Theme::apply_snapshot`.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LuaThemeSnapshot {
+    #[serde(default)]
+    pub palette: LuaThemePaletteSnapshot,
+    #[serde(default)]
+    pub shell: LuaThemeShellSnapshot,
+    #[serde(default)]
+    pub syntax: LuaThemeSyntaxSnapshot,
+    #[serde(default)]
+    pub highlights: std::collections::BTreeMap<String, LuaStyleSpec>,
+
     pub user_msg: Option<String>,
     pub user_msg_bg: Option<String>,
     pub status_text: Option<String>,
@@ -169,10 +239,36 @@ pub struct LuaThemeSnapshot {
     pub approval_danger: Option<String>,
     pub tool_call: Option<String>,
     pub tool_error: Option<String>,
+    pub shell_program: Option<String>,
+    pub shell_separator: Option<String>,
+    pub shell_redirect: Option<String>,
+    pub shell_flag: Option<String>,
+    pub shell_string: Option<String>,
+    pub shell_variable: Option<String>,
+    pub shell_comment: Option<String>,
+    pub shell_path: Option<String>,
     pub diff_removed: Option<String>,
     pub diff_added: Option<String>,
     pub thinking: Option<String>,
     pub tab_active: Option<String>,
+    pub syntax_text: Option<String>,
+    pub syntax_comment: Option<String>,
+    pub syntax_string: Option<String>,
+    pub syntax_number: Option<String>,
+    pub syntax_constant: Option<String>,
+    pub syntax_escape: Option<String>,
+    pub syntax_regex: Option<String>,
+    pub syntax_keyword: Option<String>,
+    pub syntax_keyword_control: Option<String>,
+    pub syntax_type: Option<String>,
+    pub syntax_function: Option<String>,
+    pub syntax_variable: Option<String>,
+    pub syntax_tag: Option<String>,
+    pub syntax_attribute: Option<String>,
+    pub syntax_punctuation: Option<String>,
+    pub syntax_subtle: Option<String>,
+    pub syntax_markup: Option<String>,
+    pub syntax_invalid: Option<String>,
 }
 
 impl LuaThemeSnapshot {
@@ -183,7 +279,90 @@ impl LuaThemeSnapshot {
             hex
         };
 
+        let get_table = |key: &str| -> Option<mlua::Table> { table.get(key).ok().flatten() };
+        let table_color = |t: &Option<mlua::Table>, key: &str| -> Option<String> {
+            t.as_ref().and_then(|t| t.get(key).ok().flatten())
+        };
+        let palette_table = get_table("palette");
+        let shell_table = get_table("shell");
+        let syntax_table = get_table("syntax");
+        let highlights_table = get_table("highlights");
+        let mut highlights = std::collections::BTreeMap::new();
+        if let Some(t) = highlights_table {
+            for pair in t.pairs::<String, mlua::Value>() {
+                match pair {
+                    Ok((name, mlua::Value::String(s))) => {
+                        if let Ok(s) = s.to_str() {
+                            highlights.insert(name, LuaStyleSpec::Color(s.to_string()));
+                        }
+                    }
+                    Ok((name, mlua::Value::Table(t))) => {
+                        let fg = t.get("fg").ok().flatten();
+                        let bg = t.get("bg").ok().flatten();
+                        let bold = t.get("bold").ok().flatten();
+                        let italic = t.get("italic").ok().flatten();
+                        let underline = t.get("underline").ok().flatten();
+                        highlights.insert(
+                            name,
+                            LuaStyleSpec::Style {
+                                fg,
+                                bg,
+                                bold,
+                                italic,
+                                underline,
+                            },
+                        );
+                    }
+                    Ok((name, _)) => eprintln!("bone-lua warn: invalid theme highlight: {name}"),
+                    Err(e) => eprintln!("bone-lua warn: invalid theme highlight: {e}"),
+                }
+            }
+        }
+
         Ok(Self {
+            palette: LuaThemePaletteSnapshot {
+                bg: table_color(&palette_table, "bg"),
+                fg: table_color(&palette_table, "fg"),
+                muted: table_color(&palette_table, "muted"),
+                subtle: table_color(&palette_table, "subtle"),
+                border: table_color(&palette_table, "border"),
+                accent: table_color(&palette_table, "accent"),
+                good: table_color(&palette_table, "good"),
+                warn: table_color(&palette_table, "warn"),
+                error: table_color(&palette_table, "error"),
+                selection: table_color(&palette_table, "selection"),
+            },
+            shell: LuaThemeShellSnapshot {
+                program: table_color(&shell_table, "program"),
+                separator: table_color(&shell_table, "separator"),
+                redirect: table_color(&shell_table, "redirect"),
+                flag: table_color(&shell_table, "flag"),
+                string: table_color(&shell_table, "string"),
+                variable: table_color(&shell_table, "variable"),
+                comment: table_color(&shell_table, "comment"),
+                path: table_color(&shell_table, "path"),
+            },
+            syntax: LuaThemeSyntaxSnapshot {
+                text: table_color(&syntax_table, "text"),
+                comment: table_color(&syntax_table, "comment"),
+                string: table_color(&syntax_table, "string"),
+                number: table_color(&syntax_table, "number"),
+                constant: table_color(&syntax_table, "constant"),
+                escape: table_color(&syntax_table, "escape"),
+                regex: table_color(&syntax_table, "regex"),
+                keyword: table_color(&syntax_table, "keyword"),
+                keyword_control: table_color(&syntax_table, "keyword_control"),
+                r#type: table_color(&syntax_table, "type"),
+                function_name: table_color(&syntax_table, "function_name"),
+                variable: table_color(&syntax_table, "variable"),
+                tag: table_color(&syntax_table, "tag"),
+                attribute: table_color(&syntax_table, "attribute"),
+                punctuation: table_color(&syntax_table, "punctuation"),
+                subtle: table_color(&syntax_table, "subtle"),
+                markup: table_color(&syntax_table, "markup"),
+                invalid: table_color(&syntax_table, "invalid"),
+            },
+            highlights,
             user_msg: get_color("user_msg"),
             user_msg_bg: get_color("user_msg_bg"),
             status_text: get_color("status_text"),
@@ -193,10 +372,36 @@ impl LuaThemeSnapshot {
             approval_danger: get_color("approval_danger"),
             tool_call: get_color("tool_call"),
             tool_error: get_color("tool_error"),
+            shell_program: get_color("shell_program"),
+            shell_separator: get_color("shell_separator"),
+            shell_redirect: get_color("shell_redirect"),
+            shell_flag: get_color("shell_flag"),
+            shell_string: get_color("shell_string"),
+            shell_variable: get_color("shell_variable"),
+            shell_comment: get_color("shell_comment"),
+            shell_path: get_color("shell_path"),
             diff_removed: get_color("diff_removed"),
             diff_added: get_color("diff_added"),
             thinking: get_color("thinking"),
             tab_active: get_color("tab_active"),
+            syntax_text: get_color("syntax_text"),
+            syntax_comment: get_color("syntax_comment"),
+            syntax_string: get_color("syntax_string"),
+            syntax_number: get_color("syntax_number"),
+            syntax_constant: get_color("syntax_constant"),
+            syntax_escape: get_color("syntax_escape"),
+            syntax_regex: get_color("syntax_regex"),
+            syntax_keyword: get_color("syntax_keyword"),
+            syntax_keyword_control: get_color("syntax_keyword_control"),
+            syntax_type: get_color("syntax_type"),
+            syntax_function: get_color("syntax_function"),
+            syntax_variable: get_color("syntax_variable"),
+            syntax_tag: get_color("syntax_tag"),
+            syntax_attribute: get_color("syntax_attribute"),
+            syntax_punctuation: get_color("syntax_punctuation"),
+            syntax_subtle: get_color("syntax_subtle"),
+            syntax_markup: get_color("syntax_markup"),
+            syntax_invalid: get_color("syntax_invalid"),
         })
     }
 }

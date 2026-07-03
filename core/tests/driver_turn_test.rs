@@ -782,6 +782,66 @@ impl LlmProvider for CapturingProvider {
     }
 }
 
+#[tokio::test]
+async fn driver_keeps_tool_preamble_as_assistant_content() {
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-1".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![
+                ChatEvent::TextDelta("I'll run read_file now.".into()),
+                ChatEvent::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({ "path": "/nonexistent/bone-driver-test" }),
+                }),
+            ],
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+    };
+
+    let response = driver.run(prompt).await.expect("driver run");
+    assert_eq!(response.content, "done");
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        2,
+        "tool call should trigger a second request"
+    );
+    let assistant = captured[1]
+        .iter()
+        .find(|m| m.role == ChatRole::Assistant && !m.tool_calls.is_empty())
+        .expect("second request includes assistant tool-call message");
+    assert_eq!(assistant.content, "I'll run read_file now.");
+    assert_eq!(assistant.tool_calls[0].name, "read_file");
+}
+
 // A `before_turn` hook can return `turn_message`: a transient nudge sent as the
 // *last* input item of that round's request only. Unlike `system_prompt_append`
 // it may change every round without invalidating the provider's prefix cache —

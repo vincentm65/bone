@@ -16,3 +16,4 @@ pub mod setup;
 pub mod stats;
 pub mod theme;
 pub mod tool_display;
+pub mod transcript_view;

@@ -1,4 +1,10 @@
-use bone::ui::render::markdown::render_markdown;
+use bone::ui::render::markdown::render_markdown as render_markdown_themed;
+use bone::ui::theme::Theme;
+
+fn render_markdown(content: &str, width: u16) -> Vec<ratatui::text::Line<'static>> {
+    let theme = Theme::default();
+    render_markdown_themed(content, width, theme.code())
+}
 use bone::ui::render::safe_markdown_prefix_end;
 use ratatui::style::Modifier;
 
@@ -112,6 +118,30 @@ fn streamed_text(chunks: &[&str], width: usize) -> Vec<String> {
     }
     flush(content.len(), &content, &mut inserted);
     inserted
+}
+
+#[test]
+fn line_comment_scope_does_not_leak_into_next_code_line() {
+    // The newlines syntax set only closes line-scoped contexts (# comments)
+    // on an actual \n; the renderer must highlight with terminators or the
+    // comment color bleeds into every following line.
+    let lines = render_markdown("```python\n# a comment\nreturn x\n```", 80);
+    let comment_fg = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.contains("a comment")))
+        .and_then(|l| l.spans.iter().find(|s| s.content.contains("a comment")))
+        .and_then(|s| s.style.fg)
+        .expect("comment span has a color");
+    let return_span = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .find(|s| s.content.contains("return"))
+        .expect("return span exists");
+    assert_ne!(
+        return_span.style.fg,
+        Some(comment_fg),
+        "code after a comment keeps its own color"
+    );
 }
 
 #[test]

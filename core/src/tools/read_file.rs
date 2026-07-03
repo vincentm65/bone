@@ -132,6 +132,12 @@ impl Tool for ReadFileTool {
                 "\n\n[showing lines {first}-{end} of {total}; call again with start_line={next} to continue]",
                 next = end + 1,
             ));
+        } else if first > 1 {
+            // Ranged read that reached EOF: confirm the range explicitly so
+            // the model knows it has read to the end.
+            out.push_str(&format!(
+                "\n\n[showing lines {first}-{end} of {total}; end of file]"
+            ));
         } else {
             // Complete view: give size awareness.
             out.push_str(&format!("\n\n[{total} line{} total]", plural(total)));

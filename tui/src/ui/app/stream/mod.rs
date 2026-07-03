@@ -1070,10 +1070,12 @@ impl App {
             .unwrap_or_else(|e| format!("[error: {e}]"));
 
         let is_error = result.contains("exit code: 1") || result.contains("timed out");
-        let display = format!("{cmd}\n{result}");
         self.input.reset();
-        self.messages
-            .push(Message::terminal_output(cmd.to_string(), display, is_error));
+        self.messages.push(crate::ui::tool_display::shell_row(
+            cmd,
+            result.clone(),
+            is_error,
+        ));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
 

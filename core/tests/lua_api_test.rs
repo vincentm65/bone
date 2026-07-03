@@ -677,3 +677,44 @@ bone.theme.user_msg = "#ff0000"
     // fact that the old snapshot was None and the new one is Some.
     std::fs::remove_dir_all(&config_dir).ok();
 }
+
+#[test]
+fn structured_theme_snapshot_parses_palette_shell_syntax_and_highlights() {
+    let config_dir = common::temp_dir("structured-theme-snapshot");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r##"
+bone.theme = {
+  palette = { accent = "#111111", error = "#222222" },
+  shell = { program = "#333333" },
+  syntax = { function_name = "#444444" },
+  highlights = {
+    user_msg = { fg = "fg", bg = "selection" },
+    syntax_keyword = "accent",
+  },
+}
+"##,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = bone_core::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        true,
+        bone_core::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let theme = booted.manager.theme_snapshot();
+    assert_eq!(theme.palette.accent.as_deref(), Some("#111111"));
+    assert_eq!(theme.palette.error.as_deref(), Some("#222222"));
+    assert_eq!(theme.shell.program.as_deref(), Some("#333333"));
+    assert_eq!(theme.syntax.function_name.as_deref(), Some("#444444"));
+    assert!(theme.highlights.contains_key("user_msg"));
+    assert!(theme.highlights.contains_key("syntax_keyword"));
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}

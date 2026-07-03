@@ -374,8 +374,17 @@ pub fn process_sse_chunk(
         return Ok(events);
     };
 
+    // Some providers emit stray content tokens inside the same chunk as a
+    // tool-call delta; drop those. Content in tool-call-free chunks is real
+    // prose and must be kept even if a tool call streamed earlier.
+    let has_tool_call_delta = delta
+        .get("tool_calls")
+        .and_then(|calls| calls.as_array())
+        .is_some_and(|calls| !calls.is_empty());
+
     if let Some(content) = delta.get("content").and_then(|content| content.as_str())
         && !content.is_empty()
+        && !has_tool_call_delta
     {
         events.push(ChatEvent::TextDelta(content.to_string()));
     }
@@ -573,8 +582,39 @@ impl LlmProvider for OpenAiCompatProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::openai_messages;
+    use super::{ChatEvent, openai_messages, process_sse_chunk};
     use crate::llm::{ChatMessage, ChatRole, ImageData};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn ignores_content_in_same_chunk_as_tool_call_delta() {
+        let mut partial_tool_calls = BTreeMap::new();
+        let mut usage = None;
+        let first = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{\"command\":"}}]}}]}"#;
+        let stray = r#"{"choices":[{"delta":{"content":"]","tool_calls":[{"index":0,"function":{"arguments":"\"echo hi\"}"}}]}}]}"#;
+        let done = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        assert!(
+            process_sse_chunk(first, &mut partial_tool_calls, &mut usage)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            process_sse_chunk(stray, &mut partial_tool_calls, &mut usage)
+                .unwrap()
+                .is_empty()
+        );
+        let events = process_sse_chunk(done, &mut partial_tool_calls, &mut usage).unwrap();
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChatEvent::ToolCall(call) => {
+                assert_eq!(call.name, "shell");
+                assert_eq!(call.arguments["command"], "echo hi");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
 
     #[test]
     fn serializes_images_as_openai_content_parts() {
