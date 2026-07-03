@@ -1,0 +1,5 @@
+# Tool Test Output
+- read_file: works
+- shell: works
+- write_file: testing now
+- edit_file: testing now

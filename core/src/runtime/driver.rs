@@ -19,7 +19,7 @@ use crate::agent::{
 use crate::chat::build_chat_history;
 use crate::ext::ExtensionManager;
 use crate::llm::provider::{LlmProvider, ProviderRequestContext};
-use crate::llm::{ChatEvent, ChatMessage, TokenStats, token_tracker::CHARS_PER_TOKEN};
+use crate::llm::{ChatEvent, ChatMessage, TokenStats};
 use crate::runtime::RuntimeEvent;
 use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
@@ -343,10 +343,18 @@ impl Driver {
                 // actually send — including tool results appended mid-loop.
                 // Without this, the compaction threshold check sees the stale
                 // last-request size and can overshoot the model's context limit
-                // before compaction ever triggers. The real provider-reported
-                // value overwrites this after the request lands.
-                token_stats.context_length =
-                    estimate_tokens(estimate_context_chars(&history, tool_defs_json_chars)) as u64;
+                // before compaction ever triggers. Anchored to the last
+                // provider-reported prompt size (plus a char-estimate of the
+                // growth since) so the value tracks what the provider actually
+                // charges — a raw whole-history char guess overshoots badly on
+                // reasoning models, triggering compaction tens of thousands of
+                // tokens early. The real provider-reported value overwrites
+                // this after the request lands.
+                token_stats.context_length = token_stats
+                    .anchored_context_estimate(estimate_context_chars(
+                        &history,
+                        tool_defs_json_chars,
+                    ));
                 let state = crate::ext::ctx::AppCtxState::new(
                     &tools,
                     &token_stats,
@@ -391,9 +399,12 @@ impl Driver {
                         transcript_replaced = true;
                         history =
                             build_chat_history(&transcript, system_prompt_override.as_deref());
+                        // The rewrite invalidates the provider-report anchor
+                        // (its char count belongs to the discarded history).
+                        token_stats.clear_context_anchor();
                         let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
                         token_stats.context_length =
-                            (prompt_chars as f64 / CHARS_PER_TOKEN).ceil() as u64;
+                            token_stats.anchored_context_estimate(prompt_chars);
                     }
                     if let Some(s) = action.system_prompt_append {
                         sys_appends.push(s);
@@ -416,7 +427,7 @@ impl Driver {
                     history = build_chat_history(&transcript, Some(&combined));
                     let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
                     token_stats.context_length =
-                        (prompt_chars as f64 / CHARS_PER_TOKEN).ceil() as u64;
+                        token_stats.anchored_context_estimate(prompt_chars);
                 }
 
                 // Narrow the tools the model sees for this turn. When several
@@ -591,6 +602,14 @@ impl Driver {
                             cached_tokens,
                             cost,
                         );
+                        // Calibrate the estimator: pair the provider-reported
+                        // prompt size with the char count of what we sent, so
+                        // pre-request refreshes track real growth instead of
+                        // re-guessing the whole history.
+                        token_stats.set_context_anchor(
+                            prompt_tokens as u64,
+                            estimate_context_chars(&request_history, tool_defs_json_chars),
+                        );
                         had_usage = true;
                         session.record_usage(
                             llm.id(),
@@ -633,6 +652,10 @@ impl Driver {
                 let prompt_tokens = estimate_tokens(prompt_chars);
                 let completion_tokens = estimate_tokens(completion_chars);
                 token_stats.record_estimate(prompt_chars, completion_chars);
+                // Keep the displayed context on the anchored scale so a
+                // usage-less response doesn't make the meter jump to the raw
+                // char guess and back on the next real report.
+                token_stats.context_length = token_stats.anchored_context_estimate(prompt_chars);
                 session.record_usage(
                     llm.id(),
                     llm.model(),

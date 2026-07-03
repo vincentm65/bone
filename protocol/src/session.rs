@@ -41,6 +41,9 @@ impl SessionSnapshot {
             cost: self.cost,
             request_count: self.request_count,
             context_length: self.context_length,
+            // The anchor is calibration state private to the driving side; a
+            // snapshot round-trip starts uncalibrated.
+            context_anchor: None,
         }
     }
 }
