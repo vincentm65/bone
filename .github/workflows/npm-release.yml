@@ -87,7 +87,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: set package versions
         run: |
-          npm version --prefix npm/bone-agent ${{ steps.rel.outputs.version }} --no-git-tag-version
+          npm version --prefix npm/bone-agent ${{ steps.rel.outputs.version }} --no-git-tag-version --allow-same-version
           node - <<'NODE'
           const fs = require('fs');
           const file = 'npm/bone-agent/package.json';
