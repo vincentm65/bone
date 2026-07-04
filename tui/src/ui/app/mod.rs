@@ -759,6 +759,17 @@ impl App {
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
+        // Restore the terminal (disable raw mode + bracketed paste) before the
+        // default hook prints the panic. Without this, a panic in the event loop
+        // below unwinds with raw mode still on, leaving the user's shell without
+        // echo or line editing until they blind-type `reset`. `shutdown_terminal`
+        // only touches process-global stdout, so it is safe from a hook.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = Renderer::shutdown_terminal();
+            prev_hook(info);
+        }));
+
         let mut terminal = Renderer::init_terminal(MIN_ROWS)?;
 
         self.renderer
