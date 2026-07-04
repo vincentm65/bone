@@ -1991,6 +1991,9 @@ impl App {
         if cmd == "catalog" {
             return self.open_catalog(term);
         }
+        if cmd == "update" {
+            return self.open_update(term);
+        }
 
         let prev_provider = self.view.provider_id.clone();
         let prev_model = self.view.provider_model.clone();
@@ -2258,6 +2261,24 @@ impl App {
             }
             Err(err) => self.show_reply(format!("Catalog failed: {err}"), term),
         }
+    }
+
+    fn open_update(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if let Some(status) = self.try_tmux_popup("update", "96%", "60%", term)? {
+            return match status.code() {
+                Some(0) => self.show_reply(
+                    "Update applied. Restart bone to use the new binary.".to_string(),
+                    term,
+                ),
+                Some(2) => self.show_reply("Update: no changes.".to_string(), term),
+                _ => self.show_reply("Update failed.".to_string(), term),
+            };
+        }
+
+        self.show_reply(
+            "Run `bone update` from your shell to update bone.".to_string(),
+            term,
+        )
     }
 
     fn open_setup_wizard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {

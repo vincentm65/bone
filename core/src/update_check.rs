@@ -1,6 +1,8 @@
 //! Throttled, non-blocking check for newer app releases.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const THROTTLE: Duration = Duration::from_secs(24 * 3600);
@@ -61,11 +63,47 @@ impl InstallKind {
         match self {
             Self::Npm => "npm install -g bone-agent@latest".to_string(),
             Self::Git(root) => format!(
-                "cd {} && git pull && cargo install --path tui --force",
+                "cd {} && git pull --ff-only && cargo install --path tui --force",
                 shell_quote(root)
             ),
             Self::Unknown => "https://github.com/vincentm65/bone/releases".to_string(),
         }
+    }
+
+    fn apply(&self) -> Result<(), String> {
+        match self {
+            Self::Npm => {
+                run_command(Command::new("npm").args(["install", "-g", "bone-agent@latest"]))
+            }
+            Self::Git(root) => {
+                run_command(
+                    Command::new("git")
+                        .args(["-C"])
+                        .arg(root)
+                        .args(["pull", "--ff-only"]),
+                )?;
+                run_command(
+                    Command::new("cargo")
+                        .current_dir(root)
+                        .args(["install", "--path", "tui", "--force"]),
+                )
+            }
+            Self::Unknown => Err("this install source can't be updated automatically".to_string()),
+        }
+    }
+}
+
+fn run_command(cmd: &mut Command) -> Result<(), String> {
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|err| format!("failed to run updater: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("updater exited with {status}"))
     }
 }
 
@@ -147,18 +185,56 @@ pub fn check_in_background() {
         return;
     }
     std::thread::spawn(move || {
-        let latest = reqwest::blocking::Client::builder()
-            .timeout(TIMEOUT)
-            .build()
-            .ok()
-            .and_then(|c| c.get(kind.url()).header("User-Agent", "bone").send().ok())
-            .and_then(|r| r.json::<serde_json::Value>().ok())
-            .and_then(|v| kind.latest_from_json(&v));
-        if let Some(version) = latest {
+        if let Some(version) = fetch_latest(&kind) {
             write_latest(&kind, &version);
             mark_checked(&kind);
         }
     });
+}
+
+fn fetch_latest(kind: &InstallKind) -> Option<String> {
+    reqwest::blocking::Client::builder()
+        .timeout(TIMEOUT)
+        .build()
+        .ok()
+        .and_then(|c| c.get(kind.url()).header("User-Agent", "bone").send().ok())
+        .and_then(|r| r.json::<serde_json::Value>().ok())
+        .and_then(|v| kind.latest_from_json(&v))
+}
+
+/// Interactive updater used by `bone update` and `/update`.
+pub fn run_interactive_update(assume_yes: bool) -> Result<bool, String> {
+    let kind = detect_install_kind();
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = fetch_latest(&kind).ok_or_else(|| "could not check for updates".to_string())?;
+    write_latest(&kind, &latest);
+    mark_checked(&kind);
+
+    if !is_newer_version(&latest, current) {
+        println!("bone is up to date ({current}).");
+        return Ok(false);
+    }
+
+    println!("bone {latest} available (current {current}).");
+    println!("Update command: {}", kind.update_hint());
+    if matches!(kind, InstallKind::Unknown) {
+        return Ok(false);
+    }
+    if !assume_yes {
+        print!("Apply update now? [y/N] ");
+        io::stdout().flush().map_err(|err| err.to_string())?;
+        let mut answer = String::new();
+        io::stdin()
+            .read_line(&mut answer)
+            .map_err(|err| err.to_string())?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+            return Ok(false);
+        }
+    }
+
+    kind.apply()?;
+    println!("bone updated to {latest}.");
+    Ok(true)
 }
 
 fn latest_seen(kind: &InstallKind) -> Option<String> {

@@ -2492,7 +2492,7 @@ const NATIVE_COMMANDS = new Map([
   ["tools", { description: "Configure tools", run: () => { switchTab("tools"); openSettings(); } }],
   ["help", { description: "Show available commands", run: () => openCommandMenu(true) }],
 ]);
-const HIDDEN_COMMANDS = new Set(["quit", "exit", "edit", "e", "setup", "catalog"]);
+const HIDDEN_COMMANDS = new Set(["quit", "exit", "edit", "e", "setup", "catalog", "update"]);
 
 function availableCommands() {
   const commands = new Map(NATIVE_COMMANDS);

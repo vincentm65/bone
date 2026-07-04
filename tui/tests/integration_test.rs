@@ -49,7 +49,7 @@ fn tool_message_error_flag_is_preserved() {
 fn documented_builtins_are_protected_from_lua_overrides() {
     for cmd in [
         "catalog", "clear", "config", "edit", "e", "exit", "help", "model", "new", "provider",
-        "quit", "setup", "stats", "tools",
+        "quit", "setup", "stats", "tools", "update",
     ] {
         assert!(is_protected_builtin(cmd), "/{cmd} should be protected");
     }

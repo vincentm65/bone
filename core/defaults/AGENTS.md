@@ -675,7 +675,7 @@ return {
 Both reset every turn, so a handler that reads a flag (e.g. from `ctx.state`)
 can implement a toggled "plan mode" entirely in Lua.
 
-Protected built-ins (`/catalog`, `/clear`, `/config`, `/edit`, `/e`, `/exit`, `/help`, `/model`, `/new`, `/provider`, `/quit`, `/setup`, `/stats`, `/tools`) cannot be overridden.
+Protected built-ins (`/catalog`, `/clear`, `/config`, `/edit`, `/e`, `/exit`, `/help`, `/model`, `/new`, `/provider`, `/quit`, `/setup`, `/stats`, `/tools`, `/update`) cannot be overridden.
 
 ## Event Hooks
 

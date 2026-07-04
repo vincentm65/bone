@@ -2,7 +2,10 @@
 
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -13,8 +16,30 @@ use crate::ui::fullscreen::{self, FullscreenTerminal};
 use crate::ui::render::messages::msg_to_lines;
 use crate::ui::theme::Theme;
 
+const MOUSE_WHEEL_LINES: usize = 3;
+
+struct MouseCaptureGuard;
+
+impl MouseCaptureGuard {
+    fn enable() -> io::Result<Self> {
+        crossterm::execute!(io::stdout(), EnableMouseCapture)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for MouseCaptureGuard {
+    fn drop(&mut self) {
+        if let Err(e) = crossterm::execute!(io::stdout(), DisableMouseCapture) {
+            eprintln!("bone: warning: failed to disable mouse capture: {e}");
+        }
+    }
+}
+
 pub fn run(messages: &[Message], theme: &Theme) -> io::Result<()> {
-    fullscreen::run(|term| run_loop(term, messages, theme))
+    fullscreen::run(|term| {
+        let _mouse_guard = MouseCaptureGuard::enable()?;
+        run_loop(term, messages, theme)
+    })
 }
 
 fn run_loop(term: &mut FullscreenTerminal, messages: &[Message], theme: &Theme) -> io::Result<()> {
@@ -36,6 +61,15 @@ fn run_loop(term: &mut FullscreenTerminal, messages: &[Message], theme: &Theme) 
                     KeyCode::PageUp => scroll = scroll.saturating_sub(height),
                     KeyCode::Home => scroll = 0,
                     KeyCode::End => scroll = max_scroll(&lines, height),
+                    _ => continue,
+                }
+                scroll = scroll.min(max_scroll(&lines, height));
+            }
+            Event::Mouse(mouse) => {
+                let height = view_height(term.size()?.height);
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => scroll = scroll.saturating_sub(MOUSE_WHEEL_LINES),
+                    MouseEventKind::ScrollDown => scroll = scroll.saturating_add(MOUSE_WHEEL_LINES),
                     _ => continue,
                 }
                 scroll = scroll.min(max_scroll(&lines, height));

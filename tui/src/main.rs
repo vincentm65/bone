@@ -711,6 +711,18 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(if outcome.changed { 0 } else { 2 });
     }
 
+    // `bone update` — check and apply self-updates for npm/git installs. Used
+    // both directly and by the `/update` tmux popup.
+    if args.first().map(String::as_str) == Some("update") {
+        match bone::update_check::run_interactive_update(has_flag(&args[1..], "--yes")) {
+            Ok(changed) => std::process::exit(if changed { 0 } else { 2 }),
+            Err(err) => {
+                eprintln!("Update failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Headless / non-interactive entry points must never block on the wizard;
     // they seed everything (or honor a prior selection) and proceed.
     let interactive = !matches!(
@@ -719,6 +731,7 @@ async fn main() -> std::io::Result<()> {
             | Some("serve")
             | Some("connect")
             | Some("stats-popup")
+            | Some("update")
             | Some("install")
             | Some("web")
     );
