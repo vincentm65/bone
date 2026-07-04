@@ -175,7 +175,7 @@ pub struct ExtensionManager {
     keymap_snapshot: LuaKeymapSnapshot,
     /// Standalone shared UI-state handle. Lives outside the Lua VM mutex so
     /// the TUI can drain diffs even while a tool blocks on `ctx.ui.key()`.
-    /// Also cloned into every `ctx.ui.pane` / `ctx.emit_pane` closure.
+    /// Also cloned into every `ctx.ui.pane` closure.
     ui: super::api_ui::SharedUi,
 }
 
@@ -254,7 +254,7 @@ impl ExtensionManager {
     }
 
     /// Take the pending UI diffs emitted by `bone.api.ui.*`, `ctx.ui.pane`, and
-    /// `ctx.emit_pane` since the last drain. A frontend calls this each render
+    /// `ctx.ui.pane` since the last drain. A frontend calls this each render
     /// tick and applies the diffs to its own view (the TUI converts `Float`
     /// components to panes). Empty when no Lua UI calls have happened.
     ///

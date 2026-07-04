@@ -72,7 +72,7 @@
 - Command policy — safety classification for tool calls
 - State map — `ToolStateMap`: per-tool in-memory state (source → sub_key → value)
 - Display config — `ToolDisplayConfig`: args, template, show/show_result/eager flags
-- Live events — `ToolLiveEvent::Key`: blocking key request
+- Live key requests — blocking `KeyRequest` channel
 
 ### 3.2 Built-in Tools
 

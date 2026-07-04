@@ -105,7 +105,6 @@ To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search 
 | `ctx.ui.pane(table)` | `true\|(false, string)` | Upsert/clear a live pane (tools only) — see [Live Panes](#live-panes) |
 | `ctx.ui.key()` | `table` | Block for one key event: `{code, char, ctrl, alt, shift}` — see [Live Panes](#live-panes) |
 | **Live events** | | During `execute_output_live` only |
-| `ctx.emit_pane(table)` | `true` | Same as `ctx.ui.pane` |
 | **`ctx.usage.*`** | | Token usage |
 | `ctx.usage.snapshot()` | `table\|nil` | See [Usage Snapshot](#usage-snapshot) below |
 | **`ctx.state.*`** | | Session-scoped key-value store |
@@ -153,7 +152,6 @@ Not all `ctx` fields are available in every handler type:
 | `read_file` / `write_file` | yes | yes | — |
 | `ui.notify` | yes | yes | yes |
 | `ui.status` / `ui.pane` | yes | yes | — |
-| `emit_pane` | yes | — | — |
 | `usage` | yes | yes | — |
 | `state` | yes | yes | — |
 | `tools` | yes | yes | — |
@@ -506,7 +504,7 @@ There are two ways to show a pane:
 - **Return-envelope `pane`** (above) — a single snapshot shown *after* `execute`
   returns. Good for static results.
 - **`ctx.ui.pane{}`** — emitted *while* the tool runs, as many times as you
-  like. This is how you stream progress. (`ctx.emit_pane{}` is an alias.) Only
+  like. This is how you stream progress. Only
   available during tool execution.
 
 Re-emitting the same `source` **replaces** that pane in place (upsert); emitting

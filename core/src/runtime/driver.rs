@@ -1013,7 +1013,7 @@ pub(crate) async fn execute_tool_calls(
     }
 
     // Execute all approved calls concurrently. When a frontend is attached
-    // (`runtime_events`), use the live path and forward each `ToolLiveEvent`
+    // (`runtime_events`), use the live path and forward each `KeyRequest`
     // (key requests) as a `RuntimeEvent` so the frontend can answer
     // `ctx.ui.key` mid-turn. Pane updates now flow through the standalone
     // `UiState` handle (drained by the TUI directly), not this channel.
@@ -1022,14 +1022,11 @@ pub(crate) async fn execute_tool_calls(
         let approved_calls: Vec<ToolCall> = approved.iter().map(|(_, c)| c.clone()).collect();
         let results = if let Some(events_out) = runtime_events.clone() {
             let (live_tx, mut live_rx) =
-                tokio::sync::mpsc::unbounded_channel::<crate::tools::types::ToolLiveEvent>();
+                tokio::sync::mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
             // Forward live tool events to the frontend event stream.
             let forwarder = tokio::spawn(async move {
-                use crate::tools::types::ToolLiveEvent;
-                while let Some(ev) = live_rx.recv().await {
-                    // ToolLiveEvent now has only the Key variant; pane diffs
-                    // go through the shared UiState handle.
-                    let ToolLiveEvent::Key(req) = ev;
+                while let Some(req) = live_rx.recv().await {
+                    // Pane diffs go through the shared UiState handle.
                     if let Some(registry) = &key_reply_registry {
                         let id = registry.register(req);
                         let _ = events_out.send(RuntimeEvent::KeyRequest { id });

@@ -17,10 +17,11 @@ use bone_core::llm::provider::LlmProvider;
 use bone_core::llm::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream, TokenStats,
 };
+use bone_core::pane_content::KeyRequest;
 use bone_core::runtime::{ChannelApprovalGate, Driver, RuntimeEvent};
 use bone_core::session_sink::{NullSessionSink, SessionSink};
 use bone_core::tools::registry::ToolHandler;
-use bone_core::tools::types::{Tool, ToolExecutionContext, ToolLiveEvent, ToolOutput};
+use bone_core::tools::types::{Tool, ToolExecutionContext, ToolOutput};
 use bone_core::tools::{
     ApprovalGate, ApprovalMode, AutoApprovalGate, CallOutcome, ToolCall, ToolDefinition,
     builtin_tools,
@@ -527,17 +528,14 @@ impl Tool for KeyTool {
     async fn execute_output_live(
         &self,
         _arguments: serde_json::Value,
-        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         _context: ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
         let Some(tx) = events else {
             return Ok(ToolOutput::text("no events".into()));
         };
         let (reply, rx) = tokio::sync::oneshot::channel();
-        tx.send(ToolLiveEvent::Key(bone_core::pane_content::KeyRequest {
-            reply,
-        }))
-        .unwrap();
+        tx.send(KeyRequest { reply }).unwrap();
         let key = rx.await.unwrap();
         Ok(ToolOutput::text(key.code))
     }

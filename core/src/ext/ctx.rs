@@ -21,7 +21,7 @@ static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Wraps the `block_in_place` + current-runtime `block_on` dance used by every
 /// blocking ctx primitive (`shell`, `read_file`, `write_file`, `tools.call`,
 /// the agent dispatch paths).
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
 }
 
@@ -110,9 +110,9 @@ pub struct CtxConfig {
     pub config_dir: String,
     pub cwd: String,
     pub shared_state: SharedState,
-    pub pane_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
+    pub key_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
     /// Standalone shared UI-state handle. When set, `ctx.ui.pane` and
-    /// `ctx.emit_pane` push `ViewDiff`s directly into this handle (no channel),
+    /// `ctx.ui.pane` push `ViewDiff`s directly into this handle (no channel),
     /// so the TUI can drain them even while the VM lock is held.
     pub ui: Option<super::api_ui::SharedUi>,
     pub call_id: Option<String>,
@@ -146,7 +146,7 @@ impl CtxConfig {
                 .to_string_lossy()
                 .into_owned(),
             shared_state,
-            pane_sender: None,
+            key_sender: None,
             ui: None,
             call_id: None,
             tool_handler: None,
@@ -170,7 +170,7 @@ impl CtxConfig {
 /// (slash commands, model-invoked tools, and the `before_turn` hook). Building
 /// this in one place is the single source of truth for the fields that depend
 /// on the running conversation, so commands and tools end up with an identical
-/// `ctx`. Per-call fields (`pane_sender`, `call_id`, depths, `cancelled`) are
+/// `ctx`. Per-call fields (`key_sender`, `call_id`, depths, `cancelled`) are
 /// layered on by the caller, not stored here.
 #[derive(Clone, Debug)]
 pub struct AppCtxState {
@@ -322,19 +322,10 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
     if let Some(cid) = &cfg.call_id {
         ctx.set("call_id", cid.as_str())?;
     }
-    // ctx.emit_pane(table) — push a live pane update into the shared UiState
-    // handle (v2: no longer goes through the channel). Works when `ui` is set.
-    // Same closure as `ctx.ui.pane`; both share `make_pane_emit_fn`.
-    if let Some(ui_state) = cfg.ui.clone() {
-        ctx.set("emit_pane", make_pane_emit_fn(lua, ui_state)?)?;
-    }
-
     Ok(ctx)
 }
 
-/// Build the closure backing both `ctx.ui.pane` and `ctx.emit_pane`: deserialize
-/// a `PaneContent` table and push it into the shared UI handle as a `ViewDiff`.
-/// Each call site captures its own clone of the handle.
+/// Build the `ctx.ui.pane` closure that pushes pane content into shared UI state.
 fn make_pane_emit_fn(
     lua: &Lua,
     ui_state: super::api_ui::SharedUi,
@@ -584,7 +575,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
 
 /// Build the `ctx.ui` table: stderr notifications plus the live pane/key
 /// primitives. `pane` and `key` degrade to inert stubs when their handles
-/// (`cfg.ui` / `cfg.pane_sender`) are absent (e.g. headless before_turn).
+/// (`cfg.ui` / `cfg.key_sender`) are absent (e.g. headless before_turn).
 fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let ui_table = lua.create_table()?;
     // Senders for surfacing live status to an attached frontend (the TUI).
@@ -669,18 +660,17 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
 
     // ctx.ui.key() → table
     // Blocks until the frontend delivers one terminal key event.
-    if let Some(sender) = cfg.pane_sender.clone() {
+    if let Some(sender) = cfg.key_sender.clone() {
         static KEY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let key_fn = lua.create_function(move |lua, _: ()| {
             let (tx, rx) = tokio::sync::oneshot::channel::<crate::pane_content::KeyEvent>();
             let request = crate::pane_content::KeyRequest { reply: tx };
             let _lock = KEY_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             sender
-                .send(crate::tools::types::ToolLiveEvent::Key(request))
+                .send(request)
                 .map_err(|e| mlua::Error::external(format!("key request send failed: {e}")))?;
-            let result =
-                tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(rx))
-                    .map_err(|e| mlua::Error::external(format!("key request cancelled: {e}")))?;
+            let result = block_on(rx)
+                .map_err(|e| mlua::Error::external(format!("key request cancelled: {e}")))?;
             let lua_result = lua
                 .to_value(&result)
                 .map_err(|e| mlua::Error::external(format!("key result conversion: {e}")))?;
@@ -845,7 +835,7 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     // ctx.tools.call(name, args, opts?) → { ok, name, call_id, content, is_error }
     if let Some(ref handler) = cfg.tool_handler {
         let mut handler = handler.clone();
-        let pane_sender = cfg.pane_sender.clone();
+        let key_sender = cfg.key_sender.clone();
         let depth = cfg.tool_call_depth;
         let agent_depth = cfg.agent_depth;
         let inherited_approval = cfg.approval_mode;
@@ -906,7 +896,7 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                 // Execute the tool synchronously.
                 let results = block_on(handler.execute_all_live(
                     vec![call],
-                    pane_sender.clone(),
+                    key_sender.clone(),
                     agent_depth,
                     depth + 1,
                 ));
@@ -1099,6 +1089,23 @@ fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
     Ok(db_table)
 }
 
+fn load_section_yaml(
+    config_dir: &str,
+    section: &str,
+) -> Result<Option<serde_yaml::Value>, mlua::Error> {
+    let path = Path::new(config_dir)
+        .join("config")
+        .join(format!("{section}.yaml"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| mlua::Error::external(format!("failed to read config: {e}")))?;
+    serde_yaml::from_str(&content)
+        .map(Some)
+        .map_err(|e| mlua::Error::external(format!("invalid YAML in {section}.yaml: {e}")))
+}
+
 /// Build the `ctx.config` table: read-only access to persisted YAML config plus
 /// the read/write helpers backing the customize UI (pages, provider entries).
 fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
@@ -1108,16 +1115,9 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     // ctx.config.get(section, key)
     let config_dir_for_get = cfg.config_dir.clone();
     let config_get_fn = lua.create_function(move |lua, (section, key): (String, String)| {
-        let path = std::path::Path::new(&config_dir_for_get)
-            .join("config")
-            .join(format!("{section}.yaml"));
-        if !path.is_file() {
+        let Some(doc) = load_section_yaml(&config_dir_for_get, &section)? else {
             return Ok(Value::Nil);
-        }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| mlua::Error::external(format!("failed to read config: {e}")))?;
-        let doc: serde_yaml::Value = serde_yaml::from_str(&content)
-            .map_err(|e| mlua::Error::external(format!("invalid YAML in {section}.yaml: {e}")))?;
+        };
         let Some(mapping) = doc.as_mapping() else {
             return Ok(Value::Nil);
         };
@@ -1151,16 +1151,9 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     // ctx.config.get_table(section)
     let config_dir_for_table = cfg.config_dir.clone();
     let config_get_table_fn = lua.create_function(move |lua, section: String| {
-        let path = std::path::Path::new(&config_dir_for_table)
-            .join("config")
-            .join(format!("{section}.yaml"));
-        if !path.is_file() {
+        let Some(doc) = load_section_yaml(&config_dir_for_table, &section)? else {
             return Ok(Value::Nil);
-        }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| mlua::Error::external(format!("failed to read config: {e}")))?;
-        let doc: serde_yaml::Value = serde_yaml::from_str(&content)
-            .map_err(|e| mlua::Error::external(format!("invalid YAML in {section}.yaml: {e}")))?;
+        };
         yaml_to_lua(lua, &doc)
     })?;
     config_table.set("get_table", config_get_table_fn)?;

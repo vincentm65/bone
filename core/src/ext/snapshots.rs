@@ -23,18 +23,31 @@ pub struct TextPreset {
     pub phrases: Vec<String>,
 }
 
-/// Parse spinner presets, skipping any malformed entry rather than discarding
-/// the whole list. A preset needs a `name` and at least one frame to be usable.
-fn parse_spinner_presets(table: &mlua::Table) -> Vec<SpinnerPreset> {
+fn parse_presets<T>(
+    table: &mlua::Table,
+    kind: &str,
+    build: impl Fn(String, &mlua::Table) -> Option<T>,
+) -> Vec<T> {
     let mut out = Vec::new();
     for pair in table.pairs::<mlua::Value, mlua::Table>() {
         let Ok((_, t)) = pair else {
             continue;
         };
         let Ok(name) = t.get::<String>("name") else {
-            eprintln!("bone-lua warn: spinner preset missing name; skipping");
+            eprintln!("bone-lua warn: {kind} preset missing name; skipping");
             continue;
         };
+        if let Some(preset) = build(name, &t) {
+            out.push(preset);
+        }
+    }
+    out
+}
+
+/// Parse spinner presets, skipping any malformed entry rather than discarding
+/// the whole list. A preset needs a `name` and at least one frame to be usable.
+fn parse_spinner_presets(table: &mlua::Table) -> Vec<SpinnerPreset> {
+    parse_presets(table, "spinner", |name, t| {
         let speed: u64 = t.get::<Option<u64>>("speed").ok().flatten().unwrap_or(80);
         let frames = t
             .get::<Option<mlua::Table>>("frames")
@@ -48,29 +61,20 @@ fn parse_spinner_presets(table: &mlua::Table) -> Vec<SpinnerPreset> {
             .unwrap_or_default();
         if frames.is_empty() {
             eprintln!("bone-lua warn: spinner preset '{name}' has no frames; skipping");
-            continue;
+            return None;
         }
-        out.push(SpinnerPreset {
+        Some(SpinnerPreset {
             name,
             speed,
             frames,
-        });
-    }
-    out
+        })
+    })
 }
 
 /// Parse rotating-text presets, skipping malformed entries (see
 /// [`parse_spinner_presets`]).
 fn parse_text_presets(table: &mlua::Table) -> Vec<TextPreset> {
-    let mut out = Vec::new();
-    for pair in table.pairs::<mlua::Value, mlua::Table>() {
-        let Ok((_, t)) = pair else {
-            continue;
-        };
-        let Ok(name) = t.get::<String>("name") else {
-            eprintln!("bone-lua warn: text preset missing name; skipping");
-            continue;
-        };
+    parse_presets(table, "text", |name, t| {
         let phrases = t
             .get::<Option<mlua::Table>>("phrases")
             .ok()
@@ -81,9 +85,8 @@ fn parse_text_presets(table: &mlua::Table) -> Vec<TextPreset> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        out.push(TextPreset { name, phrases });
-    }
-    out
+        Some(TextPreset { name, phrases })
+    })
 }
 
 // ── Spinner / text preset collection ────────────────────────────────────────

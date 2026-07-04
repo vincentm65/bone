@@ -2,7 +2,7 @@
 //!
 //! Wire-format types are re-exported from `bone-protocol`; only
 //! non-wire types (`ToolDisplayConfig`, `ToolExecutionContext`,
-//! `ToolLiveEvent`, `Tool`) stay core-local.
+//! `Tool`) stay core-local.
 
 use crate::pane_content::KeyRequest;
 use async_trait::async_trait;
@@ -41,11 +41,6 @@ pub struct ToolExecutionContext {
     pub approval_gate: Option<crate::tools::SharedGate>,
 }
 
-#[derive(Debug)]
-pub enum ToolLiveEvent {
-    Key(KeyRequest),
-}
-
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
@@ -58,7 +53,7 @@ pub trait Tool: Send + Sync {
     async fn execute_output_live(
         &self,
         arguments: Value,
-        _events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        _events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         _context: ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
         self.execute_output(arguments).await

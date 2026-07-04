@@ -3,12 +3,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::pane_content::KeyRequest;
 use crate::tools::ApprovalMode;
 use crate::tools::command_policy::CommandSafety;
 use crate::tools::state_map::ToolStateMap;
 use crate::tools::types::{
-    Tool, ToolCall, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolLiveEvent,
-    ToolResult,
+    Tool, ToolCall, ToolDefinition, ToolDisplayConfig, ToolExecutionContext, ToolResult,
 };
 use futures_util::future::join_all;
 
@@ -45,7 +45,7 @@ impl ToolRegistry {
     pub(crate) async fn execute_live(
         &self,
         call: ToolCall,
-        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         session_state: Option<String>,
         owner: String,
         cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -264,7 +264,7 @@ impl ToolHandler {
     pub async fn execute_all_live(
         &self,
         calls: Vec<ToolCall>,
-        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         agent_depth: usize,
         tool_call_depth: usize,
     ) -> Vec<ToolResult> {
@@ -313,7 +313,7 @@ impl ToolHandler {
     async fn execute_all_serial(
         &self,
         calls: Vec<ToolCall>,
-        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         agent_depth: usize,
         tool_call_depth: usize,
     ) -> Vec<ToolResult> {
@@ -354,7 +354,7 @@ impl ToolHandler {
     async fn execute_one_live(
         &self,
         call: ToolCall,
-        events: Option<tokio::sync::mpsc::UnboundedSender<ToolLiveEvent>>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         session_state: Option<String>,
         owner: String,
         agent_depth: usize,

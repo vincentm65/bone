@@ -686,8 +686,7 @@ impl DaemonCtx {
         let shared_ui = self.extensions.ui_handle();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_ctx = cancel.clone();
-        let (live_tx, mut live_rx) =
-            mpsc::unbounded_channel::<crate::tools::types::ToolLiveEvent>();
+        let (live_tx, mut live_rx) = mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
 
         // The handler call blocks (Lua + nested tool calls), so run it off the
         // async runtime. Mirrors the TUI's spawn_blocking in `run_lua_command`.
@@ -701,7 +700,7 @@ impl DaemonCtx {
             let shared_state = crate::ext::ctx::process_shared_state();
             let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
             app_state.apply_to(&mut ctx_cfg);
-            ctx_cfg.pane_sender = Some(live_tx);
+            ctx_cfg.key_sender = Some(live_tx);
             ctx_cfg.ui = Some(shared_ui);
             ctx_cfg.cancelled = Some(cancel_for_ctx);
             // The handler exists; from here every outcome is `Some(_)` so the daemon
@@ -732,7 +731,7 @@ impl DaemonCtx {
                     self.drain_diffs();
                     return res.ok().flatten();
                 }
-                Some(crate::tools::types::ToolLiveEvent::Key(req)) = live_rx.recv() => {
+                Some(req) = live_rx.recv() => {
                     let id = self.key_registry.register(req);
                     self.hub.publish(RuntimeEvent::KeyRequest { id });
                 }

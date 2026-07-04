@@ -170,7 +170,7 @@ impl LuaTool {
         arguments: &Value,
         config_dir: String,
         shared_state: SharedState,
-        events: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
         ui: super::api_ui::SharedUi,
         context: &ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
@@ -195,7 +195,7 @@ impl LuaTool {
         if let Some(state) = &context.app_state {
             state.apply_to(&mut ctx_cfg);
         }
-        ctx_cfg.pane_sender = events;
+        ctx_cfg.key_sender = events;
         ctx_cfg.ui = Some(ui.clone());
         ctx_cfg.call_id = Some(context.call_id.clone());
         // tool_handler comes from the per-call context (may differ from the
@@ -246,6 +246,7 @@ impl LuaTool {
     }
 }
 
+/// Remove the legacy boolean `required` shim; delete once all seeded/catalog tools are migrated.
 fn normalize_json_schema(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -290,7 +291,7 @@ impl Tool for LuaTool {
     async fn execute_output_live(
         &self,
         arguments: Value,
-        events: Option<tokio::sync::mpsc::UnboundedSender<crate::tools::types::ToolLiveEvent>>,
+        events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
         context: crate::tools::types::ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
         if context.tool_call_depth > 0 {

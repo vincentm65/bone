@@ -1,7 +1,8 @@
 use async_trait::async_trait;
+use bone_core::pane_content::KeyRequest;
 use bone_core::tools::ApprovalMode;
 use bone_core::tools::registry::{ToolHandler, ToolRegistry};
-use bone_core::tools::types::{Tool, ToolCall, ToolDefinition, ToolLiveEvent, ToolOutput};
+use bone_core::tools::types::{Tool, ToolCall, ToolDefinition, ToolOutput};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -210,13 +211,13 @@ async fn tool_handler_execute_all_runs_in_parallel() {
 }
 
 #[tokio::test]
-async fn tool_handler_execute_live_receives_pane_events() {
+async fn tool_handler_execute_live_accepts_key_request_channel() {
     let registry = ToolRegistry::new().register(PaneTool);
 
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("pane_tool", "c1")];
 
-    let (tx, _rx) = mpsc::unbounded_channel::<ToolLiveEvent>();
+    let (tx, _rx) = mpsc::unbounded_channel::<KeyRequest>();
     let results = handler.execute_all_live(calls, Some(tx), 0, 0).await;
 
     assert_eq!(results.len(), 1);

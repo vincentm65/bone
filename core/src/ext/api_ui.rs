@@ -13,8 +13,8 @@
 //!
 //! **v2 transport.** The [`SharedUi`] handle is a standalone
 //! `Arc<Mutex<UiState>>` — it lives on the [`ExtensionManager`] and is also
-//! captured by every `ctx.ui.pane` / `ctx.emit_pane` closure. Both Lua entry
-//! points push into the same handle; the TUI drains it on every render tick by
+//! captured by every `ctx.ui.pane` closure. Both Lua entry
+//! calls push into the same handle; the TUI drains it on every render tick by
 //! locking the `UiState` mutex directly (never the Lua VM mutex), so pane
 //! updates render even while a tool blocks on `ctx.ui.key()`.
 
@@ -52,7 +52,7 @@ impl UiState {
 
 /// Standalone shared UI-state handle. Lives on the [`ExtensionManager`] and is
 /// cloned into every Lua closure that emits view diffs (`bone.api.ui.*`,
-/// `ctx.ui.pane`, `ctx.emit_pane`). The TUI drains it without touching the Lua
+/// `ctx.ui.pane`). The TUI drains it without touching the Lua
 /// VM mutex.
 ///
 /// [`ExtensionManager`]: crate::ext::ExtensionManager

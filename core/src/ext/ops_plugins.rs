@@ -23,6 +23,25 @@ fn symlink_plugin_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(src, dest)
 }
 
+fn run_git(args: &[&str], cwd: Option<&Path>, verb: &str) -> Result<(), mlua::Error> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    match super::ctx::block_on(command.status()) {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(mlua::Error::external(format!(
+            "git {verb} failed (exit {})",
+            status.code().unwrap_or(-1)
+        ))),
+        Err(e) => Err(mlua::Error::external(format!("git {verb} failed: {e}"))),
+    }
+}
+
 /// Set up the `bone.plugin` table on the Lua state.
 pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
     let plugin_table = lua.create_table().map_err(crate::util::errstr)?;
@@ -97,64 +116,45 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
             // Ensure plugins directory exists.
             let _ = std::fs::create_dir_all(&dir);
 
-            if source.starts_with('/') || source.starts_with('.') {
-                // Local path — create a symlink.
-                let src = std::path::Path::new(&source);
-                let name = src
+            let is_local = source.starts_with('/') || source.starts_with('.');
+            let name = if is_local {
+                Path::new(&source)
                     .file_name()
                     .ok_or_else(|| mlua::Error::external("invalid local path"))?
                     .to_string_lossy()
-                    .to_string();
-                let dest = dir.join(&name);
-                if dest.exists() {
-                    return Err(mlua::Error::external(format!(
-                        "plugin '{}' already exists",
-                        name
-                    )));
-                }
+                    .to_string()
+            } else {
+                source
+                    .rsplit('/')
+                    .next()
+                    .ok_or_else(|| mlua::Error::external("invalid repo path"))?
+                    .to_string()
+            };
+            let dest = dir.join(&name);
+            if dest.exists() {
+                return Err(mlua::Error::external(format!(
+                    "plugin '{}' already exists",
+                    name
+                )));
+            }
+
+            if is_local {
+                // Local path — create a symlink.
                 let abs = if source.starts_with('.') {
                     let cwd: String = bone.get::<String>("cwd")?;
-                    std::path::Path::new(&cwd).join(&source)
+                    Path::new(&cwd).join(&source)
                 } else {
-                    src.to_path_buf()
+                    Path::new(&source).to_path_buf()
                 };
                 symlink_plugin_dir(&abs, &dest)
                     .map_err(|e| mlua::Error::external(format!("symlink failed: {e}")))?;
                 Ok(name)
             } else {
                 // GitHub-style "user/repo" — git clone.
-                let name = source
-                    .rsplit('/')
-                    .next()
-                    .ok_or_else(|| mlua::Error::external("invalid repo path"))?
-                    .to_string();
-                let dest = dir.join(&name);
-                if dest.exists() {
-                    return Err(mlua::Error::external(format!(
-                        "plugin '{}' already exists",
-                        name
-                    )));
-                }
                 let url = format!("https://github.com/{source}");
-                let output = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        tokio::process::Command::new("git")
-                            .args(["clone", &url])
-                            .arg(&dest)
-                            .stdout(std::process::Stdio::piped())
-                            .stderr(std::process::Stdio::piped())
-                            .status()
-                            .await
-                    })
-                });
-                match output {
-                    Ok(status) if status.success() => Ok(name),
-                    Ok(status) => Err(mlua::Error::external(format!(
-                        "git clone failed (exit {})",
-                        status.code().unwrap_or(-1)
-                    ))),
-                    Err(e) => Err(mlua::Error::external(format!("git clone failed: {e}"))),
-                }
+                let dest = dest.to_string_lossy();
+                run_git(&["clone", &url, &dest], None, "clone")?;
+                Ok(name)
             }
         })
         .map_err(crate::util::errstr)?;
@@ -244,25 +244,8 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                     name
                 )));
             }
-            let output = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    tokio::process::Command::new("git")
-                        .args(["pull"])
-                        .current_dir(&dir)
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .status()
-                        .await
-                })
-            });
-            match output {
-                Ok(status) if status.success() => Ok(true),
-                Ok(status) => Err(mlua::Error::external(format!(
-                    "git pull failed (exit {})",
-                    status.code().unwrap_or(-1)
-                ))),
-                Err(e) => Err(mlua::Error::external(format!("git pull failed: {e}"))),
-            }
+            run_git(&["pull"], Some(&dir), "pull")?;
+            Ok(true)
         })
         .map_err(crate::util::errstr)?;
     plugin_table

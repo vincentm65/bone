@@ -904,7 +904,7 @@ impl App {
     /// Ensure the viewport is the right size, then draw.
     fn ensure_viewport_and_draw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
         // Apply any Lua-driven UI updates (floats from bone.api.ui, ctx.ui.pane,
-        // or ctx.emit_pane) before measuring, so a newly opened float is
+        // or ctx.ui.pane) before measuring, so a newly opened float is
         // counted in the viewport height.
         let size = terminal.size()?;
         // Publish the live terminal width to the daemon so its Lua panes
