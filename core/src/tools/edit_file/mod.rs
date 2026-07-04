@@ -69,7 +69,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit an existing UTF-8 file. Exactly one mode per call: (a) top-level search+replace for a single change, (b) edits[] for multiple search/replace changes, or (c) mode=\"rewrite\"+content for a full rewrite. Anchors must match exactly one location unless replace_all=true (exact global replace). On success a unified diff is returned; on failure the error names the valid shapes and closest candidates.".to_string(),
+            description: "Edit an existing UTF-8 file. Exactly one mode per call: (a) top-level search+replace for a single change, (b) edits[] for multiple search/replace changes, or (c) mode=\"rewrite\"+content for a full rewrite. Anchors must match exactly one location unless replace_all=true (exact global replace); matching tolerates minor whitespace and indentation drift. On success a unified diff is returned; on failure the error names the valid shapes and closest candidates.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -347,23 +347,101 @@ fn apply_one_operation(content: &str, operation: &EditOperation) -> Result<Strin
         return replace_all_spans(content, search, replace);
     }
 
-    let (needle, replacement, label) = match operation {
-        EditOperation::Replace {
-            search, replace, ..
-        } => (search.as_str(), replace.clone(), "search text"),
-        EditOperation::Delete { search } => (search.as_str(), String::new(), "delete text"),
-        EditOperation::InsertBefore { anchor, text } => (
-            anchor.as_str(),
-            format!("{text}{anchor}"),
-            "insert_before anchor",
-        ),
-        EditOperation::InsertAfter { anchor, text } => (
-            anchor.as_str(),
-            format!("{anchor}{text}"),
-            "insert_after anchor",
-        ),
+    let (needle, label) = match operation {
+        EditOperation::Replace { search, .. } => (search.as_str(), "search text"),
+        EditOperation::Delete { search } => (search.as_str(), "delete text"),
+        EditOperation::InsertBefore { anchor, .. } => (anchor.as_str(), "insert_before anchor"),
+        EditOperation::InsertAfter { anchor, .. } => (anchor.as_str(), "insert_after anchor"),
     };
-    replace_matched_span(content, needle, &replacement, label)
+    let span = find_match_span(content, needle, label)?;
+    // Use the file's actual matched text for the preserved anchor half of an
+    // insert, so a normalized/fuzzy match never rewrites file content with the
+    // model's slightly-off reproduction of it.
+    let matched = &content[span.start..span.end];
+    let replacement = match operation {
+        EditOperation::Replace { replace, .. } => reindent_text(replace, span.reindent.as_ref()),
+        EditOperation::Delete { .. } => String::new(),
+        EditOperation::InsertBefore { text, .. } => {
+            format!("{}{matched}", reindent_text(text, span.reindent.as_ref()))
+        }
+        EditOperation::InsertAfter { text, .. } => {
+            format!("{matched}{}", reindent_text(text, span.reindent.as_ref()))
+        }
+    };
+    let mut next =
+        String::with_capacity(content.len() - (span.end - span.start) + replacement.len());
+    next.push_str(&content[..span.start]);
+    next.push_str(&replacement);
+    next.push_str(&content[span.end..]);
+    Ok(next)
+}
+
+/// Indent shifts for a whitespace-tolerant match: when the search text's
+/// indentation differs from the file's at the matched span, replacement lines
+/// should be shifted from the corresponding search-line indent to the file's
+/// actual indent.
+#[derive(Clone)]
+struct Reindent {
+    lines: Vec<(String, String)>,
+    fallback: Option<(String, String)>,
+}
+
+fn reindent_for(content: &str, needle: &str, span: &MatchSpan) -> Option<Reindent> {
+    let actual = &content[span.start..span.end];
+    let lines: Vec<_> = needle
+        .lines()
+        .zip(actual.lines())
+        .map(|(needle_line, actual_line)| {
+            (
+                leading_indent(needle_line).to_string(),
+                leading_indent(actual_line).to_string(),
+            )
+        })
+        .collect();
+    let fallback = {
+        let needle_indent = leading_indent(needle);
+        let actual_indent = leading_indent(actual);
+        (needle_indent != actual_indent)
+            .then(|| (needle_indent.to_string(), actual_indent.to_string()))
+    };
+    (fallback.is_some() || lines.iter().any(|(from, to)| from != to))
+        .then_some(Reindent { lines, fallback })
+}
+
+/// Leading whitespace of the first non-blank line.
+fn leading_indent(text: &str) -> &str {
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.is_empty() {
+            return &line[..line.len() - trimmed.len()];
+        }
+    }
+    ""
+}
+
+/// Shift replacement text from the search text's indentation to the file's
+/// actual indentation (set only when the match came from the dedented tier).
+/// Lines that don't share the search text's indent prefix are left untouched.
+fn reindent_text(text: &str, reindent: Option<&Reindent>) -> String {
+    let Some(reindent) = reindent else {
+        return text.to_string();
+    };
+    text.split_inclusive('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            if line.trim().is_empty() {
+                return line.to_string();
+            }
+            let shift = reindent.lines.get(index).or(reindent.fallback.as_ref());
+            let Some((from, to)) = shift else {
+                return line.to_string();
+            };
+            match line.strip_prefix(from.as_str()) {
+                Some(rest) => format!("{to}{rest}"),
+                None => line.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Exact global replacement for rename-style edits (replace_all=true). Unlike
@@ -378,23 +456,12 @@ fn replace_all_spans(content: &str, needle: &str, replacement: &str) -> Result<S
     Ok(content.replace(needle, replacement))
 }
 
-fn replace_matched_span(
-    content: &str,
-    needle: &str,
-    replacement: &str,
-    label: &str,
-) -> Result<String, String> {
-    let MatchSpan { start, end } = find_match_span(content, needle, label)?;
-    let mut next = String::with_capacity(content.len() - (end - start) + replacement.len());
-    next.push_str(&content[..start]);
-    next.push_str(replacement);
-    next.push_str(&content[end..]);
-    Ok(next)
-}
-
 struct MatchSpan {
     start: usize,
     end: usize,
+    /// (search text indent, file indent) when the match only succeeded after
+    /// dedenting; used to shift the replacement to the file's indentation.
+    reindent: Option<Reindent>,
 }
 
 /// Line-window matches always end at a line boundary, but the needle may
@@ -412,10 +479,7 @@ fn trim_span_newline(content: &str, needle: &str, span: MatchSpan) -> MatchSpan 
     } else {
         span.end
     };
-    MatchSpan {
-        start: span.start,
-        end,
-    }
+    MatchSpan { end, ..span }
 }
 
 fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan, String> {
@@ -435,6 +499,7 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
         return Ok(MatchSpan {
             start: exact[0].start,
             end: exact[0].end,
+            reindent: None,
         });
     }
     if exact.len() > 1 {
@@ -448,14 +513,17 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
 
     let normalized = normalized_candidates(content, needle);
     if normalized.len() == 1 {
-        return Ok(trim_span_newline(
+        let span = trim_span_newline(
             content,
             needle,
             MatchSpan {
                 start: normalized[0].start,
                 end: normalized[0].end,
+                reindent: None,
             },
-        ));
+        );
+        let reindent = reindent_for(content, needle, &span);
+        return Ok(MatchSpan { reindent, ..span });
     }
     if normalized.len() > 1 {
         return Err(ambiguous_error(
@@ -463,6 +531,29 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
             label,
             normalized.len(),
             normalized.iter().map(|m| m.start),
+        ));
+    }
+
+    let dedented = dedented_candidates(content, needle);
+    if dedented.len() == 1 {
+        let span = trim_span_newline(
+            content,
+            needle,
+            MatchSpan {
+                start: dedented[0].start,
+                end: dedented[0].end,
+                reindent: None,
+            },
+        );
+        let reindent = reindent_for(content, needle, &span);
+        return Ok(MatchSpan { reindent, ..span });
+    }
+    if dedented.len() > 1 {
+        return Err(ambiguous_error(
+            content,
+            label,
+            dedented.len(),
+            dedented.iter().map(|m| m.start),
         ));
     }
 
@@ -474,6 +565,7 @@ fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan
                 MatchSpan {
                     start: best.start,
                     end: best.end,
+                    reindent: None,
                 },
             ))
         }
@@ -512,6 +604,16 @@ fn normalized_candidates(content: &str, needle: &str) -> Vec<Candidate> {
         .into_iter()
         .filter(|candidate| {
             normalize_for_compare(&content[candidate.start..candidate.end]) == needle_norm
+        })
+        .collect()
+}
+
+fn dedented_candidates(content: &str, needle: &str) -> Vec<Candidate> {
+    let needle_norm = normalize_dedented_for_compare(needle);
+    line_window_candidates(content, needle)
+        .into_iter()
+        .filter(|candidate| {
+            normalize_dedented_for_compare(&content[candidate.start..candidate.end]) == needle_norm
         })
         .collect()
 }
@@ -611,6 +713,16 @@ fn normalize_for_compare(text: &str) -> String {
     norm
 }
 
+/// Like [`normalize_for_compare`] but indentation-insensitive: normalization
+/// collapses each line's leading whitespace run to a single space, so
+/// stripping that one space fully dedents the line.
+fn normalize_dedented_for_compare(text: &str) -> String {
+    normalize_for_compare(text)
+        .split_inclusive('\n')
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .collect()
+}
+
 fn normalize_for_match(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let mut out = String::with_capacity(text.len());
@@ -679,7 +791,9 @@ fn ambiguous_error(
     if count > 10 {
         msg.push_str(&format!("\n- ... and {} more", count - 10));
     }
-    msg.push_str("\n\nInclude more surrounding lines to make the match unique.");
+    msg.push_str(
+        "\n\nInclude more surrounding lines to make the match unique, or set replace_all=true to change every occurrence.",
+    );
     msg
 }
 

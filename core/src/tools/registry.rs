@@ -58,30 +58,77 @@ impl ToolRegistry {
         let name = call.name.clone();
         let call_id = call.id.clone();
         match self.tools.get(&name) {
-            Some(tool) => match tool
-                .execute_output_live(
-                    call.arguments,
-                    events,
-                    ToolExecutionContext {
-                        call_id: call_id.clone(),
-                        session_state,
-                        owner,
-                        cancelled,
-                        agent_depth,
-                        tool_call_depth,
-                        tool_handler,
-                        app_state,
-                        approval_gate,
-                    },
-                )
-                .await
-            {
-                Ok(output) => ToolResult::ok(call_id, name, output),
-                Err(content) => ToolResult::error(call_id, name, content),
-            },
+            Some(tool) => {
+                if let Some(msg) = reject_degenerate_arguments(tool.as_ref(), &call.arguments) {
+                    return ToolResult::error(call_id, name, msg);
+                }
+                match tool
+                    .execute_output_live(
+                        call.arguments,
+                        events,
+                        ToolExecutionContext {
+                            call_id: call_id.clone(),
+                            session_state,
+                            owner,
+                            cancelled,
+                            agent_depth,
+                            tool_call_depth,
+                            tool_handler,
+                            app_state,
+                            approval_gate,
+                        },
+                    )
+                    .await
+                {
+                    Ok(output) => ToolResult::ok(call_id, name, output),
+                    Err(content) => ToolResult::error(call_id, name, content),
+                }
+            }
             None => ToolResult::error(call_id, name, "Unknown tool"),
         }
     }
+}
+
+/// Reject calls whose arguments cannot possibly satisfy the tool's schema:
+/// null, a non-object, or an empty object when required fields are declared.
+/// Models in a degenerate loop emit these; a uniform, actionable error beats
+/// serde's deserialization message. Tools without required fields still accept
+/// empty/absent arguments.
+fn reject_degenerate_arguments(tool: &dyn Tool, arguments: &serde_json::Value) -> Option<String> {
+    if arguments
+        .as_object()
+        .is_some_and(|fields| !fields.is_empty())
+    {
+        return None;
+    }
+    let definition = tool.definition();
+    let required: Vec<&str> = definition
+        .input_schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if required.is_empty() {
+        return None;
+    }
+    let got = match arguments {
+        serde_json::Value::Null => "no arguments".to_string(),
+        serde_json::Value::Object(_) => "an empty arguments object".to_string(),
+        other => format!(
+            "arguments of type {}",
+            match other {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::Bool(_) => "boolean",
+                _ => "unknown",
+            }
+        ),
+    };
+    Some(format!(
+        "tool call arrived with {got}; re-send the call as a JSON object with required field(s): {}",
+        required.join(", ")
+    ))
 }
 
 impl Default for ToolRegistry {

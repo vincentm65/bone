@@ -23,7 +23,7 @@ impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "write_file".to_string(),
-            description: "Create a new UTF-8 text file. Fails if the file already exists — use edit_file for modifications.".to_string(),
+            description: "Create a new UTF-8 text file. Fails if the file already exists — use edit_file for modifications (mode=\"rewrite\" for a full rewrite).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -59,7 +59,8 @@ impl Tool for WriteFileTool {
         match fs::symlink_metadata(path).await {
             Ok(_) => {
                 return Err(
-                    "file already exists; use edit_file for targeted modifications".to_string(),
+                    "file already exists; use edit_file (search/replace for targeted changes, or mode=\"rewrite\" for a full rewrite)"
+                        .to_string(),
                 );
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {}

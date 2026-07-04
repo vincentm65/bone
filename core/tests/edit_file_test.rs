@@ -355,6 +355,8 @@ async fn crlf_mismatch_recovers() {
 
 #[tokio::test]
 async fn tabs_and_spaces_mismatch_recovers() {
+    // The replacement is re-indented to the file's actual tabs rather than
+    // inserted verbatim with the model's spaces.
     let path = temp_path("tabs-spaces.txt");
     fs::write(&path, "fn main() {\n\t\tprintln!(\"hi\");\n}\n")
         .await
@@ -371,7 +373,7 @@ async fn tabs_and_spaces_mismatch_recovers() {
 
     assert_eq!(
         fs::read_to_string(&path).await.unwrap(),
-        "fn main() {\n  println!(\"bye\");\n}\n"
+        "fn main() {\n\t\tprintln!(\"bye\");\n}\n"
     );
     let _ = fs::remove_file(&path).await;
 }
@@ -595,7 +597,8 @@ async fn missing_trailing_newline_with_whitespace_mismatch_recovers() {
     // The search omits the trailing newline AND uses spaces where the file
     // has a tab: exact match fails, so the normalized path must handle the
     // newline asymmetry between the needle and whole-line windows — and the
-    // replacement must not swallow the line's newline.
+    // replacement must not swallow the line's newline. The replacement is
+    // re-indented to the file's tab.
     let path = temp_path("no-trailing-newline.txt");
     fs::write(&path, "fn main() {\n\tlet value = 1;\n}\n")
         .await
@@ -612,7 +615,7 @@ async fn missing_trailing_newline_with_whitespace_mismatch_recovers() {
 
     assert_eq!(
         fs::read_to_string(&path).await.unwrap(),
-        "fn main() {\n    let value = 2;\n}\n"
+        "fn main() {\n\tlet value = 2;\n}\n"
     );
     let _ = fs::remove_file(&path).await;
 }
@@ -670,6 +673,161 @@ async fn unicode_quote_mismatch_recovers() {
         fs::read_to_string(&path).await.unwrap(),
         "// entry point\nfn main() {}\n"
     );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn extra_leading_indent_recovers_and_reindents_replacement() {
+    // The model over-indents both search and replace by 4 spaces; the dedented
+    // tier must find the block and land the replacement at the file's indent.
+    let path = temp_path("extra-indent.txt");
+    fs::write(&path, "fn build_actions() {\n    let a = 1;\n}\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "    fn build_actions() {\n        let a = 1;\n    }\n",
+        "replace": "    fn build_actions() {\n        let a = 2;\n    }\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn build_actions() {\n    let a = 2;\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn missing_leading_indent_recovers_and_reindents_replacement() {
+    // Delta in the other direction: the search under-indents a nested block.
+    let path = temp_path("missing-indent.txt");
+    fs::write(
+        &path,
+        "impl Foo {\n    fn bar() {\n        work();\n    }\n}\n",
+    )
+    .await
+    .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "fn bar() {\n    work();\n}\n",
+        "replace": "fn bar() {\n    rest();\n}\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "impl Foo {\n    fn bar() {\n        rest();\n    }\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn dedented_match_reindents_inner_lines() {
+    let path = temp_path("inner-indent.txt");
+    fs::write(&path, "if ready {\n    do_it();\n}\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "search": "if ready {\ndo_it();\n}\n",
+        "replace": "if ready {\ndone();\n}\n"
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "if ready {\n    done();\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn dedented_match_at_two_indent_levels_is_ambiguous() {
+    // The text exists twice and only matches the (wrongly indented) needle
+    // after dedenting: must error listing both, not pick one.
+    let path = temp_path("dedent-ambiguous.txt");
+    let original = "do_thing();\nmiddle();\ndo_thing();\n";
+    fs::write(&path, original).await.expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "search": "  do_thing();", "replace": "  done();" }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("matched 2 times"), "unexpected error: {err}");
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn correct_indent_resolves_uniquely_among_indent_variants() {
+    // Same dedented text at two indent levels, but the needle's indent matches
+    // one exactly: the indent-sensitive tiers must resolve it without error.
+    let path = temp_path("indent-resolves.txt");
+    fs::write(&path, "do_thing();\n    do_thing();\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "path": path, "search": "    do_thing();", "replace": "    done();" }))
+        .await
+        .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "do_thing();\n    done();\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn insert_after_with_wrong_indent_anchor_reindents_text() {
+    let path = temp_path("insert-indent.txt");
+    fs::write(&path, "fn main() {\n    first();\n}\n")
+        .await
+        .expect("setup");
+    let tool = EditFileTool;
+
+    tool.execute(json!({
+        "path": path,
+        "edits": [
+            { "insert_after": "        first();", "text": "\n        second();" }
+        ]
+    }))
+    .await
+    .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "fn main() {\n    first();\n    second();\n}\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn ambiguous_error_suggests_replace_all() {
+    let path = temp_path("ambiguous-replace-all-hint.txt");
+    fs::write(&path, "foo\nbar\nfoo\n").await.expect("setup");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "path": path, "search": "foo", "replace": "baz" }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("replace_all=true"));
     let _ = fs::remove_file(&path).await;
 }
 

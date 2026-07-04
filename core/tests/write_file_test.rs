@@ -49,6 +49,15 @@ async fn refuses_to_overwrite_existing_file() {
         .await;
 
     assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("file already exists"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.contains("mode=\"rewrite\""),
+        "error should point at edit_file rewrite mode: {err}"
+    );
     assert_eq!(
         fs::read_to_string(&path)
             .await
