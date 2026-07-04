@@ -5,7 +5,7 @@ use std::time::Duration;
 
 const THROTTLE: Duration = Duration::from_secs(24 * 3600);
 const TIMEOUT: Duration = Duration::from_secs(8);
-const GITHUB_URL: &str = "https://api.github.com/repos/vincentm65/bone/releases/latest";
+const GITHUB_URL: &str = "https://api.github.com/repos/vincentm65/bone/tags";
 const NPM_URL: &str = "https://registry.npmjs.org/bone-agent/latest";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,8 +33,14 @@ impl InstallKind {
     fn latest_from_json(&self, v: &serde_json::Value) -> Option<String> {
         match self {
             Self::Npm => v["version"].as_str().map(str::to_string),
-            Self::Git(_) | Self::Unknown => v["tag_name"]
-                .as_str()
+            Self::Git(_) | Self::Unknown => v
+                .as_array()
+                .and_then(|tags| {
+                    tags.iter()
+                        .filter_map(|tag| tag["name"].as_str())
+                        .max_by_key(|name| version_key(name))
+                })
+                .or_else(|| v["tag_name"].as_str())
                 .map(|s| s.trim_start_matches('v').to_string()),
         }
     }
@@ -76,14 +82,30 @@ fn check_due(kind: &InstallKind) -> bool {
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
-    crate::util::now_secs().saturating_sub(last) >= THROTTLE.as_secs()
+    check_due_from(
+        latest_seen(kind).as_deref(),
+        last,
+        env!("CARGO_PKG_VERSION"),
+        crate::util::now_secs(),
+    )
+}
+
+fn check_due_from(latest: Option<&str>, last: u64, current: &str, now: u64) -> bool {
+    latest.is_none_or(|latest| !is_newer_version(latest, current))
+        || now.saturating_sub(last) >= THROTTLE.as_secs()
 }
 
 fn mark_checked(kind: &InstallKind) {
+    let _ = std::fs::create_dir_all(cache_dir());
     let _ = std::fs::write(
         cache_file(kind, "checked_at"),
         crate::util::now_secs().to_string(),
     );
+}
+
+fn write_latest(kind: &InstallKind, version: &str) {
+    let _ = std::fs::create_dir_all(cache_dir());
+    let _ = std::fs::write(cache_file(kind, "latest"), version.trim());
 }
 
 fn detect_install_kind() -> InstallKind {
@@ -113,8 +135,12 @@ fn detect_install_kind_from(exe: &Path) -> InstallKind {
     InstallKind::Unknown
 }
 
-/// Fetch the latest release once per day, off the main thread. Safe to call at
+/// Fetch the latest published version off the main thread. Safe to call at
 /// every interactive startup; the banner reads the cached result next launch.
+///
+/// If the cached version does not prove this binary is stale, check again even
+/// inside the throttle window so a same-day release/tag is detected without
+/// clearing cache. Once a newer version is cached, throttle normally.
 pub fn check_in_background() {
     let kind = detect_install_kind();
     if !check_due(&kind) {
@@ -129,9 +155,9 @@ pub fn check_in_background() {
             .and_then(|r| r.json::<serde_json::Value>().ok())
             .and_then(|v| kind.latest_from_json(&v));
         if let Some(version) = latest {
-            let _ = std::fs::write(cache_file(&kind, "latest"), version.trim());
+            write_latest(&kind, &version);
+            mark_checked(&kind);
         }
-        mark_checked(&kind);
     });
 }
 
@@ -179,8 +205,9 @@ fn shell_quote(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_version, shell_quote};
-    use std::path::Path;
+    use super::{InstallKind, THROTTLE, check_due_from, is_newer_version, shell_quote};
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn compares_versions_as_versions() {
@@ -195,5 +222,46 @@ mod tests {
     fn quotes_update_paths_for_shell() {
         assert_eq!(shell_quote(Path::new("/tmp/bone")), "/tmp/bone");
         assert_eq!(shell_quote(Path::new("/tmp/my bone")), "'/tmp/my bone'");
+    }
+
+    #[test]
+    fn reads_latest_from_github_tags_or_release_json() {
+        let kind = InstallKind::Git(PathBuf::from("/tmp/bone"));
+        assert_eq!(
+            kind.latest_from_json(&json!([{ "name": "v2.2.7" }, { "name": "v2.2.8" }]))
+                .as_deref(),
+            Some("2.2.8")
+        );
+        assert_eq!(
+            kind.latest_from_json(&json!({ "tag_name": "v2.2.9" }))
+                .as_deref(),
+            Some("2.2.9")
+        );
+    }
+
+    #[test]
+    fn reads_latest_from_npm_json() {
+        assert_eq!(
+            InstallKind::Npm
+                .latest_from_json(&json!({ "version": "2.2.8" }))
+                .as_deref(),
+            Some("2.2.8")
+        );
+    }
+
+    #[test]
+    fn rechecks_when_cache_does_not_show_stale_binary() {
+        let now = THROTTLE.as_secs() + 10_000;
+        let recent = now - 10;
+        assert!(check_due_from(None, recent, "2.2.7", now));
+        assert!(check_due_from(Some("2.2.7"), recent, "2.2.7", now));
+        assert!(check_due_from(Some("2.2.6"), recent, "2.2.7", now));
+        assert!(!check_due_from(Some("2.2.8"), recent, "2.2.7", now));
+        assert!(check_due_from(
+            Some("2.2.8"),
+            now - THROTTLE.as_secs(),
+            "2.2.7",
+            now
+        ));
     }
 }
