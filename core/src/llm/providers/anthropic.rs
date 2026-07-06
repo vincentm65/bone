@@ -28,7 +28,7 @@ use crate::tools::{ToolCall, ToolDefinition};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Anthropic requires `max_tokens`; use a generous default when unset.
-const DEFAULT_MAX_TOKENS: u32 = 8192;
+const DEFAULT_MAX_TOKENS: u32 = 18000;
 
 pub struct AnthropicProvider {
     client: reqwest::Client,
