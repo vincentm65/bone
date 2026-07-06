@@ -16,9 +16,9 @@ fields:
     value:
       label: Anthropic
       base_url: https://api.anthropic.com/v1
-      model: claude-3-5-sonnet-20241022
+      model: claude-sonnet-4-6
       api_key: ""
-      endpoint: /chat/completions
+      endpoint: /messages
       handler: anthropic
   - key: gemini
     label: Gemini

@@ -3,6 +3,7 @@
 use super::provider::{LlmError, LlmErrorKind, LlmProvider};
 use crate::config::ProvidersConfig;
 
+pub mod anthropic;
 pub mod codex;
 pub mod openai_compat;
 
@@ -29,6 +30,11 @@ pub fn create_provider_with_config(
             "codex" => {
                 return Ok(Box::new(codex::CodexProvider::from_entry(id, entry)));
             }
+            "anthropic" => {
+                return Ok(Box::new(anthropic::AnthropicProvider::from_entry(
+                    id, entry,
+                )));
+            }
             "openai" | "" => {
                 return Ok(Box::new(openai_compat::OpenAiCompatProvider::from_entry(
                     id, entry,
@@ -38,7 +44,7 @@ pub fn create_provider_with_config(
                 return Err(LlmError::new_with_kind(
                     LlmErrorKind::Config,
                     format!(
-                        "unsupported handler `{}` for provider `{id}`; supported: openai, codex",
+                        "unsupported handler `{}` for provider `{id}`; supported: openai, anthropic, codex",
                         entry.handler
                     ),
                 ));
@@ -83,5 +89,8 @@ mod tests {
 
         create_provider_with_config("minimax", &config).unwrap();
         create_provider_with_config("minimax_plan", &config).unwrap();
+        // The seeded Anthropic entry uses the `anthropic` handler, which the
+        // factory must build rather than reject.
+        create_provider_with_config("anthropic", &config).unwrap();
     }
 }

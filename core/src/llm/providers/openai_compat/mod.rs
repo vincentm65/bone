@@ -362,6 +362,19 @@ pub fn delta_has_reasoning_field(data: &str) -> bool {
         .any(|key| delta.get(*key).and_then(|v| v.as_str()).is_some())
 }
 
+/// Extract cache-hit tokens from a provider `usage` block. Providers disagree
+/// on where they report it: OpenAI/GLM nest it under
+/// `prompt_tokens_details.cached_tokens`, while DeepSeek exposes a top-level
+/// `prompt_cache_hit_tokens`.
+fn cached_tokens_from_usage(usage: &Value) -> Option<u32> {
+    usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64()))
+        .map(|v| v as u32)
+}
+
 /// Process a single non-empty SSE data line (excluding `[DONE]` and comments).
 ///
 /// Captures usage, accumulates tool-call partials, and returns any events that
@@ -482,6 +495,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
         let stream_options = (self.base_url.contains("api.openai.com")
+            || self.base_url.contains("api.deepseek.com")
             || self.base_url.contains("127.0.0.1")
             || self.base_url.contains("localhost"))
         .then(|| StreamOptions {
@@ -538,11 +552,7 @@ impl LlmProvider for OpenAiCompatProvider {
                         yield ChatEvent::TokenUsage {
                             prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                             completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                            cached_tokens: usage
-                                .get("prompt_tokens_details")
-                                .and_then(|d| d.get("cached_tokens"))
-                                .and_then(|v| v.as_u64())
-                                .map(|v| v as u32),
+                            cached_tokens: cached_tokens_from_usage(usage),
                             cost: usage.get("cost").and_then(|v| v.as_f64()),
                         };
                     }
@@ -595,9 +605,36 @@ impl LlmProvider for OpenAiCompatProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatEvent, openai_messages, process_sse_chunk};
+    use super::{ChatEvent, cached_tokens_from_usage, openai_messages, process_sse_chunk};
     use crate::llm::{ChatMessage, ChatRole, ImageData};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn reads_openai_style_nested_cached_tokens() {
+        // OpenAI / GLM nest cache hits under prompt_tokens_details.
+        let usage = serde_json::json!({
+            "prompt_tokens": 100,
+            "prompt_tokens_details": { "cached_tokens": 64 }
+        });
+        assert_eq!(cached_tokens_from_usage(&usage), Some(64));
+    }
+
+    #[test]
+    fn reads_deepseek_style_top_level_cache_hit_tokens() {
+        // DeepSeek reports cache hits as a top-level usage field.
+        let usage = serde_json::json!({
+            "prompt_tokens": 100,
+            "prompt_cache_hit_tokens": 96,
+            "prompt_cache_miss_tokens": 4
+        });
+        assert_eq!(cached_tokens_from_usage(&usage), Some(96));
+    }
+
+    #[test]
+    fn no_cache_field_yields_none() {
+        let usage = serde_json::json!({ "prompt_tokens": 100 });
+        assert_eq!(cached_tokens_from_usage(&usage), None);
+    }
 
     #[test]
     fn ignores_content_in_same_chunk_as_tool_call_delta() {

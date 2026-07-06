@@ -69,7 +69,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit an existing UTF-8 file. Exactly one mode per call: (a) top-level search+replace for a single change, (b) edits[] for multiple search/replace changes, or (c) mode=\"rewrite\"+content for a full rewrite. Anchors must match exactly one location unless replace_all=true (exact global replace); matching tolerates minor whitespace and indentation drift. On success a unified diff is returned; on failure the error names the valid shapes and closest candidates.".to_string(),
+            description: "Edit an existing UTF-8 file. One mode per call: top-level search+replace, edits[] for several changes, or mode=\"rewrite\"+content for a full rewrite. Each search must match exactly one location unless replace_all=true; whitespace/indentation drift is tolerated. Returns a unified diff.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
