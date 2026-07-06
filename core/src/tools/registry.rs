@@ -89,25 +89,54 @@ impl ToolRegistry {
     }
 }
 
+/// The tool's declared required fields, in schema order (empty if none).
+fn required_fields(tool: &dyn Tool) -> Vec<String> {
+    tool.definition()
+        .input_schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Reject calls whose arguments cannot possibly satisfy the tool's schema:
 /// null, a non-object, or an empty object when required fields are declared.
 /// Models in a degenerate loop emit these; a uniform, actionable error beats
 /// serde's deserialization message. Tools without required fields still accept
 /// empty/absent arguments.
 fn reject_degenerate_arguments(tool: &dyn Tool, arguments: &serde_json::Value) -> Option<String> {
+    // The provider wraps arguments truncated mid-stream (usually the output
+    // token cap) as `{ TRUNCATED_ARGS_KEY: "<raw>" }`. Resending the same call
+    // reproduces the truncation, so steer the model toward smaller edits rather
+    // than an identical retry. Checked before the non-empty-object accept below,
+    // since the wrapper is a non-empty object.
+    if let Some(raw) = arguments
+        .get(crate::tools::TRUNCATED_ARGS_KEY)
+        .and_then(|v| v.as_str())
+    {
+        let required = required_fields(tool);
+        return Some(format!(
+            "tool call arguments were truncated ({} bytes of incomplete JSON, likely the output-token limit); \
+             do not resend the same call — split the work into smaller edits with the required field(s): {}",
+            raw.len(),
+            if required.is_empty() {
+                "(see tool schema)".to_string()
+            } else {
+                required.join(", ")
+            }
+        ));
+    }
     if arguments
         .as_object()
         .is_some_and(|fields| !fields.is_empty())
     {
         return None;
     }
-    let definition = tool.definition();
-    let required: Vec<&str> = definition
-        .input_schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
+    let required = required_fields(tool);
     if required.is_empty() {
         return None;
     }

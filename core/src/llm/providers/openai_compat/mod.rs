@@ -230,7 +230,20 @@ pub fn flush_partial_tool_calls(
         if call.id.is_empty() || call.name.is_empty() {
             continue;
         }
-        let arguments = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+        // A non-empty but unparseable argument string means the JSON was cut
+        // off mid-stream (typically the output-token cap). Wrap the raw text in
+        // a valid object keyed by `TRUNCATED_ARGS_KEY` rather than collapsing to
+        // `Null` or keeping a bare string: the assistant message is persisted to
+        // history and re-serialized on the next request, so it must stay valid
+        // JSON (a bare string would be double-encoded into a malformed
+        // `function.arguments`). The tool validator keys on the marker to report
+        // truncation instead of an identical retry.
+        let arguments = serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
+            Value::Object(serde_json::Map::from_iter([(
+                crate::tools::TRUNCATED_ARGS_KEY.to_string(),
+                Value::String(call.arguments),
+            )]))
+        });
         events.push(ChatEvent::ToolCall(ToolCall {
             id: call.id,
             name: call.name,
@@ -611,6 +624,43 @@ mod tests {
             ChatEvent::ToolCall(call) => {
                 assert_eq!(call.name, "shell");
                 assert_eq!(call.arguments["command"], "echo hi");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wraps_truncated_tool_arguments_in_valid_marker_object() {
+        // The model's argument JSON is cut off at the output-token cap, so the
+        // stream finishes with an unclosed object. It must surface as a *valid*
+        // object keyed by `TRUNCATED_ARGS_KEY` (not `Null`, not a bare string):
+        // the message is persisted and re-serialized, so it has to stay valid
+        // JSON while still letting the tool validator report truncation.
+        let mut partial_tool_calls = BTreeMap::new();
+        let mut usage = None;
+        let start = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"edit_file","arguments":"{\"path\":\"world.rs\",\"content\":\"use std"}}]}}]}"#;
+        let done = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        assert!(
+            process_sse_chunk(start, &mut partial_tool_calls, &mut usage)
+                .unwrap()
+                .is_empty()
+        );
+        let events = process_sse_chunk(done, &mut partial_tool_calls, &mut usage).unwrap();
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChatEvent::ToolCall(call) => {
+                assert_eq!(call.name, "edit_file");
+                let raw = call.arguments[crate::tools::TRUNCATED_ARGS_KEY]
+                    .as_str()
+                    .expect("truncated args wrapped under the marker key");
+                assert!(raw.starts_with("{\"path\""));
+                // Re-serializing the persisted assistant message must stay valid
+                // JSON — never a double-encoded bare string.
+                let serialized = call.arguments.to_string();
+                assert!(serde_json::from_str::<serde_json::Value>(&serialized).is_ok());
+                assert!(serialized.starts_with('{'));
             }
             other => panic!("unexpected event: {other:?}"),
         }

@@ -544,6 +544,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         token_stats,
         system_prompt_override,
         conversation_id: session_report.conv_id(),
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
     // Snapshot before the turn so an injected sink reused across turns still

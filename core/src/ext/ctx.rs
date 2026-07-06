@@ -133,6 +133,9 @@ pub struct CtxConfig {
     /// (the TUI) via `ctx.ui.status`/`ctx.ui.notify`. `None` headless, where
     /// those calls fall back to stderr.
     pub runtime_status: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
+    /// Steering text injected mid-turn via Ctrl+Enter. Passed to the
+    /// `before_turn` hook so Lua can shape the next provider request.
+    pub turn_nudge: Option<String>,
 }
 
 impl CtxConfig {
@@ -162,6 +165,7 @@ impl CtxConfig {
             usage: None,
             conversation_history: None,
             runtime_status: None,
+            turn_nudge: None,
         }
     }
 }
@@ -184,6 +188,8 @@ pub struct AppCtxState {
     pub tool_handler: Box<crate::tools::registry::ToolHandler>,
     pub usage: UsageContext,
     pub conversation_history: Vec<crate::llm::ChatMessage>,
+    /// Steering text injected mid-turn via Ctrl+Enter.
+    pub turn_nudge: Option<String>,
 }
 
 impl AppCtxState {
@@ -201,6 +207,7 @@ impl AppCtxState {
         system_prompt_override: Option<String>,
         by_provider: Vec<UsageProviderContext>,
         history: Vec<crate::llm::ChatMessage>,
+        turn_nudge: Option<String>,
     ) -> Self {
         let est = estimate_prompt_tokens(tools);
         Self {
@@ -212,6 +219,7 @@ impl AppCtxState {
             tool_handler: Box::new(tools.clone()),
             usage: build_usage_context(stats, &est, by_provider),
             conversation_history: history,
+            turn_nudge,
         }
     }
 
@@ -226,6 +234,7 @@ impl AppCtxState {
         cfg.tool_handler = Some((*self.tool_handler).clone());
         cfg.usage = Some(self.usage.clone());
         cfg.conversation_history = Some(self.conversation_history.clone());
+        cfg.turn_nudge = self.turn_nudge.clone();
     }
 }
 

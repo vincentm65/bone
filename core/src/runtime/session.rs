@@ -24,6 +24,7 @@
 //! [`apply_outcome`]: RuntimeSession::apply_outcome
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -55,6 +56,9 @@ pub struct RuntimeSession {
     pub conversation_id: Option<i64>,
     /// Monotonic message sequence within the conversation.
     pub session_seq: i64,
+    /// Shared steer nudge, wired into `LocalConn` so Ctrl+Enter can set it
+    /// during an active turn.
+    pub turn_nudge: Arc<Mutex<Option<String>>>,
 }
 
 impl RuntimeSession {
@@ -67,6 +71,7 @@ impl RuntimeSession {
             session_db: None,
             conversation_id: None,
             session_seq: 0,
+            turn_nudge: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -298,6 +303,7 @@ impl RuntimeSession {
             token_stats: self.token_stats.clone(),
             system_prompt_override: None,
             conversation_id: self.conversation_id,
+            turn_nudge: self.turn_nudge.clone(),
         }
     }
 

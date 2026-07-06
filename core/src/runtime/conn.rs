@@ -23,6 +23,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -64,6 +65,8 @@ pub trait RuntimeConn {
 /// [`take_outcome`]: LocalConn::take_outcome
 pub struct LocalConn {
     events_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
+    /// Sender for emitting status/events (e.g. steer acknowledgement).
+    events_tx: mpsc::UnboundedSender<RuntimeEvent>,
     /// The Driver awaiting a `SubmitPrompt` to start; consumed into `run_fut`.
     driver: Option<Driver>,
     /// The in-flight turn future; `None` before submit and after completion.
@@ -73,6 +76,7 @@ pub struct LocalConn {
     cancel: Arc<AtomicBool>,
     approval_registry: ApprovalReplyRegistry,
     key_registry: KeyReplyRegistry,
+    turn_nudge: Arc<Mutex<Option<String>>>,
 }
 
 impl LocalConn {
@@ -81,19 +85,23 @@ impl LocalConn {
     /// into the `Driver`/gate so `send` reaches the running turn.
     pub fn new(
         events_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
+        events_tx: mpsc::UnboundedSender<RuntimeEvent>,
         driver: Driver,
         cancel: Arc<AtomicBool>,
         approval_registry: ApprovalReplyRegistry,
         key_registry: KeyReplyRegistry,
+        turn_nudge: Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
             events_rx,
+            events_tx,
             driver: Some(driver),
             run_fut: None,
             outcome: None,
             cancel,
             approval_registry,
             key_registry,
+            turn_nudge,
         }
     }
 
@@ -126,6 +134,17 @@ impl RuntimeConn for LocalConn {
                 self.key_registry.resolve(id, key);
             }
             RuntimeCommand::Cancel => self.cancel.store(true, Ordering::Relaxed),
+            RuntimeCommand::Steer { text } => {
+                // Stash the steer text in the shared `turn_nudge`; the driver
+                // consumes it at the top of its next loop iteration and injects
+                // it as a transient `turn_message` (never persisted to the
+                // transcript). This does not mutate history — it shapes only the
+                // next provider request.
+                self.turn_nudge.lock().unwrap().replace(text.clone());
+                let _ = self.events_tx.send(RuntimeEvent::Status {
+                    message: format!("steered: {text}"),
+                });
+            }
             // Daemon-level commands are not part of a single in-process turn.
             RuntimeCommand::RunCommand { .. }
             | RuntimeCommand::NewConversation

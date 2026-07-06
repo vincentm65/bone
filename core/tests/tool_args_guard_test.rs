@@ -70,6 +70,33 @@ async fn non_object_arguments_are_rejected() {
 }
 
 #[tokio::test]
+async fn truncated_json_arguments_are_reported_as_truncation() {
+    // Arguments cut off at the output-token cap arrive wrapped in a valid marker
+    // object (see openai_compat flush_partial_tool_calls). The guard must flag
+    // truncation and steer away from an identical retry — not mislabel it as
+    // "no arguments" or accept the marker object as real arguments.
+    let result = run_one(call(
+        "edit_file",
+        json!({
+            bone_core::tools::TRUNCATED_ARGS_KEY: "{\"path\":\"world.rs\",\"content\":\"use std",
+        }),
+    ))
+    .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("truncated") && result.content.contains("do not resend"),
+        "unexpected: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("no arguments"),
+        "should not mislabel truncation: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
 async fn populated_arguments_still_reach_the_tool() {
     let result = run_one(call(
         "edit_file",

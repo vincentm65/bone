@@ -215,6 +215,13 @@ pub enum RuntimeCommand {
     SetTerminalWidth {
         width: u16,
     },
+    /// Steer the agent mid-turn: inject a system message into the transcript
+    /// so the model sees the new direction. The turn continues (not cancelled);
+    /// the steering text is also passed to the `before_turn` hook so a Lua
+    /// handler can shape the next provider request (e.g. as a `turn_message`).
+    Steer {
+        text: String,
+    },
 }
 
 #[cfg(test)]
@@ -375,6 +382,9 @@ mod tests {
                 provider_id: "anthropic".into(),
             },
             RuntimeCommand::ReloadExtensions,
+            RuntimeCommand::Steer {
+                text: "go left instead".into(),
+            },
         ];
         for cmd in &cmds {
             let s = serde_json::to_string(cmd).expect("serialize");

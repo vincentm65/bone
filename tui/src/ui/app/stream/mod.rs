@@ -4,6 +4,7 @@ use crate::chat::Message;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
 use crate::tools::{ApprovalMode, Tool, ToolCall};
+use crate::runtime::RuntimeCommand;
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
@@ -265,9 +266,20 @@ impl App {
             display_text.as_deref().unwrap_or(&text),
             image_count,
         ));
+        // Reset the input and shrink the viewport to its final (empty-input)
+        // height *before* flushing the message to scrollback. `flush_*` uses
+        // `insert_before`, which inserts directly above the *current* viewport;
+        // if we flushed while the viewport was still sized for the just-typed
+        // (possibly multi-line) input, the subsequent `redraw` shrinks the
+        // viewport by recreating it (`resize_viewport` → `term.clear()` +
+        // new inline viewport) at a position that can paint over the freshly
+        // inserted user-message row — so the message intermittently failed to
+        // appear whenever the input had grown past one line. Resetting first
+        // means the viewport is already at its final height when we insert.
+        self.input.reset();
+        self.redraw(term)?;
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
-        self.input.reset();
         self.redraw(term)?;
         self.streaming = true;
         self.cancel_streaming = false;
@@ -333,6 +345,7 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut pending_key,
+                    &self.command_tx,
                 );
                 if drained.mode_changed {
                     self.user_config.approval_mode = self.approval_mode;
@@ -523,6 +536,7 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut pending_key,
+                    &self.command_tx,
                 );
                 if drained.mode_changed {
                     self.user_config.approval_mode = self.approval_mode;
@@ -642,10 +656,14 @@ impl App {
                 format!("/{cmd} {arg}")
             };
             self.messages.push(Message::user(display));
+            // Reset input + shrink viewport before flushing (see the note in
+            // `submit_user_turn`): flushing against a still-tall viewport lets
+            // the follow-up redraw's viewport recreation clobber the echo row.
+            self.input.reset();
+            self.redraw(term).ok();
             self.renderer
                 .flush_new_to_scrollback(&self.messages, term)
                 .ok();
-            self.input.reset();
             self.streaming = true;
             self.shown_tool_rows.clear();
             self.stream_estimated_received = Some(self.view.received);
@@ -1133,6 +1151,7 @@ impl App {
         pages: &mut [PanePage],
         active_page: &mut usize,
         pending_key: &mut KeySink,
+        command_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCommand>,
     ) -> DrainKeysResult {
         let mut result = DrainKeysResult::default();
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
@@ -1181,6 +1200,17 @@ impl App {
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         result.open_transcript = true;
+                        continue;
+                    }
+                    // Ctrl+Enter during streaming: steer the agent mid-turn.
+                    if key.code == KeyCode::Enter
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        let text = input.expanded().trim().to_string();
+                        if !text.is_empty() {
+                            let _ = command_tx.send(RuntimeCommand::Steer { text });
+                            input.reset();
+                        }
                         continue;
                     }
                     // ── Page navigation (Tab/BackTab/PageUp/PageDown) ─────

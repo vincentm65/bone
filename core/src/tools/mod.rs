@@ -25,6 +25,14 @@ use std::collections::HashMap;
 /// Cap an individual line's length so a single minified multi-MB line can't
 /// consume the whole context window. Truncates on a UTF-8 char boundary.
 pub const MAX_TOOL_LINE_CHARS: usize = 2000;
+
+/// Marker key wrapping a tool call's raw arguments when the streamed JSON was
+/// cut off mid-flight (usually the output-token cap). The provider wraps the
+/// unparseable text as `{ TRUNCATED_ARGS_KEY: "<raw>" }` — a *valid* JSON
+/// object, so persisting and re-serializing the assistant message can't emit a
+/// malformed `function.arguments` payload — while the tool validator keys on
+/// this marker to report truncation instead of an identical retry.
+pub const TRUNCATED_ARGS_KEY: &str = "__bone_truncated_args__";
 pub fn truncate_line(line: &str) -> String {
     if line.chars().count() <= MAX_TOOL_LINE_CHARS {
         return line.to_string();

@@ -7,6 +7,7 @@
 //! [`AutoApprovalGate`] and calls [`Driver::run`].
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
@@ -152,6 +153,9 @@ pub struct Driver {
     /// `conv_id` is `None`), so the id is threaded in directly — it drives the
     /// provider cache key (`prompt_cache_key`) and the `ctx` conversation id.
     pub conversation_id: Option<i64>,
+    /// Shared steer nudge. `LocalConn::send(Steer)` sets it; the driver
+    /// loop checks and consumes it at the top of each iteration.
+    pub turn_nudge: Arc<Mutex<Option<String>>>,
 }
 
 /// What [`Driver::run`] hands back so a stateful frontend (the TUI) can reabsorb
@@ -281,6 +285,7 @@ impl Driver {
             mut token_stats,
             system_prompt_override,
             conversation_id,
+            turn_nudge,
         } = self;
         let is_cancelled = || {
             cancel
@@ -407,17 +412,25 @@ impl Driver {
                 break Err(format!("sub-agent exceeded {SUBAGENT_MAX_TURNS} turns"));
             }
             turns += 1;
-            // Dispatch before_turn hook so Lua can compact the conversation
-            // and shape the turn (system prompt + tool visibility) before each
-            // provider request. `turn_tool_defs` defaults to the full set and is
-            // narrowed only when a handler returns a `tool_filter`.
-            let mut turn_tool_defs = tool_defs.clone();
             // Transient per-turn messages from `before_turn` handlers. Sent as
             // the *last* input item of this turn's requests and never persisted
             // to the transcript: at the prompt tail, turn-varying content costs
             // only its own tokens instead of invalidating the provider's prefix
             // cache for the entire history (as a mutating system prompt would).
             let mut turn_messages: Vec<String> = Vec::new();
+            // Consume any mid-turn steer injected via Ctrl+Enter in a single
+            // lock acquisition: a separate clone-then-take would be a TOCTOU (a
+            // steer landing between the two locks could hand `before_turn` one
+            // value and `turn_messages` another). The same text feeds both the
+            // request (as a turn_message) and the `before_turn` hook.
+            let nudge = turn_nudge.lock().unwrap().take();
+            if let Some(nudge) = &nudge {
+                turn_messages.push(nudge.clone());
+            }
+            // Dispatch before_turn hook so Lua can compact the conversation
+            // provider request. `turn_tool_defs` defaults to the full set and is
+            // narrowed only when a handler returns a `tool_filter`.
+            let mut turn_tool_defs = tool_defs.clone();
             {
                 // Refresh context_length from the *current* pending history so
                 // the before_turn snapshot reflects what this request will
@@ -444,6 +457,7 @@ impl Driver {
                     system_prompt_override.clone(),
                     Vec::new(),
                     transcript.clone(),
+                    nudge,
                 );
                 let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
                 // Give before_turn handlers a live status channel so they can

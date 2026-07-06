@@ -679,6 +679,7 @@ impl DaemonCtx {
                 None,
                 by_provider,
                 s.transcript.clone(),
+                s.turn_nudge.lock().unwrap().clone(),
             )
         };
 
@@ -1132,7 +1133,7 @@ impl DaemonCtx {
                 self.extensions.clone(),
                 self.mode.clone(),
                 gate,
-                rt_tx,
+                rt_tx.clone(),
                 self.key_registry.clone(),
                 cancel.clone(),
                 Arc::new(crate::session_sink::NullSessionSink),
@@ -1140,10 +1141,12 @@ impl DaemonCtx {
         };
         let mut conn = LocalConn::new(
             rt_rx,
+            rt_tx,
             driver,
             cancel,
             self.approval_registry.clone(),
             self.key_registry.clone(),
+            self.session.lock().unwrap().turn_nudge.clone(),
         );
         conn.send(RuntimeCommand::SubmitPrompt {
             text,
@@ -1186,6 +1189,7 @@ impl DaemonCtx {
                     // Width updates and hooks are safe mid-turn.
                     Some(RuntimeCommand::SetTerminalWidth { width }) => self.set_width(width),
                     Some(RuntimeCommand::DispatchHook { name, payload }) => self.dispatch_hook(name, payload),
+                    Some(cmd @ RuntimeCommand::Steer { .. }) => conn.send(cmd),
                     Some(_) => {}
                     None => break,
                 },
@@ -1194,6 +1198,20 @@ impl DaemonCtx {
         // Flush any diffs emitted between the last tick and turn end.
         if self.forward_view_diffs {
             self.drain_diffs();
+        }
+
+        // Drop any steer that wasn't consumed before the turn ended (e.g. sent
+        // during the model's final, tool-call-free round, so the driver loop
+        // never reached another top-of-iteration `take`). The nudge Arc is
+        // session-lived and shared across turns, so a leftover would otherwise
+        // leak into the *next* unrelated turn.
+        {
+            let session = self.session.lock().unwrap();
+            if session.turn_nudge.lock().unwrap().take().is_some() {
+                self.hub.publish(RuntimeEvent::Status {
+                    message: "steer not applied — the turn had already finished".into(),
+                });
+            }
         }
 
         if let Some(outcome) = conn.take_outcome() {

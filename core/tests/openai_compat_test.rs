@@ -239,7 +239,7 @@ fn test_stream_ends_without_done_still_flushes() {
 }
 
 #[test]
-fn test_malformed_tool_arguments_becomes_null() {
+fn test_malformed_tool_arguments_wrapped_in_marker_object() {
     let mut partials = BTreeMap::new();
 
     let partial = PartialToolCall {
@@ -253,7 +253,14 @@ fn test_malformed_tool_arguments_becomes_null() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ChatEvent::ToolCall(call) => {
-            assert_eq!(call.arguments, Value::Null);
+            // Unparseable arguments are wrapped in a valid marker object rather
+            // than collapsed to Null or kept as a bare string: the assistant
+            // message is persisted and re-serialized, so it must stay valid JSON
+            // while the tool validator can still detect truncation.
+            assert_eq!(
+                call.arguments[bone_core::tools::TRUNCATED_ARGS_KEY],
+                Value::String("this is not json at all!!!".to_string()),
+            );
         }
         other => panic!("expected ToolCall, got {other:?}"),
     }

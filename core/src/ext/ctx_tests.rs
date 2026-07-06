@@ -480,6 +480,7 @@ fn sample_app_state() -> AppCtxState {
         None,
         Vec::new(),
         history,
+        None,
     )
 }
 

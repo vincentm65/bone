@@ -115,14 +115,16 @@ async fn local_conn_streams_turn_and_yields_outcome() {
         ],
         ApprovalMode::Safe,
     );
-    driver.runtime_events = Some(tx);
+    driver.runtime_events = Some(tx.clone());
 
     let mut conn = LocalConn::new(
         rx,
+        tx,
         driver,
         Arc::new(AtomicBool::new(false)),
         ApprovalReplyRegistry::new(),
         KeyReplyRegistry::new(),
+        Arc::new(std::sync::Mutex::new(None)),
     );
     conn.send(RuntimeCommand::SubmitPrompt {
         text: prompt.to_string(),
@@ -195,17 +197,19 @@ async fn runtime_session_accumulates_state_across_turns() {
             ExtensionManager::unloaded(),
             SharedApprovalMode::new(ApprovalMode::Safe),
             Arc::new(AutoApprovalGate),
-            tx,
+            tx.clone(),
             KeyReplyRegistry::new(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
         );
         let mut conn = LocalConn::new(
             rx,
+            tx,
             driver,
             Arc::new(AtomicBool::new(false)),
             ApprovalReplyRegistry::new(),
             KeyReplyRegistry::new(),
+            Arc::new(std::sync::Mutex::new(None)),
         );
         conn.send(RuntimeCommand::SubmitPrompt {
             text: prompt.to_string(),
@@ -273,6 +277,7 @@ fn driver_with_gate(
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
     (driver, prompt)
 }
@@ -303,6 +308,7 @@ fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
     (driver, prompt)
 }
@@ -575,6 +581,7 @@ async fn driver_key_reply_completes_turn() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
     let run = tokio::spawn(async move { driver.run(prompt).await });
@@ -728,6 +735,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
     let response = driver.run(prompt).await.expect("driver run");
@@ -822,6 +830,7 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
     let response = driver.run(prompt).await.expect("driver run");
@@ -917,6 +926,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
     driver.run(prompt).await.expect("driver run");
@@ -1055,6 +1065,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
     driver.run(prompt).await.expect("driver run");
