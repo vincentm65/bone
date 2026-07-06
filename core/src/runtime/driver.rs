@@ -397,6 +397,18 @@ impl Driver {
         });
 
         let mut consecutive_errors = 0u32;
+        // Runaway brake: local models often spew the *same* failing tool call
+        // (a search that doesn't match, empty/truncated args) many times per
+        // second because each error result is just fed back with no throttle.
+        // Track a signature of the failing calls each round; when the identical
+        // set repeats, steer the model and back off, then abort if it keeps
+        // ignoring the steer. `None` = last round had no tool errors.
+        let mut last_error_signature: Option<String> = None;
+        let mut repeated_error_rounds = 0u32;
+        // Injected as a turn_message on the round *after* a repeat is detected,
+        // so the model sees a firm reminder before it tries again.
+        let mut error_loop_steer: Option<String> = None;
+        const MAX_REPEATED_ERROR_ROUNDS: u32 = 3;
         let mut turns: usize = 0;
         // The Codex backend returns routing state on the first request of a
         // user turn. Keep it across retries and tool rounds in this run, but
@@ -426,6 +438,12 @@ impl Driver {
             let nudge = turn_nudge.lock().unwrap().take();
             if let Some(nudge) = &nudge {
                 turn_messages.push(nudge.clone());
+            }
+            // A repeated-error steer queued by the previous round takes effect
+            // here, as the last input item, so the model reads it right before
+            // it would otherwise retry the same failing call.
+            if let Some(steer) = error_loop_steer.take() {
+                turn_messages.push(steer);
             }
             // Dispatch before_turn hook so Lua can compact the conversation
             // provider request. `turn_tool_defs` defaults to the full set and is
@@ -933,6 +951,68 @@ impl Driver {
                     persist_messages.push(relay);
                 }
             }
+
+            // Runaway brake. Build a signature from this round's *failing*
+            // calls, keyed on tool name + error text: a bad edit produces a
+            // deterministic error ("search matched 0 times", "truncated…"), so
+            // repeating the same broken call yields the same signature. Any
+            // successful call, or a genuinely new error, changes it and resets
+            // the counter — legitimate long-running work is never throttled.
+            let error_signature: Option<String> = {
+                let mut errs: Vec<(&str, &str)> = results
+                    .iter()
+                    .filter(|r| r.is_error)
+                    .map(|r| (r.name.as_str(), r.content.as_str()))
+                    .collect();
+                if errs.is_empty() {
+                    None
+                } else {
+                    errs.sort_unstable();
+                    Some(
+                        errs.iter()
+                            .map(|(name, content)| format!("{name}\0{content}"))
+                            .collect::<Vec<_>>()
+                            .join("\u{1}"),
+                    )
+                }
+            };
+
+            if error_signature.is_some() && error_signature == last_error_signature {
+                repeated_error_rounds += 1;
+                if repeated_error_rounds >= MAX_REPEATED_ERROR_ROUNDS {
+                    emit_runtime(RuntimeEvent::Failed {
+                        message: format!(
+                            "aborted after {MAX_REPEATED_ERROR_ROUNDS} identical failing tool calls in a row"
+                        ),
+                    });
+                    break Err(format!(
+                        "aborted: the same tool call failed {} times in a row without progress",
+                        repeated_error_rounds + 1
+                    ));
+                }
+                // Firm steer, injected on the next round. Also back off briefly:
+                // a fast local model can otherwise spin these rounds in
+                // milliseconds, and the pause gives a mid-turn cancel a window.
+                error_loop_steer = Some(
+                    "The last tool call failed with the same error as the previous attempt. \
+                     Do not resend the identical call. Stop and reconsider: re-read the file \
+                     to get the exact current text, fix the arguments, or take a different \
+                     approach. If you cannot make progress, explain the problem instead of retrying."
+                        .to_string(),
+                );
+                emit_runtime(RuntimeEvent::Status {
+                    message: "repeated tool error — steering the model to change approach"
+                        .to_string(),
+                });
+                tokio::select! {
+                    biased;
+                    _ = await_cancel() => break Ok(String::new()),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(750)) => {}
+                }
+            } else {
+                repeated_error_rounds = 0;
+            }
+            last_error_signature = error_signature;
         };
 
         // Emit Finished only on success (Failed was already emitted at the

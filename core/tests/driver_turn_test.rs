@@ -1236,3 +1236,98 @@ async fn driver_cancelled_before_turn_returns_empty() {
         outcome.transcript
     );
 }
+
+/// A provider that emits the *same* failing tool call on every request, with
+/// no `finish_reason`/usage — the exact shape of a local model stuck spewing a
+/// broken edit as fast as it can generate. Used to prove the runaway brake
+/// aborts instead of looping forever.
+struct RepeatProvider {
+    model: String,
+    call: ToolCall,
+}
+
+#[async_trait]
+impl LlmProvider for RepeatProvider {
+    fn id(&self) -> &str {
+        "repeat"
+    }
+    fn name(&self) -> &str {
+        "Repeat Provider"
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+    async fn chat_stream(
+        &self,
+        _messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
+        let events = vec![Ok(ChatEvent::ToolCall(self.call.clone()))];
+        Ok(futures_util::stream::iter(events).boxed())
+    }
+}
+
+/// The runaway brake: a model that resends the identical failing tool call must
+/// not loop forever. After a few identical failures the Driver aborts the turn
+/// with an error rather than spinning (previously the top-level agent had no
+/// tool-error cap at all).
+#[tokio::test]
+async fn repeated_identical_failing_tool_call_aborts() {
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let llm = Arc::new(RepeatProvider {
+        model: "repeat-1".into(),
+        // A read is auto-allowed in Safe mode, and a missing file fails with a
+        // deterministic error every time — so each round's error signature is
+        // identical, tripping the brake.
+        call: ToolCall {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "path": "/nonexistent/bone-runaway-test" }),
+        },
+    });
+    let driver = Driver {
+        llm,
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
+    };
+
+    // Bound the whole thing: if the brake regresses, this loops forever, so the
+    // timeout converts a hang into a clear failure.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        driver.run_to_outcome(prompt),
+    )
+    .await
+    .expect("driver must abort the runaway, not hang");
+
+    let err = match outcome.result {
+        Ok(_) => panic!("runaway must abort with an error, not finish ok"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("in a row"),
+        "abort reason should name the repeated-failure loop, got: {err}"
+    );
+}
