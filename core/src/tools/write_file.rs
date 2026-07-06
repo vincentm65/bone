@@ -23,7 +23,7 @@ impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "write_file".to_string(),
-            description: "Create a new UTF-8 text file. Fails if the file already exists — use edit_file for modifications (mode=\"rewrite\" for a full rewrite).".to_string(),
+            description: "Create a NEW UTF-8 text file. Only for files that do not exist yet; it errors if the path already exists. To change or replace an existing file, use edit_file instead (mode=\"rewrite\" replaces the whole file).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -58,10 +58,11 @@ impl Tool for WriteFileTool {
         // is acceptable for this tool's local convenience threat model.
         match fs::symlink_metadata(path).await {
             Ok(_) => {
-                return Err(
-                    "file already exists; use edit_file (search/replace for targeted changes, or mode=\"rewrite\" for a full rewrite)"
-                        .to_string(),
-                );
+                return Err(format!(
+                    "file already exists — write_file only creates new files. Do NOT retry write_file for this path. \
+                     To change it, call edit_file: use search/replace for a targeted change, or {{\"path\":\"{}\",\"mode\":\"rewrite\",\"content\":\"...\"}} to replace the whole file.",
+                    args.path
+                ));
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(crate::util::errstr(e)),

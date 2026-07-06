@@ -55,7 +55,7 @@ async fn refuses_to_overwrite_existing_file() {
         "unexpected error: {err}"
     );
     assert!(
-        err.contains("mode=\"rewrite\""),
+        err.contains("edit_file") && err.contains("rewrite"),
         "error should point at edit_file rewrite mode: {err}"
     );
     assert_eq!(
