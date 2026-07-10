@@ -178,6 +178,130 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
     }
 }
 
+/// As [`run_script`], but emits bounded chunks as they arrive.  The final
+/// result is deliberately identical, so callers can opt into live rendering
+/// without changing model-visible output or cancellation semantics.
+pub async fn run_script_live(
+    request: ScriptRequest,
+    output_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
+    call_id: String,
+) -> Result<ScriptOutput, String> {
+    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
+    let cancel = request.cancel.clone();
+    let (shell, shell_arg, _) = shell_command();
+    let mut cmd = Command::new(shell);
+    cmd.arg(shell_arg)
+        .arg(&request.command)
+        .envs(request.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(crate::util::errstr)?;
+    let stdout = child.stdout.take().ok_or("failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("failed to capture stderr")?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(bool, Vec<u8>)>();
+    let tx_out = tx.clone();
+    tokio::spawn(async move {
+        let mut reader = stdout;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx_out.send((false, buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let tx_err = tx.clone();
+    tokio::spawn(async move {
+        let mut reader = stderr;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx_err.send((true, buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    drop(tx);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut status = None;
+    let mut timed_out = false;
+    let mut cancelled = false;
+    let mut output_open = true;
+    loop {
+        tokio::select! {
+            biased;
+            _ = await_cancel(cancel.as_ref()) => { cancelled = true; break; }
+            _ = tokio::time::sleep_until(deadline) => { timed_out = true; break; }
+            r = child.wait() => { status = Some(r.map_err(crate::util::errstr)?); break; }
+            chunk = rx.recv(), if output_open => match chunk {
+                Some((is_err, bytes)) => {
+                    if let Some(events) = &output_events { let _ = events.send(crate::runtime::RuntimeEvent::ToolOutput { call_id: call_id.clone(), content: String::from_utf8_lossy(&bytes).into_owned(), stderr: is_err }); }
+                    if is_err { err.extend(bytes) } else { out.extend(bytes) }
+                }
+                // Once both pipe readers have stopped, disable this select
+                // branch. Otherwise `recv()` would repeatedly resolve to
+                // `None` while the child is still running.
+                None => output_open = false,
+            }
+        }
+    }
+    if timed_out || cancelled {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            kill_process_group(pid);
+        }
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    while let Some((is_err, bytes)) = rx.recv().await {
+        if is_err {
+            err.extend(bytes)
+        } else {
+            out.extend(bytes)
+        }
+    }
+    let stdout = truncate_output(&String::from_utf8_lossy(&out), 500);
+    let stderr = truncate_output(&String::from_utf8_lossy(&err), 100);
+    if cancelled || timed_out {
+        let why = if cancelled {
+            "cancelled by user".to_string()
+        } else {
+            format!("timed out after {timeout_ms}ms")
+        };
+        let mut msg = format!("[{why}; partial output]\nstdout:\n{stdout}");
+        if !stderr.is_empty() {
+            msg.push_str(&format!("\nstderr:\n{stderr}"));
+        }
+        return Err(msg);
+    }
+    let status = status.ok_or("process ended without status")?;
+    Ok(ScriptOutput {
+        exit_code: status.code(),
+        signal: exit_signal(&status),
+        stdout,
+        stderr,
+    })
+}
+
 /// How the child's `wait()` resolved: it exited, the wall-clock timeout fired,
 /// or the user cancelled mid-run.
 enum WaitOutcome {
@@ -230,10 +354,10 @@ async fn kill_and_drain(
 /// Deserialize `shell` arguments: the command plus a clamped timeout.
 /// `classification` is accepted for backward compatibility and discarded (the
 /// policy classifier is authoritative).
-fn parse_shell_args(arguments: Value) -> Result<(String, u64), String> {
+fn parse_shell_args(arguments: Value) -> Result<(String, u64, bool), String> {
     let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
     let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
-    Ok((args.command, timeout_ms))
+    Ok((args.command, timeout_ms, args.background))
 }
 
 /// Render a finished command as the tool result the model reads.
@@ -310,6 +434,8 @@ struct Args {
     #[serde(default)]
     classification: Value,
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    background: bool,
 }
 
 #[async_trait]
@@ -334,6 +460,10 @@ impl Tool for ShellTool {
                         "type": "integer",
                         "minimum": 1000,
                         "description": "Timeout in ms. Default 120000. Set higher for long-running commands (e.g. downloads)."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Run as a managed background process and return its process id immediately."
                     }
                 },
                 "required": ["command"],
@@ -346,7 +476,11 @@ impl Tool for ShellTool {
         // Context-less fallback (trait default path / tests). No cancel token
         // is available here, so the wall-clock timeout is the only backstop;
         // the live path below wires in cancellation.
-        let (command, timeout_ms) = parse_shell_args(arguments)?;
+        let (command, timeout_ms, background) = parse_shell_args(arguments)?;
+        if background {
+            let id = crate::processes::registry().spawn(command, "shell".into(), timeout_ms);
+            return Ok(format!("background process started: {id}"));
+        }
         let output = run_script(ScriptRequest {
             command,
             env: Vec::new(),
@@ -366,13 +500,23 @@ impl Tool for ShellTool {
         // Live path used by the driver: thread the turn's cancel flag in so an
         // Esc mid-command kills the process tree and returns promptly instead
         // of blocking until the wall-clock timeout.
-        let (command, timeout_ms) = parse_shell_args(arguments)?;
-        let output = run_script(ScriptRequest {
-            command,
-            env: Vec::new(),
-            timeout_ms,
-            cancel: context.cancelled.clone(),
-        })
+        let (command, timeout_ms, background) = parse_shell_args(arguments)?;
+        if background {
+            let id = crate::processes::registry().spawn(command, context.owner.clone(), timeout_ms);
+            return Ok(ToolOutput::text(format!(
+                "background process started: {id}"
+            )));
+        }
+        let output = run_script_live(
+            ScriptRequest {
+                command,
+                env: Vec::new(),
+                timeout_ms,
+                cancel: context.cancelled.clone(),
+            },
+            context.runtime_events.clone(),
+            context.call_id.clone(),
+        )
         .await?;
         Ok(ToolOutput::text(format_output(&output)))
     }

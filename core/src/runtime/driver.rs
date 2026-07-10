@@ -1132,7 +1132,13 @@ pub(crate) async fn execute_tool_calls(
                 }
             });
             let results = tools
-                .execute_all_live(approved_calls, Some(live_tx), agent_depth, 0)
+                .execute_all_live(
+                    approved_calls,
+                    Some(live_tx),
+                    agent_depth,
+                    0,
+                    runtime_events.clone(),
+                )
                 .await;
             // All sender handles are now owned by the live tool executions.
             // When they finish, the channel closes and the forwarder exits.

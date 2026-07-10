@@ -218,7 +218,7 @@ async fn tool_handler_execute_live_accepts_key_request_channel() {
     let calls = vec![make_call("pane_tool", "c1")];
 
     let (tx, _rx) = mpsc::unbounded_channel::<KeyRequest>();
-    let results = handler.execute_all_live(calls, Some(tx), 0, 0).await;
+    let results = handler.execute_all_live(calls, Some(tx), 0, 0, None).await;
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].content, "pane result");
@@ -237,7 +237,7 @@ async fn tool_handler_execute_live_no_events_channel() {
     let handler = ToolHandler::new(registry);
     let calls = vec![make_call("simple", "c1")];
 
-    let results = handler.execute_all_live(calls, None, 0, 0).await;
+    let results = handler.execute_all_live(calls, None, 0, 0, None).await;
     assert_eq!(results[0].content, "ok");
     assert!(!results[0].is_error);
 }

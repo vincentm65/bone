@@ -190,6 +190,25 @@ The transcript returned by `history()` is the live in-memory history used for th
 ```
 Default timeout: 120s for `ctx.shell`, 300s for `ctx.shell_streaming`. Commands run through the same approval and policy system as the native `shell` tool.
 
+#### Managed processes
+
+Use `ctx.process` for work that must outlive a Lua handler. Bone owns the
+process group, cancellation, and captured output; extensions receive an id,
+not a raw OS handle.
+
+```lua
+local job = ctx.process.spawn("npm run dev", { timeout_ms = 3600000 })
+local state = ctx.process.status(job.id) -- running, stdout, stderr, exit_code
+local output = ctx.process.output(job.id)
+local jobs = ctx.process.list()
+ctx.process.kill(job.id)
+```
+
+The native `shell` tool also accepts `{ background = true }`, returning a
+managed process id immediately. Use this only for intentionally detached work
+(downloads, servers, long builds); normal commands remain foreground and can
+be cancelled with Ctrl+C.
+
 #### `ctx.tools.call`
 
 Call a registered tool by name with typed arguments:

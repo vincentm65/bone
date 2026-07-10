@@ -43,6 +43,15 @@ pub enum RuntimeEvent {
         #[serde(default)]
         content: String,
     },
+    /// Incremental output from a running tool. `call_id` keeps concurrent
+    /// commands correctly associated in transcript and live-panel clients.
+    ToolOutput {
+        call_id: String,
+        #[serde(default)]
+        content: String,
+        #[serde(default)]
+        stderr: bool,
+    },
     TokenUsage {
         sent: u64,
         received: u64,

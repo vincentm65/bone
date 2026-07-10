@@ -410,6 +410,69 @@ fn build_fs_table(lua: &Lua) -> Result<Table, mlua::Error> {
 /// `read_file`, `write_file`. These hang directly off `ctx` (not a sub-table),
 /// so this takes the `ctx` table and sets onto it rather than returning one.
 fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
+    // ctx.process is the extension-safe managed-process API.  Plugins never
+    // receive a child handle, so Bone retains process-tree cancellation and
+    // bounded output ownership.
+    let process = lua.create_table()?;
+    let spawn = lua.create_function(|lua, (command, opts): (String, Option<Table>)| {
+        let timeout_ms = opt_u64(&opts, "timeout_ms")
+            .unwrap_or(3_600_000)
+            .clamp(1_000, 3_600_000);
+        let owner = opts
+            .as_ref()
+            .and_then(|o| o.get::<Option<String>>("owner").ok().flatten())
+            .unwrap_or_else(|| "extension".into());
+        let id = crate::processes::registry().spawn(command, owner, timeout_ms);
+        let result = lua.create_table()?;
+        result.set("id", id)?;
+        Ok(Value::Table(result))
+    })?;
+    process.set("spawn", spawn)?;
+    let status = lua.create_function(|lua, id: String| {
+        let Some(p) = crate::processes::registry().get(&id) else {
+            return Ok(Value::Nil);
+        };
+        let t = lua.create_table()?;
+        t.set("id", p.id)?;
+        t.set("running", p.running)?;
+        t.set("stdout", p.stdout)?;
+        t.set("stderr", p.stderr)?;
+        t.set("exit_code", p.exit_code.map(i64::from))?;
+        t.set("error", p.error)?;
+        Ok(Value::Table(t))
+    })?;
+    process.set("status", status)?;
+    let output = lua.create_function(|lua, id: String| {
+        let Some(p) = crate::processes::registry().get(&id) else {
+            return Ok(Value::Nil);
+        };
+        let t = lua.create_table()?;
+        t.set("stdout", p.stdout)?;
+        t.set("stderr", p.stderr)?;
+        Ok(Value::Table(t))
+    })?;
+    process.set("output", output)?;
+    let list = lua.create_function(|lua, (): ()| {
+        let result = lua.create_table()?;
+        for (i, p) in crate::processes::registry()
+            .list(None)
+            .into_iter()
+            .enumerate()
+        {
+            let t = lua.create_table()?;
+            t.set("id", p.id)?;
+            t.set("command", p.command)?;
+            t.set("running", p.running)?;
+            result.set(i + 1, t)?;
+        }
+        Ok(Value::Table(result))
+    })?;
+    process.set("list", list)?;
+    process.set(
+        "kill",
+        lua.create_function(|_, id: String| Ok(crate::processes::registry().kill(&id)))?,
+    )?;
+    ctx.set("process", process)?;
     // ctx.shell(command, opts?) → { stdout, stderr, exit_code }
     let shell_fn = lua.create_function(|lua, (command, opts): (String, Option<Table>)| {
         // Parse opts.
@@ -909,6 +972,7 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                     key_sender.clone(),
                     agent_depth,
                     depth + 1,
+                    None,
                 ));
 
                 if let Some(result) = results.into_iter().next() {
@@ -2144,6 +2208,7 @@ fn dispatch_event(
                 cb.call::<()>(Value::Table(t))?;
             }
         }
+        RuntimeEvent::ToolOutput { .. } => {}
         RuntimeEvent::TokenUsage {
             sent,
             received,

@@ -7,6 +7,7 @@ pub mod config;
 pub mod ext;
 pub mod llm;
 pub mod pane_content;
+pub mod processes;
 pub mod rpc;
 pub mod run;
 pub mod runtime;

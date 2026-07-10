@@ -54,6 +54,7 @@ impl ToolRegistry {
         tool_handler: Option<ToolHandler>,
         app_state: Option<crate::ext::ctx::AppCtxState>,
         approval_gate: Option<crate::tools::SharedGate>,
+        runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
     ) -> ToolResult {
         let name = call.name.clone();
         let call_id = call.id.clone();
@@ -79,6 +80,7 @@ impl ToolRegistry {
                             tool_call_depth,
                             tool_handler,
                             app_state,
+                            runtime_events,
                             approval_gate,
                             snapshots,
                         },
@@ -304,7 +306,8 @@ impl ToolHandler {
     /// Execute all tool calls. Independent calls run concurrently; calls for
     /// host-stateful tools run in-order so each call sees the prior result.
     pub async fn execute_all(&self, calls: Vec<ToolCall>, agent_depth: usize) -> Vec<ToolResult> {
-        self.execute_all_live(calls, None, agent_depth, 0).await
+        self.execute_all_live(calls, None, agent_depth, 0, None)
+            .await
     }
 
     pub async fn execute_all_live(
@@ -313,6 +316,7 @@ impl ToolHandler {
         events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         agent_depth: usize,
         tool_call_depth: usize,
+        runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
     ) -> Vec<ToolResult> {
         // Bail out early if cancellation was requested.
         if self
@@ -333,7 +337,7 @@ impl ToolHandler {
             > 1
         {
             return self
-                .execute_all_serial(calls, events, agent_depth, tool_call_depth)
+                .execute_all_serial(calls, events, agent_depth, tool_call_depth, runtime_events)
                 .await;
         }
 
@@ -341,6 +345,7 @@ impl ToolHandler {
             let events = events.clone();
             let session_state = self.session_state_for_call(&call);
             let owner = self.owner.clone();
+            let runtime_events = runtime_events.clone();
             async move {
                 self.execute_one_live(
                     call,
@@ -349,6 +354,7 @@ impl ToolHandler {
                     owner,
                     agent_depth,
                     tool_call_depth,
+                    runtime_events,
                 )
                 .await
             }
@@ -362,6 +368,7 @@ impl ToolHandler {
         events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         agent_depth: usize,
         tool_call_depth: usize,
+        runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
     ) -> Vec<ToolResult> {
         let mut results = Vec::with_capacity(calls.len());
         let mut state_overrides: HashMap<String, Option<String>> = HashMap::new();
@@ -382,6 +389,7 @@ impl ToolHandler {
                     self.owner.clone(),
                     agent_depth,
                     tool_call_depth,
+                    runtime_events.clone(),
                 )
                 .await;
             if let Some(key) = self.host_state_key_for_name(&result.name) {
@@ -405,6 +413,7 @@ impl ToolHandler {
         owner: String,
         agent_depth: usize,
         tool_call_depth: usize,
+        runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
     ) -> ToolResult {
         if call.name.starts_with('/') {
             ToolResult::error(
@@ -425,6 +434,7 @@ impl ToolHandler {
                     Some(self.clone()),
                     self.app_state.clone(),
                     self.approval_gate.clone(),
+                    runtime_events,
                 )
                 .await
         } else {

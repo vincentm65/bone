@@ -1161,8 +1161,15 @@ impl App {
     pub(crate) fn maybe_refresh_jobs_pane(&mut self) -> bool {
         let registry = crate::ext::jobs::registry();
         let version = registry.version();
-        let periodic = self.jobs_last_refresh.elapsed() >= std::time::Duration::from_secs(1)
-            && !registry.running_ids().is_empty();
+        let processes_running = crate::processes::registry()
+            .list(None)
+            .iter()
+            .any(|p| p.running);
+        // Process output is a live tail, so refresh it on the normal render
+        // tick; agent jobs only need the cheaper one-second cadence.
+        let periodic = processes_running
+            || (self.jobs_last_refresh.elapsed() >= std::time::Duration::from_secs(1)
+                && !registry.running_ids().is_empty());
         if version == self.jobs_seen_version && !periodic {
             return false;
         }
@@ -1251,6 +1258,18 @@ impl App {
             self.active_page = PanePage::remove(
                 &mut self.pages,
                 crate::ui::jobs_pane::PANE_SOURCE,
+                self.active_page,
+            );
+        }
+        let processes = crate::processes::registry().list(None);
+        if let Some(page) = crate::ui::processes_pane::render(&processes) {
+            let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+            self.active_page = new_active;
+            self.panes_visible = true;
+        } else {
+            self.active_page = PanePage::remove(
+                &mut self.pages,
+                crate::ui::processes_pane::PANE_SOURCE,
                 self.active_page,
             );
         }

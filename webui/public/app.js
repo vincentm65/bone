@@ -108,7 +108,7 @@ let conversations = [];
 
 const LIVE_EVENT_TYPES = new Set([
   "started", "notice", "reasoning_delta", "text_delta", "tool_call",
-  "tool_result", "token_usage", "approval_request", "key_request",
+  "tool_result", "tool_output", "token_usage", "approval_request", "key_request",
   "finished", "failed", "work_elapsed", "view_diff",
 ]);
 
@@ -364,6 +364,7 @@ function dispatchEvent(ev) {
     case "text_delta": return appendText(ev.text);
     case "tool_call": return onToolCall(ev);
     case "tool_result": return onToolResult(ev);
+    case "tool_output": return onToolOutput(ev);
     case "token_usage": return onTokenUsage(ev);
     case "approval_request": return onApproval(ev);
     case "key_request": return onKeyRequest(ev);
@@ -697,8 +698,9 @@ function onToolResult(ev) {
   const content = (ev.content || "").trim();
   if (content) {
     const lines = content.split("\n").length;
+    const isCompletion = card.dataset.liveOutput;
     card.querySelector(".tool-body").appendChild(
-      el("div", "tool-section-label", (ev.is_error ? "Error" : "Output") + ` · ${lines} line${lines === 1 ? "" : "s"}`),
+      el("div", "tool-section-label", (isCompletion ? "Completion" : (ev.is_error ? "Error" : "Output")) + ` · ${lines} line${lines === 1 ? "" : "s"}`),
     );
     const pre = el("pre", ev.is_error ? "err" : null);
     pre.textContent = formatToolOutput(content);
@@ -725,6 +727,16 @@ function onToolResult(ev) {
   }
 
   if (state.asstEl) state.asstEl.parentElement.appendChild(state.asstEl);
+  scrollDown();
+}
+
+function onToolOutput(ev) {
+  const card = state.tools.get(ev.call_id);
+  if (!card || !ev.content) return;
+  const pre = card.querySelector(".tool-live-output") || el("pre", "tool-live-output");
+  if (!pre.parentNode) card.querySelector(".tool-body").appendChild(pre);
+  card.dataset.liveOutput = "1";
+  pre.textContent += ev.content;
   scrollDown();
 }
 

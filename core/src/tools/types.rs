@@ -36,6 +36,9 @@ pub struct ToolExecutionContext {
     pub tool_call_depth: usize,
     pub tool_handler: Option<crate::tools::registry::ToolHandler>,
     pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
+    /// Frontend event stream for incremental tool output.  Kept optional so
+    /// headless and unit-test callers retain the old execution path.
+    pub runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
     /// The driving conversation's approval gate, so tools that delegate
     /// (`ctx.agent.spawn`) can escalate would-be-denied calls to the user.
     pub approval_gate: Option<crate::tools::SharedGate>,

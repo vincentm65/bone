@@ -304,6 +304,13 @@ pub(crate) fn emit_event(
                 "is_error": is_error
             })
         }
+        crate::runtime::RuntimeEvent::ToolOutput {
+            call_id,
+            content,
+            stderr,
+        } => {
+            serde_json::json!({"type":"tool_output", "call_id":call_id, "content":content, "stderr":stderr})
+        }
         crate::runtime::RuntimeEvent::TokenUsage {
             sent,
             received,

@@ -822,7 +822,7 @@ impl App {
                     name,
                     arguments,
                 };
-                if self
+                if call.name == "shell" || self
                     .wire_tools
                     .display_for_call(&call)
                     .and_then(|d| d.eager)
@@ -836,6 +836,17 @@ impl App {
                     self.pump_show_eager_row(&call, cur_idx, term)?;
                 }
                 pending.insert(id, call);
+            }
+            RuntimeEvent::ToolOutput { call_id, content, stderr } => {
+                // A shell row is eagerly printed at dispatch; chunks follow it
+                // immediately, even while other calls in the batch run.
+                if pending.get(&call_id).is_some() && !content.is_empty() {
+                    self.messages.push(crate::ui::tool_display::shell_output_row(
+                        content,
+                        stderr,
+                    ));
+                    self.renderer.flush_new_to_scrollback(&self.messages, term)?;
+                }
             }
             RuntimeEvent::ToolResult {
                 name,
