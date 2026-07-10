@@ -1,845 +1,432 @@
-//! The `edit_file` tool: search/replace and rewrite edits with fuzzy anchor matching.
+//! The `edit_file` tool: OMP-style hashline edits.
+//!
+//! The model emits a hashline patch in the `input` field: one or more
+//! `[path#TAG]` sections, each a list of line ops (SWAP / DEL / INS.PRE /
+//! INS.POST / INS.HEAD / INS.TAIL) or a single file op (`MV dest` / `REM`).
+//! Line numbers refer to the snapshot the model last read (identified by TAG);
+//! the tool resolves that snapshot, applies the ops, and writes the result
+//! atomically. When the live file has drifted from the read snapshot it
+//! attempts a line-level 3-way merge ([`recovery`]); a conflicting overlap is
+//! rejected with a re-read instruction.
+//!
+//! All sections are preflight-validated (parse + resolve + apply, no writes)
+//! before any file is touched, so a failure in section 3 leaves sections 1–2
+//! unmodified. Mid-batch write failures report which files were written and
+//! which were not (no rollback).
+
+use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use strsim::normalized_levenshtein;
 use tokio::fs;
 
-use crate::tools::types::{Tool, ToolDefinition};
+use crate::tools::snapshot::{self, SnapshotStore};
+use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 use crate::tools::write_atomic::write_atomic;
 
+pub(crate) mod apply;
 pub(crate) mod diff;
+pub(crate) mod parser;
+pub(crate) mod recovery;
 
 pub struct EditFileTool;
 
-#[derive(Debug, Deserialize)]
-struct Args {
-    path: String,
-    search: Option<String>,
-    replace: Option<String>,
-    edits: Option<Vec<RawEditOperation>>,
-    mode: Option<String>,
-    content: Option<String>,
-    expected_hash: Option<String>,
-    replace_all: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawEditOperation {
-    search: Option<String>,
-    replace: Option<String>,
-    delete: Option<String>,
-    insert_before: Option<String>,
-    insert_after: Option<String>,
-    text: Option<String>,
-    replace_all: Option<bool>,
-    #[serde(rename = "match")]
-    match_mode: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-enum EditOperation {
-    Replace {
-        search: String,
-        replace: String,
-        replace_all: bool,
-    },
-    Delete {
-        search: String,
-    },
-    InsertBefore {
-        anchor: String,
-        text: String,
-    },
-    InsertAfter {
-        anchor: String,
-        text: String,
-    },
-}
-
+/// A preview of a pending edit, for TUI rendering. `before_hash` is the 4-hex
+/// content tag of the live file at preview time; `diff` is a unified diff.
 pub struct EditPreview {
     pub before_hash: String,
     pub diff: String,
 }
+
+type Snapshots = Arc<RwLock<SnapshotStore>>;
 
 #[async_trait]
 impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit an existing UTF-8 file. One mode per call: top-level search+replace, edits[] for several changes, or mode=\"rewrite\"+content for a full rewrite. Each search must match exactly one location unless replace_all=true; whitespace/indentation drift is tolerated. Returns a unified diff.".to_string(),
+            description: "Edit existing files with a hashline patch. Pass `input`: one or more `[path#TAG]` sections, where TAG is the 4-hex tag from your last read_file/write_file/edit_file result and line numbers refer to that snapshot. Line ops: SWAP start.=end (replace lines), DEL start.=end (delete lines), INS.PRE n / INS.POST n (insert before/after line n), INS.HEAD / INS.TAIL (insert at top/end of file). File ops, alone in their section: MV dest (rename), REM (delete file). Every body line must start with `+` at column 0 — write an empty body line as a bare `+`; a line without `+` ends the op's body. Returns the new tag and a diff.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {
+                    "input": {
                         "type": "string",
-                        "description": "File path to edit."
-                    },
-                    "search": {
-                        "type": "string",
-                        "description": "Single replacement: text to find."
-                    },
-                    "replace": {
-                        "type": "string",
-                        "description": "Replacement text for top-level search."
-                    },
-                    "edits": {
-                        "type": "array",
-                        "description": "List of edit operations. Each item: search+replace with optional replace_all.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "search": { "type": "string", "description": "Text to find and replace." },
-                                "replace": { "type": "string", "description": "Replacement text." },
-                                "replace_all": { "type": "boolean", "description": "Replace every exact occurrence instead of requiring a unique match." }
-                            },
-                            "required": ["search", "replace"],
-                            "additionalProperties": false
-                        }
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["rewrite"],
-                        "description": "Set to \"rewrite\" to replace entire file; requires content."
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "New file contents (only with mode=\"rewrite\")."
-                    },
-                    "expected_hash": {
-                        "type": "string",
-                        "description": "SHA-256 hash. Fails if file changed since preview."
-                    },
-                    "replace_all": {
-                        "type": "boolean",
-                        "description": "For the top-level search+replace: replace every exact occurrence instead of requiring a unique match. Use for renames."
+                        "description": "Hashline patch: `[path#TAG]` header, then ops. Every body line starts with `+`. Example:\n[src/main.rs#A1B2]\nSWAP 3.=4:\n+let x = 1;\n+let y = 2;\nINS.POST 10:\n+// inserted after line 10\nDEL 20.=22"
                     }
                 },
-                "required": ["path"],
+                "required": ["input"],
                 "additionalProperties": false
             }),
         }
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        execute_edit_file(arguments).await
+        run_edit(arguments, None).await
+    }
+
+    async fn execute_output_live(
+        &self,
+        arguments: Value,
+        _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        run_edit(arguments, Some(&context.snapshots))
+            .await
+            .map(ToolOutput::text)
     }
 }
 
-pub async fn preview_edit_file(tool_name: &str, arguments: Value) -> Result<EditPreview, String> {
-    let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-    let (original, next) = build_candidate_content(&args).await?;
-    let before_hash = sha256_hex(&original);
-    let diff = diff::build_unified_diff(tool_name, &args.path, &original, &next);
-    Ok(EditPreview { before_hash, diff })
-}
-
-pub async fn execute_edit_file(arguments: Value) -> Result<String, String> {
-    let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-    let (original, next) = build_candidate_content(&args).await?;
-
-    if let Some(expected_hash) = args.expected_hash.as_deref() {
-        let actual_hash = sha256_hex(&original);
-        if actual_hash != expected_hash {
-            return Err("file changed since preview; edit not applied".to_string());
-        }
-    }
-
-    if original == next {
-        return Ok("no changes".to_string());
-    }
-
-    {
-        let path = std::path::Path::new(&args.path);
-        let metadata = fs::metadata(path).await.map_err(crate::util::errstr)?;
-        let permissions = Some(metadata.permissions());
-        write_atomic(path, &next, permissions).await?;
-    }
-    let summary = diff::summarize_change(&original, &next);
-    let diff = truncate_diff(
-        &diff::build_unified_diff("edit_file", &args.path, &original, &next),
-        200,
-    );
-    Ok(format!("edited file ({summary}){diff}"))
-}
-
-fn truncate_diff(diff: &str, max_lines: usize) -> String {
-    crate::tools::shell::truncate_output(diff, max_lines)
-}
-
-async fn build_candidate_content(args: &Args) -> Result<(String, String), String> {
-    let metadata = fs::metadata(&args.path)
-        .await
-        .map_err(crate::util::errstr)?;
-    if !metadata.is_file() {
-        return Err("path is not a regular file".to_string());
-    }
-
-    let original = fs::read_to_string(&args.path)
-        .await
-        .map_err(crate::util::errstr)?;
-
-    if args.mode.as_deref() == Some("rewrite") {
-        ensure_no_edit_fields_for_rewrite(args)?;
-        let content = args
-            .content
-            .clone()
-            .ok_or_else(|| "mode=rewrite requires content".to_string())?;
-        return Ok((original, content));
-    }
-
-    if args.mode.is_some() {
-        return Err("unsupported mode; expected \"rewrite\"".to_string());
-    }
-    if args.content.is_some() {
-        return Err("content is only valid with mode=rewrite".to_string());
-    }
-
-    let operations = parse_operations(args)?;
-    let mut next = original.clone();
-    for (index, operation) in operations.iter().enumerate() {
-        next = apply_one_operation(&next, operation)
-            .map_err(|e| format!("edit {} failed: {e}", index + 1))?;
-    }
-    Ok((original, next))
-}
-
-fn ensure_no_edit_fields_for_rewrite(args: &Args) -> Result<(), String> {
-    if args.search.is_some()
-        || args.replace.is_some()
-        || args.edits.is_some()
-        || args.replace_all.is_some()
-    {
-        return Err("mode=rewrite cannot be combined with search/replace or edits".to_string());
-    }
-    Ok(())
-}
-
-fn parse_operations(args: &Args) -> Result<Vec<EditOperation>, String> {
-    let has_single = args.search.is_some() || args.replace.is_some();
-    let has_multi = args.edits.is_some();
-
-    match (has_single, has_multi) {
-        (true, true) => Err("use either search/replace or edits, not both".to_string()),
-        (false, false) => Err("provide search/replace, edits, or mode=rewrite".to_string()),
-        (true, false) => {
-            let search = args
-                .search
-                .clone()
-                .ok_or_else(|| "search is required when replace is provided".to_string())?;
-            let replace = args
-                .replace
-                .clone()
-                .ok_or_else(|| "replace is required when search is provided".to_string())?;
-            if search.is_empty() {
-                return Err("search must not be empty".to_string());
-            }
-            Ok(vec![EditOperation::Replace {
-                search,
-                replace,
-                replace_all: args.replace_all.unwrap_or(false),
-            }])
-        }
-        (false, true) => {
-            let raw = args.edits.as_ref().expect("checked above");
-            if raw.is_empty() {
-                return Err("edits must not be empty".to_string());
-            }
-            raw.iter()
-                .enumerate()
-                .map(|(i, edit)| {
-                    parse_operation(edit).map_err(|e| format!("edit {} invalid: {e}", i + 1))
-                })
-                .collect()
-        }
-    }
-}
-
-fn parse_operation(raw: &RawEditOperation) -> Result<EditOperation, String> {
-    if raw.match_mode.as_deref().unwrap_or("exact") != "exact" {
-        return Err("only match=\"exact\" is currently supported".to_string());
-    }
-
-    let mut kinds = 0;
-    kinds += (raw.search.is_some() || raw.replace.is_some()) as usize;
-    kinds += raw.delete.is_some() as usize;
-    kinds += raw.insert_before.is_some() as usize;
-    kinds += raw.insert_after.is_some() as usize;
-    if kinds != 1 {
-        return Err(
-            "specify exactly one of search/replace, delete, insert_before, or insert_after"
-                .to_string(),
-        );
-    }
-
-    if raw.search.is_some() || raw.replace.is_some() {
-        if raw.delete.is_some() || raw.insert_before.is_some() || raw.insert_after.is_some() {
-            return Err("search/replace cannot be combined with delete or insert".to_string());
-        }
-        // Be intentionally tolerant of a stray `text` field here. Some models
-        // include it after seeing the insert operation schema. If `replace` is
-        // missing, treat `text` as the replacement so the edit can still work.
-        let search = raw
-            .search
-            .clone()
-            .ok_or_else(|| "search is required with replace".to_string())?;
-        let replace = raw
-            .replace
-            .clone()
-            .or_else(|| raw.text.clone())
-            .ok_or_else(|| "replace is required with search".to_string())?;
-        if search.is_empty() {
-            return Err("search must not be empty".to_string());
-        }
-        return Ok(EditOperation::Replace {
-            search,
-            replace,
-            replace_all: raw.replace_all.unwrap_or(false),
-        });
-    }
-
-    if let Some(search) = raw.delete.clone() {
-        if raw.text.is_some() {
-            return Err("delete cannot include text".to_string());
-        }
-        if search.is_empty() {
-            return Err("delete text must not be empty".to_string());
-        }
-        return Ok(EditOperation::Delete { search });
-    }
-
-    if let Some(anchor) = raw.insert_before.clone() {
-        if anchor.is_empty() {
-            return Err("insert_before anchor must not be empty".to_string());
-        }
-        let text = raw
-            .text
-            .clone()
-            .ok_or_else(|| "insert_before requires text".to_string())?;
-        return Ok(EditOperation::InsertBefore { anchor, text });
-    }
-
-    if let Some(anchor) = raw.insert_after.clone() {
-        if anchor.is_empty() {
-            return Err("insert_after anchor must not be empty".to_string());
-        }
-        let text = raw
-            .text
-            .clone()
-            .ok_or_else(|| "insert_after requires text".to_string())?;
-        return Ok(EditOperation::InsertAfter { anchor, text });
-    }
-
-    Err("invalid edit operation".to_string())
-}
-
-fn apply_one_operation(content: &str, operation: &EditOperation) -> Result<String, String> {
-    // Replace-all is exact global replacement; it deliberately bypasses the
-    // unique-anchor rule used for every other operation.
-    if let EditOperation::Replace {
-        search,
-        replace,
-        replace_all: true,
-    } = operation
-    {
-        return replace_all_spans(content, search, replace);
-    }
-
-    let (needle, label) = match operation {
-        EditOperation::Replace { search, .. } => (search.as_str(), "search text"),
-        EditOperation::Delete { search } => (search.as_str(), "delete text"),
-        EditOperation::InsertBefore { anchor, .. } => (anchor.as_str(), "insert_before anchor"),
-        EditOperation::InsertAfter { anchor, .. } => (anchor.as_str(), "insert_after anchor"),
-    };
-    let span = find_match_span(content, needle, label)?;
-    // Use the file's actual matched text for the preserved anchor half of an
-    // insert, so a normalized/fuzzy match never rewrites file content with the
-    // model's slightly-off reproduction of it.
-    let matched = &content[span.start..span.end];
-    let replacement = match operation {
-        EditOperation::Replace { replace, .. } => reindent_text(replace, span.reindent.as_ref()),
-        EditOperation::Delete { .. } => String::new(),
-        EditOperation::InsertBefore { text, .. } => {
-            format!("{}{matched}", reindent_text(text, span.reindent.as_ref()))
-        }
-        EditOperation::InsertAfter { text, .. } => {
-            format!("{matched}{}", reindent_text(text, span.reindent.as_ref()))
-        }
-    };
-    let mut next =
-        String::with_capacity(content.len() - (span.end - span.start) + replacement.len());
-    next.push_str(&content[..span.start]);
-    next.push_str(&replacement);
-    next.push_str(&content[span.end..]);
-    Ok(next)
-}
-
-/// Indent shifts for a whitespace-tolerant match: when the search text's
-/// indentation differs from the file's at the matched span, replacement lines
-/// should be shifted from the corresponding search-line indent to the file's
-/// actual indent.
-#[derive(Clone)]
-struct Reindent {
-    lines: Vec<(String, String)>,
-    fallback: Option<(String, String)>,
-}
-
-fn reindent_for(content: &str, needle: &str, span: &MatchSpan) -> Option<Reindent> {
-    let actual = &content[span.start..span.end];
-    let lines: Vec<_> = needle
-        .lines()
-        .zip(actual.lines())
-        .map(|(needle_line, actual_line)| {
-            (
-                leading_indent(needle_line).to_string(),
-                leading_indent(actual_line).to_string(),
-            )
-        })
-        .collect();
-    let fallback = {
-        let needle_indent = leading_indent(needle);
-        let actual_indent = leading_indent(actual);
-        (needle_indent != actual_indent)
-            .then(|| (needle_indent.to_string(), actual_indent.to_string()))
-    };
-    (fallback.is_some() || lines.iter().any(|(from, to)| from != to))
-        .then_some(Reindent { lines, fallback })
-}
-
-/// Leading whitespace of the first non-blank line.
-fn leading_indent(text: &str) -> &str {
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.is_empty() {
-            return &line[..line.len() - trimmed.len()];
-        }
-    }
-    ""
-}
-
-/// Shift replacement text from the search text's indentation to the file's
-/// actual indentation (set only when the match came from the dedented tier).
-/// Lines that don't share the search text's indent prefix are left untouched.
-fn reindent_text(text: &str, reindent: Option<&Reindent>) -> String {
-    let Some(reindent) = reindent else {
-        return text.to_string();
-    };
-    text.split_inclusive('\n')
-        .enumerate()
-        .map(|(index, line)| {
-            if line.trim().is_empty() {
-                return line.to_string();
-            }
-            let shift = reindent.lines.get(index).or(reindent.fallback.as_ref());
-            let Some((from, to)) = shift else {
-                return line.to_string();
-            };
-            match line.strip_prefix(from.as_str()) {
-                Some(rest) => format!("{to}{rest}"),
-                None => line.to_string(),
-            }
-        })
-        .collect()
-}
-
-/// Exact global replacement for rename-style edits (replace_all=true). Unlike
-/// the single-match path, this does not require a unique anchor.
-fn replace_all_spans(content: &str, needle: &str, replacement: &str) -> Result<String, String> {
-    if needle.is_empty() {
-        return Err("search text must not be empty".to_string());
-    }
-    if !content.contains(needle) {
-        return Err("search text matched 0 times; expected at least 1".to_string());
-    }
-    Ok(content.replace(needle, replacement))
-}
-
-struct MatchSpan {
-    start: usize,
-    end: usize,
-    /// (search text indent, file indent) when the match only succeeded after
-    /// dedenting; used to shift the replacement to the file's indentation.
-    reindent: Option<Reindent>,
-}
-
-/// Line-window matches always end at a line boundary, but the needle may
-/// omit the final newline. Keep the file's newline in place rather than
-/// letting the replacement swallow it.
-fn trim_span_newline(content: &str, needle: &str, span: MatchSpan) -> MatchSpan {
-    if needle.ends_with('\n') {
-        return span;
-    }
-    let matched = &content[span.start..span.end];
-    let end = if matched.ends_with("\r\n") {
-        span.end - 2
-    } else if matched.ends_with('\n') {
-        span.end - 1
-    } else {
-        span.end
-    };
-    MatchSpan { end, ..span }
-}
-
-fn find_match_span(content: &str, needle: &str, label: &str) -> Result<MatchSpan, String> {
-    if needle.is_empty() {
-        return Err(format!("{label} must not be empty"));
-    }
-
-    let exact: Vec<_> = content
-        .match_indices(needle)
-        .map(|(start, text)| Candidate {
-            start,
-            end: start + text.len(),
-            score: 1.0,
-        })
-        .collect();
-    if exact.len() == 1 {
-        return Ok(MatchSpan {
-            start: exact[0].start,
-            end: exact[0].end,
-            reindent: None,
-        });
-    }
-    if exact.len() > 1 {
-        return Err(ambiguous_error(
-            content,
-            label,
-            exact.len(),
-            exact.iter().map(|m| m.start),
-        ));
-    }
-
-    let normalized = normalized_candidates(content, needle);
-    if normalized.len() == 1 {
-        let span = trim_span_newline(
-            content,
-            needle,
-            MatchSpan {
-                start: normalized[0].start,
-                end: normalized[0].end,
-                reindent: None,
-            },
-        );
-        let reindent = reindent_for(content, needle, &span);
-        return Ok(MatchSpan { reindent, ..span });
-    }
-    if normalized.len() > 1 {
-        return Err(ambiguous_error(
-            content,
-            label,
-            normalized.len(),
-            normalized.iter().map(|m| m.start),
-        ));
-    }
-
-    let dedented = dedented_candidates(content, needle);
-    if dedented.len() == 1 {
-        let span = trim_span_newline(
-            content,
-            needle,
-            MatchSpan {
-                start: dedented[0].start,
-                end: dedented[0].end,
-                reindent: None,
-            },
-        );
-        let reindent = reindent_for(content, needle, &span);
-        return Ok(MatchSpan { reindent, ..span });
-    }
-    if dedented.len() > 1 {
-        return Err(ambiguous_error(
-            content,
-            label,
-            dedented.len(),
-            dedented.iter().map(|m| m.start),
-        ));
-    }
-
-    match fuzzy_candidate(content, needle) {
-        Some(best) if best.score >= 0.92 && needle.trim().len() >= 30 && best.margin >= 0.08 => {
-            Ok(trim_span_newline(
-                content,
-                needle,
-                MatchSpan {
-                    start: best.start,
-                    end: best.end,
-                    reindent: None,
-                },
-            ))
-        }
-        Some(best) => Err(no_match_error(
-            content,
-            needle,
-            label,
-            Some((best.start, best.end, best.score)),
-        )),
-        None => Err(no_match_error(content, needle, label, None)),
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Candidate {
-    start: usize,
-    end: usize,
-    score: f64,
-}
-
-struct FuzzyCandidate {
-    start: usize,
-    end: usize,
-    score: f64,
-    margin: f64,
-}
-
-struct ClosestHint {
-    line: usize,
-    snippet: String,
-}
-
-fn normalized_candidates(content: &str, needle: &str) -> Vec<Candidate> {
-    let needle_norm = normalize_for_compare(needle);
-    line_window_candidates(content, needle)
-        .into_iter()
-        .filter(|candidate| {
-            normalize_for_compare(&content[candidate.start..candidate.end]) == needle_norm
-        })
-        .collect()
-}
-
-fn dedented_candidates(content: &str, needle: &str) -> Vec<Candidate> {
-    let needle_norm = normalize_dedented_for_compare(needle);
-    line_window_candidates(content, needle)
-        .into_iter()
-        .filter(|candidate| {
-            normalize_dedented_for_compare(&content[candidate.start..candidate.end]) == needle_norm
-        })
-        .collect()
-}
-
-fn fuzzy_candidate(content: &str, needle: &str) -> Option<FuzzyCandidate> {
-    let needle_norm = normalize_for_compare(needle);
-    let mut ranked: Vec<Candidate> = line_window_candidates(content, needle)
-        .into_iter()
-        .map(|mut candidate| {
-            candidate.score = normalized_levenshtein(
-                &normalize_for_compare(&content[candidate.start..candidate.end]),
-                &needle_norm,
-            );
-            candidate
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let best = *ranked.first()?;
-    // Margin measures ambiguity between distinct locations; windows that
-    // overlap the best span (e.g. the same block one line larger) are the
-    // same location, not a competing candidate.
-    let second = ranked
-        .iter()
-        .skip(1)
-        .find(|c| c.end <= best.start || c.start >= best.end)
-        .map(|c| c.score)
-        .unwrap_or(0.0);
-    Some(FuzzyCandidate {
-        start: best.start,
-        end: best.end,
-        score: best.score,
-        margin: best.score - second,
-    })
-}
-
-fn line_window_candidates(content: &str, needle: &str) -> Vec<Candidate> {
-    let spans = line_spans(content);
-    let needle_lines = needle_line_count(needle);
-    if spans.is_empty() || needle_lines == 0 {
-        return Vec::new();
-    }
-
-    // Also try windows one line shorter and longer than the needle, so a
-    // search text with a dropped or added blank line can still be recovered.
-    let mut candidates = Vec::new();
-    for window in needle_lines.saturating_sub(1).max(1)..=needle_lines + 1 {
-        if window > spans.len() {
+/// Preview a pending hashline edit for TUI rendering. Degrades to live-file
+/// resolution (no snapshot store, no visible-line guard): it shows what the
+/// patch would do against the current file. Stale-tag mismatches are only
+/// caught at apply time.
+pub async fn preview_edit_file(_tool_name: &str, arguments: Value) -> Result<EditPreview, String> {
+    let input = extract_input(arguments)?;
+    let patch = parser::parse(&input)?;
+    let mut combined = String::new();
+    let mut before_hash = String::new();
+    for section in &patch.sections {
+        let content_ops: Vec<_> = section
+            .ops
+            .iter()
+            .filter(|o| !is_lifecycle(o))
+            .cloned()
+            .collect();
+        if content_ops.is_empty() {
             continue;
         }
-        for start_line in 0..=spans.len() - window {
-            candidates.push(Candidate {
-                start: spans[start_line].0,
-                end: spans[start_line + window - 1].1,
-                score: 0.0,
-            });
+        let live = read_live_normalized(&section.path).await?;
+        if before_hash.is_empty() {
+            before_hash = snapshot::compute_tag(&live);
         }
-    }
-    candidates.sort_by_key(|c| (c.start, c.end));
-    candidates.dedup_by_key(|c| (c.start, c.end));
-    candidates
-}
-
-fn line_spans(content: &str) -> Vec<(usize, usize)> {
-    if content.is_empty() {
-        return Vec::new();
-    }
-    let mut spans = Vec::new();
-    let mut start = 0;
-    for (idx, ch) in content.char_indices() {
-        if ch == '\n' {
-            spans.push((start, idx + 1));
-            start = idx + 1;
-        }
-    }
-    if start < content.len() {
-        spans.push((start, content.len()));
-    }
-    spans
-}
-
-fn needle_line_count(needle: &str) -> usize {
-    if needle.is_empty() {
-        0
-    } else {
-        needle.split_inclusive('\n').count()
-    }
-}
-
-/// Normalized text with a single trailing newline removed. Line windows
-/// always end in `\n` (except at EOF), so needles that omit the final
-/// newline would otherwise never compare equal to any window.
-fn normalize_for_compare(text: &str) -> String {
-    let mut norm = normalize_for_match(text);
-    if norm.ends_with('\n') {
-        norm.pop();
-    }
-    norm
-}
-
-/// Like [`normalize_for_compare`] but indentation-insensitive: normalization
-/// collapses each line's leading whitespace run to a single space, so
-/// stripping that one space fully dedents the line.
-fn normalize_dedented_for_compare(text: &str) -> String {
-    normalize_for_compare(text)
-        .split_inclusive('\n')
-        .map(|line| line.strip_prefix(' ').unwrap_or(line))
-        .collect()
-}
-
-fn normalize_for_match(text: &str) -> String {
-    let text = text.replace("\r\n", "\n");
-    let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let (body, newline) = line
-            .strip_suffix('\n')
-            .map(|body| (body, true))
-            .unwrap_or((line, false));
-        push_normalized_line(&mut out, body);
-        if newline {
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn push_normalized_line(out: &mut String, line: &str) {
-    // Models often "correct" typographic characters when reproducing file
-    // content; fold the common ones so they don't defeat recovery.
-    let mapped: String = line
-        .chars()
-        .filter_map(|ch| match ch {
-            '\u{2018}' | '\u{2019}' => Some('\''),
-            '\u{201C}' | '\u{201D}' => Some('"'),
-            '\u{00A0}' => Some(' '),
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' => None,
-            _ => Some(ch),
-        })
-        .collect();
-    let trimmed = mapped.trim_end_matches([' ', '\t']);
-    let mut in_space = false;
-    for ch in trimmed.chars() {
-        if ch == ' ' || ch == '\t' {
-            if !in_space {
-                out.push(' ');
-                in_space = true;
-            }
-        } else {
-            out.push(ch);
-            in_space = false;
-        }
-    }
-}
-
-fn ambiguous_error(
-    content: &str,
-    label: &str,
-    count: usize,
-    starts: impl Iterator<Item = usize>,
-) -> String {
-    let mut msg = format!("{label} matched {count} times; expected exactly 1\n\nMatches:");
-    for start in starts.take(10) {
-        let snippet: String = content[start..]
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(120)
-            .collect();
-        msg.push_str(&format!(
-            "\n- line {}: {}",
-            line_number_for_byte_offset(content, start),
-            snippet.trim_end()
+        let edited = apply::apply_ops(&live, &content_ops, None).map_err(|e| e.to_string())?;
+        combined.push_str(&diff::build_unified_diff(
+            "edit_file",
+            &section.path,
+            &live,
+            &edited,
         ));
     }
-    if count > 10 {
-        msg.push_str(&format!("\n- ... and {} more", count - 10));
-    }
-    msg.push_str(
-        "\n\nInclude more surrounding lines to make the match unique, or set replace_all=true to change every occurrence.",
-    );
-    msg
-}
-
-fn no_match_error(
-    content: &str,
-    needle: &str,
-    label: &str,
-    best: Option<(usize, usize, f64)>,
-) -> String {
-    let mut msg = format!("{label} matched 0 times; expected exactly 1");
-    if let Some((start, end, score)) = best {
-        msg.push_str(&format!(
-            "\nBest candidate line {} scored {:.2}; edit not applied because the match was not confident enough.\n\nActual candidate:\n{}\n\nSubmitted search:\n{}",
-            line_number_for_byte_offset(content, start),
-            score,
-            &content[start..end],
-            needle
-        ));
-    } else if let Some(hint) = find_closest_lines(content, needle) {
-        msg.push_str(&format!(
-            "\nClosest candidate line {}:\n{}\n\nSubmitted search:\n{}",
-            hint.line, hint.snippet, needle
-        ));
-    } else {
-        msg.push_str(&format!("\n\nSubmitted search:\n{needle}"));
-    }
-    msg
-}
-
-fn find_closest_lines(content: &str, needle: &str) -> Option<ClosestHint> {
-    fuzzy_candidate(content, needle).map(|candidate| ClosestHint {
-        line: line_number_for_byte_offset(content, candidate.start),
-        snippet: content[candidate.start..candidate.end].to_string(),
+    Ok(EditPreview {
+        before_hash,
+        diff: combined,
     })
 }
 
-fn line_number_for_byte_offset(content: &str, offset: usize) -> usize {
-    content[..offset.min(content.len())]
-        .bytes()
-        .filter(|b| *b == b'\n')
-        .count()
-        + 1
+/// Core entry point shared by the context-aware and degraded paths.
+async fn run_edit(arguments: Value, snapshots: Option<&Snapshots>) -> Result<String, String> {
+    let input = extract_input(arguments)?;
+    let patch = parser::parse(&input)?;
+
+    // ── Preflight: validate every section and build a write plan. ──────────
+    // No writes happen here, so a failure leaves the filesystem untouched.
+    let mut plans = Vec::with_capacity(patch.sections.len());
+    let mut paths = HashSet::with_capacity(patch.sections.len());
+    for section in &patch.sections {
+        if !paths.insert(section.path.as_str()) {
+            return Err(format!(
+                "duplicate section for `{}`; combine its operations into one section",
+                section.path
+            ));
+        }
+        plans.push(build_plan(section, snapshots).await?);
+    }
+
+    // ── Execute: apply writes in order. Track successes for a mid-batch ────
+    // ── failure report (no rollback). ──────────────────────────────────────
+    let mut outcomes = Vec::with_capacity(plans.len());
+    for (idx, plan) in plans.into_iter().enumerate() {
+        match execute_plan(&plan).await {
+            Ok(outcome) => outcomes.push((plan, outcome)),
+            Err(e) => {
+                let written: Vec<&str> =
+                    outcomes.iter().map(|(p, _)| p.path_for_report()).collect();
+                let mut msg = String::new();
+                if !written.is_empty() {
+                    msg.push_str(&format!("wrote: {} — ", written.join(", ")));
+                }
+                msg.push_str(&format!(
+                    "section {} (`{}`) failed: {e}",
+                    idx + 1,
+                    plan.path_for_report()
+                ));
+                return Err(msg);
+            }
+        }
+    }
+
+    // ── Record: update the snapshot store for the next round. ──────────────
+    if let Some(store) = snapshots {
+        let mut guard = store.write().map_err(|e| e.to_string())?;
+        for (plan, _) in &outcomes {
+            match plan {
+                Plan::Content { path, new_text, .. } => {
+                    let n = snapshot::numbered_lines(new_text).len();
+                    guard.record(path, new_text, Some(&(1..=n).collect::<Vec<_>>()));
+                }
+                Plan::Rename { from, to } => guard.relocate(from, to),
+                Plan::Remove { path } => guard.invalidate(path),
+            }
+        }
+    }
+
+    Ok(build_summary(&outcomes))
 }
 
-pub fn sha256_hex(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
+/// One section's resolved write plan (post-preflight, pre-write).
+enum Plan {
+    /// Replace a file's contents. `live` is the pre-edit normalized text (diff
+    /// base); `new_text` is what gets written (already merge-recovered if the
+    /// read was stale).
+    Content {
+        path: String,
+        live: String,
+        new_text: String,
+    },
+    /// Rename `from` → `to`.
+    Rename { from: String, to: String },
+    /// Delete `path`.
+    Remove { path: String },
+}
+
+impl Plan {
+    /// Path used in progress/error reports.
+    fn path_for_report(&self) -> &str {
+        match self {
+            Plan::Content { path, .. } | Plan::Remove { path } => path,
+            Plan::Rename { from, .. } => from,
+        }
+    }
+}
+
+/// The result of executing a plan (for summary construction).
+enum Outcome {
+    Content {
+        path: String,
+        new_tag: String,
+        diff: String,
+    },
+    Renamed {
+        from: String,
+        to: String,
+    },
+    Removed {
+        path: String,
+    },
+}
+
+/// True for file-lifecycle ops (MV/REM) handled outside the apply engine.
+fn is_lifecycle(op: &parser::Op) -> bool {
+    matches!(op, parser::Op::Move { .. } | parser::Op::Remove)
+}
+
+/// Resolve a section into a write plan: partition ops, fetch the snapshot,
+/// apply content ops (preflight), and recover from drift if needed.
+async fn build_plan(
+    section: &parser::Section,
+    snapshots: Option<&Snapshots>,
+) -> Result<Plan, String> {
+    let mut content_ops = Vec::new();
+    let mut lifecycle = None;
+    for op in &section.ops {
+        if is_lifecycle(op) {
+            if lifecycle.is_some() || !content_ops.is_empty() {
+                return Err(format!(
+                    "a file op ({}) must be the only op in its `[{}#{}`] section; \
+                     move content edits to a separate call",
+                    op.label(),
+                    section.path,
+                    section.tag
+                ));
+            }
+            lifecycle = Some(op);
+        } else {
+            if lifecycle.is_some() {
+                return Err(format!(
+                    "content op ({}) cannot follow a file op in `[{}#{}`]; \
+                     split into separate sections",
+                    op.label(),
+                    section.path,
+                    section.tag
+                ));
+            }
+            content_ops.push(op.clone());
+        }
+    }
+
+    if let Some(op) = lifecycle {
+        return Ok(match op {
+            parser::Op::Move { dest } => Plan::Rename {
+                from: section.path.clone(),
+                to: dest.clone(),
+            },
+            parser::Op::Remove => Plan::Remove {
+                path: section.path.clone(),
+            },
+            // Unreachable: is_lifecycle guards the variant.
+            _ => unreachable!("lifecycle op was validated"),
+        });
+    }
+
+    if content_ops.is_empty() {
+        return Err(format!(
+            "section `[{}#{}`] has no operations",
+            section.path, section.tag
+        ));
+    }
+
+    // ── Resolve the snapshot the model referenced. ─────────────────────────
+    // Read the live file first so a content match can recover seen-lines even
+    // when the tag itself drifted (e.g. the model re-read but quoted a stale
+    // tag). Locks are held only for the brief lookup, never across awaits.
+    let live = read_live_normalized(&section.path).await?;
+    let (base_text, seen_lines) = resolve_base(snapshots, &section.path, &section.tag, &live)?;
+
+    // ── Apply ops against the read snapshot (original-line semantics). ──────
+    let edited =
+        apply::apply_ops(&base_text, &content_ops, Some(&seen_lines)).map_err(|e| e.to_string())?;
+
+    // ── Reconcile with the live file (fresh vs stale). ─────────────────────
+    let new_text = if base_text == live {
+        edited
+    } else {
+        // The file changed since the read: 3-way merge the intended change
+        // onto the current contents.
+        let recovered =
+            recovery::merge_onto(&base_text, &edited, &live).map_err(|e| e.to_string())?;
+        recovered.text
+    };
+
+    // ── No-op / loop guard: a content edit that changes nothing almost ──────
+    // ── always means the model is re-applying an edit that already took. ────
+    if new_text == live {
+        return Err(format!(
+            "no change to `{}` — the file already matches this edit, so it was likely \
+             already applied; re-read the file to see current line numbers and tags",
+            section.path
+        ));
+    }
+
+    Ok(Plan::Content {
+        path: section.path.clone(),
+        live,
+        new_text,
+    })
+}
+
+/// Look up the snapshot the model referenced. Context-free callers operate on
+/// the live file, while context-aware callers must supply a recorded tag.
+fn resolve_base(
+    snapshots: Option<&Snapshots>,
+    path: &str,
+    tag: &str,
+    live: &str,
+) -> Result<(String, BTreeSet<usize>), String> {
+    let Some(store) = snapshots else {
+        return Ok((live.to_string(), BTreeSet::new()));
+    };
+    let guard = store.read().map_err(|e| e.to_string())?;
+    if let Some(snap) = guard.by_hash(path, tag) {
+        return Ok((snap.text.clone(), snap.seen_lines.clone()));
+    }
+    Err(format!(
+        "snapshot tag `{tag}` for `{path}` was not found; re-read the file and use the new tag"
+    ))
+}
+
+/// Read a file as normalized text (BOM stripped, CRLF/CR → LF).
+async fn read_live_normalized(path: &str) -> Result<String, String> {
+    let meta = fs::metadata(path).await.map_err(crate::util::errstr)?;
+    if !meta.is_file() {
+        return Err(format!("`{path}` is not a regular file"));
+    }
+    let raw = fs::read_to_string(path)
+        .await
+        .map_err(crate::util::errstr)?;
+    Ok(snapshot::normalize_text(&raw))
+}
+
+/// Execute one plan (filesystem write). Returns its outcome for the summary.
+async fn execute_plan(plan: &Plan) -> Result<Outcome, String> {
+    match plan {
+        Plan::Content {
+            path,
+            live,
+            new_text,
+        } => {
+            let p = Path::new(path);
+            let permissions = fs::metadata(p).await.ok().map(|m| m.permissions());
+            write_atomic(p, new_text, permissions).await?;
+            let new_tag = snapshot::compute_tag(new_text);
+            let diff =
+                truncate_output(&diff::build_unified_diff("edit_file", path, live, new_text));
+            Ok(Outcome::Content {
+                path: path.clone(),
+                new_tag,
+                diff,
+            })
+        }
+        Plan::Rename { from, to } => {
+            fs::rename(from, to).await.map_err(crate::util::errstr)?;
+            Ok(Outcome::Renamed {
+                from: from.clone(),
+                to: to.clone(),
+            })
+        }
+        Plan::Remove { path } => {
+            fs::remove_file(path).await.map_err(crate::util::errstr)?;
+            Ok(Outcome::Removed { path: path.clone() })
+        }
+    }
+}
+
+/// Build the success message: one line per file plus a unified diff for
+/// content edits.
+fn build_summary(outcomes: &[(Plan, Outcome)]) -> String {
+    let mut out = String::new();
+    for (_, outcome) in outcomes {
+        match outcome {
+            Outcome::Content {
+                path,
+                new_tag,
+                diff,
+            } => {
+                out.push_str(&format!("edited `{path}` [`{path}#{new_tag}`]\n"));
+                if !diff.trim().is_empty() {
+                    out.push_str(diff);
+                    if !diff.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+            }
+            Outcome::Renamed { from, to } => {
+                out.push_str(&format!("renamed `{from}` → `{to}`\n"));
+            }
+            Outcome::Removed { path } => {
+                out.push_str(&format!("deleted `{path}`\n"));
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Extract and validate the `input` field from the tool arguments.
+fn extract_input(arguments: Value) -> Result<String, String> {
+    let input = arguments
+        .get("input")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            "edit_file requires an `input` string field holding a hashline patch".to_string()
+        })?;
+    if input.trim().is_empty() {
+        return Err("`input` is empty; provide a `[path#TAG]` hashline patch".to_string());
+    }
+    Ok(input.to_string())
+}
+
+/// Cap a diff to a readable length so tool results stay bounded.
+fn truncate_output(text: &str) -> String {
+    crate::tools::shell::truncate_output(text, 200)
 }

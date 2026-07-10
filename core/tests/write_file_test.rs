@@ -22,7 +22,8 @@ async fn creates_new_file() {
         .await
         .expect("write_file should create a new file");
 
-    assert_eq!(result, "wrote 5 bytes");
+    assert!(result.contains("wrote"));
+    assert!(result.contains("#"));
     assert_eq!(
         fs::read_to_string(&path)
             .await
@@ -55,8 +56,8 @@ async fn refuses_to_overwrite_existing_file() {
         "unexpected error: {err}"
     );
     assert!(
-        err.contains("edit_file") && err.contains("rewrite"),
-        "error should point at edit_file rewrite mode: {err}"
+        err.contains("edit_file") && err.contains("hashline"),
+        "error should point at edit_file hashline: {err}"
     );
     assert_eq!(
         fs::read_to_string(&path)

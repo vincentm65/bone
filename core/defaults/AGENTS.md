@@ -71,7 +71,7 @@ local table = cjson.decode(json_str)
 
 A `ctx` table is passed as the second argument to tool `execute(params, ctx)` and command `handler(args, ctx)` functions. Event handlers receive a smaller `ctx` (see [Context Availability](#context-availability) below).
 
-To edit existing files, use `ctx.tools.call("edit_file", { path = "...", search = "...", replace = "..." })` which goes through the full approval pipeline. There is no convenience `ctx.edit_file` method.
+To edit existing files, use `ctx.tools.call("edit_file", { input = "[path#TAG]\nSWAP 1.=3:\n+new line" })` which goes through the full approval pipeline. There is no convenience `ctx.edit_file` method.
 
 #### Reference Table
 
@@ -319,7 +319,7 @@ These are compiled into bone and do not require any seeding or installation:
 - **shell** — Run a non-interactive shell command with bash -lc
 - **read_file** — Read a UTF-8 text file
 - **write_file** — Create a new UTF-8 text file
-- **edit_file** — Edit an existing file (search+replace, edits[], rewrite)
+- **edit_file** — Edit existing files with a hashline patch (`{ input: string }`)
 
 ### Catalog Lua Tools (optional, installed via `/catalog`)
 
@@ -344,14 +344,18 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 
 ```lua
 -- Native Rust tool. Parameters: path, start_line?, max_lines?
+-- Output includes [path#TAG] header + N: line-number prefixes (hashline format).
 ```
 
 ```lua
 -- Native Rust tool. Parameters: path, content
+-- On success emits [path#TAG] header for the newly created file.
 ```
 
 ```lua
--- Native Rust tool. Parameters: path, search?, replace?, edits?, mode?, content?, expected_hash?
+-- Native Rust tool. Parameters: input (hashline patch string)
+-- input contains [path#TAG] sections with line ops: SWAP/DEL/INS.PRE/INS.POST/INS.HEAD/INS.TAIL
+-- or file ops: MV dest / REM. TAG is the 4-hex tag from read_file/write_file/edit_file output.
 ```
 
 ## Commands

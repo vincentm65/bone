@@ -51,7 +51,7 @@ async fn empty_object_arguments_are_rejected_with_required_fields() {
         result.content
     );
     assert!(
-        result.content.contains("path"),
+        result.content.contains("input"),
         "should name required fields: {}",
         result.content
     );

@@ -6,6 +6,7 @@ pub mod edit_file;
 pub mod read_file;
 pub mod registry;
 pub mod shell;
+pub mod snapshot;
 pub mod state_map;
 pub mod types;
 pub mod write_atomic;

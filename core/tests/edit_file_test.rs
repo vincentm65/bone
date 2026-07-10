@@ -5,527 +5,578 @@ use std::path::PathBuf;
 use serde_json::json;
 use tokio::fs;
 
-use bone_core::tools::edit_file::{EditFileTool, preview_edit_file, sha256_hex};
-use bone_core::tools::types::Tool;
+use bone_core::tools::edit_file::{EditFileTool, preview_edit_file};
+use bone_core::tools::types::{Tool, ToolExecutionContext};
 
 fn temp_path(name: &str) -> PathBuf {
     common::temp_path(&format!("edit-file-{name}"))
 }
 
-#[tokio::test]
-async fn refuses_empty_search_string() {
-    let path = temp_path("empty-search.txt");
-    fs::write(&path, "original content").await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "", "replace": "replacement" }))
-        .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("search must not be empty"));
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "original content");
-    let _ = fs::remove_file(&path).await;
+/// Write a temp file and return its path.
+async fn setup(name: &str, content: &str) -> PathBuf {
+    let path = temp_path(name);
+    fs::write(&path, content).await.expect("setup");
+    path
 }
 
-#[tokio::test]
-async fn refuses_missing_search_string() {
-    let path = temp_path("missing-search.txt");
-    fs::write(&path, "hello world").await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "notfound", "replace": "x" }))
-        .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("matched 0 times"));
-    let _ = fs::remove_file(&path).await;
+/// Build a single-section hashline patch.
+fn patch(path: &str, ops: &str) -> String {
+    // Tag is irrelevant in the degraded `execute()` path (no snapshot store),
+    // but the parser still requires a 4-hex header.
+    format!("[{path}#A1B2]\n{ops}")
 }
 
-#[tokio::test]
-async fn refuses_duplicate_search_string_with_line_numbers() {
-    let path = temp_path("dup-search.txt");
-    fs::write(&path, "foo\nbar\nfoo").await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "foo", "replace": "baz" }))
-        .await;
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("matched 2 times"));
-    assert!(err.contains("line 1"));
-    assert!(err.contains("line 3"));
-    let _ = fs::remove_file(&path).await;
-}
+// ── SWAP ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn successfully_edits_exactly_one_occurrence() {
-    let path = temp_path("exact-one.txt");
-    fs::write(&path, "hello world").await.expect("setup");
+async fn swap_single_line() {
+    let path = setup("swap-single.txt", "alpha\nbeta\ngamma\n").await;
     let tool = EditFileTool;
 
-    let result = tool
-        .execute(json!({ "path": path, "search": "hello", "replace": "goodbye" }))
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 2.=2:\n+BETA") }))
         .await
         .expect("success");
 
-    assert!(result.contains("edited file"));
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "goodbye world");
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "alpha\nBETA\ngamma\n"
+    );
     let _ = fs::remove_file(&path).await;
 }
 
 #[tokio::test]
-async fn preserves_file_contents_on_failed_duplicate_search() {
-    let path = temp_path("preserve-dup.txt");
-    let original = "alpha beta alpha gamma";
-    fs::write(&path, original).await.expect("setup");
+async fn swap_range() {
+    let path = setup("swap-range.txt", "one\ntwo\nthree\nfour\n").await;
     let tool = EditFileTool;
 
-    let result = tool
-        .execute(json!({ "path": path, "search": "alpha", "replace": "delta" }))
-        .await;
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 2.=3:\n+TWO\n+THREE") }))
+        .await
+        .expect("success");
 
-    assert!(result.is_err());
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\nTWO\nTHREE\nfour\n"
+    );
     let _ = fs::remove_file(&path).await;
 }
 
 #[tokio::test]
-async fn preserves_file_contents_on_missing_search() {
-    let path = temp_path("preserve-missing.txt");
-    let original = "keep me safe";
-    fs::write(&path, original).await.expect("setup");
+async fn swap_expands_one_line_to_many() {
+    let path = setup("swap-expand.txt", "old\n").await;
     let tool = EditFileTool;
 
-    let result = tool
-        .execute(json!({ "path": path, "search": "nope", "replace": "noway" }))
-        .await;
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 1.=1:\n+a\n+b\n+c") }))
+        .await
+        .expect("success");
 
-    assert!(result.is_err());
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "a\nb\nc\n");
     let _ = fs::remove_file(&path).await;
 }
 
 #[tokio::test]
-async fn multi_edit_success() {
-    let path = temp_path("multi.txt");
-    fs::write(&path, "alpha beta gamma").await.expect("setup");
+async fn swap_bare_line_number_shorthand() {
+    // `SWAP N:` is tolerated as `SWAP N.=N:`.
+    let path = setup("swap-shorthand.txt", "alpha\nbeta\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 1:\n+ALPHA") }))
+        .await
+        .expect("success");
+
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "ALPHA\nbeta\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+// ── DEL ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn del_single_line() {
+    let path = setup("del-single.txt", "one\ntwo\nthree\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "DEL 2") }))
+        .await
+        .expect("success");
+
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\nthree\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn del_range() {
+    let path = setup("del-range.txt", "a\nb\nc\nd\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "DEL 2.=3") }))
+        .await
+        .expect("success");
+
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "a\nd\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+// ── INS ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ins_pre() {
+    let path = setup("ins-pre.txt", "one\nthree\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "INS.PRE 2:\n+two") }))
+        .await
+        .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn ins_post() {
+    let path = setup("ins-post.txt", "one\ntwo\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "INS.POST 1:\n+one.five") }))
+        .await
+        .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\none.five\ntwo\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn ins_head() {
+    let path = setup("ins-head.txt", "two\nthree\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "INS.HEAD:\n+one") }))
+        .await
+        .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn ins_tail() {
+    let path = setup("ins-tail.txt", "one\ntwo\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "INS.TAIL:\n+three") }))
+        .await
+        .expect("success");
+
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+// ── Multi-hunk (original-line semantics) ────────────────────────────────────
+
+#[tokio::test]
+async fn multi_hunk_original_line_semantics() {
+    // Line numbers refer to the original snapshot, not shifted by earlier hunks.
+    let path = setup("multi-hunk.txt", "a\nb\nc\nd\n").await;
     let tool = EditFileTool;
 
     tool.execute(json!({
-        "path": path,
-        "edits": [
-            { "search": "alpha", "replace": "one" },
-            { "search": "beta", "replace": "two" }
-        ]
+        "input": patch(
+            &path.to_string_lossy(),
+            "DEL 2\nSWAP 4.=4:\n+D\nINS.PRE 1:\n+prefix"
+        )
     }))
     .await
     .expect("success");
 
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one two gamma");
+    // DEL 2 removes "b", SWAP 4 replaces "d" (original line 4), INS.PRE 1 inserts before "a".
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "prefix\na\nc\nD\n"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+// ── File lifecycle: MV / REM ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn duplicate_sections_are_rejected_without_writing() {
+    let path = setup("duplicate-sections.txt", "one\ntwo\n").await;
+    let path_text = path.to_string_lossy();
+    let input = format!("[{path_text}#A1B2]\nSWAP 1:\n+ONE\n[{path_text}#A1B2]\nSWAP 2:\n+TWO");
+    let error = EditFileTool
+        .execute(json!({ "input": input }))
+        .await
+        .expect_err("duplicate paths must fail preflight");
+    assert!(error.contains("duplicate section"), "{error}");
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
     let _ = fs::remove_file(&path).await;
 }
 
 #[tokio::test]
-async fn search_replace_uses_replace_when_text_is_also_present() {
-    let path = temp_path("stray-text.txt");
-    fs::write(&path, "alpha beta").await.expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "edits": [
-            { "search": "alpha", "replace": "one", "text": "ignored" }
-        ]
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one beta");
+async fn unknown_snapshot_tag_is_rejected_without_writing() {
+    let path = setup("unknown-tag.txt", "one\ntwo\n").await;
+    let error = EditFileTool
+        .execute_output_live(
+            json!({
+                "input": patch(&path.to_string_lossy(), "SWAP 1:\n+ONE")
+            }),
+            None,
+            ToolExecutionContext::default(),
+        )
+        .await
+        .expect_err("unknown tags must require a re-read");
+    assert!(error.contains("was not found; re-read"), "{error}");
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
     let _ = fs::remove_file(&path).await;
 }
 
 #[tokio::test]
-async fn search_replace_accepts_text_as_replace_fallback() {
-    let path = temp_path("text-fallback.txt");
-    fs::write(&path, "alpha beta").await.expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "edits": [
-            { "search": "alpha", "text": "one" }
-        ]
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one beta");
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn multi_edit_failure_is_atomic() {
-    let path = temp_path("multi-atomic.txt");
-    let original = "alpha beta gamma";
-    fs::write(&path, original).await.expect("setup");
+async fn mv_renames_file() {
+    let path = setup("mv-src.txt", "content\n").await;
+    let dest = temp_path("mv-dst.txt");
+    let _ = fs::remove_file(&dest).await; // clean slate
     let tool = EditFileTool;
 
     let result = tool
         .execute(json!({
-            "path": path,
-            "edits": [
-                { "search": "alpha", "replace": "one" },
-                { "search": "missing", "replace": "two" }
-            ]
+            "input": format!("[{}#A1B2]\nMV {}", path.to_string_lossy(), dest.to_string_lossy())
+        }))
+        .await
+        .expect("success");
+
+    assert!(result.contains("renamed"));
+    assert!(!path.exists());
+    assert_eq!(fs::read_to_string(&dest).await.unwrap(), "content\n");
+    let _ = fs::remove_file(&dest).await;
+}
+
+#[tokio::test]
+async fn rem_deletes_file() {
+    let path = setup("rem-src.txt", "content\n").await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "input": patch(&path.to_string_lossy(), "REM") }))
+        .await
+        .expect("success");
+
+    assert!(result.contains("deleted"));
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn mv_mixed_with_content_op_rejected() {
+    let path = setup("mv-mixed.txt", "content\n").await;
+    let dest = temp_path("mv-mixed-dst.txt");
+    let _ = fs::remove_file(&dest).await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "input": format!(
+                "[{}#A1B2]\nSWAP 1.=1:\n+changed\nMV {}",
+                path.to_string_lossy(),
+                dest.to_string_lossy()
+            )
         }))
         .await;
 
     assert!(result.is_err());
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    assert!(result.unwrap_err().contains("must be the only op"));
+    // File unchanged.
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "content\n");
+    assert!(!dest.exists());
+    let _ = fs::remove_file(&path).await;
+    let _ = fs::remove_file(&dest).await;
+}
+
+// ── Multi-file ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn multi_file_success() {
+    let p1 = setup("multi-1.txt", "one\n").await;
+    let p2 = setup("multi-2.txt", "two\n").await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "input": format!(
+                "[{}#A1B2]\nSWAP 1.=1:\n+ONE\n[{}#A1B2]\nSWAP 1.=1:\n+TWO",
+                p1.to_string_lossy(),
+                p2.to_string_lossy()
+            )
+        }))
+        .await
+        .expect("success");
+
+    assert!(result.contains("edited"));
+    assert_eq!(fs::read_to_string(&p1).await.unwrap(), "ONE\n");
+    assert_eq!(fs::read_to_string(&p2).await.unwrap(), "TWO\n");
+    let _ = fs::remove_file(&p1).await;
+    let _ = fs::remove_file(&p2).await;
+}
+
+#[tokio::test]
+async fn prefailure_leaves_all_files_unchanged() {
+    // Second section fails during preflight (out of bounds). All sections are
+    // validated before any write, so neither file is touched.
+    let p1 = setup("partial-1.txt", "one\n").await;
+    let p2 = setup("partial-2.txt", "two\n").await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "input": format!(
+                "[{}#A1B2]\nSWAP 1.=1:\n+ONE\n[{}#A1B2]\nSWAP 99.=99:\n+BAD",
+                p1.to_string_lossy(),
+                p2.to_string_lossy()
+            )
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(!result.unwrap_err().contains("wrote:"));
+    // Neither file written.
+    assert_eq!(fs::read_to_string(&p1).await.unwrap(), "one\n");
+    assert_eq!(fs::read_to_string(&p2).await.unwrap(), "two\n");
+    let _ = fs::remove_file(&p1).await;
+    let _ = fs::remove_file(&p2).await;
+}
+
+#[tokio::test]
+async fn mid_batch_write_failure_reports_written() {
+    // First section writes; second section's MV fails at execution time
+    // (destination parent doesn't exist). No rollback.
+    let p1 = setup("midbatch-1.txt", "one\n").await;
+    let p2 = setup("midbatch-2.txt", "two\n").await;
+    let bad_dest = temp_path("nonexistent_dir/dst.txt");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "input": format!(
+                "[{}#A1B2]\nSWAP 1.=1:\n+ONE\n[{}#A1B2]\nMV {}",
+                p1.to_string_lossy(),
+                p2.to_string_lossy(),
+                bad_dest.to_string_lossy()
+            )
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    // First file was written before the failure.
+    assert!(err.contains("wrote:"));
+    assert!(err.contains("ONE") || fs::read_to_string(&p1).await.unwrap() == "ONE\n");
+    // Second file unchanged (MV failed).
+    assert_eq!(fs::read_to_string(&p2).await.unwrap(), "two\n");
+    assert!(!bad_dest.exists());
+    let _ = fs::remove_file(&p1).await;
+    let _ = fs::remove_file(&p2).await;
+}
+
+// ── Error handling ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn empty_input_rejected() {
+    let path = setup("empty-input.txt", "content\n").await;
+    let tool = EditFileTool;
+
+    let result = tool.execute(json!({ "input": "" })).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("empty"));
     let _ = fs::remove_file(&path).await;
 }
 
 #[tokio::test]
-async fn insert_before_and_after_and_delete_work() {
-    let path = temp_path("ops.txt");
-    fs::write(&path, "one\nthree\nfour\n").await.expect("setup");
+async fn missing_input_field_rejected() {
+    let tool = EditFileTool;
+    let result = tool.execute(json!({ "path": "/tmp/nonexistent" })).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("input"));
+}
+
+#[tokio::test]
+async fn out_of_bounds_swap_rejected() {
+    let path = setup("oob.txt", "one\ntwo\n").await;
     let tool = EditFileTool;
 
-    tool.execute(json!({
-        "path": path,
-        "edits": [
-            { "insert_before": "three", "text": "two\n" },
-            { "insert_after": "four", "text": "\nfive" },
-            { "delete": "one\n" }
-        ]
-    }))
-    .await
-    .expect("success");
+    let result = tool
+        .execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 99.=99:\n+x") }))
+        .await;
 
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "two\nthree\nfour\nfive\n"
-    );
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("out of bounds"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
     let _ = fs::remove_file(&path).await;
 }
+
+#[tokio::test]
+async fn overlapping_ranges_rejected() {
+    let path = setup("overlap.txt", "a\nb\nc\nd\n").await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({
+            "input": patch(
+                &path.to_string_lossy(),
+                "SWAP 1.=3:\n+x\n+y\n+z\nDEL 2"
+            )
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("overlap"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "a\nb\nc\nd\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn nonexistent_file_rejected() {
+    let path = temp_path("does-not-exist.txt");
+    let _ = fs::remove_file(&path).await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 1.=1:\n+x") }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn directory_rejected() {
+    let dir = common::temp_dir("edit-file-dir");
+    fs::create_dir_all(&dir).await.expect("mkdir");
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "input": patch(&dir.to_string_lossy(), "SWAP 1.=1:\n+x") }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not a regular file"));
+    let _ = fs::remove_dir_all(&dir).await;
+}
+
+#[tokio::test]
+async fn empty_body_on_swap_rejected() {
+    let path = setup("empty-body.txt", "one\ntwo\n").await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 1.=1:") }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("empty body"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn noop_swap_rejected() {
+    // SWAP that produces the same content → no-op guard.
+    let path = setup("noop.txt", "same\n").await;
+    let tool = EditFileTool;
+
+    let result = tool
+        .execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 1.=1:\n+same") }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("no change"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "same\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+// ── Normalization ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn crlf_normalized_on_edit() {
+    let path = setup("crlf.txt", "alpha\r\nbeta\r\n").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 2.=2:\n+BETA") }))
+        .await
+        .expect("success");
+
+    // CRLF → LF normalization: output has no \r.
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "alpha\nBETA\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn no_trailing_newline_preserved() {
+    let path = setup("no-nl.txt", "a\nb\nc").await;
+    let tool = EditFileTool;
+
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 2.=2:\n+B") }))
+        .await
+        .expect("success");
+
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "a\nB\nc");
+    let _ = fs::remove_file(&path).await;
+}
+
+// ── Schema ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn edit_schema_advertises_only_search_replace_operations() {
+fn schema_advertises_only_input_field() {
     let schema = EditFileTool.definition().input_schema;
-    let props = &schema["properties"]["edits"]["items"]["properties"];
-    assert!(props.get("search").is_some());
-    assert!(props.get("replace").is_some());
-    assert!(props.get("replace_all").is_some());
-    assert!(props.get("delete").is_none());
-    assert!(props.get("insert_before").is_none());
-    assert!(props.get("insert_after").is_none());
-    assert!(props.get("text").is_none());
-    assert!(props.get("match").is_none());
+    let props = &schema["properties"];
+    assert!(props.get("input").is_some());
+    assert!(props.get("path").is_none());
+    assert!(props.get("search").is_none());
+    assert!(props.get("replace").is_none());
+    assert!(props.get("edits").is_none());
+    assert!(props.get("mode").is_none());
+    assert!(props.get("content").is_none());
+    assert!(props.get("expected_hash").is_none());
+    assert_eq!(schema["required"], json!(["input"]));
 }
 
+// ── Preview ─────────────────────────────────────────────────────────────────
+
 #[tokio::test]
-async fn rewrite_replaces_whole_file() {
-    let path = temp_path("rewrite.txt");
-    fs::write(&path, "old").await.expect("setup");
-    let tool = EditFileTool;
+async fn preview_shows_diff_for_swap() {
+    let path = setup("preview.txt", "old\n").await;
+    let args = json!({ "input": patch(&path.to_string_lossy(), "SWAP 1.=1:\n+new") });
 
-    tool.execute(json!({ "path": path, "mode": "rewrite", "content": "new\nfile\n" }))
-        .await
-        .expect("success");
+    let preview = preview_edit_file("edit_file", args).await.expect("preview");
+    assert!(preview.diff.contains("old"));
+    assert!(preview.diff.contains("new"));
+    assert!(!preview.before_hash.is_empty());
 
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "new\nfile\n");
+    // Preview does not write.
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "old\n");
     let _ = fs::remove_file(&path).await;
 }
 
-#[tokio::test]
-async fn large_rewrite_truncates_returned_diff() {
-    let path = temp_path("large-rewrite.txt");
-    fs::write(&path, "old\n").await.expect("setup");
-    let content = (1..=400)
-        .map(|i| format!("line {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "mode": "rewrite", "content": content }))
-        .await
-        .expect("success");
-
-    assert!(result.starts_with("edited file (+400, -1)"));
-    assert!(result.contains("lines truncated"));
-    assert!(result.lines().count() <= 202);
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn expected_hash_mismatch_preserves_file() {
-    let path = temp_path("hash.txt");
-    fs::write(&path, "old").await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({
-            "path": path,
-            "search": "old",
-            "replace": "new",
-            "expected_hash": sha256_hex("different")
-        }))
-        .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("file changed since preview"));
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "old");
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn zero_match_includes_closest_region_hint() {
-    let path = temp_path("hint.txt");
-    fs::write(&path, "fn main() {\n    println!(\"hello\");\n}\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({
-            "path": path,
-            "search": "    println!(\"world\");",
-            "replace": "    println!(\"universe\");"
-        }))
-        .await;
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("matched 0 times"));
-    assert!(err.contains("candidate"));
-    assert!(err.contains("println!"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn trailing_whitespace_mismatch_recovers() {
-    let path = temp_path("trailing-space.txt");
-    fs::write(&path, "fn main() {\n    let value = 1;   \n}\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "    let value = 1;\n",
-        "replace": "    let value = 2;\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn main() {\n    let value = 2;\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn crlf_mismatch_recovers() {
-    let path = temp_path("crlf.txt");
-    fs::write(&path, "alpha\r\nbeta\r\ngamma\r\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "alpha\nbeta\n",
-        "replace": "one\ntwo\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\ntwo\ngamma\r\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn tabs_and_spaces_mismatch_recovers() {
-    // The replacement is re-indented to the file's actual tabs rather than
-    // inserted verbatim with the model's spaces.
-    let path = temp_path("tabs-spaces.txt");
-    fs::write(&path, "fn main() {\n\t\tprintln!(\"hi\");\n}\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "  println!(\"hi\");\n",
-        "replace": "  println!(\"bye\");\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn main() {\n\t\tprintln!(\"bye\");\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn fuzzy_recovery_applies_for_high_confidence_block() {
-    let path = temp_path("fuzzy-high.txt");
-    fs::write(
-        &path,
-        "fn score(input: i32) -> i32 {\n    let adjusted = input + 1;\n    adjusted * 2\n}\n",
-    )
-    .await
-    .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "fn score(input: i32) -> i32 {\n    let adjusted = input + 2;\n    adjusted * 2\n}\n",
-        "replace": "fn score(input: i32) -> i32 {\n    input * 3\n}\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn score(input: i32) -> i32 {\n    input * 3\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn fuzzy_recovery_rejects_low_confidence_block() {
-    let path = temp_path("fuzzy-low.txt");
-    let original = "fn alpha() {\n    println!(\"alpha\");\n    println!(\"done\");\n}\n";
-    fs::write(&path, original).await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({
-            "path": path,
-            "search": "struct Missing {\n    value: usize,\n    label: String,\n}\n",
-            "replace": "replacement\n"
-        }))
-        .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not confident enough"));
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn fuzzy_recovery_rejects_close_candidates() {
-    let path = temp_path("fuzzy-close.txt");
-    let original = "fn first() {\n    let value = compute_total(10);\n    println!(\"{}\", value);\n}\n\nfn second() {\n    let value = compute_total(11);\n    println!(\"{}\", value);\n}\n";
-    fs::write(&path, original).await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({
-            "path": path,
-            "search": "fn third() {\n    let value = compute_total(12);\n    println!(\"{}\", value);\n}\n",
-            "replace": "replacement\n"
-        }))
-        .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not confident enough"));
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn exact_duplicates_do_not_attempt_fuzzy_recovery() {
-    let path = temp_path("exact-dup-no-fuzzy.txt");
-    let original = "target block\ntarget block\n";
-    fs::write(&path, original).await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "target block", "replace": "changed" }))
-        .await;
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("matched 2 times"));
-    assert!(!err.contains("not confident enough"));
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn multi_edit_failure_is_atomic_after_recovered_edit() {
-    let path = temp_path("multi-recover-atomic.txt");
-    let original = "fn main() {\n    let value = 1;   \n}\n";
-    fs::write(&path, original).await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({
-            "path": path,
-            "edits": [
-                { "search": "    let value = 1;\n", "replace": "    let value = 2;\n" },
-                { "search": "definitely missing", "replace": "x" }
-            ]
-        }))
-        .await;
-
-    assert!(result.is_err());
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn preview_uses_same_recovery_logic_as_execute() {
-    let path = temp_path("preview-recover.txt");
-    fs::write(&path, "fn main() {\n    let value = 1;   \n}\n")
-        .await
-        .expect("setup");
-    let args = json!({
-        "path": path,
-        "search": "    let value = 1;\n",
-        "replace": "    let value = 2;\n"
-    });
-
-    let preview = preview_edit_file("edit_file", args.clone())
-        .await
-        .expect("preview");
-    assert!(preview.diff.contains("let value = 2;"));
-
-    let tool = EditFileTool;
-    tool.execute(args).await.expect("success");
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn main() {\n    let value = 2;\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
+// ── Permissions ─────────────────────────────────────────────────────────────
 
 #[cfg(unix)]
 #[tokio::test]
 async fn preserves_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = temp_path("perms.sh");
-    fs::write(&path, "old").await.expect("setup");
+    let path = setup("perms.sh", "old\n").await;
     fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .await
         .expect("chmod");
     let tool = EditFileTool;
 
-    tool.execute(json!({ "path": path, "search": "old", "replace": "new" }))
+    tool.execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 1.=1:\n+new") }))
         .await
         .expect("success");
 
@@ -534,325 +585,21 @@ async fn preserves_permissions() {
     let _ = fs::remove_file(&path).await;
 }
 
+// ── Return format ───────────────────────────────────────────────────────────
+
 #[tokio::test]
-async fn replace_all_top_level_replaces_every_occurrence() {
-    let path = temp_path("replace-all-top.txt");
-    fs::write(&path, "foo bar foo baz foo")
-        .await
-        .expect("setup");
+async fn success_message_includes_new_tag() {
+    let path = setup("tag.txt", "old\n").await;
     let tool = EditFileTool;
 
-    tool.execute(json!({ "path": path, "search": "foo", "replace": "qux", "replace_all": true }))
+    let result = tool
+        .execute(json!({ "input": patch(&path.to_string_lossy(), "SWAP 1.=1:\n+new") }))
         .await
         .expect("success");
 
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "qux bar qux baz qux"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn replace_all_in_edits_array_replaces_every_occurrence() {
-    let path = temp_path("replace-all-edits.txt");
-    fs::write(&path, "alpha beta alpha gamma alpha")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "edits": [
-            { "search": "alpha", "replace": "one", "replace_all": true }
-        ]
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one beta one gamma one"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn replace_all_errors_on_zero_matches() {
-    let path = temp_path("replace-all-zero.txt");
-    fs::write(&path, "nothing here").await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "ghost", "replace": "x", "replace_all": true }))
-        .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("matched 0 times"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn missing_trailing_newline_with_whitespace_mismatch_recovers() {
-    // The search omits the trailing newline AND uses spaces where the file
-    // has a tab: exact match fails, so the normalized path must handle the
-    // newline asymmetry between the needle and whole-line windows — and the
-    // replacement must not swallow the line's newline. The replacement is
-    // re-indented to the file's tab.
-    let path = temp_path("no-trailing-newline.txt");
-    fs::write(&path, "fn main() {\n\tlet value = 1;\n}\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "    let value = 1;",
-        "replace": "    let value = 2;"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn main() {\n\tlet value = 2;\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn dropped_blank_line_recovers() {
-    // The model's search omits a blank line present in the file; window
-    // sizes of needle_lines±1 let fuzzy matching find the real block.
-    let path = temp_path("dropped-blank-line.txt");
-    fs::write(
-        &path,
-        "fn compute() {\n    let alpha = first_value();\n\n    let beta = second_value();\n}\n",
-    )
-    .await
-    .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "fn compute() {\n    let alpha = first_value();\n    let beta = second_value();\n}\n",
-        "replace": "fn compute() {\n    combined_values()\n}\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn compute() {\n    combined_values()\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn unicode_quote_mismatch_recovers() {
-    // File contains a curly apostrophe; the model reproduces it as a straight
-    // quote. Normalization folds typographic characters.
-    let path = temp_path("unicode-quote.txt");
-    fs::write(
-        &path,
-        "// it\u{2019}s the \u{201C}main\u{201D} entry\nfn main() {}\n",
-    )
-    .await
-    .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "// it's the \"main\" entry\n",
-        "replace": "// entry point\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "// entry point\nfn main() {}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn extra_leading_indent_recovers_and_reindents_replacement() {
-    // The model over-indents both search and replace by 4 spaces; the dedented
-    // tier must find the block and land the replacement at the file's indent.
-    let path = temp_path("extra-indent.txt");
-    fs::write(&path, "fn build_actions() {\n    let a = 1;\n}\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "    fn build_actions() {\n        let a = 1;\n    }\n",
-        "replace": "    fn build_actions() {\n        let a = 2;\n    }\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn build_actions() {\n    let a = 2;\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn missing_leading_indent_recovers_and_reindents_replacement() {
-    // Delta in the other direction: the search under-indents a nested block.
-    let path = temp_path("missing-indent.txt");
-    fs::write(
-        &path,
-        "impl Foo {\n    fn bar() {\n        work();\n    }\n}\n",
-    )
-    .await
-    .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "fn bar() {\n    work();\n}\n",
-        "replace": "fn bar() {\n    rest();\n}\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "impl Foo {\n    fn bar() {\n        rest();\n    }\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn dedented_match_reindents_inner_lines() {
-    let path = temp_path("inner-indent.txt");
-    fs::write(&path, "if ready {\n    do_it();\n}\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "search": "if ready {\ndo_it();\n}\n",
-        "replace": "if ready {\ndone();\n}\n"
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "if ready {\n    done();\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn dedented_match_at_two_indent_levels_is_ambiguous() {
-    // The text exists twice and only matches the (wrongly indented) needle
-    // after dedenting: must error listing both, not pick one.
-    let path = temp_path("dedent-ambiguous.txt");
-    let original = "do_thing();\nmiddle();\ndo_thing();\n";
-    fs::write(&path, original).await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "  do_thing();", "replace": "  done();" }))
-        .await;
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("matched 2 times"), "unexpected error: {err}");
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn correct_indent_resolves_uniquely_among_indent_variants() {
-    // Same dedented text at two indent levels, but the needle's indent matches
-    // one exactly: the indent-sensitive tiers must resolve it without error.
-    let path = temp_path("indent-resolves.txt");
-    fs::write(&path, "do_thing();\n    do_thing();\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({ "path": path, "search": "    do_thing();", "replace": "    done();" }))
-        .await
-        .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "do_thing();\n    done();\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn insert_after_with_wrong_indent_anchor_reindents_text() {
-    let path = temp_path("insert-indent.txt");
-    fs::write(&path, "fn main() {\n    first();\n}\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    tool.execute(json!({
-        "path": path,
-        "edits": [
-            { "insert_after": "        first();", "text": "\n        second();" }
-        ]
-    }))
-    .await
-    .expect("success");
-
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "fn main() {\n    first();\n    second();\n}\n"
-    );
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn ambiguous_error_suggests_replace_all() {
-    let path = temp_path("ambiguous-replace-all-hint.txt");
-    fs::write(&path, "foo\nbar\nfoo\n").await.expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "foo", "replace": "baz" }))
-        .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("replace_all=true"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn ambiguous_error_includes_match_snippets() {
-    let path = temp_path("ambiguous-snippets.txt");
-    fs::write(&path, "let x = total;\nother line\nlet x = total;\n")
-        .await
-        .expect("setup");
-    let tool = EditFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "search": "let x = total;", "replace": "let x = sum;" }))
-        .await;
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("line 1: let x = total;"),
-        "missing snippet: {err}"
-    );
-    assert!(
-        err.contains("line 3: let x = total;"),
-        "missing snippet: {err}"
-    );
-    assert!(err.contains("surrounding lines"));
+    // Result contains edited `<path>` and a new [path#TAG] header.
+    assert!(result.contains("edited"));
+    assert!(result.contains("#"));
+    assert!(result.contains("new"));
     let _ = fs::remove_file(&path).await;
 }

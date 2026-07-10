@@ -25,9 +25,13 @@ async fn reads_entire_file_when_no_options_given() {
         .await
         .expect("read should succeed");
 
-    // Full read of a small file: content plus a size-awareness footer, no
-    // paging prompt.
-    assert_eq!(result, "line one\nline two\nline three\n\n[3 lines total]");
+    // Full read: hashline header + total-lines footer + numbered lines.
+    assert!(result.starts_with("["));
+    assert!(result.contains("#"));
+    assert!(result.contains("[3 lines total]"));
+    assert!(result.contains("    1: line one"));
+    assert!(result.contains("    2: line two"));
+    assert!(result.contains("    3: line three"));
     let _ = fs::remove_file(&path).await;
 }
 
@@ -44,11 +48,11 @@ async fn start_line_skips_to_given_line() {
         .await
         .expect("read should succeed");
 
-    // Ranged read to EOF: explicit range so the model knows it hit the end.
-    assert_eq!(
-        result,
-        "gamma\ndelta\n\n[showing lines 3-4 of 4; end of file]"
-    );
+    // Ranged read to EOF: hashline header + end-of-file footer + numbered lines.
+    assert!(result.starts_with("["));
+    assert!(result.contains("[showing lines 3-4 of 4; end of file]"));
+    assert!(result.contains("    3: gamma"));
+    assert!(result.contains("    4: delta"));
     let _ = fs::remove_file(&path).await;
 }
 
@@ -63,11 +67,12 @@ async fn max_lines_limits_output() {
         .await
         .expect("read should succeed");
 
-    // Partial view: tells the model the range and how to page.
-    assert_eq!(
-        result,
-        "b\nc\n\n[showing lines 2-3 of 5; call again with start_line=4 to continue]"
-    );
+    // Partial view: hashline header + editable-lines footer + numbered lines.
+    assert!(result.starts_with("["));
+    assert!(result.contains("only these lines are editable"));
+    assert!(result.contains("start_line=4"));
+    assert!(result.contains("    2: b"));
+    assert!(result.contains("    3: c"));
     let _ = fs::remove_file(&path).await;
 }
 
@@ -82,8 +87,23 @@ async fn start_line_beyond_file_returns_empty() {
         .await
         .expect("read should succeed");
 
-    // Empty range still reports total size so the model can recover.
-    assert_eq!(result, "[no lines in range; file has 1 line]");
+    // Empty range still reports hashline header + total size.
+    assert!(result.starts_with("["));
+    assert!(result.contains("[no lines in range; file has 1 line]"));
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn empty_file_returns_hashline_header_and_footer() {
+    let path = temp_path("empty.txt");
+    fs::write(&path, "").await.expect("setup");
+    let result = ReadFileTool
+        .execute(json!({ "path": path }))
+        .await
+        .expect("read should succeed");
+    assert!(result.starts_with("["));
+    assert!(result.contains('#'));
+    assert!(result.contains("[empty file; 0 lines total]"));
     let _ = fs::remove_file(&path).await;
 }
 
@@ -124,12 +144,13 @@ async fn large_file_shows_paging_footer() {
         .expect("read should succeed");
 
     assert!(
-        result.contains("[showing lines 1-500 of 600; call again with start_line=501 to continue]"),
+        result.contains("[showing lines 1-500 of 600; only these lines are editable"),
         "missing paging footer: {result}"
     );
+    assert!(result.contains("start_line=501"));
     // Last line of the window is present, line 501 is not.
-    assert!(result.contains("line 500"));
-    assert!(!result.contains("\nline 501\n"));
+    assert!(result.contains("  500: line 500"));
+    assert!(!result.contains("  501:"));
     let _ = fs::remove_file(&path).await;
 }
 

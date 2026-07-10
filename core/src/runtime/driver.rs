@@ -789,7 +789,11 @@ impl Driver {
                     });
                     break Err("aborted after 5 consecutive stream errors".to_string());
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::select! {
+                    biased;
+                    _ = await_cancel() => break Ok(String::new()),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
                 continue;
             }
             consecutive_errors = 0;

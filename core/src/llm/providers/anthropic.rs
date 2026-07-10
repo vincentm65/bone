@@ -231,9 +231,8 @@ fn finish_tool_use(partial: PartialToolUse) -> Option<ChatEvent> {
     let arguments = if partial.input.trim().is_empty() {
         json!({})
     } else {
-        serde_json::from_str(&partial.input).unwrap_or_else(|_| {
-            json!({ crate::tools::TRUNCATED_ARGS_KEY: partial.input })
-        })
+        serde_json::from_str(&partial.input)
+            .unwrap_or_else(|_| json!({ crate::tools::TRUNCATED_ARGS_KEY: partial.input }))
     };
     Some(ChatEvent::ToolCall(ToolCall {
         id: partial.id,
@@ -402,7 +401,10 @@ impl LlmProvider for AnthropicProvider {
 /// reported separately. Sum them so `prompt_tokens` reflects the full prompt,
 /// matching how the OpenAI-compat providers report `prompt_tokens`.
 fn usage_input_tokens(usage: &Value) -> u32 {
-    let base = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let base = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let cache_read = usage
         .get("cache_read_input_tokens")
         .and_then(|v| v.as_u64())
@@ -416,7 +418,7 @@ fn usage_input_tokens(usage: &Value) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_request_parts, finish_tool_use, usage_input_tokens, PartialToolUse};
+    use super::{PartialToolUse, build_request_parts, finish_tool_use, usage_input_tokens};
     use crate::llm::provider::ChatEvent;
     use crate::llm::{ChatMessage, ChatRole};
     use serde_json::json;

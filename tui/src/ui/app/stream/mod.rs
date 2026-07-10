@@ -1,10 +1,10 @@
 //! Streaming turn driver: renders provider/tool events and handles keys during a turn.
 
 use crate::chat::Message;
+use crate::runtime::RuntimeCommand;
 use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
 use crate::tools::{ApprovalMode, Tool, ToolCall};
-use crate::runtime::RuntimeCommand;
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
@@ -1030,9 +1030,9 @@ impl App {
     /// Render the `edit_file` diff preview to scrollback (a tool row + the
     /// unified diff), mirroring the non-Driver path's `prepare_tool_call`. The
     /// call id is recorded in `shown_tool_rows` so the later `ToolResult` event
-    /// doesn't render a duplicate row. (The Driver executes the edit itself, so
-    /// unlike the old path we can't inject `expected_hash` — the preview here is
-    /// purely for display.)
+    /// doesn't render a duplicate row. The Driver executes the edit itself, so
+    /// this preview resolves the hashline patch against the live file purely
+    /// for display (no snapshot store; stale-tag mismatches surface at apply).
     pub(crate) async fn pump_show_edit_preview(
         &mut self,
         call: &ToolCall,
@@ -1203,9 +1203,7 @@ impl App {
                         continue;
                     }
                     // Ctrl+Enter during streaming: steer the agent mid-turn.
-                    if key.code == KeyCode::Enter
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
+                    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
                         let text = input.expanded().trim().to_string();
                         if !text.is_empty() {
                             let _ = command_tx.send(RuntimeCommand::Steer { text });

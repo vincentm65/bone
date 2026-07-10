@@ -1,14 +1,25 @@
 //! The `write_file` tool: creates a new file atomically (fails if it exists).
+//!
+//! On success it records the file's normalized content as a fresh snapshot
+//! (all lines visible — the model just authored them) so a following
+//! `edit_file` can anchor on any line, and emits a `[path#TAG]` header the
+//! model quotes in that edit.
+
+use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::ErrorKind;
-use std::path::Path;
 use tokio::fs;
 
-use crate::tools::types::{Tool, ToolDefinition};
+use crate::tools::snapshot::{self, SnapshotStore};
+use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 use crate::tools::write_atomic::write_atomic;
+
+/// Shared snapshot store type (mirrors the alias in `edit_file`/`read_file`).
+type Snapshots = Arc<RwLock<SnapshotStore>>;
 
 pub struct WriteFileTool;
 
@@ -23,7 +34,7 @@ impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "write_file".to_string(),
-            description: "Create a NEW UTF-8 text file. Only for files that do not exist yet; it errors if the path already exists. To change or replace an existing file, use edit_file instead (mode=\"rewrite\" replaces the whole file).".to_string(),
+            description: "Create a NEW UTF-8 text file. Only for files that do not exist yet; it errors if the path already exists. To change an existing file, use edit_file with a hashline patch instead. Returns a `[path#TAG]` header to quote in your next edit_file.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -43,31 +54,71 @@ impl Tool for WriteFileTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-        if let Some(parent) = Path::new(&args.path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(crate::util::errstr)?;
-        }
-        let path = Path::new(&args.path);
-        // Reject if the destination already exists. `rename` will silently
-        // overwrite on Unix, and `exists()` misses dangling symlinks, so use
-        // symlink_metadata. A create-between-check-and-rename race remains but
-        // is acceptable for this tool's local convenience threat model.
-        match fs::symlink_metadata(path).await {
-            Ok(_) => {
-                return Err(format!(
-                    "file already exists — write_file only creates new files. Do NOT retry write_file for this path. \
-                     To change it, call edit_file: use search/replace for a targeted change, or {{\"path\":\"{}\",\"mode\":\"rewrite\",\"content\":\"...\"}} to replace the whole file.",
-                    args.path
-                ));
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(crate::util::errstr(e)),
-        }
-        write_atomic(path, &args.content, None).await?;
-        Ok(format!("wrote {} bytes", args.content.len()))
+        write_file_inner(arguments, None).await
     }
+
+    async fn execute_output_live(
+        &self,
+        arguments: Value,
+        _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        write_file_inner(arguments, Some(&context.snapshots))
+            .await
+            .map(ToolOutput::text)
+    }
+}
+
+async fn write_file_inner(
+    arguments: Value,
+    snapshots: Option<&Snapshots>,
+) -> Result<String, String> {
+    let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
+    if let Some(parent) = Path::new(&args.path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(crate::util::errstr)?;
+    }
+    let path = Path::new(&args.path);
+    // Reject if the destination already exists. `rename` will silently
+    // overwrite on Unix, and `exists()` misses dangling symlinks, so use
+    // symlink_metadata. A create-between-check-and-rename race remains but
+    // is acceptable for this tool's local convenience threat model.
+    match fs::symlink_metadata(path).await {
+        Ok(_) => {
+            return Err(format!(
+                "file already exists — write_file only creates new files. Do NOT retry write_file for this path. \
+                 To change it, call edit_file with a `[path#TAG]` hashline patch (SWAP/DEL/INS line ops).",
+            ));
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(crate::util::errstr(e)),
+    }
+    write_atomic(path, &args.content, None).await?;
+
+    // Snapshot the normalized content with every line visible, so a follow-up
+    // edit_file can anchor on any line. The tag matches what read_file would
+    // emit for the same bytes (both normalize identically).
+    let normalized = snapshot::normalize_text(&args.content);
+    let n = snapshot::numbered_lines(&normalized).len();
+    let tag = match snapshots {
+        Some(store) => match store.write() {
+            Ok(mut guard) => {
+                guard.record(&args.path, &normalized, Some(&(1..=n).collect::<Vec<_>>()))
+            }
+            Err(_) => snapshot::compute_tag(&normalized),
+        },
+        None => snapshot::compute_tag(&normalized),
+    };
+
+    Ok(format!(
+        "wrote {} ({} bytes, {} line{}) [`{}#{tag}`]",
+        args.path,
+        args.content.len(),
+        n,
+        if n == 1 { "" } else { "s" },
+        args.path,
+    ))
 }

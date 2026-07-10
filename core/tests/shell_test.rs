@@ -1,11 +1,14 @@
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
 use serde_json::json;
 
 use bone_core::tools::shell::ShellTool;
 use bone_core::tools::shell::truncate_output;
-use bone_core::tools::types::Tool;
-
+use bone_core::tools::types::{Tool, ToolExecutionContext};
 #[tokio::test]
 async fn timeout_returns_partial_stdout() {
     // A command that prints to stdout then sleeps past the timeout. The model
@@ -60,4 +63,46 @@ async fn classification_is_accepted_but_ignored() {
         .expect("command should succeed");
 
     assert!(result.contains("exit code: 0"));
+}
+
+#[tokio::test]
+async fn cancel_kills_promptly_and_returns_partial_output() {
+    // A command that prints then sleeps well past the wall-clock timeout. We
+    // flip the cancel flag mid-run and expect execute_output_live to return
+    // within a second or so (far under the 30s timeout) with partial output —
+    // proving the process tree is killed on cancel, not waited out.
+    let tool = ShellTool;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut ctx = ToolExecutionContext::default();
+    ctx.cancelled = Some(cancel.clone());
+
+    let cmd = tokio::spawn(async move {
+        tool.execute_output_live(
+            json!({
+                "command": "echo 'starting download' && sleep 30",
+                "timeout_ms": 30_000
+            }),
+            None,
+            ctx,
+        )
+        .await
+    });
+
+    // Let the echo land, then cancel.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let start = Instant::now();
+    cancel.store(true, Ordering::Relaxed);
+
+    let result = cmd.await.expect("task panicked");
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "expected cancel error, got: {result:?}");
+    let err = result.unwrap_err();
+    assert!(err.contains("[cancelled by user"));
+    assert!(err.contains("starting download"));
+    // Must return in well under the 30s timeout — the polling interval is 25ms.
+    assert!(
+        elapsed.as_secs() < 5,
+        "cancel took {elapsed:?}, expected < 5s"
+    );
 }

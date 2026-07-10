@@ -39,6 +39,10 @@ pub struct ToolExecutionContext {
     /// The driving conversation's approval gate, so tools that delegate
     /// (`ctx.agent.spawn`) can escalate would-be-denied calls to the user.
     pub approval_gate: Option<crate::tools::SharedGate>,
+    /// Shared session-scope snapshot store for hashline file ops. Cloned from
+    /// the driving [`ToolHandler`], so the same store is seen by `read_file`,
+    /// `write_file`, and `edit_file` across a whole session.
+    pub snapshots: std::sync::Arc<std::sync::RwLock<crate::tools::snapshot::SnapshotStore>>,
 }
 
 #[async_trait]

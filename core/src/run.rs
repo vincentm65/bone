@@ -118,6 +118,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             max_tokens: None,
             approval_gate: None,
             transcript: None,
+            cancel: None,
         })
         .await;
     }
@@ -140,6 +141,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         max_tokens: None,
         approval_gate: None,
         transcript: None,
+        cancel: None,
     })
     .await
 }

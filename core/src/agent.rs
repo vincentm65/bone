@@ -227,6 +227,11 @@ pub struct AgentRequest {
     pub max_tokens: Option<u32>,
     pub approval_gate: Option<crate::tools::SharedGate>,
     pub transcript: Option<Vec<ChatMessage>>,
+    /// Shared cancel flag (the driving session's Esc token). Threaded into
+    /// the subagent's `Driver` so its tools — including the shell — can be
+    /// killed mid-execution when the user cancels, rather than only at the
+    /// watchdog's next boundary.
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Current time in epoch milliseconds.
@@ -538,7 +543,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         event_sender: request.event_sender.clone(),
         runtime_events: None,
         key_reply_registry: None,
-        cancel: None,
+        cancel: request.cancel,
         history,
         transcript,
         token_stats,
@@ -626,12 +631,7 @@ pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "edit_file" => call
-            .arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        "edit_file" => summarize_edit_file_input(&call.arguments),
         "read_file" => call
             .arguments
             .get("path")
@@ -648,6 +648,39 @@ pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
                 format!("{}...", &json[..end])
             } else {
                 json
+            }
+        }
+    }
+}
+
+/// Summarize an `edit_file` hashline patch for display: `<path> (<OP>)` from
+/// the first section's path and first op. Falls back to a truncated first line
+/// of the input on a parse error.
+fn summarize_edit_file_input(args: &serde_json::Value) -> String {
+    let Some(input) = args.get("input").and_then(|v| v.as_str()) else {
+        return String::new();
+    };
+    match crate::tools::edit_file::parser::parse(input) {
+        Ok(patch) => match patch.sections.first() {
+            Some(section) => {
+                let path = section.path.as_str();
+                match section.ops.first() {
+                    Some(op) => format!("{path} ({})", op.label()),
+                    None => path.to_string(),
+                }
+            }
+            None => String::new(),
+        },
+        Err(_) => {
+            let first = input.lines().next().unwrap_or("");
+            if first.len() > 80 {
+                let mut end = 77;
+                while !first.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &first[..end])
+            } else {
+                first.to_string()
             }
         }
     }
@@ -679,6 +712,7 @@ mod tests {
             max_tokens: None,
             approval_gate: None,
             transcript: None,
+            cancel: None,
         }
     }
 

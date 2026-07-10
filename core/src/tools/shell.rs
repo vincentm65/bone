@@ -1,29 +1,56 @@
 //! The `shell` / `bash` tool: runs commands with streaming output and timeouts.
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 use crate::tools::truncate_line;
-use crate::tools::types::{Tool, ToolDefinition};
+use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 
 // ── Script execution (formerly script_runner.rs) ────────────────────────────
 
 #[cfg(unix)]
 unsafe extern "C" {
     fn setsid() -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
 }
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+/// Signal the child's whole process group so grandchildren (the actual
+/// download/build the shell spawned) die with it, not just the wrapper.
+/// `setsid()` in `pre_exec` makes the child a group leader (pgid == pid), so a
+/// signal to the group (`-pid`) reaches the entire tree.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // Negative pid => the whole process group.
+    unsafe {
+        let _ = kill(-(pid as i32), SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
 
 pub struct ScriptRequest {
     pub command: String,
     pub env: Vec<(String, String)>,
     pub timeout_ms: u64,
+    /// Cooperative cancel flag. When set (Esc/Ctrl+C mid-turn), `run_script`
+    /// kills the process tree and returns promptly with partial output instead
+    /// of blocking until `timeout_ms`. `None` for the context-less paths
+    /// (`ctx.shell`), where the wall-clock timeout is the only backstop.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 pub struct ScriptOutput {
@@ -62,6 +89,7 @@ fn which(name: &str) -> bool {
 
 pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
     let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
+    let cancel = request.cancel.clone();
     let (shell, shell_arg, _) = shell_command();
     let mut cmd = Command::new(shell);
     cmd.arg(shell_arg)
@@ -100,8 +128,22 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
         buf
     });
 
-    match timeout(Duration::from_millis(timeout_ms), child.wait()).await {
-        Ok(Ok(status)) => {
+    // Race the child against both the wall-clock timeout and a cooperative
+    // cancel (Esc). Whichever fires first wins; `select!` drops the losing
+    // branch future, which releases the `&mut child` borrow held by the
+    // `child.wait()` future so the kill/reap below can run.
+    let outcome = tokio::select! {
+        biased;
+        _ = await_cancel(cancel.as_ref()) => WaitOutcome::Cancelled,
+        r = timeout(Duration::from_millis(timeout_ms), child.wait()) => match r {
+            Ok(Ok(status)) => WaitOutcome::Exited(status),
+            Ok(Err(e)) => return Err(crate::util::errstr(e)),
+            Err(_) => WaitOutcome::TimedOut,
+        },
+    };
+
+    match outcome {
+        WaitOutcome::Exited(status) => {
             let out = stdout_task.await.unwrap_or_default();
             let err = stderr_task.await.unwrap_or_default();
             Ok(ScriptOutput {
@@ -111,17 +153,9 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
                 stderr: truncate_output(&String::from_utf8_lossy(&err), 100),
             })
         }
-        Ok(Err(e)) => Err(crate::util::errstr(e)),
-        Err(_) => {
-            // Timed out. Kill the child, then await the read tasks (they finish
-            // once the pipes close on child exit). For a build that times out,
-            // the partial compiler output is exactly what the model needs next.
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            let out = stdout_task.await.unwrap_or_default();
-            let err = stderr_task.await.unwrap_or_default();
-            let stdout_str = truncate_output(&String::from_utf8_lossy(&out), 500);
-            let stderr_str = truncate_output(&String::from_utf8_lossy(&err), 100);
+        WaitOutcome::TimedOut => {
+            let (stdout_str, stderr_str) =
+                kill_and_drain(&mut child, stdout_task, stderr_task).await;
             let mut msg =
                 format!("[timed out after {timeout_ms}ms; partial output]\nstdout:\n{stdout_str}");
             if !stderr_str.is_empty() {
@@ -129,7 +163,90 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
             }
             Err(msg)
         }
+        WaitOutcome::Cancelled => {
+            // Esc/Ctrl+C mid-command: kill the whole tree and return whatever
+            // output was captured, so a stuck download no longer freezes the
+            // machine until the wall-clock timeout.
+            let (stdout_str, stderr_str) =
+                kill_and_drain(&mut child, stdout_task, stderr_task).await;
+            let mut msg = format!("[cancelled by user; partial output]\nstdout:\n{stdout_str}");
+            if !stderr_str.is_empty() {
+                msg.push_str(&format!("\nstderr:\n{stderr_str}"));
+            }
+            Err(msg)
+        }
     }
+}
+
+/// How the child's `wait()` resolved: it exited, the wall-clock timeout fired,
+/// or the user cancelled mid-run.
+enum WaitOutcome {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+    Cancelled,
+}
+
+/// Awaitable cancel: resolves once the shared flag flips, so a `select!` can
+/// interrupt `child.wait()` the instant Esc lands rather than only at the next
+/// wall-clock boundary. `None` (no flag, e.g. headless `ctx.shell`) never
+/// resolves, so the `select!` always takes the wait branch there.
+async fn await_cancel(cancel: Option<&Arc<AtomicBool>>) {
+    match cancel {
+        Some(flag) => {
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Kill the child and its whole process tree, reap it, and drain the captured
+/// stdout/stderr so partial output survives. Shared by the timeout and cancel
+/// paths. The pipes close once the process group dies, so the read tasks
+/// started in `run_script` finish and return everything buffered so far.
+async fn kill_and_drain(
+    child: &mut tokio::process::Child,
+    stdout_task: JoinHandle<Vec<u8>>,
+    stderr_task: JoinHandle<Vec<u8>>,
+) -> (String, String) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        kill_process_group(pid);
+    }
+    // Cross-platform backstop: signal the direct child even where the group
+    // kill above is a no-op (non-Unix) or the pid was already reaped. Ignored
+    // errors are fine — the child may already be dead.
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    let out = stdout_task.await.unwrap_or_default();
+    let err = stderr_task.await.unwrap_or_default();
+    (
+        truncate_output(&String::from_utf8_lossy(&out), 500),
+        truncate_output(&String::from_utf8_lossy(&err), 100),
+    )
+}
+
+/// Deserialize `shell` arguments: the command plus a clamped timeout.
+/// `classification` is accepted for backward compatibility and discarded (the
+/// policy classifier is authoritative).
+fn parse_shell_args(arguments: Value) -> Result<(String, u64), String> {
+    let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
+    let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
+    Ok((args.command, timeout_ms))
+}
+
+/// Render a finished command as the tool result the model reads.
+fn format_output(output: &ScriptOutput) -> String {
+    let mut result = format!(
+        "exit code: {}\nstdout:\n{}",
+        output_status_label(output),
+        output.stdout,
+    );
+    if !output.stderr.is_empty() {
+        result.push_str(&format!("\nstderr:\n{}", output.stderr));
+    }
+    result
 }
 
 /// Truncate output to `max_lines`, keeping the first half and last half with a
@@ -226,24 +343,37 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-        let _ = args.classification;
-        let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
-
+        // Context-less fallback (trait default path / tests). No cancel token
+        // is available here, so the wall-clock timeout is the only backstop;
+        // the live path below wires in cancellation.
+        let (command, timeout_ms) = parse_shell_args(arguments)?;
         let output = run_script(ScriptRequest {
-            command: args.command,
+            command,
             env: Vec::new(),
             timeout_ms,
+            cancel: None,
         })
         .await?;
-        let mut result = format!(
-            "exit code: {}\nstdout:\n{stdout_trunc}",
-            output_status_label(&output),
-            stdout_trunc = output.stdout,
-        );
-        if !output.stderr.is_empty() {
-            result.push_str(&format!("\nstderr:\n{}", output.stderr));
-        }
-        Ok(result)
+        Ok(format_output(&output))
+    }
+
+    async fn execute_output_live(
+        &self,
+        arguments: Value,
+        _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        // Live path used by the driver: thread the turn's cancel flag in so an
+        // Esc mid-command kills the process tree and returns promptly instead
+        // of blocking until the wall-clock timeout.
+        let (command, timeout_ms) = parse_shell_args(arguments)?;
+        let output = run_script(ScriptRequest {
+            command,
+            env: Vec::new(),
+            timeout_ms,
+            cancel: context.cancelled.clone(),
+        })
+        .await?;
+        Ok(ToolOutput::text(format_output(&output)))
     }
 }

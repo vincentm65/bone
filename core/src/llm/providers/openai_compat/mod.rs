@@ -371,7 +371,11 @@ fn cached_tokens_from_usage(usage: &Value) -> Option<u32> {
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
-        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64()))
+        .or_else(|| {
+            usage
+                .get("prompt_cache_hit_tokens")
+                .and_then(|v| v.as_u64())
+        })
         .map(|v| v as u32)
 }
 

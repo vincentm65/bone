@@ -62,6 +62,10 @@ impl ToolRegistry {
                 if let Some(msg) = reject_degenerate_arguments(tool.as_ref(), &call.arguments) {
                     return ToolResult::error(call_id, name, msg);
                 }
+                let snapshots = tool_handler
+                    .as_ref()
+                    .map(|h| h.snapshots.clone())
+                    .unwrap_or_default();
                 match tool
                     .execute_output_live(
                         call.arguments,
@@ -76,6 +80,7 @@ impl ToolRegistry {
                             tool_handler,
                             app_state,
                             approval_gate,
+                            snapshots,
                         },
                     )
                     .await
@@ -186,6 +191,12 @@ pub struct ToolHandler {
     /// Propagated to nested/subagent calls via the recursive `self.clone()` in
     /// `execute_one_live`, so tools see the same `ctx` as slash commands.
     pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
+    /// Session-scoped file snapshots backing hashline `read_file`/`write_file`/
+    /// `edit_file`. Behind an `Arc<RwLock<..>>` so every cloned handler in a
+    /// turn (and across turns) shares one store — the driver clones the
+    /// `ToolHandler` per turn but never swaps this `Arc`, so snapshots persist
+    /// for the whole session.
+    pub snapshots: std::sync::Arc<std::sync::RwLock<crate::tools::snapshot::SnapshotStore>>,
 }
 
 impl ToolHandler {
@@ -221,6 +232,9 @@ impl ToolHandler {
             cancel_token: None,
             approval_gate: None,
             app_state: None,
+            snapshots: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::tools::snapshot::SnapshotStore::new(),
+            )),
         }
     }
 
@@ -242,6 +256,9 @@ impl ToolHandler {
             cancel_token: None,
             approval_gate: None,
             app_state: None,
+            snapshots: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::tools::snapshot::SnapshotStore::new(),
+            )),
         }
     }
 

@@ -422,6 +422,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
             command,
             env: Vec::new(),
             timeout_ms,
+            cancel: None,
         }));
 
         match output {
@@ -1365,13 +1366,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             Err(e) => return agent_result_to_lua(lua, Err(e)),
         };
         let BuiltAgent {
-            request,
+            mut request,
             activity,
             timeout_ms,
             wall_timeout_ms,
         } = built;
 
         let cancelled = cancelled_run.clone();
+        request.cancel = cancelled.clone();
         let response = block_on(run_agent_with_watchdog(
             request,
             activity,
@@ -1409,13 +1411,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 Err(e) => return agent_result_to_lua(lua, Err(e)),
             };
             let BuiltAgent {
-                request,
+                mut request,
                 activity,
                 timeout_ms,
                 wall_timeout_ms,
             } = built;
 
             let cancelled = cancelled_stream.clone();
+            request.cancel = cancelled.clone();
             let response = block_on(async {
                 let agent_future = crate::agent::run_agent(request);
                 tokio::pin!(agent_future);
@@ -1682,6 +1685,7 @@ fn launch_background_job(
         tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
     built.request.event_sender = Some(event_tx);
     let job_cancel = Arc::new(AtomicBool::new(false));
+    built.request.cancel = Some(job_cancel.clone());
     let id = crate::ext::jobs::registry().create(crate::ext::jobs::NewJob {
         agent,
         task,
@@ -1823,6 +1827,7 @@ fn build_agent_request(
         max_tokens,
         approval_gate,
         transcript: None,
+        cancel: None,
     };
     Ok(BuiltAgent {
         request,
