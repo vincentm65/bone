@@ -466,6 +466,8 @@ impl App {
         // back to its non-interactive decision); clear the prompt UI too.
         self.pending_approval = None;
         self.active_prompt = None;
+        self.running_shells.clear();
+        self.pending_shells.clear();
         self.clear_approval_pane();
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
@@ -624,6 +626,7 @@ impl App {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'command,
                 },
                 _ = ticker.tick() => {
+                    self.promote_pending_shells();
                     self.maybe_refresh_jobs_pane();
                     self.render_streaming(term).ok();
                 }
@@ -838,12 +841,11 @@ impl App {
                     name,
                     arguments,
                 };
-                if call.name == "shell"
-                    || self
-                        .wire_tools
-                        .display_for_call(&call)
-                        .and_then(|d| d.eager)
-                        .unwrap_or(false)
+                if self
+                    .wire_tools
+                    .display_for_call(&call)
+                    .and_then(|d| d.eager)
+                    .unwrap_or(false)
                 {
                     // Tools that declare `display.eager` (e.g. `subagent`, whose
                     // dispatch/wait calls block until the agents finish) would
@@ -851,6 +853,15 @@ impl App {
                     // the id is recorded in `shown_tool_rows` so the later
                     // `ToolResult` event doesn't render a duplicate.
                     self.pump_show_eager_row(&call, cur_idx, term)?;
+                }
+                if call.name == "shell" {
+                    let label = call
+                        .arguments
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .map(crate::ui::tool_display::format_shell_label)
+                        .unwrap_or_else(|| "shell".to_string());
+                    self.pending_shells.push((id.clone(), label, Instant::now()));
                 }
                 pending.insert(id, call);
             }
@@ -868,6 +879,8 @@ impl App {
                 // every later keystroke this turn buffers instead of reaching
                 // the chat input.
                 pending_key.clear_owner();
+                self.running_shells.retain(|(cid, _)| cid != &call_id);
+                self.pending_shells.retain(|(cid, _, _)| cid != &call_id);
                 if let Some(idx) = cur_idx.take() {
                     self.renderer
                         .finalize_streaming_message(&self.messages[idx].content, term)?;
@@ -884,16 +897,6 @@ impl App {
                 };
                 if self.shown_tool_rows.remove(&call_id) {
                     pending.remove(&call_id);
-                    // Shell calls show their command eagerly, but their output
-                    // is committed only once, on completion. Keeping it as a
-                    // separate shell message gives the normal head/tail preview
-                    // while Ctrl+O retains the complete result.
-                    if name == "shell" && !result.content.is_empty() {
-                        self.messages.push(crate::ui::tool_display::shell_output_row(
-                            result.content.clone(),
-                            is_error,
-                        ));
-                    }
                 } else if let Some(call) = pending.remove(&call_id) {
                     let display = self.wire_tools.display_for_call(&call);
                     self.messages.push(build_tool_row(&call, &result, display));
@@ -1095,8 +1098,27 @@ impl App {
         if self.thinking_clear_at.is_some_and(|d| Instant::now() >= d) {
             self.clear_thinking_pane();
         }
+        self.promote_pending_shells();
         self.maybe_refresh_jobs_pane();
         self.render_streaming(term)
+    }
+
+    /// Promote shell calls that have been alive longer than the display
+    /// threshold (500ms) from the hidden `pending_shells` list to the visible
+    /// `running_shells` strip, so only long-running commands appear.
+    fn promote_pending_shells(&mut self) {
+        const SHELL_DISPLAY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+        let now = Instant::now();
+        let mut promoted = Vec::new();
+        self.pending_shells.retain(|(id, label, start)| {
+            if now.duration_since(*start) >= SHELL_DISPLAY_DELAY {
+                promoted.push((id.clone(), label.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        self.running_shells.extend(promoted);
     }
 
     /// Render the bottom pane during a live turn or tool run: spinner-animated,
@@ -1122,23 +1144,15 @@ impl App {
                 pages: if self.panes_visible { &self.pages } else { &[] },
                 active_page: self.active_page,
                 autocomplete: None,
+                running: &self.running_shells,
             },
         )
     }
 
     async fn run_inline_command(&mut self, cmd: &str, term: &mut BoneTerminal) -> io::Result<()> {
-        use crate::tools::command_policy::classify_command;
-
-        let safety = classify_command(cmd);
-        let classification = match safety {
-            crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
-            crate::tools::command_policy::CommandSafety::Danger => "danger",
-        };
-
         let result = ShellTool
             .execute(serde_json::json!({
                 "command": cmd,
-                "classification": classification,
                 "timeout_ms": 60_000,
             }))
             .await

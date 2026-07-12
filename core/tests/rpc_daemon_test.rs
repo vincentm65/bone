@@ -323,9 +323,13 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
     // Session starts with the full builtin tool set (non-empty).
-    let session = Arc::new(Mutex::new(RuntimeSession::new(ToolHandler::new(
-        builtin_tools(),
-    ))));
+    let mut initial = ToolHandler::new(builtin_tools());
+    // Seed session-scoped state that must survive the registry swap.
+    initial
+        .state_map
+        .set("task_list", "default", r#"{"items":["a"]}"#.into());
+    let snapshots_before = initial.snapshots.clone();
+    let session = Arc::new(Mutex::new(RuntimeSession::new(initial)));
     assert!(
         !session.lock().unwrap().tools.definitions().is_empty(),
         "precondition: session boots with builtin tools",
@@ -373,10 +377,20 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
 
     // Inbox drained (taken), and the session swapped to the adopted handler.
     assert!(inbox.lock().unwrap().is_none(), "inbox should be consumed");
+    let tools = &session.lock().unwrap().tools;
     assert_eq!(
-        session.lock().unwrap().tools.definitions().len(),
+        tools.definitions().len(),
         0,
         "session adopted the inbox's empty tool handler",
+    );
+    assert_eq!(
+        tools.state_map.get("task_list", "default"),
+        Some(r#"{"items":["a"]}"#),
+        "host tool state_map must survive ReloadExtensions",
+    );
+    assert!(
+        Arc::ptr_eq(&tools.snapshots, &snapshots_before),
+        "snapshot store Arc must be preserved across ReloadExtensions",
     );
 }
 

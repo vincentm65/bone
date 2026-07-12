@@ -142,7 +142,7 @@ end
 
 bone.register_tool({
     name = "task_list",
-    description = "Maintain a visible checklist (TUI pane) for the user. Use it for any task with ~3+ distinct steps or work spanning multiple files. Call 'write' with the FULL list every time — it replaces the whole list, so there are no indices to track. Keep exactly one item 'in_progress' (the step you're working on now) and flip items to 'done' the moment they're finished, then write again. State is host-held; no state arg. Actions: write (pass tasks, optional name, max 15), clear.",
+    description = "Maintain a visible checklist (TUI pane) for the user. Use it for any task with ~3+ distinct steps or work spanning multiple files. Call 'write' with the FULL list every time — it replaces the whole list, so there are no indices to track. Keep at most one item 'in_progress' (the step you're working on now); flip it to 'done' when finished. When all items are done, write the list with zero in_progress to signal completion, then call 'clear' once the user confirms. State is host-held; no state arg. Actions: write (pass tasks, optional name, max 15), clear.",
     safety = "read_only",
     -- Host-managed state: the host serializes batched calls and threads the
     -- prior list back in (state_key defaults to the tool name, "task_list").
@@ -218,6 +218,20 @@ local function emit_turn_message_once(ctx, message)
     return { turn_message = message }
 end
 
+local function render_list_text(tasks)
+    local lines = {}
+    for _, t in ipairs(tasks) do
+        local mark = "[ ]"
+        if t.status == "done" then
+            mark = "[x]"
+        elseif t.status == "in_progress" then
+            mark = "[~]"
+        end
+        table.insert(lines, string.format("  %s %s", mark, t.text))
+    end
+    return table.concat(lines, "\n")
+end
+
 bone.on("before_turn", function(_event, ctx)
     if bone.agent_depth ~= 0 then return end
 
@@ -245,16 +259,20 @@ bone.on("before_turn", function(_event, ctx)
         end
     end
 
-    -- All done → no reminder needed (offer to clear).
+    -- All done → offer to clear (dedup ok: situational, not state-bearing).
     if done >= #tasks then
         return emit_turn_message_once(ctx,
             "Your task list is complete. Call task_list (action=clear) once the user has confirmed you're finished.")
     end
 
+    -- Active list: always emit the full list (no dedup) so the model can
+    -- reproduce it even after compaction drops its prior tool-call args.
     local current_line = current
-        and string.format(" Current in-progress item: \"%s\".", current)
-        or " No item is marked in_progress — mark the one you're working on now."
-    return emit_turn_message_once(ctx, string.format(
-        "Active task list: %d/%d done.%s As you work, call task_list (action=write) with the full list to mark items in_progress/done. Keep exactly one item in_progress.",
-        done, #tasks, current_line))
+        and string.format("In-progress: \"%s\".", current)
+        or "No item is in_progress — mark the next one you're working on."
+    return {
+        turn_message = string.format(
+            "Active task list (%d/%d done). %s\n%s\nResend the full list via task_list (action=write) to update statuses. Keep at most one item in_progress (zero once all are done).",
+            done, #tasks, current_line, render_list_text(tasks)),
+    }
 end)

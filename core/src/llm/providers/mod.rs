@@ -5,6 +5,7 @@ use crate::config::ProvidersConfig;
 
 pub mod anthropic;
 pub mod codex;
+pub mod grok_build;
 pub mod openai_compat;
 
 /// Construct a provider by stable id, set its model, and return it.
@@ -30,6 +31,11 @@ pub fn create_provider_with_config(
             "codex" => {
                 return Ok(Box::new(codex::CodexProvider::from_entry(id, entry)));
             }
+            "grok_build" => {
+                return Ok(Box::new(grok_build::GrokBuildProvider::from_entry(
+                    id, entry,
+                )));
+            }
             "anthropic" => {
                 return Ok(Box::new(anthropic::AnthropicProvider::from_entry(
                     id, entry,
@@ -44,7 +50,7 @@ pub fn create_provider_with_config(
                 return Err(LlmError::new_with_kind(
                     LlmErrorKind::Config,
                     format!(
-                        "unsupported handler `{}` for provider `{id}`; supported: openai, anthropic, codex",
+                        "unsupported handler `{}` for provider `{id}`; supported: openai, anthropic, codex, grok_build",
                         entry.handler
                     ),
                 ));
@@ -92,5 +98,6 @@ mod tests {
         // The seeded Anthropic entry uses the `anthropic` handler, which the
         // factory must build rather than reject.
         create_provider_with_config("anthropic", &config).unwrap();
+        create_provider_with_config("grok_build", &config).unwrap();
     }
 }

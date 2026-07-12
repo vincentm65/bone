@@ -50,19 +50,6 @@ pub fn shell_row(cmd: &str, output: String, is_error: bool) -> Message {
     }
 }
 
-pub fn shell_output_row(output: String, is_error: bool) -> Message {
-    Message {
-        role: ChatRole::Tool,
-        content: output,
-        tool: Some(crate::chat::ToolDisplay {
-            label: String::new(),
-            is_error,
-            is_shell: true,
-        }),
-        image_count: 0,
-    }
-}
-
 pub fn tool_label(
     call: &ToolCall,
     result: &ToolResult,

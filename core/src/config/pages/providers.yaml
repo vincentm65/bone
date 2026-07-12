@@ -111,6 +111,16 @@ fields:
       endpoint: /responses
       handler: codex
       reasoning_effort: ""
+  - key: grok_build
+    label: Grok Build
+    type: provider
+    value:
+      label: Grok Build
+      base_url: ""
+      model: grok-build
+      api_key: ""
+      endpoint: ""
+      handler: grok_build
   - key: local
     label: llama.cpp
     type: provider

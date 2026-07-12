@@ -310,11 +310,19 @@ impl Renderer {
         pages: &[PanePage],
         active_page: usize,
         autocomplete: Option<&super::autocomplete::AutocompleteState>,
+        running: usize,
     ) -> io::Result<()> {
         let size = term.size()?;
-        let desired =
-            Self::desired_height(input, prompt, size.width, pages, active_page, autocomplete)
-                .min(max_viewport_height(size.height));
+        let desired = Self::desired_height(
+            input,
+            prompt,
+            size.width,
+            pages,
+            active_page,
+            autocomplete,
+            running,
+        )
+        .min(max_viewport_height(size.height));
         let old = self.viewport_height;
         if desired != old {
             Self::resize_viewport(term, old, desired)?;
@@ -461,7 +469,15 @@ impl Renderer {
 
     /// Redraw the bottom pane during streaming (elapsed-time spinner advances).
     pub fn tick_spinner(&mut self, term: &mut BoneTerminal, args: &PaneDraw<'_>) -> io::Result<()> {
-        self.ensure_viewport_height(term, args.input, None, args.pages, args.active_page, None)?;
+        self.ensure_viewport_height(
+            term,
+            args.input,
+            None,
+            args.pages,
+            args.active_page,
+            None,
+            args.running.len(),
+        )?;
         term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
         Ok(())
     }

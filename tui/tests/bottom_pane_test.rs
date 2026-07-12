@@ -55,6 +55,7 @@ fn pane_args<'a>(
         pages,
         active_page,
         autocomplete,
+        running: &[],
     }
 }
 fn row_text(terminal: &Terminal<TestBackend>, row: u16, width: u16) -> String {
@@ -150,7 +151,10 @@ fn newline_cursor_marker_is_included_in_input_height() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 6);
+    assert_eq!(
+        Renderer::desired_height(&input, None, 20, &[], 0, None, 0),
+        6
+    );
 }
 
 #[test]
@@ -159,7 +163,10 @@ fn composer_reserves_terminal_final_column_like_submitted_user_text() {
     input.buffer = "a".repeat(17);
     input.cursor_pos = input.buffer.chars().count();
 
-    assert_eq!(Renderer::desired_height(&input, None, 20, &[], 0, None), 5);
+    assert_eq!(
+        Renderer::desired_height(&input, None, 20, &[], 0, None, 0),
+        5
+    );
 }
 
 #[test]
@@ -170,7 +177,10 @@ fn composer_height_uses_the_same_word_wrapping_as_rendering() {
         ..Default::default()
     };
 
-    assert_eq!(Renderer::desired_height(&input, None, 10, &[], 0, None), 6);
+    assert_eq!(
+        Renderer::desired_height(&input, None, 10, &[], 0, None, 0),
+        6
+    );
 }
 
 #[test]
@@ -214,7 +224,7 @@ fn long_prompt_uses_a_bounded_viewport_height() {
     );
 
     assert_eq!(
-        Renderer::desired_height(&input, Some(&prompt), 80, &[], 0, None),
+        Renderer::desired_height(&input, Some(&prompt), 80, &[], 0, None, 0),
         13
     );
 }
@@ -235,11 +245,14 @@ fn pane_page_adds_height_to_viewport() {
     }];
 
     // Without pages: top_sep(1) + input(1) + bot_sep(1) + status(1) = 4
-    assert_eq!(Renderer::desired_height(&input, None, 80, &[], 0, None), 4);
+    assert_eq!(
+        Renderer::desired_height(&input, None, 80, &[], 0, None, 0),
+        4
+    );
 
     // With 3-line page: base(3) + page_sep(1) + content(3) = 7
     assert_eq!(
-        Renderer::desired_height(&input, None, 80, &pages, 0, None),
+        Renderer::desired_height(&input, None, 80, &pages, 0, None, 0),
         7
     );
 }
@@ -259,7 +272,7 @@ fn pane_page_honors_visible_rows() {
 
     // base(3) + page_sep(1) + tool-requested content rows(12)
     assert_eq!(
-        Renderer::desired_height(&input, None, 80, &pages, 0, None),
+        Renderer::desired_height(&input, None, 80, &pages, 0, None, 0),
         16
     );
 }
@@ -286,7 +299,7 @@ fn pane_page_with_two_pages_renders_content() {
 
     // base(3) + page_sep(1) + content(1) = 5
     assert_eq!(
-        Renderer::desired_height(&input, None, 80, &pages, 0, None),
+        Renderer::desired_height(&input, None, 80, &pages, 0, None, 0),
         5
     );
 }

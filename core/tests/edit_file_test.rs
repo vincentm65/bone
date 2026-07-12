@@ -6,6 +6,7 @@ use serde_json::json;
 use tokio::fs;
 
 use bone_core::tools::edit_file::{EditFileTool, preview_edit_file};
+use bone_core::tools::snapshot;
 use bone_core::tools::types::{Tool, ToolExecutionContext};
 
 fn temp_path(name: &str) -> PathBuf {
@@ -237,6 +238,29 @@ async fn unknown_snapshot_tag_is_rejected_without_writing() {
         .expect_err("unknown tags must require a re-read");
     assert!(error.contains("was not found; re-read"), "{error}");
     assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
+    let _ = fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn exact_live_tag_recovers_when_snapshot_store_was_restarted() {
+    // A resumed conversation can contain a read_file result whose in-memory
+    // snapshot was lost when the daemon restarted. An exact live-content tag
+    // is still sufficient to apply the anchored edit safely.
+    let path = setup("restarted-snapshot.txt", "one\ntwo\n").await;
+    let tag = snapshot::compute_tag("one\ntwo\n");
+    let input = format!("[{}#{tag}]\nSWAP 2.=2:\n+TWO", path.to_string_lossy());
+
+    let result = EditFileTool
+        .execute_output_live(
+            json!({ "input": input }),
+            None,
+            ToolExecutionContext::default(),
+        )
+        .await
+        .expect("exact live tag should recover");
+
+    assert!(result.content.contains("edited"));
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\nTWO\n");
     let _ = fs::remove_file(&path).await;
 }
 

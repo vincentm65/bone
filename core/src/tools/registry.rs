@@ -264,6 +264,21 @@ impl ToolHandler {
         }
     }
 
+    /// After an extension reload, keep session-scoped fields from `previous`
+    /// while adopting the freshly booted registry/definitions/display maps.
+    ///
+    /// Snapshots, host tool state (`task_list`, etc.), the approval gate, cancel
+    /// token, and app ctx are conversation state and must not reset when Lua
+    /// tools are reloaded mid-session.
+    pub fn adopt_session_state_from(&mut self, previous: &ToolHandler) {
+        self.snapshots = previous.snapshots.clone();
+        self.state_map = previous.state_map.clone();
+        self.approval_gate = previous.approval_gate.clone();
+        self.cancel_token = previous.cancel_token.clone();
+        self.app_state = previous.app_state.clone();
+        self.owner = previous.owner.clone();
+    }
+
     pub fn is_enabled(&self, name: &str) -> bool {
         self.enabled.contains(name)
     }

@@ -370,15 +370,20 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
     if !entry.api_key.is_empty()
         || is_local_base_url(&entry.base_url)
         || (entry.handler == "codex" && has_codex_auth_token())
+        || (entry.handler == "grok_build" && crate::llm::providers::grok_build::has_cached_auth())
     {
         return;
     }
-    eprintln!(
-        "bone: warning: provider '{}' has no API key configured.",
-        provider_id
-    );
-    eprintln!(
-        "  Edit {} and add your API key.",
-        providers_path().display()
-    );
+    if entry.handler == "grok_build" {
+        eprintln!("bone: warning: Grok subscription is not authenticated; run `grok login`.");
+    } else {
+        eprintln!(
+            "bone: warning: provider '{}' has no API key configured.",
+            provider_id
+        );
+        eprintln!(
+            "  Edit {} and add your API key.",
+            providers_path().display()
+        );
+    }
 }

@@ -331,6 +331,19 @@ fn resolve_base(
     if let Some(snap) = guard.by_hash(path, tag) {
         return Ok((snap.text.clone(), snap.seen_lines.clone()));
     }
+
+    // The transcript can outlive the in-memory snapshot store: for example,
+    // the daemon may have resumed a conversation from SQLite, or a provider
+    // may replay a cached read result without re-running the local tool. If the
+    // live content itself has the requested tag, it is the exact snapshot the
+    // model referenced, so applying against it is safe. We no longer have the
+    // read's visibility metadata in this case; treat the whole exact-content
+    // snapshot as visible rather than failing a valid cached/replayed read.
+    if snapshot::compute_tag(live) == tag {
+        let seen_lines = (1..=snapshot::numbered_lines(live).len()).collect();
+        return Ok((live.to_string(), seen_lines));
+    }
+
     Err(format!(
         "snapshot tag `{tag}` for `{path}` was not found; re-read the file and use the new tag"
     ))

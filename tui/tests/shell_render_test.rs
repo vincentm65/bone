@@ -1,6 +1,6 @@
 use bone::ui::render::messages::msg_to_lines;
 use bone::ui::theme::Theme;
-use bone::ui::tool_display::{shell_output_row, shell_row};
+use bone::ui::tool_display::shell_row;
 use ratatui::style::Color;
 use ratatui::text::Line;
 
@@ -26,33 +26,6 @@ fn shell_lines(output: &str, width: u16, expanded: bool) -> Vec<Line<'static>> {
         width,
         expanded,
     )
-}
-
-#[test]
-fn shell_call_label_and_later_output_render_without_duplicate_label() {
-    let rendered = msg_to_lines(
-        &[
-            shell_row("ls tui/src", String::new(), false),
-            shell_output_row("lib.rs\nmain.rs".to_string(), false),
-        ],
-        &Theme::default(),
-        None,
-        80,
-        false,
-    )
-    .iter()
-    .map(line_text)
-    .collect::<Vec<_>>();
-
-    assert_eq!(
-        rendered,
-        vec![
-            "    shell ls tui/src",
-            "      │ lib.rs",
-            "      ╰ main.rs",
-            ""
-        ]
-    );
 }
 
 #[test]

@@ -29,6 +29,11 @@ pub struct OpenAiCompatProvider {
     /// Optional cap on output tokens, sent as `max_tokens`. `None` omits the
     /// field so the server applies its own default.
     max_tokens: Option<u32>,
+    /// Optional transport overrides used by subscription-backed providers
+    /// that speak the same Chat Completions wire format.
+    api_key_override: Option<String>,
+    extra_headers: Vec<(String, String)>,
+    conversation_header: Option<(String, fn(i64) -> String)>,
 }
 
 impl OpenAiCompatProvider {
@@ -47,7 +52,27 @@ impl OpenAiCompatProvider {
             api_key: entry.api_key.clone(),
             endpoint: entry.endpoint.clone(),
             max_tokens: None,
+            api_key_override: None,
+            extra_headers: Vec::new(),
+            conversation_header: None,
         }
+    }
+
+    /// Build a Chat Completions provider for another authenticated endpoint
+    /// while reusing the standard OpenAI-compatible message, tool, and stream
+    /// handling.
+    pub(crate) fn from_entry_with_transport(
+        id: &str,
+        entry: &ProviderEntry,
+        api_key: String,
+        extra_headers: Vec<(String, String)>,
+        conversation_header: Option<(String, fn(i64) -> String)>,
+    ) -> Self {
+        let mut provider = Self::from_entry(id, entry);
+        provider.api_key_override = Some(api_key);
+        provider.extra_headers = extra_headers;
+        provider.conversation_header = conversation_header;
+        provider
     }
 
     fn chat_url(&self) -> String {
@@ -498,6 +523,16 @@ impl LlmProvider for OpenAiCompatProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
+        self.chat_stream_with_context(messages, tools, Default::default())
+            .await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        context: crate::llm::provider::ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
         let stream_options = (self.base_url.contains("api.openai.com")
             || self.base_url.contains("api.deepseek.com")
             || self.base_url.contains("127.0.0.1")
@@ -517,8 +552,18 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let mut req = self.client.post(self.chat_url()).json(&request);
 
-        if !self.api_key.is_empty() {
-            req = req.bearer_auth(&self.api_key);
+        let api_key = self.api_key_override.as_deref().unwrap_or(&self.api_key);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        for (name, value) in &self.extra_headers {
+            req = req.header(name, value);
+        }
+        if let (Some((header, encode)), Some(conversation_id)) =
+            (self.conversation_header.as_ref(), context.conversation_id)
+        {
+            req = req.header(header, encode(conversation_id));
         }
 
         let response = req.send().await?;
@@ -609,7 +654,9 @@ impl LlmProvider for OpenAiCompatProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatEvent, cached_tokens_from_usage, openai_messages, process_sse_chunk};
+    use super::{
+        ChatEvent, cached_tokens_from_usage, openai_messages, openai_tools, process_sse_chunk,
+    };
     use crate::llm::{ChatMessage, ChatRole, ImageData};
     use std::collections::BTreeMap;
 
@@ -732,5 +779,22 @@ mod tests {
         let messages = openai_messages(vec![ChatMessage::new(ChatRole::User, "hello")]);
         let json = serde_json::to_value(&messages[0]).unwrap();
         assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn serializes_tools_with_required_function_envelope() {
+        let tools = openai_tools(vec![crate::tools::ToolDefinition {
+            name: "shell".into(),
+            description: "Run a command".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}}
+            }),
+        }]);
+        let json = serde_json::to_value(tools).unwrap();
+
+        assert_eq!(json[0]["type"], "function");
+        assert_eq!(json[0]["function"]["name"], "shell");
+        assert!(json[0].get("name").is_none());
     }
 }

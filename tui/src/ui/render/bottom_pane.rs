@@ -21,6 +21,9 @@ pub struct PaneDraw<'a> {
     pub pages: &'a [PanePage],
     pub active_page: usize,
     pub autocomplete: Option<&'a AutocompleteState>,
+    /// In-flight shell commands (call_id, formatted label), shown as a
+    /// transient strip above the input while running.
+    pub running: &'a [(String, String)],
 }
 fn push_metric(parts: &mut Vec<Span<'static>>, style: Style, label: &str) {
     if !parts.is_empty() {
@@ -325,7 +328,9 @@ impl super::Renderer {
         pages: &[PanePage],
         active_page: usize,
         autocomplete: Option<&AutocompleteState>,
+        running: usize,
     ) -> u16 {
+        let running_rows = running as u16;
         if let Some(p) = prompt {
             let options = p.options.len().min(p.visible_rows) as u16;
             let hint = u16::from(p.hint.is_some());
@@ -346,14 +351,19 @@ impl super::Renderer {
                 // title + hint + options
                 1u16 + hint + options
             };
-            // top sep + prompt region + status + page region
-            return 1 + prompt_rows + 1 + page_extra_height(pages, active_page);
+            // top sep + running + prompt region + status + page region
+            return 1 + running_rows + prompt_rows + 1 + page_extra_height(pages, active_page);
         }
         let input_rows = rendered_input_rows(input, terminal_width);
         let ac_rows = autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
-        // top sep + input_rows + autocomplete + bot_sep + status + page region
+        // top sep + running + input_rows + autocomplete + bot_sep + status + page region
         let bot_sep = u16::from(pages.is_empty());
-        1 + input_rows.max(1) + ac_rows + bot_sep + 1 + page_extra_height(pages, active_page)
+        1 + running_rows
+            + input_rows.max(1)
+            + ac_rows
+            + bot_sep
+            + 1
+            + page_extra_height(pages, active_page)
     }
 
     pub fn draw_bottom_pane_with_tick(
@@ -383,6 +393,39 @@ impl super::Renderer {
         };
 
         let mut y = area.y;
+
+        // ── Running shell commands strip (above the separator) ───────────
+        if !args.running.is_empty() && y < content_bottom {
+            let spinner = spinner_frame(status_info);
+            for (_, label) in args.running {
+                if y >= content_bottom {
+                    break;
+                }
+                let first_line = label.lines().next().unwrap_or(label);
+                let mut spans = Vec::new();
+                if let Some(ref s) = spinner {
+                    spans.push(Span::styled(
+                        s.clone(),
+                        Style::default().fg(self.theme.thinking),
+                    ));
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(
+                    first_line.to_string(),
+                    Style::default().fg(self.theme.tool_call),
+                ));
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
+            }
+        }
+
         if area.height > 0 {
             frame.render_widget(
                 Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
@@ -883,4 +926,20 @@ impl super::Renderer {
             }
         }
     }
+}
+
+/// Current spinner frame string for the running-commands strip, mirroring
+/// the status bar's spinner computation.
+fn spinner_frame(status_info: &StatusInfo) -> Option<String> {
+    let frames = &status_info.spinner_frames;
+    if frames.is_empty() {
+        return None;
+    }
+    let speed = if status_info.spinner_speed_ms > 0 {
+        status_info.spinner_speed_ms
+    } else {
+        80
+    };
+    let idx = (status_info.spinner_elapsed_ms / speed) as usize % frames.len();
+    Some(frames[idx].clone())
 }

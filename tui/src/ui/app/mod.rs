@@ -154,6 +154,12 @@ pub struct App {
     lua_status: Vec<(String, Vec<crate::runtime::view::StatusSegment>)>,
     /// Call IDs that already have a tool row in chat (to avoid duplicates).
     shown_tool_rows: std::collections::HashSet<String>,
+    /// In-flight shell commands (call_id, formatted label), shown as a
+    /// transient strip above the input while running.
+    running_shells: Vec<(String, String)>,
+    /// Shell calls waiting for a display threshold before promotion to
+    /// `running_shells`, so sub-second commands don't flash the strip.
+    pending_shells: Vec<(String, String, std::time::Instant)>,
     /// Last-seen job-registry version (forces first-tick render).
     jobs_seen_version: u64,
     /// Last wall-clock jobs-pane refresh (drives the ~1s live ticker).
@@ -263,6 +269,8 @@ impl App {
             banner_shown: false,
             lua_status: Vec::new(),
             shown_tool_rows: std::collections::HashSet::new(),
+            running_shells: Vec::new(),
+            pending_shells: Vec::new(),
             jobs_seen_version: u64::MAX,
             jobs_last_refresh: std::time::Instant::now(),
             selected_job_id: None,
@@ -936,6 +944,7 @@ impl App {
             self.visible_pages(),
             self.active_page,
             self.autocomplete.as_ref(),
+            self.running_shells.len(),
         )
         // The inline viewport can never be taller than the terminal — crossterm
         // can't reserve more rows than exist, and an oversized inline viewport
@@ -1441,6 +1450,7 @@ impl App {
                 pages: self.visible_pages(),
                 active_page: self.active_page,
                 autocomplete: self.autocomplete.as_ref(),
+                running: &self.running_shells,
             },
             // The tool-approval prompt renders as a live pane (source
             // `"approval"`) in the pane region, not the input slot, so the input

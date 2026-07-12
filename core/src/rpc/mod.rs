@@ -998,7 +998,13 @@ impl DaemonCtx {
                 self.extensions = booted.manager;
                 {
                     let mut s = self.session.lock().unwrap();
-                    s.tools = booted.tools;
+                    // Reloading extensions must not wipe conversation-scoped
+                    // tool state. The new registry has fresh definitions, but
+                    // snapshots, host state (task_list, …), gates, and cancel
+                    // tokens belong to the session and must survive the swap.
+                    let mut tools = booted.tools;
+                    tools.adopt_session_state_from(&s.tools);
+                    s.tools = tools;
                 }
                 let count = self.session.lock().unwrap().tools.definitions().len();
                 self.hub.publish(RuntimeEvent::Status {

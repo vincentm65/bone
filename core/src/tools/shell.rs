@@ -352,8 +352,6 @@ async fn kill_and_drain(
 }
 
 /// Deserialize `shell` arguments: the command plus a clamped timeout.
-/// `classification` is accepted for backward compatibility and discarded (the
-/// policy classifier is authoritative).
 fn parse_shell_args(arguments: Value) -> Result<(String, u64, bool), String> {
     let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
     let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
@@ -429,10 +427,6 @@ pub struct ShellTool;
 #[derive(Deserialize)]
 struct Args {
     command: String,
-    /// Accepted-and-ignored for backward compatibility with old transcripts.
-    /// The deterministic classifier in command_policy is the sole authority.
-    #[serde(default)]
-    classification: Value,
     timeout_ms: Option<u64>,
     #[serde(default)]
     background: bool,

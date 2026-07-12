@@ -290,10 +290,7 @@ pub(crate) fn emit_event(
             serde_json::json!({ "type": "notice", "message": message })
         }
         crate::runtime::RuntimeEvent::ToolCall {
-            id,
-            name,
-            summary,
-            ..
+            id, name, summary, ..
         } => {
             let summary = truncate_str(summary, 200);
             serde_json::json!({
