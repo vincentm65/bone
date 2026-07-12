@@ -1,4 +1,4 @@
-# Bone v2.2.9 — Feature Inventory
+# Bone v2.3.0 — Feature Inventory
 
 > Organized by logical subsystem for code review.
 

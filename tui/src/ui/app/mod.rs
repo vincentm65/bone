@@ -158,6 +158,8 @@ pub struct App {
     jobs_seen_version: u64,
     /// Last wall-clock jobs-pane refresh (drives the ~1s live ticker).
     jobs_last_refresh: std::time::Instant,
+    /// Job selected in the native Agents pane.
+    selected_job_id: Option<String>,
     /// Set after the user was warned that quitting kills running sub-agent
     /// jobs; the next quit request goes through.
     quit_despite_jobs: bool,
@@ -263,6 +265,7 @@ impl App {
             shown_tool_rows: std::collections::HashSet::new(),
             jobs_seen_version: u64::MAX,
             jobs_last_refresh: std::time::Instant::now(),
+            selected_job_id: None,
             quit_despite_jobs: false,
             terminal_bg_set: false,
         })
@@ -1248,7 +1251,16 @@ impl App {
             .iter()
             .any(|j| j.status == crate::ext::jobs::JobStatus::Running);
         if has_running {
-            if let Some(page) = crate::ui::jobs_pane::render(&jobs) {
+            let active: Vec<_> = jobs.iter().filter(|j| !j.is_finished()).collect();
+            if !active
+                .iter()
+                .any(|j| Some(j.id.as_str()) == self.selected_job_id.as_deref())
+            {
+                self.selected_job_id = active.first().map(|j| j.id.clone());
+            }
+            if let Some(page) =
+                crate::ui::jobs_pane::render_selected(&jobs, self.selected_job_id.as_deref())
+            {
                 let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
                 self.active_page = new_active;
                 self.panes_visible = true;
@@ -1282,6 +1294,63 @@ impl App {
         let still_running = crate::ext::jobs::registry().running_jobs();
         crate::ext::jobs::format_results_for_injection(jobs, &still_running)
     }
+}
+
+/// Render a point-in-time view of a running job from its bounded runtime-event log.
+fn job_snapshot_messages(job: &crate::ext::jobs::Job) -> Vec<Message> {
+    let mut rows = vec![Message::user(job.task.clone())];
+    let mut answer = String::new();
+    for event in &job.events {
+        match event {
+            crate::runtime::RuntimeEvent::TextDelta { text } => answer.push_str(text),
+            crate::runtime::RuntimeEvent::ReasoningDelta { text } => {
+                if !text.is_empty() {
+                    rows.push(Message::system(format!("thinking: {text}")));
+                }
+            }
+            crate::runtime::RuntimeEvent::ToolCall { name, summary, .. } => {
+                if !answer.trim().is_empty() {
+                    rows.push(Message::assistant(std::mem::take(&mut answer)));
+                }
+                rows.push(Message::tool_row(format!("{name}: {summary}"), false));
+            }
+            crate::runtime::RuntimeEvent::ToolOutput {
+                content, stderr, ..
+            } => {
+                rows.push(Message::terminal_output(
+                    "live output".to_string(),
+                    content.clone(),
+                    *stderr,
+                ));
+            }
+            crate::runtime::RuntimeEvent::ToolResult {
+                name,
+                content,
+                is_error,
+                ..
+            } => {
+                if !content.is_empty() {
+                    rows.push(Message::terminal_output(
+                        name.clone(),
+                        content.clone(),
+                        *is_error,
+                    ));
+                }
+            }
+            crate::runtime::RuntimeEvent::Failed { message } => {
+                rows.push(Message::system(format!("failed: {message}")))
+            }
+            _ => {}
+        }
+    }
+    if !answer.trim().is_empty() {
+        rows.push(Message::assistant(answer));
+    }
+    if rows.len() == 1 {
+        let status = job.activity.as_deref().unwrap_or("starting");
+        rows.push(Message::system(format!("{} — {status}", job.id)));
+    }
+    rows
 }
 
 /// Built-in spinner used when no Lua preset resolves, so the streaming spinner
@@ -1446,6 +1515,55 @@ impl App {
         result
     }
 
+    fn agents_pane_active(&self) -> bool {
+        self.panes_visible
+            && self
+                .pages
+                .get(self.active_page)
+                .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE)
+    }
+
+    fn move_job_selection(&mut self, down: bool) {
+        let jobs = crate::ext::jobs::registry().running_jobs();
+        if jobs.is_empty() {
+            self.selected_job_id = None;
+            return;
+        }
+        let current = self
+            .selected_job_id
+            .as_deref()
+            .and_then(|id| jobs.iter().position(|j| j.id == id))
+            .unwrap_or(0);
+        let next = if down {
+            (current + 1).min(jobs.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.selected_job_id = Some(jobs[next].id.clone());
+        self.refresh_jobs_pane();
+    }
+
+    fn open_selected_job(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let Some(id) = self.selected_job_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(job) = crate::ext::jobs::registry()
+            .all_jobs()
+            .into_iter()
+            .find(|j| j.id == id)
+        else {
+            return Ok(());
+        };
+        let messages = if let Some(transcript) = &job.transcript {
+            self.rebuild_scrollback_from_transcript(transcript)
+        } else {
+            job_snapshot_messages(&job)
+        };
+        let result = crate::ui::transcript_view::run_collapsed(&messages, &self.renderer.theme);
+        self.force_redraw(term)?;
+        result
+    }
+
     async fn handle_key(
         &mut self,
         code: KeyCode,
@@ -1460,6 +1578,28 @@ impl App {
 
         if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
             return self.open_transcript_view(term);
+        }
+
+        if self.agents_pane_active() && modifiers.is_empty() {
+            match code {
+                KeyCode::Up => {
+                    self.move_job_selection(false);
+                    return self.redraw(term);
+                }
+                KeyCode::Down => {
+                    self.move_job_selection(true);
+                    return self.redraw(term);
+                }
+                KeyCode::Enter => return self.open_selected_job(term),
+                KeyCode::Char('k') => {
+                    if let Some(id) = self.selected_job_id.as_deref() {
+                        crate::ext::jobs::registry().cancel(id);
+                    }
+                    self.refresh_jobs_pane();
+                    return self.redraw(term);
+                }
+                _ => {}
+            }
         }
 
         if self.panes_visible && !self.pages.is_empty() && modifiers.is_empty() {

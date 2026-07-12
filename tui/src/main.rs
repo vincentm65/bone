@@ -564,10 +564,19 @@ async fn run_connect(args: &[String]) -> std::io::Result<()> {
     // borrowing `conn`, which `next_event` holds mutably in the other arm.
     let commands = conn.command_sender();
 
-    eprintln!("bone: connected to {addr}; type a prompt and press enter.");
+    eprintln!(
+        "bone: connected to {addr}; type a prompt and press enter. (Ctrl+C cancels a turn; Ctrl+D quits)"
+    );
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     loop {
         tokio::select! {
+            // Intercept SIGINT so Ctrl+C cancels the in-flight turn instead
+            // of killing the client mid-stream. Re-armed each iteration.
+            // Quit with Ctrl+D (EOF) or by closing stdin.
+            _ = tokio::signal::ctrl_c() => {
+                let _ = commands.send(RuntimeCommand::Cancel);
+                eprintln!("bone: cancelled current turn");
+            },
             line = lines.next_line() => match line? {
                 Some(line) if !line.trim().is_empty() => {
                     let _ = commands.send(RuntimeCommand::SubmitPrompt { text: line, images: vec![] });

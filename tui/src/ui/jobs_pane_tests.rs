@@ -17,6 +17,7 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
         max_concurrency: 1,
         activity: None,
         trace: Vec::new(),
+        events: Vec::new(),
         transcript: None,
         scope: None,
         cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -85,6 +86,36 @@ fn render_shows_running_status() {
     assert!(line.contains("◑"), "expected running icon: {line}");
     assert!(!line.contains("running"));
     assert!(line.contains("do something"));
+}
+
+#[test]
+fn selected_job_is_marked() {
+    let jobs = vec![job("job-1", "researcher", JobStatus::Running)];
+    let pane = render_selected(&jobs, Some("job-1")).unwrap();
+    let line: String = pane.content[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(line.contains('›'));
+    assert_eq!(pane.content[0].style.bg, Some(Color::DarkGray));
+}
+
+#[test]
+fn selected_job_scrolls_into_view() {
+    let jobs: Vec<_> = (0..10)
+        .map(|i| {
+            job(
+                &format!("job-{i}"),
+                &format!("agent-{i}"),
+                JobStatus::Running,
+            )
+        })
+        .collect();
+    let pane = render_selected(&jobs, Some("job-9")).unwrap();
+
+    assert_eq!(pane.scroll, 2);
+    assert!(pane.scroll <= pane.max_scroll());
 }
 
 #[test]

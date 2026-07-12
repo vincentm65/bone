@@ -57,6 +57,9 @@ pub struct Job {
     /// Recent tool-call summaries (up to [`MAX_TRACE_LINES`]), appended to
     /// error results so a failed job is diagnosable.
     pub trace: Vec<String>,
+    /// Bounded snapshot of the agent's runtime events for in-progress inspection.
+    #[serde(skip)]
+    pub events: Vec<crate::runtime::RuntimeEvent>,
     /// Full conversation transcript, kept on successful completion so
     /// `ctx.agent.followup` can resume this agent with its context intact.
     #[serde(skip)]
@@ -188,6 +191,7 @@ impl JobRegistry {
             max_concurrency,
             activity: None,
             trace: Vec::new(),
+            events: Vec::new(),
             transcript: None,
             scope,
             cancel_flag,
@@ -269,6 +273,18 @@ impl JobRegistry {
             }
             drop(jobs);
             self.version.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Retain a bounded event stream so the TUI can inspect a running agent.
+    pub fn note_event(&self, id: &str, event: crate::runtime::RuntimeEvent) {
+        const MAX_EVENTS: usize = 500;
+        let mut jobs = self.lock_jobs();
+        if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
+            if job.events.len() >= MAX_EVENTS {
+                job.events.remove(0);
+            }
+            job.events.push(event);
         }
     }
 
@@ -500,6 +516,7 @@ impl JobRegistry {
             return false;
         }
         job.cancel_flag.store(true, Ordering::Relaxed);
+        job.activity = Some("cancelling…".to_string());
         self.completed.notify_all();
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);

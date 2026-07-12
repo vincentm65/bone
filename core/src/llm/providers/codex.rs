@@ -27,6 +27,7 @@ pub struct CodexProvider {
     endpoint: String,
     id: String,
     label: String,
+    reasoning_effort: Option<String>,
 }
 
 impl CodexProvider {
@@ -44,6 +45,10 @@ impl CodexProvider {
             model: entry.model.clone(),
             api_key: entry.api_key.clone(),
             endpoint: entry.endpoint.clone(),
+            reasoning_effort: match entry.reasoning_effort.trim() {
+                "" | "default" => None,
+                effort => Some(effort.to_ascii_lowercase()),
+            },
         }
     }
 
@@ -59,6 +64,8 @@ pub struct CodexRequest {
     pub input: Vec<CodexInputItem>,
     pub stream: bool,
     pub store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<CodexReasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +86,11 @@ pub struct CodexRequest {
     /// turn when `store: false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<&'static str>>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct CodexReasoning {
+    pub effort: String,
 }
 
 /// Typed input items for the Codex Responses API. Uses `#[serde(untagged)]`;
@@ -526,6 +538,10 @@ impl LlmProvider for CodexProvider {
             input: input_items,
             stream: true,
             store: false,
+            reasoning: self
+                .reasoning_effort
+                .clone()
+                .map(|effort| CodexReasoning { effort }),
             temperature: None,
             top_p: None,
             tools,

@@ -1324,6 +1324,7 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
             row.set("endpoint", entry.endpoint.as_str())?;
             row.set("handler", entry.handler.as_str())?;
             row.set("api_key", entry.api_key.as_str())?;
+            row.set("reasoning_effort", entry.reasoning_effort.as_str())?;
             row.set("active", id == list_active_provider)?;
             out.push(row)?;
         }
@@ -1346,6 +1347,9 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
                 .get::<Option<String>>("handler")?
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "openai".to_string()),
+            reasoning_effort: entry
+                .get::<Option<String>>("reasoning_effort")?
+                .unwrap_or_default(),
         };
         let mut custom = crate::config::custom::CustomConfigs::load();
         custom.set_provider_entry("providers", &id, &provider);
@@ -1791,15 +1795,16 @@ fn launch_background_job(
         let event_job_id = spawned_id.clone();
         let event_task = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                match event {
+                match &event {
                     crate::runtime::RuntimeEvent::ToolCall { summary, .. } => {
                         crate::ext::jobs::registry().note_activity(&event_job_id, &summary);
                     }
                     crate::runtime::RuntimeEvent::ToolResult { is_error, .. } => {
-                        crate::ext::jobs::registry().note_activity_done(&event_job_id, is_error);
+                        crate::ext::jobs::registry().note_activity_done(&event_job_id, *is_error);
                     }
                     _ => {}
                 }
+                crate::ext::jobs::registry().note_event(&event_job_id, event);
             }
         });
         let response = run_agent_with_watchdog(

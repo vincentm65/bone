@@ -289,17 +289,29 @@ pub(crate) fn emit_event(
         crate::runtime::RuntimeEvent::Notice { message } => {
             serde_json::json!({ "type": "notice", "message": message })
         }
-        crate::runtime::RuntimeEvent::ToolCall { name, summary, .. } => {
+        crate::runtime::RuntimeEvent::ToolCall {
+            id,
+            name,
+            summary,
+            ..
+        } => {
             let summary = truncate_str(summary, 200);
             serde_json::json!({
                 "type": "tool_call",
+                "call_id": id,
                 "name": name,
                 "summary": summary
             })
         }
-        crate::runtime::RuntimeEvent::ToolResult { name, is_error, .. } => {
+        crate::runtime::RuntimeEvent::ToolResult {
+            name,
+            call_id,
+            is_error,
+            ..
+        } => {
             serde_json::json!({
                 "type": "tool_result",
+                "call_id": call_id,
                 "name": name,
                 "is_error": is_error
             })

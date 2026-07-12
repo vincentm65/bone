@@ -170,6 +170,9 @@ fn test_codex_request_serializes_prompt_cache_key() {
         input: build_codex_messages(vec![ChatMessage::new(ChatRole::User, "hi")]),
         stream: true,
         store: false,
+        reasoning: Some(bone_core::llm::providers::codex::CodexReasoning {
+            effort: "high".to_string(),
+        }),
         temperature: None,
         top_p: None,
         tools: None,
@@ -193,6 +196,7 @@ fn test_codex_request_omits_optional_fields_when_unset() {
         input: build_codex_messages(vec![ChatMessage::new(ChatRole::User, "hi")]),
         stream: true,
         store: false,
+        reasoning: None,
         temperature: None,
         top_p: None,
         tools: None,

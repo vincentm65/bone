@@ -739,9 +739,18 @@ impl DaemonCtx {
                 _ = diff_timer.tick() => self.drain_diffs(),
                 cmd = commands.recv() => match cmd {
                     Some(RuntimeCommand::KeyReply { id, key }) => { self.key_registry.resolve(id, key); }
-                    Some(RuntimeCommand::Cancel) => cancel.store(true, Ordering::Relaxed),
+                    Some(RuntimeCommand::Cancel) | None => {
+                        // Signal the blocking handler, then stop waiting for
+                        // it. Cooperative handlers/tools poll this flag and
+                        // self-abort; detaching the handle ensures we don't
+                        // wedge on a non-cooperative one (which would ignore
+                        // every subsequent command). The caller publishes an
+                        // empty CommandComplete, like the no-op path.
+                        cancel.store(true, Ordering::Relaxed);
+                        self.drain_diffs();
+                        return Some(None);
+                    }
                     Some(_) => {} // other commands are ignored while a command runs
-                    None => cancel.store(true, Ordering::Relaxed),
                 },
             }
         }

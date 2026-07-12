@@ -499,11 +499,18 @@ impl Driver {
                 // manager (shared `Arc<Mutex<Lua>>`) and awaiting the join lets
                 // this future yield so the UI keeps animating.
                 let ext_for_hook = extensions.clone();
-                let actions = tokio::task::spawn_blocking(move || {
-                    ext_for_hook.dispatch_before_turn(&ctx_cfg)
-                })
-                .await
-                .unwrap_or_default();
+                // Race the hook against cancel so a Ctrl+C during a slow
+                // before_turn (e.g. auto-compaction) returns control now
+                // instead of parking the turn until summarization finishes.
+                // Dropping the handle detaches the blocking task; cooperative
+                // handlers observe `ctx.cancelled` and abort on their own.
+                let actions = tokio::select! {
+                    biased;
+                    _ = await_cancel() => break 'turn Ok(String::new()),
+                    res = tokio::task::spawn_blocking(move || {
+                        ext_for_hook.dispatch_before_turn(&ctx_cfg)
+                    }) => res.unwrap_or_default(),
+                };
                 for action in actions {
                     if let Some(new_messages) = action.conversation_replace {
                         transcript = new_messages;

@@ -88,7 +88,7 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 if let Some(elapsed) = elapsed {
                     parts.push(Span::styled(
                         format!(" ({}s) {} total", elapsed, format_tokens(total)),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::Gray),
                     ));
                 } else {
                     parts.push(Span::styled(
@@ -110,7 +110,7 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 ),
                 Span::styled(agent.clone(), Style::default().fg(name_fg(job))),
                 Span::styled(" ", Style::default().fg(Color::DarkGray)),
-                Span::styled(status, Style::default().fg(Color::DarkGray)),
+                Span::styled(status, Style::default().fg(Color::Gray)),
             ]));
         }
     }
@@ -127,6 +127,75 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
         content: lines,
         visible_rows: 8,
         scroll: 0,
+    })
+}
+
+/// Render active jobs as individually selectable rows.
+///
+/// The regular renderer groups jobs by agent, which is useful for an overview
+/// but does not give the keyboard selection code a one-row-per-job target.
+/// Keep this view flat so the selected job can be highlighted and scrolled
+/// into view reliably.
+pub fn render_selected(jobs: &[Job], selected_id: Option<&str>) -> Option<PanePage> {
+    let active: Vec<&Job> = jobs.iter().filter(|job| !job.is_finished()).collect();
+    if active.is_empty() {
+        return None;
+    }
+
+    let now = current_unix_seconds();
+    let mut lines = Vec::with_capacity(active.len());
+    for job in &active {
+        let selected = Some(job.id.as_str()) == selected_id;
+        let (icon, status) = job_status(job, now);
+        let mut line = Line::from(vec![
+            Span::styled(
+                if selected { " › " } else { "   " },
+                Style::default().fg(if selected {
+                    Color::White
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(
+                format!("{icon} "),
+                Style::default()
+                    .fg(icon_fg(job))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(job.agent.clone(), Style::default().fg(name_fg(job))),
+            Span::styled(" ", Style::default().fg(Color::DarkGray)),
+            Span::styled(status, Style::default().fg(Color::Gray)),
+        ]);
+        if selected {
+            line = line.style(Style::default().bg(Color::DarkGray));
+        }
+        lines.push(line);
+    }
+
+    let selected_index = active
+        .iter()
+        .position(|job| Some(job.id.as_str()) == selected_id)
+        .unwrap_or(0);
+    let visible_rows: usize = 8;
+    let scroll = selected_index.saturating_sub(visible_rows.saturating_sub(1));
+
+    Some(PanePage {
+        source: PANE_SOURCE.to_string(),
+        title: format!(
+            "Agents ({})",
+            active
+                .iter()
+                .fold(Vec::<&str>::new(), |mut names, job| {
+                    if !names.contains(&job.agent.as_str()) {
+                        names.push(job.agent.as_str());
+                    }
+                    names
+                })
+                .len()
+        ),
+        content: lines,
+        visible_rows,
+        scroll,
     })
 }
 

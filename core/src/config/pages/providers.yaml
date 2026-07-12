@@ -110,6 +110,7 @@ fields:
       api_key: ""
       endpoint: /responses
       handler: codex
+      reasoning_effort: ""
   - key: local
     label: llama.cpp
     type: provider

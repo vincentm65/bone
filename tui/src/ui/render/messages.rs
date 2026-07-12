@@ -30,6 +30,28 @@ pub fn render_tool(
     width: usize,
     expanded: bool,
 ) {
+    render_tool_with_hint(
+        tool,
+        content,
+        image_count,
+        theme,
+        lines,
+        width,
+        expanded,
+        true,
+    );
+}
+
+pub(crate) fn render_tool_with_hint(
+    tool: &ToolDisplay,
+    content: &str,
+    image_count: usize,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    expanded: bool,
+    show_expand_hint: bool,
+) {
     let marker = if tool.is_error { "✕ " } else { "  " };
     let name_style = tool_name_style(tool, theme);
     let rest_style = tool_rest_style(tool, theme);
@@ -100,7 +122,15 @@ pub fn render_tool(
     }
 
     if tool.is_shell {
-        render_shell_output(content, tool.is_error, expanded, theme, lines, width);
+        render_shell_output(
+            content,
+            tool.is_error,
+            expanded,
+            show_expand_hint,
+            theme,
+            lines,
+            width,
+        );
     } else if !content.is_empty() {
         render_tool_content(content, theme, lines, width);
     }
@@ -347,6 +377,7 @@ fn render_shell_output(
     content: &str,
     is_error: bool,
     expanded: bool,
+    show_expand_hint: bool,
     theme: &Theme,
     lines: &mut Vec<Line<'static>>,
     width: usize,
@@ -396,7 +427,8 @@ fn render_shell_output(
         };
         // Shell tool results are already capped by core; expanded means up to that retained output.
         let mut shown = visual_lines.iter().take(2).cloned().collect::<Vec<_>>();
-        shown.push(format!("⋮ +{hidden} {noun} (ctrl+o)"));
+        let hint = if show_expand_hint { " (ctrl+o)" } else { "" };
+        shown.push(format!("⋮ +{hidden} {noun}{hint}"));
         shown.extend(
             visual_lines
                 .iter()
@@ -945,6 +977,17 @@ pub fn msg_to_lines(
     width: u16,
     expanded: bool,
 ) -> Vec<Line<'static>> {
+    msg_to_lines_with_shell_hint(msgs, theme, prev_role, width, expanded, true)
+}
+
+pub(crate) fn msg_to_lines_with_shell_hint(
+    msgs: &[Message],
+    theme: &Theme,
+    prev_role: Option<ChatRole>,
+    width: u16,
+    expanded: bool,
+    show_expand_hint: bool,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut prev_role = prev_role;
 
@@ -961,7 +1004,7 @@ pub fn msg_to_lines(
         }
 
         if let Some(tool) = &msg.tool {
-            render_tool(
+            render_tool_with_hint(
                 tool,
                 &msg.content,
                 msg.image_count,
@@ -969,6 +1012,7 @@ pub fn msg_to_lines(
                 &mut lines,
                 width as usize,
                 expanded,
+                show_expand_hint,
             );
         } else {
             render_content(msg, theme, &mut lines, width);

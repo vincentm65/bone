@@ -35,6 +35,10 @@ pub struct ProviderEntry {
         deserialize_with = "string_or_default_handler"
     )]
     pub handler: String,
+
+    /// Codex Responses API reasoning effort. Empty means use the model default.
+    #[serde(default, deserialize_with = "string_or_default")]
+    pub reasoning_effort: String,
 }
 
 fn string_or_default_with<'de, D>(
@@ -106,6 +110,7 @@ impl ProviderEntry {
             api_key: get("api_key"),
             endpoint: get_with_default("endpoint", &default_endpoint()),
             handler: get_with_default("handler", &default_handler()),
+            reasoning_effort: get("reasoning_effort"),
         })
     }
 }

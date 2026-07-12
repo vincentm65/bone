@@ -38,6 +38,8 @@ pub(crate) struct KeySink {
 struct DrainKeysResult {
     mode_changed: bool,
     open_transcript: bool,
+    open_job: bool,
+    jobs_changed: bool,
 }
 
 /// A pending `ctx.ui.key()` request from the daemon, delivered via
@@ -344,6 +346,7 @@ impl App {
                     &mut self.panes_visible,
                     &mut self.pages,
                     &mut self.active_page,
+                    &mut self.selected_job_id,
                     &mut pending_key,
                     &self.command_tx,
                 );
@@ -353,6 +356,12 @@ impl App {
                 }
                 if drained.open_transcript {
                     self.open_transcript_view(term)?;
+                }
+                if drained.jobs_changed {
+                    self.refresh_jobs_pane();
+                }
+                if drained.open_job {
+                    self.open_selected_job(term)?;
                 }
             }
             if self.cancel_streaming {
@@ -535,6 +544,7 @@ impl App {
                     &mut self.panes_visible,
                     &mut self.pages,
                     &mut self.active_page,
+                    &mut self.selected_job_id,
                     &mut pending_key,
                     &self.command_tx,
                 );
@@ -544,6 +554,12 @@ impl App {
                 }
                 if drained.open_transcript {
                     self.open_transcript_view(term).ok();
+                }
+                if drained.jobs_changed {
+                    self.refresh_jobs_pane();
+                }
+                if drained.open_job {
+                    self.open_selected_job(term).ok();
                 }
             }
             if self.cancel_streaming {
@@ -822,11 +838,12 @@ impl App {
                     name,
                     arguments,
                 };
-                if call.name == "shell" || self
-                    .wire_tools
-                    .display_for_call(&call)
-                    .and_then(|d| d.eager)
-                    .unwrap_or(false)
+                if call.name == "shell"
+                    || self
+                        .wire_tools
+                        .display_for_call(&call)
+                        .and_then(|d| d.eager)
+                        .unwrap_or(false)
                 {
                     // Tools that declare `display.eager` (e.g. `subagent`, whose
                     // dispatch/wait calls block until the agents finish) would
@@ -837,17 +854,9 @@ impl App {
                 }
                 pending.insert(id, call);
             }
-            RuntimeEvent::ToolOutput { call_id, content, stderr } => {
-                // A shell row is eagerly printed at dispatch; chunks follow it
-                // immediately, even while other calls in the batch run.
-                if pending.get(&call_id).is_some() && !content.is_empty() {
-                    self.messages.push(crate::ui::tool_display::shell_output_row(
-                        content,
-                        stderr,
-                    ));
-                    self.renderer.flush_new_to_scrollback(&self.messages, term)?;
-                }
-            }
+            // ToolResult carries the complete capped output. Waiting for it
+            // prevents chunks from parallel shells appearing under each other.
+            RuntimeEvent::ToolOutput { .. } => {}
             RuntimeEvent::ToolResult {
                 name,
                 call_id,
@@ -874,7 +883,17 @@ impl App {
                     ..Default::default()
                 };
                 if self.shown_tool_rows.remove(&call_id) {
-                    // preview already rendered the row + diff
+                    pending.remove(&call_id);
+                    // Shell calls show their command eagerly, but their output
+                    // is committed only once, on completion. Keeping it as a
+                    // separate shell message gives the normal head/tail preview
+                    // while Ctrl+O retains the complete result.
+                    if name == "shell" && !result.content.is_empty() {
+                        self.messages.push(crate::ui::tool_display::shell_output_row(
+                            result.content.clone(),
+                            is_error,
+                        ));
+                    }
                 } else if let Some(call) = pending.remove(&call_id) {
                     let display = self.wire_tools.display_for_call(&call);
                     self.messages.push(build_tool_row(&call, &result, display));
@@ -1161,6 +1180,7 @@ impl App {
         panes_visible: &mut bool,
         pages: &mut [PanePage],
         active_page: &mut usize,
+        selected_job_id: &mut Option<String>,
         pending_key: &mut KeySink,
         command_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCommand>,
     ) -> DrainKeysResult {
@@ -1212,6 +1232,42 @@ impl App {
                     {
                         result.open_transcript = true;
                         continue;
+                    }
+                    let agents_active = *panes_visible
+                        && pages
+                            .get(*active_page)
+                            .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE);
+                    if agents_active && key.modifiers.is_empty() {
+                        let jobs = crate::ext::jobs::registry().running_jobs();
+                        let current = selected_job_id
+                            .as_deref()
+                            .and_then(|id| jobs.iter().position(|j| j.id == id))
+                            .unwrap_or(0);
+                        match key.code {
+                            KeyCode::Up if !jobs.is_empty() => {
+                                *selected_job_id = Some(jobs[current.saturating_sub(1)].id.clone());
+                                result.jobs_changed = true;
+                                continue;
+                            }
+                            KeyCode::Down if !jobs.is_empty() => {
+                                *selected_job_id =
+                                    Some(jobs[(current + 1).min(jobs.len() - 1)].id.clone());
+                                result.jobs_changed = true;
+                                continue;
+                            }
+                            KeyCode::Enter => {
+                                result.open_job = true;
+                                continue;
+                            }
+                            KeyCode::Char('k') => {
+                                if let Some(id) = selected_job_id.as_deref() {
+                                    crate::ext::jobs::registry().cancel(id);
+                                }
+                                result.jobs_changed = true;
+                                continue;
+                            }
+                            _ => {}
+                        }
                     }
                     // Ctrl+Enter during streaming: steer the agent mid-turn.
                     if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {

@@ -1,4 +1,4 @@
-//! Fullscreen transcript viewer with shell outputs expanded.
+//! Fullscreen transcript viewer for conversation and sub-agent transcripts.
 
 use std::io;
 
@@ -13,7 +13,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::chat::Message;
 use crate::ui::fullscreen::{self, FullscreenTerminal};
-use crate::ui::render::messages::msg_to_lines;
+use crate::ui::render::messages::msg_to_lines_with_shell_hint;
 use crate::ui::theme::Theme;
 
 const MOUSE_WHEEL_LINES: usize = 3;
@@ -36,15 +36,39 @@ impl Drop for MouseCaptureGuard {
 }
 
 pub fn run(messages: &[Message], theme: &Theme) -> io::Result<()> {
+    run_with_shell_outputs(messages, theme, true)
+}
+
+pub fn run_collapsed(messages: &[Message], theme: &Theme) -> io::Result<()> {
+    run_with_shell_outputs(messages, theme, false)
+}
+
+fn run_with_shell_outputs(
+    messages: &[Message],
+    theme: &Theme,
+    expanded_shell_outputs: bool,
+) -> io::Result<()> {
     fullscreen::run(|term| {
         let _mouse_guard = MouseCaptureGuard::enable()?;
-        run_loop(term, messages, theme)
+        run_loop(term, messages, theme, expanded_shell_outputs)
     })
 }
 
-fn run_loop(term: &mut FullscreenTerminal, messages: &[Message], theme: &Theme) -> io::Result<()> {
+fn run_loop(
+    term: &mut FullscreenTerminal,
+    messages: &[Message],
+    theme: &Theme,
+    expanded_shell_outputs: bool,
+) -> io::Result<()> {
     let mut width = term.size()?.width.max(1);
-    let mut lines = msg_to_lines(messages, theme, None, width, true);
+    let mut lines = msg_to_lines_with_shell_hint(
+        messages,
+        theme,
+        None,
+        width,
+        expanded_shell_outputs,
+        expanded_shell_outputs,
+    );
     let mut scroll = initial_scroll(&lines, term.size()?.height);
 
     draw(term, &lines, scroll)?;
@@ -76,7 +100,14 @@ fn run_loop(term: &mut FullscreenTerminal, messages: &[Message], theme: &Theme) 
             }
             Event::Resize(new_width, _) => {
                 width = new_width.max(1);
-                lines = msg_to_lines(messages, theme, None, width, true);
+                lines = msg_to_lines_with_shell_hint(
+                    messages,
+                    theme,
+                    None,
+                    width,
+                    expanded_shell_outputs,
+                    expanded_shell_outputs,
+                );
                 scroll = scroll.min(max_scroll(&lines, view_height(term.size()?.height)));
             }
             _ => continue,

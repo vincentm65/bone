@@ -1961,6 +1961,7 @@ const PROVIDER_FIELDS = [
   { key: "api_key",  label: "API Key",     placeholder: "sk-...",         type: "text" },
   { key: "endpoint", label: "Endpoint",    placeholder: "/chat/completions", type: "text" },
   { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex"] },
+  { key: "reasoning_effort", label: "Reasoning effort", placeholder: "Default", type: "select", options: ["default", "minimal", "low", "medium", "high", "xhigh", "max"], codexOnly: true },
 ];
 
 let _provExpanded = null;   // key of expanded card (null = collapsed)
@@ -2027,6 +2028,7 @@ function renderProviderPicker() {
     // Expanded editor (hidden by default)
     const editor = el("div", "prov-editor");
     for (const fd of PROVIDER_FIELDS) {
+      if (fd.codexOnly && p.handler !== "codex") continue;
       const field = el("div", "prov-field");
       const lbl = el("label", null, fd.label);
       const input = fd.type === "select"
