@@ -258,12 +258,6 @@ pub fn seed_base() {
     ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
 }
 
-/// Seed all file-based config if missing. Should be called once at startup
-/// from every entry point (TUI, run, agent).
-pub fn seed_all() {
-    seed_all_with(None);
-}
-
 /// Seed base config plus default tools, filtered by the onboarding selection.
 /// `None` seeds every bundled tool (default / upgrade behavior).
 pub fn seed_all_with(selection: Option<&SetupSelection>) {

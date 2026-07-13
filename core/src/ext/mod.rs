@@ -227,12 +227,6 @@ pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>, fo
     seed_default_lua(dir, DEFAULT_LUA_COMMANDS, allow, force)
 }
 
-/// Execute all Lua files from a directory.
-/// Files are expected to register tools, commands, or other extensions.
-pub fn run_lua_files(lua: &mlua::Lua, dir: &std::path::Path) -> Result<(), String> {
-    run_lua_files_filtered(lua, dir, |_| true)
-}
-
 /// Execute the Lua tool files from `dir`, honoring the onboarding selection.
 /// Bundled default tools the user deselected are skipped; user-authored files
 /// (not among the bundled defaults) always run. `allow == None` runs every
