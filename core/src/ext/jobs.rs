@@ -32,6 +32,13 @@ pub enum JobStatus {
     Error,
 }
 
+#[derive(Debug, Clone)]
+pub struct JobEvent {
+    pub event: crate::runtime::RuntimeEvent,
+    /// Unified diff captured before an `edit_file` call executes.
+    pub edit_preview: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Job {
     pub id: String,
@@ -59,7 +66,7 @@ pub struct Job {
     pub trace: Vec<String>,
     /// Bounded snapshot of the agent's runtime events for in-progress inspection.
     #[serde(skip)]
-    pub events: Vec<crate::runtime::RuntimeEvent>,
+    pub events: Vec<JobEvent>,
     /// Full conversation transcript, kept on successful completion so
     /// `ctx.agent.followup` can resume this agent with its context intact.
     #[serde(skip)]
@@ -277,14 +284,22 @@ impl JobRegistry {
     }
 
     /// Retain a bounded event stream so the TUI can inspect a running agent.
-    pub fn note_event(&self, id: &str, event: crate::runtime::RuntimeEvent) {
+    pub fn note_event(
+        &self,
+        id: &str,
+        event: crate::runtime::RuntimeEvent,
+        edit_preview: Option<String>,
+    ) {
         const MAX_EVENTS: usize = 500;
         let mut jobs = self.lock_jobs();
         if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
             if job.events.len() >= MAX_EVENTS {
                 job.events.remove(0);
             }
-            job.events.push(event);
+            job.events.push(JobEvent {
+                event,
+                edit_preview,
+            });
         }
     }
 

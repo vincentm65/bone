@@ -1795,6 +1795,17 @@ fn launch_background_job(
         let event_job_id = spawned_id.clone();
         let event_task = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                let edit_preview = match &event {
+                    crate::runtime::RuntimeEvent::ToolCall {
+                        name, arguments, ..
+                    } if name == "edit_file" => {
+                        crate::tools::edit_file::preview_edit_file(name, arguments.clone())
+                            .await
+                            .ok()
+                            .map(|preview| preview.diff)
+                    }
+                    _ => None,
+                };
                 match &event {
                     crate::runtime::RuntimeEvent::ToolCall { summary, .. } => {
                         crate::ext::jobs::registry().note_activity(&event_job_id, &summary);
@@ -1804,7 +1815,7 @@ fn launch_background_job(
                     }
                     _ => {}
                 }
-                crate::ext::jobs::registry().note_event(&event_job_id, event);
+                crate::ext::jobs::registry().note_event(&event_job_id, event, edit_preview);
             }
         });
         let response = run_agent_with_watchdog(

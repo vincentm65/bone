@@ -2326,18 +2326,55 @@ function renderBehavior() {
       writeConfig("general", "show_thinking", on, "bool", false);
     })));
 
-  // auto-compact tokens
-  wrap.appendChild(setRow("Auto-compact at", "Summarise the conversation once it passes this many tokens.",
+  const triggerMode = findField("compact_trigger_mode").value || "absolute";
+  wrap.appendChild(setRow("Compaction trigger", "Use a fixed token threshold or a percentage of model context capacity.",
+    enumEl(triggerMode, ["absolute", "percentage"], (v) =>
+      writeConfig("general", "compact_trigger_mode", v, "enum", true))));
+
+  wrap.appendChild(setRow("Fixed threshold", "Auto-compact at this context size. Blank disables automatic compaction in absolute mode.",
     numEl(findField("auto_compact_tokens").value || "", "tokens", (v) =>
       writeConfig("general", "auto_compact_tokens", v, "string", true))));
 
-  // keep messages on compact
-  wrap.appendChild(setRow("Keep recent messages", "How many recent messages to preserve when compacting.",
-    numEl(findField("auto_compact_keep_messages").value || "", "msgs", (v) =>
-      writeConfig("general", "auto_compact_keep_messages", v, "string", true))));
+  wrap.appendChild(setRow("Capacity threshold", "Auto-compact at this percentage when percentage mode is selected.",
+    numEl(findField("compact_trigger_percentage").value || "80", "%", (v) =>
+      writeConfig("general", "compact_trigger_percentage", v, "string", true))));
+
+  wrap.appendChild(setRow("Context capacity", "Override model context capacity when it is not reported automatically.",
+    numEl(findField("compact_context_window_tokens").value || "", "tokens", (v) =>
+      writeConfig("general", "compact_context_window_tokens", v, "string", true))));
+
+  wrap.appendChild(setRow("Keep recent context", "Token budget preserved verbatim at complete turn boundaries.",
+    numEl(findField("compact_keep_tokens").value || "12000", "tokens", (v) =>
+      writeConfig("general", "compact_keep_tokens", v, "string", true))));
+
+  wrap.appendChild(setRow("Checkpoint input", "Maximum summarizer input per incremental folding pass.",
+    numEl(findField("compact_input_tokens").value || "30000", "tokens", (v) =>
+      writeConfig("general", "compact_input_tokens", v, "string", true))));
+
+  wrap.appendChild(setRow("Checkpoint output", "Maximum size of the structured context checkpoint.",
+    numEl(findField("compact_summary_tokens").value || "2500", "tokens", (v) =>
+      writeConfig("general", "compact_summary_tokens", v, "string", true))));
+
+  wrap.appendChild(setRow("Safety reserve", "Capacity held back from percentage-triggered compaction.",
+    numEl(findField("compact_safety_tokens").value || "8000", "tokens", (v) =>
+      writeConfig("general", "compact_safety_tokens", v, "string", true))));
 
   // render the display pane too (shares this load)
   renderDisplay();
+}
+
+function enumEl(value, options, onCommit) {
+  const select = document.createElement("select");
+  select.className = "set-num";
+  for (const option of options) {
+    const item = document.createElement("option");
+    item.value = option;
+    item.textContent = option[0].toUpperCase() + option.slice(1);
+    item.selected = option === value;
+    select.appendChild(item);
+  }
+  select.onchange = () => onCommit(select.value);
+  return select;
 }
 
 function numEl(value, suffix, onCommit) {

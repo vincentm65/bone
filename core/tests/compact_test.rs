@@ -600,10 +600,6 @@ fn compact_preserves_tool_call_chains() {
     let lua_arc = booted.manager.lua_arc();
     let lua = lua_arc.lock().unwrap();
     lua.load(r#"
-        -- task_list also registers a before_turn handler now, so don't assume
-        -- index 1 is compact's. The compact handler is the one that returns a
-        -- replacement transcript (a table with `.messages`); others return only
-        -- system_prompt_append. Located by the loop below.
         local ctx = {
             config = {
                 get = function(section, key)
@@ -614,8 +610,11 @@ fn compact_preserves_tool_call_chains() {
                     if section == "commands" then return { disabled = {} } end
                 end,
             },
-            usage = { snapshot = function() return { context_length = 100 } end },
-            conversation = { history = function() return {
+            usage = { snapshot = function() return { context_length = 99999 } end },
+            conversation = {
+                current = function() return nil end,
+                context_tokens = function() return 100 end,
+                history = function() return {
                 { role = "user", content = "older" },
                 { role = "assistant", content = "older answer" },
                 { role = "user", content = "read it" },
@@ -628,8 +627,6 @@ fn compact_preserves_tool_call_chains() {
             agent = { run = function() return { ok = true, content = "summary" } end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
-        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
-        -- so they run without error while we hunt for compact's result.
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         local ret
         for _, h in ipairs(bone._handlers.before_turn) do
@@ -642,6 +639,7 @@ fn compact_preserves_tool_call_chains() {
     .unwrap();
 
     let raw: String = lua.globals().get("_COMPACT_TOOL_RET").unwrap();
+
     let messages: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert!(
         messages.as_array().unwrap().iter().any(|m| {
@@ -695,8 +693,11 @@ fn compact_drops_orphan_tool_results() {
                     if section == "commands" then return { disabled = {} } end
                 end,
             },
-            usage = { snapshot = function() return { context_length = 200 } end },
-            conversation = { history = function() return {
+            usage = { snapshot = function() return { context_length = 99999 } end },
+            conversation = {
+                current = function() return nil end,
+                context_tokens = function() return 100 end,
+                history = function() return {
                 { role = "user", content = "read it" },
                 { role = "assistant", content = "", tool_calls = {
                     { id = "call_1", name = "read_file", arguments = { path = "Cargo.toml" } },
@@ -784,8 +785,11 @@ fn auto_compact_enabled_under_denylist_config() {
                     if section == "commands" then return { disabled = {} } end
                 end,
             },
-            usage = { snapshot = function() return { context_length = 100 } end },
-            conversation = { history = function() return {
+            usage = { snapshot = function() return { context_length = 99999 } end },
+            conversation = {
+                current = function() return nil end,
+                context_tokens = function() return 100 end,
+                history = function() return {
                 { role = "user", content = "older" },
                 { role = "assistant", content = "older answer" },
                 { role = "user", content = "continue" },
@@ -953,19 +957,25 @@ fn auto_compact_does_not_thrash_on_stable_context() {
     lua.load(
         r#"
         _RUN_COUNT = 0
+        _CONTEXT_LENGTH = 150000
+        -- Simulate the real system: context_length drops after compaction.
         local ctx = {
             config = {
                 get = function(section, key)
-                    if key == "auto_compact_tokens" then return "100000" end
+                    if key == "auto_compact_tokens" then return "1" end
                     if key == "auto_compact_keep_messages" then return "2" end
                 end,
                 get_table = function(section)
                     if section == "commands" then return { disabled = {} } end
                 end,
             },
-            -- Same context_length on both calls: no growth between turns.
-            usage = { snapshot = function() return { context_length = 150000 } end },
-            conversation = { history = function() return {
+            usage = { snapshot = function()
+                return { context_length = _CONTEXT_LENGTH }
+            end },
+            conversation = {
+                current = function() return { id = "baseline-reset" } end,
+                context_tokens = function() return 100 end,
+                history = function() return {
                 { role = "user", content = "older" },
                 { role = "assistant", content = "older answer" },
                 { role = "user", content = "recent" },
@@ -987,9 +997,13 @@ fn auto_compact_does_not_thrash_on_stable_context() {
             return ret
         end
         local first = run_once()
+        _CONTEXT_LENGTH = 100
         local second = run_once()
+        _CONTEXT_LENGTH = 3000
+        local third = run_once()
         _FIRST_RET = first and "table" or "nil"
         _SECOND_RET = second and "table" or "nil"
+        _THIRD_RET = third and "table" or "nil"
     "#,
     )
     .exec()
@@ -998,14 +1012,19 @@ fn auto_compact_does_not_thrash_on_stable_context() {
     let run_count: i64 = lua.globals().get("_RUN_COUNT").unwrap();
     let first: String = lua.globals().get("_FIRST_RET").unwrap();
     let second: String = lua.globals().get("_SECOND_RET").unwrap();
+    let third: String = lua.globals().get("_THIRD_RET").unwrap();
     assert_eq!(first, "table", "first turn should compact");
     assert_eq!(
         second, "nil",
-        "second turn with unchanged context must be suppressed (no re-compaction)",
+        "unchanged compacted context must not immediately re-compact",
     );
     assert_eq!(
-        run_count, 1,
-        "summarizer must run exactly once, not on every turn; got {run_count}",
+        third, "table",
+        "growth from the compacted baseline must trigger before reaching the old context size",
+    );
+    assert_eq!(
+        run_count, 2,
+        "summarizer should run for the initial compaction and later material growth; got {run_count}",
     );
 
     std::fs::remove_dir_all(&config_dir).ok();

@@ -683,21 +683,15 @@ impl App {
                         rows.push(Message::assistant(msg.content.clone()));
                     }
                 }
-                // A *successful* `edit_file` shows its diff (no separate tool
-                // row) live; the diff is embedded in the result content after
-                // the summary line, and a System message starting with `\n`
-                // renders as a preview. Failures (no diff) fall through to the
-                // generic tool-row path below so the error is still visible.
-                ChatRole::Tool
-                    if msg.name.as_deref() == Some("edit_file")
-                        && !msg.is_error
-                        && msg.content.starts_with("edited file (") =>
-                {
-                    if let Some(nl) = msg.content.find('\n') {
-                        rows.push(Message::system(msg.content[nl..].to_string()));
-                    }
-                }
                 ChatRole::Tool => {
+                    if let Some(diff) = edit_diff_message(
+                        msg.name.as_deref().unwrap_or_default(),
+                        msg.is_error,
+                        &msg.content,
+                    ) {
+                        rows.push(diff);
+                        continue;
+                    }
                     let row = match msg.tool_call_id.as_deref().and_then(|id| calls.get(id)) {
                         Some(call) => build_tool_row(
                             call,
@@ -1366,46 +1360,76 @@ impl App {
     }
 }
 
+fn edit_diff_message(name: &str, is_error: bool, content: &str) -> Option<Message> {
+    if name != "edit_file" || is_error || !content.starts_with("Edited: ") {
+        return None;
+    }
+    let newline = content.find('\n')?;
+    Some(Message::system(content[newline..].to_string()))
+}
+
 /// Render a point-in-time view of a running job from its bounded runtime-event log.
-fn job_snapshot_messages(job: &crate::ext::jobs::Job) -> Vec<Message> {
+fn job_snapshot_messages(job: &crate::ext::jobs::Job, wire_tools: &WireTools) -> Vec<Message> {
     let mut rows = vec![Message::user(job.task.clone())];
     let mut answer = String::new();
-    for event in &job.events {
-        match event {
+    let mut calls = std::collections::HashMap::new();
+    let mut shown_edit_previews = std::collections::HashSet::new();
+    for job_event in &job.events {
+        match &job_event.event {
             crate::runtime::RuntimeEvent::TextDelta { text } => answer.push_str(text),
             crate::runtime::RuntimeEvent::ReasoningDelta { text } => {
                 if !text.is_empty() {
                     rows.push(Message::system(format!("thinking: {text}")));
                 }
             }
-            crate::runtime::RuntimeEvent::ToolCall { name, summary, .. } => {
+            crate::runtime::RuntimeEvent::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => {
                 if !answer.trim().is_empty() {
                     rows.push(Message::assistant(std::mem::take(&mut answer)));
                 }
-                rows.push(Message::tool_row(format!("{name}: {summary}"), false));
+                calls.insert(
+                    id.clone(),
+                    ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    },
+                );
+                if let Some(diff) = &job_event.edit_preview {
+                    rows.push(Message::system(diff.clone()));
+                    shown_edit_previews.insert(id.clone());
+                }
             }
-            crate::runtime::RuntimeEvent::ToolOutput {
-                content, stderr, ..
-            } => {
-                rows.push(Message::terminal_output(
-                    "live output".to_string(),
-                    content.clone(),
-                    *stderr,
-                ));
-            }
+            crate::runtime::RuntimeEvent::ToolOutput { .. } => {}
             crate::runtime::RuntimeEvent::ToolResult {
                 name,
+                call_id,
                 content,
                 is_error,
-                ..
             } => {
-                if !content.is_empty() {
-                    rows.push(Message::terminal_output(
-                        name.clone(),
-                        content.clone(),
-                        *is_error,
-                    ));
+                if shown_edit_previews.contains(call_id) && !is_error {
+                    continue;
                 }
+                if let Some(diff) = edit_diff_message(name, *is_error, content) {
+                    rows.push(diff);
+                    continue;
+                }
+                let result = ToolResult {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                    ..Default::default()
+                };
+                let row = match calls.get(call_id) {
+                    Some(call) => build_tool_row(call, &result, wire_tools.display_for_call(call)),
+                    None => Message::tool_row(name.clone(), *is_error),
+                };
+                rows.push(row);
             }
             crate::runtime::RuntimeEvent::Failed { message } => {
                 rows.push(Message::system(format!("failed: {message}")))
@@ -1679,7 +1703,7 @@ impl App {
         let messages = if let Some(transcript) = &job.transcript {
             self.rebuild_scrollback_from_transcript(transcript)
         } else {
-            job_snapshot_messages(&job)
+            job_snapshot_messages(&job, &self.wire_tools)
         };
         let result = crate::ui::transcript_view::run_collapsed(&messages, &self.renderer.theme);
         self.force_redraw(term)?;

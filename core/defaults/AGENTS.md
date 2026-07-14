@@ -391,32 +391,43 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 
 ### /compact
 
-Manual context compaction via summarization. Summarizes older conversation messages and replaces the transcript with a compact version, keeping recent messages verbatim.
+Reliable context compaction using a versioned `[Context checkpoint v1]`. Older complete turns are folded into a validated checkpoint while recent complete turns remain verbatim. Existing checkpoints are updated incrementally instead of repeatedly summarizing the full transcript.
+
+Usage:
 
 ```
-/compact
+/compact                       # compact now
+/compact preview               # inspect boundaries and budgets without changing history
+/compact inspect               # show the current checkpoint and protected-item count
+/compact pin <exact text>      # preserve text verbatim across later compactions
+/compact pins                  # list protected items
+/compact unpin <number>        # remove a protected item
 ```
 
-- Requires `ctx.conversation.history()` — shows an error if unavailable.
-- Skips when there are fewer user+assistant messages than the keep threshold.
-- Uses `ctx.agent.run()` to generate a summary of older messages, capped via `max_tokens` so a runaway/looping model can't emit a summary larger than the context it is meant to shrink.
-- Discards the result if the compacted context would not be smaller than the original (`new_context >= context_length`) — installing a larger transcript could push the next request past the model's context window (an unrecoverable provider 400). Both the manual and automatic paths enforce this.
-- Returns a `conversation.replace` action (see [Return Actions](#command-return-semantics)).
-- The default file `lua/commands/compact.lua` also registers a `before_turn` handler for automatic compaction.
+Reliability properties:
+
+- The checkpoint has required sections for the current objective, constraints, verified facts, files/symbols, validation, completed work, unresolved issues, pending action, and critical verbatim details.
+- Summarizer input and output are bounded. Large history is split on UTF-8 boundaries and folded incrementally using the previous validated checkpoint.
+- Replacement happens only after deterministic schema, size, and protected-text validation, and only when the resulting provider context estimate is smaller. Failure preserves the original transcript.
+- Turn boundaries keep user, assistant, and associated tool messages together. The legacy message-count setting is rounded out to complete turns.
+- Summarization runs without tools and with explicit output and wall-clock limits.
+- Automatic compaction emits transient status while working and a persistent notice only on failure.
 
 Configuration:
-- `auto_compact_tokens` — token threshold for auto-compact. Blank/unset disables auto-compact.
-- `auto_compact_keep_messages` — recent user/assistant message count to preserve after compaction. Blank/unset disables manual and automatic compaction.
 
-Auto-compaction runs after a user message is appended and before the provider request is built. It triggers only when both config values are positive integers and the current context estimate is at or above `auto_compact_tokens`.
+- `compact_trigger_mode` — `absolute` (default) or `percentage`.
+- `auto_compact_tokens` — positive token threshold used in absolute mode. Blank disables automatic compaction in that mode.
+- `compact_trigger_percentage` — context-capacity percentage used in percentage mode (default `80`).
+- `compact_context_window_tokens` — optional model context-capacity override when runtime metadata does not provide one. Percentage mode is disabled if capacity is unknown.
+- `compact_safety_tokens` — reserve below context capacity (default `8000`); the percentage threshold never exceeds capacity minus this reserve.
+- `compact_keep_tokens` — recent complete-turn token budget preserved verbatim (default `12000`).
+- `compact_input_tokens` — maximum summarizer input per folding pass (default `30000`).
+- `compact_summary_tokens` — maximum validated checkpoint output (default `2500`).
+- `auto_compact_keep_messages` — deprecated compatibility setting. When present, it replaces `compact_keep_tokens` with a recent user/assistant message target, rounded to complete turns.
 
-Auto-compaction announces itself to the attached frontend via `ctx.ui.notice` (a persistent transcript line, not a transient status): a `Compacting context…` notice before the summarization call and a `Compacted: N → M messages (~X → ~Y tokens)` notice with the savings afterwards. The Driver runs the `before_turn` hook on a blocking thread so the UI stays responsive (spinner animates, Esc cancels) during the summarization, and threads the turn cancel flag so Esc aborts an in-flight compaction. `ctx.ui.notify` at info level is forwarded to the frontend the same way (no longer a silent no-op).
+Auto-compaction runs after a user message is appended and before the provider request is built. A per-conversation growth gate prevents repeated retries when context has not grown materially. After a successful replacement, its baseline is reset to the new compacted context estimate.
 
-**Known limitation:** compaction preserves only complete tool-call chains. If the keep boundary would leave a `tool` result without its matching assistant `tool_calls`, or an assistant `tool_calls` entry without its matching result, that incomplete chain is dropped from the compacted transcript to keep provider history valid.
-
-**Disable:** clear `auto_compact_tokens`, clear `auto_compact_keep_messages`, or remove `lua/commands/compact.lua` from the config directory. Removing the file stops both manual `/compact` and auto-compaction.
-
-**Implementation:** summarization policy is entirely in Lua. Rust provides the generic APIs (`ctx.conversation`, `before_turn`, `conversation.replace` action) and durably checkpoints the resulting model-facing context without rewriting full history.
+The transcript replacement is returned as a `conversation.replace` action (see [Return Actions](#command-return-semantics)). The Driver runs `before_turn` on a blocking thread so the UI stays responsive and Esc can cancel an in-flight summarizer. The implementation policy remains entirely in `lua/commands/compact.lua`; Rust supplies generic conversation, request-estimation, agent, and return-action APIs.
 
 ### /config
 
