@@ -11,6 +11,27 @@ pub async fn write_atomic(
     content: &str,
     permissions: Option<std::fs::Permissions>,
 ) -> Result<(), String> {
+    write_atomic_inner(path, content, permissions, None).await
+}
+
+/// Atomically write only if the destination still has `expected` byte content.
+/// The comparison happens immediately before rename, minimizing but not
+/// eliminating the POSIX check/rename race with uncooperative external writers.
+pub async fn write_atomic_if_unchanged(
+    path: &Path,
+    content: &str,
+    permissions: Option<std::fs::Permissions>,
+    expected: &[u8],
+) -> Result<(), String> {
+    write_atomic_inner(path, content, permissions, Some(expected)).await
+}
+
+async fn write_atomic_inner(
+    path: &Path,
+    content: &str,
+    permissions: Option<std::fs::Permissions>,
+    expected: Option<&[u8]>,
+) -> Result<(), String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -40,6 +61,20 @@ pub async fn write_atomic(
             let _ = std::fs::remove_file(&temp_path);
             e.to_string()
         })?;
+    }
+
+    if let Some(expected) = expected {
+        let current = fs::read(path).await.map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            e.to_string()
+        })?;
+        if current != expected {
+            let _ = fs::remove_file(&temp_path).await;
+            return Err(format!(
+                "`{}` changed while the edit was being prepared; re-read it and retry",
+                path.display()
+            ));
+        }
     }
 
     fs::rename(&temp_path, path).await.map_err(|e| {

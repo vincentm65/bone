@@ -66,6 +66,36 @@ async fn classification_is_accepted_but_ignored() {
 }
 
 #[tokio::test]
+async fn obvious_shell_file_writes_redirect_to_dedicated_tools() {
+    let tool = ShellTool;
+    for command in [
+        "sed -i 's/old/new/' file.txt",
+        "tee file.txt",
+        "printf hello > file.txt",
+        "echo hello | tee file.txt",
+        "cat source.txt > copy.txt",
+    ] {
+        let error = tool
+            .execute(json!({ "command": command }))
+            .await
+            .expect_err(command);
+        assert!(
+            error.contains("write_file") || error.contains("edit_file"),
+            "{command}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shell_keeps_read_fallbacks_and_normal_commands_available() {
+    let tool = ShellTool;
+    for command in ["cat /dev/null", "head -1 /dev/null", "printf hello"] {
+        let result = tool.execute(json!({ "command": command })).await;
+        assert!(result.is_ok(), "{command}: {result:?}");
+    }
+}
+
+#[tokio::test]
 async fn cancel_kills_promptly_and_returns_partial_output() {
     // A command that prints then sleeps well past the wall-clock timeout. We
     // flip the cancel flag mid-run and expect execute_output_live to return

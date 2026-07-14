@@ -193,7 +193,7 @@ pub struct ToolHandler {
     /// Propagated to nested/subagent calls via the recursive `self.clone()` in
     /// `execute_one_live`, so tools see the same `ctx` as slash commands.
     pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
-    /// Session-scoped file snapshots backing hashline `read_file`/`write_file`/
+    /// Session-scoped file snapshots backing `read_file`/`write_file`/
     /// `edit_file`. Behind an `Arc<RwLock<..>>` so every cloned handler in a
     /// turn (and across turns) shares one store — the driver clones the
     /// `ToolHandler` per turn but never swaps this `Arc`, so snapshots persist

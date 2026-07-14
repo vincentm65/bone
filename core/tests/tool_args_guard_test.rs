@@ -51,7 +51,9 @@ async fn empty_object_arguments_are_rejected_with_required_fields() {
         result.content
     );
     assert!(
-        result.content.contains("input"),
+        result.content.contains("path")
+            && result.content.contains("old_text")
+            && result.content.contains("new_text"),
         "should name required fields: {}",
         result.content
     );
@@ -104,7 +106,7 @@ async fn populated_arguments_still_reach_the_tool() {
     ))
     .await;
 
-    // Reaches the tool itself (fails on the missing file / missing operation,
+    // Reaches the tool itself (fails on the missing required edit fields,
     // not on the argument guard).
     assert!(result.is_error);
     assert!(

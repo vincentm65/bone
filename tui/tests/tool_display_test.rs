@@ -312,3 +312,30 @@ fn read_file_summary_reports_zero_for_footer_only_result() {
     let tool = row.tool.unwrap();
     assert!(tool.label.contains("(0 lines)"), "label: {}", tool.label);
 }
+
+#[test]
+fn read_file_summary_counts_only_new_numbered_rows() {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: json!({ "path": "src/main.rs", "start_line": 20 }),
+    };
+    let result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "read_file".to_string(),
+        content: "File: /repo/src/main.rs\nRange: lines 20-21 of 30.\n   20 | alpha\n   21 | beta"
+            .to_string(),
+        images: Vec::new(),
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+
+    let row = build_tool_row(&call, &result, None);
+    let tool = row.tool.unwrap();
+    assert!(
+        tool.label.contains("(lines 20-21, 2 read)"),
+        "label: {}",
+        tool.label
+    );
+}

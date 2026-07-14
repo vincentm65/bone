@@ -354,8 +354,50 @@ async fn kill_and_drain(
 /// Deserialize `shell` arguments: the command plus a clamped timeout.
 fn parse_shell_args(arguments: Value) -> Result<(String, u64, bool), String> {
     let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
+    reject_obvious_file_write(&args.command)?;
     let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
     Ok((args.command, timeout_ms, args.background))
+}
+
+/// Reject unmistakable attempts to use shell as a text-file writer while
+/// leaving builds, formatters, generators, bulk transforms, and read fallbacks
+/// available. This is intentionally narrower than the prompt guidance.
+fn reject_obvious_file_write(command: &str) -> Result<(), String> {
+    let trimmed = command.trim_start();
+    let first = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let lower = trimmed.to_ascii_lowercase();
+
+    let sed_in_place = first == "sed"
+        && trimmed
+            .split_whitespace()
+            .skip(1)
+            .take_while(|token| token.starts_with('-'))
+            .any(|token| token == "-i" || token.starts_with("-i."));
+    if sed_in_place {
+        return Err(
+            "use read_file followed by edit_file instead of `sed -i` for file contents".to_string(),
+        );
+    }
+
+    if first == "tee" {
+        return Err("use write_file for a new file or read_file followed by edit_file for an existing file instead of `tee`".to_string());
+    }
+
+    let content_emitter = matches!(first.as_str(), "echo" | "printf" | "cat");
+    let redirects_output = lower.contains(" >") || lower.contains(" 1>") || lower.contains(">>");
+    let pipes_to_tee = lower.contains("| tee ") || lower.ends_with("| tee");
+    if content_emitter && (redirects_output || pipes_to_tee) {
+        return Err("use write_file for a new file or read_file followed by edit_file for an existing file instead of shell redirection".to_string());
+    }
+
+    Ok(())
 }
 
 /// Render a finished command as the tool result the model reads.
@@ -437,7 +479,7 @@ impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         let (_, _, shell_label) = shell_command();
         let desc = format!(
-            "Run a non-interactive shell command with {shell_label}. Returns exit code, stdout, and stderr."
+            "Run a non-interactive shell command with {shell_label}. Do not use shell to read, create, or edit file contents when read_file, write_file, or edit_file can do it. File-tool fallbacks are appropriate only when a file tool recommends shell, for bulk multi-file operations, or when no dedicated tool supports the operation. Returns exit code, stdout, and stderr."
         );
         let cmd_desc = format!("Command to execute with {shell_label}. Runs without stdin.");
         ToolDefinition {

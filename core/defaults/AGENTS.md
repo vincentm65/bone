@@ -71,7 +71,7 @@ local table = cjson.decode(json_str)
 
 A `ctx` table is passed as the second argument to tool `execute(params, ctx)` and command `handler(args, ctx)` functions. Event handlers receive a smaller `ctx` (see [Context Availability](#context-availability) below).
 
-To edit existing files, use `ctx.tools.call("edit_file", { input = "[path#TAG]\nSWAP 1.=3:\n+new line" })` which goes through the full approval pipeline. There is no convenience `ctx.edit_file` method.
+To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_file", { path = path, old_text = old, new_text = new })` which goes through the full approval pipeline. There is no convenience `ctx.edit_file` method.
 
 #### Reference Table
 
@@ -338,7 +338,17 @@ These are compiled into bone and do not require any seeding or installation:
 - **shell** — Run a non-interactive shell command with bash -lc
 - **read_file** — Read a UTF-8 text file
 - **write_file** — Create a new UTF-8 text file
-- **edit_file** — Edit existing files with a hashline patch (`{ input: string }`)
+- **edit_file** — Replace one exact unique text block in an existing file (`{ path, old_text, new_text }`)
+
+Use the dedicated file tools as the default interface for file contents:
+
+- Use `read_file` rather than `cat`, `head`, `tail`, or `sed`.
+- Use `write_file` rather than `tee`, `printf`, heredocs, or redirection.
+- Read first, then use `edit_file` rather than `sed -i`, scripts, heredocs, or redirection.
+- Use `shell` only when a file tool explicitly recommends it, for a bulk
+  multi-file operation, or when no dedicated file tool supports the operation.
+  If a file tool fails, follow its error instead of immediately retrying the
+  same operation through `shell`.
 
 ### Catalog Lua Tools (optional, installed via `/catalog`)
 
@@ -363,18 +373,18 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 
 ```lua
 -- Native Rust tool. Parameters: path, start_line?, max_lines?
--- Output includes [path#TAG] header + N: line-number prefixes (hashline format).
+-- Output includes the resolved path, shown range, and numbered lines.
 ```
 
 ```lua
 -- Native Rust tool. Parameters: path, content
--- On success emits [path#TAG] header for the newly created file.
+-- Creates a new file and refuses to overwrite an existing path.
 ```
 
 ```lua
--- Native Rust tool. Parameters: input (hashline patch string)
--- input contains [path#TAG] sections with line ops: SWAP/DEL/INS.PRE/INS.POST/INS.HEAD/INS.TAIL
--- or file ops: MV dest / REM. TAG is the 4-hex tag from read_file/write_file/edit_file output.
+-- Native Rust tool. Parameters: path, old_text, new_text
+-- Read the file first. old_text must be an exact unique block from the shown
+-- lines; new_text replaces it and may be empty to delete it.
 ```
 
 ## Commands

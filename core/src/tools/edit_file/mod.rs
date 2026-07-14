@@ -1,40 +1,26 @@
-//! The `edit_file` tool: OMP-style hashline edits.
+//! Simple exact-text editing for existing files.
 //!
-//! The model emits a hashline patch in the `input` field: one or more
-//! `[path#TAG]` sections, each a list of line ops (SWAP / DEL / INS.PRE /
-//! INS.POST / INS.HEAD / INS.TAIL) or a single file op (`MV dest` / `REM`).
-//! Line numbers refer to the snapshot the model last read (identified by TAG);
-//! the tool resolves that snapshot, applies the ops, and writes the result
-//! atomically. When the live file has drifted from the read snapshot it
-//! attempts a line-level 3-way merge ([`recovery`]); a conflicting overlap is
-//! rejected with a re-read instruction.
-//!
-//! All sections are preflight-validated (parse + resolve + apply, no writes)
-//! before any file is touched, so a failure in section 3 leaves sections 1–2
-//! unmodified. Mid-batch write failures report which files were written and
-//! which were not (no rollback).
+//! The agent supplies a path plus one exact `old_text` → `new_text`
+//! replacement. Context-aware calls require a preceding `read_file`; the
+//! snapshot stays internal and is used for visibility and stale-file checks.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::fs;
 
 use crate::tools::snapshot::{self, SnapshotStore};
 use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
-use crate::tools::write_atomic::write_atomic;
+use crate::tools::write_atomic::write_atomic_if_unchanged;
 
-pub(crate) mod apply;
 pub(crate) mod diff;
-pub(crate) mod parser;
-pub(crate) mod recovery;
 
 pub struct EditFileTool;
 
-/// A preview of a pending edit, for TUI rendering. `before_hash` is the 4-hex
-/// content tag of the live file at preview time; `diff` is a unified diff.
 pub struct EditPreview {
     pub before_hash: String,
     pub diff: String,
@@ -42,21 +28,37 @@ pub struct EditPreview {
 
 type Snapshots = Arc<RwLock<SnapshotStore>>;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Args {
+    path: String,
+    old_text: String,
+    new_text: String,
+}
+
 #[async_trait]
 impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Edit existing files with a hashline patch. Pass `input`: one or more `[path#TAG]` sections, where TAG is the 4-hex tag from your last read_file/write_file/edit_file result and line numbers refer to that snapshot. Line ops: SWAP start.=end (replace lines), DEL start.=end (delete lines), INS.PRE n / INS.POST n (insert before/after line n), INS.HEAD / INS.TAIL (insert at top/end of file). File ops, alone in their section: MV dest (rename), REM (delete file). Every body line must start with `+` at column 0 — write an empty body line as a bare `+`; a line without `+` ends the op's body. Returns the new tag and a diff.".to_string(),
+            description: "Preferred tool for modifying existing file contents; use this instead of shell commands such as sed -i, tee, heredocs, scripts, or redirection. Replaces one exact, unique block in an existing UTF-8 file. Read the file first, then pass the same path, copy a unique block of shown text into old_text, and put the desired replacement in new_text. Use an empty new_text to delete. To insert, include a small unchanged surrounding block in both old_text and new_text. Returns a unified diff.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "input": {
+                    "path": {
                         "type": "string",
-                        "description": "Hashline patch: `[path#TAG]` header, then ops. Every body line starts with `+`. Example:\n[src/main.rs#A1B2]\nSWAP 3.=4:\n+let x = 1;\n+let y = 2;\nINS.POST 10:\n+// inserted after line 10\nDEL 20.=22"
+                        "description": "File path. Relative paths resolve from the working directory."
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact unique text copied from read_file output, without line-number prefixes. May be empty only when the file is empty."
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text. May be empty to delete old_text."
                     }
                 },
-                "required": ["input"],
+                "required": ["path", "old_text", "new_text"],
                 "additionalProperties": false
             }),
         }
@@ -78,368 +80,179 @@ impl Tool for EditFileTool {
     }
 }
 
-/// Preview a pending hashline edit for TUI rendering. Degrades to live-file
-/// resolution (no snapshot store, no visible-line guard): it shows what the
-/// patch would do against the current file. Stale-tag mismatches are only
-/// caught at apply time.
 pub async fn preview_edit_file(_tool_name: &str, arguments: Value) -> Result<EditPreview, String> {
-    let input = extract_input(arguments)?;
-    let patch = parser::parse(&input)?;
-    let mut combined = String::new();
-    let mut before_hash = String::new();
-    for section in &patch.sections {
-        let content_ops: Vec<_> = section
-            .ops
-            .iter()
-            .filter(|o| !is_lifecycle(o))
-            .cloned()
-            .collect();
-        if content_ops.is_empty() {
-            continue;
-        }
-        let live = read_live_normalized(&section.path).await?;
-        if before_hash.is_empty() {
-            before_hash = snapshot::compute_tag(&live);
-        }
-        let edited = apply::apply_ops(&live, &content_ops, None).map_err(|e| e.to_string())?;
-        combined.push_str(&diff::build_unified_diff(
-            "edit_file",
-            &section.path,
-            &live,
-            &edited,
-        ));
-    }
+    let args = parse_args(arguments)?;
+    let resolved = snapshot::resolve_existing_path(&args.path).await?;
+    let path = resolved.to_string_lossy().into_owned();
+    let (_, live) = read_live(&resolved).await?;
+    let old_text = snapshot::normalize_text(&args.old_text);
+    let new_text = snapshot::normalize_text(&args.new_text);
+    let edited = replace_unique(&live, &old_text, &new_text, &path)?;
     Ok(EditPreview {
-        before_hash,
-        diff: combined,
+        before_hash: snapshot::compute_tag(&live),
+        diff: diff::build_unified_diff("edit_file", &path, &live, &edited),
     })
 }
 
-/// Core entry point shared by the context-aware and degraded paths.
 async fn run_edit(arguments: Value, snapshots: Option<&Snapshots>) -> Result<String, String> {
-    let input = extract_input(arguments)?;
-    let patch = parser::parse(&input)?;
+    let args = parse_args(arguments)?;
+    let resolved = snapshot::resolve_existing_path(&args.path).await?;
+    let path = resolved.to_string_lossy().into_owned();
+    let (live_raw, live) = read_live(&resolved).await?;
+    let old_text = snapshot::normalize_text(&args.old_text);
+    let new_text = snapshot::normalize_text(&args.new_text);
 
-    // ── Preflight: validate every section and build a write plan. ──────────
-    // No writes happen here, so a failure leaves the filesystem untouched.
-    let mut plans = Vec::with_capacity(patch.sections.len());
-    let mut paths = HashSet::with_capacity(patch.sections.len());
-    for section in &patch.sections {
-        if !paths.insert(section.path.as_str()) {
-            return Err(format!(
-                "duplicate section for `{}`; combine its operations into one section",
-                section.path
-            ));
+    let (base, fully_seen) = if let Some(store) = snapshots {
+        let guard = store.read().map_err(|e| e.to_string())?;
+        let snap = guard
+            .head(&path)
+            .ok_or_else(|| format!("read `{path}` with read_file before editing it"))?;
+        ensure_visible(&snap.text, &old_text, &snap.seen_lines, &path)?;
+        let line_count = snapshot::numbered_lines(&snap.text).len();
+        (
+            snap.text.clone(),
+            (1..=line_count).all(|line| snap.seen_lines.contains(&line)),
+        )
+    } else {
+        (live.clone(), true)
+    };
+
+    // Validate against what the model saw even when the live file has drifted.
+    unique_match_offset(&base, &old_text, &path)?;
+    let live_offset = unique_match_offset(&live, &old_text, &path).map_err(|e| {
+        if base != live {
+            format!("{e}; `{path}` changed after it was read, so re-read it and retry")
+        } else {
+            e
         }
-        plans.push(build_plan(section, snapshots).await?);
+    })?;
+    let edited = replace_unique(&live, &old_text, &new_text, &path)?;
+    if edited == live {
+        return Err(format!(
+            "no change to `{path}`; old_text and new_text produce identical content"
+        ));
     }
 
-    // ── Execute: apply writes in order. Track successes for a mid-batch ────
-    // ── failure report (no rollback). ──────────────────────────────────────
-    let mut outcomes = Vec::with_capacity(plans.len());
-    for (idx, plan) in plans.into_iter().enumerate() {
-        match execute_plan(&plan).await {
-            Ok(outcome) => outcomes.push((plan, outcome)),
-            Err(e) => {
-                let written: Vec<&str> =
-                    outcomes.iter().map(|(p, _)| p.path_for_report()).collect();
-                let mut msg = String::new();
-                if !written.is_empty() {
-                    msg.push_str(&format!("wrote: {} — ", written.join(", ")));
-                }
-                msg.push_str(&format!(
-                    "section {} (`{}`) failed: {e}",
-                    idx + 1,
-                    plan.path_for_report()
-                ));
-                return Err(msg);
-            }
-        }
-    }
+    let permissions = fs::metadata(&resolved)
+        .await
+        .map_err(|e| format!("could not re-check `{path}` before writing: {e}"))?
+        .permissions();
+    write_atomic_if_unchanged(&resolved, &edited, Some(permissions), live_raw.as_bytes()).await?;
 
-    // ── Record: update the snapshot store for the next round. ──────────────
     if let Some(store) = snapshots {
         let mut guard = store.write().map_err(|e| e.to_string())?;
-        for (plan, _) in &outcomes {
-            match plan {
-                Plan::Content { path, new_text, .. } => {
-                    let n = snapshot::numbered_lines(new_text).len();
-                    guard.record(path, new_text, Some(&(1..=n).collect::<Vec<_>>()));
-                }
-                Plan::Rename { from, to } => guard.relocate(from, to),
-                Plan::Remove { path } => guard.invalidate(path),
-            }
-        }
-    }
-
-    Ok(build_summary(&outcomes))
-}
-
-/// One section's resolved write plan (post-preflight, pre-write).
-enum Plan {
-    /// Replace a file's contents. `live` is the pre-edit normalized text (diff
-    /// base); `new_text` is what gets written (already merge-recovered if the
-    /// read was stale).
-    Content {
-        path: String,
-        live: String,
-        new_text: String,
-    },
-    /// Rename `from` → `to`.
-    Rename { from: String, to: String },
-    /// Delete `path`.
-    Remove { path: String },
-}
-
-impl Plan {
-    /// Path used in progress/error reports.
-    fn path_for_report(&self) -> &str {
-        match self {
-            Plan::Content { path, .. } | Plan::Remove { path } => path,
-            Plan::Rename { from, .. } => from,
-        }
-    }
-}
-
-/// The result of executing a plan (for summary construction).
-enum Outcome {
-    Content {
-        path: String,
-        new_tag: String,
-        diff: String,
-    },
-    Renamed {
-        from: String,
-        to: String,
-    },
-    Removed {
-        path: String,
-    },
-}
-
-/// True for file-lifecycle ops (MV/REM) handled outside the apply engine.
-fn is_lifecycle(op: &parser::Op) -> bool {
-    matches!(op, parser::Op::Move { .. } | parser::Op::Remove)
-}
-
-/// Resolve a section into a write plan: partition ops, fetch the snapshot,
-/// apply content ops (preflight), and recover from drift if needed.
-async fn build_plan(
-    section: &parser::Section,
-    snapshots: Option<&Snapshots>,
-) -> Result<Plan, String> {
-    let mut content_ops = Vec::new();
-    let mut lifecycle = None;
-    for op in &section.ops {
-        if is_lifecycle(op) {
-            if lifecycle.is_some() || !content_ops.is_empty() {
-                return Err(format!(
-                    "a file op ({}) must be the only op in its `[{}#{}`] section; \
-                     move content edits to a separate call",
-                    op.label(),
-                    section.path,
-                    section.tag
-                ));
-            }
-            lifecycle = Some(op);
+        let seen = if fully_seen && base == live {
+            (1..=snapshot::numbered_lines(&edited).len()).collect()
         } else {
-            if lifecycle.is_some() {
-                return Err(format!(
-                    "content op ({}) cannot follow a file op in `[{}#{}`]; \
-                     split into separate sections",
-                    op.label(),
-                    section.path,
-                    section.tag
-                ));
-            }
-            content_ops.push(op.clone());
-        }
+            replacement_lines(&live, live_offset, &new_text)
+        };
+        guard.record(&path, &edited, Some(&seen));
     }
 
-    if let Some(op) = lifecycle {
-        return Ok(match op {
-            parser::Op::Move { dest } => Plan::Rename {
-                from: section.path.clone(),
-                to: dest.clone(),
-            },
-            parser::Op::Remove => Plan::Remove {
-                path: section.path.clone(),
-            },
-            // Unreachable: is_lifecycle guards the variant.
-            _ => unreachable!("lifecycle op was validated"),
-        });
-    }
-
-    if content_ops.is_empty() {
-        return Err(format!(
-            "section `[{}#{}`] has no operations",
-            section.path, section.tag
-        ));
-    }
-
-    // ── Resolve the snapshot the model referenced. ─────────────────────────
-    // Read the live file first so a content match can recover seen-lines even
-    // when the tag itself drifted (e.g. the model re-read but quoted a stale
-    // tag). Locks are held only for the brief lookup, never across awaits.
-    let live = read_live_normalized(&section.path).await?;
-    let (base_text, seen_lines) = resolve_base(snapshots, &section.path, &section.tag, &live)?;
-
-    // ── Apply ops against the read snapshot (original-line semantics). ──────
-    let edited =
-        apply::apply_ops(&base_text, &content_ops, Some(&seen_lines)).map_err(|e| e.to_string())?;
-
-    // ── Reconcile with the live file (fresh vs stale). ─────────────────────
-    let new_text = if base_text == live {
-        edited
-    } else {
-        // The file changed since the read: 3-way merge the intended change
-        // onto the current contents.
-        let recovered =
-            recovery::merge_onto(&base_text, &edited, &live).map_err(|e| e.to_string())?;
-        recovered.text
-    };
-
-    // ── No-op / loop guard: a content edit that changes nothing almost ──────
-    // ── always means the model is re-applying an edit that already took. ────
-    if new_text == live {
-        return Err(format!(
-            "no change to `{}` — the file already matches this edit, so it was likely \
-             already applied; re-read the file to see current line numbers and tags",
-            section.path
-        ));
-    }
-
-    Ok(Plan::Content {
-        path: section.path.clone(),
-        live,
-        new_text,
-    })
+    let rendered = truncate_output(&diff::build_unified_diff(
+        "edit_file",
+        &path,
+        &live,
+        &edited,
+    ));
+    Ok(format!("Edited: {path}\n{rendered}").trim_end().to_string())
 }
 
-/// Look up the snapshot the model referenced. Context-free callers operate on
-/// the live file, while context-aware callers must supply a recorded tag.
-fn resolve_base(
-    snapshots: Option<&Snapshots>,
+fn parse_args(arguments: Value) -> Result<Args, String> {
+    let args: Args = serde_json::from_value(arguments).map_err(|e| {
+        format!("edit_file requires path, old_text, and new_text string fields: {e}")
+    })?;
+    if args.path.trim().is_empty() {
+        return Err("`path` must not be empty".to_string());
+    }
+    if args.old_text.is_empty() && args.new_text.is_empty() {
+        return Err("`old_text` and `new_text` cannot both be empty".to_string());
+    }
+    Ok(args)
+}
+
+fn unique_match_offset(text: &str, needle: &str, path: &str) -> Result<usize, String> {
+    if needle.is_empty() {
+        return if text.is_empty() {
+            Ok(0)
+        } else {
+            Err(format!(
+                "old_text may be empty only when `{path}` is empty; copy a unique block from read_file"
+            ))
+        };
+    }
+    let mut matches = text.match_indices(needle);
+    let Some((offset, _)) = matches.next() else {
+        return Err(format!(
+            "old_text was not found in `{path}`; copy it exactly from read_file"
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "old_text occurs more than once in `{path}`; include more surrounding text so it is unique"
+        ));
+    }
+    Ok(offset)
+}
+
+fn replace_unique(text: &str, old: &str, new: &str, path: &str) -> Result<String, String> {
+    let offset = unique_match_offset(text, old, path)?;
+    let mut result = String::with_capacity(text.len() - old.len() + new.len());
+    result.push_str(&text[..offset]);
+    result.push_str(new);
+    result.push_str(&text[offset + old.len()..]);
+    Ok(result)
+}
+
+fn ensure_visible(
+    snapshot_text: &str,
+    old_text: &str,
+    seen_lines: &BTreeSet<usize>,
     path: &str,
-    tag: &str,
-    live: &str,
-) -> Result<(String, BTreeSet<usize>), String> {
-    let Some(store) = snapshots else {
-        return Ok((live.to_string(), BTreeSet::new()));
-    };
-    let guard = store.read().map_err(|e| e.to_string())?;
-    if let Some(snap) = guard.by_hash(path, tag) {
-        return Ok((snap.text.clone(), snap.seen_lines.clone()));
+) -> Result<(), String> {
+    if old_text.is_empty() && snapshot_text.is_empty() {
+        return Ok(());
     }
-
-    // The transcript can outlive the in-memory snapshot store: for example,
-    // the daemon may have resumed a conversation from SQLite, or a provider
-    // may replay a cached read result without re-running the local tool. If the
-    // live content itself has the requested tag, it is the exact snapshot the
-    // model referenced, so applying against it is safe. We no longer have the
-    // read's visibility metadata in this case; treat the whole exact-content
-    // snapshot as visible rather than failing a valid cached/replayed read.
-    if snapshot::compute_tag(live) == tag {
-        let seen_lines = (1..=snapshot::numbered_lines(live).len()).collect();
-        return Ok((live.to_string(), seen_lines));
+    let offset = unique_match_offset(snapshot_text, old_text, path)?;
+    let start_line = 1 + snapshot_text[..offset]
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count();
+    let last_byte = offset + old_text.len() - 1;
+    let end_line = 1 + snapshot_text[..=last_byte]
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count()
+        - usize::from(old_text.ends_with('\n'));
+    if (start_line..=end_line).any(|line| !seen_lines.contains(&line)) {
+        return Err(format!(
+            "old_text includes lines that were not shown from `{path}`; read that range before editing"
+        ));
     }
-
-    Err(format!(
-        "snapshot tag `{tag}` for `{path}` was not found; re-read the file and use the new tag"
-    ))
+    Ok(())
 }
 
-/// Read a file as normalized text (BOM stripped, CRLF/CR → LF).
-async fn read_live_normalized(path: &str) -> Result<String, String> {
+fn replacement_lines(live: &str, offset: usize, new_text: &str) -> Vec<usize> {
+    if new_text.is_empty() {
+        return Vec::new();
+    }
+    let start_line = 1 + live[..offset].bytes().filter(|b| *b == b'\n').count();
+    let count = snapshot::numbered_lines(new_text).len().max(1);
+    (start_line..start_line + count).collect()
+}
+
+async fn read_live(path: &Path) -> Result<(String, String), String> {
     let meta = fs::metadata(path).await.map_err(crate::util::errstr)?;
     if !meta.is_file() {
-        return Err(format!("`{path}` is not a regular file"));
+        return Err(format!("`{}` is not a regular file", path.display()));
     }
     let raw = fs::read_to_string(path)
         .await
         .map_err(crate::util::errstr)?;
-    Ok(snapshot::normalize_text(&raw))
+    let normalized = snapshot::normalize_text(&raw);
+    Ok((raw, normalized))
 }
 
-/// Execute one plan (filesystem write). Returns its outcome for the summary.
-async fn execute_plan(plan: &Plan) -> Result<Outcome, String> {
-    match plan {
-        Plan::Content {
-            path,
-            live,
-            new_text,
-        } => {
-            let p = Path::new(path);
-            let permissions = fs::metadata(p).await.ok().map(|m| m.permissions());
-            write_atomic(p, new_text, permissions).await?;
-            let new_tag = snapshot::compute_tag(new_text);
-            let diff =
-                truncate_output(&diff::build_unified_diff("edit_file", path, live, new_text));
-            Ok(Outcome::Content {
-                path: path.clone(),
-                new_tag,
-                diff,
-            })
-        }
-        Plan::Rename { from, to } => {
-            fs::rename(from, to).await.map_err(crate::util::errstr)?;
-            Ok(Outcome::Renamed {
-                from: from.clone(),
-                to: to.clone(),
-            })
-        }
-        Plan::Remove { path } => {
-            fs::remove_file(path).await.map_err(crate::util::errstr)?;
-            Ok(Outcome::Removed { path: path.clone() })
-        }
-    }
-}
-
-/// Build the success message: one line per file plus a unified diff for
-/// content edits.
-fn build_summary(outcomes: &[(Plan, Outcome)]) -> String {
-    let mut out = String::new();
-    for (_, outcome) in outcomes {
-        match outcome {
-            Outcome::Content {
-                path,
-                new_tag,
-                diff,
-            } => {
-                out.push_str(&format!("edited `{path}` [`{path}#{new_tag}`]\n"));
-                if !diff.trim().is_empty() {
-                    out.push_str(diff);
-                    if !diff.ends_with('\n') {
-                        out.push('\n');
-                    }
-                }
-            }
-            Outcome::Renamed { from, to } => {
-                out.push_str(&format!("renamed `{from}` → `{to}`\n"));
-            }
-            Outcome::Removed { path } => {
-                out.push_str(&format!("deleted `{path}`\n"));
-            }
-        }
-    }
-    out.trim_end().to_string()
-}
-
-/// Extract and validate the `input` field from the tool arguments.
-fn extract_input(arguments: Value) -> Result<String, String> {
-    let input = arguments
-        .get("input")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            "edit_file requires an `input` string field holding a hashline patch".to_string()
-        })?;
-    if input.trim().is_empty() {
-        return Err("`input` is empty; provide a `[path#TAG]` hashline patch".to_string());
-    }
-    Ok(input.to_string())
-}
-
-/// Cap a diff to a readable length so tool results stay bounded.
 fn truncate_output(text: &str) -> String {
     crate::tools::shell::truncate_output(text, 200)
 }

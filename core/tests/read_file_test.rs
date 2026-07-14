@@ -2,224 +2,132 @@ mod common;
 
 use std::path::PathBuf;
 
+use bone_core::tools::read_file::ReadFileTool;
+use bone_core::tools::types::{Tool, ToolExecutionContext};
 use serde_json::json;
 use tokio::fs;
 
-use bone_core::tools::read_file::ReadFileTool;
-use bone_core::tools::types::Tool;
-
 fn temp_path(name: &str) -> PathBuf {
-    common::temp_path(&format!("read-file-{name}"))
+    common::temp_path(&format!("simple-read-{name}"))
 }
 
 #[tokio::test]
-async fn reads_entire_file_when_no_options_given() {
+async fn returns_resolved_path_range_and_numbered_text() {
     let path = temp_path("full.txt");
     fs::write(&path, "line one\nline two\nline three")
         .await
-        .expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path }))
-        .await
-        .expect("read should succeed");
-
-    // Full read: hashline header + total-lines footer + numbered lines.
-    assert!(result.starts_with("["));
-    assert!(result.contains("#"));
-    assert!(result.contains("[3 lines total]"));
-    assert!(result.contains("    1: line one"));
-    assert!(result.contains("    2: line two"));
-    assert!(result.contains("    3: line three"));
-    let _ = fs::remove_file(&path).await;
+        .unwrap();
+    let result = ReadFileTool.execute(json!({ "path": path })).await.unwrap();
+    let canonical = fs::canonicalize(&path).await.unwrap();
+    assert!(result.starts_with(&format!("File: {}", canonical.display())));
+    assert!(result.contains("Range: lines 1-3 of 3; entire file."));
+    assert!(result.contains("    1 | line one"));
+    assert!(result.contains("    3 | line three"));
+    assert!(!result.contains('#'));
+    let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn start_line_skips_to_given_line() {
-    let path = temp_path("start-line.txt");
-    fs::write(&path, "alpha\nbeta\ngamma\ndelta")
-        .await
-        .expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "start_line": 3 }))
-        .await
-        .expect("read should succeed");
-
-    // Ranged read to EOF: hashline header + end-of-file footer + numbered lines.
-    assert!(result.starts_with("["));
-    assert!(result.contains("[showing lines 3-4 of 4; end of file]"));
-    assert!(result.contains("    3: gamma"));
-    assert!(result.contains("    4: delta"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn max_lines_limits_output() {
-    let path = temp_path("max-lines.txt");
-    fs::write(&path, "a\nb\nc\nd\ne").await.expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
+async fn range_is_clear_and_provides_the_next_call() {
+    let path = temp_path("range.txt");
+    fs::write(&path, "a\nb\nc\nd").await.unwrap();
+    let result = ReadFileTool
         .execute(json!({ "path": path, "start_line": 2, "max_lines": 2 }))
         .await
-        .expect("read should succeed");
-
-    // Partial view: hashline header + editable-lines footer + numbered lines.
-    assert!(result.starts_with("["));
-    assert!(result.contains("only these lines are editable"));
+        .unwrap();
+    assert!(result.contains("Range: lines 2-3 of 4"));
     assert!(result.contains("start_line=4"));
-    assert!(result.contains("    2: b"));
-    assert!(result.contains("    3: c"));
-    let _ = fs::remove_file(&path).await;
+    assert!(result.contains("    2 | b"));
+    assert!(!result.contains("    4 | d"));
+    let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn start_line_beyond_file_returns_empty() {
-    let path = temp_path("beyond.txt");
-    fs::write(&path, "only one line").await.expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
+async fn start_beyond_eof_and_empty_files_are_explicit() {
+    let path = temp_path("empty-range.txt");
+    fs::write(&path, "only").await.unwrap();
+    let beyond = ReadFileTool
         .execute(json!({ "path": path, "start_line": 99 }))
         .await
-        .expect("read should succeed");
-
-    // Empty range still reports hashline header + total size.
-    assert!(result.starts_with("["));
-    assert!(result.contains("[no lines in range; file has 1 line]"));
-    let _ = fs::remove_file(&path).await;
+        .unwrap();
+    assert!(beyond.contains("Range: no lines; file has 1 line"));
+    fs::write(&path, "").await.unwrap();
+    let empty = ReadFileTool.execute(json!({ "path": path })).await.unwrap();
+    assert!(empty.contains("Range: empty file; 0 lines total"));
+    let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn empty_file_returns_hashline_header_and_footer() {
-    let path = temp_path("empty.txt");
-    fs::write(&path, "").await.expect("setup");
-    let result = ReadFileTool
-        .execute(json!({ "path": path }))
-        .await
-        .expect("read should succeed");
-    assert!(result.starts_with("["));
-    assert!(result.contains('#'));
-    assert!(result.contains("[empty file; 0 lines total]"));
-    let _ = fs::remove_file(&path).await;
+async fn long_lines_are_bounded_and_marked_uneditable() {
+    let path = temp_path("long.txt");
+    fs::write(&path, "x".repeat(5000)).await.unwrap();
+    let result = ReadFileTool.execute(json!({ "path": path })).await.unwrap();
+    assert!(result.contains("…[truncated]"));
+    assert!(result.contains("not editable"));
+    assert!(result.len() < 5000);
+    let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn png_returns_image_output() {
-    let dir = common::temp_dir("read-file-image");
-    fs::create_dir_all(&dir).await.expect("setup dir");
+async fn image_files_still_return_attachments() {
+    let dir = common::temp_dir("simple-read-image");
+    fs::create_dir_all(&dir).await.unwrap();
     let path = dir.join("image.png");
-    fs::write(&path, [137, 80, 78, 71]).await.expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
+    fs::write(&path, [137, 80, 78, 71]).await.unwrap();
+    let result = ReadFileTool
         .execute_output(json!({ "path": path }))
         .await
-        .expect("read image should succeed");
-
+        .unwrap();
     assert_eq!(result.images.len(), 1);
     assert_eq!(result.images[0].media_type, "image/png");
-    assert!(result.content.contains("image/png"));
-    let _ = fs::remove_dir_all(&dir).await;
+    let _ = fs::remove_dir_all(dir).await;
 }
 
 #[tokio::test]
-async fn large_file_shows_paging_footer() {
-    // A file over the default 500-line cap: the model must be told it is seeing
-    // a partial view and how to continue.
-    let body: String = (1..=600)
-        .map(|i| format!("line {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let path = temp_path("large.txt");
-    fs::write(&path, body).await.expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path }))
-        .await
-        .expect("read should succeed");
-
-    assert!(
-        result.contains("[showing lines 1-500 of 600; only these lines are editable"),
-        "missing paging footer: {result}"
-    );
-    assert!(result.contains("start_line=501"));
-    // Last line of the window is present, line 501 is not.
-    assert!(result.contains("  500: line 500"));
-    assert!(!result.contains("  501:"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn paging_continues_from_start_line() {
-    let body: String = (1..=600)
-        .map(|i| format!("line {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let path = temp_path("large-page2.txt");
-    fs::write(&path, body).await.expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path, "start_line": 501 }))
-        .await
-        .expect("read should succeed");
-
-    // Reading the tail reaches EOF: explicit range, no paging prompt.
-    assert!(result.contains("line 600"));
-    assert!(result.contains("[showing lines 501-600 of 600; end of file]"));
-    assert!(!result.contains("call again"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn long_single_line_is_capped() {
-    // A single minified mega-line must not flood the context window.
-    let mega = "x".repeat(5000);
-    let path = temp_path("mega.txt");
-    fs::write(&path, &mega).await.expect("setup");
-    let tool = ReadFileTool;
-
-    let result = tool
-        .execute(json!({ "path": path }))
-        .await
-        .expect("read should succeed");
-
-    assert!(result.contains("…[truncated]"), "missing truncation marker");
-    // The kept body is bounded; the marker plus footer keep it well short of
-    // the raw 5000-char line.
-    assert!(result.len() < 5000);
-    assert!(result.contains("[1 line total]"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn refuses_oversized_text_file_before_reading() {
-    let path = temp_path("oversized.txt");
-    let file = fs::File::create(&path).await.expect("setup");
-    file.set_len(51 * 1024 * 1024).await.expect("set len");
-    let tool = ReadFileTool;
-
-    let result = tool.execute(json!({ "path": path })).await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("too large to read directly"));
-    let _ = fs::remove_file(&path).await;
-}
-
-#[tokio::test]
-async fn invalid_utf8_gets_instructive_error() {
+async fn invalid_utf8_gets_an_actionable_error() {
     let path = temp_path("binary.bin");
-    fs::write(&path, [0xff, 0xfe, 0xfd]).await.expect("setup");
-    let tool = ReadFileTool;
+    fs::write(&path, [0xff, 0xfe]).await.unwrap();
+    let error = ReadFileTool
+        .execute(json!({ "path": path }))
+        .await
+        .unwrap_err();
+    assert!(error.contains("not valid UTF-8"));
+    let _ = fs::remove_file(path).await;
+}
 
-    let result = tool.execute(json!({ "path": path })).await;
+#[tokio::test]
+async fn preserves_trailing_whitespace_on_the_last_displayed_line() {
+    let path = temp_path("trailing-whitespace.txt");
+    fs::write(&path, "first\nlast  \t\n").await.unwrap();
+    let result = ReadFileTool.execute(json!({ "path": path })).await.unwrap();
+    assert!(result.ends_with("    2 | last  \t"), "{result:?}");
+    let _ = fs::remove_file(path).await;
+}
 
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not valid UTF-8"));
-    let _ = fs::remove_file(&path).await;
+#[tokio::test]
+async fn reports_a_poisoned_snapshot_store() {
+    let path = temp_path("poisoned-snapshot.txt");
+    fs::write(&path, "content\n").await.unwrap();
+    let context = ToolExecutionContext::default();
+    let snapshots = context.snapshots.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = snapshots.write().unwrap();
+        panic!("poison snapshot store for test");
+    })
+    .join();
+
+    let error = ReadFileTool
+        .execute_output_live(json!({ "path": path }), None, context)
+        .await
+        .unwrap_err();
+    assert!(error.contains("snapshot store lock is poisoned"), "{error}");
+    let _ = fs::remove_file(path).await;
+}
+
+#[test]
+fn schema_is_small_and_bounded() {
+    let schema = ReadFileTool.definition().input_schema;
+    assert_eq!(schema["required"], json!(["path"]));
+    assert_eq!(schema["properties"]["max_lines"]["maximum"], 1000);
+    assert_eq!(schema["additionalProperties"], false);
 }

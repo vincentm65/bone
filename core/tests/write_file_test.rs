@@ -23,7 +23,6 @@ async fn creates_new_file() {
         .expect("write_file should create a new file");
 
     assert!(result.contains("wrote"));
-    assert!(result.contains("#"));
     assert_eq!(
         fs::read_to_string(&path)
             .await
@@ -56,8 +55,8 @@ async fn refuses_to_overwrite_existing_file() {
         "unexpected error: {err}"
     );
     assert!(
-        err.contains("edit_file") && err.contains("hashline"),
-        "error should point at edit_file hashline: {err}"
+        err.contains("edit_file") && err.contains("old_text"),
+        "error should point at the simple edit_file contract: {err}"
     );
     assert_eq!(
         fs::read_to_string(&path)

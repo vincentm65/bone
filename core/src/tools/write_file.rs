@@ -2,8 +2,7 @@
 //!
 //! On success it records the file's normalized content as a fresh snapshot
 //! (all lines visible — the model just authored them) so a following
-//! `edit_file` can anchor on any line, and emits a `[path#TAG]` header the
-//! model quotes in that edit.
+//! `edit_file` can validate a simple exact-text replacement.
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -34,7 +33,7 @@ impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "write_file".to_string(),
-            description: "Create a NEW UTF-8 text file. Only for files that do not exist yet; it errors if the path already exists. To change an existing file, use edit_file with a hashline patch instead. Returns a `[path#TAG]` header to quote in your next edit_file.".to_string(),
+            description: "Preferred tool for creating file contents; use this instead of shell commands such as tee, printf, heredocs, or redirection. Creates a NEW UTF-8 text file and errors if the path already exists. To change an existing file, read it and use edit_file with path, old_text, and new_text.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -90,7 +89,7 @@ async fn write_file_inner(
         Ok(_) => {
             return Err(format!(
                 "file already exists — write_file only creates new files. Do NOT retry write_file for this path. \
-                 To change it, call edit_file with a `[path#TAG]` hashline patch (SWAP/DEL/INS line ops).",
+                 To change it, read the file and call edit_file with path, old_text, and new_text.",
             ));
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -103,22 +102,26 @@ async fn write_file_inner(
     // emit for the same bytes (both normalize identically).
     let normalized = snapshot::normalize_text(&args.content);
     let n = snapshot::numbered_lines(&normalized).len();
-    let tag = match snapshots {
-        Some(store) => match store.write() {
-            Ok(mut guard) => {
-                guard.record(&args.path, &normalized, Some(&(1..=n).collect::<Vec<_>>()))
-            }
-            Err(_) => snapshot::compute_tag(&normalized),
-        },
-        None => snapshot::compute_tag(&normalized),
-    };
+    let snapshot_path = fs::canonicalize(path)
+        .await
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    if let Some(store) = snapshots
+        && let Ok(mut guard) = store.write()
+    {
+        guard.record(
+            &snapshot_path,
+            &normalized,
+            Some(&(1..=n).collect::<Vec<_>>()),
+        );
+    }
 
     Ok(format!(
-        "wrote {} ({} bytes, {} line{}) [`{}#{tag}`]",
-        args.path,
+        "wrote {} ({} bytes, {} line{})",
+        snapshot_path,
         args.content.len(),
         n,
         if n == 1 { "" } else { "s" },
-        args.path,
     ))
 }

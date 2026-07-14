@@ -217,6 +217,25 @@ fn format_display_value(value: &Value) -> String {
 }
 
 pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {
+    // Current read_file output has two metadata lines followed by `N | text`.
+    // Count only numbered content rows, not the File/Range/Note headers.
+    let numbered_lines = result
+        .content
+        .lines()
+        .filter(|line| {
+            line.split_once(" | ")
+                .is_some_and(|(prefix, _)| prefix.trim().parse::<usize>().is_ok())
+        })
+        .count();
+    if result.content.starts_with("File: ") {
+        if numbered_lines == 0 {
+            return " (0 lines)".to_string();
+        }
+        let start_line = call.arguments["start_line"].as_u64().unwrap_or(1) as usize;
+        let end_line = start_line + numbered_lines - 1;
+        return format!(" (lines {start_line}-{end_line}, {numbered_lines} read)");
+    }
+
     // The result ends with a bracketed status footer ("\n\n[...]") that is
     // not file content; don't count it toward lines read.
     let content = result
