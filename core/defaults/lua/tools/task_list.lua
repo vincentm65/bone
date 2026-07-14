@@ -98,6 +98,22 @@ local function execute(params, ctx)
         })
     end
 
+    if action == "complete" then
+        local raw = ctx.state.get("task_list")
+        if not raw or raw == "" then
+            return "ERROR: No active task list to complete."
+        end
+        local ok, state = pcall(cjson.decode, raw)
+        if not ok or type(state) ~= "table" or type(state.tasks) ~= "table" or #state.tasks == 0 then
+            return "ERROR: Active task list is unavailable or invalid."
+        end
+        for _, task in ipairs(state.tasks) do
+            task.status = "done"
+        end
+        ctx.state.set("task_list", cjson.encode(state))
+        return emit(state, "All tasks complete.")
+    end
+
     if action == "write" then
         local raw_tasks = params.tasks
         if type(raw_tasks) ~= "table" then
@@ -142,7 +158,7 @@ end
 
 bone.register_tool({
     name = "task_list",
-    description = "Maintain a visible checklist (TUI pane) for the user. Use it for any task with ~3+ distinct steps or work spanning multiple files. Call 'write' with the FULL list every time — it replaces the whole list, so there are no indices to track. Keep at most one item 'in_progress' (the step you're working on now); flip it to 'done' when finished. When all items are done, write the list with zero in_progress to signal completion, then call 'clear' once the user confirms. State is host-held; no state arg. Actions: write (pass tasks, optional name, max 15), clear.",
+    description = "Maintain a visible checklist (TUI pane) for the user. Use it for any task with ~3+ distinct steps or work spanning multiple files. Call 'write' with the FULL list every time — it replaces the whole list, so there are no indices to track. Keep at most one item 'in_progress' (the step you're working on now); flip it to 'done' when finished. Once the work is genuinely complete, call 'complete' to mark the whole current list done. Call 'clear' only when the user confirms. State is host-held; no state arg. Actions: write (pass tasks, optional name, max 15), complete, clear.",
     safety = "read_only",
     -- Host-managed state: the host serializes batched calls and threads the
     -- prior list back in (state_key defaults to the tool name, "task_list").
@@ -152,8 +168,8 @@ bone.register_tool({
         properties = {
             action = {
                 type = "string",
-                description = "'write' (replace the full list) or 'clear' (remove the list).",
-                enum = { "write", "clear" },
+                description = "'write' (replace the full list), 'complete' (mark every current task done), or 'clear' (remove the list).",
+                enum = { "write", "complete", "clear" },
             },
             name = {
                 type = "string",
@@ -262,7 +278,7 @@ bone.on("before_turn", function(_event, ctx)
     -- All done → offer to clear (dedup ok: situational, not state-bearing).
     if done >= #tasks then
         return emit_turn_message_once(ctx,
-            "Your task list is complete. Call task_list (action=clear) once the user has confirmed you're finished.")
+            "Your task list is complete. Leave it visible, and call task_list (action=clear) only once the user has confirmed you're finished.")
     end
 
     -- Active list: always emit the full list (no dedup) so the model can
@@ -272,7 +288,7 @@ bone.on("before_turn", function(_event, ctx)
         or "No item is in_progress — mark the next one you're working on."
     return {
         turn_message = string.format(
-            "Active task list (%d/%d done). %s\n%s\nResend the full list via task_list (action=write) to update statuses. Keep at most one item in_progress (zero once all are done).",
+            "Active task list (%d/%d done). %s\n%s\nUse task_list (action=write) to update progress. Once the work is genuinely complete, call task_list (action=complete) before your final answer.",
             done, #tasks, current_line, render_list_text(tasks)),
     }
 end)

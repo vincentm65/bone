@@ -4,12 +4,18 @@
 
 mod common;
 
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use bone_core::runtime::view::ViewDiff;
 use bone_core::tools::types::ToolCall;
 
 const TASK_LIST: &str = include_str!("fixtures/task_list.lua");
+
+fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn boot(config_dir: &std::path::Path) -> bone_core::ext::BootedTools {
     let tools_dir = config_dir.join("lua/tools");
@@ -57,6 +63,7 @@ fn run(
 
 #[test]
 fn tasklist_create_pushes_pane_to_shared_ui() {
+    let _guard = test_lock().lock().unwrap();
     let config_dir = common::temp_dir("tasklist-pane-create");
     let booted = boot(&config_dir);
 
@@ -87,7 +94,38 @@ fn tasklist_create_pushes_pane_to_shared_ui() {
 }
 
 #[test]
+fn tasklist_complete_updates_state_through_ctx() {
+    let _guard = test_lock().lock().unwrap();
+    let config_dir = common::temp_dir("tasklist-complete");
+    let booted = boot(&config_dir);
+
+    run(
+        &booted,
+        serde_json::json!({
+            "action": "write",
+            "tasks": ["alpha", {"text": "beta", "status": "in_progress"}],
+        }),
+    );
+    let _ = booted.manager.drain_view_diffs();
+
+    let res = run(&booted, serde_json::json!({ "action": "complete" }));
+    assert!(!res.is_error, "tool errored: {}", res.content);
+    assert_eq!(res.content, "All tasks complete.");
+
+    let state: serde_json::Value =
+        serde_json::from_str(res.state.as_deref().expect("complete should return state")).unwrap();
+    assert!(
+        state["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|task| task["status"] == "done")
+    );
+}
+
+#[test]
 fn tasklist_kill_pushes_pane_removal() {
+    let _guard = test_lock().lock().unwrap();
     let config_dir = common::temp_dir("tasklist-pane-kill");
     let booted = boot(&config_dir);
 

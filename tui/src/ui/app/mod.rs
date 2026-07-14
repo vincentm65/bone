@@ -26,6 +26,32 @@ use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
 use super::render::{BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, PaneDraw, Renderer, StatusInfo};
 
+fn should_open_agent_log(input: &InputState) -> bool {
+    input.buffer.trim().is_empty()
+}
+
+fn finish_queue_edit(
+    queue: &mut VecDeque<String>,
+    queue_selected: &mut usize,
+    queue_editing: &mut Option<(usize, String)>,
+    input: &mut InputState,
+    save: bool,
+) -> bool {
+    let Some((index, original)) = queue_editing.take() else {
+        return false;
+    };
+    let edited = input.expanded().trim().to_string();
+    let text = if save && !edited.is_empty() {
+        edited
+    } else {
+        original
+    };
+    queue.insert(index.min(queue.len()), text);
+    *queue_selected = index.min(queue.len() - 1);
+    input.clear_buffer();
+    true
+}
+
 /// A tool-call approval awaiting a user decision. Held in `App` while the
 /// bottom-pane prompt is shown so the streaming loop keeps pumping (spinner,
 /// events, subagent panes) instead of blocking on a nested poll loop. The
@@ -86,6 +112,10 @@ pub struct App {
     pub user_config: UserConfig,
     pub custom_configs: config::custom::CustomConfigs,
     pub queue: VecDeque<String>,
+    /// Selected row in the native input-queue pane.
+    pub queue_selected: usize,
+    /// Queue item temporarily removed for in-place editing: (original index, text).
+    pub queue_editing: Option<(usize, String)>,
 
     pub approval_mode: ApprovalMode,
     pub active_prompt: Option<Prompt>,
@@ -242,6 +272,8 @@ impl App {
             user_config,
             custom_configs,
             queue: VecDeque::new(),
+            queue_selected: 0,
+            queue_editing: None,
 
             approval_mode,
             active_prompt: None,
@@ -701,6 +733,8 @@ impl App {
         self.active_page = 0;
         self.jobs_seen_version = u64::MAX;
         self.queue.clear();
+        self.queue_selected = 0;
+        self.queue_editing = None;
         self.active_prompt = None;
         self.pending_approval = None;
     }
@@ -1107,6 +1141,26 @@ impl App {
         self.pages.iter().any(|p| p.source == "interact")
     }
 
+    /// Submit queued turns without overwriting text typed while a turn runs.
+    /// Draining pauses as soon as the input contains a draft; the idle inbox
+    /// tick resumes it after that draft is submitted or cleared.
+    async fn drain_queue_when_input_empty(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        while !self.queue.is_empty()
+            && self.input.buffer.is_empty()
+            && !self.input.has_pastes()
+            && !self.input.has_images()
+        {
+            let queued = self.queue.pop_front().expect("queue checked non-empty");
+            self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+            self.refresh_queue_pane();
+            self.input.buffer = queued;
+            self.input.cursor_pos = self.input.buffer.chars().count();
+            self.send_message(term).await?;
+        }
+        self.refresh_queue_pane();
+        Ok(())
+    }
+
     /// Tick background-job status: refresh pane if needed, auto-inject
     /// finished results when the TUI is idle.
     async fn tick_jobs(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
@@ -1122,21 +1176,34 @@ impl App {
             if let Some((text, display)) = Self::format_job_results(&finished) {
                 let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
                 let draft = std::mem::take(&mut self.input.buffer);
-                let draft_cursor = self.input.cursor_pos;
+                let draft_cursor = self.input.cursor_pos.min(draft.chars().count());
+                let mut draft_pastes = std::mem::take(&mut self.input.pastes);
+                let mut draft_images = std::mem::take(&mut self.input.images);
+                self.input.cursor_pos = 0;
                 self.submit_user_turn(text, Some(display), Vec::new(), term)
                     .await?;
                 crate::ext::jobs::registry().mark_consumed(&ids);
-                if !draft.is_empty() {
-                    self.input.buffer = draft;
-                    self.input.cursor_pos = draft_cursor.min(self.input.buffer.chars().count());
-                    self.redraw(term)?;
-                }
-                // Drain any queued messages left after injection.
-                while let Some(queued) = self.queue.pop_front() {
-                    self.input.buffer = queued;
-                    self.input.cursor_pos = self.input.buffer.chars().count();
-                    self.send_message(term).await?;
-                }
+
+                // The injected turn resets the input. Preserve both the draft that
+                // existed before injection and anything typed while it streamed.
+                let fresh = std::mem::take(&mut self.input.buffer);
+                let mut fresh_pastes = std::mem::take(&mut self.input.pastes);
+                let mut fresh_images = std::mem::take(&mut self.input.images);
+                let byte_cursor = draft
+                    .char_indices()
+                    .nth(draft_cursor)
+                    .map(|(index, _)| index)
+                    .unwrap_or(draft.len());
+                self.input.buffer = draft;
+                self.input.buffer.insert_str(byte_cursor, &fresh);
+                self.input.cursor_pos = draft_cursor + fresh.chars().count();
+                draft_pastes.append(&mut fresh_pastes);
+                draft_images.append(&mut fresh_images);
+                self.input.pastes = draft_pastes;
+                self.input.images = draft_images;
+
+                self.drain_queue_when_input_empty(term).await?;
+                self.redraw(term)?;
             }
         }
 
@@ -1149,19 +1216,13 @@ impl App {
     /// input uses), so the status bar's `Q:` count reflects them.
     async fn tick_inbox(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         let texts = crate::ext::inbox::drain();
-        if texts.is_empty() {
-            return Ok(());
-        }
         for text in texts {
             self.queue.push_back(text);
         }
         if self.active_prompt.is_none() && !self.streaming {
-            while let Some(queued) = self.queue.pop_front() {
-                self.input.buffer = queued;
-                self.input.cursor_pos = self.input.buffer.chars().count();
-                self.send_message(term).await?;
-            }
-        } else {
+            self.drain_queue_when_input_empty(term).await?;
+        } else if !self.queue.is_empty() {
+            self.refresh_queue_pane();
             self.redraw(term)?;
         }
         Ok(())
@@ -1525,6 +1586,57 @@ impl App {
         result
     }
 
+    fn queue_pane_active(&self) -> bool {
+        self.panes_visible
+            && self
+                .pages
+                .get(self.active_page)
+                .is_some_and(|p| p.source == crate::ui::queue_pane::PANE_SOURCE)
+    }
+
+    fn refresh_queue_pane(&mut self) {
+        if self.queue.is_empty() {
+            self.queue_selected = 0;
+            self.active_page = PanePage::remove(
+                &mut self.pages,
+                crate::ui::queue_pane::PANE_SOURCE,
+                self.active_page,
+            );
+            return;
+        }
+        self.queue_selected = self.queue_selected.min(self.queue.len() - 1);
+        if let Some(page) = crate::ui::queue_pane::render(&self.queue, self.queue_selected) {
+            let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
+            self.active_page = active;
+            self.panes_visible = true;
+        }
+    }
+
+    fn begin_queue_edit(&mut self) {
+        if !self.input.buffer.is_empty() || self.queue.is_empty() {
+            return;
+        }
+        let index = self.queue_selected.min(self.queue.len() - 1);
+        if let Some(text) = self.queue.remove(index) {
+            self.input.buffer = text.clone();
+            self.input.cursor_pos = self.input.buffer.chars().count();
+            self.queue_editing = Some((index, text));
+            self.refresh_queue_pane();
+        }
+    }
+
+    fn finish_queue_edit(&mut self, save: bool) {
+        if finish_queue_edit(
+            &mut self.queue,
+            &mut self.queue_selected,
+            &mut self.queue_editing,
+            &mut self.input,
+            save,
+        ) {
+            self.refresh_queue_pane();
+        }
+    }
+
     fn agents_pane_active(&self) -> bool {
         self.panes_visible
             && self
@@ -1590,6 +1702,73 @@ impl App {
             return self.open_transcript_view(term);
         }
 
+        if self.queue_editing.is_some() && modifiers.is_empty() {
+            match code {
+                KeyCode::Enter => {
+                    self.finish_queue_edit(true);
+                    return self.redraw(term);
+                }
+                KeyCode::Esc => {
+                    self.finish_queue_edit(false);
+                    return self.redraw(term);
+                }
+                _ => {}
+            }
+        }
+
+        if self.queue_pane_active()
+            && self.input.buffer.is_empty()
+            && self.queue_editing.is_none()
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            let index = self.queue_selected.min(self.queue.len().saturating_sub(1));
+            match code {
+                KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) && index > 0 => {
+                    self.queue.swap(index, index - 1);
+                    self.queue_selected = index - 1;
+                    self.refresh_queue_pane();
+                    return self.redraw(term);
+                }
+                KeyCode::Down
+                    if modifiers.contains(KeyModifiers::SHIFT) && index + 1 < self.queue.len() =>
+                {
+                    self.queue.swap(index, index + 1);
+                    self.queue_selected = index + 1;
+                    self.refresh_queue_pane();
+                    return self.redraw(term);
+                }
+                KeyCode::Up if modifiers.is_empty() => {
+                    self.queue_selected = index.saturating_sub(1);
+                    self.refresh_queue_pane();
+                    return self.redraw(term);
+                }
+                KeyCode::Down if modifiers.is_empty() => {
+                    self.queue_selected = (index + 1).min(self.queue.len().saturating_sub(1));
+                    self.refresh_queue_pane();
+                    return self.redraw(term);
+                }
+                KeyCode::Enter if modifiers.is_empty() && self.input.buffer.trim().is_empty() => {
+                    if let Some(text) = self.queue.remove(index) {
+                        self.queue.push_front(text);
+                        self.queue_selected = 0;
+                    }
+                    self.refresh_queue_pane();
+                    return self.redraw(term);
+                }
+                KeyCode::F(2) if modifiers.is_empty() => {
+                    self.begin_queue_edit();
+                    return self.redraw(term);
+                }
+                KeyCode::Delete if modifiers.is_empty() => {
+                    self.queue.remove(index);
+                    self.queue_selected = index.min(self.queue.len().saturating_sub(1));
+                    self.refresh_queue_pane();
+                    return self.redraw(term);
+                }
+                _ => {}
+            }
+        }
+
         if self.agents_pane_active() && modifiers.is_empty() {
             match code {
                 KeyCode::Up => {
@@ -1600,7 +1779,9 @@ impl App {
                     self.move_job_selection(true);
                     return self.redraw(term);
                 }
-                KeyCode::Enter => return self.open_selected_job(term),
+                KeyCode::Enter if should_open_agent_log(&self.input) => {
+                    return self.open_selected_job(term);
+                }
                 KeyCode::Char('k') => {
                     if let Some(id) = self.selected_job_id.as_deref() {
                         crate::ext::jobs::registry().cancel(id);
@@ -1696,11 +1877,7 @@ impl App {
                         if code == KeyCode::Enter {
                             self.autocomplete = None;
                             self.send_message(term).await?;
-                            while let Some(queued) = self.queue.pop_front() {
-                                self.input.buffer = queued;
-                                self.input.cursor_pos = self.input.buffer.chars().count();
-                                self.send_message(term).await?;
-                            }
+                            self.drain_queue_when_input_empty(term).await?;
                         } else {
                             self.autocomplete = None;
                             self.redraw(term)?;
@@ -1738,15 +1915,13 @@ impl App {
                         PanePage::remove(&mut self.pages, "interact", self.active_page);
                 }
                 self.send_message(term).await?;
-                while let Some(queued) = self.queue.pop_front() {
-                    self.input.buffer = queued;
-                    self.input.cursor_pos = self.input.buffer.chars().count();
-                    self.send_message(term).await?;
-                }
+                self.drain_queue_when_input_empty(term).await?;
                 Ok(())
             }
             InputAction::ClearQueue => {
                 self.queue.clear();
+                self.queue_editing = None;
+                self.refresh_queue_pane();
                 self.redraw(term)
             }
             InputAction::CycleMode => {
@@ -1856,8 +2031,6 @@ impl App {
             // running. Ask the daemon to terminate them (a no-op if none).
             let _ = self.command_tx.send(crate::runtime::RuntimeCommand::Cancel);
         }
-        self.queue.clear();
-
         self.redraw(term)?;
         Ok(())
     }
@@ -2529,3 +2702,7 @@ fn apply_lua_config_snapshot(
         cfg.spinner_texts = snapshot.texts.clone();
     }
 }
+
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;

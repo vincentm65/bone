@@ -85,30 +85,18 @@ local function write_or_rewrite(ctx, path, content)
         local ok, err = pcall(ctx.write_file, path, content)
         return ok, err
     end
-    -- File exists: read via tool (records snapshot + gives tag), then hashline-rewrite all lines.
+    -- File exists: read via the native tool to record a snapshot, then replace
+    -- the exact current contents with the desired contents.
     local read = ctx.tools.call("read_file", { path = path }, { approval = "read_only" })
     if not read or not read.ok then
         return false, "read_file failed"
     end
-    local tag = read.content:match("#(%x+)%]") or "0000"
-    -- Count existing lines from the hashline output (lines with N: prefix).
-    local n = 0
-    for line in read.content:gmatch("[^\n]+") do
-        if line:match("^%s+%d+:") then n = n + 1 end
-    end
-    local op
-    if n > 0 then
-        op = (content == "") and ("DEL 1.=" .. n) or ("SWAP 1.=" .. n .. ":")
-    else
-        op = "INS.HEAD:"
-    end
-    local patch = "[" .. path .. "#" .. tag .. "]\n" .. op
-    if content ~= "" then
-        for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-            patch = patch .. "\n+" .. line
-        end
-    end
-    local res = ctx.tools.call("edit_file", { input = patch }, { approval = "danger" })
+    local old = ctx.read_file(path)
+    local res = ctx.tools.call("edit_file", {
+        path = path,
+        old_text = old,
+        new_text = content,
+    }, { approval = "danger" })
     return res and res.ok, res and res.content or "edit_file failed"
 end
 

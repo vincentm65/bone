@@ -121,6 +121,7 @@ fields:
       api_key: ""
       endpoint: ""
       handler: grok_build
+      reasoning_effort: ""
   - key: local
     label: llama.cpp
     type: provider

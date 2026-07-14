@@ -1960,8 +1960,8 @@ const PROVIDER_FIELDS = [
   { key: "model",    label: "Model",       placeholder: "gpt-4o-mini",    type: "text" },
   { key: "api_key",  label: "API Key",     placeholder: "sk-...",         type: "text" },
   { key: "endpoint", label: "Endpoint",    placeholder: "/chat/completions", type: "text" },
-  { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex"] },
-  { key: "reasoning_effort", label: "Reasoning effort", placeholder: "Default", type: "select", options: ["default", "minimal", "low", "medium", "high", "xhigh", "max"], codexOnly: true },
+  { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex", "grok_build"] },
+  { key: "reasoning_effort", label: "Reasoning effort", placeholder: "Default", type: "select", options: ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"], effortHandlers: ["codex", "openai", "grok_build"] },
 ];
 
 let _provExpanded = null;   // key of expanded card (null = collapsed)
@@ -2028,7 +2028,7 @@ function renderProviderPicker() {
     // Expanded editor (hidden by default)
     const editor = el("div", "prov-editor");
     for (const fd of PROVIDER_FIELDS) {
-      if (fd.codexOnly && p.handler !== "codex") continue;
+      if (fd.effortHandlers && !fd.effortHandlers.includes(p.handler)) continue;
       const field = el("div", "prov-field");
       const lbl = el("label", null, fd.label);
       const input = fd.type === "select"

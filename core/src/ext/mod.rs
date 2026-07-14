@@ -80,8 +80,11 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
     existing.contains("ctx.ui.interact")
         || (name == "ui/menu.lua" && !existing.contains("require(\"ui.pane\")"))
         // task_list reminders are now deduped per conversation; refresh older
-        // seeded copies that would re-emit identical turn messages every tool round.
-        || (name == "task_list.lua" && !existing.contains("emit_turn_message_once"))
+        // seeded copies that would re-emit identical turn messages every tool round,
+        // as well as copies that predate the complete action.
+        || (name == "task_list.lua"
+            && (!existing.contains("emit_turn_message_once")
+                || !existing.contains("if action == \"complete\" then")))
         // subagent's eager-render + dispatch label moved from hardcoded host
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
@@ -94,10 +97,10 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         // an `[e] edit` action key; refresh older seeded copies that predate the
         // `action_keys` wiring so `e` opens the provider editor again.
         || (name == "config.lua" && !existing.contains("action_keys"))
-        // memory's write_or_rewrite moved from edit_file's removed
-        // `mode = "rewrite"` shape to the hashline `input` patch (commit
-        // ca2acc7); refresh older seeded copies that still call the dead API.
-        || (name == "memory.lua" && existing.contains("mode = \"rewrite\""))
+        // Refresh memory copies using either removed edit_file contract.
+        || (name == "memory.lua"
+            && (existing.contains("mode = \"rewrite\"")
+                || existing.contains("input = patch")))
 }
 
 /// Boot the Lua extension system.
@@ -305,89 +308,5 @@ fn run_lua_files_filtered(
 }
 
 #[cfg(test)]
-mod seed_tests {
-    use super::*;
-
-    #[test]
-    fn extract_description_prefers_field_then_comment() {
-        assert_eq!(
-            extract_description("-- header\nregister_tool({ description = \"does a thing\" })"),
-            "does a thing"
-        );
-        assert_eq!(
-            extract_description("-- just a comment\nlocal x = 1"),
-            "just a comment"
-        );
-        assert_eq!(extract_description("local x = 1"), "");
-    }
-
-    #[test]
-    fn allow_filter_seeds_only_named_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "bone-seed-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // Optional tools all moved to the catalog, so exercise the (identical)
-        // seed logic against the bundled commands instead.
-        // Pick the first bundled command to allow, exclude the rest.
-        let first = DEFAULT_LUA_COMMANDS[0].0.to_string();
-        let allow: HashSet<String> = std::iter::once(first.clone()).collect();
-        seed_default_lua_commands(&dir, Some(&allow), false);
-
-        assert!(dir.join(&first).exists(), "allowed file should be seeded");
-        for (name, _) in DEFAULT_LUA_COMMANDS.iter().skip(1) {
-            assert!(
-                !dir.join(name).exists(),
-                "non-selected file {name} should not be seeded"
-            );
-        }
-
-        // None seeds everything.
-        seed_default_lua_commands(&dir, None, false);
-        for (name, _) in DEFAULT_LUA_COMMANDS {
-            assert!(dir.join(name).exists(), "{name} should be seeded with None");
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn force_overwrites_existing_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "bone-seed-force-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // Use a bundled command that `should_refresh_seeded_lua` doesn't
-        // force-refresh by name, which would defeat the "preserved" check below.
-        let (first, content) = *DEFAULT_LUA_COMMANDS
-            .iter()
-            .find(|(name, _)| !matches!(*name, "compact.lua" | "config.lua"))
-            .expect("a non-auto-refreshed bundled command");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(first), "-- user edit\n").unwrap();
-
-        // Without force, an existing file is left untouched.
-        seed_default_lua_commands(&dir, None, false);
-        assert_eq!(
-            std::fs::read_to_string(dir.join(first)).unwrap(),
-            "-- user edit\n",
-            "without force, existing file should be preserved"
-        );
-
-        // With force, the bundled default replaces it.
-        seed_default_lua_commands(&dir, None, true);
-        assert_eq!(
-            std::fs::read_to_string(dir.join(first)).unwrap(),
-            content,
-            "force should overwrite with the bundled default"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+#[path = "seed_tests.rs"]
+mod seed_tests;

@@ -45,10 +45,7 @@ impl CodexProvider {
             model: entry.model.clone(),
             api_key: entry.api_key.clone(),
             endpoint: entry.endpoint.clone(),
-            reasoning_effort: match entry.reasoning_effort.trim() {
-                "" | "default" => None,
-                effort => Some(effort.to_ascii_lowercase()),
-            },
+            reasoning_effort: entry.reasoning_effort_opt(),
         }
     }
 

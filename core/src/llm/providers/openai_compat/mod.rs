@@ -29,6 +29,9 @@ pub struct OpenAiCompatProvider {
     /// Optional cap on output tokens, sent as `max_tokens`. `None` omits the
     /// field so the server applies its own default.
     max_tokens: Option<u32>,
+    /// Optional Chat Completions `reasoning_effort` (xAI / Grok, etc.).
+    /// Empty/default means omit and let the model use its own default.
+    reasoning_effort: Option<String>,
     /// Optional transport overrides used by subscription-backed providers
     /// that speak the same Chat Completions wire format.
     api_key_override: Option<String>,
@@ -52,6 +55,7 @@ impl OpenAiCompatProvider {
             api_key: entry.api_key.clone(),
             endpoint: entry.endpoint.clone(),
             max_tokens: None,
+            reasoning_effort: entry.reasoning_effort_opt(),
             api_key_override: None,
             extra_headers: Vec::new(),
             conversation_header: None,
@@ -80,6 +84,16 @@ impl OpenAiCompatProvider {
     }
 }
 
+/// Providers that send streaming usage only when explicitly requested.
+/// Grok's cache-hit token count is part of that final usage chunk.
+fn stream_usage_enabled(base_url: &str) -> bool {
+    base_url.contains("api.openai.com")
+        || base_url.contains("api.deepseek.com")
+        || base_url.contains("cli-chat-proxy.grok.com")
+        || base_url.contains("127.0.0.1")
+        || base_url.contains("localhost")
+}
+
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
@@ -91,6 +105,10 @@ struct ChatRequest {
     stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// xAI/Grok-style effort dial. Omitted when unset so non-reasoning
+    /// OpenAI-compatible backends are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -533,11 +551,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tools: Vec<ToolDefinition>,
         context: crate::llm::provider::ProviderRequestContext,
     ) -> Result<ResponseStream, LlmError> {
-        let stream_options = (self.base_url.contains("api.openai.com")
-            || self.base_url.contains("api.deepseek.com")
-            || self.base_url.contains("127.0.0.1")
-            || self.base_url.contains("localhost"))
-        .then(|| StreamOptions {
+        let stream_options = stream_usage_enabled(&self.base_url).then(|| StreamOptions {
             include_usage: true,
         });
 
@@ -548,6 +562,7 @@ impl LlmProvider for OpenAiCompatProvider {
             tools: openai_tools(tools),
             stream_options,
             max_tokens: self.max_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
         };
 
         let mut req = self.client.post(self.chat_url()).json(&request);
@@ -653,148 +668,5 @@ impl LlmProvider for OpenAiCompatProvider {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        ChatEvent, cached_tokens_from_usage, openai_messages, openai_tools, process_sse_chunk,
-    };
-    use crate::llm::{ChatMessage, ChatRole, ImageData};
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn reads_openai_style_nested_cached_tokens() {
-        // OpenAI / GLM nest cache hits under prompt_tokens_details.
-        let usage = serde_json::json!({
-            "prompt_tokens": 100,
-            "prompt_tokens_details": { "cached_tokens": 64 }
-        });
-        assert_eq!(cached_tokens_from_usage(&usage), Some(64));
-    }
-
-    #[test]
-    fn reads_deepseek_style_top_level_cache_hit_tokens() {
-        // DeepSeek reports cache hits as a top-level usage field.
-        let usage = serde_json::json!({
-            "prompt_tokens": 100,
-            "prompt_cache_hit_tokens": 96,
-            "prompt_cache_miss_tokens": 4
-        });
-        assert_eq!(cached_tokens_from_usage(&usage), Some(96));
-    }
-
-    #[test]
-    fn no_cache_field_yields_none() {
-        let usage = serde_json::json!({ "prompt_tokens": 100 });
-        assert_eq!(cached_tokens_from_usage(&usage), None);
-    }
-
-    #[test]
-    fn ignores_content_in_same_chunk_as_tool_call_delta() {
-        let mut partial_tool_calls = BTreeMap::new();
-        let mut usage = None;
-        let first = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{\"command\":"}}]}}]}"#;
-        let stray = r#"{"choices":[{"delta":{"content":"]","tool_calls":[{"index":0,"function":{"arguments":"\"echo hi\"}"}}]}}]}"#;
-        let done = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
-
-        assert!(
-            process_sse_chunk(first, &mut partial_tool_calls, &mut usage)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            process_sse_chunk(stray, &mut partial_tool_calls, &mut usage)
-                .unwrap()
-                .is_empty()
-        );
-        let events = process_sse_chunk(done, &mut partial_tool_calls, &mut usage).unwrap();
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ChatEvent::ToolCall(call) => {
-                assert_eq!(call.name, "shell");
-                assert_eq!(call.arguments["command"], "echo hi");
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn wraps_truncated_tool_arguments_in_valid_marker_object() {
-        // The model's argument JSON is cut off at the output-token cap, so the
-        // stream finishes with an unclosed object. It must surface as a *valid*
-        // object keyed by `TRUNCATED_ARGS_KEY` (not `Null`, not a bare string):
-        // the message is persisted and re-serialized, so it has to stay valid
-        // JSON while still letting the tool validator report truncation.
-        let mut partial_tool_calls = BTreeMap::new();
-        let mut usage = None;
-        let start = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"edit_file","arguments":"{\"path\":\"world.rs\",\"content\":\"use std"}}]}}]}"#;
-        let done = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
-
-        assert!(
-            process_sse_chunk(start, &mut partial_tool_calls, &mut usage)
-                .unwrap()
-                .is_empty()
-        );
-        let events = process_sse_chunk(done, &mut partial_tool_calls, &mut usage).unwrap();
-
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ChatEvent::ToolCall(call) => {
-                assert_eq!(call.name, "edit_file");
-                let raw = call.arguments[crate::tools::TRUNCATED_ARGS_KEY]
-                    .as_str()
-                    .expect("truncated args wrapped under the marker key");
-                assert!(raw.starts_with("{\"path\""));
-                // Re-serializing the persisted assistant message must stay valid
-                // JSON — never a double-encoded bare string.
-                let serialized = call.arguments.to_string();
-                assert!(serde_json::from_str::<serde_json::Value>(&serialized).is_ok());
-                assert!(serialized.starts_with('{'));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn serializes_images_as_openai_content_parts() {
-        let messages = openai_messages(vec![ChatMessage::user_with_images(
-            "look",
-            vec![ImageData {
-                media_type: "image/png".to_string(),
-                data: "abc".to_string(),
-            }],
-        )]);
-        let json = serde_json::to_value(&messages[0]).unwrap();
-
-        assert_eq!(json["content"][0]["type"], "text");
-        assert_eq!(json["content"][0]["text"], "look");
-        assert_eq!(json["content"][1]["type"], "image_url");
-        assert_eq!(
-            json["content"][1]["image_url"]["url"],
-            "data:image/png;base64,abc"
-        );
-    }
-
-    #[test]
-    fn serializes_text_only_as_plain_string() {
-        let messages = openai_messages(vec![ChatMessage::new(ChatRole::User, "hello")]);
-        let json = serde_json::to_value(&messages[0]).unwrap();
-        assert_eq!(json["content"], "hello");
-    }
-
-    #[test]
-    fn serializes_tools_with_required_function_envelope() {
-        let tools = openai_tools(vec![crate::tools::ToolDefinition {
-            name: "shell".into(),
-            description: "Run a command".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {"command": {"type": "string"}}
-            }),
-        }]);
-        let json = serde_json::to_value(tools).unwrap();
-
-        assert_eq!(json[0]["type"], "function");
-        assert_eq!(json[0]["function"]["name"], "shell");
-        assert!(json[0].get("name").is_none());
-    }
-}
+#[path = "openai_compat_tests.rs"]
+mod openai_compat_tests;

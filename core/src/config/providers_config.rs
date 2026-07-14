@@ -36,7 +36,9 @@ pub struct ProviderEntry {
     )]
     pub handler: String,
 
-    /// Codex Responses API reasoning effort. Empty means use the model default.
+    /// Reasoning effort for backends that expose it (Codex Responses
+    /// `reasoning.effort`, OpenAI-compatible Chat Completions
+    /// `reasoning_effort` for xAI/Grok, etc.). Empty means model default.
     #[serde(default, deserialize_with = "string_or_default")]
     pub reasoning_effort: String,
 }
@@ -81,6 +83,14 @@ fn default_handler() -> String {
 }
 
 impl ProviderEntry {
+    /// Non-empty reasoning effort for request builders. Empty/`default` → None.
+    pub fn reasoning_effort_opt(&self) -> Option<String> {
+        match self.reasoning_effort.trim() {
+            "" | "default" => None,
+            effort => Some(effort.to_ascii_lowercase()),
+        }
+    }
+
     /// Deserialize a ProviderEntry from a nested YAML map value
     /// (as stored in a CustomConfigPage field).
     pub fn from_nested(val: &serde_yaml::Value) -> Option<Self> {

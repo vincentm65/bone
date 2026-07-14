@@ -15,7 +15,7 @@ use std::io;
 use std::time::Instant;
 use tokio::time::Duration;
 
-use super::{App, apply_input_key_with_paste_burst};
+use super::{App, apply_input_key_with_paste_burst, should_open_agent_log};
 
 /// One place that resolves a `KeyEvent` to a blocked `ctx.ui.key()` request.
 /// The daemon asks for a key via `RuntimeEvent::KeyRequest`, and the reply goes
@@ -209,6 +209,26 @@ fn format_elapsed_ms(ms: u64) -> String {
     format!("{mins}:{secs:02}")
 }
 
+fn refresh_queue_page(
+    queue: &VecDeque<String>,
+    selected: &mut usize,
+    pages: &mut Vec<PanePage>,
+    active_page: &mut usize,
+    panes_visible: &mut bool,
+) {
+    if queue.is_empty() {
+        *selected = 0;
+        *active_page = PanePage::remove(pages, crate::ui::queue_pane::PANE_SOURCE, *active_page);
+    } else {
+        *selected = (*selected).min(queue.len() - 1);
+        if let Some(page) = crate::ui::queue_pane::render(queue, *selected) {
+            let (_, active) = PanePage::upsert(pages, *active_page, page);
+            *active_page = active;
+            *panes_visible = true;
+        }
+    }
+}
+
 impl App {
     pub(crate) async fn send_message(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         // Expand any collapsed paste placeholders so the model and transcript
@@ -347,6 +367,8 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut self.selected_job_id,
+                    &mut self.queue_selected,
+                    &mut self.queue_editing,
                     &mut pending_key,
                     &self.command_tx,
                 );
@@ -547,6 +569,8 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut self.selected_job_id,
+                    &mut self.queue_selected,
+                    &mut self.queue_editing,
                     &mut pending_key,
                     &self.command_tx,
                 );
@@ -1064,8 +1088,8 @@ impl App {
     /// unified diff), mirroring the non-Driver path's `prepare_tool_call`. The
     /// call id is recorded in `shown_tool_rows` so the later `ToolResult` event
     /// doesn't render a duplicate row. The Driver executes the edit itself, so
-    /// this preview resolves the hashline patch against the live file purely
-    /// for display (no snapshot store; stale-tag mismatches surface at apply).
+    /// this preview resolves the exact replacement against the live file purely
+    /// for display (the context-aware execution still enforces prior reads).
     pub(crate) async fn pump_show_edit_preview(
         &mut self,
         call: &ToolCall,
@@ -1192,9 +1216,11 @@ impl App {
         mode: &mut ApprovalMode,
         cancel: &mut bool,
         panes_visible: &mut bool,
-        pages: &mut [PanePage],
+        pages: &mut Vec<PanePage>,
         active_page: &mut usize,
         selected_job_id: &mut Option<String>,
+        queue_selected: &mut usize,
+        queue_editing: &mut Option<(usize, String)>,
         pending_key: &mut KeySink,
         command_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCommand>,
     ) -> DrainKeysResult {
@@ -1247,6 +1273,95 @@ impl App {
                         result.open_transcript = true;
                         continue;
                     }
+                    if queue_editing.is_some()
+                        && key.modifiers.is_empty()
+                        && matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+                    {
+                        super::finish_queue_edit(
+                            queue,
+                            queue_selected,
+                            queue_editing,
+                            input,
+                            key.code == KeyCode::Enter,
+                        );
+                        refresh_queue_page(
+                            queue,
+                            queue_selected,
+                            pages,
+                            active_page,
+                            panes_visible,
+                        );
+                        continue;
+                    }
+                    let queue_active = *panes_visible
+                        && input.buffer.is_empty()
+                        && queue_editing.is_none()
+                        && pages
+                            .get(*active_page)
+                            .is_some_and(|p| p.source == crate::ui::queue_pane::PANE_SOURCE);
+                    if queue_active
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
+                        let index = (*queue_selected).min(queue.len().saturating_sub(1));
+                        let handled = match key.code {
+                            KeyCode::Up
+                                if key.modifiers.contains(KeyModifiers::SHIFT) && index > 0 =>
+                            {
+                                queue.swap(index, index - 1);
+                                *queue_selected = index - 1;
+                                true
+                            }
+                            KeyCode::Down
+                                if key.modifiers.contains(KeyModifiers::SHIFT)
+                                    && index + 1 < queue.len() =>
+                            {
+                                queue.swap(index, index + 1);
+                                *queue_selected = index + 1;
+                                true
+                            }
+                            KeyCode::Up if key.modifiers.is_empty() => {
+                                *queue_selected = index.saturating_sub(1);
+                                true
+                            }
+                            KeyCode::Down if key.modifiers.is_empty() => {
+                                *queue_selected = (index + 1).min(queue.len().saturating_sub(1));
+                                true
+                            }
+                            KeyCode::Enter if key.modifiers.is_empty() => {
+                                if let Some(text) = queue.remove(index) {
+                                    queue.push_front(text);
+                                    *queue_selected = 0;
+                                }
+                                true
+                            }
+                            KeyCode::F(2) if key.modifiers.is_empty() => {
+                                if let Some(text) = queue.remove(index) {
+                                    input.buffer = text.clone();
+                                    input.cursor_pos = input.buffer.chars().count();
+                                    *queue_editing = Some((index, text));
+                                }
+                                true
+                            }
+                            KeyCode::Delete if key.modifiers.is_empty() => {
+                                queue.remove(index);
+                                *queue_selected = index.min(queue.len().saturating_sub(1));
+                                true
+                            }
+                            _ => false,
+                        };
+                        if handled {
+                            refresh_queue_page(
+                                queue,
+                                queue_selected,
+                                pages,
+                                active_page,
+                                panes_visible,
+                            );
+                            continue;
+                        }
+                    }
                     let agents_active = *panes_visible
                         && pages
                             .get(*active_page)
@@ -1269,7 +1384,7 @@ impl App {
                                 result.jobs_changed = true;
                                 continue;
                             }
-                            KeyCode::Enter => {
+                            KeyCode::Enter if should_open_agent_log(input) => {
                                 result.open_job = true;
                                 continue;
                             }
@@ -1353,7 +1468,6 @@ impl App {
                                 match applied.action {
                                     InputAction::Cancel => {
                                         *cancel = true;
-                                        queue.clear();
                                         return result;
                                     }
                                     InputAction::Submit => {
@@ -1362,10 +1476,28 @@ impl App {
                                         let text = input.expanded().trim().to_string();
                                         if !text.is_empty() {
                                             queue.push_back(text);
+                                            *queue_selected = queue.len() - 1;
                                             input.reset();
+                                            refresh_queue_page(
+                                                queue,
+                                                queue_selected,
+                                                pages,
+                                                active_page,
+                                                panes_visible,
+                                            );
                                         }
                                     }
-                                    InputAction::ClearQueue => queue.clear(),
+                                    InputAction::ClearQueue => {
+                                        queue.clear();
+                                        *queue_editing = None;
+                                        refresh_queue_page(
+                                            queue,
+                                            queue_selected,
+                                            pages,
+                                            active_page,
+                                            panes_visible,
+                                        );
+                                    }
                                     InputAction::CycleMode => {
                                         let new_mode = mode.cycle();
                                         *mode = new_mode;
@@ -1389,88 +1521,5 @@ impl App {
 }
 
 #[cfg(test)]
-mod keysink_tests {
-    use super::KeySink;
-    use crate::pane_content::KeyEvent;
-    use crate::runtime::RuntimeCommand;
-    use tokio::sync::mpsc::{self, UnboundedReceiver};
-
-    fn key(c: &str) -> KeyEvent {
-        KeyEvent {
-            code: c.to_string(),
-            char: Some(c.to_string()),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        }
-    }
-
-    /// Pull the `(id, key)` from the next `KeyReply` the sink emitted.
-    fn next_reply(rx: &mut UnboundedReceiver<RuntimeCommand>) -> (u64, KeyEvent) {
-        match rx.try_recv().expect("a KeyReply command") {
-            RuntimeCommand::KeyReply { id, key } => (id, key),
-            other => panic!("expected KeyReply, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn key_routes_to_armed_reply_slot() {
-        let mut sink = KeySink::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
-        sink.set_daemon(1, tx);
-        assert!(sink.wants_key());
-        assert!(sink.deliver(key("a")));
-        assert_eq!(next_reply(&mut rx), (1, key("a")));
-    }
-
-    #[test]
-    fn owner_buffers_keys_between_requests() {
-        // Between a tool's successive requests the slot is empty but the tool
-        // still owns input, so keys buffer rather than leaking to chat.
-        let mut sink = KeySink::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
-        sink.set_daemon(1, tx);
-        sink.deliver(key("a")); // resolves the slot, owns_input stays latched
-        assert_eq!(next_reply(&mut rx), (1, key("a")));
-        assert!(sink.wants_key()); // still owned
-        assert!(sink.deliver(key("b"))); // buffered, consumed (not leaked)
-
-        // Next request drains the buffered key instead of blocking.
-        let (tx2, mut rx2) = mpsc::unbounded_channel::<RuntimeCommand>();
-        sink.set_daemon(2, tx2);
-        assert_eq!(next_reply(&mut rx2), (2, key("b")));
-    }
-
-    #[test]
-    fn clear_owner_releases_input_to_chat() {
-        // After the owning tool finishes, keys must fall through to chat input
-        // instead of staying latched/buffered for the rest of the turn.
-        let mut sink = KeySink::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
-        sink.set_daemon(1, tx);
-        sink.deliver(key("a"));
-        assert_eq!(next_reply(&mut rx), (1, key("a")));
-
-        sink.clear_owner();
-        assert!(!sink.wants_key());
-        assert!(!sink.deliver(key("b"))); // falls through to chat
-    }
-
-    #[test]
-    fn clear_owner_drops_stale_buffer() {
-        // Buffered keys belong to the finished tool and must not bleed into a
-        // later tool's first key request.
-        let mut sink = KeySink::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
-        sink.set_daemon(1, tx);
-        sink.deliver(key("a"));
-        let _ = next_reply(&mut rx);
-        sink.deliver(key("buffered")); // buffered for next request
-        sink.clear_owner();
-
-        let (tx2, mut rx2) = mpsc::unbounded_channel::<RuntimeCommand>();
-        sink.set_daemon(2, tx2);
-        sink.deliver(key("fresh"));
-        assert_eq!(next_reply(&mut rx2), (2, key("fresh")));
-    }
-}
+#[path = "keysink_tests.rs"]
+mod keysink_tests;

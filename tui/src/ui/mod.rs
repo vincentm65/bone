@@ -12,6 +12,7 @@ pub mod pane_page;
 pub mod picker;
 pub mod processes_pane;
 pub mod prompt;
+pub mod queue_pane;
 pub mod render;
 pub mod setup;
 pub mod stats;
