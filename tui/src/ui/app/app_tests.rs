@@ -1,5 +1,39 @@
-use super::{WireTools, edit_diff_message, job_snapshot_messages, should_open_agent_log};
+use super::{
+    WireTools, configured_input_style, edit_diff_message, job_snapshot_messages,
+    should_open_agent_log,
+};
 use crate::ui::input::InputState;
+use crate::ui::render::InputPreset;
+
+#[test]
+fn config_preset_override_preserves_explicit_lua_input_customization() {
+    let snapshot = crate::ext::snapshots::LuaInputStyleSnapshot {
+        preset: Some("lines".into()),
+        prefix: Some("λ ".into()),
+        horizontal_padding: Some(3),
+        vertical_padding: Some(2),
+        fill: Some(false),
+        ..Default::default()
+    };
+
+    let custom = configured_input_style(&snapshot, None);
+    assert_eq!(custom.preset, InputPreset::Lines);
+
+    let filled = configured_input_style(&snapshot, Some("filled"));
+    assert_eq!(filled.preset, InputPreset::Filled);
+    assert_eq!(filled.prefix, "λ ");
+    assert_eq!(filled.horizontal_padding, 3);
+    assert_eq!(filled.vertical_padding, 2);
+    assert!(!filled.fill);
+
+    let box_defaults = configured_input_style(
+        &crate::ext::snapshots::LuaInputStyleSnapshot::default(),
+        Some("box"),
+    );
+    assert_eq!(box_defaults.preset, InputPreset::Box);
+    assert_eq!(box_defaults.horizontal_padding, 1);
+    assert!(!box_defaults.fill);
+}
 
 #[test]
 fn agent_log_enter_opens_log_with_empty_input() {

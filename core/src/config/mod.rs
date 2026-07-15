@@ -64,6 +64,8 @@ pub struct UserConfig {
     pub spinner_text_speed: u64,
     /// Comma-separated custom thinking-text phrases. Non-empty overrides preset phrases.
     pub spinner_text_custom: String,
+    /// Input composer preset selected in `/config`; `None` keeps the init.lua preset.
+    pub input_preset: Option<String>,
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
@@ -88,6 +90,7 @@ impl Default for UserConfig {
             spinner_text_rotate: true,
             spinner_text_speed: 0,
             spinner_text_custom: String::new(),
+            input_preset: None,
         }
     }
 }
@@ -134,6 +137,10 @@ impl UserConfig {
             self.enabled_tools = default_enabled_tools();
         }
         self.show_thinking = custom.get_value("general", "show_thinking") == "true";
+        self.input_preset = match custom.get_value("general", "input_preset").as_str() {
+            preset @ ("lines" | "box" | "filled") => Some(preset.to_string()),
+            _ => None,
+        };
 
         // Status bar toggles
         for key in Self::STATUS_TOGGLE_KEYS {

@@ -875,8 +875,36 @@ bone.config = {
         tokens_in = true, tokens_out = true, tokens_total = true,
         tps = true, queue = true, spinner = true, timer = true,
     },
+    ui = {
+        input = {
+            -- `/config` selects custom/lines/box/filled. When set to custom,
+            -- this preset is used; the remaining fields always customize it.
+            preset = "lines",
+            prefix = "> ",               -- text before the first input line
+            show_prefix = true,           -- false hides the prefix
+            horizontal_padding = 0,       -- box/filled default to 1
+            vertical_padding = 0,         -- filled defaults to 1 (three rows)
+            fill = false,                 -- filled defaults to true
+            border = {                    -- each override must be one cell wide
+                horizontal = "─", vertical = "│",
+                top_left = "╭", top_right = "╮",
+                bottom_left = "╰", bottom_right = "╯",
+            },
+        },
+    },
 }
 ```
+
+Use `/config` → **General** → **Input style** to switch between `lines`,
+`box`, and `filled`. Choose `custom` to use the preset from `init.lua`. The
+other `ui.input` fields remain sourced from `init.lua` for every menu choice, so
+prefix, padding, fill, and border customizations are preserved while switching
+presets.
+
+Input layout is rendered natively in Rust, so Unicode wrapping, cursor placement,
+autocomplete, viewport sizing, and small-terminal clipping remain consistent.
+Omitted input settings use the selected preset's defaults; omitting `ui.input`
+preserves the legacy two-line `lines` composer.
 
 Invalid values warn and fall back to Rust defaults. `init.lua` is the source of truth.
 
@@ -947,6 +975,10 @@ bone.theme = {
     palette = { accent = "#8cdcdc" },
     highlights = {
         user_msg = { fg = "fg", bg = "selection" },
+        input_border = "border",
+        input_bg = "selection",
+        input_prefix = "fg",
+        input_cursor = "accent",
         tool_error = "error",
         syntax_keyword = "accent",
     },

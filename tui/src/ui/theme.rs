@@ -43,6 +43,9 @@ pub struct Theme {
     pub user_msg_bg: Color,
     pub status_text: Color,
     pub input_border: Color,
+    pub input_bg: Color,
+    pub input_prefix: Color,
+    pub input_cursor: Color,
     pub system_msg: Color,
     pub approval_safe: Color,
     pub approval_danger: Color,
@@ -95,6 +98,9 @@ impl Default for Theme {
             user_msg_bg: palette.selection,
             status_text: palette.muted,
             input_border: palette.border,
+            input_bg: palette.selection,
+            input_prefix: palette.fg,
+            input_cursor: palette.fg,
             system_msg: palette.fg,
             approval_safe: palette.good,
             approval_danger: palette.error,
@@ -267,6 +273,9 @@ impl Theme {
         self.user_msg_bg = self.palette.selection;
         self.status_text = self.palette.muted;
         self.input_border = self.palette.border;
+        self.input_bg = self.palette.selection;
+        self.input_prefix = self.palette.fg;
+        self.input_cursor = self.palette.fg;
         self.system_msg = self.palette.fg;
         self.approval_safe = self.palette.good;
         self.approval_danger = self.palette.error;
@@ -282,6 +291,9 @@ impl Theme {
             "user_msg_bg" => self.user_msg_bg = color,
             "status_text" => self.status_text = color,
             "input_border" => self.input_border = color,
+            "input_bg" => self.input_bg = color,
+            "input_prefix" => self.input_prefix = color,
+            "input_cursor" => self.input_cursor = color,
             "system_msg" => self.system_msg = color,
             "approval_safe" => self.approval_safe = color,
             "approval_danger" => self.approval_danger = color,
@@ -547,6 +559,9 @@ impl Theme {
             "user_msg_bg" => set!(user_msg_bg),
             "status_text" => set!(status_text),
             "input_border" => set!(input_border),
+            "input_bg" => set!(input_bg),
+            "input_prefix" => set!(input_prefix),
+            "input_cursor" => set!(input_cursor),
             "system_msg" => set!(system_msg),
             "approval_safe" => set!(approval_safe),
             "approval_danger" => set!(approval_danger),

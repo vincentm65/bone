@@ -70,8 +70,145 @@ impl PageLayout {
     }
 }
 
-fn input_width(terminal_width: u16) -> usize {
-    terminal_width.saturating_sub(1).max(1) as usize
+const MAX_INPUT_PADDING: u16 = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputPreset {
+    Lines,
+    Box,
+    Filled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBorder {
+    horizontal: String,
+    vertical: String,
+    top_left: String,
+    top_right: String,
+    bottom_left: String,
+    bottom_right: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputStyle {
+    pub preset: InputPreset,
+    pub prefix: String,
+    pub horizontal_padding: u16,
+    pub vertical_padding: u16,
+    pub fill: bool,
+    border: InputBorder,
+}
+
+impl Default for InputStyle {
+    fn default() -> Self {
+        Self::preset(InputPreset::Lines)
+    }
+}
+
+impl InputStyle {
+    fn preset(preset: InputPreset) -> Self {
+        let (horizontal_padding, vertical_padding, fill) = match preset {
+            InputPreset::Lines => (0, 0, false),
+            InputPreset::Box => (1, 0, false),
+            InputPreset::Filled => (1, 1, true),
+        };
+        Self {
+            preset,
+            prefix: "> ".to_string(),
+            horizontal_padding,
+            vertical_padding,
+            fill,
+            border: InputBorder {
+                horizontal: "─".to_string(),
+                vertical: "│".to_string(),
+                top_left: "╭".to_string(),
+                top_right: "╮".to_string(),
+                bottom_left: "╰".to_string(),
+                bottom_right: "╯".to_string(),
+            },
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &crate::ext::snapshots::LuaInputStyleSnapshot) -> Self {
+        let preset = match snapshot.preset.as_deref() {
+            None | Some("lines") => InputPreset::Lines,
+            Some("box") => InputPreset::Box,
+            Some("filled") => InputPreset::Filled,
+            Some(other) => {
+                eprintln!("bone-lua warn: invalid input preset '{other}'; using lines");
+                InputPreset::Lines
+            }
+        };
+        let mut style = Self::preset(preset);
+        if snapshot.show_prefix == Some(false) {
+            style.prefix.clear();
+        } else if let Some(prefix) = &snapshot.prefix {
+            style.prefix = prefix.clone();
+        }
+        if let Some(padding) = snapshot.horizontal_padding {
+            style.horizontal_padding = padding.min(MAX_INPUT_PADDING);
+        }
+        if let Some(padding) = snapshot.vertical_padding {
+            style.vertical_padding = padding.min(MAX_INPUT_PADDING);
+        }
+        if let Some(fill) = snapshot.fill {
+            style.fill = fill;
+        }
+
+        fn glyph(value: &Option<String>, fallback: &str) -> String {
+            value
+                .as_deref()
+                .filter(|value| UnicodeWidthStr::width(*value) == 1)
+                .unwrap_or(fallback)
+                .to_string()
+        }
+        style.border = InputBorder {
+            horizontal: glyph(&snapshot.border.horizontal, &style.border.horizontal),
+            vertical: glyph(&snapshot.border.vertical, &style.border.vertical),
+            top_left: glyph(&snapshot.border.top_left, &style.border.top_left),
+            top_right: glyph(&snapshot.border.top_right, &style.border.top_right),
+            bottom_left: glyph(&snapshot.border.bottom_left, &style.border.bottom_left),
+            bottom_right: glyph(&snapshot.border.bottom_right, &style.border.bottom_right),
+        };
+        style
+    }
+
+    fn has_sides(&self) -> bool {
+        self.preset == InputPreset::Box
+    }
+
+    fn top_border(&self) -> bool {
+        self.preset != InputPreset::Filled
+    }
+
+    fn bottom_border(&self) -> bool {
+        match self.preset {
+            InputPreset::Lines | InputPreset::Box => true,
+            InputPreset::Filled => false,
+        }
+    }
+
+    fn input_width(&self, terminal_width: u16) -> u16 {
+        let sides = u16::from(self.has_sides()).saturating_mul(2);
+        terminal_width
+            .saturating_sub(1 + sides + self.horizontal_padding.saturating_mul(2))
+            .max(1)
+    }
+
+    fn content_rect(&self, area: Rect, y: u16, height: u16) -> Rect {
+        let side = u16::from(self.has_sides());
+        let inset = side.saturating_add(self.horizontal_padding);
+        let x_offset = inset.min(area.width.saturating_sub(1));
+        let available = area
+            .width
+            .saturating_sub(1 + x_offset + side + self.horizontal_padding);
+        Rect {
+            x: area.x.saturating_add(x_offset),
+            y,
+            width: available,
+            height,
+        }
+    }
 }
 
 fn shell_prompt_title(prompt: &Prompt) -> String {
@@ -255,17 +392,28 @@ fn push_input_text(text: &str, spans: &mut Vec<Span<'static>>, lines: &mut Vec<L
 }
 
 /// Build actual logical lines so hard newlines in pasted input render as rows.
-fn input_text(input: &InputState) -> Text<'static> {
+fn input_text(
+    input: &InputState,
+    style: &InputStyle,
+    theme: &crate::ui::theme::Theme,
+) -> Text<'static> {
     let (before, at_cursor, after) = cursor_split(input);
-    let mut spans = vec![Span::raw("> ")];
+    let mut spans = if style.prefix.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::styled(
+            style.prefix.clone(),
+            Style::default().fg(theme.input_prefix),
+        )]
+    };
     let mut lines = Vec::new();
 
     push_input_text(&before, &mut spans, &mut lines);
+    let cursor_style = Style::default()
+        .fg(theme.input_cursor)
+        .add_modifier(Modifier::REVERSED);
     if at_cursor == '\n' {
-        spans.push(Span::styled(
-            BLANK_CURSOR_CELL,
-            Style::default().add_modifier(Modifier::REVERSED),
-        ));
+        spans.push(Span::styled(BLANK_CURSOR_CELL, cursor_style));
         lines.push(Line::from(std::mem::take(&mut spans)));
     } else {
         let cursor_cell = if at_cursor == ' ' {
@@ -273,10 +421,7 @@ fn input_text(input: &InputState) -> Text<'static> {
         } else {
             at_cursor.to_string()
         };
-        spans.push(Span::styled(
-            cursor_cell,
-            Style::default().add_modifier(Modifier::REVERSED),
-        ));
+        spans.push(Span::styled(cursor_cell, cursor_style));
     }
     push_input_text(&after, &mut spans, &mut lines);
     lines.push(Line::from(spans));
@@ -284,11 +429,41 @@ fn input_text(input: &InputState) -> Text<'static> {
     Text::from(lines)
 }
 
-fn rendered_input_rows(input: &InputState, terminal_width: u16) -> u16 {
-    Paragraph::new(input_text(input))
+fn rendered_input_rows(
+    input: &InputState,
+    terminal_width: u16,
+    style: &InputStyle,
+    theme: &crate::ui::theme::Theme,
+) -> u16 {
+    Paragraph::new(input_text(input, style, theme))
         .wrap(Wrap { trim: false })
-        .line_count(input_width(terminal_width) as u16)
+        .line_count(style.input_width(terminal_width))
         .max(1) as u16
+}
+
+fn input_border_line(style: &InputStyle, width: u16, top: bool) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if style.has_sides() {
+        let (left, right) = if top {
+            (&style.border.top_left, &style.border.top_right)
+        } else {
+            (&style.border.bottom_left, &style.border.bottom_right)
+        };
+        if width == 1 {
+            return left.clone();
+        }
+        format!(
+            "{left}{}{right}",
+            style
+                .border
+                .horizontal
+                .repeat(width.saturating_sub(2) as usize)
+        )
+    } else {
+        style.border.horizontal.repeat(width as usize)
+    }
 }
 
 /// Clamp a tool-requested pane content height to the supported range.
@@ -322,6 +497,7 @@ impl super::Renderer {
 
     /// Compute the desired viewport height for the current state.
     pub fn desired_height(
+        &self,
         input: &InputState,
         prompt: Option<&Prompt>,
         terminal_width: u16,
@@ -354,14 +530,17 @@ impl super::Renderer {
             // top sep + running + prompt region + status + page region
             return 1 + running_rows + prompt_rows + 1 + page_extra_height(pages, active_page);
         }
-        let input_rows = rendered_input_rows(input, terminal_width);
+        let input_rows = rendered_input_rows(input, terminal_width, &self.input_style, &self.theme);
         let ac_rows = autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
-        // top sep + running + input_rows + autocomplete + bot_sep + status + page region
-        let bot_sep = u16::from(pages.is_empty());
-        1 + running_rows
+        let top = u16::from(self.input_style.top_border());
+        let bottom = u16::from(self.input_style.bottom_border());
+        let padding = self.input_style.vertical_padding.saturating_mul(2);
+        running_rows
+            + top
+            + padding
             + input_rows.max(1)
             + ac_rows
-            + bot_sep
+            + bottom
             + 1
             + page_extra_height(pages, active_page)
     }
@@ -389,7 +568,12 @@ impl super::Renderer {
         let input_view = if prompt.is_some() {
             None
         } else {
-            Some(rendered_input_rows(input, area.width))
+            Some(rendered_input_rows(
+                input,
+                area.width,
+                &self.input_style,
+                &self.theme,
+            ))
         };
 
         let mut y = area.y;
@@ -426,16 +610,79 @@ impl super::Renderer {
             }
         }
 
-        if area.height > 0 {
-            frame.render_widget(
-                Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
-                Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
+        if prompt.is_some() {
+            if y < content_bottom {
+                frame.render_widget(
+                    Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
+            }
+        } else if let Some(input_rows) = input_view {
+            let top = u16::from(self.input_style.top_border());
+            let bottom = u16::from(self.input_style.bottom_border());
+            let interior_height = self
+                .input_style
+                .vertical_padding
+                .saturating_mul(2)
+                .saturating_add(input_rows)
+                .saturating_add(ac_rows);
+            let composer_height = top
+                .saturating_add(interior_height)
+                .saturating_add(bottom)
+                .min(content_bottom.saturating_sub(y));
+            let composer_start = y;
+            if self.input_style.fill && composer_height > 0 {
+                frame.render_widget(
+                    Paragraph::new("").style(Style::default().bg(self.theme.input_bg)),
+                    Rect {
+                        y,
+                        height: composer_height,
+                        ..area
+                    },
+                );
+            }
+            if self.input_style.has_sides() {
+                let sides_start = composer_start.saturating_add(top);
+                let sides_end = sides_start
+                    .saturating_add(interior_height)
+                    .min(content_bottom);
+                for side_y in sides_start..sides_end {
+                    for side_x in [area.x, area.right().saturating_sub(1)] {
+                        frame.render_widget(
+                            Paragraph::new(self.input_style.border.vertical.clone())
+                                .style(Style::default().fg(self.theme.input_border)),
+                            Rect {
+                                x: side_x,
+                                y: side_y,
+                                width: u16::from(area.width > 0),
+                                height: 1,
+                            },
+                        );
+                    }
+                }
+            }
+            if self.input_style.top_border() && y < content_bottom {
+                frame.render_widget(
+                    Paragraph::new(input_border_line(&self.input_style, area.width, true))
+                        .style(Style::default().fg(self.theme.input_border)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..area
+                    },
+                );
+                y += 1;
+            }
+            y = y.saturating_add(
+                self.input_style
+                    .vertical_padding
+                    .min(content_bottom.saturating_sub(y)),
             );
-            y += 1;
         }
 
         if let Some(prompt) = prompt {
@@ -595,21 +842,17 @@ impl super::Renderer {
             let visible_input_rows = input_rows.min(content_bottom.saturating_sub(y));
             if visible_input_rows > 0 {
                 frame.render_widget(
-                    Paragraph::new(input_text(input)).wrap(Wrap { trim: false }),
-                    Rect {
-                        y,
-                        height: visible_input_rows,
-                        width: area.width.saturating_sub(1).max(1),
-                        ..area
-                    },
+                    Paragraph::new(input_text(input, &self.input_style, &self.theme))
+                        .wrap(Wrap { trim: false }),
+                    self.input_style.content_rect(area, y, visible_input_rows),
                 );
             }
             y += visible_input_rows;
         }
 
-        // ── Autocomplete dropdown ──────────────────────────────────────
-        if let Some(ac) = ac {
-            let ac_end = y + ac_rows;
+        // Autocomplete is part of the styled composer, below the input text.
+        if let (Some(ac), Some(_)) = (ac, input_view) {
+            let ac_end = y.saturating_add(ac_rows).min(content_bottom);
             let name_width = ac.max_name_width();
             for (local_i, (name, desc)) in ac
                 .matches
@@ -633,26 +876,33 @@ impl super::Renderer {
                 let label = format!("  /{name:<name_width$} — {desc}");
                 frame.render_widget(
                     Paragraph::new(Span::styled(label, style)),
-                    Rect {
-                        y,
-                        height: 1,
-                        ..area
-                    },
+                    self.input_style.content_rect(area, y, 1),
                 );
                 y += 1;
             }
             if ac.more_count() > 0 && y < ac_end {
                 let hint = format!("  … [+{} more]", ac.more_count());
-                let display_width = UnicodeWidthStr::width(hint.as_str());
-                let padded = format!(
-                    "{hint}{}",
-                    " ".repeat((area.width as usize).saturating_sub(display_width))
-                );
                 frame.render_widget(
                     Paragraph::new(Span::styled(
-                        padded,
+                        hint,
                         Style::default().fg(self.theme.status_text),
                     )),
+                    self.input_style.content_rect(area, y, 1),
+                );
+            }
+            y = ac_end;
+        }
+
+        if input_view.is_some() {
+            y = y.saturating_add(
+                self.input_style
+                    .vertical_padding
+                    .min(content_bottom.saturating_sub(y)),
+            );
+            if self.input_style.bottom_border() && y < content_bottom {
+                frame.render_widget(
+                    Paragraph::new(input_border_line(&self.input_style, area.width, false))
+                        .style(Style::default().fg(self.theme.input_border)),
                     Rect {
                         y,
                         height: 1,
@@ -660,19 +910,6 @@ impl super::Renderer {
                     },
                 );
             }
-        }
-
-        // Input bottom border — persists even when panes are hidden (Ctrl+T).
-        // When pages are visible, the page top separator serves this role.
-        if pages.is_empty() && input_view.is_some() && y < content_bottom {
-            frame.render_widget(
-                Paragraph::new(sep.clone()).style(Style::default().fg(self.theme.input_border)),
-                Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
-            );
         }
 
         // ── Page region ──────────────────────────────────────────────────
@@ -688,9 +925,8 @@ impl super::Renderer {
             if available > 0 {
                 let page_idx = active_page.min(pages.len() - 1);
 
-                let page_sep = "─".repeat(area.width as usize);
                 frame.render_widget(
-                    Paragraph::new(page_sep).style(Style::default().fg(self.theme.input_border)),
+                    Paragraph::new(""),
                     Rect {
                         y: page_start,
                         height: 1,

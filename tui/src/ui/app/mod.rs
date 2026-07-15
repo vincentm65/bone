@@ -88,6 +88,17 @@ impl WireTools {
     }
 }
 
+fn configured_input_style(
+    snapshot: &crate::ext::snapshots::LuaInputStyleSnapshot,
+    preset: Option<&str>,
+) -> super::render::InputStyle {
+    let mut snapshot = snapshot.clone();
+    if let Some(preset) = preset {
+        snapshot.preset = Some(preset.to_string());
+    }
+    super::render::InputStyle::from_snapshot(&snapshot)
+}
+
 pub struct App {
     pub messages: Vec<Message>,
     /// Channel to send commands (SubmitPrompt, lifecycle, approvals) to the
@@ -169,6 +180,9 @@ pub struct App {
     /// Keymap snapshot for custom bindings, supplied by the daemon's
     /// `FrontendState`.
     lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
+    /// Native input customization from init.lua. The config menu may override
+    /// only its preset while preserving all explicit custom fields.
+    lua_input_style: crate::ext::snapshots::LuaInputStyleSnapshot,
     /// Slash commands `(name, description)` the daemon advertised via
     /// `FrontendState`, for autocomplete.
     wire_commands: Vec<(String, String)>,
@@ -296,6 +310,7 @@ impl App {
             turn_pause_start: None,
             autocomplete: None,
             lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot::default(),
+            lua_input_style: crate::ext::snapshots::LuaInputStyleSnapshot::default(),
             wire_commands: Vec::new(),
             wire_tools: WireTools::default(),
             banner_shown: false,
@@ -457,6 +472,11 @@ impl App {
         }
         if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaConfigSnapshot>(config)
         {
+            self.lua_input_style = snap.input.clone();
+            self.renderer.input_style = configured_input_style(
+                &self.lua_input_style,
+                self.user_config.input_preset.as_deref(),
+            );
             apply_lua_config_snapshot(&mut self.user_config, &snap);
         }
         self.wire_commands = commands;
@@ -809,6 +829,10 @@ impl App {
 
     fn apply_custom_configs_to_runtime(&mut self, custom: config::custom::CustomConfigs) {
         self.user_config.apply_custom_configs(&custom);
+        self.renderer.input_style = configured_input_style(
+            &self.lua_input_style,
+            self.user_config.input_preset.as_deref(),
+        );
         self.approval_mode = self.user_config.approval_mode;
         self.custom_configs = custom;
     }
@@ -989,26 +1013,28 @@ impl App {
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::SetTerminalWidth { width: size.width });
-        let desired = Renderer::desired_height(
-            &self.input,
-            // Approval prompt is a pane now (counted via `visible_pages`), so the
-            // input slot is sized normally — pass no prompt.
-            None,
-            size.width,
-            self.visible_pages(),
-            self.active_page,
-            self.autocomplete.as_ref(),
-            self.running_shells.len(),
-        )
-        // The inline viewport can never be taller than the terminal — crossterm
-        // can't reserve more rows than exist, and an oversized inline viewport
-        // scrolls and overlaps (duplicated tab bars, status text bleeding into
-        // a tall /config menu over a subagent pane). The draw code already
-        // truncates content to its area, so clamping degrades gracefully. We
-        // reserve one row above it (`max_viewport_height`) so the viewport never
-        // fills the whole screen and `insert_before` keeps using its robust
-        // partial-screen scroll path.
-        .min(crate::ui::render::max_viewport_height(size.height));
+        let desired = self
+            .renderer
+            .desired_height(
+                &self.input,
+                // Approval prompt is a pane now (counted via `visible_pages`), so the
+                // input slot is sized normally — pass no prompt.
+                None,
+                size.width,
+                self.visible_pages(),
+                self.active_page,
+                self.autocomplete.as_ref(),
+                self.running_shells.len(),
+            )
+            // The inline viewport can never be taller than the terminal — crossterm
+            // can't reserve more rows than exist, and an oversized inline viewport
+            // scrolls and overlaps (duplicated tab bars, status text bleeding into
+            // a tall /config menu over a subagent pane). The draw code already
+            // truncates content to its area, so clamping degrades gracefully. We
+            // reserve one row above it (`max_viewport_height`) so the viewport never
+            // fills the whole screen and `insert_before` keeps using its robust
+            // partial-screen scroll path.
+            .min(crate::ui::render::max_viewport_height(size.height));
 
         let old_height = self.renderer.viewport_height;
         if desired != old_height {
@@ -2624,9 +2650,7 @@ impl App {
     /// (e.g. approval mode) stay in sync.
     fn reload_extensions(&mut self) -> String {
         let custom = config::custom::CustomConfigs::load();
-        self.user_config.apply_custom_configs(&custom);
-        self.approval_mode = self.user_config.approval_mode;
-        self.custom_configs = custom;
+        self.apply_custom_configs_to_runtime(custom);
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::ReloadExtensions);

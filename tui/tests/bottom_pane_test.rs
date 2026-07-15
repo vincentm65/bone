@@ -1,10 +1,11 @@
+use bone::ext::snapshots::{LuaInputBorderSnapshot, LuaInputStyleSnapshot};
 use bone::llm::TokenStats;
 use bone::tools::ApprovalMode;
 use bone::ui::autocomplete::AutocompleteState;
 use bone::ui::input::InputState;
 use bone::ui::pane_page::PanePage;
 use bone::ui::prompt::Prompt;
-use bone::ui::render::{PaneDraw, Renderer, StatusInfo};
+use bone::ui::render::{InputStyle, PaneDraw, Renderer, StatusInfo};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -152,7 +153,7 @@ fn newline_cursor_marker_is_included_in_input_height() {
     };
 
     assert_eq!(
-        Renderer::desired_height(&input, None, 20, &[], 0, None, 0),
+        Renderer::new().desired_height(&input, None, 20, &[], 0, None, 0),
         6
     );
 }
@@ -164,7 +165,7 @@ fn composer_reserves_terminal_final_column_like_submitted_user_text() {
     input.cursor_pos = input.buffer.chars().count();
 
     assert_eq!(
-        Renderer::desired_height(&input, None, 20, &[], 0, None, 0),
+        Renderer::new().desired_height(&input, None, 20, &[], 0, None, 0),
         5
     );
 }
@@ -178,7 +179,7 @@ fn composer_height_uses_the_same_word_wrapping_as_rendering() {
     };
 
     assert_eq!(
-        Renderer::desired_height(&input, None, 10, &[], 0, None, 0),
+        Renderer::new().desired_height(&input, None, 10, &[], 0, None, 0),
         6
     );
 }
@@ -224,7 +225,7 @@ fn long_prompt_uses_a_bounded_viewport_height() {
     );
 
     assert_eq!(
-        Renderer::desired_height(&input, Some(&prompt), 80, &[], 0, None, 0),
+        Renderer::new().desired_height(&input, Some(&prompt), 80, &[], 0, None, 0),
         13
     );
 }
@@ -246,14 +247,14 @@ fn pane_page_adds_height_to_viewport() {
 
     // Without pages: top_sep(1) + input(1) + bot_sep(1) + status(1) = 4
     assert_eq!(
-        Renderer::desired_height(&input, None, 80, &[], 0, None, 0),
+        Renderer::new().desired_height(&input, None, 80, &[], 0, None, 0),
         4
     );
 
-    // With 3-line page: base(3) + page_sep(1) + content(3) = 7
+    // With 3-line page: base(4) + blank separator(1) + content(3) = 8
     assert_eq!(
-        Renderer::desired_height(&input, None, 80, &pages, 0, None, 0),
-        7
+        Renderer::new().desired_height(&input, None, 80, &pages, 0, None, 0),
+        8
     );
 }
 
@@ -270,10 +271,10 @@ fn pane_page_honors_visible_rows() {
         scroll: 0,
     }];
 
-    // base(3) + page_sep(1) + tool-requested content rows(12)
+    // base(4) + blank separator(1) + tool-requested content rows(12)
     assert_eq!(
-        Renderer::desired_height(&input, None, 80, &pages, 0, None, 0),
-        16
+        Renderer::new().desired_height(&input, None, 80, &pages, 0, None, 0),
+        17
     );
 }
 
@@ -297,10 +298,10 @@ fn pane_page_with_two_pages_renders_content() {
         },
     ];
 
-    // base(3) + page_sep(1) + content(1) = 5
+    // base(4) + blank separator(1) + content(1) = 6
     assert_eq!(
-        Renderer::desired_height(&input, None, 80, &pages, 0, None, 0),
-        5
+        Renderer::new().desired_height(&input, None, 80, &pages, 0, None, 0),
+        6
     );
 }
 
@@ -358,13 +359,15 @@ fn pane_page_renders_content_between_input_and_status() {
         })
         .unwrap();
 
-    // Row layout (5 rows total):
+    // Row layout (6 rows total):
     // 0: top sep
     // 1: input "> "
-    // 2: (blank)
-    // 3: page sep
+    // 2: input bottom border
+    // 3: blank pane separator
     // 4: "hello pane"
     // 5: status bar
+    assert!(row_text(&terminal, 2, 40).contains('─'));
+    assert!(row_text(&terminal, 3, 40).trim().is_empty());
     assert!(row_text(&terminal, 4, 40).contains("hello pane"));
     assert!(row_text(&terminal, 5, 40).contains("test-model"));
 }
@@ -423,4 +426,158 @@ fn redraw_clears_stale_prompt_and_pane_rows() {
     assert!(!second.contains("deepseek-1 idle"));
     assert!(second.contains(">"));
     assert!(second.contains("test-model"));
+}
+
+fn input_style(preset: &str) -> InputStyle {
+    InputStyle::from_snapshot(&LuaInputStyleSnapshot {
+        preset: Some(preset.to_string()),
+        ..Default::default()
+    })
+}
+
+#[test]
+fn box_preset_draws_sides_and_corners() {
+    let mut renderer = Renderer::new();
+    renderer.input_style = input_style("box");
+    let mut input = InputState::default();
+    input.buffer = "hello".to_string();
+    input.cursor_pos = input.buffer.chars().count();
+    let status = status_info();
+    let height = renderer.desired_height(&input, None, 20, &[], 0, None, 0);
+    let mut terminal = Terminal::new(TestBackend::new(20, height)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(frame, &pane_args(&input, &status, &[], 0, None), None)
+        })
+        .unwrap();
+
+    let top = row_text(&terminal, 0, 20);
+    let input_row = row_text(&terminal, 1, 20);
+    let bottom = row_text(&terminal, 2, 20);
+    assert!(top.starts_with('╭') && top.ends_with('╮'));
+    assert!(input_row.starts_with("│ > hello") && input_row.ends_with('│'));
+    assert!(bottom.starts_with('╰') && bottom.ends_with('╯'));
+}
+
+#[test]
+fn filled_preset_fills_three_composer_rows() {
+    let mut renderer = Renderer::new();
+    renderer.input_style = input_style("filled");
+    let input = InputState::default();
+    let status = status_info();
+    let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(frame, &pane_args(&input, &status, &[], 0, None), None)
+        })
+        .unwrap();
+
+    assert!(row_text(&terminal, 1, 20).starts_with(" >"));
+    for y in 0..=2 {
+        assert_eq!(
+            terminal.backend().buffer().cell((0, y)).unwrap().bg,
+            renderer.theme.input_bg
+        );
+        assert_eq!(
+            terminal.backend().buffer().cell((18, y)).unwrap().bg,
+            renderer.theme.input_bg
+        );
+    }
+}
+
+#[test]
+fn custom_prefix_padding_and_border_glyphs_are_applied() {
+    let mut renderer = Renderer::new();
+    renderer.input_style = InputStyle::from_snapshot(&LuaInputStyleSnapshot {
+        preset: Some("box".to_string()),
+        prefix: Some("λ ".to_string()),
+        horizontal_padding: Some(2),
+        vertical_padding: Some(1),
+        border: LuaInputBorderSnapshot {
+            horizontal: Some("-".to_string()),
+            vertical: Some("|".to_string()),
+            top_left: Some("+".to_string()),
+            top_right: Some("+".to_string()),
+            bottom_left: Some("[".to_string()),
+            bottom_right: Some("]".to_string()),
+        },
+        ..Default::default()
+    });
+    let input = InputState::default();
+    let status = status_info();
+    let height = renderer.desired_height(&input, None, 16, &[], 0, None, 0);
+    let mut terminal = Terminal::new(TestBackend::new(16, height)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(frame, &pane_args(&input, &status, &[], 0, None), None)
+        })
+        .unwrap();
+
+    assert_eq!(height, 6);
+    assert_eq!(row_text(&terminal, 0, 16), "+--------------+");
+    assert!(row_text(&terminal, 1, 16).starts_with('|'));
+    assert!(row_text(&terminal, 2, 16).starts_with("|  λ "));
+    assert_eq!(row_text(&terminal, 4, 16), "[--------------]");
+}
+
+#[test]
+fn box_wrapping_and_autocomplete_stay_inside_the_composer() {
+    let mut renderer = Renderer::new();
+    renderer.input_style = input_style("box");
+    let mut input = InputState::default();
+    input.buffer = "/help with a long suffix".to_string();
+    input.cursor_pos = input.buffer.chars().count();
+    let autocomplete = AutocompleteState::new(vec![
+        ("help".to_string(), "show help".to_string()),
+        ("history".to_string(), "show history".to_string()),
+    ]);
+    let status = status_info();
+    let height = renderer.desired_height(&input, None, 14, &[], 0, Some(&autocomplete), 0);
+    let mut terminal = Terminal::new(TestBackend::new(14, height)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status, &[], 0, Some(&autocomplete)),
+                None,
+            )
+        })
+        .unwrap();
+
+    assert!(
+        height > 9,
+        "wrapped input and autocomplete must be measured"
+    );
+    for row in 1..height - 2 {
+        let text = row_text(&terminal, row, 14);
+        assert!(
+            text.starts_with('│') && text.ends_with('│'),
+            "row {row}: {text:?}"
+        );
+    }
+    assert!(row_text(&terminal, height - 2, 14).starts_with('╰'));
+}
+
+#[test]
+fn all_presets_clip_without_panicking_in_a_tiny_terminal() {
+    for preset in ["lines", "box", "filled"] {
+        let mut renderer = Renderer::new();
+        renderer.input_style = input_style(preset);
+        let input = InputState {
+            buffer: "wide text".to_string(),
+            cursor_pos: 9,
+            ..Default::default()
+        };
+        let status = status_info();
+        let mut terminal = Terminal::new(TestBackend::new(1, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                renderer.draw_bottom_pane(frame, &pane_args(&input, &status, &[], 0, None), None)
+            })
+            .unwrap();
+    }
 }

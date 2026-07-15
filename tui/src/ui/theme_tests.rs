@@ -56,6 +56,29 @@ fn set_highlight_sets_resets_and_rejects() {
     assert!(!theme.set_highlight("input_border", Some("not-a-color")));
 }
 
+#[test]
+fn input_highlights_set_reset_and_follow_palette_defaults() {
+    let mut theme = Theme::default();
+    assert_eq!(theme.input_bg, theme.palette.selection);
+    assert_eq!(theme.input_prefix, theme.palette.fg);
+    assert_eq!(theme.input_cursor, theme.palette.fg);
+
+    for name in ["input_bg", "input_prefix", "input_cursor"] {
+        assert!(theme.set_highlight(name, Some("#123456")));
+    }
+    assert_eq!(theme.input_bg, Color::Rgb(0x12, 0x34, 0x56));
+    assert_eq!(theme.input_prefix, Color::Rgb(0x12, 0x34, 0x56));
+    assert_eq!(theme.input_cursor, Color::Rgb(0x12, 0x34, 0x56));
+
+    for name in ["input_bg", "input_prefix", "input_cursor"] {
+        assert!(theme.set_highlight(name, None));
+    }
+    let defaults = Theme::default();
+    assert_eq!(theme.input_bg, defaults.input_bg);
+    assert_eq!(theme.input_prefix, defaults.input_prefix);
+    assert_eq!(theme.input_cursor, defaults.input_cursor);
+}
+
 /// Find the foreground of the rule whose selector is exactly `scope`.
 fn code_fg(theme: &Theme, scope: &str) -> Option<SyColor> {
     let sel: syntect::highlighting::ScopeSelectors = scope.parse().unwrap();

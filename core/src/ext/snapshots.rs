@@ -118,11 +118,37 @@ pub fn collect_presets(lua: &mlua::Lua) -> (Vec<SpinnerPreset>, Vec<TextPreset>)
 
 // ── Config snapshot ─────────────────────────────────────────────────────────
 
+/// Optional border-glyph overrides for `bone.config.ui.input`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LuaInputBorderSnapshot {
+    pub horizontal: Option<String>,
+    pub vertical: Option<String>,
+    pub top_left: Option<String>,
+    pub top_right: Option<String>,
+    pub bottom_left: Option<String>,
+    pub bottom_right: Option<String>,
+}
+
+/// Declarative input-composer style from `bone.config.ui.input`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LuaInputStyleSnapshot {
+    pub preset: Option<String>,
+    pub prefix: Option<String>,
+    pub show_prefix: Option<bool>,
+    pub horizontal_padding: Option<u16>,
+    pub vertical_padding: Option<u16>,
+    pub fill: Option<bool>,
+    #[serde(default)]
+    pub border: LuaInputBorderSnapshot,
+}
+
 /// Subset of `bone.config` captured after init.lua.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LuaConfigSnapshot {
     pub approval_mode: Option<String>,
     pub status_show: HashMap<String, bool>,
+    #[serde(default)]
+    pub input: LuaInputStyleSnapshot,
     /// Spinner + text presets from `require("ui.spinners")` (boot snapshot).
     pub spinners: Vec<SpinnerPreset>,
     pub texts: Vec<TextPreset>,
@@ -146,9 +172,41 @@ impl LuaConfigSnapshot {
             })
             .unwrap_or_default();
 
+        let input = table
+            .get::<Option<mlua::Table>>("ui")
+            .ok()
+            .flatten()
+            .and_then(|ui| ui.get::<Option<mlua::Table>>("input").ok().flatten())
+            .map(|input| {
+                let border = input
+                    .get::<Option<mlua::Table>>("border")
+                    .ok()
+                    .flatten()
+                    .map(|border| LuaInputBorderSnapshot {
+                        horizontal: border.get("horizontal").ok().flatten(),
+                        vertical: border.get("vertical").ok().flatten(),
+                        top_left: border.get("top_left").ok().flatten(),
+                        top_right: border.get("top_right").ok().flatten(),
+                        bottom_left: border.get("bottom_left").ok().flatten(),
+                        bottom_right: border.get("bottom_right").ok().flatten(),
+                    })
+                    .unwrap_or_default();
+                LuaInputStyleSnapshot {
+                    preset: input.get("preset").ok().flatten(),
+                    prefix: input.get("prefix").ok().flatten(),
+                    show_prefix: input.get("show_prefix").ok().flatten(),
+                    horizontal_padding: input.get("horizontal_padding").ok().flatten(),
+                    vertical_padding: input.get("vertical_padding").ok().flatten(),
+                    fill: input.get("fill").ok().flatten(),
+                    border,
+                }
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             approval_mode,
             status_show,
+            input,
             spinners: Vec::new(),
             texts: Vec::new(),
         })
@@ -448,5 +506,62 @@ impl LuaKeymapSnapshot {
             normal: parse_mode("n")?,
             insert: parse_mode("i")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_snapshot_parses_input_style() {
+        let lua = mlua::Lua::new();
+        let config: mlua::Table = lua
+            .load(
+                r#"
+                return {
+                    ui = {
+                        input = {
+                            preset = "box",
+                            prefix = "λ ",
+                            show_prefix = true,
+                            horizontal_padding = 2,
+                            vertical_padding = 1,
+                            fill = true,
+                            border = {
+                                horizontal = "-", vertical = "|",
+                                top_left = "+", top_right = "+",
+                                bottom_left = "[", bottom_right = "]",
+                            },
+                        },
+                    },
+                }
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        let snapshot = LuaConfigSnapshot::from_lua_table(&lua, &config).unwrap();
+        assert_eq!(snapshot.input.preset.as_deref(), Some("box"));
+        assert_eq!(snapshot.input.prefix.as_deref(), Some("λ "));
+        assert_eq!(snapshot.input.show_prefix, Some(true));
+        assert_eq!(snapshot.input.horizontal_padding, Some(2));
+        assert_eq!(snapshot.input.vertical_padding, Some(1));
+        assert_eq!(snapshot.input.fill, Some(true));
+        assert_eq!(snapshot.input.border.horizontal.as_deref(), Some("-"));
+        assert_eq!(snapshot.input.border.vertical.as_deref(), Some("|"));
+        assert_eq!(snapshot.input.border.bottom_left.as_deref(), Some("["));
+        assert_eq!(snapshot.input.border.bottom_right.as_deref(), Some("]"));
+    }
+
+    #[test]
+    fn config_snapshot_defaults_when_input_style_is_absent() {
+        let lua = mlua::Lua::new();
+        let config = lua.create_table().unwrap();
+        let snapshot = LuaConfigSnapshot::from_lua_table(&lua, &config).unwrap();
+
+        assert!(snapshot.input.preset.is_none());
+        assert!(snapshot.input.prefix.is_none());
+        assert!(snapshot.input.border.horizontal.is_none());
     }
 }

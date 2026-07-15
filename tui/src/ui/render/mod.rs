@@ -45,6 +45,7 @@ pub use bottom_pane::PaneDraw;
 pub(crate) use bottom_pane::approval_pane_lines;
 pub(crate) use bottom_pane::clamped_pane_visible_rows;
 pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
+pub use bottom_pane::{InputPreset, InputStyle};
 
 pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
 
@@ -109,6 +110,7 @@ impl StatusInfo {
 /// Owns all terminal rendering state and drawing logic.
 pub struct Renderer {
     pub theme: Theme,
+    pub input_style: InputStyle,
     /// Index of the first message NOT yet pushed to native scrollback.
     pub scrollback_cursor: usize,
     /// Byte offset of the current streaming assistant message already flushed
@@ -135,6 +137,7 @@ impl Renderer {
     pub fn new() -> Self {
         Self {
             theme: Theme::default(),
+            input_style: InputStyle::default(),
             scrollback_cursor: 0,
             streaming_source_flushed: 0,
             last_size: None,
@@ -313,16 +316,17 @@ impl Renderer {
         running: usize,
     ) -> io::Result<()> {
         let size = term.size()?;
-        let desired = Self::desired_height(
-            input,
-            prompt,
-            size.width,
-            pages,
-            active_page,
-            autocomplete,
-            running,
-        )
-        .min(max_viewport_height(size.height));
+        let desired = self
+            .desired_height(
+                input,
+                prompt,
+                size.width,
+                pages,
+                active_page,
+                autocomplete,
+                running,
+            )
+            .min(max_viewport_height(size.height));
         let old = self.viewport_height;
         if desired != old {
             Self::resize_viewport(term, old, desired)?;

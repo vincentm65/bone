@@ -9,6 +9,11 @@ fields:
     label: "Show reasoning in a live pane"
     type: bool
     default: false
+  - key: input_preset
+    label: "Input style"
+    type: enum
+    options: [custom, lines, box, filled]
+    default: custom
   - key: auto_compact_tokens
     label: "Auto-compact threshold (tokens)"
     type: string
