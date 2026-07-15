@@ -250,3 +250,52 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_load_failure_is_correlated() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (manager, receiver) = SessionManager::new();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                let id = match target {
+                    SessionTarget::Conversation(404) => return Err("conversation not found".into()),
+                    SessionTarget::Conversation(id) => id,
+                    SessionTarget::Latest => 1,
+                    SessionTarget::New => 2,
+                };
+                Ok(fake_managed_runtime(id, active.clone(), max_active.clone()))
+            }));
+
+            let (client, server) = tokio::io::duplex(4096);
+            let serve = tokio::task::spawn_local(serve_managed_connection(
+                server,
+                manager,
+                SessionTarget::Latest,
+            ));
+            let (read, mut write) = tokio::io::split(client);
+            let mut read = codec::MessageReader::new(read);
+            let _: RuntimeEvent = read.read().await.unwrap().unwrap();
+
+            codec::write_message(&mut write, &RuntimeCommand::LoadConversation { id: 404 })
+                .await
+                .unwrap();
+            let failed: RuntimeEvent =
+                tokio::time::timeout(std::time::Duration::from_secs(1), read.read())
+                    .await
+                    .expect("load failure response timed out")
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(
+                failed,
+                RuntimeEvent::ConversationLoadFailed { id: 404, message }
+                    if message == "conversation not found"
+            ));
+
+            serve.abort();
+            runner.abort();
+        })
+        .await;
+}

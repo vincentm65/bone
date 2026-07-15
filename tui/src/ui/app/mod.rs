@@ -363,13 +363,16 @@ impl App {
                 self.apply_snapshot(snapshot);
             }
             RuntimeEvent::ConversationLoaded { messages, snapshot } => {
+                self.reset_transient_ui_state();
+                self.cancel_streaming = false;
                 self.apply_snapshot(snapshot);
                 self.messages.clear();
                 let rows = self.rebuild_scrollback_from_transcript(&messages);
                 self.messages.extend(rows);
                 self.renderer.scrollback_cursor = 0;
             }
-            RuntimeEvent::Status { message } => {
+            RuntimeEvent::Status { message }
+            | RuntimeEvent::ConversationLoadFailed { message, .. } => {
                 self.messages.push(Message::system(message));
             }
             // The daemon VM's boot-time display state. Adopt it so the frontend
@@ -509,7 +512,7 @@ impl App {
         }
 
         if let Some(load) = action.conversation_load {
-            self.load_conversation(load, term)?;
+            self.load_conversation(load, term).await?;
         }
 
         if let Some(config_action) = action.config_action {
@@ -610,51 +613,64 @@ impl App {
         self.await_state_snapshot().await;
     }
 
-    /// Load a past conversation as the active chat (the `conversation.load`
-    /// action, used by `/history`). Clears the current scrollback/transcript and
-    /// resumes the selected conversation in place so future messages append to
-    /// it rather than doubling up on the previous conversation.
-    fn load_conversation(
+    /// Load a past conversation as one atomic frontend operation. Waiting here
+    /// yields to the in-process daemon and prevents the reply from racing with
+    /// the next submitted user message.
+    async fn load_conversation(
         &mut self,
         load: crate::ext::types::ConversationLoad,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        self.reset_transient_ui_state();
+        let Some(id) = load.conversation_id else {
+            return Ok(());
+        };
 
-        // Build the rendered scrollback from the loaded messages directly
-        // (no runtime access needed — ConversationLoad carries the messages).
-        self.conversation_id = load.conversation_id;
-        self.messages.clear();
-        let rows = self.rebuild_scrollback_from_transcript(&load.messages);
-        self.messages.extend(rows);
-        self.renderer.scrollback_cursor = 0;
-
-        // Update local token estimate from the loaded transcript. Reuse the
-        // core estimator (the driver's authoritative one) so the status-bar
-        // estimate can't drift from the daemon's.
-        self.token_stats.reset();
-        let history = crate::chat::build_chat_history(&load.messages, None);
-        let tool_defs_json_chars = serde_json::to_string(self.wire_tools.definitions())
-            .map(|json| json.chars().count())
-            .unwrap_or(0);
-        let prompt_chars = crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
-        self.token_stats.set_context_estimate(prompt_chars);
-
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
-        self.cancel_streaming = false;
-        self.redraw(term)?;
-
-        // Tell the daemon (idempotent — shares the same session).
-        // The daemon publishes ConversationLoaded with authoritative state,
-        // which the idle loop picks up on the next poll.
-        if let Some(conv_id) = load.conversation_id {
-            let _ = self
-                .command_tx
-                .send(crate::runtime::RuntimeCommand::LoadConversation { id: conv_id });
+        // A response from an earlier command must not satisfy this request.
+        while let Ok(ev) = self.events_rx.try_recv() {
+            self.apply_idle_event(ev);
         }
+        self.command_tx
+            .send(crate::runtime::RuntimeCommand::LoadConversation { id })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "runtime command channel closed")
+            })?;
 
-        Ok(())
+        loop {
+            match self.events_rx.recv().await {
+                Ok(crate::runtime::RuntimeEvent::ConversationLoaded { messages, snapshot })
+                    if snapshot.conversation_id == Some(id) =>
+                {
+                    self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
+                        messages,
+                        snapshot,
+                    });
+                    Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
+                    self.renderer.reset_scrollback_state();
+                    self.renderer
+                        .flush_new_to_scrollback(&self.messages, term)?;
+                    self.redraw(term)?;
+                    return Ok(());
+                }
+                Ok(crate::runtime::RuntimeEvent::ConversationLoadFailed {
+                    id: failed_id,
+                    message,
+                }) if failed_id == id => {
+                    self.messages.push(Message::system(message));
+                    self.renderer
+                        .flush_new_to_scrollback(&self.messages, term)?;
+                    self.redraw(term)?;
+                    return Ok(());
+                }
+                Ok(other) => self.apply_idle_event(other),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "runtime event channel closed while loading conversation",
+                    ));
+                }
+            }
+        }
     }
 
     /// Convert the loaded transcript into rendered scrollback rows, reusing the
@@ -876,7 +892,10 @@ impl App {
             // Drain daemon events between turns (StateSnapshot, Status,
             // FrontendState, etc.).
             let before = self.messages.len();
+            let mut replaced_scrollback = false;
             while let Ok(ev) = self.events_rx.try_recv() {
+                replaced_scrollback |=
+                    matches!(&ev, crate::runtime::RuntimeEvent::ConversationLoaded { .. });
                 if let crate::runtime::RuntimeEvent::ApprovalRequest {
                     id,
                     call_id,
@@ -908,9 +927,16 @@ impl App {
                     self.apply_idle_event(ev);
                 }
             }
-            // Commit any scrollback an idle event added (banner, Status notices)
-            // so it renders promptly rather than waiting for the next keystroke.
-            if self.messages.len() != before {
+            // Loading a conversation replaces native terminal scrollback; a
+            // cursor reset alone would leave the command's old "Loading..."
+            // line visible and make a successful load look stuck.
+            if replaced_scrollback {
+                Renderer::hard_reset_viewport(&mut terminal, self.renderer.viewport_height)?;
+                self.renderer.reset_scrollback_state();
+            }
+            // Commit any scrollback an idle event added or replaced so it
+            // renders promptly rather than waiting for the next keystroke.
+            if replaced_scrollback || self.messages.len() != before {
                 self.renderer
                     .flush_new_to_scrollback(&self.messages, &mut terminal)?;
                 self.redraw(&mut terminal)?;

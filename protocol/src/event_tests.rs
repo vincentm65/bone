@@ -80,6 +80,10 @@ fn every_runtime_event_variant_round_trips() {
             messages: vec![ChatMessage::new(ChatRole::User, "hi")],
             snapshot: SessionSnapshot::default(),
         },
+        RuntimeEvent::ConversationLoadFailed {
+            id: 7,
+            message: "missing".into(),
+        },
         RuntimeEvent::TurnComplete,
         RuntimeEvent::ViewDiff {
             diff: ViewDiff::SetHighlight {

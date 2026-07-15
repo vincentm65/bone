@@ -288,7 +288,7 @@ where
                         }
                         Err(message) => codec::write_message(
                             &mut write_half,
-                            &RuntimeEvent::Status { message },
+                            &RuntimeEvent::ConversationLoadFailed { id, message },
                         ).await?,
                     }
                 }
@@ -873,7 +873,8 @@ impl DaemonCtx {
                     self.hub
                         .publish(RuntimeEvent::ConversationLoaded { messages, snapshot });
                 } else {
-                    self.hub.publish(RuntimeEvent::Status {
+                    self.hub.publish(RuntimeEvent::ConversationLoadFailed {
+                        id,
                         message: format!("failed to load conversation {id}"),
                     });
                 }

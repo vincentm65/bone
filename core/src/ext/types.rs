@@ -601,15 +601,17 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
             }
         }
         Some("conversation.load") => {
-            let messages = match table.get::<Option<mlua::Table>>("messages") {
-                Ok(Some(t)) => parse_messages_table(&t),
-                _ => Vec::new(),
-            };
-            if messages.is_empty() {
-                eprintln!("bone-lua warn: conversation.load has no valid messages; ignoring");
+            let conversation_id: Option<i64> =
+                table.get::<Option<i64>>("conversation_id").ok().flatten();
+            if conversation_id.is_none() {
+                eprintln!("bone-lua warn: conversation.load missing conversation_id; ignoring");
             } else {
-                let conversation_id: Option<i64> =
-                    table.get::<Option<i64>>("conversation_id").ok().flatten();
+                // Accept messages from older commands for wire compatibility, but
+                // the daemon is the sole authoritative transcript loader.
+                let messages = match table.get::<Option<mlua::Table>>("messages") {
+                    Ok(Some(t)) => parse_messages_table(&t),
+                    _ => Vec::new(),
+                };
                 out.conversation_load = Some(ConversationLoad {
                     messages,
                     conversation_id,

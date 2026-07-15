@@ -120,7 +120,20 @@ fn turn_shaping_only_action_has_no_command_action() {
 }
 
 #[test]
-fn conversation_load_without_id_is_none_id() {
+fn parses_conversation_load_with_only_id() {
+    let lua = Lua::new();
+    let action = lua.create_table().unwrap();
+    action.set("action", "conversation.load").unwrap();
+    action.set("conversation_id", 7i64).unwrap();
+
+    let parsed = parse_lua_return_action(&action).expect("action parsed");
+    let load = parsed.conversation_load.expect("load payload");
+    assert_eq!(load.conversation_id, Some(7));
+    assert!(load.messages.is_empty());
+}
+
+#[test]
+fn conversation_load_without_id_is_ignored() {
     let lua = Lua::new();
     let messages = lua.create_table().unwrap();
     messages.push(msg_table(&lua, "user", "hi")).unwrap();
@@ -128,9 +141,7 @@ fn conversation_load_without_id_is_none_id() {
     action.set("action", "conversation.load").unwrap();
     action.set("messages", messages).unwrap();
 
-    let parsed = parse_lua_return_action(&action).expect("action parsed");
-    let load = parsed.conversation_load.expect("load payload");
-    assert_eq!(load.conversation_id, None);
+    assert!(parse_lua_return_action(&action).is_none());
 }
 
 #[test]

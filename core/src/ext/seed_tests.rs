@@ -84,6 +84,27 @@ fn force_overwrites_existing_file() {
 }
 
 #[test]
+fn history_and_menu_seeds_refresh_pre_feature_copies() {
+    let dir = std::env::temp_dir().join(format!(
+        "bone-history-menu-seed-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let history = dir.join("history.lua");
+    std::fs::write(&history, "-- old history helper\n").unwrap();
+    assert!(should_refresh_seeded_lua(&history, "history.lua"));
+
+    let menu = dir.join("menu.lua");
+    std::fs::write(&menu, "local pane = require(\"ui.pane\")\n").unwrap();
+    assert!(should_refresh_seeded_lua(&menu, "ui/menu.lua"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn task_list_seed_refreshes_when_complete_action_is_missing() {
     let dir = std::env::temp_dir().join(format!(
         "bone-task-list-seed-test-{}-{:?}",

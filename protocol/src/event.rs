@@ -111,6 +111,12 @@ pub enum RuntimeEvent {
         messages: Vec<ChatMessage>,
         snapshot: SessionSnapshot,
     },
+    /// Correlated failure response for `LoadConversation`; lets a waiting
+    /// frontend return to input instead of hanging after a database error.
+    ConversationLoadFailed {
+        id: i64,
+        message: String,
+    },
     TurnComplete,
     ViewDiff {
         diff: ViewDiff,
@@ -149,6 +155,9 @@ pub struct CommandAction {
 /// Payload for the `conversation.load` action (`/history`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationLoad {
+    /// Legacy command payload. New clients ignore this and let the daemon load
+    /// the complete authoritative transcript by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<ChatMessage>,
     /// Conversation id to resume; future messages append here.
     #[serde(default)]

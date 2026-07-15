@@ -98,7 +98,7 @@ fn selected_job_is_marked() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(line.contains('›'));
-    assert_eq!(pane.content[0].style.bg, Some(Color::DarkGray));
+    assert_eq!(pane.content[0].style.bg, Some(SELECTED_BG));
 }
 
 #[test]

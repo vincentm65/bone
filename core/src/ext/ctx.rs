@@ -2256,6 +2256,7 @@ fn dispatch_event(
         | RuntimeEvent::StateSnapshot { .. }
         | RuntimeEvent::FrontendState { .. }
         | RuntimeEvent::ConversationLoaded { .. }
+        | RuntimeEvent::ConversationLoadFailed { .. }
         | RuntimeEvent::ViewDiff { .. }
         | RuntimeEvent::CommandComplete { .. }
         | RuntimeEvent::TurnComplete => {}

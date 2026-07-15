@@ -400,6 +400,7 @@ impl SessionDb {
         )?;
         let db = Self { conn };
         db.setup_schema()?;
+        db.prune_ended_empty_conversations()?;
         Ok(db)
     }
 
@@ -915,14 +916,46 @@ impl SessionDb {
         Ok(())
     }
 
-    /// Mark a conversation as ended.
+    /// End a conversation, removing it instead when it never recorded any
+    /// messages, usage, or context checkpoints.
     pub fn end_conversation(&self, conversation_id: i64) -> rusqlite::Result<()> {
-        let now = now_iso();
-        self.conn.execute(
-            "UPDATE conversations SET ended_at = ?1 WHERE id = ?2",
-            params![now, conversation_id],
+        let tx = self.conn.unchecked_transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM conversations
+             WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM messages WHERE conversation_id = ?1)
+               AND NOT EXISTS (SELECT 1 FROM usage_events WHERE conversation_id = ?1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_context_checkpoints WHERE conversation_id = ?1
+               )",
+            params![conversation_id],
         )?;
-        Ok(())
+        if removed == 0 {
+            tx.execute(
+                "UPDATE conversations SET ended_at = ?1 WHERE id = ?2",
+                params![now_iso(), conversation_id],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Remove fully empty conversations left by older versions after they ended.
+    fn prune_ended_empty_conversations(&self) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM conversations
+             WHERE ended_at IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM messages WHERE conversation_id = conversations.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM usage_events WHERE conversation_id = conversations.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_context_checkpoints
+                   WHERE conversation_id = conversations.id
+               )",
+            [],
+        )
     }
 
     /// Clear the `ended_at` marker so a previously-ended conversation can be

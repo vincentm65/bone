@@ -16,6 +16,9 @@ use super::pane_page::PanePage;
 /// Pane source identifier (stable key for upsert/remove).
 pub const PANE_SOURCE: &str = "jobs";
 
+// Match the selected-row background used by the shared Lua menu (/history).
+const SELECTED_BG: Color = Color::Rgb(0x3A, 0x3F, 0x4B);
+
 /// Render the jobs pane from the registry snapshot, grouping by `agent` label.
 /// Only shows agents with at least one running job (a completed job stays
 /// visible while a sibling in the same group is still running).
@@ -167,7 +170,7 @@ pub fn render_selected(jobs: &[Job], selected_id: Option<&str>) -> Option<PanePa
             Span::styled(status, Style::default().fg(Color::Gray)),
         ]);
         if selected {
-            line = line.style(Style::default().bg(Color::DarkGray));
+            line = line.style(Style::default().bg(SELECTED_BG));
         }
         lines.push(line);
     }

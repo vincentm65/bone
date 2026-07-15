@@ -705,6 +705,59 @@ fn all_time_months_include_usage_older_than_three_years() {
     assert_eq!(snapshot.total.prompt_tokens, 42);
 }
 
+#[test]
+fn opening_cleanup_prunes_only_ended_fully_empty_conversations() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let empty = db.create_conversation("local", "local").unwrap();
+    db.conn
+        .execute(
+            "UPDATE conversations SET ended_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
+            [empty],
+        )
+        .unwrap();
+    let kept = db.create_conversation("local", "local").unwrap();
+    db.append_message(kept, "user", "keep", None, None, None, None, false, 1)
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE conversations SET ended_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
+            [kept],
+        )
+        .unwrap();
+
+    assert_eq!(db.prune_ended_empty_conversations().unwrap(), 1);
+    assert_eq!(db.latest_conversation().unwrap(), Some((kept, true)));
+}
+
+#[test]
+fn ending_fully_empty_conversation_deletes_it() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let id = db.create_conversation("local", "local").unwrap();
+    db.end_conversation(id).unwrap();
+
+    assert_eq!(db.latest_conversation().unwrap(), None);
+}
+
+#[test]
+fn ending_conversation_with_a_message_preserves_it() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let id = db.create_conversation("local", "local").unwrap();
+    db.append_message(id, "user", "keep", None, None, None, None, false, 1)
+        .unwrap();
+    db.end_conversation(id).unwrap();
+
+    assert_eq!(db.latest_conversation().unwrap(), Some((id, true)));
+}
+
 /// `latest_conversation` underpins resume-on-boot: it returns the most recent
 /// conversation and whether it holds any messages, so `init_db` can reload a
 /// non-empty conversation, recycle a trailing empty one, or mint the first.

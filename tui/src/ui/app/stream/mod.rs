@@ -805,6 +805,9 @@ impl App {
             RuntimeEvent::Failed { message } => {
                 self.pump_notice(format!("⚠ turn failed: {message}"), cur_idx, term)?;
             }
+            RuntimeEvent::ConversationLoadFailed { message, .. } => {
+                self.pump_notice(message, cur_idx, term)?;
+            }
             RuntimeEvent::WorkElapsed { elapsed_ms } => {
                 self.pump_notice(format!("worked for {}", format_elapsed_ms(elapsed_ms)), cur_idx, term)?;
             }
@@ -835,6 +838,8 @@ impl App {
             // Conversation lifecycle: update the view and rebuild scrollback
             // from the loaded messages. Arrives on /history load or attach.
             RuntimeEvent::ConversationLoaded { messages, snapshot } => {
+                self.reset_transient_ui_state();
+                self.cancel_streaming = false;
                 self.apply_snapshot(snapshot);
                 self.messages.clear();
                 let rows = self.rebuild_scrollback_from_transcript(&messages);
