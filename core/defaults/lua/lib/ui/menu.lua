@@ -111,6 +111,7 @@ local function normalize_options(options)
         if type(opt) == "table" then
             out[i] = {
                 label = one_line(opt.label or opt.value or i),
+                label_modifiers = opt.label_modifiers,
                 description = opt.description and one_line(opt.description) or nil,
                 description_spans = opt.description_spans,
                 search_text = one_line(opt.search_text or ""),
@@ -239,6 +240,7 @@ local function render_select(p, state)
         local check = ""
         if state.multi then check = checked and "[x] " or "[ ] " end
         local fg = "white"
+        local label_mods = opt.label_modifiers or (selected and { "bold" } or {})
         local existing_marker, label = split_leading_circle(opt.label)
         label = clip(label, width - 3 - #check - (existing_marker and 2 or 0))
         local option_line
@@ -248,13 +250,13 @@ local function render_select(p, state)
             option_line = line(
                 span(" " .. cursor .. " ", cursor_fg, cursor_mods),
                 span(dot .. " ", dot_fg),
-                span(label, fg, selected and { "bold" } or {})
+                span(label, fg, label_mods)
             )
         else
             option_line = line(
                 span(" " .. cursor .. " ", cursor_fg, cursor_mods),
                 span(check, checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
-                span(label, fg, selected and { "bold" } or {})
+                span(label, fg, label_mods)
             )
         end
         if selected then option_line.bg = SELECTED_BG end

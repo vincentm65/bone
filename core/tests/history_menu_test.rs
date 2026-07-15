@@ -167,7 +167,8 @@ fn run_menu(keys: &str) -> (Option<i64>, bool, bool) {
               description_spans = {{ {{ text = "openai/model-a", fg = "#8CC8FF" }} }},
             }},
             {{
-              label = "Beta", description = "anthropic/model-b", search_text = "id-2", value = 2,
+              label = "Beta", label_modifiers = {{ "bold" }},
+              description = "anthropic/model-b", search_text = "id-2", value = 2,
               description_spans = {{ {{ text = "anthropic/model-b", fg = "#8CC8FF" }} }},
             }},
             {{
@@ -180,6 +181,7 @@ fn run_menu(keys: &str) -> (Option<i64>, bool, bool) {
         local lines = _G.last_menu_lines
         result.style_ok = lines[2].bg == "#3A3F4B"
           and lines[2].spans[3].fg == "white"
+          and lines[2].spans[3].modifiers[1] == "bold"
           and lines[3].bg == "#3A3F4B"
           and lines[3].spans[1].fg == "gray"
           and lines[3].spans[2].fg == "#8CC8FF"

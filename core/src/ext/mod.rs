@@ -82,7 +82,8 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         || (name == "ui/menu.lua"
             && (!existing.contains("require(\"ui.pane\")")
                 || !existing.contains("SELECTED_BG")
-                || !existing.contains("description_spans")))
+                || !existing.contains("description_spans")
+                || !existing.contains("label_modifiers")))
         // History now includes aggregate message and token counts/status.
         || (name == "history.lua" && !existing.contains("total_token_count"))
         // task_list reminders are now deduped per conversation; refresh older
