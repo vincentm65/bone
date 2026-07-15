@@ -1,6 +1,6 @@
 {
   "name": "bone-agent",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "A terminal-based AI coding assistant",
   "bin": {
     "bone": "bin/bone.js"
@@ -9,11 +9,11 @@
     "bin"
   ],
   "optionalDependencies": {
-    "bone-agent-linux-x64": "2.4.0",
-    "bone-agent-linux-arm64": "2.4.0",
-    "bone-agent-darwin-x64": "2.4.0",
-    "bone-agent-darwin-arm64": "2.4.0",
-    "bone-agent-windows-x64": "2.4.0",
+    "bone-agent-linux-x64": "2.4.1",
+    "bone-agent-linux-arm64": "2.4.1",
+    "bone-agent-darwin-x64": "2.4.1",
+    "bone-agent-darwin-arm64": "2.4.1",
+    "bone-agent-windows-x64": "2.4.1"
   },
   "engines": {
     "node": ">=18"

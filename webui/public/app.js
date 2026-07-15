@@ -1120,7 +1120,10 @@ function renderTaskList() {
   const progressLabel = progressIdx >= 0
     ? ` ${progressIdx + 1}/${taskState.items.length}`
     : ` ${done}/${taskState.items.length}`;
-  label.innerHTML = `${activeTask}<span class="task-progress">${progressLabel}</span>`;
+  label.textContent = activeTask;
+  let ps = label.querySelector(".task-progress");
+  if (!ps) { ps = document.createElement("span"); ps.className = "task-progress"; label.appendChild(ps); }
+  ps.textContent = progressLabel;
 
   // Expanded: full list
   titleEl.textContent = taskState.title || "Tasks";
@@ -1318,8 +1321,18 @@ function clearRecovery() { const b = $("recovery"); if (b) b.remove(); }
 
 async function restartEngine() {
   toast("restarting engine…");
+  try {
+    const response = await fetch("/api/restart-daemon", { method: "POST" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      toast(body.error || "engine could not be restarted");
+      return;
+    }
+  } catch {
+    toast("engine could not be restarted");
+    return;
+  }
   clearRecovery();
-  await fetch("/api/restart-daemon", { method: "POST" }).catch(() => {});
   // The SSE link reconnects automatically; resend the pending prompt once back.
   const text = state.lastText;
   state.lastText = null;

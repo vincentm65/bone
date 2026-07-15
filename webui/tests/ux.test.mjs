@@ -201,6 +201,98 @@ test("recoverable data failures expose a persistent retry action", () => {
   assert.match(js, /reportError\("Could not load conversations"/);
 });
 
+test("renderTaskList escapes agent-controlled task text (no HTML injection)", () => {
+  // Build minimal DOM stubs for the elements renderTaskList touches.
+  const label = { textContent: "", innerHTML: "", childNodes: [], appendChild(c) { this.childNodes.push(c); return c; }, querySelector() { return null; } };
+  const wrap = { classList: { add() {}, remove() {}, toggle() {}, contains() {} } };
+  const collapsed = {};
+  const titleEl = { textContent: "" };
+  const countEl = { textContent: "" };
+  const itemsEl = { innerHTML: "", childNodes: [], appendChild(c) { this.childNodes.push(c); } };
+  const expanded = { querySelector: (s) => (s === ".task-list-title" ? titleEl : countEl) };
+
+  const byId = new Map([
+    ["task-popup-label", label],
+    ["task-popup-wrap", wrap],
+    ["task-popup-collapsed", collapsed],
+    ["task-popup-expanded", expanded],
+    ["task-list-items", itemsEl],
+  ]);
+
+  // el() that tracks querySelector-able children so expanded rows work.
+  function elStub(tag, cls, html) {
+    const el = { className: cls || "", textContent: "", childNodes: [], classList: { add() {}, remove() {}, toggle() {}, contains: () => cls && cls.includes("open") }, dataset: {}, querySelector(s) { return this.childNodes.find((c) => c.className === s.slice(1)) || null; }, appendChild(c) { this.childNodes.push(c); return c; } };
+    let markup = "";
+    Object.defineProperty(el, "innerHTML", {
+      get() { return markup; },
+      set(value) {
+        markup = value;
+        this.childNodes = [];
+        for (const [, cn, text] of value.matchAll(/<span class="([^"]*)">(.*?)<\/span>/g)) {
+          this.childNodes.push({ className: cn, textContent: text, tagName: "SPAN" });
+        }
+      },
+    });
+    el.innerHTML = html || "";
+    return el;
+  }
+
+  const fnSrc = js.slice(js.indexOf("function renderTaskList"),
+    js.indexOf("function toggleTaskPopup")) + ";renderTaskList();";
+
+  const ctx = vm.createContext({
+    taskState: {
+      active: true,
+      title: "Test",
+      items: [
+        { text: '<img src=x onerror=alert(1)>', status: "in_progress" },
+        { text: "safe task", status: "pending" },
+      ],
+      expanded: false,
+    },
+    document: { createElement: (tag) => elStub(tag) },
+    $: (id) => byId.get(id),
+    el: elStub,
+  });
+
+  vm.runInContext(fnSrc, ctx);
+
+  // The collapsed label must store agent-controlled content as text, not HTML.
+  assert.equal(label.textContent, '<img src=x onerror=alert(1)>',
+    "agent-controlled text must be assigned through textContent");
+
+  // The progress span must exist as a DOM child (preserves layout behavior).
+  assert.equal(label.childNodes.length, 1,
+    "label must contain one child (the progress span)");
+  assert.equal(label.childNodes[0].className, "task-progress");
+  assert.equal(label.childNodes[0].textContent, " 1/2");
+
+  // No HTML-injection surface in the expanded list either.
+  assert.equal(itemsEl.childNodes.length, 2, "both tasks rendered");
+  assert.equal(itemsEl.childNodes[0].querySelector(".task-text").textContent, "<img src=x onerror=alert(1)>",
+    "task text in expanded list must be safe text");
+  assert.equal(itemsEl.childNodes[1].querySelector(".task-text").textContent, "safe task",
+    "second task text must be safe text");
+});
+
 test("stats charts have keyboard-accessible spoken values", () => {
   assert.match(js, /tabindex="0" role="img" aria-label=/);
+});
+
+test("restart-daemon kills only tracked child process, not arbitrary port listeners", () => {
+  // The fuser-based port-kill that kills ANY process on the daemon port is removed.
+  assert.doesNotMatch(bridge, /fuser/);
+  assert.doesNotMatch(bridge, /spawn\("fuser"/);
+  // restartDaemon checks daemonProc before killing — returns early if untracked.
+  assert.match(bridge, /if \(!daemonProc\)/);
+  assert.match(bridge, /return false/);
+  // The /api/restart-daemon handler returns 503 with a clear error when untracked,
+  // and the client preserves recovery UI when that request fails.
+  assert.match(bridge, /res\.writeHead\(503/);
+  assert.match(bridge, /daemon not managed by this bridge/);
+  assert.match(js, /if \(!response\.ok\)/);
+  assert.match(js, /body\.error \|\| "engine could not be restarted"/);
+  // Self-healing is preserved for tracked daemons (setTimeout + ensureDaemon).
+  assert.match(bridge, /setTimeout\(ensureDaemon, 700\)/);
+  assert.match(bridge, /return true/);
 });

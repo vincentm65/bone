@@ -368,14 +368,18 @@ function ensureDaemon() {
 
 // Hard-restart the daemon. Used to recover when a turn wedges (e.g. an approval
 // abandoned by another client leaves the runtime blocked forever). Killing the
-// listener is enough — every session's self-healing link redials and respawns
-// it. The conversation survives in the SQLite history and can be reloaded.
+// tracked child process is enough — every session's self-healing link redials
+// and respawns it via ensureDaemon. The conversation survives in the SQLite
+// history and can be reloaded.
+// Returns true if a tracked daemon was killed, false if the daemon was not
+// managed by this bridge (externally managed or already stopped).
 function restartDaemon() {
+  if (!daemonProc) { log("restart requested — no tracked daemon"); return false; }
   log("restart requested — killing daemon");
-  if (daemonProc) { try { daemonProc.kill("SIGKILL"); } catch {} daemonProc = null; }
-  // Also clear any orphan listener the bridge didn't spawn (e.g. left by a prior run).
-  try { spawn("fuser", ["-k", `${DAEMON_PORT}/tcp`], { stdio: "ignore" }); } catch {}
+  try { daemonProc.kill("SIGKILL"); } catch {}
+  daemonProc = null;
   setTimeout(ensureDaemon, 700);
+  return true;
 }
 
 // A self-healing link to the daemon. Dials with backoff (spawning the daemon if
@@ -853,7 +857,11 @@ const server = http.createServer(async (req, res) => {
   });
   if (url.pathname === "/api/config" && req.method === "GET") return sendJson(res, getConfig);
   if (url.pathname === "/api/config" && req.method === "POST") return handleConfigWrite(req, res);
-  if (url.pathname === "/api/restart-daemon" && req.method === "POST") { restartDaemon(); return res.writeHead(204).end(); }
+  if (url.pathname === "/api/restart-daemon" && req.method === "POST") {
+    if (restartDaemon()) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+    res.writeHead(503, { "content-type": "application/json" }).end(JSON.stringify({ error: "daemon not managed by this bridge; restart manually" }));
+    return;
+  }
   if (url.pathname === "/api/watch" && req.method === "POST") return handleWatch(url, req, res, true);
   if (url.pathname === "/api/unwatch" && req.method === "POST") return handleWatch(url, req, res, false);
 
