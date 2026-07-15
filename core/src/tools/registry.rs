@@ -67,6 +67,7 @@ impl ToolRegistry {
                     .as_ref()
                     .map(|h| h.snapshots.clone())
                     .unwrap_or_default();
+                let working_dir = tool_handler.as_ref().and_then(|h| h.working_dir.clone());
                 match tool
                     .execute_output_live(
                         call.arguments,
@@ -83,6 +84,7 @@ impl ToolRegistry {
                             runtime_events,
                             approval_gate,
                             snapshots,
+                            working_dir,
                         },
                     )
                     .await
@@ -193,6 +195,8 @@ pub struct ToolHandler {
     /// Propagated to nested/subagent calls via the recursive `self.clone()` in
     /// `execute_one_live`, so tools see the same `ctx` as slash commands.
     pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
+    /// Stable project directory used to resolve relative tool paths.
+    pub working_dir: Option<std::path::PathBuf>,
     /// Session-scoped file snapshots backing `read_file`/`write_file`/
     /// `edit_file`. Behind an `Arc<RwLock<..>>` so every cloned handler in a
     /// turn (and across turns) shares one store — the driver clones the
@@ -234,6 +238,7 @@ impl ToolHandler {
             cancel_token: None,
             approval_gate: None,
             app_state: None,
+            working_dir: std::env::current_dir().ok(),
             snapshots: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::tools::snapshot::SnapshotStore::new(),
             )),
@@ -258,10 +263,16 @@ impl ToolHandler {
             cancel_token: None,
             approval_gate: None,
             app_state: None,
+            working_dir: std::env::current_dir().ok(),
             snapshots: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::tools::snapshot::SnapshotStore::new(),
             )),
         }
+    }
+
+    pub fn with_working_dir(mut self, working_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.working_dir = Some(working_dir.into());
+        self
     }
 
     /// After an extension reload, keep session-scoped fields from `previous`
@@ -272,6 +283,7 @@ impl ToolHandler {
     /// tools are reloaded mid-session.
     pub fn adopt_session_state_from(&mut self, previous: &ToolHandler) {
         self.snapshots = previous.snapshots.clone();
+        self.working_dir = previous.working_dir.clone();
         self.state_map = previous.state_map.clone();
         self.approval_gate = previous.approval_gate.clone();
         self.cancel_token = previous.cancel_token.clone();

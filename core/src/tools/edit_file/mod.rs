@@ -65,7 +65,7 @@ impl Tool for EditFileTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        run_edit(arguments, None).await
+        run_edit(arguments, None, None).await
     }
 
     async fn execute_output_live(
@@ -74,15 +74,23 @@ impl Tool for EditFileTool {
         _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
         context: ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
-        run_edit(arguments, Some(&context.snapshots))
-            .await
-            .map(ToolOutput::text)
+        run_edit(
+            arguments,
+            Some(&context.snapshots),
+            context.working_dir.as_deref(),
+        )
+        .await
+        .map(ToolOutput::text)
     }
 }
 
-pub async fn preview_edit_file(_tool_name: &str, arguments: Value) -> Result<EditPreview, String> {
+pub async fn preview_edit_file(
+    _tool_name: &str,
+    arguments: Value,
+    working_dir: Option<&Path>,
+) -> Result<EditPreview, String> {
     let args = parse_args(arguments)?;
-    let resolved = snapshot::resolve_existing_path(&args.path).await?;
+    let resolved = snapshot::resolve_existing_path(&args.path, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
     let (_, live) = read_live(&resolved).await?;
     let old_text = snapshot::normalize_text(&args.old_text);
@@ -94,9 +102,13 @@ pub async fn preview_edit_file(_tool_name: &str, arguments: Value) -> Result<Edi
     })
 }
 
-async fn run_edit(arguments: Value, snapshots: Option<&Snapshots>) -> Result<String, String> {
+async fn run_edit(
+    arguments: Value,
+    snapshots: Option<&Snapshots>,
+    working_dir: Option<&Path>,
+) -> Result<String, String> {
     let args = parse_args(arguments)?;
-    let resolved = snapshot::resolve_existing_path(&args.path).await?;
+    let resolved = snapshot::resolve_existing_path(&args.path, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
     let (live_raw, live) = read_live(&resolved).await?;
     let old_text = snapshot::normalize_text(&args.old_text);

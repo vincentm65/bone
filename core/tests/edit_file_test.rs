@@ -170,14 +170,11 @@ async fn stale_conflict_requests_a_reread() {
 #[tokio::test]
 async fn relative_and_absolute_paths_share_snapshot_identity() {
     let path = setup("path.txt", "old\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-    let mut relative = PathBuf::new();
-    for _ in std::env::current_dir().unwrap().components().skip(1) {
-        relative.push("..");
-    }
-    relative.push(path.strip_prefix("/").unwrap());
-    edit_live(&relative, "old", "new", &context).await.unwrap();
+    let project_dir = path.parent().unwrap().to_path_buf();
+    let relative = PathBuf::from(path.file_name().unwrap());
+    let context = ToolExecutionContext::default().with_working_dir(project_dir);
+    read_into_context(&relative, &context).await;
+    edit_live(&path, "old", "new", &context).await.unwrap();
     assert_eq!(fs::read_to_string(&path).await.unwrap(), "new\n");
     let _ = fs::remove_file(path).await;
 }
@@ -218,11 +215,14 @@ async fn conditional_atomic_write_rejects_changed_destination() {
 }
 
 #[tokio::test]
-async fn preview_uses_the_simple_schema_without_writing() {
+async fn preview_uses_session_working_dir_without_writing() {
     let path = setup("preview.txt", "old\n").await;
+    let project_dir = path.parent().unwrap();
+    let relative = path.file_name().unwrap().to_string_lossy();
     let preview = preview_edit_file(
         "edit_file",
-        json!({ "path": path, "old_text": "old", "new_text": "new" }),
+        json!({ "path": relative, "old_text": "old", "new_text": "new" }),
+        Some(project_dir),
     )
     .await
     .unwrap();

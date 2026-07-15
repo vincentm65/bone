@@ -1222,8 +1222,14 @@ function onApproval(ev) {
     </div>`;
   card.querySelector(".approval-tool").textContent = ev.name;
   card.querySelector(".approval-detail").textContent = ev.summary || "The agent wants to run this tool.";
-  if (ev.arguments && Object.keys(ev.arguments).length) {
-    const pre = card.querySelector(".approval-args");
+  // Prefer the daemon-computed edit preview (same framing as the TUI); fall
+  // back to raw JSON arguments when preview is absent.
+  const pre = card.querySelector(".approval-args");
+  if (ev.preview) {
+    const body = String(ev.preview).replace(/^\n/, "");
+    pre.textContent = "Proposed change (not yet applied):\n" + body;
+    pre.classList.remove("hidden");
+  } else if (ev.arguments && Object.keys(ev.arguments).length) {
     pre.textContent = JSON.stringify(ev.arguments, null, 2);
     pre.classList.remove("hidden");
   }

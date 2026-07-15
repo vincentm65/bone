@@ -5,6 +5,7 @@
 //! validate an exact replacement without making the model repeat hashes or a
 //! custom patch language. Image files are returned as attachments unchanged.
 
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -82,7 +83,7 @@ impl Tool for ReadFileTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path to read."
+                        "description": "File path to read. Relative paths resolve from the working directory."
                     },
                     "start_line": {
                         "type": "integer",
@@ -104,11 +105,11 @@ impl Tool for ReadFileTool {
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-        read_text(&args, None).await
+        read_text(&args, None, None).await
     }
 
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
-        self.read_file_inner(arguments, None).await
+        self.read_file_inner(arguments, None, None).await
     }
 
     async fn execute_output_live(
@@ -117,8 +118,12 @@ impl Tool for ReadFileTool {
         _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
         context: ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
-        self.read_file_inner(arguments, Some(&context.snapshots))
-            .await
+        self.read_file_inner(
+            arguments,
+            Some(&context.snapshots),
+            context.working_dir.as_deref(),
+        )
+        .await
     }
 }
 
@@ -129,10 +134,11 @@ impl ReadFileTool {
         &self,
         arguments: Value,
         snapshots: Option<&Snapshots>,
+        working_dir: Option<&Path>,
     ) -> Result<ToolOutput, String> {
         let path = arguments.get("path").and_then(|v| v.as_str());
         if let Some(media_type) = path.and_then(image_media_type) {
-            let resolved = snapshot::resolve_existing_path(path.unwrap()).await?;
+            let resolved = snapshot::resolve_existing_path(path.unwrap(), working_dir).await?;
             let path = resolved.to_string_lossy().into_owned();
             ensure_size(&path, MAX_IMAGE_FILE_BYTES).await?;
             let bytes = fs::read(&resolved).await.map_err(crate::util::errstr)?;
@@ -149,14 +155,18 @@ impl ReadFileTool {
         }
 
         let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-        let text = read_text(&args, snapshots).await?;
+        let text = read_text(&args, snapshots, working_dir).await?;
         Ok(ToolOutput::text(text))
     }
 }
 
 /// Read text, optionally recording the snapshot and shown line numbers.
-async fn read_text(args: &Args, snapshots: Option<&Snapshots>) -> Result<String, String> {
-    let resolved = snapshot::resolve_existing_path(&args.path).await?;
+async fn read_text(
+    args: &Args,
+    snapshots: Option<&Snapshots>,
+    working_dir: Option<&Path>,
+) -> Result<String, String> {
+    let resolved = snapshot::resolve_existing_path(&args.path, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
     ensure_size(&path, MAX_TEXT_FILE_BYTES).await?;
     let raw = fs::read_to_string(&resolved).await.map_err(|e| {

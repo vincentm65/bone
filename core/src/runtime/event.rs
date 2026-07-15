@@ -171,6 +171,7 @@ pub struct ChannelApprovalGate {
     events: mpsc::UnboundedSender<RuntimeEvent>,
     registry: ApprovalReplyRegistry,
     timer: Option<WorkTimer>,
+    working_dir: Option<std::path::PathBuf>,
 }
 
 impl ChannelApprovalGate {
@@ -178,11 +179,13 @@ impl ChannelApprovalGate {
         events: mpsc::UnboundedSender<RuntimeEvent>,
         registry: ApprovalReplyRegistry,
         timer: Option<WorkTimer>,
+        working_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             events,
             registry,
             timer,
+            working_dir,
         }
     }
 }
@@ -197,6 +200,18 @@ impl ApprovalGate for ChannelApprovalGate {
     ) -> CallOutcome {
         let (reply_tx, reply_rx) = oneshot::channel();
         let id = self.registry.register(reply_tx);
+        let preview = if call.name == "edit_file" {
+            crate::tools::edit_file::preview_edit_file(
+                &call.name,
+                call.arguments.clone(),
+                self.working_dir.as_deref(),
+            )
+            .await
+            .ok()
+            .map(|preview| preview.diff)
+        } else {
+            None
+        };
         let event = RuntimeEvent::ApprovalRequest {
             id,
             call_id: call.id.clone(),
@@ -205,6 +220,7 @@ impl ApprovalGate for ChannelApprovalGate {
             arguments: call.arguments.clone(),
             blocked: blocked.clone(),
             auto_allows,
+            preview,
         };
         if self.events.send(event).is_err() {
             // Frontend detached: fall back without wedging the loop.

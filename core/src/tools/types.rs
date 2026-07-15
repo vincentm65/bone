@@ -4,6 +4,8 @@
 //! non-wire types (`ToolDisplayConfig`, `ToolExecutionContext`,
 //! `Tool`) stay core-local.
 
+use std::path::PathBuf;
+
 use crate::pane_content::KeyRequest;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,16 @@ pub struct ToolExecutionContext {
     /// the driving [`ToolHandler`], so the same store is seen by `read_file`,
     /// `write_file`, and `edit_file` across a whole session.
     pub snapshots: std::sync::Arc<std::sync::RwLock<crate::tools::snapshot::SnapshotStore>>,
+    /// Working directory for resolving relative paths. When `None`, tools fall
+    /// back to the ambient process `current_dir()` (historical behavior).
+    pub working_dir: Option<PathBuf>,
+}
+
+impl ToolExecutionContext {
+    pub fn with_working_dir(mut self, working_dir: PathBuf) -> Self {
+        self.working_dir = Some(working_dir);
+        self
+    }
 }
 
 #[async_trait]

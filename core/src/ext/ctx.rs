@@ -1413,6 +1413,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         model: cfg.model.clone(),
         agent_depth: cfg.agent_depth,
         approval_gate: cfg.approval_gate.clone(),
+        cwd: std::path::PathBuf::from(&cfg.cwd),
     };
     let cancelled_flag = cfg.cancelled.clone();
 
@@ -1573,6 +1574,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             title,
             max_concurrency,
             spawn_scope,
+            Some(inherited_spawn.cwd.clone()),
         );
 
         let result = lua.create_table()?;
@@ -1624,6 +1626,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 title,
                 max_concurrency,
                 followup_scope,
+                Some(inherited_followup.cwd.clone()),
             );
             let result = lua.create_table()?;
             result.set("ok", true)?;
@@ -1727,6 +1730,8 @@ struct InheritedCtx {
     model: Option<String>,
     agent_depth: usize,
     approval_gate: Option<crate::tools::SharedGate>,
+    /// Session working directory for file-tool path resolution / previews.
+    cwd: std::path::PathBuf,
 }
 
 /// A ready-to-run `AgentRequest` plus the handles the dispatch loops need: the
@@ -1748,6 +1753,7 @@ fn launch_background_job(
     title: String,
     max_concurrency: usize,
     scope: Option<i64>,
+    working_dir: Option<std::path::PathBuf>,
 ) -> String {
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
@@ -1798,12 +1804,14 @@ fn launch_background_job(
                 let edit_preview = match &event {
                     crate::runtime::RuntimeEvent::ToolCall {
                         name, arguments, ..
-                    } if name == "edit_file" => {
-                        crate::tools::edit_file::preview_edit_file(name, arguments.clone())
-                            .await
-                            .ok()
-                            .map(|preview| preview.diff)
-                    }
+                    } if name == "edit_file" => crate::tools::edit_file::preview_edit_file(
+                        name,
+                        arguments.clone(),
+                        working_dir.as_deref(),
+                    )
+                    .await
+                    .ok()
+                    .map(|preview| preview.diff),
                     _ => None,
                 };
                 match &event {

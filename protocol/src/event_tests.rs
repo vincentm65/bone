@@ -53,6 +53,17 @@ fn every_runtime_event_variant_round_trips() {
             arguments: json!({ "command": "ls" }),
             blocked: None,
             auto_allows: false,
+            preview: None,
+        },
+        RuntimeEvent::ApprovalRequest {
+            id: 3,
+            call_id: "c1".into(),
+            name: "edit_file".into(),
+            summary: "edit_file: path".into(),
+            arguments: json!({ "path": "f", "old_text": "a", "new_text": "b" }),
+            blocked: None,
+            auto_allows: true,
+            preview: Some("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n".into()),
         },
         RuntimeEvent::Finished {
             content: "done".into(),

@@ -926,6 +926,7 @@ impl App {
                     name,
                     arguments,
                     auto_allows,
+                    preview,
                     ..
                 } = ev
                 {
@@ -934,8 +935,8 @@ impl App {
                         name,
                         arguments,
                     };
-                    if call.name == "edit_file" {
-                        self.pump_show_edit_preview(&call, &mut terminal).await?;
+                    if let Some(preview) = preview.as_deref() {
+                        self.pump_show_edit_preview(preview, &mut terminal)?;
                     }
                     if auto_allows {
                         let _ =

@@ -2,7 +2,6 @@
 
 use crate::chat::Message;
 use crate::runtime::RuntimeCommand;
-use crate::tools::edit_file::preview_edit_file;
 use crate::tools::shell::ShellTool;
 use crate::tools::{ApprovalMode, Tool, ToolCall};
 use crate::ui::input::{InputAction, InputState};
@@ -404,18 +403,15 @@ impl App {
                 ev = self.events_rx.recv() => match ev {
                     // The daemon signals turn completion with TurnComplete.
                     Ok(RuntimeEvent::TurnComplete) => break,
-                    // Approval requests need the async edit-preview path, so they
-                    // are handled here rather than in the (sync) event pump. Tool
-                    // calls are resolved one at a time by the gate, so at most one
-                    // ApprovalRequest is outstanding.
+                    // Approval requests are handled here because collecting a
+                    // decision may block the turn. The daemon supplies any edit
+                    // preview, so the frontend never resolves tool paths itself.
                     Ok(RuntimeEvent::ApprovalRequest {
-                        id, call_id, name, arguments, auto_allows, ..
+                        id, call_id, name, arguments, auto_allows, preview, ..
                     }) => {
                         let call = crate::tools::ToolCall { id: call_id, name, arguments };
-                        // Show the edit-file diff preview before deciding, so the
-                        // user sees what's being changed (in Safe and Danger modes).
-                        if call.name == "edit_file" {
-                            self.pump_show_edit_preview(&call, term).await?;
+                        if let Some(preview) = preview.as_deref() {
+                            self.pump_show_edit_preview(preview, term)?;
                         }
                         if auto_allows {
                             let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
@@ -611,11 +607,11 @@ impl App {
                     // Without this arm the request falls into `Ok(_) => {}` and
                     // the user is never asked.
                     Ok(RuntimeEvent::ApprovalRequest {
-                        id, call_id, name, arguments, auto_allows, ..
+                        id, call_id, name, arguments, auto_allows, preview, ..
                     }) => {
                         let call = crate::tools::ToolCall { id: call_id, name, arguments };
-                        if call.name == "edit_file" {
-                            self.pump_show_edit_preview(&call, term).await.ok();
+                        if let Some(preview) = preview.as_deref() {
+                            self.pump_show_edit_preview(preview, term).ok();
                         }
                         if auto_allows {
                             let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
@@ -1089,23 +1085,20 @@ impl App {
         Ok(())
     }
 
-    /// Render the `edit_file` diff preview to scrollback (a tool row + the
-    /// unified diff), mirroring the non-Driver path's `prepare_tool_call`. The
-    /// call id is recorded in `shown_tool_rows` so the later `ToolResult` event
-    /// doesn't render a duplicate row. The Driver executes the edit itself, so
-    /// this preview resolves the exact replacement against the live file purely
-    /// for display (the context-aware execution still enforces prior reads).
-    pub(crate) async fn pump_show_edit_preview(
+    /// Render a daemon-computed `edit_file` proposal to scrollback. The preview
+    /// is explicitly labeled as not yet applied; the later `ToolResult` always
+    /// renders the authoritative success/error row.
+    pub(crate) fn pump_show_edit_preview(
         &mut self,
-        call: &ToolCall,
+        preview: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        let preview = match preview_edit_file(&call.name, call.arguments.clone()).await {
-            Ok(p) => p,
-            Err(_) => return Ok(()), // execution will surface the real error
-        };
-        self.messages.push(Message::system(preview.diff));
-        self.shown_tool_rows.insert(call.id.clone());
+        // Explicit separator so the label stays readable even if the preview
+        // format loses its leading newline.
+        let body = preview.strip_prefix('\n').unwrap_or(preview);
+        self.messages.push(Message::system(format!(
+            "Proposed change (not yet applied):\n{body}"
+        )));
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         Ok(())

@@ -1137,10 +1137,12 @@ impl DaemonCtx {
         let cancel = Arc::new(AtomicBool::new(false));
         let work_timer = crate::runtime::timer::WorkTimer::start();
         self.key_registry.set_timer(Some(work_timer.clone()));
+        let working_dir = self.session.lock().unwrap().tools.working_dir.clone();
         let gate = Arc::new(ChannelApprovalGate::new(
             rt_tx.clone(),
             self.approval_registry.clone(),
             Some(work_timer.clone()),
+            working_dir,
         ));
         let driver = {
             let s = self.session.lock().unwrap();

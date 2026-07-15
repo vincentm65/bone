@@ -177,7 +177,8 @@ pub fn boot_with_tools(
         loaded.dynamic_display,
         loaded.dynamic_safety,
         loaded.dynamic_state,
-    );
+    )
+    .with_working_dir(cwd);
 
     BootedTools {
         manager: extensions,

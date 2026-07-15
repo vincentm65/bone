@@ -463,7 +463,7 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
     let (evtx, mut evrx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
     let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel::<AgentRunEvent>();
     let gate: Arc<dyn ApprovalGate> =
-        Arc::new(ChannelApprovalGate::new(evtx, registry.clone(), None));
+        Arc::new(ChannelApprovalGate::new(evtx, registry.clone(), None, None));
     let (mut driver, prompt) = driver_with_gate(
         vec![ChatEvent::ToolCall(ToolCall {
             id: "call_1".into(),

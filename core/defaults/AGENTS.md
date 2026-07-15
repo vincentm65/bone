@@ -1,21 +1,40 @@
+<!-- bone-agents-reference-version: 2 -->
 # Bone Agent Reference
+
+This is Bone-owned reference material for both the coding agent and humans who
+write Bone extensions. Bone refreshes this file from the running build. Put
+user-authored instructions in `AGENTS.local.md`; Bone never modifies that file.
+
+## Agent Operating Instructions
+
+> **Agent rule:** Treat paths below as relative to the resolved Bone config
+> directory unless a path is explicitly absolute.
+
+> **Agent rule:** After editing `config/providers.yaml` or
+> `command-policy.yaml`, tell the user to restart Bone.
+
+> **Agent rule:** Prefer the native file tools for file contents. Read a file
+> before editing it, and use `shell` only when no dedicated file operation fits.
 
 ## Config Location
 
-All file paths below are relative to the bone config directory. The resolved path is provided in the system prompt under "Resolved config directory".
+The resolved config directory is provided in the system prompt.
 
 ```
-init.lua              — Lua configuration and customization (optional)
-lua/tools/            — Custom + catalog Lua tools (installed via /catalog)
-lua/commands/         — Custom + bundled/catalog Lua commands
-lua/plugins/          — Lua plugins (optional)
-lua/lib/              — Lua library modules (optional, bundled: history.lua, ui/)
-providers.yaml        — LLM provider entries
-command-policy.yaml   — Shell command safety tiers
-memory.md             — User preferences (auto-maintained by /memory)
+init.lua                 — Lua configuration and customization (optional)
+lua/tools/               — Custom + catalog Lua tools (installed via /catalog)
+lua/commands/            — Custom + bundled/catalog Lua commands
+lua/plugins/             — Lua plugins (optional)
+lua/lib/                 — Lua library modules (optional, bundled: history.lua, ui/)
+config/general.yaml      — Approval, input, and compaction settings
+config/status.yaml       — Status-bar and spinner settings
+config/providers.yaml    — LLM provider entries
+config/tools.yaml        — Tool enable/disable toggles
+config/commands.yaml     — Command enable/disable toggles
+command-policy.yaml      — Shell command safety tiers
+memory/                  — Scoped user memory maintained by /memory
+AGENTS.local.md          — Optional user-authored agent instructions
 ```
-
-After editing `providers.yaml` or `command-policy.yaml`, tell the user to restart bone.
 
 ## Lua Extension System
 
@@ -339,6 +358,7 @@ These are compiled into bone and do not require any seeding or installation:
 - **read_file** — Read a UTF-8 text file
 - **write_file** — Create a new UTF-8 text file
 - **edit_file** — Replace one exact unique text block in an existing file (`{ path, old_text, new_text }`)
+- **process** — List, inspect, or stop managed background shell processes
 
 Use the dedicated file tools as the default interface for file contents:
 
@@ -368,7 +388,8 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 
 ```lua
 -- Native Rust tool, not Lua. Called by the LLM directly.
--- Parameters: command (string, required), classification (string: "read_only" or "danger"), timeout_ms (integer, optional)
+-- Parameters: command (string, required), timeout_ms (integer, optional),
+-- background (boolean, optional)
 ```
 
 ```lua
@@ -385,6 +406,11 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 -- Native Rust tool. Parameters: path, old_text, new_text
 -- Read the file first. old_text must be an exact unique block from the shown
 -- lines; new_text replaces it and may be empty to delete it.
+```
+
+```lua
+-- Native Rust tool. Parameters: action ("list", "status", or "kill"), id?
+-- Manages processes started by shell with background = true.
 ```
 
 ## Commands
@@ -413,7 +439,9 @@ Reliability properties:
 - Summarization runs without tools and with explicit output and wall-clock limits.
 - Automatic compaction emits transient status while working and a persistent notice only on failure.
 
-Configuration:
+Configuration is stored in `config/general.yaml` and read by the command through
+`ctx.config.get("general", key)`. Change it through `/config` or edit that YAML;
+these are not `bone.config` fields:
 
 - `compact_trigger_mode` — `absolute` (default) or `percentage`.
 - `auto_compact_tokens` — positive token threshold used in absolute mode. Blank disables automatic compaction in that mode.
@@ -435,7 +463,7 @@ Open the interactive config editor. See [Config, Theme, and Keymaps](#config-the
 
 ### /memory
 
-Incremental memory builder. Processes new conversations and queued explicit preference signals, then quietly updates scoped memory files without submitting a follow-up chat turn. Global memory lives in `memory/global.md`; current-project memory lives in `memory/projects/<cwd-key>.md`; pending cheap captures live in `memory/inbox.jsonl`; checkpoints live in `memory/state.json`. A legacy `memory.md` is still read as a fallback until scoped memory exists.
+Incremental memory builder. Processes new conversations and queued explicit preference signals, then quietly updates scoped memory files without submitting a follow-up chat turn. Global memory lives in `memory/global.md`; current-project memory lives in `memory/projects/<cwd-key>.md`; pending cheap captures live in `memory/inbox.jsonl`; checkpoints live in `memory/state.json`. A legacy `memory.md` is still read as a fallback until scoped memory exists. A legacy `memory.last_run` timestamp is read only to migrate into `memory/state.json` when that state file does not yet exist; current versions do not write `memory.last_run`.
 
 Usage:
 - `/memory` — process new conversations and queued preference signals.
@@ -490,7 +518,7 @@ bone.register_tool({
 
 ### Tool Fields
 
-- **name** — unique string identifier. Native tools (`shell`, `read_file`, `write_file`, `edit_file`) cannot be overridden.
+- **name** — unique string identifier. Native tools (`shell`, `read_file`, `write_file`, `edit_file`, `process`) cannot be overridden.
 - **description** — shown to the LLM when deciding which tool to call.
 - **parameters** — JSON Schema object describing the tool's arguments.
 - **safety** — `"read_only"` or `"danger"`. In safe mode only `read_only` tools auto-run; in danger mode everything auto-runs.
@@ -832,19 +860,26 @@ Lua draws UI by emitting view updates. Floats render as panes; a status line
 appends to the native status bar; highlights recolor the live theme.
 
 ```lua
-bone.api.ui.open_float({ id, title, lines, width, height, border, anchor })
-bone.api.ui.set_lines(id, lines)        -- replace a float's lines
+bone.api.ui.open_float({
+    id = "help",                 -- required
+    title = "Help", lines = { "text" },
+    width = 40, height = 10,
+    anchor = "center",           -- top_left | top_right | bottom_left | bottom_right | center
+    col = 0, row = 0,             -- signed offsets from the anchor
+    z = 0, border = false,
+})
+bone.api.ui.set_lines(id, lines)         -- replace a float's lines
 bone.api.ui.close(id)
 bone.api.ui.set_statusline(id, segments) -- segments: { {text, fg?, align?}, ... }
 bone.api.ui.set_highlight(name, color)   -- color string, or nil to reset
-bone.api.ui.term_width()                 -- terminal columns (80 when headless)
+bone.api.ui.term_width()                  -- terminal columns (80 when headless)
 ```
 
 **`set_statusline(id, segments)`** — each segment is `{ text, fg?, align? }`,
-where `fg` is a color string and `align` is `"left"` (default) or `"right"`.
-Right-aligned segments are drawn at the right edge of the status row; others
-extend the native bar. Replacing the same `id` updates it; the segments persist
-until changed.
+where `fg` is a color string and `align` is `"left"` (default), `"center"`, or
+`"right"`. Right-aligned segments are drawn at the right edge of the status
+row; left and center segments extend the native bar. Replacing the same `id`
+updates it; the segments persist until changed.
 
 **`set_highlight(name, color)`** — recolors a named highlight group live. The
 group `name` is one of the [theme](#theme) field names (`user_msg`,
@@ -868,12 +903,16 @@ Set these in `init.lua`. Rust snapshots them once at boot; no per-frame Lua read
 ```lua
 bone.config = {
     approval_mode = "safe",               -- "safe" | "danger"
-    auto_compact_tokens = 8000,           -- token threshold for auto-compact
-    auto_compact_keep_messages = 12,      -- messages to keep after compact
     status_show = {
-        model = true, approval = true, tokens_curr = true,
-        tokens_in = true, tokens_out = true, tokens_total = true,
-        tps = true, queue = true, spinner = true, timer = true,
+        status_show_model = true,
+        status_show_approval = true,
+        status_show_tokens_curr = true,
+        status_show_tokens_in = true,
+        status_show_tokens_out = true,
+        status_show_tokens_total = true,
+        status_show_queue = true,
+        status_show_spinner = true,
+        status_show_timer = true,
     },
     ui = {
         input = {
@@ -1033,16 +1072,23 @@ Plugins do not auto-run. Repeated `load` is a no-op.
 ## File Layout
 
 ```
-~/.bone-rust/
+<config-dir>/
   init.lua                     -- main Lua config (optional)
-  providers.yaml               -- LLM providers (Rust-managed)
-  command-policy.yaml           -- shell command safety (Rust-managed)
-  memory.md                    -- user preferences (auto-maintained)
-  memory.last_run              -- /memory checkpoint timestamp
-  AGENTS.md                    -- this reference file
+  command-policy.yaml          -- shell command safety tiers
+  AGENTS.md                    -- Bone-owned reference; refreshed by each build
+  AGENTS.local.md              -- optional user-authored agent instructions
+  .setup.json                  -- onboarding selection/marker
   config/
-    general.yaml               -- general settings (approval mode, status bar)
+    general.yaml               -- approval, input, and compaction settings
+    status.yaml                -- status-bar and spinner settings
+    providers.yaml             -- LLM provider entries
     tools.yaml                 -- tool enable/disable toggles
+    commands.yaml              -- command enable/disable toggles
+  memory/
+    global.md                  -- global user preferences
+    projects/<cwd-key>.md       -- project-scoped preferences
+    inbox.jsonl                -- queued explicit preference signals
+    state.json                 -- /memory processing checkpoint
   lua/
     tools/
       my_custom_tool.lua       -- user-created or installed via /catalog
@@ -1060,7 +1106,12 @@ Plugins do not auto-run. Repeated `load` is a no-op.
         init.lua
 ```
 
-Seeded Lua files are created on first launch and never overwrite existing files. Catalog tools/commands are installed only when selected during onboarding or via `/catalog`.
+Legacy root files `memory.md` and `memory.last_run` may remain for migration as
+described under `/memory`. Bone refreshes `AGENTS.md` from the bundled reference
+at startup and never modifies `AGENTS.local.md`. Other seeded Lua files are
+created on first launch and do not overwrite existing files. Catalog
+tools/commands are installed only when selected during onboarding or via
+`/catalog`.
 
 ## Tool vs Command
 

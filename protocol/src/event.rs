@@ -71,6 +71,11 @@ pub enum RuntimeEvent {
         blocked: Option<String>,
         #[serde(default)]
         auto_allows: bool,
+        /// Daemon-computed edit_file diff preview, rendered by the frontend
+        /// instead of re-resolving the file locally. `None` for non-edit_file
+        /// calls or when preview generation fails (non-fatal).
+        #[serde(default)]
+        preview: Option<String>,
     },
     Finished {
         content: String,

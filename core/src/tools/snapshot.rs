@@ -15,17 +15,30 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
-/// Resolve an existing path to one stable identity. Relative paths use the
-/// process working directory; canonicalization also collapses `.`/`..` and
-/// makes equivalent symlinked paths share snapshots.
-pub async fn resolve_existing_path(path: &str) -> Result<PathBuf, String> {
+/// Anchor a path to the session working directory. Absolute paths are unchanged.
+pub fn resolve_path(path: &str, working_dir: Option<&Path>) -> Result<PathBuf, String> {
     if path.trim().is_empty() {
         return Err("`path` must not be empty".to_string());
     }
-    fs::canonicalize(path)
+    let path = PathBuf::from(path);
+    Ok(if path.is_relative() {
+        working_dir.map_or(path.clone(), |cwd| cwd.join(path))
+    } else {
+        path
+    })
+}
+
+/// Resolve an existing path to one stable identity. Canonicalization collapses
+/// `.`/`..` and makes equivalent symlinked paths share snapshots.
+pub async fn resolve_existing_path(
+    path: &str,
+    working_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let target = resolve_path(path, working_dir)?;
+    fs::canonicalize(target)
         .await
         .map_err(|e| format!("could not resolve `{path}`: {e}"))
 }
