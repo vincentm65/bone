@@ -14,6 +14,7 @@ local M = {}
 
 local SOURCE = "interact"
 local MAX_ROWS = 12
+local SELECTED_BG = "#3A3F4B"
 
 -- Current pane width in columns, or nil when the host can't report it (older
 -- binary lacking `ctx.ui.width`, or not yet drawn). Callers that get nil skip
@@ -69,20 +70,55 @@ local function wrap_input(text, max)
     return segments
 end
 
+local function one_line(value)
+    return tostring(value or ""):gsub("%s+", " ")
+end
+
+local function clip(value, max)
+    local chars = utf8_chars(one_line(value))
+    if not max or #chars <= max then return table.concat(chars) end
+    if max < 2 then return "" end
+    return table.concat(chars, "", 1, max - 1) .. "…"
+end
+
 local function normalize_options(options)
     local out = {}
     for i, opt in ipairs(options or {}) do
         if type(opt) == "table" then
             out[i] = {
-                label = tostring(opt.label or opt.value or i),
+                label = one_line(opt.label or opt.value or i),
+                description = opt.description and one_line(opt.description) or nil,
+                search_text = one_line(opt.search_text or ""),
                 value = opt.value or opt.label or tostring(i),
                 action = opt.action,
             }
         else
-            out[i] = { label = tostring(opt), value = opt }
+            out[i] = { label = one_line(opt), value = opt, search_text = "" }
         end
     end
     return out
+end
+
+local function apply_filter(state, selected_value)
+    local query = state.filter:lower()
+    local filtered = {}
+    for _, opt in ipairs(state.all_options) do
+        local haystack = (opt.label .. " " .. (opt.description or "") .. " " .. opt.search_text):lower()
+        if query == "" or haystack:find(query, 1, true) then
+            filtered[#filtered + 1] = opt
+        end
+    end
+    state.options = filtered
+    state.selected = clamp(state.selected, 1, math.max(1, #filtered))
+    if selected_value ~= nil then
+        for i, opt in ipairs(filtered) do
+            if opt.value == selected_value then
+                state.selected = i
+                break
+            end
+        end
+    end
+    state.scroll = 0
 end
 
 local function render_tabs(lines, tabs, active)
@@ -122,6 +158,15 @@ local function render_select(p, state)
     if state.question and state.question ~= "" then
         lines[#lines + 1] = line(span(state.question, "white", { "bold" }))
     end
+    if state.searchable then
+        local cursor = state.filter_focused and "█" or ""
+        local count = string.format("  %d/%d", #state.options, #state.all_options)
+        lines[#lines + 1] = line(
+            span("Filter: ", "darkgray"),
+            span(state.filter .. cursor, "white", state.filter_focused and { "bold" } or {}),
+            span(count, "darkgray")
+        )
+    end
 
     local total = #state.options
     -- Custom-input value wraps under the " > Custom: " label (11 cols); compute
@@ -136,7 +181,15 @@ local function render_select(p, state)
     -- hints legend (1) + trailing blank (1) + the custom-input rows (when
     -- enabled, possibly wrapped to several rows).
     local reserved = 2 + (state.allow_custom and custom_rows or 0)
-    local option_rows = math.max(1, rows_for(state) - #lines - reserved)
+    local available_rows = math.max(1, rows_for(state) - #lines - reserved)
+    local has_descriptions = false
+    for _, opt in ipairs(state.options) do
+        if opt.description and opt.description ~= "" then
+            has_descriptions = true
+            break
+        end
+    end
+    local option_rows = math.max(1, math.floor(available_rows / (has_descriptions and 2 or 1)))
     if total > option_rows then
         state.scroll = clamp(state.scroll or 0, 0, math.max(0, total - option_rows))
         if state.selected <= state.scroll then state.scroll = state.selected - 1 end
@@ -147,38 +200,51 @@ local function render_select(p, state)
 
     local first = (state.scroll or 0) + 1
     local last = math.min(total, first + option_rows - 1)
+    local width = pane_width(p.ctx) or math.huge
     if first > 1 then
-        lines[#lines + 1] = line(span("    ↑ " .. tostring(first - 1) .. " more", "darkgray"))
+        lines[#lines + 1] = line(span(clip("    ↑ " .. tostring(first - 1) .. " more", width), "darkgray"))
     end
     for i = first, last do
         local opt = state.options[i]
         local selected = i == state.selected and not state.custom_focused
-        local checked = state.checked and state.checked[i]
+        local checked = state.checked and state.checked[opt]
         local cursor = selected and ">" or " "
         local cursor_fg = selected and "cyan" or "darkgray"
         local cursor_mods = selected and { "bold" } or {}
         local check = ""
         if state.multi then check = checked and "[x] " or "[ ] " end
-        local fg = selected and "white" or "darkgray"
+        local fg = "white"
         local existing_marker, label = split_leading_circle(opt.label)
+        label = clip(label, width - 3 - #check - (existing_marker and 2 or 0))
+        local option_line
         if existing_marker and not state.multi then
             local dot = existing_marker
             local dot_fg = existing_marker == "●" and "#78B373" or "darkgray"
-            lines[#lines + 1] = line(
+            option_line = line(
                 span(" " .. cursor .. " ", cursor_fg, cursor_mods),
                 span(dot .. " ", dot_fg),
                 span(label, fg, selected and { "bold" } or {})
             )
         else
-            lines[#lines + 1] = line(
+            option_line = line(
                 span(" " .. cursor .. " ", cursor_fg, cursor_mods),
                 span(check, checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
-                span(opt.label, fg, selected and { "bold" } or {})
+                span(label, fg, selected and { "bold" } or {})
             )
         end
+        if selected then option_line.bg = SELECTED_BG end
+        lines[#lines + 1] = option_line
+        if opt.description and opt.description ~= "" then
+            local description_line = line(span("     " .. clip(opt.description, width - 5), "gray"))
+            if selected then description_line.bg = SELECTED_BG end
+            lines[#lines + 1] = description_line
+        end
+    end
+    if total == 0 then
+        lines[#lines + 1] = line(span("   No matches", "darkgray"))
     end
     if last < total then
-        lines[#lines + 1] = line(span("    ↓ " .. tostring(total - last) .. " more", "darkgray"))
+        lines[#lines + 1] = line(span(clip("    ↓ " .. tostring(total - last) .. " more", width), "darkgray"))
     end
     if state.allow_custom then
         local cursor = state.custom_focused and ">" or " "
@@ -206,9 +272,10 @@ local function render_select(p, state)
         lines[#lines + 1] = line(span(state.notice, "#E5C07B"))
     end
     -- One-line control legend so the keys aren't a guessing game.
-    local hints = { "↑↓ move" }
+    local hints = { "↑↓/j/k move" }
     if state.multi then hints[#hints + 1] = "Space toggle" end
     hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
+    if state.searchable then hints[#hints + 1] = "/ or type filter" end
     if state.allow_custom then hints[#hints + 1] = "Tab custom" end
     hints[#hints + 1] = "Esc cancel"
     lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
@@ -231,14 +298,19 @@ end
 
 local function select_loop(ctx, spec, multi)
     local p = pane.new(ctx, { id = SOURCE, title = spec.title or "Menu" })
+    local all_options = normalize_options(spec.options)
     local state = {
         title = spec.title,
         question = spec.question,
-        options = normalize_options(spec.options),
+        options = all_options,
+        all_options = all_options,
         selected = math.max(1, tonumber(spec.default or 1) or 1),
         checked = {},
         allow_custom = spec.allow_custom or false,
         input = tostring(spec.initial or ""),
+        searchable = spec.searchable or false,
+        filter = "",
+        filter_focused = false,
         tabs = spec.tabs,
         active_tab = spec.active_tab or 1,
         left_value = spec.left_value,
@@ -268,13 +340,33 @@ local function select_loop(ctx, spec, multi)
             return { value = action, selected = state.selected, action_key = true }
         end
 
-        if state.custom_focused and is_text_key(key) then
+        local filter_text
+        if state.searchable and not state.custom_focused and is_text_key(key) then
+            if state.filter_focused then
+                filter_text = key.char
+            elseif key.char == "/" then
+                state.filter_focused = true
+            elseif key.char ~= "j" and key.char ~= "k" then
+                state.filter_focused = true
+                filter_text = key.char
+            end
+        end
+        if filter_text then
+            local selected_value = state.options[state.selected] and state.options[state.selected].value
+            state.filter = state.filter .. filter_text
+            apply_filter(state, selected_value)
+        elseif state.searchable and state.filter_focused and code == "Backspace" then
+            local selected_value = state.options[state.selected] and state.options[state.selected].value
+            state.filter = state.filter:sub(1, -2)
+            apply_filter(state, selected_value)
+        elseif state.custom_focused and is_text_key(key) then
             state.input = state.input .. key.char
         elseif state.custom_focused and code == "Backspace" then
             state.input = state.input:sub(1, -2)
         elseif code == "Esc" then
             return { cancelled = true }
-        elseif code == "Up" then
+        elseif code == "Up" or (code == "Char" and key.char == "k" and not state.filter_focused) then
+            state.filter_focused = false
             if state.custom_focused then
                 state.custom_focused = false
                 state.selected = #state.options
@@ -283,7 +375,8 @@ local function select_loop(ctx, spec, multi)
             elseif state.allow_custom then
                 state.custom_focused = true
             end
-        elseif code == "Down" then
+        elseif code == "Down" or (code == "Char" and key.char == "j" and not state.filter_focused) then
+            state.filter_focused = false
             if state.custom_focused then
                 state.custom_focused = false
                 state.selected = 1
@@ -306,13 +399,17 @@ local function select_loop(ctx, spec, multi)
             state.custom_focused = false
         elseif code == "Tab" and state.allow_custom then
             state.custom_focused = not state.custom_focused
-        elseif code == "Char" and key.char == " " and multi and not state.custom_focused then
-            state.checked[state.selected] = not state.checked[state.selected]
+        elseif code == "Char" and key.char == " " and multi and not state.custom_focused
+            and state.options[state.selected] then
+            local opt = state.options[state.selected]
+            state.checked[opt] = not state.checked[opt]
         elseif code == "Enter" then
-            if multi then
+            if #state.options == 0 and not state.custom_focused then
+                state.notice = "No matching options."
+            elseif multi then
                 local values = {}
-                for i, opt in ipairs(state.options) do
-                    if state.checked[i] then values[#values + 1] = opt.value end
+                for _, opt in ipairs(state.all_options) do
+                    if state.checked[opt] then values[#values + 1] = opt.value end
                 end
                 local custom = (state.allow_custom and state.input ~= "") and state.input or nil
                 if #values == 0 and not custom then
@@ -330,7 +427,7 @@ local function select_loop(ctx, spec, multi)
                 return { value = state.options[state.selected].value, selected = state.selected }
             end
         end
-        if state.selected ~= prev and spec.on_change then
+        if state.selected ~= prev and spec.on_change and state.options[state.selected] then
             spec.on_change(state.options[state.selected].value, state)
         end
     end

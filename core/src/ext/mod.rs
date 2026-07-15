@@ -78,7 +78,12 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         return false;
     };
     existing.contains("ctx.ui.interact")
-        || (name == "ui/menu.lua" && !existing.contains("require(\"ui.pane\")"))
+        // Refresh menus predating either the pane migration or full-row selection styling.
+        || (name == "ui/menu.lua"
+            && (!existing.contains("require(\"ui.pane\")")
+                || !existing.contains("SELECTED_BG")))
+        // History now includes aggregate message and token counts/status.
+        || (name == "history.lua" && !existing.contains("total_token_count"))
         // task_list reminders are now deduped per conversation; refresh older
         // seeded copies that would re-emit identical turn messages every tool round,
         // as well as copies that predate the complete action.

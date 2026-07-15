@@ -32,15 +32,38 @@ local function decode_tool_calls(raw)
   return out
 end
 
--- List recent conversations, newest first.
--- Returns array of { id, provider, model, started_at, ended_at }.
+-- Conversations ordered by latest activity. Counts, preview, and completion
+-- state are aggregated in one query so callers do not need per-row lookups.
 function M.list(ctx, limit)
-  limit = math.max(1, math.min(limit or 20, 100))
-  return ctx.db.query(
-    "SELECT id, provider, model, started_at, ended_at " ..
-    "FROM conversations ORDER BY id DESC LIMIT ?",
-    { limit }
-  ) or {}
+  limit = math.max(1, math.min(limit or 50, 100))
+  return ctx.db.query([[
+    SELECT c.id, c.provider, c.model, c.started_at, c.ended_at,
+           COALESCE(MAX(m.created_at), c.started_at) AS last_activity,
+           COUNT(m.id) AS total_message_count,
+           COALESCE((SELECT SUM(u.prompt_tokens + u.completion_tokens)
+                     FROM usage_events u WHERE u.conversation_id = c.id), 0)
+             AS total_token_count,
+           CASE
+             WHEN SUM(CASE WHEN m.role = 'user' AND m.content <> ''
+                            AND m.content NOT LIKE '[Context summary]%'
+                           THEN 1 ELSE 0 END) = 0 THEN 'empty'
+             WHEN COALESCE(MAX(CASE WHEN m.role = 'assistant' THEN m.seq END), -1)
+                  < MAX(CASE WHEN m.role = 'user' AND m.content <> ''
+                              AND m.content NOT LIKE '[Context summary]%'
+                             THEN m.seq END) THEN 'interrupted'
+             ELSE 'completed'
+           END AS status,
+           (SELECT p.content FROM messages p
+            WHERE p.conversation_id = c.id AND p.role = 'user'
+              AND p.content <> '' AND p.content NOT LIKE '[Context summary]%'
+            ORDER BY p.seq LIMIT 1) AS preview
+    FROM conversations c
+    LEFT JOIN messages m ON m.conversation_id = c.id
+    GROUP BY c.id
+    HAVING COUNT(m.id) > 0
+    ORDER BY last_activity DESC
+    LIMIT ?
+  ]], { limit }) or {}
 end
 
 -- Messages for a conversation in chronological order.
