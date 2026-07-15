@@ -78,10 +78,11 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         return false;
     };
     existing.contains("ctx.ui.interact")
-        // Refresh menus predating either the pane migration or full-row selection styling.
+        // Refresh menus predating the pane migration or current option-row styling.
         || (name == "ui/menu.lua"
             && (!existing.contains("require(\"ui.pane\")")
-                || !existing.contains("SELECTED_BG")))
+                || !existing.contains("SELECTED_BG")
+                || !existing.contains("description_spans")))
         // History now includes aggregate message and token counts/status.
         || (name == "history.lua" && !existing.contains("total_token_count"))
         // task_list reminders are now deduped per conversation; refresh older

@@ -81,6 +81,30 @@ local function clip(value, max)
     return table.concat(chars, "", 1, max - 1) .. "…"
 end
 
+local function clip_spans(values, max)
+    local out = {}
+    local remaining = max
+    for _, value in ipairs(values or {}) do
+        if remaining <= 0 then break end
+        local chars = utf8_chars(one_line(value.text))
+        local clipped = #chars > remaining
+        local text
+        if not clipped then
+            text = table.concat(chars)
+        elseif remaining >= 2 then
+            text = table.concat(chars, "", 1, remaining - 1) .. "…"
+        else
+            text = ""
+        end
+        if text ~= "" then
+            out[#out + 1] = span(text, value.fg or "gray", value.modifiers)
+        end
+        remaining = remaining - #utf8_chars(text)
+        if clipped then break end
+    end
+    return out
+end
+
 local function normalize_options(options)
     local out = {}
     for i, opt in ipairs(options or {}) do
@@ -88,6 +112,7 @@ local function normalize_options(options)
             out[i] = {
                 label = one_line(opt.label or opt.value or i),
                 description = opt.description and one_line(opt.description) or nil,
+                description_spans = opt.description_spans,
                 search_text = one_line(opt.search_text or ""),
                 value = opt.value or opt.label or tostring(i),
                 action = opt.action,
@@ -235,7 +260,15 @@ local function render_select(p, state)
         if selected then option_line.bg = SELECTED_BG end
         lines[#lines + 1] = option_line
         if opt.description and opt.description ~= "" then
-            local description_line = line(span("     " .. clip(opt.description, width - 5), "gray"))
+            local description_spans = { span("     ", "gray") }
+            if opt.description_spans then
+                for _, description_span in ipairs(clip_spans(opt.description_spans, width - 5)) do
+                    description_spans[#description_spans + 1] = description_span
+                end
+            else
+                description_spans[#description_spans + 1] = span(clip(opt.description, width - 5), "gray")
+            end
+            local description_line = { spans = description_spans }
             if selected then description_line.bg = SELECTED_BG end
             lines[#lines + 1] = description_line
         end

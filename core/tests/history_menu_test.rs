@@ -151,8 +151,9 @@ fn run_menu(keys: &str) -> (Option<i64>, bool, bool) {
     .unwrap();
     let menu: Table = lua.load(MENU_LUA).eval().unwrap();
     lua.globals().set("menu", menu).unwrap();
-    let result: Table = lua.load(format!(
-        r##"
+    let result: Table = lua
+        .load(format!(
+            r##"
         local keys, index = {{ {keys} }}, 0
         local ctx = {{ ui = {{
           key = function() index = index + 1; return keys[index] end,
@@ -161,9 +162,18 @@ fn run_menu(keys: &str) -> (Option<i64>, bool, bool) {
         }} }}
         local result = menu.select(ctx, {{
           options = {{
-            {{ label = "Alpha", description = "openai/model-a", search_text = "id-1", value = 1 }},
-            {{ label = "Beta", description = "anthropic/model-b", search_text = "id-2", value = 2 }},
-            {{ label = "Gamma", description = "local/model-c", search_text = "id-3", value = 3 }},
+            {{
+              label = "Alpha", description = "openai/model-a", search_text = "id-1", value = 1,
+              description_spans = {{ {{ text = "openai/model-a", fg = "#8CC8FF" }} }},
+            }},
+            {{
+              label = "Beta", description = "anthropic/model-b", search_text = "id-2", value = 2,
+              description_spans = {{ {{ text = "anthropic/model-b", fg = "#8CC8FF" }} }},
+            }},
+            {{
+              label = "Gamma", description = "local/model-c", search_text = "id-3", value = 3,
+              description_spans = {{ {{ text = "local/model-c", fg = "#8CC8FF" }} }},
+            }},
           }},
           searchable = true,
         }})
@@ -172,11 +182,12 @@ fn run_menu(keys: &str) -> (Option<i64>, bool, bool) {
           and lines[2].spans[3].fg == "white"
           and lines[3].bg == "#3A3F4B"
           and lines[3].spans[1].fg == "gray"
+          and lines[3].spans[2].fg == "#8CC8FF"
         return result
         "##
-    ))
-    .eval()
-    .unwrap();
+        ))
+        .eval()
+        .unwrap();
     (
         result.get::<i64>("value").ok(),
         result.get::<bool>("cancelled").unwrap_or(false),
