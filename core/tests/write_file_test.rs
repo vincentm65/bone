@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::json;
 use tokio::fs;
 
-use bone_core::tools::types::Tool;
+use bone_core::tools::types::{Tool, ToolExecutionContext};
 use bone_core::tools::write_file::WriteFileTool;
 
 fn temp_path(name: &str) -> PathBuf {
@@ -92,4 +92,70 @@ async fn refuses_dangling_symlink() {
             .is_symlink()
     );
     let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn live_writes_are_confined_to_working_directory() {
+    let root = temp_path("confined");
+    fs::create_dir_all(&root).await.unwrap();
+    let outside = root.parent().unwrap().join(format!(
+        "{}-outside.txt",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let nested_escape = PathBuf::from("missing")
+        .join("..")
+        .join("..")
+        .join(outside.file_name().unwrap());
+    let context = ToolExecutionContext::default().with_working_dir(root.clone());
+
+    for path in [
+        PathBuf::from("../escape.txt"),
+        outside.clone(),
+        nested_escape,
+    ] {
+        let result = WriteFileTool
+            .execute_output_live(
+                json!({ "path": path, "content": "escape" }),
+                None,
+                context.clone(),
+            )
+            .await;
+        assert!(
+            result
+                .unwrap_err()
+                .contains("outside the working directory"),
+            "{path:?}"
+        );
+    }
+    assert!(!outside.exists());
+    let _ = fs::remove_dir_all(root).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_writes_reject_symlinked_parent_escape() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_path("confined-link");
+    let outside = temp_path("confined-link-target");
+    fs::create_dir_all(&root).await.unwrap();
+    fs::create_dir_all(&outside).await.unwrap();
+    symlink(&outside, root.join("link")).unwrap();
+
+    let result = WriteFileTool
+        .execute_output_live(
+            json!({ "path": "link/escape.txt", "content": "escape" }),
+            None,
+            ToolExecutionContext::default().with_working_dir(root.clone()),
+        )
+        .await;
+    assert!(
+        result
+            .unwrap_err()
+            .contains("outside the working directory")
+    );
+    assert!(!outside.join("escape.txt").exists());
+
+    let _ = fs::remove_dir_all(root).await;
+    let _ = fs::remove_dir_all(outside).await;
 }

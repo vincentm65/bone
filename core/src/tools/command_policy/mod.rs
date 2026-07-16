@@ -111,6 +111,16 @@ fn unquote(value: &str) -> &str {
 
 /// Classify a command string based on policy only — never on model claims.
 pub fn classify_command(command: &str) -> CommandSafety {
+    // The splitter does not expand command/process substitutions. Treat syntax
+    // it cannot inspect as dangerous rather than approving only its outer text.
+    if command.contains('\0')
+        || command.contains("$(")
+        || command.contains('`')
+        || command.contains("<(")
+        || command.contains(">(")
+    {
+        return CommandSafety::Danger;
+    }
     shell_segments(peel_shell_wrapper(command))
         .into_iter()
         .map(|segment| classify_segment(&segment))

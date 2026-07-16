@@ -78,7 +78,7 @@ async fn write_file_inner(
     working_dir: Option<&Path>,
 ) -> Result<String, String> {
     let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-    let path = snapshot::resolve_path(&args.path, working_dir)?;
+    let path = snapshot::resolve_new_path(&args.path, working_dir).await?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {

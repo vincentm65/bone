@@ -88,6 +88,9 @@ fn which(name: &str) -> bool {
 }
 
 pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
+    if request.command.contains('\0') {
+        return Err("shell command must not contain NUL bytes".to_string());
+    }
     let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
     let cancel = request.cancel.clone();
     let (shell, shell_arg, _) = shell_command();

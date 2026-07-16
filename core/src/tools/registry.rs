@@ -310,10 +310,7 @@ impl ToolHandler {
     /// `ctx.state` map used by Lua tools / `before_turn`.
     pub fn clear_host_state(&mut self) {
         self.state_map.clear();
-        let mut map = self
-            .shared_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = self.shared_state.lock().unwrap_or_else(|e| e.into_inner());
         map.clear();
     }
 

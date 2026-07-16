@@ -262,10 +262,7 @@ fn tasklist_invalid_action_mentions_complete() {
     let config_dir = common::temp_dir("tasklist-bad-action");
     let booted = boot(&config_dir);
 
-    let res = run(
-        &booted,
-        serde_json::json!({ "action": "nope" }),
-    );
+    let res = run(&booted, serde_json::json!({ "action": "nope" }));
     assert!(
         res.content.contains("advance") && res.content.contains("complete"),
         "error should list advance and complete: {}",
@@ -304,20 +301,20 @@ fn tasklist_advance_marks_current_done_and_starts_next() {
     assert_eq!(tasks[2]["status"], "pending");
 
     let res2 = run(&booted, serde_json::json!({ "action": "advance" }));
-    let state2: serde_json::Value =
-        serde_json::from_str(res2.state.as_deref().unwrap()).unwrap();
+    let state2: serde_json::Value = serde_json::from_str(res2.state.as_deref().unwrap()).unwrap();
     assert_eq!(state2["tasks"][1]["status"], "done");
     assert_eq!(state2["tasks"][2]["status"], "in_progress");
 
     let res3 = run(&booted, serde_json::json!({ "action": "advance" }));
     assert_eq!(res3.content, "All tasks complete.");
-    let state3: serde_json::Value =
-        serde_json::from_str(res3.state.as_deref().unwrap()).unwrap();
-    assert!(state3["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|t| t["status"] == "done"));
+    let state3: serde_json::Value = serde_json::from_str(res3.state.as_deref().unwrap()).unwrap();
+    assert!(
+        state3["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] == "done")
+    );
 }
 
 /// write with a later in_progress auto-closes earlier unfinished items so the
@@ -342,8 +339,7 @@ fn tasklist_write_closes_prior_steps_when_later_in_progress() {
     assert!(!res.is_error, "write errored: {}", res.content);
     assert_eq!(res.content, "2/3 done");
 
-    let state: serde_json::Value =
-        serde_json::from_str(res.state.as_deref().unwrap()).unwrap();
+    let state: serde_json::Value = serde_json::from_str(res.state.as_deref().unwrap()).unwrap();
     assert_eq!(state["tasks"][0]["status"], "done");
     assert_eq!(state["tasks"][1]["status"], "done");
     assert_eq!(state["tasks"][2]["status"], "in_progress");

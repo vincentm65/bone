@@ -43,6 +43,58 @@ pub async fn resolve_existing_path(
         .map_err(|e| format!("could not resolve `{path}`: {e}"))
 }
 
+/// Resolve a not-yet-created path without allowing it to escape `working_dir`.
+/// Canonicalizing the nearest existing ancestor handles both `..` and symlinked
+/// parent directories while still permitting missing intermediate directories.
+pub async fn resolve_new_path(path: &str, working_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let target = resolve_path(path, working_dir)?;
+    let Some(working_dir) = working_dir else {
+        return Ok(target);
+    };
+    let boundary = fs::canonicalize(working_dir)
+        .await
+        .map_err(|e| format!("could not resolve working directory: {e}"))?;
+
+    let mut ancestor = target.as_path();
+    loop {
+        match fs::symlink_metadata(ancestor).await {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| format!("could not resolve `{path}`"))?;
+            }
+            Err(e) => return Err(format!("could not resolve `{path}`: {e}")),
+        }
+    }
+    let mut resolved = fs::canonicalize(ancestor)
+        .await
+        .map_err(|e| format!("could not resolve `{path}`: {e}"))?;
+    for component in target
+        .strip_prefix(ancestor)
+        .map_err(crate::util::errstr)?
+        .components()
+    {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(component) => resolved.push(component),
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(format!("could not resolve `{path}`"));
+            }
+        }
+    }
+    if !resolved.starts_with(&boundary) {
+        return Err(format!(
+            "path `{path}` is outside the working directory `{}`",
+            working_dir.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 /// Upper bound on retained versions per path (for stale recovery). Mirrors
 /// OMP's default of 4.
 const MAX_VERSIONS: usize = 4;

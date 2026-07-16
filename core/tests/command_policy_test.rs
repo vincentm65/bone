@@ -51,6 +51,22 @@ fn policy_danger_rm() {
 }
 
 #[test]
+fn policy_danger_unsupported_expansion_and_nul() {
+    for command in [
+        "echo $(rm file)",
+        "echo `rm file`",
+        "diff <(cat a) <(cat b)",
+        "pwd\0",
+    ] {
+        assert_eq!(
+            classify_command(command),
+            CommandSafety::Danger,
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
 fn policy_danger_sudo() {
     assert_eq!(
         classify_command("sudo apt install foo"),
@@ -589,7 +605,7 @@ fn compound_newlines_comments_and_pipes_readonly() {
 }
 
 #[test]
-fn compound_readonly_while_loop_pipeline() {
+fn compound_with_command_substitution_is_danger() {
     let command = r#"
     find /home/vincent/projects/bone/src -name "*.rs" |
       sort |
@@ -599,7 +615,7 @@ fn compound_readonly_while_loop_pipeline() {
       sort -rn
 "#;
 
-    assert_eq!(classify_command(command), CommandSafety::ReadOnly);
+    assert_eq!(classify_command(command), CommandSafety::Danger);
 }
 
 #[test]

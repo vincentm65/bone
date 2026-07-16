@@ -296,7 +296,7 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
 
     // ctx.shell / ctx.shell_streaming / ctx.read_file / ctx.write_file — the
     // top-level I/O primitives (set directly on ctx, not under a sub-table).
-    add_io_primitives(lua, &ctx)?;
+    add_io_primitives(lua, &ctx, cfg)?;
 
     // ctx.ui — notifications, live pane updates, blocking key reads.
     ctx.set("ui", build_ui_table(lua, cfg)?)?;
@@ -404,15 +404,51 @@ fn build_fs_table(lua: &Lua) -> Result<Table, mlua::Error> {
     Ok(fs_table)
 }
 
+fn require_shell_approval(
+    command: &str,
+    mode: crate::tools::ApprovalMode,
+    gate: Option<&crate::tools::SharedGate>,
+) -> Result<(), mlua::Error> {
+    if command.contains('\0') {
+        return Err(mlua::Error::external(
+            "shell command must not contain NUL bytes",
+        ));
+    }
+    let safety = crate::tools::command_policy::classify_command(command);
+    let call = ToolCall {
+        id: format!(
+            "lua_shell_{}",
+            LUA_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ),
+        name: "shell".into(),
+        arguments: serde_json::json!({ "command": command }),
+    };
+    let allowed = mode.allows_safety(safety);
+    let outcome = match gate {
+        Some(gate) => block_on(gate.0.decide(None, allowed, &call)),
+        None => crate::tools::approval::decide_call(None, allowed),
+    };
+    match outcome {
+        bone_protocol::CallOutcome::Approve => Ok(()),
+        bone_protocol::CallOutcome::Blocked(reason) => Err(mlua::Error::external(reason)),
+        bone_protocol::CallOutcome::Denied => Err(mlua::Error::external(
+            crate::tools::approval::denied_message(mode, safety),
+        )),
+    }
+}
+
 /// Set the top-level I/O primitives on `ctx`: `shell`, `shell_streaming`,
 /// `read_file`, `write_file`. These hang directly off `ctx` (not a sub-table),
 /// so this takes the `ctx` table and sets onto it rather than returning one.
-fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
+fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
     // ctx.process is the extension-safe managed-process API.  Plugins never
     // receive a child handle, so Bone retains process-tree cancellation and
     // bounded output ownership.
     let process = lua.create_table()?;
-    let spawn = lua.create_function(|lua, (command, opts): (String, Option<Table>)| {
+    let approval_mode = cfg.approval_mode;
+    let approval_gate = cfg.approval_gate.clone();
+    let spawn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
+        require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
         let timeout_ms = opt_u64(&opts, "timeout_ms")
             .unwrap_or(3_600_000)
             .clamp(1_000, 3_600_000);
@@ -472,7 +508,10 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
     )?;
     ctx.set("process", process)?;
     // ctx.shell(command, opts?) → { stdout, stderr, exit_code }
-    let shell_fn = lua.create_function(|lua, (command, opts): (String, Option<Table>)| {
+    let approval_mode = cfg.approval_mode;
+    let approval_gate = cfg.approval_gate.clone();
+    let shell_fn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
+        require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
         // Parse opts.
         let timeout_ms = opt_u64(&opts, "timeout_ms")
             .unwrap_or(120_000)
@@ -501,8 +540,11 @@ fn add_io_primitives(lua: &Lua, ctx: &Table) -> Result<(), mlua::Error> {
 
     // ctx.shell_streaming(command, callback, opts?) → { stdout, stderr, exit_code }
     // Runs command via bash, reads stdout line-by-line, calls callback(line) for each.
+    let approval_mode = cfg.approval_mode;
+    let approval_gate = cfg.approval_gate.clone();
     let shell_streaming_fn = lua.create_function(
-        |lua, (command, callback, opts): (String, mlua::Function, Option<Table>)| {
+        move |lua, (command, callback, opts): (String, mlua::Function, Option<Table>)| {
+            require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
             let timeout_ms = opt_u64(&opts, "timeout_ms")
                 .unwrap_or(300_000)
                 .clamp(1_000, 300_000);

@@ -700,9 +700,70 @@ fn ctx_state_is_shared_across_contexts() {
 fn ctx_state_is_isolated_across_fresh_maps() {
     let a = new_shared_state();
     let b = new_shared_state();
-    a.lock().unwrap().insert("task_list".into(), "parent".into());
+    a.lock()
+        .unwrap()
+        .insert("task_list".into(), "parent".into());
     assert!(
         b.lock().unwrap().get("task_list").is_none(),
         "fresh shared_state must not see another conversation's keys"
     );
+}
+
+#[test]
+fn extension_shell_primitives_enforce_safe_mode() {
+    let cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    for expression in [
+        r#"ctx.shell("rm /tmp/bone-approval-test")"#,
+        r#"ctx.shell_streaming("rm /tmp/bone-approval-test", function() end)"#,
+        r#"ctx.process.spawn("rm /tmp/bone-approval-test")"#,
+    ] {
+        let allowed: bool = lua
+            .load(format!("return pcall(function() {expression} end)"))
+            .eval()
+            .unwrap();
+        assert!(!allowed, "dangerous extension shell call was not denied");
+    }
+}
+
+struct BlockingGate;
+
+#[async_trait::async_trait]
+impl crate::tools::ApprovalGate for BlockingGate {
+    async fn decide(
+        &self,
+        _blocked: Option<String>,
+        _auto_allows: bool,
+        _call: &ToolCall,
+    ) -> bone_protocol::CallOutcome {
+        bone_protocol::CallOutcome::Blocked("blocked by test gate".into())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_shell_primitives_use_approval_gate() {
+    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg.approval_mode = crate::tools::ApprovalMode::Danger;
+    cfg.approval_gate = Some(crate::tools::SharedGate(Arc::new(BlockingGate)));
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    for expression in [
+        r#"ctx.shell("echo ok")"#,
+        r#"ctx.shell_streaming("echo ok", function() end)"#,
+        r#"ctx.process.spawn("echo ok")"#,
+    ] {
+        let (allowed, error): (bool, String) = lua
+            .load(format!(
+                "local ok, err = pcall(function() {expression} end); return ok, tostring(err)"
+            ))
+            .eval()
+            .unwrap();
+        assert!(!allowed);
+        assert!(error.contains("blocked by test gate"), "{error}");
+    }
 }
