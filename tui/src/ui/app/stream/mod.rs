@@ -411,7 +411,7 @@ impl App {
                     }) => {
                         let call = crate::tools::ToolCall { id: call_id, name, arguments };
                         if let Some(preview) = preview.as_deref() {
-                            self.pump_show_edit_preview(preview, term)?;
+                            self.pump_show_edit_preview(&call.id, preview, term)?;
                         }
                         if auto_allows {
                             let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
@@ -611,7 +611,7 @@ impl App {
                     }) => {
                         let call = crate::tools::ToolCall { id: call_id, name, arguments };
                         if let Some(preview) = preview.as_deref() {
-                            self.pump_show_edit_preview(preview, term).ok();
+                            self.pump_show_edit_preview(&call.id, preview, term).ok();
                         }
                         if auto_allows {
                             let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
@@ -1085,20 +1085,17 @@ impl App {
         Ok(())
     }
 
-    /// Render a daemon-computed `edit_file` proposal to scrollback. The preview
-    /// is explicitly labeled as not yet applied; the later `ToolResult` always
-    /// renders the authoritative success/error row.
+    /// Render a daemon-computed `edit_file` diff to scrollback. The call id is
+    /// recorded in `shown_tool_rows` so the later `ToolResult` does not render
+    /// a duplicate row (the preview already shows the edit).
     pub(crate) fn pump_show_edit_preview(
         &mut self,
+        call_id: &str,
         preview: &str,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        // Explicit separator so the label stays readable even if the preview
-        // format loses its leading newline.
-        let body = preview.strip_prefix('\n').unwrap_or(preview);
-        self.messages.push(Message::system(format!(
-            "Proposed change (not yet applied):\n{body}"
-        )));
+        self.messages.push(Message::system(preview.to_string()));
+        self.shown_tool_rows.insert(call_id.to_string());
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         Ok(())

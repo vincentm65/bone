@@ -936,7 +936,7 @@ impl App {
                         arguments,
                     };
                     if let Some(preview) = preview.as_deref() {
-                        self.pump_show_edit_preview(preview, &mut terminal)?;
+                        self.pump_show_edit_preview(&call.id, preview, &mut terminal)?;
                     }
                     if auto_allows {
                         let _ =
