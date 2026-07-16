@@ -378,7 +378,7 @@ impl App {
                 self.apply_snapshot(snapshot);
             }
             RuntimeEvent::ConversationLoaded { messages, snapshot } => {
-                self.reset_transient_ui_state();
+                self.reset_transient_ui_state(true);
                 self.cancel_streaming = false;
                 self.apply_snapshot(snapshot);
                 self.messages.clear();
@@ -755,16 +755,31 @@ impl App {
     }
 
     /// Reset transient per-turn UI state before switching conversations:
-    /// abort any in-flight stream, drop panes, queued input, and any pending
-    /// tool-approval prompt. Shared by `/clear` and conversation load.
-    fn reset_transient_ui_state(&mut self) {
+    /// abort any in-flight stream, drop panes, and any pending tool-approval
+    /// prompt. Shared by `/clear` and conversation load.
+    ///
+    /// When `clear_queue` is true (conversation load), drop stacked input —
+    /// those prompts targeted the previous conversation. When false (`/clear`
+    /// / `/new`), preserve the queue so later stacked messages still run
+    /// (e.g. `msg1`, `/clear`, `msg2`). Explicit queue wipe remains Ctrl+D.
+    fn reset_transient_ui_state(&mut self, clear_queue: bool) {
         self.cancel_streaming = true;
         self.pages.clear();
         self.active_page = 0;
         self.jobs_seen_version = u64::MAX;
-        self.queue.clear();
-        self.queue_selected = 0;
-        self.queue_editing = None;
+        if clear_queue {
+            self.queue.clear();
+            self.queue_selected = 0;
+            self.queue_editing = None;
+        } else {
+            // Pane UI was wiped; drop any in-progress queue edit state.
+            self.queue_editing = None;
+            if !self.queue.is_empty() {
+                self.queue_selected = self.queue_selected.min(self.queue.len() - 1);
+            } else {
+                self.queue_selected = 0;
+            }
+        }
         self.active_prompt = None;
         self.pending_approval = None;
     }
@@ -777,7 +792,9 @@ impl App {
     /// Clear chat history, end the current DB conversation, start a fresh one,
     /// and display a usage summary.
     async fn clear_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        self.reset_transient_ui_state();
+        // Keep remaining stacked messages — `/clear` itself may be one item in
+        // the queue, with more work intentionally queued after it.
+        self.reset_transient_ui_state(false);
 
         let summary = if self.token_stats.request_count > 0 {
             format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
@@ -800,6 +817,8 @@ impl App {
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.cancel_streaming = false;
+        // Pages were cleared above; re-show the queue pane if items remain.
+        self.refresh_queue_pane();
         self.redraw(term)?;
         Ok(())
     }

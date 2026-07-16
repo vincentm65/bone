@@ -834,7 +834,7 @@ impl App {
             // Conversation lifecycle: update the view and rebuild scrollback
             // from the loaded messages. Arrives on /history load or attach.
             RuntimeEvent::ConversationLoaded { messages, snapshot } => {
-                self.reset_transient_ui_state();
+                self.reset_transient_ui_state(true);
                 self.cancel_streaming = false;
                 self.apply_snapshot(snapshot);
                 self.messages.clear();
