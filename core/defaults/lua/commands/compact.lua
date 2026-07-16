@@ -19,7 +19,8 @@ local REQUIRED_SECTIONS = {
 local PROTECTED_SECTION = "Protected context (verbatim):"
 local DEFAULT_KEEP_TOKENS = 12000
 local DEFAULT_INPUT_TOKENS = 30000
-local DEFAULT_SUMMARY_TOKENS = 2500
+local DEFAULT_CHECKPOINT_TOKENS = 2500
+local DEFAULT_GENERATION_TOKENS = 8000
 local DEFAULT_SAFETY_TOKENS = 8000
 local CHARS_PER_TOKEN = 3.8
 
@@ -52,7 +53,9 @@ local function compact_config(ctx)
         legacy_keep_messages = config_int(ctx, "auto_compact_keep_messages"),
         keep_tokens = config_int(ctx, "compact_keep_tokens") or DEFAULT_KEEP_TOKENS,
         input_tokens = config_int(ctx, "compact_input_tokens") or DEFAULT_INPUT_TOKENS,
-        summary_tokens = config_int(ctx, "compact_summary_tokens") or DEFAULT_SUMMARY_TOKENS,
+        checkpoint_tokens = config_int(ctx, "compact_checkpoint_tokens")
+            or config_int(ctx, "compact_summary_tokens") or DEFAULT_CHECKPOINT_TOKENS,
+        generation_tokens = config_int(ctx, "compact_generation_tokens") or DEFAULT_GENERATION_TOKENS,
         safety_tokens = config_int(ctx, "compact_safety_tokens") or DEFAULT_SAFETY_TOKENS,
         trigger_mode = config_value(ctx, "compact_trigger_mode") or "absolute",
         trigger_percentage = percentage,
@@ -138,11 +141,21 @@ local function render_checkpoint(summary, pins)
     return table.concat(out, "\n")
 end
 
-local function validate_checkpoint(checkpoint, max_tokens, pins)
+local function checkpoint_token_count(ctx, checkpoint)
+    if ctx.conversation and ctx.conversation.context_tokens then
+        local ok, tokens = pcall(ctx.conversation.context_tokens, {
+            { role = "user", content = checkpoint },
+        })
+        if ok and tonumber(tokens) and tonumber(tokens) > 0 then return tonumber(tokens) end
+    end
+    return estimate_tokens(checkpoint)
+end
+
+local function validate_checkpoint(ctx, checkpoint, max_tokens, pins)
     if type(checkpoint) ~= "string" or checkpoint:sub(1, #CHECKPOINT_MARKER) ~= CHECKPOINT_MARKER then
         return false, "missing checkpoint marker"
     end
-    if estimate_tokens(checkpoint) > max_tokens then
+    if checkpoint_token_count(ctx, checkpoint) > max_tokens then
         return false, "checkpoint exceeds output budget"
     end
     local previous_at = 0
@@ -277,20 +290,43 @@ local function summary_prompt(previous, excerpt, pins, repair)
     return table.concat(parts, "\n\n")
 end
 
-local function run_summary(ctx, previous, excerpt, pins, config, repair)
-    local prompt = summary_prompt(previous, excerpt, pins, repair)
+local function compression_prompt(candidate, pins, max_tokens)
+    local parts = {
+        "Compress the rejected checkpoint below so the complete rendered checkpoint fits within "
+            .. max_tokens .. " tokens, including headings, marker, and protected context.",
+        "Preserve exact paths, identifiers, commands, errors, numbers, decisions, constraints, pending work, and failed approaches.",
+        "Return only the required sections with exactly these headings; use '- None' when empty:",
+        table.concat(REQUIRED_SECTIONS, "\n"),
+    }
+    if #pins > 0 then
+        parts[#parts + 1] = "Protected requirements that must remain verbatim:\n- " .. table.concat(pins, "\n- ")
+    end
+    parts[#parts + 1] = "Rejected checkpoint to compress:\n" .. candidate
+    return table.concat(parts, "\n\n")
+end
+
+local function run_prompt(ctx, prompt, pins, config)
     local result = ctx.agent and ctx.agent.run and ctx.agent.run(prompt, {
         tools = {},
         system_prompt = "You are a precise context checkpoint writer. Return only the requested structured checkpoint sections.",
         timeout_ms = 120000,
         wall_timeout_ms = 180000,
-        max_tokens = config.summary_tokens,
+        max_tokens = config.generation_tokens,
     }) or nil
     if type(result) ~= "table" then return nil, "summarizer returned no result" end
     if not result.ok then return nil, result.error or "summarization failed" end
     local content = trim(result.content)
     if content == "" then return nil, "summarizer returned an empty summary" end
     return render_checkpoint(content, pins)
+end
+
+local function run_summary(ctx, previous, excerpt, pins, config, repair)
+    return run_prompt(ctx, summary_prompt(previous, excerpt, pins, repair), pins, config)
+end
+
+local function run_compression(ctx, candidate, pins, config)
+    return run_prompt(ctx,
+        compression_prompt(candidate, pins, config.checkpoint_tokens), pins, config)
 end
 
 local function summarize_bounded(ctx, old_checkpoint, older, pins, config)
@@ -300,7 +336,7 @@ local function summarize_bounded(ctx, old_checkpoint, older, pins, config)
     local fixed_prompt = summary_prompt(nil, "", pins, nil)
     -- Reserve room for the largest allowed previous checkpoint on every fold,
     -- not just the checkpoint present on the first pass.
-    local checkpoint_reserve = math.floor(config.summary_tokens * CHARS_PER_TOKEN)
+    local checkpoint_reserve = math.floor(config.checkpoint_tokens * CHARS_PER_TOKEN)
     local max_excerpt_bytes = math.floor(config.input_tokens * CHARS_PER_TOKEN)
         - #fixed_prompt - checkpoint_reserve - 1024
     if max_excerpt_bytes < 1024 then return nil, "compaction input budget is too small" end
@@ -309,11 +345,15 @@ local function summarize_bounded(ctx, old_checkpoint, older, pins, config)
     for _, excerpt in ipairs(excerpts) do
         local candidate, err = run_summary(ctx, checkpoint, excerpt, pins, config, nil)
         if not candidate then return nil, err end
-        local valid, reason = validate_checkpoint(candidate, config.summary_tokens, pins)
+        local valid, reason = validate_checkpoint(ctx, candidate, config.checkpoint_tokens, pins)
         if not valid then
-            candidate, err = run_summary(ctx, checkpoint, excerpt, pins, config, reason)
+            if reason == "checkpoint exceeds output budget" then
+                candidate, err = run_compression(ctx, candidate, pins, config)
+            else
+                candidate, err = run_summary(ctx, checkpoint, excerpt, pins, config, reason)
+            end
             if not candidate then return nil, err end
-            valid, reason = validate_checkpoint(candidate, config.summary_tokens, pins)
+            valid, reason = validate_checkpoint(ctx, candidate, config.checkpoint_tokens, pins)
             if not valid then return nil, "checkpoint validation failed: " .. reason end
         end
         checkpoint = candidate
@@ -489,7 +529,7 @@ local function handle_preview(ctx)
     return command_result(string.format(
         "Compaction preview\nCurrent context: ~%d tokens\nOlder messages to summarize: %d\nRecent messages preserved verbatim: %d (~%d tokens)\nExisting checkpoint: %s\nInput budget per pass: %d tokens\nCheckpoint budget: %d tokens",
         old_tokens, #older, #recent, kept_tokens, checkpoint and "yes" or "no",
-        config.input_tokens, config.summary_tokens))
+        config.input_tokens, config.checkpoint_tokens))
 end
 
 local function handle_pin(ctx, text)

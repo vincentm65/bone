@@ -39,10 +39,14 @@ fields:
     label: "Summarizer input budget (tokens)"
     type: string
     default: "30000"
-  - key: compact_summary_tokens
-    label: "Checkpoint output budget (tokens)"
+  - key: compact_checkpoint_tokens
+    label: "Final checkpoint budget (tokens)"
     type: string
     default: "2500"
+  - key: compact_generation_tokens
+    label: "Summarizer generation allowance (tokens)"
+    type: string
+    default: "8000"
   - key: compact_safety_tokens
     label: "Context safety reserve (tokens)"
     type: string

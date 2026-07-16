@@ -493,10 +493,12 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
 /// Select persistence for a headless run.
 ///
 /// Top-level `bone run` invocations are user conversations and retain their
-/// SQLite history. Delegated agents are implementation details of their parent
-/// conversation; persisting each one as a top-level chat pollutes history and
-/// lets test-only subagent prompts leak into the user's database. An explicitly
-/// injected sink always wins, including for nested agents.
+/// SQLite history. Delegated agents must not open a separate top-level chat
+/// (that pollutes history with internal prompts). Callers that know the parent
+/// conversation inject [`crate::session_sink::UsageOnlySessionSink`] so nested
+/// token usage still lands in `usage_events` (and thus `/stats`); without an
+/// injected sink, depth > 0 falls back to [`crate::session_sink::NullSessionSink`].
+/// An explicitly injected sink always wins, including for nested agents.
 fn session_sink_for_request(
     request: &AgentRequest,
     provider: &str,

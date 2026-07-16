@@ -450,7 +450,8 @@ these are not `bone.config` fields:
 - `compact_safety_tokens` — reserve below context capacity (default `8000`); the percentage threshold never exceeds capacity minus this reserve.
 - `compact_keep_tokens` — recent complete-turn token budget preserved verbatim (default `12000`).
 - `compact_input_tokens` — maximum summarizer input per folding pass (default `30000`).
-- `compact_summary_tokens` — maximum validated checkpoint output (default `2500`).
+- `compact_checkpoint_tokens` — maximum fully rendered checkpoint size (default `2500`). The deprecated `compact_summary_tokens` is accepted as a fallback.
+- `compact_generation_tokens` — provider generation allowance for summary and compression passes (default `8000`).
 - `auto_compact_keep_messages` — deprecated compatibility setting. When present, it replaces `compact_keep_tokens` with a recent user/assistant message target, rounded to complete turns.
 
 Auto-compaction runs after a user message is appended and before the provider request is built. A per-conversation growth gate prevents repeated retries when context has not grown materially. After a successful replacement, its baseline is reset to the new compacted context estimate.

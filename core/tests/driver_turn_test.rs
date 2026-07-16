@@ -19,7 +19,8 @@ use bone_core::llm::{
 };
 use bone_core::pane_content::KeyRequest;
 use bone_core::runtime::{ChannelApprovalGate, Driver, RuntimeEvent};
-use bone_core::session_sink::{NullSessionSink, SessionSink};
+use bone_core::session_db::SessionDb;
+use bone_core::session_sink::{NullSessionSink, SessionSink, UsageOnlySessionSink};
 use bone_core::tools::registry::ToolHandler;
 use bone_core::tools::types::{Tool, ToolExecutionContext, ToolOutput};
 use bone_core::tools::{
@@ -396,6 +397,82 @@ async fn driver_outcome_carries_usage_records() {
     assert_eq!(u.completion_tokens, 2);
     assert_eq!(u.cached_tokens, Some(4));
     assert!(!u.is_estimated, "provider-reported usage is not estimated");
+}
+
+/// Nested agents inject `UsageOnlySessionSink` so their driver-reported usage
+/// lands in the parent conversation's `usage_events` (what `/stats` reads).
+#[tokio::test]
+async fn driver_usage_only_sink_persists_to_parent_conversation() {
+    let path = std::env::temp_dir().join(format!(
+        "bone_driver_usage_only_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let parent_id = {
+        let db = SessionDb::open(&path).unwrap();
+        db.create_conversation("parent", "parent-model").unwrap()
+    };
+    let sink_db = SessionDb::open(&path).unwrap();
+    let sink: Arc<dyn SessionSink> = Arc::new(UsageOnlySessionSink::with_db(sink_db, parent_id));
+
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "sub-model",
+            vec![
+                ChatEvent::TextDelta("nested answer".into()),
+                ChatEvent::TokenUsage {
+                    prompt_tokens: 50,
+                    completion_tokens: 12,
+                    cached_tokens: Some(5),
+                    cost: Some(0.001),
+                },
+            ],
+        )),
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools()),
+        session: sink,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 1,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: Some(parent_id),
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert!(outcome.result.is_ok(), "nested turn should succeed");
+    assert_eq!(outcome.usage.len(), 1);
+
+    let verify = SessionDb::open(&path).unwrap();
+    assert_eq!(
+        verify.max_message_seq(parent_id).unwrap(),
+        0,
+        "nested agent must not append parent transcript rows"
+    );
+    let usage = verify.conversation_usage(parent_id).unwrap();
+    assert_eq!(usage.prompt_tokens, 50);
+    assert_eq!(usage.completion_tokens, 12);
+    assert_eq!(usage.cached_tokens, 5);
+    assert_eq!(usage.request_count, 1);
+    assert!((usage.cost - 0.001).abs() < 1e-9);
+
+    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]

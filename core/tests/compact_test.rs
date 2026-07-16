@@ -1114,6 +1114,91 @@ fn auto_compact_no_notice_when_nothing_older_than_keep_window() {
     std::fs::remove_dir_all(&config_dir).ok();
 }
 
+#[test]
+fn compact_compresses_oversized_candidate_with_separate_generation_budget() {
+    let config_dir = common::temp_dir("compact-compress-oversized");
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = bone_core::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone_core::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let lua_arc = booted.manager.lua_arc();
+    let lua = lua_arc.lock().unwrap();
+    lua.load(
+        r#"
+        _RUN_COUNT = 0
+        _MAX_TOKENS = {}
+        _SECOND_PROMPT_COMPRESSES_CANDIDATE = "no"
+        local ctx = {
+            config = {
+                get = function(section, key)
+                    if key == "auto_compact_tokens" then return "1" end
+                    if key == "auto_compact_keep_messages" then return "2" end
+                    if key == "compact_checkpoint_tokens" then return "100" end
+                    if key == "compact_generation_tokens" then return "7777" end
+                end,
+                get_table = function(section)
+                    if section == "commands" then return { disabled = {} } end
+                end,
+            },
+            usage = { snapshot = function() return { context_length = 999 } end },
+            conversation = {
+                context_tokens = function(messages)
+                    local encoded = cjson.encode(messages)
+                    if encoded:find("OVERSIZED", 1, true) then return 101 end
+                    return 50
+                end,
+                history = function() return {
+                    { role = "user", content = "older" },
+                    { role = "assistant", content = "older answer" },
+                    { role = "user", content = "recent" },
+                    { role = "assistant", content = "recent answer" },
+                } end,
+            },
+            agent = { run = function(prompt, opts)
+                _RUN_COUNT = _RUN_COUNT + 1
+                _MAX_TOKENS[#_MAX_TOKENS + 1] = opts.max_tokens
+                if _RUN_COUNT == 1 then return { ok = true, content = "OVERSIZED" } end
+                if prompt:find("Rejected checkpoint to compress", 1, true)
+                    and prompt:find("OVERSIZED", 1, true) then
+                    _SECOND_PROMPT_COMPRESSES_CANDIDATE = "yes"
+                end
+                return { ok = true, content = "small" }
+            end },
+            ui = { notify = function() end, status = function() end, notice = function() end },
+        }
+        ctx.state = { get = function() return nil end, set = function() end, clear = function() end }
+        local ret
+        for _, h in ipairs(bone._handlers.before_turn) do
+            local r = h({}, ctx)
+            if type(r) == "table" and r.messages then ret = r; break end
+        end
+        _COMPRESSION_RET = ret and "table" or "nil"
+        _GENERATION_BUDGETS = table.concat(_MAX_TOKENS, ",")
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    let result: String = lua.globals().get("_COMPRESSION_RET").unwrap();
+    let prompts_candidate: String = lua
+        .globals()
+        .get("_SECOND_PROMPT_COMPRESSES_CANDIDATE")
+        .unwrap();
+    let budgets: String = lua.globals().get("_GENERATION_BUDGETS").unwrap();
+    assert_eq!(result, "table", "compressed checkpoint should be accepted");
+    assert_eq!(prompts_candidate, "yes");
+    assert_eq!(budgets, "7777,7777");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
 // ── 7. compact command is NOT a protected builtin ───────────────────────────
 
 // ── 6e. agent.run opts include tools={}, system_prompt, wall_timeout_ms ─────

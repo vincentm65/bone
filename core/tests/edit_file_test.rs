@@ -137,7 +137,7 @@ async fn rejects_text_outside_the_read_range() {
 }
 
 #[tokio::test]
-async fn tolerates_unrelated_live_drift_when_match_remains_unique() {
+async fn rejects_external_changes_even_when_the_match_remains_unique() {
     let path = setup("drift.txt", "alpha\nbeta\ngamma\n").await;
     let context = ToolExecutionContext::default();
     read_into_context(&path, &context).await;
@@ -145,10 +145,13 @@ async fn tolerates_unrelated_live_drift_when_match_remains_unique() {
         .await
         .unwrap();
 
-    edit_live(&path, "beta", "BETA", &context).await.unwrap();
+    let error = edit_live(&path, "beta", "BETA", &context)
+        .await
+        .unwrap_err();
+    assert!(error.contains("changed after it was read"), "{error}");
     assert_eq!(
         fs::read_to_string(&path).await.unwrap(),
-        "prefix\nalpha\nBETA\ngamma\n"
+        "prefix\nalpha\nbeta\ngamma\n"
     );
     let _ = fs::remove_file(path).await;
 }
@@ -197,6 +200,89 @@ async fn partial_read_stays_partial_after_an_edit() {
         .await
         .unwrap_err();
     assert!(error.contains("not shown"), "{error}");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn preserves_other_visible_lines_after_an_edit() {
+    let path = setup("two-edits.txt", "one\ntwo\nthree\nfour\nfive\n").await;
+    let context = ToolExecutionContext::default();
+    ReadFileTool
+        .execute_output_live(
+            json!({ "path": path, "start_line": 2, "max_lines": 3 }),
+            None,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+
+    edit_live(&path, "two", "TWO", &context).await.unwrap();
+    edit_live(&path, "four", "FOUR", &context).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\nTWO\nthree\nFOUR\nfive\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn newline_replacement_preserves_visible_unchanged_suffix() {
+    let path = setup("newline-suffix.txt", "abcDEFghi").await;
+    let context = ToolExecutionContext::default();
+    ReadFileTool
+        .execute_output_live(json!({ "path": path }), None, context.clone())
+        .await
+        .unwrap();
+
+    edit_live(&path, "DEF", "X\n", &context).await.unwrap();
+    edit_live(&path, "ghi", "GHI", &context).await.unwrap();
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "abcX\nGHI");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn deletion_shifts_later_visible_lines() {
+    let path = setup("delete-shift.txt", "one\ntwo\nthree\nfour\nfive\n").await;
+    let context = ToolExecutionContext::default();
+    ReadFileTool
+        .execute_output_live(
+            json!({ "path": path, "start_line": 2, "max_lines": 3 }),
+            None,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+
+    edit_live(&path, "two\n", "", &context).await.unwrap();
+    edit_live(&path, "four", "FOUR", &context).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\nthree\nFOUR\nfive\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn insertion_shifts_later_visible_lines() {
+    let path = setup("insert-shift.txt", "one\ntwo\nthree\nfour\nfive\n").await;
+    let context = ToolExecutionContext::default();
+    ReadFileTool
+        .execute_output_live(
+            json!({ "path": path, "start_line": 2, "max_lines": 3 }),
+            None,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+
+    edit_live(&path, "two", "two\ninserted", &context)
+        .await
+        .unwrap();
+    edit_live(&path, "four", "FOUR", &context).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\ntwo\ninserted\nthree\nFOUR\nfive\n"
+    );
     let _ = fs::remove_file(path).await;
 }
 

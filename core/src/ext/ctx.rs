@@ -1414,6 +1414,9 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         agent_depth: cfg.agent_depth,
         approval_gate: cfg.approval_gate.clone(),
         cwd: std::path::PathBuf::from(&cfg.cwd),
+        // Parent conversation id — nested agents attribute usage here so
+        // `/stats` includes subagent tokens without creating a separate chat.
+        session_id: cfg.session_id,
     };
     let cancelled_flag = cfg.cancelled.clone();
 
@@ -1732,6 +1735,9 @@ struct InheritedCtx {
     approval_gate: Option<crate::tools::SharedGate>,
     /// Session working directory for file-tool path resolution / previews.
     cwd: std::path::PathBuf,
+    /// Parent conversation id for nested usage attribution (`None` when the
+    /// parent has no open DB conversation — nested usage is then discarded).
+    session_id: Option<i64>,
 }
 
 /// A ready-to-run `AgentRequest` plus the handles the dispatch loops need: the
@@ -1910,7 +1916,11 @@ fn build_agent_request(
         on_token_usage: None,
         activity: Some(activity.clone()),
         llm: None,
-        session_sink: None,
+        // Attribute nested token usage to the parent conversation so `/stats`
+        // counts subagents. Messages stay out of the parent transcript
+        // (`UsageOnlySessionSink` no-ops append/end). `None` when the parent
+        // has no conversation (headless without a session) → NullSessionSink.
+        session_sink: crate::session_sink::UsageOnlySessionSink::for_parent(inherited.session_id),
         tool_allowlist,
         max_tokens,
         approval_gate,

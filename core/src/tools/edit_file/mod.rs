@@ -114,30 +114,23 @@ async fn run_edit(
     let old_text = snapshot::normalize_text(&args.old_text);
     let new_text = snapshot::normalize_text(&args.new_text);
 
-    let (base, fully_seen) = if let Some(store) = snapshots {
+    let (base, seen_lines) = if let Some(store) = snapshots {
         let guard = store.read().map_err(|e| e.to_string())?;
         let snap = guard
             .head(&path)
             .ok_or_else(|| format!("read `{path}` with read_file before editing it"))?;
         ensure_visible(&snap.text, &old_text, &snap.seen_lines, &path)?;
-        let line_count = snapshot::numbered_lines(&snap.text).len();
-        (
-            snap.text.clone(),
-            (1..=line_count).all(|line| snap.seen_lines.contains(&line)),
-        )
+        (snap.text.clone(), snap.seen_lines.clone())
     } else {
-        (live.clone(), true)
+        (live.clone(), BTreeSet::new())
     };
 
-    // Validate against what the model saw even when the live file has drifted.
-    unique_match_offset(&base, &old_text, &path)?;
-    let live_offset = unique_match_offset(&live, &old_text, &path).map_err(|e| {
-        if base != live {
-            format!("{e}; `{path}` changed after it was read, so re-read it and retry")
-        } else {
-            e
-        }
-    })?;
+    if base != live {
+        return Err(format!(
+            "`{path}` changed after it was read; re-read it and retry"
+        ));
+    }
+    let live_offset = unique_match_offset(&live, &old_text, &path)?;
     let edited = replace_unique(&live, &old_text, &new_text, &path)?;
     if edited == live {
         return Err(format!(
@@ -152,12 +145,15 @@ async fn run_edit(
     write_atomic_if_unchanged(&resolved, &edited, Some(permissions), live_raw.as_bytes()).await?;
 
     if let Some(store) = snapshots {
+        let seen = remap_seen_lines(
+            &live,
+            &edited,
+            live_offset,
+            &old_text,
+            &new_text,
+            &seen_lines,
+        );
         let mut guard = store.write().map_err(|e| e.to_string())?;
-        let seen = if fully_seen && base == live {
-            (1..=snapshot::numbered_lines(&edited).len()).collect()
-        } else {
-            replacement_lines(&live, live_offset, &new_text)
-        };
         guard.record(&path, &edited, Some(&seen));
     }
 
@@ -244,13 +240,40 @@ fn ensure_visible(
     Ok(())
 }
 
-fn replacement_lines(live: &str, offset: usize, new_text: &str) -> Vec<usize> {
-    if new_text.is_empty() {
-        return Vec::new();
+fn remap_seen_lines(
+    live: &str,
+    edited: &str,
+    offset: usize,
+    old_text: &str,
+    new_text: &str,
+    seen_lines: &BTreeSet<usize>,
+) -> Vec<usize> {
+    if old_text.is_empty() {
+        return (1..=snapshot::numbered_lines(edited).len()).collect();
     }
+
     let start_line = 1 + live[..offset].bytes().filter(|b| *b == b'\n').count();
-    let count = snapshot::numbered_lines(new_text).len().max(1);
-    (start_line..start_line + count).collect()
+    let old_end_line = start_line + old_text.bytes().filter(|b| *b == b'\n').count()
+        - usize::from(old_text.ends_with('\n'));
+    let delta = snapshot::numbered_lines(edited).len() as isize
+        - snapshot::numbered_lines(live).len() as isize;
+    let mut remapped = BTreeSet::new();
+    for &line in seen_lines {
+        if line < start_line {
+            remapped.insert(line);
+        } else if line > old_end_line {
+            remapped.insert((line as isize + delta) as usize);
+        }
+    }
+    if !new_text.is_empty() {
+        let unchanged_suffix_continues = new_text.ends_with('\n')
+            && !old_text.ends_with('\n')
+            && offset + old_text.len() < live.len();
+        let count = snapshot::numbered_lines(new_text).len().max(1)
+            + usize::from(unchanged_suffix_continues);
+        remapped.extend(start_line..start_line + count);
+    }
+    remapped.into_iter().collect()
 }
 
 async fn read_live(path: &Path) -> Result<(String, String), String> {
