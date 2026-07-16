@@ -101,6 +101,11 @@ pub struct UsageContext {
 }
 
 /// Context for creating the ctx table. These values come from the Rust side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConversationOperation {
+    Load(i64),
+}
+
 pub struct CtxConfig {
     pub config_dir: String,
     pub cwd: String,
@@ -123,6 +128,8 @@ pub struct CtxConfig {
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
     pub conversation_history: Option<Vec<crate::llm::ChatMessage>>,
+    /// Sink for daemon-owned conversation mutations requested by Lua.
+    pub conversation_operations: Option<std::sync::mpsc::Sender<ConversationOperation>>,
     /// Sender for the frontend-facing `RuntimeEvent` stream. When set, hooks
     /// (e.g. `before_turn`) can surface live status to the attached frontend
     /// (the TUI) via `ctx.ui.status`/`ctx.ui.notify`. `None` headless, where
@@ -159,6 +166,7 @@ impl CtxConfig {
             cancelled: None,
             usage: None,
             conversation_history: None,
+            conversation_operations: None,
             runtime_status: None,
             turn_nudge: None,
         }
@@ -304,8 +312,11 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
     // ctx.usage.snapshot() → current conversation usage details.
     ctx.set("usage", build_usage_table(lua, cfg)?)?;
 
-    // ctx.conversation — active conversation snapshot + history.
+    // ctx.conversation — active conversation snapshot + daemon-owned operations.
     ctx.set("conversation", build_conversation_table(lua, cfg)?)?;
+
+    // ctx.runtime.info() — read-only execution/session metadata.
+    ctx.set("runtime", build_runtime_table(lua, cfg)?)?;
 
     // ctx.state — per-process shared key/value scratch space.
     ctx.set("state", build_state_table(lua, cfg)?)?;
@@ -686,6 +697,31 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LuaViewDiff {
+    Upsert {
+        component: crate::runtime::view::Component,
+    },
+    Remove {
+        id: String,
+    },
+    SetHighlight {
+        name: String,
+        fg: Option<String>,
+    },
+}
+
+impl From<LuaViewDiff> for crate::runtime::view::ViewDiff {
+    fn from(value: LuaViewDiff) -> Self {
+        match value {
+            LuaViewDiff::Upsert { component } => Self::Upsert { component },
+            LuaViewDiff::Remove { id } => Self::Remove { id },
+            LuaViewDiff::SetHighlight { name, fg } => Self::SetHighlight { name, fg },
+        }
+    }
+}
+
 /// Build the `ctx.ui` table: stderr notifications plus the live pane/key
 /// primitives. `pane` and `key` degrade to inert stubs when their handles
 /// (`cfg.ui` / `cfg.key_sender`) are absent (e.g. headless before_turn).
@@ -795,7 +831,51 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
         ui_table.set("key", key_unavailable_fn)?;
     }
 
+    // ctx.ui.apply(diff) — apply any protocol ViewDiff declaratively.
+    if let Some(ui_state) = cfg.ui.clone() {
+        let apply_fn = lua.create_function(move |lua, value: Value| {
+            let json: serde_json::Value = lua.from_value(value)?;
+            let diff: LuaViewDiff = serde_json::from_value(json)
+                .map_err(|e| mlua::Error::external(format!("ui diff: {e}")))?;
+            super::api_ui::lock_shared(&ui_state).apply(diff.into());
+            Ok(true)
+        })?;
+        ui_table.set("apply", apply_fn)?;
+    } else {
+        let apply_unavailable_fn =
+            lua.create_function(|_, _: Value| Ok((false, "ui unavailable")))?;
+        ui_table.set("apply", apply_unavailable_fn)?;
+    }
+
     Ok(ui_table)
+}
+
+/// Build `ctx.runtime`: a read-only snapshot of generic execution/session metadata.
+fn build_runtime_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
+    let runtime_table = lua.create_table()?;
+    let session_id = cfg.session_id;
+    let provider = cfg.provider.clone();
+    let model = cfg.model.clone();
+    let agent_depth = cfg.agent_depth;
+    let approval_mode = match cfg.approval_mode {
+        crate::tools::ApprovalMode::Safe => "safe",
+        crate::tools::ApprovalMode::Danger => "danger",
+    };
+    let info_fn = lua.create_function(move |lua, _: ()| {
+        let info = lua.create_table()?;
+        info.set("session_id", session_id)?;
+        info.set("provider", provider.as_deref())?;
+        info.set("model", model.as_deref())?;
+        info.set("agent_depth", agent_depth)?;
+        info.set("approval_mode", approval_mode)?;
+        let execution = lua.create_table()?;
+        execution.set("kind", "agent")?;
+        execution.set("depth", agent_depth)?;
+        info.set("execution", execution)?;
+        Ok(info)
+    })?;
+    runtime_table.set("info", info_fn)?;
+    Ok(runtime_table)
 }
 
 /// Build the `ctx.usage` table: `snapshot()` returns the current conversation's
@@ -877,6 +957,29 @@ fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::E
         conversation_table.set("current", nil_fn.clone())?;
         conversation_table.set("history", nil_fn)?;
     }
+
+    let submit_fn = lua.create_function(|_, text: String| {
+        if !text.trim().is_empty() {
+            crate::ext::inbox::push(text);
+        }
+        Ok(true)
+    })?;
+    conversation_table.set("submit", submit_fn)?;
+
+    if let Some(sender) = cfg.conversation_operations.clone() {
+        let load_fn = lua.create_function(move |_, id: i64| {
+            sender
+                .send(ConversationOperation::Load(id))
+                .map_err(|_| mlua::Error::external("conversation operation unavailable"))?;
+            Ok(true)
+        })?;
+        conversation_table.set("load", load_fn)?;
+    } else {
+        let load_unavailable_fn =
+            lua.create_function(|_, _: i64| Ok((false, "conversation operation unavailable")))?;
+        conversation_table.set("load", load_unavailable_fn)?;
+    }
+
     Ok(conversation_table)
 }
 

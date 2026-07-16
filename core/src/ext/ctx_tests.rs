@@ -767,3 +767,78 @@ async fn extension_shell_primitives_use_approval_gate() {
         assert!(error.contains("blocked by test gate"), "{error}");
     }
 }
+
+#[test]
+fn runtime_info_exposes_read_only_execution_metadata() {
+    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg.session_id = Some(42);
+    cfg.provider = Some("openrouter".into());
+    cfg.model = Some("test-model".into());
+    cfg.agent_depth = 2;
+    cfg.approval_mode = crate::tools::ApprovalMode::Danger;
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let info: serde_json::Value = lua
+        .from_value(lua.load("return ctx.runtime.info()").eval().unwrap())
+        .unwrap();
+    assert_eq!(info["session_id"], 42);
+    assert_eq!(info["provider"], "openrouter");
+    assert_eq!(info["model"], "test-model");
+    assert_eq!(info["agent_depth"], 2);
+    assert_eq!(info["approval_mode"], "danger");
+    assert_eq!(info["execution"]["kind"], "agent");
+    assert_eq!(info["execution"]["depth"], 2);
+}
+
+#[test]
+fn conversation_submit_and_load_queue_generic_operations() {
+    crate::ext::inbox::drain();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg.conversation_operations = Some(tx);
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    lua.load(
+        r#"
+        assert(ctx.conversation.submit("continue this") == true)
+        assert(ctx.conversation.load(17) == true)
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    assert_eq!(crate::ext::inbox::drain(), vec!["continue this"]);
+    assert_eq!(rx.try_recv().unwrap(), ConversationOperation::Load(17));
+}
+
+#[test]
+fn ui_apply_accepts_protocol_view_diffs() {
+    let ui = crate::ext::api_ui::new_shared();
+    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg.ui = Some(ui.clone());
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    lua.load(
+        r##"assert(ctx.ui.apply({ kind = "set_highlight", name = "accent", fg = "#abcdef" }))"##,
+    )
+    .exec()
+    .unwrap();
+
+    assert_eq!(
+        crate::ext::api_ui::snapshot(&ui)
+            .highlights
+            .get("accent")
+            .map(String::as_str),
+        Some("#abcdef")
+    );
+    assert!(matches!(
+        crate::ext::api_ui::drain_diffs(&ui).as_slice(),
+        [crate::runtime::view::ViewDiff::SetHighlight { name, .. }] if name == "accent"
+    ));
+}

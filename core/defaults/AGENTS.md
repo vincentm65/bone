@@ -122,8 +122,11 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | `ctx.ui.status(msg)` | | Surface a *transient* live status line to the attached frontend (TUI); may be replaced. Stderr fallback when headless |
 | `ctx.ui.notice(msg)` | | Surface a *persistent* notice that the frontend keeps in the conversation scrollback (e.g. an auto-compaction announcement). Stderr fallback when headless |
 | `ctx.ui.pane(table)` | `true\|(false, string)` | Upsert/clear a live pane (tools only) — see [Live Panes](#live-panes) |
+| `ctx.ui.apply(diff)` | `true\|(false, string)` | Apply a protocol `ViewDiff` (`upsert`, `remove`, or `set_highlight`) declaratively |
 | `ctx.ui.key()` | `table` | Block for one key event: `{code, char, ctrl, alt, shift}` — see [Live Panes](#live-panes) |
 | **Live events** | | During `execute_output_live` only |
+| **`ctx.runtime.*`** | | Read-only runtime metadata |
+| `ctx.runtime.info()` | `table` | `{session_id, provider, model, agent_depth, approval_mode, execution={kind, depth}}` |
 | **`ctx.usage.*`** | | Token usage |
 | `ctx.usage.snapshot()` | `table\|nil` | See [Usage Snapshot](#usage-snapshot) below |
 | **`ctx.state.*`** | | Session-scoped key-value store |
@@ -156,6 +159,8 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | **`ctx.conversation.*`** | | Active conversation transcript (not SQLite) |
 | `ctx.conversation.current()` | `table\|nil` | `{id, provider, model}` for the active conversation |
 | `ctx.conversation.history()` | `array` | In-memory transcript: `{role, content, tool_calls?, name?, tool_call_id?}` |
+| `ctx.conversation.submit(text)` | `true` | Queue a later user turn through the daemon-owned inbox |
+| `ctx.conversation.load(id)` | `true\|(false, string)` | Ask the daemon to load a conversation (interactive command contexts) |
 
 #### Context Availability
 
@@ -199,7 +204,7 @@ local messages = ctx.conversation.history()
 -- The system prompt is NOT included.
 ```
 
-The transcript returned by `history()` is the live in-memory history used for the next provider request. It can be modified via return actions (see [Return Actions](#command-return-semantics)).
+The transcript returned by `history()` is the live in-memory history used for the next provider request. Use `submit(text)` to queue a later user turn. Interactive commands can call `load(id)` to ask the daemon to switch conversations and emit the normal transcript/state updates.
 
 #### Shell Options
 

@@ -675,7 +675,10 @@ impl DaemonCtx {
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
         name: String,
         input: String,
-    ) -> Option<Option<crate::ext::types::LuaCommandReturn>> {
+    ) -> Option<(
+        Option<crate::ext::types::LuaCommandReturn>,
+        Vec<crate::ext::ctx::ConversationOperation>,
+    )> {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         // App-derived ctx snapshot, assembled from the session + provider the same
@@ -705,6 +708,7 @@ impl DaemonCtx {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_ctx = cancel.clone();
         let (live_tx, mut live_rx) = mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
+        let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
 
         // The handler call blocks (Lua + nested tool calls), so run it off the
         // async runtime. Mirrors the TUI's spawn_blocking in `run_lua_command`.
@@ -721,16 +725,17 @@ impl DaemonCtx {
             ctx_cfg.key_sender = Some(live_tx);
             ctx_cfg.ui = Some(shared_ui);
             ctx_cfg.cancelled = Some(cancel_for_ctx);
+            ctx_cfg.conversation_operations = Some(conversation_tx);
             // The handler exists; from here every outcome is `Some(_)` so the daemon
             // never mistakes a ran command for an unknown one.
             let ctx_table = match crate::ext::ctx::create_ctx_table(&lua_guard, &ctx_cfg) {
                 Ok(t) => t,
-                Err(_) => return Some(None),
+                Err(_) => return Some((None, Vec::new())),
             };
             // Release the VM lock before calling in: a nested `ctx.tools.call` runs
             // inline on this thread and must re-acquire the (non-reentrant) mutex.
             drop(lua_guard);
-            Some(match handler.call::<mlua::Value>((input, ctx_table)) {
+            let ret = match handler.call::<mlua::Value>((input, ctx_table)) {
                 Ok(value) => crate::ext::types::parse_lua_command_return(value),
                 Err(e) => Some(crate::ext::types::LuaCommandReturn {
                     output: format!("Lua command error: {e}"),
@@ -738,7 +743,8 @@ impl DaemonCtx {
                     action: None,
                     display_role: None,
                 }),
-            })
+            };
+            Some((ret, conversation_rx.try_iter().collect()))
         });
 
         let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -765,11 +771,60 @@ impl DaemonCtx {
                         // empty CommandComplete, like the no-op path.
                         cancel.store(true, Ordering::Relaxed);
                         self.drain_diffs();
-                        return Some(None);
+                        return Some((None, Vec::new()));
                     }
                     Some(_) => {} // other commands are ignored while a command runs
                 },
             }
+        }
+    }
+
+    fn load_conversation(&mut self, id: i64) {
+        let loaded = {
+            let s = self.session.lock().unwrap();
+            s.session_db.as_ref().and_then(|db| {
+                let full = db.load_messages(id).ok()?;
+                let effective = db.load_effective_transcript(id).ok()?;
+                let provider_model = db.conversation_provider_model(id).ok().flatten();
+                Some((full, effective, provider_model))
+            })
+        };
+        if let Some((rows, effective, provider_model)) = loaded {
+            if let Some((provider_id, model)) = provider_model {
+                self.restore_provider(&provider_id, &model);
+            }
+            let messages = rows
+                .into_iter()
+                .map(crate::session_db::stored_to_chat_message)
+                .collect::<Vec<_>>();
+            let snapshot = {
+                let mut s = self.session.lock().unwrap();
+                if let Some(db) = s.session_db.as_ref() {
+                    if let Some(old) = s.conversation_id
+                        && old != id
+                    {
+                        let _ = db.end_conversation(old);
+                    }
+                    let _ = db.reopen_conversation(id);
+                }
+                s.conversation_id = Some(id);
+                s.session_seq = s
+                    .session_db
+                    .as_ref()
+                    .and_then(|db| db.max_message_seq(id).ok())
+                    .unwrap_or(0);
+                s.transcript = effective;
+                s.restore_usage_and_context();
+                s.snapshot(self.llm.id(), self.llm.model())
+            };
+            self.reset_host_tool_state();
+            self.hub
+                .publish(RuntimeEvent::ConversationLoaded { messages, snapshot });
+        } else {
+            self.hub.publish(RuntimeEvent::ConversationLoadFailed {
+                id,
+                message: format!("failed to load conversation {id}"),
+            });
         }
     }
 
@@ -848,57 +903,7 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::LoadConversation { id } => {
-                let loaded = {
-                    let s = self.session.lock().unwrap();
-                    s.session_db.as_ref().and_then(|db| {
-                        let full = db.load_messages(id).ok()?;
-                        let effective = db.load_effective_transcript(id).ok()?;
-                        let provider_model = db.conversation_provider_model(id).ok().flatten();
-                        Some((full, effective, provider_model))
-                    })
-                };
-                if let Some((rows, effective, provider_model)) = loaded {
-                    // Restore the provider/model this conversation was created
-                    // with, so the label, cost accounting, and the next turn all
-                    // use its provider rather than whatever was last active.
-                    if let Some((provider_id, model)) = provider_model {
-                        self.restore_provider(&provider_id, &model);
-                    }
-                    let messages = rows
-                        .into_iter()
-                        .map(crate::session_db::stored_to_chat_message)
-                        .collect::<Vec<_>>();
-                    let snapshot = {
-                        let mut s = self.session.lock().unwrap();
-                        if let Some(db) = s.session_db.as_ref() {
-                            if let Some(old) = s.conversation_id
-                                && old != id
-                            {
-                                let _ = db.end_conversation(old);
-                            }
-                            let _ = db.reopen_conversation(id);
-                        }
-                        s.conversation_id = Some(id);
-                        s.session_seq = s
-                            .session_db
-                            .as_ref()
-                            .and_then(|db| db.max_message_seq(id).ok())
-                            .unwrap_or(0);
-                        s.transcript = effective;
-                        s.restore_usage_and_context();
-                        s.snapshot(self.llm.id(), self.llm.model())
-                    };
-                    // Host tool state is in-memory only today; never carry the
-                    // previous chat's task_list into a loaded conversation.
-                    self.reset_host_tool_state();
-                    self.hub
-                        .publish(RuntimeEvent::ConversationLoaded { messages, snapshot });
-                } else {
-                    self.hub.publish(RuntimeEvent::ConversationLoadFailed {
-                        id,
-                        message: format!("failed to load conversation {id}"),
-                    });
-                }
+                self.load_conversation(id);
                 Flow::Continue
             }
             RuntimeCommand::SetApprovalMode { mode: mode_str } => {
@@ -1047,7 +1052,7 @@ impl DaemonCtx {
                 let result = self
                     .run_interactive_command(commands, name.clone(), input)
                     .await;
-                let ret = match result {
+                let (ret, operations) = match result {
                     // Command name isn't registered: the only genuine "unknown".
                     None => {
                         self.hub.publish(RuntimeEvent::Status {
@@ -1061,23 +1066,27 @@ impl DaemonCtx {
                         });
                         return Flow::Continue;
                     }
-                    // Handler ran but produced no output/action (e.g. an
-                    // interactive picker returning `{ submit = false }`). Complete
-                    // the command cleanly — NOT an error. Without this, a no-op
-                    // return was mis-reported as "unknown command: <name>" even
-                    // though the picker worked. Mirrors the local path, which
-                    // treats a found-but-no-op handler as "handled, just redraw".
-                    Some(None) => {
-                        self.hub.publish(RuntimeEvent::CommandComplete {
-                            output: String::new(),
-                            submit: false,
-                            display_role: None,
-                            action: None,
-                        });
-                        self.publish_snapshot();
-                        return Flow::Continue;
+                    Some(result) => result,
+                };
+                let Some(ret) = ret else {
+                    self.hub.publish(RuntimeEvent::CommandComplete {
+                        output: String::new(),
+                        submit: false,
+                        display_role: None,
+                        action: None,
+                    });
+                    let has_operations = !operations.is_empty();
+                    for operation in operations {
+                        match operation {
+                            crate::ext::ctx::ConversationOperation::Load(id) => {
+                                self.load_conversation(id)
+                            }
+                        }
                     }
-                    Some(Some(ret)) => ret,
+                    if !has_operations {
+                        self.publish_snapshot();
+                    }
+                    return Flow::Continue;
                 };
                 // Forward any config/runtime/conversation action the handler
                 // requested. These are frontend-coupled (local config state,
@@ -1092,7 +1101,10 @@ impl DaemonCtx {
                     .as_ref()
                     .and_then(|a| a.config_action.as_ref())
                     .is_some();
-                let submit = ret.submit && !reply_bearing;
+                // A conversation switch and an immediate submitted turn cannot be
+                // represented as one command completion. Let the switch win rather
+                // than telling the frontend to wait for a turn that will not start.
+                let submit = ret.submit && !reply_bearing && operations.is_empty();
                 let action = ret.action.as_ref().and_then(|a| a.to_command_action());
                 self.hub.publish(RuntimeEvent::CommandComplete {
                     output: ret.output.clone(),
@@ -1100,6 +1112,16 @@ impl DaemonCtx {
                     display_role: ret.display_role.clone(),
                     action,
                 });
+                if !operations.is_empty() {
+                    for operation in operations {
+                        match operation {
+                            crate::ext::ctx::ConversationOperation::Load(id) => {
+                                self.load_conversation(id)
+                            }
+                        }
+                    }
+                    return Flow::Continue;
+                }
                 if submit && !ret.output.is_empty() {
                     // Submit the handler's output as the next turn (mirrors the
                     // SubmitPrompt pre-turn push), then run the turn.
