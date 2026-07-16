@@ -267,7 +267,7 @@ fn classify_segment(command: &str) -> CommandSafety {
         && let Some(sub) = names.get(1)
         && matches!(
             sub.as_str(),
-            "status" | "log" | "diff" | "branch" | "show" | "ls-files"
+            "status" | "log" | "diff" | "branch" | "show" | "ls-files" | "rev-parse"
         )
     {
         return CommandSafety::ReadOnly;
@@ -334,7 +334,10 @@ fn load_command_policy() -> CommandPolicy {
     let path = config::command_policy_path();
     let raw = if path.exists() {
         config::load_yaml::<RawCommandPolicy>(&path).unwrap_or_else(|| {
-            eprintln!("bone: warning: failed to parse {}", path.display());
+            crate::ext::ctx::runtime_warn_once(format!(
+                "bone: warning: failed to parse {}",
+                path.display()
+            ));
             default_raw_command_policy()
         })
     } else {

@@ -207,7 +207,7 @@ impl Driver {
             Ok(outcome) => outcome,
             Err(payload) => {
                 let msg = super::panic_message(&*payload);
-                eprintln!("bone: agent turn panicked: {msg}");
+                crate::ext::ctx::runtime_warn(format!("bone: agent turn panicked: {msg}"));
                 DriverOutcome {
                     result: Err(format!("agent turn panicked: {msg}")),
                     tools,
@@ -432,7 +432,7 @@ impl Driver {
                     system_prompt_override.clone(),
                     Vec::new(),
                     transcript.clone(),
-                    nudge,
+                    nudge.clone(),
                 );
                 let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
                 // Give before_turn handlers a live status channel so they can
@@ -511,8 +511,8 @@ impl Driver {
                 if let Some(allow) = tool_filter {
                     turn_tool_defs.retain(|d| allow.iter().any(|n| n == &d.name));
                     if turn_tool_defs.is_empty() {
-                        eprintln!(
-                            "bone-lua warn: before_turn tool_filter hid every tool this turn"
+                        crate::ext::ctx::runtime_warn_once(
+                            "bone-lua warn: before_turn tool_filter hid every tool this turn",
                         );
                     }
                 }
@@ -839,6 +839,22 @@ impl Driver {
             // Let running tools observe cancellation.
             tools.cancel_token = cancel.clone();
             tools.approval_gate = Some(crate::tools::SharedGate(gate.clone()));
+            // Lua tools need the same live conversation context as before_turn
+            // and slash commands. Drop the previous snapshot first so cloning
+            // the handler into AppCtxState cannot build a recursive chain.
+            tools.app_state = None;
+            tools.app_state = Some(crate::ext::ctx::AppCtxState::new(
+                &tools,
+                &token_stats,
+                &approval_mode.get(),
+                conversation_id,
+                llm.id(),
+                llm.model(),
+                system_prompt_override.clone(),
+                Vec::new(),
+                transcript.clone(),
+                nudge.clone(),
+            ));
             // Re-read each round so a mid-turn Safe/Danger toggle takes effect
             // on the very next tool batch.
             let results = execute_tool_calls(

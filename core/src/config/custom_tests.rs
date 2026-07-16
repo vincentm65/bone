@@ -68,15 +68,9 @@ fn backfill_adds_new_seed_field_to_existing_general_page() {
         assert_eq!(configs.get_value("general", "show_thinking"), "false");
         assert_eq!(configs.get_value("general", "input_preset"), "custom");
         assert_eq!(configs.get_value("general", "approval_mode"), "danger");
-        assert_eq!(UserConfig::from_custom_configs(&configs).input_preset, None);
 
         configs.set_value("general", "input_preset", "box".to_string());
-        assert_eq!(
-            UserConfig::from_custom_configs(&configs)
-                .input_preset
-                .as_deref(),
-            Some("box")
-        );
+        assert_eq!(configs.get_value("general", "input_preset"), "box");
     });
 }
 

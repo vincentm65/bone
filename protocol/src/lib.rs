@@ -12,7 +12,9 @@ pub mod tokens;
 pub mod tools;
 pub mod view;
 
-pub use event::{CommandAction, ConfigAction, ConversationLoad, RuntimeCommand, RuntimeEvent};
+pub use event::{
+    CommandAction, ConfigAction, ConversationLoad, KeymapDispatchKind, RuntimeCommand, RuntimeEvent,
+};
 pub use input::KeyEvent;
 pub use message::{
     ChatMessage, ChatRole, ImageData, OutputItem, Reasoning, ReasoningItem, ToolCall, ToolResult,

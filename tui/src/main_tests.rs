@@ -1,4 +1,5 @@
-use super::{has_flag, parse_provider_model};
+use super::{approval_mode, has_flag, parse_provider_model};
+use bone::tools::ApprovalMode;
 
 fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
@@ -37,4 +38,11 @@ fn has_flag_detects_presence() {
         &args(&["--listen", "x"]),
         "--shutdown-on-stdin-eof"
     ));
+}
+
+#[test]
+fn approval_mode_uses_canonical_setting() {
+    assert_eq!(approval_mode("danger"), ApprovalMode::Danger);
+    assert_eq!(approval_mode("safe"), ApprovalMode::Safe);
+    assert_eq!(approval_mode("invalid"), ApprovalMode::Safe);
 }

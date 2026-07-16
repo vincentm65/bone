@@ -54,7 +54,7 @@ local function sep()
   return string.format("%s%s%s", DIM, string.rep("─", 52), RESET)
 end
 
-bone.register_command("usage", {
+bone.command.register("usage", {
   description = "Show token usage for current conversation",
   handler = function(_, ctx)
     local usage = ctx.usage and ctx.usage.snapshot and ctx.usage.snapshot() or nil

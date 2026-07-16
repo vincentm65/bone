@@ -258,22 +258,47 @@ pub(crate) fn tui_owns_terminal() -> bool {
     }
 }
 
-/// The one sink for Lua debug output (`ctx.log.*`, the global `print`):
-/// append `msg` to `bone.log`, and — unless the TUI owns the terminal — echo
-/// to stderr. Nothing here ever touches stdout/stderr while ratatui is in raw
-/// mode, so a stray `print()` can no longer scramble the status bar.
-pub(crate) fn lua_log(config_dir: &str, level: &str, msg: &str) {
-    let path = std::path::Path::new(config_dir).join("bone.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+fn write_log(config_dir: &std::path::Path, message: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(config_dir.join("bone.log"))
     {
         use std::io::Write;
-        let _ = writeln!(f, "bone-lua [{level}]: {msg}");
+        let _ = writeln!(file, "{message}");
     }
+}
+
+/// Report a runtime warning without writing over an active TUI.
+pub fn runtime_warn(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    write_log(&crate::config::bone_dir(), message);
     if !tui_owns_terminal() {
-        eprintln!("bone-lua [{level}]: {msg}");
+        eprintln!("{message}");
+    }
+}
+
+/// Report a persistent configuration warning once per process.
+pub fn runtime_warn_once(message: impl Into<String>) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let message = message.into();
+    if WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(message.clone())
+    {
+        runtime_warn(message);
+    }
+}
+
+/// The one sink for Lua debug output (`ctx.log.*`, the global `print`).
+pub(crate) fn lua_log(config_dir: &str, level: &str, msg: &str) {
+    let message = format!("bone-lua [{level}]: {msg}");
+    write_log(std::path::Path::new(config_dir), &message);
+    if !tui_owns_terminal() {
+        eprintln!("{message}");
     }
 }
 
@@ -1323,6 +1348,26 @@ fn load_section_yaml(
         .map_err(|e| mlua::Error::external(format!("invalid YAML in {section}.yaml: {e}")))
 }
 
+fn canonical_display_value(namespace: &str, key: &str, value: String) -> serde_yaml::Value {
+    let is_bool = (namespace == "general" && key == "show_thinking")
+        || (namespace == "status"
+            && (key.starts_with("status_show_") || key == "status_spinner_text_rotate"));
+    if is_bool {
+        return match value.as_str() {
+            "true" => serde_yaml::Value::Bool(true),
+            "false" => serde_yaml::Value::Bool(false),
+            _ => serde_yaml::Value::String(value),
+        };
+    }
+    if namespace == "status"
+        && matches!(key, "status_spinner_speed" | "status_spinner_text_speed")
+        && let Ok(number) = value.parse::<u64>()
+    {
+        return serde_yaml::Value::Number(number.into());
+    }
+    serde_yaml::Value::String(value)
+}
+
 /// Build the `ctx.config` table: read-only access to persisted YAML config plus
 /// the read/write helpers backing the customize UI (pages, provider entries).
 fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
@@ -1332,6 +1377,11 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     // ctx.config.get(section, key)
     let config_dir_for_get = cfg.config_dir.clone();
     let config_get_fn = lua.create_function(move |lua, (section, key): (String, String)| {
+        if crate::config::settings::Settings::is_canonical(&section, &key) {
+            let custom = crate::config::custom::CustomConfigs::load();
+            let value = canonical_display_value(&section, &key, custom.get_value(&section, &key));
+            return yaml_to_lua(lua, &value);
+        }
         let Some(doc) = load_section_yaml(&config_dir_for_get, &section)? else {
             return Ok(Value::Nil);
         };
@@ -1368,6 +1418,58 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     // ctx.config.get_table(section)
     let config_dir_for_table = cfg.config_dir.clone();
     let config_get_table_fn = lua.create_function(move |lua, section: String| {
+        let has_canonical = crate::config::settings::Settings::canonical_keys()
+            .iter()
+            .any(|(namespace, _)| *namespace == section);
+        if has_canonical || matches!(section.as_str(), "theme" | "keymaps") {
+            let custom = crate::config::custom::CustomConfigs::load();
+            if let Some(settings) = custom.settings.as_ref() {
+                if section == "theme" {
+                    let value = serde_yaml::to_value(&settings.resolved().theme)
+                        .map_err(mlua::Error::external)?;
+                    return yaml_to_lua(lua, &value);
+                }
+                if section == "keymaps" {
+                    let value = serde_yaml::to_value(&settings.resolved().keymaps)
+                        .map_err(mlua::Error::external)?;
+                    return yaml_to_lua(lua, &value);
+                }
+            }
+
+            let Some(mut doc) = load_section_yaml(&config_dir_for_table, &section)? else {
+                return Ok(Value::Nil);
+            };
+            if let Some(fields) = doc
+                .as_mapping_mut()
+                .and_then(|mapping| mapping.get_mut(serde_yaml::Value::String("fields".into())))
+                .and_then(serde_yaml::Value::as_sequence_mut)
+            {
+                for field in fields {
+                    let Some(field_map) = field.as_mapping_mut() else {
+                        continue;
+                    };
+                    let Some(key) = field_map
+                        .get(serde_yaml::Value::String("key".into()))
+                        .and_then(serde_yaml::Value::as_str)
+                        .map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    if crate::config::settings::Settings::is_canonical(&section, &key) {
+                        field_map.insert(
+                            serde_yaml::Value::String("value".into()),
+                            canonical_display_value(
+                                &section,
+                                &key,
+                                custom.get_value(&section, &key),
+                            ),
+                        );
+                    }
+                }
+            }
+            return yaml_to_lua(lua, &doc);
+        }
+
         let Some(doc) = load_section_yaml(&config_dir_for_table, &section)? else {
             return Ok(Value::Nil);
         };
@@ -1430,11 +1532,15 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     })?;
     config_table.set("get_pages", get_pages_fn)?;
 
-    // ctx.config.set_value(namespace, key, value)
+    // ctx.config.set_value(namespace, key, value) -> true; raises a Lua error
+    // when canonical validation or atomic persistence fails so `/config` can
+    // surface the failure instead of pretending the edit was saved.
     let set_value_fn =
         lua.create_function(|_, (namespace, key, value): (String, String, String)| {
             let mut custom = crate::config::custom::CustomConfigs::load();
-            custom.set_value(&namespace, &key, value);
+            custom
+                .try_set_value(&namespace, &key, value)
+                .map_err(mlua::Error::external)?;
             Ok(true)
         })?;
     config_table.set("set_value", set_value_fn)?;
@@ -2181,11 +2287,11 @@ fn warn_unknown_opts(opts: &Option<Table>, allowed: &[&str]) {
             && let Ok(k) = s.to_str()
             && !allowed.contains(&k.as_ref())
         {
-            eprintln!(
+            runtime_warn_once(format!(
                 "bone-lua warn: unknown agent option '{}' (known: {})",
                 k.as_ref(),
                 allowed.join(", ")
-            );
+            ));
         }
     }
 }
@@ -2420,6 +2526,7 @@ fn dispatch_event(
         | RuntimeEvent::ConversationLoadFailed { .. }
         | RuntimeEvent::ViewDiff { .. }
         | RuntimeEvent::CommandComplete { .. }
+        | RuntimeEvent::KeymapDispatched { .. }
         | RuntimeEvent::TurnComplete => {}
     }
     Ok(())

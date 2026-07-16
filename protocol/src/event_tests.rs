@@ -87,6 +87,19 @@ fn every_runtime_event_variant_round_trips() {
                 provider_model: "gpt-4o".into(),
             },
         },
+        RuntimeEvent::FrontendState {
+            banner: "bone".into(),
+            settings: json!({
+                "version": 1,
+                "general": { "approval": "danger", "show_reasoning": true },
+                "ui": {},
+                "theme": { "palette": { "accent": "#abcdef" } },
+                "keymaps": { "normal": [{ "key": "<C-p>", "action": "toggle_panes" }] }
+            }),
+            commands: vec![("config".into(), "Configure Bone".into())],
+            tool_defs: vec![],
+            tool_display: json!({}),
+        },
         RuntimeEvent::ConversationLoaded {
             messages: vec![ChatMessage::new(ChatRole::User, "hi")],
             snapshot: SessionSnapshot::default(),
@@ -109,6 +122,16 @@ fn every_runtime_event_variant_round_trips() {
             action: None,
         },
         RuntimeEvent::CommandComplete {
+            output: "restart".into(),
+            submit: false,
+            display_role: None,
+            action: Some(CommandAction {
+                conversation_replace: None,
+                conversation_load: None,
+                config_action: Some(ConfigAction::ApplyRestartRequired),
+            }),
+        },
+        RuntimeEvent::CommandComplete {
             output: "switched".into(),
             submit: false,
             display_role: None,
@@ -122,6 +145,14 @@ fn every_runtime_event_variant_round_trips() {
                     id: "anthropic".into(),
                 }),
             }),
+        },
+        RuntimeEvent::KeymapDispatched {
+            kind: KeymapDispatchKind::Noop,
+        },
+        RuntimeEvent::KeymapDispatched {
+            kind: KeymapDispatchKind::Prompt {
+                text: "summarize this".into(),
+            },
         },
     ];
     for ev in &variants {
@@ -169,8 +200,24 @@ fn every_runtime_command_variant_round_trips() {
             provider_id: "anthropic".into(),
         },
         RuntimeCommand::ReloadExtensions,
+        RuntimeCommand::ReloadSettings,
+        RuntimeCommand::SetApprovalMode {
+            mode: "danger".into(),
+        },
+        RuntimeCommand::AppendMessage {
+            role: "user".into(),
+            content: "context".into(),
+        },
+        RuntimeCommand::DispatchHook {
+            name: "mode_change".into(),
+            payload: json!({ "mode": "danger" }),
+        },
+        RuntimeCommand::SetTerminalWidth { width: 120 },
         RuntimeCommand::Steer {
             text: "go left instead".into(),
+        },
+        RuntimeCommand::KeymapDispatch {
+            action: "toggle_panes".into(),
         },
     ];
     for cmd in &cmds {

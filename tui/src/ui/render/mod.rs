@@ -224,8 +224,10 @@ impl Renderer {
         // new height. Use ratatui's `term.clear()` rather than manual cursor
         // movement: it clears the viewport's actual tracked area and positions
         // the replacement inline viewport at the old viewport top, so UI rows
-        // do not leak into scrollback when the pane grows or shrinks.
+        // do not leak into scrollback when the pane grows or shrinks. Crossterm
+        // queues the clear; flush it before the replacement queries the cursor.
         term.clear()?;
+        Write::flush(term.backend_mut())?;
         Self::replace_terminal(term, new_height)
     }
 

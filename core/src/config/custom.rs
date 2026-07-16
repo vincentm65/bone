@@ -3,10 +3,11 @@
 //! Each page file (e.g. `general.yaml`, `tools.yaml`) contains both the field
 //! schema *and* the current values. No separate values file is needed.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::settings::Settings;
 use super::{UserConfig, bone_dir, load_yaml, seed_file_forced, seed_file_if_missing};
 
 // ── Schema types ────────────────────────────────────────────────────────────
@@ -66,12 +67,23 @@ const NATIVE_TOOLS: &[&str] = &["shell", "read_file", "write_file", "edit_file"]
 pub struct CustomConfigs {
     /// filename stem -> page
     pub pages: Vec<(String, CustomConfigPage)>,
+    /// Canonical settings, loaded from `~/.bone-rust/config.yaml`.
+    /// `None` when the file has not been loaded yet (or does not exist).
+    pub settings: Option<Settings>,
 }
 
 // ── Paths ───────────────────────────────────────────────────────────────────
 
 pub fn config_dir() -> PathBuf {
     bone_dir().join("config")
+}
+
+/// Report a malformed config page once without writing over an active TUI.
+fn warn_parse_failure(path: &Path) {
+    crate::ext::ctx::runtime_warn_once(format!(
+        "bone: warning: failed to parse {}",
+        path.display()
+    ));
 }
 
 // ── Built-in seed pages ────────────────────────────────────────────────────
@@ -128,12 +140,17 @@ impl CustomConfigs {
         let mut configs = CustomConfigs::default();
 
         if !dir.is_dir() {
+            // No config directory yet — try loading settings anyway for migration.
+            configs.settings = Self::load_or_migrate_settings(&configs.pages);
             return configs;
         }
 
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => return configs,
+            Err(_) => {
+                configs.settings = Self::load_or_migrate_settings(&configs.pages);
+                return configs;
+            }
         };
 
         for entry in entries.flatten() {
@@ -164,18 +181,49 @@ impl CustomConfigs {
                     // Old format — will be migrated by rebuild_denylist_pages().
                     configs.pages.push((stem, page));
                 } else {
-                    eprintln!("bone: warning: failed to parse {}", path.display());
+                    warn_parse_failure(&path);
                 }
             } else if let Some(page) = load_yaml::<CustomConfigPage>(&path) {
                 configs.pages.push((stem, page));
             } else {
-                eprintln!("bone: warning: failed to parse {}", path.display());
+                warn_parse_failure(&path);
             }
         }
 
         configs.pages.sort_by(|a, b| a.0.cmp(&b.0));
         configs.rebuild_denylist_pages();
+
+        // Load or migrate canonical settings after pages are populated.
+        configs.settings = Self::load_or_migrate_settings(&configs.pages);
+
         configs
+    }
+
+    /// Load canonical settings from `config.yaml`, or migrate from pages if
+    /// the file does not yet exist.  This is deliberately **not** recursive —
+    /// it does not call `load()` again, so there is no infinite loop.
+    fn load_or_migrate_settings(pages: &[(String, CustomConfigPage)]) -> Option<Settings> {
+        match Settings::load() {
+            Ok(Some(s)) => Some(s),
+            Ok(None) => {
+                // First boot: migrate from legacy pages and persist.
+                let s = Settings::migrate_from_pages(pages);
+                if let Err(e) = s.save() {
+                    crate::ext::ctx::runtime_warn(format!(
+                        "bone: warning: could not write canonical settings: {e}"
+                    ));
+                }
+                Some(s)
+            }
+            Err(e) => {
+                crate::ext::ctx::runtime_warn_once(format!(
+                    "bone: error: could not load canonical settings: {e}"
+                ));
+                // Never fall back to legacy values after config.yaml exists. Keep
+                // validated defaults active while leaving the invalid file untouched.
+                Some(Settings::defaults())
+            }
+        }
     }
 
     /// Save a single page back to its YAML file.
@@ -417,7 +465,15 @@ impl CustomConfigs {
     }
 
     /// Get the display value for a field, falling back to the default.
+    /// Routes canonical keys (general approval/show_thinking/input_preset and
+    /// all status fields) through [`Settings`] when available.
     pub fn get_value(&self, namespace: &str, key: &str) -> String {
+        // Route canonical keys through settings.
+        if let Some(ref settings) = self.settings {
+            if Settings::is_canonical(namespace, key) {
+                return settings.get_value(namespace, key);
+            }
+        }
         let Some(page) = self.page_ref(namespace) else {
             return String::new();
         };
@@ -435,8 +491,40 @@ impl CustomConfigs {
         }
     }
 
-    /// Set a value and persist immediately to the page YAML.
+    /// Set a value and persist immediately. Canonical settings return validation
+    /// and persistence failures to the caller; legacy page writes report a
+    /// generic I/O failure when the save does not succeed.
+    pub fn try_set_value(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        value: String,
+    ) -> Result<(), String> {
+        if self.settings.is_some() && Settings::is_canonical(namespace, key) {
+            return self
+                .settings
+                .as_mut()
+                .expect("checked above")
+                .set_value(namespace, key, value)
+                .map_err(|e| e.to_string());
+        }
+
+        self.set_legacy_value(namespace, key, value)
+    }
+
+    /// Compatibility wrapper for callers that cannot surface errors.
     pub fn set_value(&mut self, namespace: &str, key: &str, value: String) {
+        if let Err(e) = self.try_set_value(namespace, key, value) {
+            crate::ext::ctx::runtime_warn(format!("bone: warning: set_value failed: {e}"));
+        }
+    }
+
+    fn set_legacy_value(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        value: String,
+    ) -> Result<(), String> {
         // Deny-list pages: update the deny-list YAML directly.
         if namespace == "tools" || namespace == "commands" {
             let (mut disabled, title) = self.read_denylist(namespace);
@@ -447,28 +535,29 @@ impl CustomConfigs {
             } else {
                 disabled.retain(|d| d != key);
             }
-            if self.save_denylist(namespace, &disabled, &title) {
-                // Update in-memory field for immediate UI feedback.
-                if let Some(page) = self.page_mut(namespace)
-                    && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
-                {
-                    let yaml_val = match value.as_str() {
-                        "true" => serde_yaml::Value::Bool(true),
-                        "false" => serde_yaml::Value::Bool(false),
-                        _ => serde_yaml::Value::String(value),
-                    };
-                    field.value = Some(yaml_val);
-                }
+            if !self.save_denylist(namespace, &disabled, &title) {
+                return Err(format!("could not save {namespace}.yaml"));
             }
-            return;
+            // Update in-memory field for immediate UI feedback.
+            if let Some(page) = self.page_mut(namespace)
+                && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
+            {
+                let yaml_val = match value.as_str() {
+                    "true" => serde_yaml::Value::Bool(true),
+                    "false" => serde_yaml::Value::Bool(false),
+                    _ => serde_yaml::Value::String(value),
+                };
+                field.value = Some(yaml_val);
+            }
+            return Ok(());
         }
 
         let Some(page) = self.page_mut(namespace) else {
-            return;
+            return Err(format!("unknown config namespace: {namespace}"));
         };
         let field = page.fields.iter_mut().find(|f| f.key == key);
         let Some(field) = field else {
-            return;
+            return Err(format!("unknown config field: {namespace}.{key}"));
         };
         let yaml_val = match field.field_type {
             ConfigFieldType::Bool => match value.as_str() {
@@ -484,7 +573,15 @@ impl CustomConfigs {
         };
         let old_value = field.value.clone();
         field.value = Some(yaml_val);
-        self.save_or_revert(namespace, key, old_value);
+        if !self.save_page(namespace) {
+            if let Some(page) = self.page_mut(namespace)
+                && let Some(field) = page.fields.iter_mut().find(|f| f.key == key)
+            {
+                field.value = old_value;
+            }
+            return Err(format!("could not save {namespace}.yaml"));
+        }
+        Ok(())
     }
 
     /// Find a field definition by namespace and key.
@@ -768,7 +865,10 @@ fn backfill_fields(file: &str, seed_yaml: &str) {
         && let Ok(yaml) = serde_yaml::to_string(&page)
         && let Err(e) = std::fs::write(&path, yaml)
     {
-        eprintln!("bone: warning: could not write {}: {e}", path.display());
+        crate::ext::ctx::runtime_warn(format!(
+            "bone: warning: could not write {}: {e}",
+            path.display()
+        ));
     }
 }
 
@@ -786,7 +886,3 @@ fn value_for_field(field: &ConfigField, value: String) -> serde_yaml::Value {
         _ => serde_yaml::Value::String(value),
     }
 }
-
-#[cfg(test)]
-#[path = "custom_tests.rs"]
-mod custom_tests;

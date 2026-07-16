@@ -19,7 +19,7 @@ use serde_json::Value;
 
 /// A Lua tool that attempts each sandboxed API and returns a summary table.
 const SANDBOX_PROBE_TOOL: &str = r#"
-bone.register_tool({
+bone.tool.register({
   name = "sandbox_probe",
   description = "probes sandboxed APIs",
   safety = "danger",
@@ -53,7 +53,7 @@ bone.register_tool({
 "#;
 
 const LEGACY_REQUIRED_TOOL: &str = r#"
-bone.register_tool({
+bone.tool.register({
   name = "legacy_required",
   description = "schema with stale boolean required",
   safety = "read_only",
@@ -245,7 +245,7 @@ fn assert_no_boolean_required(value: &Value, path: &str) {
 
 /// A tool that calls itself recursively via ctx.tools.call until depth is exhausted.
 const DEPTH_COUNTER_TOOL: &str = r#"
-bone.register_tool({
+bone.tool.register({
   name = "depth_counter",
   description = "calls itself recursively via ctx.tools.call",
   safety = "read_only",
@@ -333,7 +333,7 @@ fn tools_call_depth_limit_enforced() {
 /// A tool that calls ctx.agent.run. When executed at max agent depth,
 /// it should get the depth-exceeded error without touching an LLM.
 const AGENT_DEPTH_TOOL: &str = r#"
-bone.register_tool({
+bone.tool.register({
   name = "agent_depth_probe",
   description = "probes ctx.agent.run depth",
   safety = "read_only",
@@ -537,7 +537,7 @@ fn reload_picks_up_new_tools_and_commands() {
     std::fs::write(
         tools_dir.join("reload_test.lua"),
         r#"
-bone.register_tool({
+bone.tool.register({
   name = "reload_test_tool",
   description = "tool added after initial boot",
   safety = "read_only",
@@ -552,7 +552,7 @@ bone.register_tool({
     std::fs::write(
         cmd_dir.join("reload_cmd.lua"),
         r#"
-bone.register_command("reload_test_cmd", {
+bone.command.register("reload_test_cmd", {
   description = "command added after initial boot",
   handler = function() return { display = "ok", submit = false } end,
 })
@@ -622,99 +622,6 @@ bone.register_command("reload_test_cmd", {
         results[0].content
     );
     assert_eq!(results[0].content, "reloaded");
-
-    std::fs::remove_dir_all(&config_dir).ok();
-}
-
-#[test]
-fn reload_snapshots_come_from_same_fresh_vm() {
-    let config_dir = common::temp_dir("reload-snapshots");
-    let tools_dir = config_dir.join("lua/tools");
-    std::fs::create_dir_all(&tools_dir).unwrap();
-
-    // Boot without any theme config.
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
-    let booted1 = bone_core::ext::boot_with_tools(
-        &config_dir,
-        &config_dir,
-        &mut custom,
-        true,
-        bone_core::ext::BootOptions::default(),
-        "test-model",
-        "TestProvider",
-    );
-    assert!(
-        booted1.manager.theme_snapshot().user_msg.is_none(),
-        "no theme should be set on first boot",
-    );
-
-    // Add a theme in init.lua.
-    std::fs::write(
-        config_dir.join("init.lua"),
-        r##"
-bone.theme = bone.theme or {}
-bone.theme.user_msg = "#ff0000"
-"##,
-    )
-    .unwrap();
-
-    // Reboot — snapshots should reflect the new theme.
-    let booted2 = bone_core::ext::boot_with_tools(
-        &config_dir,
-        &config_dir,
-        &mut custom,
-        true,
-        bone_core::ext::BootOptions::default(),
-        "test-model",
-        "TestProvider",
-    );
-    assert!(
-        booted2.manager.theme_snapshot().user_msg.is_some(),
-        "theme snapshot should have user_msg after reload",
-    );
-
-    // The VM should be a different instance (fresh boot), verified by the
-    // fact that the old snapshot was None and the new one is Some.
-    std::fs::remove_dir_all(&config_dir).ok();
-}
-
-#[test]
-fn structured_theme_snapshot_parses_palette_shell_syntax_and_highlights() {
-    let config_dir = common::temp_dir("structured-theme-snapshot");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(
-        config_dir.join("init.lua"),
-        r##"
-bone.theme = {
-  palette = { accent = "#111111", error = "#222222" },
-  shell = { program = "#333333" },
-  syntax = { function_name = "#444444" },
-  highlights = {
-    user_msg = { fg = "fg", bg = "selection" },
-    syntax_keyword = "accent",
-  },
-}
-"##,
-    )
-    .unwrap();
-
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
-    let booted = bone_core::ext::boot_with_tools(
-        &config_dir,
-        &config_dir,
-        &mut custom,
-        true,
-        bone_core::ext::BootOptions::default(),
-        "test-model",
-        "TestProvider",
-    );
-    let theme = booted.manager.theme_snapshot();
-    assert_eq!(theme.palette.accent.as_deref(), Some("#111111"));
-    assert_eq!(theme.palette.error.as_deref(), Some("#222222"));
-    assert_eq!(theme.shell.program.as_deref(), Some("#333333"));
-    assert_eq!(theme.syntax.function_name.as_deref(), Some("#444444"));
-    assert!(theme.highlights.contains_key("user_msg"));
-    assert!(theme.highlights.contains_key("syntax_keyword"));
 
     std::fs::remove_dir_all(&config_dir).ok();
 }

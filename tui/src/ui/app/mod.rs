@@ -89,7 +89,7 @@ impl WireTools {
 }
 
 fn configured_input_style(
-    snapshot: &crate::ext::snapshots::LuaInputStyleSnapshot,
+    snapshot: &crate::ext::snapshots::InputStyleSnapshot,
     preset: Option<&str>,
 ) -> super::render::InputStyle {
     let mut snapshot = snapshot.clone();
@@ -177,12 +177,10 @@ pub struct App {
     turn_pause_start: Option<Instant>,
     /// Active autocomplete state (shown when typing `/`).
     autocomplete: Option<AutocompleteState>,
-    /// Keymap snapshot for custom bindings, supplied by the daemon's
-    /// `FrontendState`.
-    lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot,
-    /// Native input customization from init.lua. The config menu may override
-    /// only its preset while preserving all explicit custom fields.
-    lua_input_style: crate::ext::snapshots::LuaInputStyleSnapshot,
+    /// Resolved key bindings supplied by the daemon's `FrontendState`.
+    keymaps: crate::config::settings::KeymapSettings,
+    /// Resolved input customization supplied by the daemon.
+    lua_input_style: crate::ext::snapshots::InputStyleSnapshot,
     /// Slash commands `(name, description)` the daemon advertised via
     /// `FrontendState`, for autocomplete.
     wire_commands: Vec<(String, String)>,
@@ -239,17 +237,6 @@ impl App {
         // applies the user's theme over the wire on attach.
         let renderer = Renderer::new();
         let mut messages = Vec::new();
-
-        // Sync our configured approval mode to the runtime up front: it boots
-        // its gate at `Safe` regardless of config, and the client otherwise
-        // only pushes the mode when the user *cycles* it.
-        let _ = command_tx.send(crate::runtime::RuntimeCommand::SetApprovalMode {
-            mode: match approval_mode {
-                crate::tools::ApprovalMode::Danger => "danger",
-                crate::tools::ApprovalMode::Safe => "safe",
-            }
-            .to_string(),
-        });
 
         // Read-only DB handle for the App's stats queries (sqlite WAL supports
         // concurrent readers); the daemon owns the authoritative connection.
@@ -309,8 +296,8 @@ impl App {
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
             autocomplete: None,
-            lua_keymap: crate::ext::snapshots::LuaKeymapSnapshot::default(),
-            lua_input_style: crate::ext::snapshots::LuaInputStyleSnapshot::default(),
+            keymaps: crate::config::settings::KeymapSettings::default(),
+            lua_input_style: crate::ext::snapshots::InputStyleSnapshot::default(),
             wire_commands: Vec::new(),
             wire_tools: WireTools::default(),
             banner_shown: false,
@@ -397,22 +384,12 @@ impl App {
             // remains the fallback for anything not carried here.
             RuntimeEvent::FrontendState {
                 banner,
-                theme,
-                keymap,
-                config,
+                settings,
                 commands,
                 tool_defs,
                 tool_display,
             } => {
-                self.apply_frontend_state(
-                    banner,
-                    theme,
-                    keymap,
-                    config,
-                    commands,
-                    tool_defs,
-                    tool_display,
-                );
+                self.apply_frontend_state(banner, settings, commands, tool_defs, tool_display);
             }
             // Pane/UI diff from a remote daemon (e.g. a command's pane between
             // turns). In-process these come from the shared UiState drain.
@@ -424,18 +401,13 @@ impl App {
         }
     }
 
-    /// Adopt the daemon VM's display state (theme/keymap/config/commands) from a
-    /// `FrontendState` event. The blobs arrive as JSON (the protocol crate has no
-    /// Lua snapshot types); deserialize back into the `Lua*Snapshot` shapes and
-    /// apply them exactly as the boot path does. A blob that fails to decode is
-    /// skipped so a partial/garbled field can't blank the others.
-    #[allow(clippy::too_many_arguments)]
+    /// Adopt the daemon-owned resolved settings and display metadata from a
+    /// `FrontendState` event. Invalid settings leave the current frontend state
+    /// untouched while command/tool metadata is still refreshed.
     fn apply_frontend_state(
         &mut self,
         banner: String,
-        theme: serde_json::Value,
-        keymap: serde_json::Value,
-        config: serde_json::Value,
+        settings: serde_json::Value,
         commands: Vec<(String, String)>,
         tool_defs: Vec<crate::tools::ToolDefinition>,
         tool_display: serde_json::Value,
@@ -459,25 +431,23 @@ impl App {
                 env!("CARGO_PKG_VERSION")
             )));
         }
-        if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaThemeSnapshot>(theme) {
-            self.renderer.theme.apply_snapshot(&snap);
+        if let Ok(resolved) =
+            serde_json::from_value::<crate::ext::snapshots::ResolvedFrontendSettings>(settings)
+        {
+            let settings = resolved.settings;
+            self.renderer.theme.apply_snapshot(&settings.theme);
             theme_changed = true;
+            self.lua_input_style = input_style_snapshot(&settings.ui.input);
+            apply_settings_to_user_config(&mut self.user_config, &settings);
+            self.user_config.spinner_styles = resolved.spinner_styles;
+            self.user_config.spinner_texts = resolved.spinner_texts;
+            self.keymaps = settings.keymaps;
+            self.approval_mode = self.user_config.approval_mode;
+            self.renderer.input_style =
+                configured_input_style(&self.lua_input_style, settings.ui.input.preset.as_deref());
         }
         if theme_changed {
             self.apply_terminal_background();
-        }
-        if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaKeymapSnapshot>(keymap)
-        {
-            self.lua_keymap = snap;
-        }
-        if let Ok(snap) = serde_json::from_value::<crate::ext::snapshots::LuaConfigSnapshot>(config)
-        {
-            self.lua_input_style = snap.input.clone();
-            self.renderer.input_style = configured_input_style(
-                &self.lua_input_style,
-                self.user_config.input_preset.as_deref(),
-            );
-            apply_lua_config_snapshot(&mut self.user_config, &snap);
         }
         self.wire_commands = commands;
         // Tool render metadata: definitions arrive typed; display configs as an
@@ -544,15 +514,26 @@ impl App {
     async fn apply_config_action(&mut self, action: crate::ext::types::ConfigAction) -> String {
         match action {
             crate::ext::types::ConfigAction::Apply => {
-                let custom = config::custom::CustomConfigs::load();
-                self.apply_custom_configs_to_runtime(custom);
-                // Notify the daemon to rebuild its provider from updated config.
+                let _ = self
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::ReloadSettings);
                 let active_id = self.view.provider_id.clone();
                 self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
                     provider_id: active_id,
                 })
                 .await;
                 "Configuration applied.".to_string()
+            }
+            crate::ext::types::ConfigAction::ApplyRestartRequired => {
+                let _ = self
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::ReloadSettings);
+                let active_id = self.view.provider_id.clone();
+                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
+                    provider_id: active_id,
+                })
+                .await;
+                "Configuration saved. Restart required for tool/command changes.".to_string()
             }
             crate::ext::types::ConfigAction::ReloadTools => self.reload_extensions(),
             crate::ext::types::ConfigAction::SwitchProvider { id } => {
@@ -828,8 +809,6 @@ impl App {
             crate::tools::ApprovalMode::Danger => "danger",
             crate::tools::ApprovalMode::Safe => "safe",
         };
-        self.custom_configs
-            .set_value("general", "approval_mode", mode.to_string());
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::DispatchHook {
@@ -844,16 +823,6 @@ impl App {
             .send(crate::runtime::RuntimeCommand::SetApprovalMode {
                 mode: mode.to_string(),
             });
-    }
-
-    fn apply_custom_configs_to_runtime(&mut self, custom: config::custom::CustomConfigs) {
-        self.user_config.apply_custom_configs(&custom);
-        self.renderer.input_style = configured_input_style(
-            &self.lua_input_style,
-            self.user_config.input_preset.as_deref(),
-        );
-        self.approval_mode = self.user_config.approval_mode;
-        self.custom_configs = custom;
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -989,7 +958,7 @@ impl App {
             // Tick background jobs: refresh pane + auto-inject finished results.
             self.tick_jobs(&mut terminal).await?;
 
-            // Drain prompts queued by Lua via `bone.api.submit`.
+            // Drain prompts queued by Lua via `bone.submit`.
             self.tick_inbox(&mut terminal).await?;
         }
 
@@ -1276,7 +1245,7 @@ impl App {
         Ok(())
     }
 
-    /// Drain prompts queued by Lua (`bone.api.submit`) and feed them through the
+    /// Drain prompts queued by Lua (`bone.submit`) and feed them through the
     /// normal input path. When idle they submit immediately; mid-turn they wait
     /// in `self.queue` and drain when the active turn ends (the same path typed
     /// input uses), so the status bar's `Q:` count reflects them.
@@ -2665,12 +2634,9 @@ impl App {
     /// Ask the daemon to rebuild its Lua VM and tool registry from disk (the
     /// `/tools reload` and post-`/catalog` hot-reload path). The daemon disk-boots
     /// and broadcasts a fresh `FrontendState` (new theme/keymap/commands/tools)
-    /// plus a `Status` summary, which the event loop applies. Also refresh the
-    /// local config-derived state from disk so settings tracked client-side
-    /// (e.g. approval mode) stay in sync.
+    /// plus a `Status` summary, which the event loop applies. Frontend state is
+    /// driven entirely by the daemon's `FrontendState`.
     fn reload_extensions(&mut self) -> String {
-        let custom = config::custom::CustomConfigs::load();
-        self.apply_custom_configs_to_runtime(custom);
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::ReloadExtensions);
@@ -2768,33 +2734,62 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Apply a Lua config snapshot to the Rust `UserConfig`.
-/// Lua values override YAML config values.
-fn apply_lua_config_snapshot(
+fn input_style_snapshot(
+    input: &crate::config::settings::UiInputSettings,
+) -> crate::ext::snapshots::InputStyleSnapshot {
+    crate::ext::snapshots::InputStyleSnapshot {
+        preset: input.preset.clone(),
+        prefix: input.prefix.clone(),
+        show_prefix: Some(input.show_prefix),
+        horizontal_padding: input.horizontal_padding,
+        vertical_padding: input.vertical_padding,
+        fill: input.fill,
+        border: crate::ext::snapshots::InputBorderSnapshot {
+            horizontal: input.border.horizontal.clone(),
+            vertical: input.border.vertical.clone(),
+            top_left: input.border.top_left.clone(),
+            top_right: input.border.top_right.clone(),
+            bottom_left: input.border.bottom_left.clone(),
+            bottom_right: input.border.bottom_right.clone(),
+        },
+    }
+}
+
+fn apply_settings_to_user_config(
     cfg: &mut crate::config::UserConfig,
-    snapshot: &crate::ext::snapshots::LuaConfigSnapshot,
+    settings: &crate::config::settings::BoneSettings,
 ) {
-    if let Some(ref approval_mode) = snapshot.approval_mode {
-        cfg.approval_mode = match approval_mode.as_str() {
-            "danger" => crate::tools::ApprovalMode::Danger,
-            _ => crate::tools::ApprovalMode::Safe,
-        };
+    cfg.approval_mode = match settings.general.approval.as_str() {
+        "danger" => crate::tools::ApprovalMode::Danger,
+        _ => crate::tools::ApprovalMode::Safe,
+    };
+    cfg.show_thinking = settings.general.show_reasoning;
+    cfg.input_preset = settings.ui.input.preset.clone();
+    for (key, value) in [
+        ("status_show_model", settings.ui.status_show_model),
+        ("status_show_approval", settings.ui.status_show_approval),
+        (
+            "status_show_tokens_curr",
+            settings.ui.status_show_tokens_curr,
+        ),
+        ("status_show_tokens_in", settings.ui.status_show_tokens_in),
+        ("status_show_tokens_out", settings.ui.status_show_tokens_out),
+        (
+            "status_show_tokens_total",
+            settings.ui.status_show_tokens_total,
+        ),
+        ("status_show_queue", settings.ui.status_show_queue),
+        ("status_show_spinner", settings.ui.status_show_spinner),
+        ("status_show_timer", settings.ui.status_show_timer),
+    ] {
+        cfg.status_show.insert(key.to_string(), value);
     }
-
-    // Merge status_show — Lua values override, missing keys keep defaults.
-    if !snapshot.status_show.is_empty() {
-        for (k, v) in &snapshot.status_show {
-            cfg.status_show.insert(k.clone(), *v);
-        }
-    }
-
-    // Spinner/text presets from the seeded ui.spinners lib.
-    if !snapshot.spinners.is_empty() {
-        cfg.spinner_styles = snapshot.spinners.clone();
-    }
-    if !snapshot.texts.is_empty() {
-        cfg.spinner_texts = snapshot.texts.clone();
-    }
+    cfg.spinner_style = settings.ui.spinner_style.clone();
+    cfg.spinner_text = settings.ui.spinner_text.clone();
+    cfg.spinner_speed = settings.ui.spinner_speed;
+    cfg.spinner_text_rotate = settings.ui.spinner_text_rotate;
+    cfg.spinner_text_speed = settings.ui.spinner_text_speed;
+    cfg.spinner_text_custom = settings.ui.spinner_custom.clone();
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use bone::ext::snapshots::{LuaInputBorderSnapshot, LuaInputStyleSnapshot};
+use bone::ext::snapshots::{InputBorderSnapshot, InputStyleSnapshot};
 use bone::llm::TokenStats;
 use bone::tools::ApprovalMode;
 use bone::ui::autocomplete::AutocompleteState;
@@ -429,7 +429,7 @@ fn redraw_clears_stale_prompt_and_pane_rows() {
 }
 
 fn input_style(preset: &str) -> InputStyle {
-    InputStyle::from_snapshot(&LuaInputStyleSnapshot {
+    InputStyle::from_snapshot(&InputStyleSnapshot {
         preset: Some(preset.to_string()),
         ..Default::default()
     })
@@ -490,12 +490,12 @@ fn filled_preset_fills_three_composer_rows() {
 #[test]
 fn custom_prefix_padding_and_border_glyphs_are_applied() {
     let mut renderer = Renderer::new();
-    renderer.input_style = InputStyle::from_snapshot(&LuaInputStyleSnapshot {
+    renderer.input_style = InputStyle::from_snapshot(&InputStyleSnapshot {
         preset: Some("box".to_string()),
         prefix: Some("λ ".to_string()),
         horizontal_padding: Some(2),
         vertical_padding: Some(1),
-        border: LuaInputBorderSnapshot {
+        border: InputBorderSnapshot {
             horizontal: Some("-".to_string()),
             vertical: Some("|".to_string()),
             top_left: Some("+".to_string()),

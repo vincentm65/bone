@@ -816,6 +816,7 @@ impl App {
             // CommandComplete is consumed by the remote command pump, not the
             // turn pump; if one arrives here it's a no-op.
             | RuntimeEvent::CommandComplete { .. }
+            | RuntimeEvent::KeymapDispatched { .. }
             // Boot-time display state; consumed at attach (apply_idle_event),
             // not mid-turn. A no-op here.
             | RuntimeEvent::FrontendState { .. }

@@ -29,14 +29,14 @@ fn test_job(agent: &str, task: &str) -> bone::ext::jobs::NewJob {
 
 /// Two sub-agents registered in init.lua.
 const TWO_AGENTS_INIT: &str = r#"
-bone.register_subagent({
+bone.subagent.register({
     name = "researcher",
     description = "Searches the web and summarizes findings",
     system_prompt = "You are a researcher.",
     timeout_ms = 1000,
 })
 
-bone.register_subagent({
+bone.subagent.register({
     name = "coder",
     description = "Writes and fixes code",
     system_prompt = "You are a coder.",
@@ -270,7 +270,7 @@ fn dispatch_with_wait_returns_results_inline() {
     // colliding with other tests dispatching in parallel.
     std::fs::write(
         config_dir.join("init.lua"),
-        r#"bone.register_subagent({
+        r#"bone.subagent.register({
             name = "waiter-inline",
             description = "test agent",
             system_prompt = "You are a test agent.",
@@ -342,7 +342,7 @@ fn wait_action_collects_dispatched_job() {
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
         config_dir.join("init.lua"),
-        r#"bone.register_subagent({
+        r#"bone.subagent.register({
             name = "waiter-collect",
             description = "test agent",
             system_prompt = "You are a test agent.",
@@ -416,7 +416,7 @@ fn wait_action_collects_dispatched_job() {
 
 /// A tool that tries to spawn a sub-agent job.
 const SPAWN_AT_DEPTH: &str = r#"
-bone.register_tool({
+bone.tool.register({
     name = "spawn_at_depth",
     description = "attempts ctx.agent.spawn at current depth",
     safety = "read_only",
@@ -530,7 +530,7 @@ fn rust_jobs_pane_returns_valid_panepage() {
 /// `ok` it returns. Exercises the Lua→registry→cancel-flag wiring that the
 /// `spawn` watchdog observes.
 const CANCEL_TOOL_LUA: &str = r#"
-bone.register_tool({
+bone.tool.register({
     name = "lua_cancel",
     description = "cancels a job id via ctx.agent.cancel and reports ok",
     safety = "read_only",

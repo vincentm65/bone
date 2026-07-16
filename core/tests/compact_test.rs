@@ -95,7 +95,7 @@ fn before_turn_is_valid_event_name() {
 
 /// A Lua command that probes ctx.conversation and stores the results in globals.
 const CONV_API_PROBE_CMD: &str = r#"
-bone.register_command("convprobe", {
+bone.command.register("convprobe", {
     description = "probes ctx.conversation",
     handler = function(args, ctx)
         local results = {}
@@ -292,7 +292,7 @@ fn conversation_api_available_in_commands() {
 // ── 4. conversation.replace return action parsing ───────────────────────────
 
 const ACTION_RETURN_CMD: &str = r#"
-bone.register_command("actiontest", {
+bone.command.register("actiontest", {
     description = "tests return action parsing",
     handler = function(args, ctx)
         if args == "replace" then
@@ -627,6 +627,7 @@ fn compact_preserves_tool_call_chains() {
             agent = { run = function() return { ok = true, content = "summary" } end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         local ret
         for _, h in ipairs(bone._handlers.before_turn) do
@@ -709,8 +710,9 @@ fn compact_drops_orphan_tool_results() {
             agent = { run = function() return { ok = true, content = "summary" } end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
-        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
-        -- so they run without error while we hunt for compact's result.
+        -- Other before_turn handlers (e.g. task_list) read ctx.runtime and ctx.state;
+        -- stub them so they run without error while we hunt for compact's result.
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         local ret
         for _, h in ipairs(bone._handlers.before_turn) do
@@ -798,8 +800,9 @@ fn auto_compact_enabled_under_denylist_config() {
             agent = { run = function() return { ok = true, content = "summary" } end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
-        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
-        -- so they run without error while we hunt for compact's result.
+        -- Other before_turn handlers (e.g. task_list) read ctx.runtime and ctx.state;
+        -- stub them so they run without error while we hunt for compact's result.
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         local ret
         for _, h in ipairs(bone._handlers.before_turn) do
@@ -860,8 +863,9 @@ fn auto_compact_disabled_when_in_denylist() {
             agent = { run = function() return { ok = true, content = "should not run" } end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
-        -- Other before_turn handlers (e.g. task_list) read ctx.state; stub it
-        -- so they run without error while we hunt for compact's result.
+        -- Other before_turn handlers (e.g. task_list) read ctx.runtime and ctx.state;
+        -- stub them so they run without error while we hunt for compact's result.
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         local ret
         for _, h in ipairs(bone._handlers.before_turn) do
@@ -987,6 +991,7 @@ fn auto_compact_does_not_thrash_on_stable_context() {
             end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         local function run_once()
             local ret
@@ -1082,6 +1087,7 @@ fn auto_compact_no_notice_when_nothing_older_than_keep_window() {
                 notice = function(msg) _NOTICES[#_NOTICES + 1] = msg end,
             },
         }
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         local ret
         for _, h in ipairs(bone._handlers.before_turn) do
@@ -1173,6 +1179,7 @@ fn compact_compresses_oversized_candidate_with_separate_generation_budget() {
             end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = { get = function() return nil end, set = function() end, clear = function() end }
         local ret
         for _, h in ipairs(bone._handlers.before_turn) do
@@ -1245,6 +1252,7 @@ fn compact_passes_tools_eq_empty_and_wall_timeout_to_agent_run() {
             end },
             ui = { notify = function() end, status = function() end, notice = function() end },
         }
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         for _, h in ipairs(bone._handlers.before_turn) do
             local r = h({}, ctx)
@@ -1325,6 +1333,7 @@ fn compact_empty_summary_uses_notice_not_notify() {
                 notice = function(msg) _NOTICES[#_NOTICES + 1] = msg end,
             },
         }
+        ctx.runtime = { info = function() return { execution = { depth = 0 } } end }
         ctx.state = ctx.state or { get = function() return nil end, set = function() end, clear = function() end }
         for _, h in ipairs(bone._handlers.before_turn) do
             local r = h({}, ctx)

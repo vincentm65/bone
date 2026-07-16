@@ -1,4 +1,4 @@
-//! `LuaTool` — a tool registered from Lua via `bone.register_tool()`.
+//! `LuaTool` — a tool registered from Lua via `bone.tool.register()`.
 //!
 //! Implements the `Tool` trait so it can be registered in `ToolRegistry`
 //! alongside native and dynamic tools.

@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt};
 
-use super::snapshots::{LuaConfigSnapshot, LuaKeymapSnapshot, LuaStyleSpec, LuaThemeSnapshot};
+use crate::config::settings::{BoneSettings, Settings, ThemeStyleSpec};
 use crate::tools::ToolCall;
+use bone_protocol::KeymapDispatchKind;
 
 /// Options controlling the Lua boot context.
 ///
@@ -82,6 +83,7 @@ pub struct ConversationLoad {
 #[derive(Debug, Clone)]
 pub enum ConfigAction {
     Apply,
+    ApplyRestartRequired,
     ReloadTools,
     SwitchProvider { id: String },
 }
@@ -109,6 +111,9 @@ impl LuaReturnAction {
             }),
             config_action: self.config_action.as_ref().map(|c| match c {
                 ConfigAction::Apply => bone_protocol::ConfigAction::Apply,
+                ConfigAction::ApplyRestartRequired => {
+                    bone_protocol::ConfigAction::ApplyRestartRequired
+                }
                 ConfigAction::ReloadTools => bone_protocol::ConfigAction::ReloadTools,
                 ConfigAction::SwitchProvider { id } => {
                     bone_protocol::ConfigAction::SwitchProvider { id: id.clone() }
@@ -130,6 +135,9 @@ impl From<bone_protocol::CommandAction> for LuaReturnAction {
             }),
             config_action: a.config_action.map(|c| match c {
                 bone_protocol::ConfigAction::Apply => ConfigAction::Apply,
+                bone_protocol::ConfigAction::ApplyRestartRequired => {
+                    ConfigAction::ApplyRestartRequired
+                }
                 bone_protocol::ConfigAction::ReloadTools => ConfigAction::ReloadTools,
                 bone_protocol::ConfigAction::SwitchProvider { id } => {
                     ConfigAction::SwitchProvider { id }
@@ -165,14 +173,10 @@ pub struct ExtensionManager {
     engine_ok: bool,
     /// `true` when `init.lua` was loaded without errors.
     loaded: bool,
-    /// Commands registered via `bone.register_command()` during init.lua.
+    /// Commands registered via `bone.command.register()` during init.lua.
     commands: Vec<super::ops_commands::RegisteredLuaCommand>,
-    /// Snapshot of `bone.config` captured after init.lua.
-    config_snapshot: LuaConfigSnapshot,
-    /// Snapshot of `bone.theme` captured after init.lua.
-    theme_snapshot: LuaThemeSnapshot,
-    /// Snapshot of `bone.keymap` captured after init.lua.
-    keymap_snapshot: LuaKeymapSnapshot,
+    /// Canonical resolved settings owned by this daemon runtime.
+    settings: Arc<Mutex<Settings>>,
     /// Standalone shared UI-state handle. Lives outside the Lua VM mutex so
     /// the TUI can drain diffs even while a tool blocks on `ctx.ui.key()`.
     /// Also cloned into every `ctx.ui.pane` closure.
@@ -187,9 +191,7 @@ impl ExtensionManager {
         engine_ok: bool,
         loaded: bool,
         commands: Vec<super::ops_commands::RegisteredLuaCommand>,
-        config_snapshot: LuaConfigSnapshot,
-        theme_snapshot: LuaThemeSnapshot,
-        keymap_snapshot: LuaKeymapSnapshot,
+        settings: Arc<Mutex<Settings>>,
         ui: super::api_ui::SharedUi,
     ) -> Self {
         Self {
@@ -197,9 +199,7 @@ impl ExtensionManager {
             engine_ok,
             loaded,
             commands,
-            config_snapshot,
-            theme_snapshot,
-            keymap_snapshot,
+            settings,
             ui,
         }
     }
@@ -224,9 +224,7 @@ impl ExtensionManager {
             engine_ok: false,
             loaded: false,
             commands: Vec::new(),
-            config_snapshot: LuaConfigSnapshot::default(),
-            theme_snapshot: LuaThemeSnapshot::default(),
-            keymap_snapshot: LuaKeymapSnapshot::default(),
+            settings: Arc::new(Mutex::new(Settings::defaults())),
             ui: super::api_ui::new_shared(),
         }
     }
@@ -270,36 +268,44 @@ impl ExtensionManager {
         &self.commands
     }
 
-    /// Get the Lua config snapshot captured at boot.
-    pub fn config_snapshot(&self) -> &LuaConfigSnapshot {
-        &self.config_snapshot
-    }
-
-    /// Get the Lua theme snapshot captured at boot.
-    pub fn theme_snapshot(&self) -> &LuaThemeSnapshot {
-        &self.theme_snapshot
-    }
-
-    /// Get the boot theme plus any `bone.api.ui.set_highlight` calls emitted
-    /// during init.lua. Theme commands persist by replaying set_highlight at
-    /// startup, so remote/late frontends must receive those values in their
-    /// initial `FrontendState` instead of waiting for already-drained diffs.
-    pub fn frontend_theme_snapshot(&self) -> LuaThemeSnapshot {
-        let mut snapshot = self.theme_snapshot.clone();
+    /// Get the daemon-owned resolved settings, including dynamic UI highlights
+    /// and renderer presets from the booted UI module.
+    pub fn frontend_settings(&self) -> super::snapshots::ResolvedFrontendSettings {
+        let mut settings = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resolved()
+            .clone();
         let view = super::api_ui::snapshot(&self.ui);
         for (name, color) in view.highlights {
             if name == "bg" {
-                snapshot.palette.bg = Some(color);
+                settings.theme.palette.bg = Some(color);
             } else {
-                snapshot.highlights.insert(name, LuaStyleSpec::Color(color));
+                settings
+                    .theme
+                    .highlights
+                    .insert(name, ThemeStyleSpec::Color(color));
             }
         }
-        snapshot
+        let (spinner_styles, spinner_texts) = self
+            .lua
+            .lock()
+            .map(|lua| super::snapshots::collect_presets(&lua))
+            .unwrap_or_default();
+        super::snapshots::ResolvedFrontendSettings {
+            settings,
+            spinner_styles,
+            spinner_texts,
+        }
     }
 
-    /// Get the Lua keymap snapshot captured at boot.
-    pub fn keymap_snapshot(&self) -> &LuaKeymapSnapshot {
-        &self.keymap_snapshot
+    /// Replace the daemon's resolved settings after a validated full-file reload.
+    pub fn replace_settings(&self, settings: BoneSettings) {
+        self.settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inner = settings;
     }
 
     /// The base banner lines from `bone.banner()` (no client-side update/catalog
@@ -416,7 +422,9 @@ impl ExtensionManager {
         let ctx_table = match crate::ext::ctx::create_ctx_table(&lua, ctx_cfg) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("bone-lua warn: before_turn ctx creation failed: {e}");
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone-lua warn: before_turn ctx creation failed: {e}"
+                ));
                 return Vec::new();
             }
         };
@@ -425,7 +433,9 @@ impl ExtensionManager {
         let event_table = match lua.create_table() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("bone-lua warn: before_turn event table failed: {e}");
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone-lua warn: before_turn event table failed: {e}"
+                ));
                 return Vec::new();
             }
         };
@@ -445,20 +455,119 @@ impl ExtensionManager {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("bone-lua warn: before_turn handler error: {e}");
+                    crate::ext::ctx::runtime_warn(format!(
+                        "bone-lua warn: before_turn handler error: {e}"
+                    ));
                 }
             }
         }
 
         actions
     }
+
+    /// Dispatch a keymap rhs: classify the action string (built-in, slash command,
+    /// or prompt) or, if the action is a `__cb_<id>` callback reference, execute
+    /// the Lua callback and classify its return value.
+    ///
+    /// Returns the classified kind so the frontend can apply it locally.
+    pub fn dispatch_keymap(&self, action: &str) -> KeymapDispatchKind {
+        // Lua callback reference: look up and execute.
+        if let Some(cb_id) = action.strip_prefix("__cb_") {
+            let lua = match guard_with_bone(&self.lua) {
+                Some(g) => g,
+                None => {
+                    crate::ext::ctx::runtime_warn(format!(
+                        "bone-lua warn: keymap callback {cb_id}: Lua unavailable"
+                    ));
+                    return KeymapDispatchKind::Noop;
+                }
+            };
+            let bone = match lua.globals().get::<Option<mlua::Table>>("bone") {
+                Ok(Some(t)) => t,
+                _ => return KeymapDispatchKind::Noop,
+            };
+            let cbs: mlua::Table = match bone.get::<Option<mlua::Table>>("_keymap_callbacks") {
+                Ok(Some(t)) => t,
+                _ => return KeymapDispatchKind::Noop,
+            };
+            let ret: mlua::Value = match cbs.get::<mlua::Value>(cb_id) {
+                Ok(v) => v,
+                Err(_) => {
+                    crate::ext::ctx::runtime_warn_once(format!(
+                        "bone-lua warn: keymap callback {cb_id} not found"
+                    ));
+                    return KeymapDispatchKind::Noop;
+                }
+            };
+            let result: String = match ret {
+                mlua::Value::Function(f) => match f.call::<mlua::Value>(()) {
+                    Ok(mlua::Value::String(s)) => {
+                        s.to_str().map(|s| s.to_string()).unwrap_or_default()
+                    }
+                    Ok(mlua::Value::Nil) => return KeymapDispatchKind::Noop,
+                    Ok(_) => {
+                        crate::ext::ctx::runtime_warn_once(format!(
+                            "bone-lua warn: keymap callback {cb_id} must return a string or nil"
+                        ));
+                        return KeymapDispatchKind::Noop;
+                    }
+                    Err(e) => {
+                        crate::ext::ctx::runtime_warn(format!(
+                            "bone-lua warn: keymap callback {cb_id} error: {e}"
+                        ));
+                        return KeymapDispatchKind::Noop;
+                    }
+                },
+                _ => {
+                    crate::ext::ctx::runtime_warn_once(format!(
+                        "bone-lua warn: keymap callback {cb_id} is not callable"
+                    ));
+                    return KeymapDispatchKind::Noop;
+                }
+            };
+            if result.is_empty() {
+                KeymapDispatchKind::Noop
+            } else {
+                Self::classify_keymap_action(&result)
+            }
+        } else {
+            Self::classify_keymap_action(action)
+        }
+    }
+
+    /// Classify a keymap rhs string: built-in action, slash command, or prompt.
+    fn classify_keymap_action(action: &str) -> KeymapDispatchKind {
+        if action.starts_with('/') {
+            KeymapDispatchKind::Command {
+                text: action.to_string(),
+            }
+        } else if is_builtin_action(action) {
+            KeymapDispatchKind::Builtin {
+                action: action.to_string(),
+            }
+        } else {
+            KeymapDispatchKind::Prompt {
+                text: action.to_string(),
+            }
+        }
+    }
 }
 
-/// Result of booting the Lua extension system.
+/// Known built-in keymap actions the frontend can execute locally.
+fn is_builtin_action(action: &str) -> bool {
+    matches!(
+        action,
+        "toggle_panes"
+            | "cycle_approval_mode"
+            | "cursor_to_start"
+            | "cursor_to_end"
+            | "paste_image"
+    )
+}
 pub struct BootResult {
     /// The extension manager (keeps the Lua VM alive).
     pub manager: ExtensionManager,
-    /// Tools registered via `bone.register_tool()` during init.lua.
+    /// Tools registered via `bone.tool.register()` during init.lua.
     pub tools: Vec<super::lua_tool::LuaTool>,
     /// Conversation-scoped `ctx.state` map shared by the collected Lua tools.
     /// The boot path installs this Arc on the resulting [`crate::tools::registry::ToolHandler`].
@@ -597,7 +706,9 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
                 _ => Vec::new(),
             };
             if messages.is_empty() {
-                eprintln!("bone-lua warn: conversation.replace has no valid messages; ignoring");
+                crate::ext::ctx::runtime_warn_once(
+                    "bone-lua warn: conversation.replace has no valid messages; ignoring",
+                );
             } else {
                 out.conversation_replace = Some(messages);
                 any = true;
@@ -607,7 +718,9 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
             let conversation_id: Option<i64> =
                 table.get::<Option<i64>>("conversation_id").ok().flatten();
             if conversation_id.is_none() {
-                eprintln!("bone-lua warn: conversation.load missing conversation_id; ignoring");
+                crate::ext::ctx::runtime_warn_once(
+                    "bone-lua warn: conversation.load missing conversation_id; ignoring",
+                );
             } else {
                 // Accept messages from older commands for wire compatibility, but
                 // the daemon is the sole authoritative transcript loader.
@@ -626,6 +739,10 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
             out.config_action = Some(ConfigAction::Apply);
             any = true;
         }
+        Some("config.apply_restart_required") => {
+            out.config_action = Some(ConfigAction::ApplyRestartRequired);
+            any = true;
+        }
         Some("config.reload_tools") => {
             out.config_action = Some(ConfigAction::ReloadTools);
             any = true;
@@ -638,13 +755,17 @@ pub(crate) fn parse_lua_return_action(table: &mlua::Table) -> Option<LuaReturnAc
                 .or_else(|| table.get::<Option<String>>("id").ok().flatten())
                 .unwrap_or_default();
             if id.is_empty() {
-                eprintln!("bone-lua warn: config.switch_provider missing provider id; ignoring");
+                crate::ext::ctx::runtime_warn_once(
+                    "bone-lua warn: config.switch_provider missing provider id; ignoring",
+                );
             } else {
                 out.config_action = Some(ConfigAction::SwitchProvider { id });
                 any = true;
             }
         }
-        Some(other) => eprintln!("bone-lua warn: unknown action '{other}'; ignoring"),
+        Some(other) => crate::ext::ctx::runtime_warn_once(format!(
+            "bone-lua warn: unknown action '{other}'; ignoring"
+        )),
         None => {}
     }
 
@@ -825,7 +946,7 @@ fn dispatch_event_inner(
     let ctx_table = match create_event_ctx(lua) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("bone-lua warn: event ctx creation failed: {e}");
+            crate::ext::ctx::runtime_warn(format!("bone-lua warn: event ctx creation failed: {e}"));
             return EventDispatchResult::Continue;
         }
     };
@@ -850,7 +971,9 @@ fn dispatch_event_inner(
             Ok(_) => {}
             Err(e) => {
                 // Fail-open: log and continue to next handler.
-                eprintln!("bone-lua warn: event handler error for '{event_name}': {e}");
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone-lua warn: event handler error for '{event_name}': {e}"
+                ));
             }
         }
     }
@@ -869,7 +992,7 @@ fn create_event_ctx(lua: &mlua::Lua) -> Result<mlua::Table, mlua::Error> {
             Some("error") => "bone-lua error",
             _ => "bone-lua",
         };
-        eprintln!("{prefix}: {msg}");
+        crate::ext::ctx::runtime_warn(format!("{prefix}: {msg}"));
         Ok(())
     })?;
     ui.set("notify", notify_fn)?;

@@ -86,7 +86,7 @@ async fn interactive_command_esc_does_not_freeze() {
 local pane = require("ui.pane")
 local span, wait_key, key_name = pane.span, pane.wait_key, pane.key_name
 
-bone.register_command("picker", {
+bone.command.register("picker", {
   description = "interactive picker test",
   handler = function(arg, ctx)
     local p = pane.new(ctx, { id = "interact", title = "Picker" })

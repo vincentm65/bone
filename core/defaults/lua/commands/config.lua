@@ -65,6 +65,15 @@ local function edit_text(ctx, label, initial)
    return result.value or ""
 end
 
+local function save_value(ctx, namespace, key, value)
+   local ok, result = pcall(ctx.config.set_value, namespace, key, value)
+   if not ok then
+      ctx.ui.notify("Could not save setting: " .. tostring(result), "error")
+      return false
+   end
+   return result == true
+end
+
 local function edit_provider(ctx, provider)
    local entry = {
       label = provider.label or "",
@@ -213,6 +222,7 @@ local function run(ctx, start_ns)
    local sel = 1
    local scroll_first = 1
    local changed = false
+   local restart_required = false
    local cursor = {}   -- per-namespace selection memory (restored on tab change)
    local cur_ns = nil  -- namespace shown last render; detects tab switches
    local p = pane.new(ctx, { id = "interact", title = "Config" })
@@ -329,15 +339,15 @@ local function run(ctx, start_ns)
                local f = row.field
                if f.type == "bool" or f.type == "enum" then
                   local nv = ctx.config.cycle_field(ns, f.key, f.value or "")
-                  if nv then
-                     ctx.config.set_value(ns, f.key, nv)
+                  if nv and save_value(ctx, ns, f.key, nv) then
                      changed = true
+                     restart_required = restart_required or ns == "tools" or ns == "commands"
                   end
                else
                   local v = edit_text(ctx, f.label or f.key, f.value or "")
-                  if v ~= nil then
-                     ctx.config.set_value(ns, f.key, v)
+                  if v ~= nil and save_value(ctx, ns, f.key, v) then
                      changed = true
+                     restart_required = restart_required or ns == "tools" or ns == "commands"
                   end
                end
             end
@@ -351,11 +361,14 @@ local function run(ctx, start_ns)
    end
 
    menu.clear(ctx)
+   if restart_required then
+      return { action = "config.apply_restart_required", submit = false }
+   end
    if changed then return { action = "config.apply", submit = false } end
    return nil
 end
 
-bone.register_command("config", {
+bone.command.register("config", {
    description = "edit configuration",
    handler = function(arg, ctx)
       local words = split_args(arg)

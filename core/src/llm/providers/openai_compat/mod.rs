@@ -422,6 +422,25 @@ fn cached_tokens_from_usage(usage: &Value) -> Option<u32> {
         .map(|v| v as u32)
 }
 
+/// Flush everything buffered at the end of an SSE response. Taking
+/// `last_usage` makes this idempotent: the `[DONE]` path and the natural EOF
+/// path can both call it without emitting usage twice.
+fn flush_stream_end(
+    partial_tool_calls: &mut BTreeMap<usize, PartialToolCall>,
+    last_usage: &mut Option<Value>,
+) -> Vec<ChatEvent> {
+    let mut events = flush_partial_tool_calls(partial_tool_calls);
+    if let Some(usage) = last_usage.take() {
+        events.push(ChatEvent::TokenUsage {
+            prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+            completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0) as u32,
+            cached_tokens: cached_tokens_from_usage(&usage),
+            cost: usage.get("cost").and_then(|v| v.as_f64()),
+        });
+    }
+    events
+}
+
 /// Process a single non-empty SSE data line (excluding `[DONE]` and comments).
 ///
 /// Captures usage, accumulates tool-call partials, and returns any events that
@@ -596,29 +615,30 @@ impl LlmProvider for OpenAiCompatProvider {
             let mut last_usage: Option<serde_json::Value> = None;
             let mut think = ThinkParser::new();
 
-            while let Some(event) = events.try_next().await.map_err(|err| {
-                LlmError::new_with_kind(LlmErrorKind::Connection, err.to_string())
-            })? {
+            loop {
+                let event = match events.try_next().await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(err) => {
+                        // Do not emit buffered usage from a failed attempt: the
+                        // driver may retry it, which would double-count usage.
+                        Err(LlmError::new_with_kind(
+                            LlmErrorKind::Connection,
+                            err.to_string(),
+                        ))?;
+                        unreachable!();
+                    }
+                };
                 let data = event.data.trim();
                 if data.is_empty() {
                     continue;
                 }
 
                 if data == "[DONE]" {
-                    // Flush partial tool calls — some providers send [DONE]
-                    // without finish_reason: "tool_calls", which would
-                    // silently drop tool calls and stall the agent loop.
-                    for event in flush_partial_tool_calls(&mut partial_tool_calls) {
+                    // Some providers send [DONE] without finish_reason:
+                    // "tool_calls". Flush both pending calls and usage.
+                    for event in flush_stream_end(&mut partial_tool_calls, &mut last_usage) {
                         yield event;
-                    }
-
-                    if let Some(usage) = &last_usage {
-                        yield ChatEvent::TokenUsage {
-                            prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                            completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                            cached_tokens: cached_tokens_from_usage(usage),
-                            cost: usage.get("cost").and_then(|v| v.as_f64()),
-                        };
                     }
                     break;
                 }
@@ -657,8 +677,9 @@ impl LlmProvider for OpenAiCompatProvider {
                 }
             }
 
-            // Flush any remaining partial tool calls on premature stream end.
-            for event in flush_partial_tool_calls(&mut partial_tool_calls) {
+            // Natural EOF without `[DONE]` must not discard a final usage-only
+            // chunk or pending tool calls.
+            for event in flush_stream_end(&mut partial_tool_calls, &mut last_usage) {
                 yield event;
             }
         };

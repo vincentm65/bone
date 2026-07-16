@@ -14,7 +14,7 @@ use std::time::Duration;
 use bone_core::tools::types::ToolCall;
 
 const OUTER_TOOL: &str = r#"
-bone.register_tool({
+bone.tool.register({
   name = "outer_caller",
   description = "calls inner_echo via ctx.tools.call",
   safety = "read_only",
@@ -30,7 +30,7 @@ bone.register_tool({
 "#;
 
 const INNER_TOOL: &str = r#"
-bone.register_tool({
+bone.tool.register({
   name = "inner_echo",
   description = "echoes its msg argument",
   safety = "read_only",

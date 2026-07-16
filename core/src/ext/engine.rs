@@ -7,61 +7,10 @@ use mlua::{Function, Lua, LuaSerdeExt, Result as LuaResult, Table};
 
 use super::types::BootOptions;
 
-/// Default `init.lua` content — defines `bone.banner` for the startup/clear banner.
+/// Default `init.lua`: lightweight wiring only. Substantial banner logic lives
+/// in the seeded `lua/lib/banner.lua` module.
 const DEFAULT_INIT_LUA: &str = r#"-- Bone init.lua
--- Customize or replace this file to change the banner and other Lua hooks.
-
--- Default banner function. Override to change the startup/clear banner.
--- Available globals:
---   bone.version     — e.g. "2.1.0"
---   bone.cwd         — current working directory
---   bone.model       — model name (e.g. "gpt-4o")
---   bone.provider    — provider name (e.g. "OpenAI (openai)")
---   bone.term_width  — terminal width in columns (e.g. 120)
---   bone.headless    — true if running without TUI
---   bone.config_dir  — path to ~/.bone-rust
---
--- Return a table of strings. Each string is one banner line, rendered as
--- plain text (no per-substring color). Rust only bolds a line that equals
--- exactly "bone". The full-width box is drawn here so it adapts to term_width.
-local function width(s)           -- display width (codepoint count)
-    local n = 0
-    for _ in utf8.codes(s) do n = n + 1 end
-    return n
-end
-
-local function short_dir(path)    -- path -> first/.../last
-    local parts = {}
-    for seg in path:gmatch("[^/]+") do parts[#parts + 1] = seg end
-    if #parts > 2 then
-        local first = (path:sub(1, 1) == "/") and "/" or parts[1]
-        local last = parts[#parts]
-        local sep = (first:sub(-1) == "/") and "" or "/"
-        return first .. sep .. ".../" .. last
-    end
-    return path
-end
-
-bone.banner = function()
-    local w = bone.api.ui.term_width()
-    local content_w = w - 3
-
-    -- Padded row: │ left  <pad>  right │, filling w columns.
-    local function row(left, right)
-        local pad = math.max(0, content_w - width(left) - width(right))
-        local spaces = math.max(0, pad - 1)
-        return "│ " .. left .. (" "):rep(spaces) .. right .. " │"
-    end
-
-    local rule = ("─"):rep(math.max(0, w - 2))
-
-    return {
-        "╭" .. rule .. "╮",
-        row("bone", "v" .. bone.version),
-        row(bone.provider .. " · " .. bone.model, short_dir(bone.cwd)),
-        "╰" .. rule .. "╯",
-    }
-end
+require("banner")
 "#;
 
 /// Appended to the banner template when the user opts into a populated
@@ -69,8 +18,8 @@ end
 const SUBAGENT_INIT_SNIPPET: &str = r#"
 -- A ready-to-use sub-agent, live immediately. Dispatch it with the `subagent`
 -- tool, e.g. "use the researcher subagent to investigate X". Add more with
--- additional bone.register_subagent { ... } calls, or delete this block.
-bone.register_subagent({
+-- additional bone.subagent.register { ... } calls, or delete this block.
+bone.subagent.register({
     name = "researcher",
     description = "Investigates a question across the codebase and reports concise findings.",
     system_prompt = "You are a focused research agent. Investigate the assigned task "
@@ -104,6 +53,7 @@ pub(crate) fn create_engine(
     model: &str,
     provider: &str,
     shared_ui: super::api_ui::SharedUi,
+    settings: std::sync::Arc<std::sync::Mutex<crate::config::settings::Settings>>,
 ) -> Result<Lua, String> {
     let lua = Lua::new();
 
@@ -191,7 +141,7 @@ pub(crate) fn create_engine(
     // Inject cjson global (encode/decode via serde_json).
     inject_cjson(&lua, &globals)?;
 
-    // bone.register_tool + bone._tools array
+    // bone.tool.register + bone._tools array
     let bone = &globals.get::<Table>("bone").map_err(crate::util::errstr)?;
     super::ops_tools::setup_register_tool(&lua, bone)?;
     super::ops_tools::setup_register_subagent(&lua, bone)?;
@@ -203,7 +153,7 @@ pub(crate) fn create_engine(
     super::api_ui::setup_api_ui(&lua, bone, shared_ui)?;
     // bone.api.{autocmd,emit,keymap,config} — the always-available runtime API
     // (Phase 6). Must run after `setup_on` so `bone.api.autocmd` can alias it.
-    super::api::setup_api(&lua, bone)?;
+    super::api::setup_api(&lua, bone, settings, config_dir.join("config.yaml"))?;
 
     Ok(lua)
 }
@@ -226,7 +176,11 @@ pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
     match lua.load(&source).set_name("init.lua").exec() {
         Ok(()) => Ok(true),
         Err(e) => {
-            eprintln!("bone: warning: init.lua error: {e}");
+            super::ctx::lua_log(
+                &config_dir.to_string_lossy(),
+                "warn",
+                &format!("init.lua error: {e}"),
+            );
             Ok(false)
         }
     }

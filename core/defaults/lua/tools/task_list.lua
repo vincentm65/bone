@@ -246,7 +246,7 @@ local function execute(params, ctx)
     return "ERROR: Action must be 'write', 'advance', 'complete', or 'clear'."
 end
 
-bone.register_tool({
+bone.tool.register({
     name = "task_list",
     description = "Maintain a visible checklist (TUI pane) for multi-step work. Prefer action=advance after each finished step (marks the current item done and starts the next) — do not leave steps open when you move on. Use action=write with the FULL list to create/reorder/rename (at most one in_progress). When the whole job is done, call action=complete before your final answer so the pane shows N/N. Call clear only after the user confirms. State is host-held. Actions: write (tasks, optional name, max 15), advance, complete, clear.",
     safety = "read_only",

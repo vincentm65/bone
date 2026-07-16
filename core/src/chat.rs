@@ -95,19 +95,4 @@ impl Message {
             image_count: 0,
         }
     }
-
-    /// Terminal output: shows a label (e.g. "shell: ls") plus visible content.
-    #[must_use]
-    pub fn terminal_output(command: String, content: String, is_error: bool) -> Self {
-        Self {
-            role: ChatRole::Tool,
-            content,
-            tool: Some(ToolDisplay {
-                label: format!("shell: {command}"),
-                is_error,
-                is_shell: true,
-            }),
-            image_count: 0,
-        }
-    }
 }

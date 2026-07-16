@@ -1,5 +1,4 @@
-//! `bone.register_command(name, def)` — validates and stores a Lua command definition
-//! in `bone._commands` for later collection by the Rust boot code.
+//! `bone.command.register(name, def)` — Lua command registration.
 //!
 //! `def` can be either:
 //!   - A table with `description` and `handler` fields (long form)
@@ -42,14 +41,14 @@ pub fn find_handler(lua: &Lua, name: &str) -> Option<mlua::Function> {
     None
 }
 
-/// A command registered from Lua via `bone.register_command()`.
+/// A command registered from Lua via `bone.command.register()`.
 #[derive(Clone)]
 pub struct RegisteredLuaCommand {
     pub name: String,
     pub description: String,
 }
 
-/// Create the `bone.register_command` function and the `bone._commands` storage array.
+/// Create `bone.command.register` and the `bone._commands` storage array.
 pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), String> {
     let commands_array = lua.create_table().map_err(crate::util::errstr)?;
     bone.set("_commands", commands_array)
@@ -59,18 +58,24 @@ pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), Stri
         .create_function(|lua, args: Variadic<Value>| {
             let commands: Table = lua.globals().get::<Table>("bone")?.get("_commands")?;
             let Some(first) = args.first() else {
-                eprintln!("bone-lua warn: register_command: missing name; skipping");
+                crate::ext::ctx::runtime_warn_once(
+                    "bone-lua warn: register_command: missing name; skipping",
+                );
                 return Ok(());
             };
             let name = match first {
                 Value::String(s) => s.to_str()?.to_string(),
                 _ => {
-                    eprintln!("bone-lua warn: register_command: missing or invalid name; skipping");
+                    crate::ext::ctx::runtime_warn_once(
+                        "bone-lua warn: register_command: missing or invalid name; skipping",
+                    );
                     return Ok(());
                 }
             };
             let Some(def) = args.get(1) else {
-                eprintln!("bone-lua warn: register_command '{name}': missing handler; skipping");
+                crate::ext::ctx::runtime_warn_once(format!(
+                    "bone-lua warn: register_command '{name}': missing handler; skipping"
+                ));
                 return Ok(());
             };
 
@@ -85,11 +90,15 @@ pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), Stri
                     let handler = match t.get::<Value>("handler") {
                         Ok(Value::Function(f)) => f,
                         Ok(_) => {
-                            eprintln!("bone-lua warn: register_command '{name}': handler is not a function; skipping");
+                            crate::ext::ctx::runtime_warn_once(format!(
+                                "bone-lua warn: register_command '{name}': handler is not a function; skipping"
+                            ));
                             return Ok(());
                         }
                         Err(_) => {
-                            eprintln!("bone-lua warn: register_command '{name}': missing handler; skipping");
+                            crate::ext::ctx::runtime_warn_once(format!(
+                                "bone-lua warn: register_command '{name}': missing handler; skipping"
+                            ));
                             return Ok(());
                         }
                     };
@@ -98,7 +107,9 @@ pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), Stri
                     entry.set("handler", handler)?;
                 }
                 _ => {
-                    eprintln!("bone-lua warn: register_command '{name}': handler must be a function or table; skipping");
+                    crate::ext::ctx::runtime_warn_once(format!(
+                        "bone-lua warn: register_command '{name}': handler must be a function or table; skipping"
+                    ));
                     return Ok(());
                 }
             }
@@ -108,7 +119,10 @@ pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), Stri
         })
         .map_err(crate::util::errstr)?;
 
-    bone.set("register_command", register_fn)
+    let command = lua.create_table().map_err(crate::util::errstr)?;
+    command
+        .set("register", register_fn)
         .map_err(crate::util::errstr)?;
+    bone.set("command", command).map_err(crate::util::errstr)?;
     Ok(())
 }

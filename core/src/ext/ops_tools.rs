@@ -1,9 +1,8 @@
-//! `bone.register_tool(table)` — validates and stores a Lua tool definition
-//! in `bone._tools` for later collection by the Rust boot code.
+//! `bone.tool.register(table)` and `bone.subagent.register(table)` bindings.
 
 use mlua::{Lua, Table};
 
-/// Create the `bone.register_tool` function and the `bone._tools` storage array.
+/// Create `bone.tool.register` and the `bone._tools` storage array.
 pub(crate) fn setup_register_tool(lua: &Lua, bone: &Table) -> Result<(), String> {
     let tools_array = lua.create_table().map_err(crate::util::errstr)?;
     bone.set("_tools", tools_array)
@@ -15,7 +14,9 @@ pub(crate) fn setup_register_tool(lua: &Lua, bone: &Table) -> Result<(), String>
             // Full validation of description, parameters, safety, and execute
             // happens in LuaTool::from_entry during tool collection.
             if args.get::<String>("name").is_err() {
-                eprintln!("bone-lua warn: register_tool: missing or invalid 'name'; skipping");
+                crate::ext::ctx::runtime_warn_once(
+                    "bone-lua warn: register_tool: missing or invalid 'name'; skipping",
+                );
                 return Ok(());
             }
 
@@ -26,15 +27,14 @@ pub(crate) fn setup_register_tool(lua: &Lua, bone: &Table) -> Result<(), String>
         })
         .map_err(crate::util::errstr)?;
 
-    bone.set("register_tool", register_fn)
+    let tool = lua.create_table().map_err(crate::util::errstr)?;
+    tool.set("register", register_fn)
         .map_err(crate::util::errstr)?;
+    bone.set("tool", tool).map_err(crate::util::errstr)?;
     Ok(())
 }
 
-// `bone.register_subagent(table)` — validates and stores a sub-agent definition
-// in `bone._subagents` for later use by the subagent tool.
-
-/// Create the `bone.register_subagent` function and the `bone._subagents` storage table.
+/// Create `bone.subagent.register` and the `bone._subagents` storage table.
 pub(crate) fn setup_register_subagent(lua: &Lua, bone: &Table) -> Result<(), String> {
     let subagents_table = lua.create_table().map_err(crate::util::errstr)?;
     bone.set("_subagents", subagents_table)
@@ -45,14 +45,16 @@ pub(crate) fn setup_register_subagent(lua: &Lua, bone: &Table) -> Result<(), Str
             let name: String = match args.get("name") {
                 Ok(n) => n,
                 Err(_) => {
-                    eprintln!(
-                        "bone-lua warn: register_subagent: missing or invalid 'name'; skipping"
+                    crate::ext::ctx::runtime_warn_once(
+                        "bone-lua warn: register_subagent: missing or invalid 'name'; skipping",
                     );
                     return Ok(());
                 }
             };
             if name.is_empty() {
-                eprintln!("bone-lua warn: register_subagent: empty 'name'; skipping");
+                crate::ext::ctx::runtime_warn_once(
+                    "bone-lua warn: register_subagent: empty 'name'; skipping",
+                );
                 return Ok(());
             }
 
@@ -64,9 +66,9 @@ pub(crate) fn setup_register_subagent(lua: &Lua, bone: &Table) -> Result<(), Str
                     .get("name")
                     .unwrap_or_else(|_| "<missing>".to_string());
                 if existing_name == name {
-                    eprintln!(
+                    crate::ext::ctx::runtime_warn_once(format!(
                         "bone-lua warn: register_subagent: duplicate name '{name}'; skipping"
-                    );
+                    ));
                     return Ok(());
                 }
             }
@@ -77,7 +79,11 @@ pub(crate) fn setup_register_subagent(lua: &Lua, bone: &Table) -> Result<(), Str
         })
         .map_err(crate::util::errstr)?;
 
-    bone.set("register_subagent", register_fn)
+    let subagent = lua.create_table().map_err(crate::util::errstr)?;
+    subagent
+        .set("register", register_fn)
+        .map_err(crate::util::errstr)?;
+    bone.set("subagent", subagent)
         .map_err(crate::util::errstr)?;
     Ok(())
 }

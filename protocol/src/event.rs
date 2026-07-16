@@ -89,17 +89,15 @@ pub enum RuntimeEvent {
     StateSnapshot {
         snapshot: SessionSnapshot,
     },
-    /// Boot-time display state the daemon's Lua VM produced (theme/keymap/banner/
-    /// command-list/config), so a frontend can render the user's customizations
-    /// without running Lua itself. Sent on connect and re-sent after a
-    /// `ReloadExtensions`. The snapshots are carried as opaque JSON to keep the
-    /// protocol crate free of the core's Lua snapshot types; the consuming client
-    /// deserializes them back into `Lua*Snapshot`.
+    /// Boot-time resolved display state (settings, renderer presets, banner, and
+    /// command list) owned by the daemon, so a frontend can render the user's
+    /// customizations without running Lua itself. Sent on connect and re-sent
+    /// after settings or extensions reload. The snapshot is carried as opaque
+    /// JSON to keep the protocol crate free of the core's config types.
     FrontendState {
         banner: String,
-        theme: serde_json::Value,
-        keymap: serde_json::Value,
-        config: serde_json::Value,
+        /// Serialized unified resolved frontend settings payload.
+        settings: serde_json::Value,
         /// `(name, description)` for slash-command autocomplete.
         commands: Vec<(String, String)>,
         /// Enabled tool definitions, so a VM-less frontend can estimate context
@@ -134,6 +132,10 @@ pub enum RuntimeEvent {
         /// the client can apply it. `None` for plain text/pane/submit commands.
         #[serde(default)]
         action: Option<CommandAction>,
+    },
+    /// Result of daemon-side keymap rhs dispatch and optional Lua callback.
+    KeymapDispatched {
+        kind: KeymapDispatchKind,
     },
 }
 
@@ -174,6 +176,7 @@ pub struct ConversationLoad {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigAction {
     Apply,
+    ApplyRestartRequired,
     ReloadTools,
     SwitchProvider { id: String },
 }
@@ -212,6 +215,9 @@ pub enum RuntimeCommand {
         provider_id: String,
     },
     ReloadExtensions,
+    /// Reload only canonical `config.yaml`, preserving extension/tool runtime
+    /// state, then broadcast a fresh full frontend settings snapshot.
+    ReloadSettings,
     /// Set the daemon's authoritative approval mode (`"safe"` / `"danger"`).
     /// The frontend sends this whenever the user cycles Safe/Danger so the
     /// daemon's `SharedApprovalMode` — which actually gates tool calls — tracks
@@ -245,6 +251,29 @@ pub enum RuntimeCommand {
     Steer {
         text: String,
     },
+    /// Dispatch a keymap action to the daemon for rhs classification and
+    /// optional Lua callback execution. The frontend sends this instead of
+    /// locally resolving action semantics. The daemon responds with a
+    /// [`KeymapDispatched`] event.
+    KeymapDispatch {
+        /// The action string looked up from the binding (may be a callback id).
+        action: String,
+    },
+}
+
+/// Classified result of a keymap rhs dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeymapDispatchKind {
+    /// Callback completed without requesting a frontend action.
+    Noop,
+    /// A local built-in action the frontend knows how to execute
+    /// (e.g. "toggle_panes", "paste_image").
+    Builtin { action: String },
+    /// A slash-command string (e.g. "/help").
+    Command { text: String },
+    /// A prompt to submit as a user message.
+    Prompt { text: String },
 }
 
 #[cfg(test)]

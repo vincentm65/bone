@@ -8,11 +8,10 @@
 //! (the `ToolHandler` is cloned per turn but the `Arc` is shared, and the
 //! driver never reassigns it — see `runtime/session.rs`).
 //!
-//! Per path we keep the most recent read plus a small ring of prior versions;
-//! each carries the line numbers the model actually saw, so the visibility
-//! guard can reject edits to elided lines.
+//! Per path we keep the most recent read and the line numbers the model
+//! actually saw, so the visibility guard can reject edits to elided lines.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -95,11 +94,7 @@ pub async fn resolve_new_path(path: &str, working_dir: Option<&Path>) -> Result<
     Ok(resolved)
 }
 
-/// Upper bound on retained versions per path (for stale recovery). Mirrors
-/// OMP's default of 4.
-const MAX_VERSIONS: usize = 4;
-
-/// One recorded file snapshot.
+/// Most recently recorded state of a file.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     /// Normalized full file text (LF line endings, BOM stripped).
@@ -111,23 +106,10 @@ pub struct Snapshot {
     pub seen_lines: BTreeSet<usize>,
 }
 
-impl Snapshot {
-    /// True if `line` (1-indexed) was shown to the model in this snapshot.
-    pub fn saw_line(&self, line: usize) -> bool {
-        self.seen_lines.contains(&line)
-    }
-}
-
-#[derive(Debug, Default)]
-struct History {
-    /// Newest version at the back; capped at [`MAX_VERSIONS`].
-    versions: VecDeque<Snapshot>,
-}
-
-/// Per-session store of file snapshots, keyed by path.
+/// Per-session store of the latest file snapshot, keyed by path.
 #[derive(Debug, Default)]
 pub struct SnapshotStore {
-    paths: HashMap<String, History>,
+    paths: HashMap<String, Snapshot>,
 }
 
 impl SnapshotStore {
@@ -137,36 +119,19 @@ impl SnapshotStore {
 
     /// Most recent snapshot for `path`, if any.
     pub fn head(&self, path: &str) -> Option<&Snapshot> {
-        self.paths.get(path).and_then(|h| h.versions.back())
+        self.paths.get(path)
     }
 
-    /// Any retained version of `path` whose tag matches `tag`.
-    pub fn by_hash(&self, path: &str, tag: &str) -> Option<&Snapshot> {
-        self.paths.get(path)?.versions.iter().find(|s| s.tag == tag)
-    }
-
-    /// Any retained version of `path` whose normalized text equals `text`.
-    pub fn by_content(&self, path: &str, text: &str) -> Option<&Snapshot> {
-        self.paths
-            .get(path)?
-            .versions
-            .iter()
-            .find(|s| s.text == text)
-    }
-
-    /// Record a normalized snapshot for `path`, returning its tag. If an
-    /// identical version already exists it is promoted to newest (and its
-    /// seen-lines merged) so a re-read neither duplicates nor loses visibility.
+    /// Record a normalized snapshot for `path`, returning its tag. A repeated
+    /// read of identical content merges the lines visible to the model.
     pub fn record(&mut self, path: &str, text: &str, seen_lines: Option<&[usize]>) -> String {
         let tag = compute_tag(text);
-        let history = self.paths.entry(path.to_string()).or_default();
-
-        if let Some(pos) = history.versions.iter().position(|s| s.text == text) {
-            let mut snap = history.versions.remove(pos).expect("position is valid");
+        if let Some(snapshot) = self.paths.get_mut(path)
+            && snapshot.text == text
+        {
             if let Some(lines) = seen_lines {
-                snap.seen_lines.extend(lines.iter().copied());
+                snapshot.seen_lines.extend(lines.iter().copied());
             }
-            history.versions.push_back(snap);
             return tag;
         }
 
@@ -174,50 +139,20 @@ impl SnapshotStore {
         if let Some(lines) = seen_lines {
             seen.extend(lines.iter().copied());
         }
-        history.versions.push_back(Snapshot {
-            text: text.to_string(),
-            tag: tag.clone(),
-            seen_lines: seen,
-        });
-        while history.versions.len() > MAX_VERSIONS {
-            history.versions.pop_front();
-        }
+        self.paths.insert(
+            path.to_string(),
+            Snapshot {
+                text: text.to_string(),
+                tag: tag.clone(),
+                seen_lines: seen,
+            },
+        );
         tag
-    }
-
-    /// Merge additional seen-lines into the version tagged `tag` for `path`.
-    pub fn record_seen_lines(&mut self, path: &str, tag: &str, lines: &[usize]) {
-        let Some(history) = self.paths.get_mut(path) else {
-            return;
-        };
-        if let Some(snap) = history.versions.iter_mut().find(|s| s.tag == tag) {
-            snap.seen_lines.extend(lines.iter().copied());
-        }
-    }
-
-    /// Drop all versions for `path` (e.g. after the file is deleted).
-    pub fn invalidate(&mut self, path: &str) {
-        self.paths.remove(path);
-    }
-
-    /// Move all versions from `from` to `to` (rename).
-    pub fn relocate(&mut self, from: &str, to: &str) {
-        if from == to {
-            return;
-        }
-        if let Some(history) = self.paths.remove(from) {
-            self.paths.insert(to.to_string(), history);
-        }
     }
 
     /// Clear everything (session reset).
     pub fn clear(&mut self) {
         self.paths.clear();
-    }
-
-    /// Number of retained versions for `path` (diagnostic/test helper).
-    pub fn version_count(&self, path: &str) -> usize {
-        self.paths.get(path).map(|h| h.versions.len()).unwrap_or(0)
     }
 }
 

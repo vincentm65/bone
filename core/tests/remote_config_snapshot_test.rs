@@ -90,7 +90,7 @@ async fn await_state_snapshot_unblocks_after_reply_bearing_command() {
     std::fs::write(
         cmd_dir.join("cfgapply.lua"),
         r#"
-bone.register_command("cfgapply", {
+bone.command.register("cfgapply", {
   description = "config.apply test",
   handler = function(arg, ctx)
     -- Interactive phase: read keys until Enter (the picker pattern).

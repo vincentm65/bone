@@ -129,13 +129,15 @@ impl InputStyle {
         }
     }
 
-    pub fn from_snapshot(snapshot: &crate::ext::snapshots::LuaInputStyleSnapshot) -> Self {
+    pub fn from_snapshot(snapshot: &crate::ext::snapshots::InputStyleSnapshot) -> Self {
         let preset = match snapshot.preset.as_deref() {
             None | Some("lines") => InputPreset::Lines,
             Some("box") => InputPreset::Box,
             Some("filled") => InputPreset::Filled,
             Some(other) => {
-                eprintln!("bone-lua warn: invalid input preset '{other}'; using lines");
+                bone_core::ext::ctx::runtime_warn_once(format!(
+                    "bone-lua warn: invalid input preset '{other}'; using lines"
+                ));
                 InputPreset::Lines
             }
         };

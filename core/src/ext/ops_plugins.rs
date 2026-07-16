@@ -66,22 +66,22 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
             let init_path = plugins_dir(&config_dir).join(&name).join("init.lua");
 
             if !init_path.exists() {
-                eprintln!(
+                crate::ext::ctx::runtime_warn_once(format!(
                     "bone: warning: plugin '{}' not found at {}",
                     name,
                     init_path.display()
-                );
+                ));
                 return Ok(false);
             }
 
             let source = match std::fs::read_to_string(&init_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!(
+                    crate::ext::ctx::runtime_warn_once(format!(
                         "bone: warning: plugin '{}': failed to read {}: {e}",
                         name,
                         init_path.display()
-                    );
+                    ));
                     return Ok(false);
                 }
             };
@@ -96,7 +96,10 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                     Ok(true)
                 }
                 Err(e) => {
-                    eprintln!("bone: warning: plugin '{}' error: {e}", name);
+                    crate::ext::ctx::runtime_warn(format!(
+                        "bone: warning: plugin '{}' error: {e}",
+                        name
+                    ));
                     Ok(false)
                 }
             }

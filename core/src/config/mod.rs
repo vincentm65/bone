@@ -2,6 +2,7 @@
 
 pub mod custom;
 pub mod providers_config;
+pub mod settings;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,9 +96,6 @@ impl Default for UserConfig {
     }
 }
 
-fn bool_config(custom: &custom::CustomConfigs, key: &str) -> bool {
-    custom.get_value("status", key).parse().unwrap_or(true)
-}
 impl UserConfig {
     pub(crate) const STATUS_TOGGLE_KEYS: [&'static str; 9] = [
         "status_show_model",
@@ -116,59 +114,6 @@ impl UserConfig {
             .iter()
             .map(|&k| (k.to_string(), true))
             .collect()
-    }
-
-    /// Build a UserConfig by reading all values from the custom config pages.
-    pub fn from_custom_configs(custom: &custom::CustomConfigs) -> Self {
-        let mut cfg = Self::default();
-        cfg.apply_custom_configs(custom);
-        cfg
-    }
-
-    /// Populate fields from the custom config pages.
-    pub fn apply_custom_configs(&mut self, custom: &custom::CustomConfigs) {
-        // General page
-        self.approval_mode = match custom.get_value("general", "approval_mode").as_str() {
-            "danger" => ApprovalMode::Danger,
-            _ => ApprovalMode::Safe,
-        };
-        self.enabled_tools = custom.enabled_tool_names();
-        if self.enabled_tools.is_empty() {
-            self.enabled_tools = default_enabled_tools();
-        }
-        self.show_thinking = custom.get_value("general", "show_thinking") == "true";
-        self.input_preset = match custom.get_value("general", "input_preset").as_str() {
-            preset @ ("lines" | "box" | "filled") => Some(preset.to_string()),
-            _ => None,
-        };
-
-        // Status bar toggles
-        for key in Self::STATUS_TOGGLE_KEYS {
-            if let Some(val) = self.status_show.get_mut(key) {
-                *val = bool_config(custom, key);
-            }
-        }
-
-        // Spinner selection (status page)
-        let style = custom.get_value("status", "status_spinner_style");
-        self.spinner_style = if style.is_empty() {
-            "braille".to_string()
-        } else {
-            style
-        };
-        let text = custom.get_value("status", "status_spinner_text");
-        self.spinner_text = if text.is_empty() {
-            "thinking".to_string()
-        } else {
-            text
-        };
-        let speed = custom.get_value("status", "status_spinner_speed");
-        self.spinner_speed = speed.parse::<u64>().ok().filter(|&v| v > 0).unwrap_or(0);
-        self.spinner_text_rotate =
-            custom.get_value("status", "status_spinner_text_rotate") != "false";
-        let text_speed = custom.get_value("status", "status_spinner_text_speed");
-        self.spinner_text_speed = text_speed.parse::<u64>().ok().unwrap_or(0);
-        self.spinner_text_custom = custom.get_value("status", "status_spinner_text_custom");
     }
 }
 
@@ -207,12 +152,14 @@ fn preserve_divergent_agents_md(agents_path: &Path, local_path: &Path, bundled: 
     }
     match fs::write(local_path, &existing) {
         Ok(()) => {
-            eprintln!("bone: previous AGENTS.md customizations preserved in AGENTS.local.md");
+            crate::ext::ctx::runtime_warn(
+                "bone: previous AGENTS.md customizations preserved in AGENTS.local.md",
+            );
         }
         Err(e) => {
-            eprintln!(
+            crate::ext::ctx::runtime_warn(format!(
                 "bone: warning: could not preserve previous AGENTS.md to AGENTS.local.md: {e}"
-            );
+            ));
         }
     }
 }
@@ -237,11 +184,17 @@ pub fn seed_file_forced(path: &Path, content: &str) {
     if let Some(parent) = path.parent()
         && let Err(e) = fs::create_dir_all(parent)
     {
-        eprintln!("bone: warning: could not create {}: {e}", parent.display());
+        crate::ext::ctx::runtime_warn(format!(
+            "bone: warning: could not create {}: {e}",
+            parent.display()
+        ));
         return;
     }
     if let Err(e) = fs::write(path, content) {
-        eprintln!("bone: warning: could not write {}: {e}", path.display());
+        crate::ext::ctx::runtime_warn(format!(
+            "bone: warning: could not write {}: {e}",
+            path.display()
+        ));
     }
 }
 /// The onboarding wizard's persisted choices: which bundled tools/commands the
@@ -399,11 +352,11 @@ fn has_codex_auth_token() -> bool {
 /// if not, so new users know what to do next.
 pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
     let Some(entry) = config.providers.get(provider_id) else {
-        eprintln!(
+        crate::ext::ctx::runtime_warn(format!(
             "bone: warning: provider '{}' not found in {}",
             provider_id,
             providers_path().display()
-        );
+        ));
         return;
     };
 
@@ -415,16 +368,15 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
         return;
     }
     if entry.handler == "grok_build" {
-        eprintln!("bone: warning: Grok subscription is not authenticated; run `grok login`.");
+        crate::ext::ctx::runtime_warn(
+            "bone: warning: Grok subscription is not authenticated; run `grok login`.",
+        );
     } else {
-        eprintln!(
-            "bone: warning: provider '{}' has no API key configured.",
-            provider_id
-        );
-        eprintln!(
-            "  Edit {} and add your API key.",
+        crate::ext::ctx::runtime_warn(format!(
+            "bone: warning: provider '{}' has no API key configured. Edit {} and add your API key.",
+            provider_id,
             providers_path().display()
-        );
+        ));
     }
 }
 

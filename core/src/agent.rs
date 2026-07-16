@@ -1,7 +1,7 @@
 //! Headless agent turn loop: drives a provider through chat history, tool calls, and session persistence without the TUI.
 
 use crate::chat::build_chat_history;
-use crate::config::{UserConfig, custom::CustomConfigs};
+use crate::config::custom::CustomConfigs;
 use crate::llm::{
     ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
     token_tracker::CHARS_PER_TOKEN,
@@ -129,7 +129,7 @@ impl SessionWriter {
     /// uniform and the counter stays accurate.
     fn note_failure(&self, op: &str, err: &rusqlite::Error) {
         self.failures.fetch_add(1, Ordering::Relaxed);
-        eprintln!("bone: warning: session db {op} failed: {err}");
+        crate::ext::ctx::runtime_warn(format!("bone: warning: session db {op} failed: {err}"));
     }
 }
 
@@ -351,6 +351,7 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::ConversationLoadFailed { .. }
         | crate::runtime::RuntimeEvent::ViewDiff { .. }
         | crate::runtime::RuntimeEvent::CommandComplete { .. }
+        | crate::runtime::RuntimeEvent::KeymapDispatched { .. }
         | crate::runtime::RuntimeEvent::TurnComplete => return,
     };
     println!("{json}");
@@ -432,7 +433,6 @@ pub fn resolve_provider(
 
 fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     let mut custom = CustomConfigs::load();
-    let _user_config = UserConfig::from_custom_configs(&custom);
     let mut providers_config = custom.derive_providers_config();
 
     let llm = resolve_provider(request, &mut custom, &mut providers_config)?;
@@ -581,9 +581,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     // succeeded, so this is a warning, not an error.
     let failures = session_report.persist_failures().saturating_sub(before);
     if request.agent_depth == 0 && failures > 0 {
-        eprintln!(
+        crate::ext::ctx::runtime_warn(format!(
             "bone: warning: {failures} session write(s) failed this turn; history may be incomplete"
-        );
+        ));
     }
 
     result
@@ -625,7 +625,7 @@ fn open_headless_session(provider: &str, model: &str) -> SessionWriter {
     }) {
         Ok((db, id)) => (Some(db), Some(id)),
         Err(e) => {
-            eprintln!("bone: warning: session db open failed: {e}");
+            crate::ext::ctx::runtime_warn(format!("bone: warning: session db open failed: {e}"));
             (None, None)
         }
     };

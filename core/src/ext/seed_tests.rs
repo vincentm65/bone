@@ -105,6 +105,27 @@ fn history_and_menu_seeds_refresh_pre_feature_copies() {
 }
 
 #[test]
+fn seeds_refresh_pre_namespace_registration_apis() {
+    let dir = std::env::temp_dir().join(format!(
+        "bone-registration-api-seed-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let tool = dir.join("tool.lua");
+    std::fs::write(&tool, "bone.register_tool({})\n").unwrap();
+    assert!(should_refresh_seeded_lua(&tool, "tool.lua"));
+
+    let command = dir.join("command.lua");
+    std::fs::write(&command, "bone.register_command('x', function() end)\n").unwrap();
+    assert!(should_refresh_seeded_lua(&command, "command.lua"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn task_list_seed_refreshes_when_complete_action_is_missing() {
     let dir = std::env::temp_dir().join(format!(
         "bone-task-list-seed-test-{}-{:?}",

@@ -30,7 +30,9 @@ impl MouseCaptureGuard {
 impl Drop for MouseCaptureGuard {
     fn drop(&mut self) {
         if let Err(e) = crossterm::execute!(io::stdout(), DisableMouseCapture) {
-            eprintln!("bone: warning: failed to disable mouse capture: {e}");
+            bone_core::ext::ctx::runtime_warn(format!(
+                "bone: warning: failed to disable mouse capture: {e}"
+            ));
         }
     }
 }

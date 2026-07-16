@@ -5,7 +5,9 @@ fn lua_with_api() -> Lua {
     let bone = lua.create_table().unwrap();
     // bone.on + _handlers, then bone.api.*
     super::super::ops_events::setup_on(&lua, &bone).unwrap();
-    setup_api(&lua, &bone).unwrap();
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+    let path = std::env::temp_dir().join("test-settings.yaml");
+    setup_api(&lua, &bone, settings, path).unwrap();
     lua.globals().set("bone", bone).unwrap();
     lua
 }
@@ -34,48 +36,197 @@ fn autocmd_for_custom_event_fires_on_emit() {
 }
 
 #[test]
-fn keymap_set_get_del() {
-    let lua = lua_with_api();
+fn top_level_keymap_accepts_strings_and_callbacks() {
+    let lua = Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+    setup_api(
+        &lua,
+        &bone,
+        Arc::clone(&settings),
+        std::env::temp_dir().join("unused-keymap-settings.yaml"),
+    )
+    .unwrap();
+    lua.globals().set("bone", bone).unwrap();
     lua.load(
         r#"
-            bone.api.keymap.set("n", "ctrl+p", "open_config")
-            bone.api.keymap.set("n", "ctrl+s", "save")
-            local n = bone.api.keymap.get("n")
-            assert(n["ctrl+p"] == "open_config", "binding set")
-            assert(n["ctrl+s"] == "save", "second binding set")
-            bone.api.keymap.del("n", "ctrl+s")
-            assert(bone.api.keymap.get("n")["ctrl+s"] == nil, "binding deleted")
+            assert(bone.api.keymap == nil)
+            bone.keymap.set("<C-p>", "toggle_panes")
+            bone.keymap.set("<C-h>", function() return "/help" end)
+            bone.keymap.set("<C-n>", function() end)
         "#,
     )
     .exec()
     .unwrap();
 
-    // Rust sees the live keymap.
-    let km: Table = lua
-        .globals()
-        .get::<Table>("bone")
-        .unwrap()
-        .get("keymap")
-        .unwrap();
-    let snap = super::super::snapshots::LuaKeymapSnapshot::from_lua_table(&lua, &km).unwrap();
-    assert!(
-        snap.normal
-            .iter()
-            .any(|b| b.key == "ctrl+p" && b.action == "open_config")
+    let (callback, noop_callback) = {
+        let store = settings.lock().unwrap();
+        assert_eq!(store.resolved().keymaps.bindings[0].action, "toggle_panes");
+        assert!(
+            store.resolved().keymaps.bindings[1]
+                .action
+                .starts_with("__cb_")
+        );
+        assert!(
+            store.resolved().keymaps.bindings[2]
+                .action
+                .starts_with("__cb_")
+        );
+        (
+            store.resolved().keymaps.bindings[1].action.clone(),
+            store.resolved().keymaps.bindings[2].action.clone(),
+        )
+    };
+    let manager = crate::ext::types::ExtensionManager::from_arc(
+        Arc::new(Mutex::new(lua)),
+        true,
+        true,
+        Vec::new(),
+        settings,
+        crate::ext::api_ui::new_shared(),
     );
-    assert!(!snap.normal.iter().any(|b| b.key == "ctrl+s"));
+    assert!(matches!(
+        manager.dispatch_keymap("toggle_panes"),
+        bone_protocol::KeymapDispatchKind::Builtin { .. }
+    ));
+    assert!(matches!(
+        manager.dispatch_keymap("summarize this"),
+        bone_protocol::KeymapDispatchKind::Prompt { .. }
+    ));
+    assert!(matches!(
+        manager.dispatch_keymap(&callback),
+        bone_protocol::KeymapDispatchKind::Command { ref text } if text == "/help"
+    ));
+    assert!(matches!(
+        manager.dispatch_keymap(&noop_callback),
+        bone_protocol::KeymapDispatchKind::Noop
+    ));
 }
 
 #[test]
-fn config_set_get() {
+fn canonical_namespaces_have_no_legacy_config_or_keymap_aliases() {
     let lua = lua_with_api();
     lua.load(
         r#"
-            bone.api.config.set("approval_mode", "danger")
-            assert(bone.api.config.get("approval_mode") == "danger")
-            assert(bone.config.approval_mode == "danger", "mutates the live table")
+            assert(type(bone.submit) == "function")
+            assert(type(bone.keymap.set) == "function")
+            assert(type(bone.settings.get) == "function")
+            assert(type(bone.theme.load) == "function")
+            assert(bone.config == nil)
+            assert(bone.api.submit == nil)
+            assert(bone.api.config == nil)
+            assert(bone.api.keymap == nil)
         "#,
     )
     .exec()
     .unwrap();
+}
+
+#[test]
+fn theme_list_load_and_reload_selected_theme() {
+    let root = std::env::temp_dir().join(format!(
+        "bone-lua-theme-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let themes = root.join("lua/themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    let theme_path = themes.join("ocean.lua");
+    std::fs::write(
+        &theme_path,
+        r##"return { palette = { accent = "#112233" }, thinking = "accent" }"##,
+    )
+    .unwrap();
+    let settings_path = root.join("config.yaml");
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+
+    let lua = Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    setup_api(&lua, &bone, Arc::clone(&settings), settings_path.clone()).unwrap();
+    lua.globals().set("bone", bone).unwrap();
+    lua.load(
+        r#"
+            local themes = bone.theme.list()
+            assert(#themes == 1 and themes[1] == "ocean")
+            bone.theme.load("ocean")
+        "#,
+    )
+    .exec()
+    .unwrap();
+    {
+        let store = settings.lock().unwrap();
+        assert_eq!(store.resolved().theme.name.as_deref(), Some("ocean"));
+        assert_eq!(
+            store.resolved().theme.palette.accent.as_deref(),
+            Some("#112233")
+        );
+    }
+    assert!(
+        std::fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("name: ocean")
+    );
+
+    std::fs::write(
+        &theme_path,
+        r##"return { palette = { accent = "#445566" } }"##,
+    )
+    .unwrap();
+    let lua = Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    setup_api(&lua, &bone, Arc::clone(&settings), settings_path).unwrap();
+    assert_eq!(
+        settings
+            .lock()
+            .unwrap()
+            .resolved()
+            .theme
+            .palette
+            .accent
+            .as_deref(),
+        Some("#445566")
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn settings_get_set_reset_persist_and_validate() {
+    let lua = Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+    let path = std::env::temp_dir().join(format!(
+        "bone-lua-settings-{}-{}.yaml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    setup_api(&lua, &bone, Arc::clone(&settings), path.clone()).unwrap();
+    lua.globals().set("bone", bone).unwrap();
+
+    lua.load(
+        r#"
+            assert(bone.settings.get("general.approval") == "safe")
+            bone.settings.set("general.approval", "danger")
+            assert(bone.settings.get("general.approval") == "danger")
+            assert(not pcall(bone.settings.set, "general.approval", "invalid"))
+            assert(bone.settings.get("general.approval") == "danger")
+            assert(bone.settings.reset("general.approval") == "safe")
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("approval: safe"));
+    assert_eq!(settings.lock().unwrap().resolved().general.approval, "safe");
+    let _ = std::fs::remove_file(path);
 }

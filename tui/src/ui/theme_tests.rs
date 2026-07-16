@@ -125,7 +125,7 @@ fn syntax_highlight_rebuilds_code_theme() {
     );
 
     // apply_snapshot also rebuilds.
-    let snap = crate::ext::snapshots::LuaThemeSnapshot {
+    let snap = crate::config::settings::ThemeSettings {
         syntax_string: Some("#ff00ff".to_string()),
         ..Default::default()
     };
@@ -146,7 +146,7 @@ fn structured_theme_applies_palette_shell_syntax_and_highlights() {
     let mut highlights = std::collections::BTreeMap::new();
     highlights.insert(
         "user_msg".to_string(),
-        crate::ext::snapshots::LuaStyleSpec::Style {
+        crate::config::settings::ThemeStyleSpec::Style {
             fg: Some("fg".to_string()),
             bg: Some("selection".to_string()),
             bold: None,
@@ -156,22 +156,22 @@ fn structured_theme_applies_palette_shell_syntax_and_highlights() {
     );
     highlights.insert(
         "syntax_keyword".to_string(),
-        crate::ext::snapshots::LuaStyleSpec::Color("accent".to_string()),
+        crate::config::settings::ThemeStyleSpec::Color("accent".to_string()),
     );
 
-    let snap = crate::ext::snapshots::LuaThemeSnapshot {
-        palette: crate::ext::snapshots::LuaThemePaletteSnapshot {
+    let snap = crate::config::settings::ThemeSettings {
+        palette: crate::config::settings::ThemePaletteSettings {
             fg: Some("#111111".to_string()),
             accent: Some("#222222".to_string()),
             error: Some("#333333".to_string()),
             selection: Some("#444444".to_string()),
             ..Default::default()
         },
-        shell: crate::ext::snapshots::LuaThemeShellSnapshot {
+        shell: crate::config::settings::ThemeShellSettings {
             program: Some("#555555".to_string()),
             ..Default::default()
         },
-        syntax: crate::ext::snapshots::LuaThemeSyntaxSnapshot {
+        syntax: crate::config::settings::ThemeSyntaxSettings {
             function_name: Some("#666666".to_string()),
             ..Default::default()
         },

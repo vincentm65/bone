@@ -234,32 +234,6 @@ fn custom_configs_number_field_stores_yaml_number() {
 }
 
 #[test]
-fn user_config_from_custom_configs_applies_general_settings() {
-    use bone::config::UserConfig;
-    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
-    use bone::tools::ApprovalMode;
-
-    let mut configs = CustomConfigs::default();
-    configs.pages.push((
-        "general".to_string(),
-        CustomConfigPage {
-            title: "General".to_string(),
-            fields: vec![ConfigField {
-                key: "approval_mode".to_string(),
-                label: None,
-                field_type: ConfigFieldType::Enum,
-                options: vec!["safe".into(), "edit".into(), "danger".into()],
-                default: Some(serde_yaml::Value::String("safe".into())),
-                value: Some(serde_yaml::Value::String("danger".into())),
-            }],
-        },
-    ));
-
-    let cfg = UserConfig::from_custom_configs(&configs);
-    assert_eq!(cfg.approval_mode, ApprovalMode::Danger);
-}
-
-#[test]
 fn enabled_tool_names_only_includes_true_and_unset() {
     use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
 

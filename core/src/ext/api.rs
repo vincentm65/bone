@@ -1,23 +1,15 @@
-//! `bone.api.*` — the always-available Lua runtime API (Phase 6).
+//! Canonical always-available Lua runtime APIs.
 //!
-//! Where `ctx.*` is handed to a tool/command only while it runs, `bone.api` is
-//! a stable namespace usable any time (including from `init.lua` and autocmd
-//! handlers). It is the `vim.api`-style surface for registering behavior,
-//! remapping keys, reacting to events, and reading or writing local config.
-//!
-//! This module adds the event/keymap/config slices; the UI slice lives in
-//! [`super::api_ui`]. All three hang off the same `bone.api` table.
-//!
-//! - `bone.api.autocmd(event, handler)` — alias of `bone.on`; registers a
-//!   handler for any (including custom) event.
-//! - `bone.api.emit(event, payload?)` — synchronously fire an event's handlers.
-//! - `bone.api.keymap.set/del/get` — mutate `bone.keymap` at runtime.
-//! - `bone.api.config.set/get` — mutate `bone.config` at runtime.
-//!
-//! Keymap and config changes mutate the live `bone.keymap` / `bone.config`
-//! tables; Rust captures a snapshot of both at boot.
+//! `bone.api.ui` contains low-level drawing primitives. User-facing operations
+//! live in purpose-specific namespaces such as `bone.keymap`, `bone.settings`,
+//! and `bone.theme`, or directly at `bone.submit`.
 
-use mlua::{Function, Lua, Table, Value};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
+
+use crate::config::settings::Settings;
 
 /// Get `bone.api`, creating it if absent (so ordering with `api_ui` is safe).
 fn api_table(lua: &Lua, bone: &Table) -> mlua::Result<Table> {
@@ -31,25 +23,14 @@ fn api_table(lua: &Lua, bone: &Table) -> mlua::Result<Table> {
     }
 }
 
-/// Get a named sub-table of `bone`, creating it if absent.
-fn ensure_subtable(lua: &Lua, bone: &Table, name: &str) -> mlua::Result<Table> {
-    match bone.get::<Option<Table>>(name)? {
-        Some(t) => Ok(t),
-        None => {
-            let t = lua.create_table()?;
-            bone.set(name, &t)?;
-            Ok(t)
-        }
-    }
-}
-
-/// Register `bone.api.autocmd/emit` and `bone.api.keymap.*` / `bone.api.config.*`.
-pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
+/// Register canonical runtime APIs.
+pub fn setup_api(
+    lua: &Lua,
+    bone: &Table,
+    settings: Arc<Mutex<Settings>>,
+    settings_path: PathBuf,
+) -> Result<(), String> {
     let api = api_table(lua, bone).map_err(crate::util::errstr)?;
-
-    // Ensure the live config/keymap tables exist for runtime mutation.
-    ensure_subtable(lua, bone, "config").map_err(crate::util::errstr)?;
-    ensure_subtable(lua, bone, "keymap").map_err(crate::util::errstr)?;
 
     // bone.api.autocmd = bone.on (general event registration).
     if let Some(on) = bone
@@ -78,7 +59,9 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             for h in arr.sequence_values::<Function>().flatten() {
                 // Swallow handler errors so one bad autocmd can't break emit.
                 if let Err(e) = h.call::<Value>((payload.clone(), ctx.clone())) {
-                    eprintln!("bone-lua warn: autocmd '{event}' handler error: {e}");
+                    super::ctx::runtime_warn(format!(
+                        "bone-lua warn: autocmd '{event}' handler error: {e}"
+                    ));
                 }
             }
             Ok(())
@@ -86,7 +69,7 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
         .map_err(crate::util::errstr)?;
     api.set("emit", emit).map_err(crate::util::errstr)?;
 
-    // bone.api.submit(text) — queue a prompt for the frontend to submit, like
+    // bone.submit(text) — queue a prompt for the frontend to submit, like
     // typed input. Drained between turns (or queued behind the active turn).
     let submit = lua
         .create_function(|_, text: String| {
@@ -96,98 +79,201 @@ pub fn setup_api(lua: &Lua, bone: &Table) -> Result<(), String> {
             Ok(())
         })
         .map_err(crate::util::errstr)?;
-    api.set("submit", submit).map_err(crate::util::errstr)?;
+    bone.set("submit", submit).map_err(crate::util::errstr)?;
 
-    // bone.api.keymap.{set,del,get}
+    // bone.keymap.set(key, rhs) — declarations are exposed to frontends,
+    // while rhs callbacks and classification remain daemon-owned.
     let keymap = lua.create_table().map_err(crate::util::errstr)?;
-
+    let callbacks = lua.create_table().map_err(crate::util::errstr)?;
+    bone.set("_keymap_callbacks", callbacks)
+        .map_err(crate::util::errstr)?;
+    let keymap_store = Arc::clone(&settings);
     let set = lua
-        .create_function(|lua, (mode, key, action): (String, String, String)| {
-            let bone: Table = lua.globals().get("bone")?;
-            let km: Table = match bone.get::<Option<Table>>("keymap")? {
-                Some(t) => t,
-                None => {
-                    let t = lua.create_table()?;
-                    bone.set("keymap", &t)?;
-                    t
+        .create_function(move |lua, (key, rhs): (String, Value)| {
+            if key.is_empty() {
+                return Err(mlua::Error::external("keymap key must not be empty"));
+            }
+            let action = match rhs {
+                Value::String(value) => value.to_str()?.to_string(),
+                Value::Function(callback) => {
+                    static NEXT_CALLBACK: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(1);
+                    let id = NEXT_CALLBACK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let id = id.to_string();
+                    let bone: Table = lua.globals().get("bone")?;
+                    let callbacks: Table = bone.get("_keymap_callbacks")?;
+                    callbacks.set(&*id, callback)?;
+                    format!("__cb_{id}")
+                }
+                _ => {
+                    return Err(mlua::Error::external(
+                        "keymap rhs must be a string or function",
+                    ));
                 }
             };
-            let mode_tbl: Table = match km.get::<Option<Table>>(&*mode)? {
-                Some(t) => t,
-                None => {
-                    let t = lua.create_table()?;
-                    km.set(&*mode, &t)?;
-                    t
-                }
-            };
-            mode_tbl.set(key, action)?;
+            if action.is_empty() {
+                return Err(mlua::Error::external("keymap rhs must not be empty"));
+            }
+            let mut store = keymap_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
+            let bindings = &mut store.inner.keymaps.bindings;
+            if let Some(binding) = bindings.iter_mut().find(|binding| binding.key == key) {
+                binding.action = action;
+            } else {
+                bindings.push(crate::config::settings::KeyBinding { key, action });
+            }
             Ok(())
         })
         .map_err(crate::util::errstr)?;
     keymap.set("set", set).map_err(crate::util::errstr)?;
+    bone.set("keymap", keymap).map_err(crate::util::errstr)?;
 
-    let del = lua
-        .create_function(|lua, (mode, key): (String, String)| {
-            let bone: Table = lua.globals().get("bone")?;
-            if let Some(km) = bone.get::<Option<Table>>("keymap")?
-                && let Some(mode_tbl) = km.get::<Option<Table>>(&*mode)?
-            {
-                mode_tbl.set(key, Value::Nil)?;
-            }
-            Ok(())
-        })
-        .map_err(crate::util::errstr)?;
-    keymap.set("del", del).map_err(crate::util::errstr)?;
+    setup_theme_api(lua, bone, Arc::clone(&settings), &settings_path)?;
 
+    // bone.settings.{get,set,reset} — canonical, validated, persistent settings.
+    let settings_api = lua.create_table().map_err(crate::util::errstr)?;
+
+    let get_store = Arc::clone(&settings);
     let get = lua
-        .create_function(|lua, mode: String| {
-            let bone: Table = lua.globals().get("bone")?;
-            if let Some(km) = bone.get::<Option<Table>>("keymap")?
-                && let Some(mode_tbl) = km.get::<Option<Table>>(&*mode)?
-            {
-                return Ok(mode_tbl);
-            }
-            lua.create_table()
+        .create_function(move |lua, path: String| {
+            let value = get_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
+                .get_path(&path)
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+            lua.to_value(&value)
         })
         .map_err(crate::util::errstr)?;
-    keymap.set("get", get).map_err(crate::util::errstr)?;
+    settings_api.set("get", get).map_err(crate::util::errstr)?;
 
-    api.set("keymap", keymap).map_err(crate::util::errstr)?;
-
-    // bone.api.config.{set,get}
-    let config = lua.create_table().map_err(crate::util::errstr)?;
-
-    let cset = lua
-        .create_function(|lua, (key, value): (String, Value)| {
-            let bone: Table = lua.globals().get("bone")?;
-            let cfg: Table = match bone.get::<Option<Table>>("config")? {
-                Some(t) => t,
-                None => {
-                    let t = lua.create_table()?;
-                    bone.set("config", &t)?;
-                    t
-                }
-            };
-            cfg.set(key, value)?;
+    let set_store = Arc::clone(&settings);
+    let set_path = settings_path.clone();
+    let set = lua
+        .create_function(move |lua, (path, value): (String, Value)| {
+            let value: serde_json::Value = lua.from_value(value)?;
+            set_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
+                .set_path_at(&path, value, &set_path)
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
             Ok(())
         })
         .map_err(crate::util::errstr)?;
-    config.set("set", cset).map_err(crate::util::errstr)?;
+    settings_api.set("set", set).map_err(crate::util::errstr)?;
 
-    let cget = lua
-        .create_function(|lua, key: String| {
-            let bone: Table = lua.globals().get("bone")?;
-            match bone.get::<Option<Table>>("config")? {
-                Some(cfg) => cfg.get::<Value>(key),
-                None => Ok(Value::Nil),
-            }
+    let reset_store = Arc::clone(&settings);
+    let reset = lua
+        .create_function(move |lua, path: String| {
+            let value = reset_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
+                .reset_path_at(&path, &settings_path)
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+            lua.to_value(&value)
         })
         .map_err(crate::util::errstr)?;
-    config.set("get", cget).map_err(crate::util::errstr)?;
-
-    api.set("config", config).map_err(crate::util::errstr)?;
+    settings_api
+        .set("reset", reset)
+        .map_err(crate::util::errstr)?;
+    bone.set("settings", settings_api)
+        .map_err(crate::util::errstr)?;
 
     Ok(())
+}
+
+fn setup_theme_api(
+    lua: &Lua,
+    bone: &Table,
+    settings: Arc<Mutex<Settings>>,
+    settings_path: &Path,
+) -> Result<(), String> {
+    let themes_dir = settings_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("lua/themes");
+    let theme = lua.create_table().map_err(crate::util::errstr)?;
+
+    let list_dir = themes_dir.clone();
+    let list = lua
+        .create_function(move |lua, ()| {
+            let mut names = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&list_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) == Some("lua")
+                        && let Some(name) = path.file_stem().and_then(|name| name.to_str())
+                    {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+            names.sort();
+            lua.create_sequence_from(names)
+        })
+        .map_err(crate::util::errstr)?;
+    theme.set("list", list).map_err(crate::util::errstr)?;
+
+    let load_dir = themes_dir.clone();
+    let load_store = Arc::clone(&settings);
+    let load_path = settings_path.to_path_buf();
+    let load = lua
+        .create_function(move |lua, name: String| {
+            load_theme(lua, &load_dir, &load_store, &load_path, &name)
+                .map_err(mlua::Error::external)
+        })
+        .map_err(crate::util::errstr)?;
+    theme.set("load", load).map_err(crate::util::errstr)?;
+    bone.set("theme", theme).map_err(crate::util::errstr)?;
+
+    let selected = settings
+        .lock()
+        .map_err(|e| format!("settings lock poisoned: {e}"))?
+        .resolved()
+        .theme
+        .name
+        .clone();
+    if let Some(name) = selected
+        && let Err(error) = load_theme(lua, &themes_dir, &settings, settings_path, &name)
+    {
+        super::ctx::runtime_warn_once(format!(
+            "bone-lua warn: could not reload theme '{name}': {error}"
+        ));
+    }
+    Ok(())
+}
+
+fn load_theme(
+    lua: &Lua,
+    themes_dir: &Path,
+    settings: &Arc<Mutex<Settings>>,
+    settings_path: &Path,
+    name: &str,
+) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("theme name must contain only ASCII letters, digits, '-' or '_'".into());
+    }
+    let path = themes_dir.join(format!("{name}.lua"));
+    let source = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let value = lua
+        .load(&source)
+        .set_name(path.to_string_lossy())
+        .eval::<Value>()
+        .map_err(|error| format!("failed to evaluate theme '{name}': {error}"))?;
+    let mut resolved: crate::config::settings::ThemeSettings = lua
+        .from_value(value)
+        .map_err(|error| format!("invalid theme '{name}': {error}"))?;
+    resolved.name = Some(name.to_string());
+    settings
+        .lock()
+        .map_err(|e| format!("settings lock poisoned: {e}"))?
+        .replace_theme_at(resolved, settings_path)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

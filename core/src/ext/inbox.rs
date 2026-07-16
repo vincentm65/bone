@@ -1,6 +1,6 @@
 //! Process-global submit inbox: Lua → the running frontend.
 //!
-//! `bone.api.submit(text)` queues a prompt here from any Lua context (a tool, a
+//! `bone.submit(text)` queues a prompt here from any Lua context (a tool, a
 //! command, an autocmd handler). The interactive frontend drains it on its event
 //! loop and submits it like typed input — between turns, or queued behind the
 //! active turn. This is the steering primitive behind plugins like `/btw`: Lua

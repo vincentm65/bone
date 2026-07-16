@@ -604,7 +604,7 @@ local function handle_compact(ctx)
     })
 end
 
-bone.register_command("compact", {
+bone.command.register("compact", {
     description = "Compact, preview, inspect, or protect conversation context",
     handler = function(args, ctx)
         local command, rest = trim(args):match("^(%S*)%s*(.-)$")

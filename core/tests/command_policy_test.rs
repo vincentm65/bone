@@ -369,6 +369,14 @@ fn policy_readonly_git() {
     assert_eq!(classify_command("git branch"), CommandSafety::ReadOnly);
     assert_eq!(classify_command("git show HEAD"), CommandSafety::ReadOnly);
     assert_eq!(classify_command("git ls-files"), CommandSafety::ReadOnly);
+    assert_eq!(
+        classify_command("git rev-parse --is-inside-work-tree"),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        classify_command("git rev-parse --verify HEAD"),
+        CommandSafety::ReadOnly
+    );
 }
 
 /// Shell approval ignores model classification entirely — deterministic policy wins.

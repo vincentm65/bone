@@ -156,6 +156,8 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::AppendMessage { .. }
             | RuntimeCommand::DispatchHook { .. }
             | RuntimeCommand::SetTerminalWidth { .. }
+            | RuntimeCommand::KeymapDispatch { .. }
+            | RuntimeCommand::ReloadSettings
             | RuntimeCommand::ReloadExtensions => {}
         }
     }

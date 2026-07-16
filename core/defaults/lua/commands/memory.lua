@@ -366,7 +366,7 @@ bone.on("before_turn", function(_, ctx)
     return nil
 end)
 
-bone.register_command("memory", {
+bone.command.register("memory", {
     description = "Quietly update global and project memory from recent conversations.",
     handler = function(arg, ctx)
         local p = paths(ctx)

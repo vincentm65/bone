@@ -11,27 +11,17 @@ use super::{App, BoneTerminal};
 
 impl App {
     /// Look up a keymap binding for the given key combo.
-    /// Returns the action name if found in the current mode.
+    /// Returns the configured action for the given key combo.
     pub(super) fn lookup_keymap(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<String> {
-        let mode = if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
-            "n"
-        } else {
-            "i"
-        };
-
-        let bindings = match mode {
-            "n" => &self.lua_keymap.normal,
-            "i" => &self.lua_keymap.insert,
-            _ => return None,
-        };
-
-        for binding in bindings {
+        for binding in &self.keymaps.bindings {
             if key_matches(&binding.key, code, modifiers) {
                 return Some(binding.action.clone());
             }
         }
-        if mode == "i"
-            && code == KeyCode::Char('v')
+
+        // Hard-coded fallback: paste image on Ctrl+V / Alt+V (mimics the
+        // default insert binding users expect without explicit configuration).
+        if code == KeyCode::Char('v')
             && (modifiers == KeyModifiers::CONTROL
                 || modifiers == KeyModifiers::ALT
                 || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT))
@@ -41,13 +31,46 @@ impl App {
         None
     }
 
-    /// Execute a keymap action.
+    /// Ask the daemon to resolve and execute a keymap rhs, then apply its
+    /// frontend-facing result.
     pub(super) async fn handle_keymap_action(
         &mut self,
         action: String,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        match action.as_str() {
+        self.command_tx
+            .send(crate::runtime::RuntimeCommand::KeymapDispatch { action })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "runtime disconnected"))?;
+        let kind = loop {
+            let event =
+                self.events_rx.recv().await.map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "runtime disconnected")
+                })?;
+            if let crate::runtime::RuntimeEvent::KeymapDispatched { kind } = event {
+                break kind;
+            }
+            self.apply_idle_event(event);
+        };
+        match kind {
+            bone_protocol::KeymapDispatchKind::Noop => Ok(()),
+            bone_protocol::KeymapDispatchKind::Builtin { action } => {
+                self.handle_builtin_keymap_action(&action, term)
+            }
+            bone_protocol::KeymapDispatchKind::Command { text }
+            | bone_protocol::KeymapDispatchKind::Prompt { text } => {
+                self.input.buffer = text;
+                self.input.cursor_pos = self.input.buffer.chars().count();
+                self.send_message(term).await
+            }
+        }
+    }
+
+    fn handle_builtin_keymap_action(
+        &mut self,
+        action: &str,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        match action {
             "toggle_panes" => {
                 self.panes_visible = !self.panes_visible;
                 self.redraw(term)
@@ -76,7 +99,9 @@ impl App {
                 self.redraw(term)
             }
             other => {
-                eprintln!("bone-lua warn: unknown keymap action '{other}'; ignoring");
+                bone_core::ext::ctx::runtime_warn_once(format!(
+                    "bone-lua warn: unknown keymap action '{other}'; ignoring"
+                ));
                 self.redraw(term)
             }
         }

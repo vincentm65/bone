@@ -7,7 +7,7 @@ use crate::ui::render::InputPreset;
 
 #[test]
 fn config_preset_override_preserves_explicit_lua_input_customization() {
-    let snapshot = crate::ext::snapshots::LuaInputStyleSnapshot {
+    let snapshot = crate::ext::snapshots::InputStyleSnapshot {
         preset: Some("lines".into()),
         prefix: Some("λ ".into()),
         horizontal_padding: Some(3),
@@ -27,7 +27,7 @@ fn config_preset_override_preserves_explicit_lua_input_customization() {
     assert!(!filled.fill);
 
     let box_defaults = configured_input_style(
-        &crate::ext::snapshots::LuaInputStyleSnapshot::default(),
+        &crate::ext::snapshots::InputStyleSnapshot::default(),
         Some("box"),
     );
     assert_eq!(box_defaults.preset, InputPreset::Box);

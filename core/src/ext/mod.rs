@@ -78,6 +78,9 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         return false;
     };
     existing.contains("ctx.ui.interact")
+        // Refresh bundled extensions that use the pre-namespace registration API.
+        || existing.contains("bone.register_tool")
+        || existing.contains("bone.register_command")
         // Refresh menus predating the pane migration or current option-row styling.
         || (name == "ui/menu.lua"
             && (!existing.contains("require(\"ui.pane\")")
@@ -203,7 +206,10 @@ fn seed_default_lua(
     force: bool,
 ) {
     if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("bone: warning: could not create {}: {e}", dir.display());
+        ctx::runtime_warn(format!(
+            "bone: warning: could not create {}: {e}",
+            dir.display()
+        ));
         return;
     }
     for (name, content) in bundled {
@@ -216,13 +222,19 @@ fn seed_default_lua(
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
-            eprintln!("bone: warning: could not create {}: {e}", parent.display());
+            ctx::runtime_warn(format!(
+                "bone: warning: could not create {}: {e}",
+                parent.display()
+            ));
             continue;
         }
         if (force || !path.exists() || should_refresh_seeded_lua(&path, name))
             && let Err(e) = std::fs::write(&path, content)
         {
-            eprintln!("bone: warning: could not write {}: {e}", path.display());
+            ctx::runtime_warn(format!(
+                "bone: warning: could not write {}: {e}",
+                path.display()
+            ));
         }
     }
 }

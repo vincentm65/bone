@@ -611,10 +611,16 @@ async fn daemon_runs_registered_command_over_socket() {
     std::fs::write(
         cmd_dir.join("echo.lua"),
         r#"
-bone.register_command("echo", {
+bone.command.register("echo", {
   description = "echo back the input",
   handler = function(input, ctx)
     return { display = "echo: " .. input, submit = false }
+  end,
+})
+bone.command.register("restart", {
+  description = "request restart feedback",
+  handler = function(_input, _ctx)
+    return { action = "config.apply_restart_required", submit = false }
   end,
 })
 "#,
@@ -679,9 +685,37 @@ bone.register_command("echo", {
     .await
     .expect("command did not complete");
 
-    std::fs::remove_dir_all(&config_dir).ok();
     assert_eq!(result.0, "echo: hi", "daemon ran the command in its VM");
     assert!(!result.1, "echo is a display command, not a submit");
+
+    client
+        .command_sender()
+        .send(RuntimeCommand::RunCommand {
+            name: "restart".into(),
+            input: String::new(),
+        })
+        .unwrap();
+    let restart = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let RuntimeEvent::CommandComplete { output, action, .. } =
+                events.recv().await.unwrap()
+            {
+                break (output, action);
+            }
+        }
+    })
+    .await
+    .expect("restart-reporting command did not complete");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+    assert_eq!(
+        restart.0,
+        "Configuration saved. Restart required for tool/command changes."
+    );
+    assert!(matches!(
+        restart.1.and_then(|action| action.config_action),
+        Some(bone_protocol::ConfigAction::ApplyRestartRequired)
+    ));
 }
 
 /// A registered command whose handler returns a no-op (`{ submit = false }`
@@ -707,7 +741,7 @@ async fn registered_command_with_noop_return_is_not_unknown() {
     std::fs::write(
         cmd_dir.join("noop.lua"),
         r#"
-bone.register_command("noop", {
+bone.command.register("noop", {
   description = "do work, return nothing to submit",
   handler = function(_input, _ctx)
     return { submit = false }
@@ -788,12 +822,13 @@ bone.register_command("noop", {
 }
 
 /// `frontend_state` packages the daemon VM's boot-time display state (banner,
-/// theme, keymap, command-list, config) into a `FrontendState` event so a
-/// VM-less frontend can render the user's customizations over the wire. Boots a
-/// real ExtensionManager from a temp config dir whose `init.lua` sets a theme
-/// color, a banner, and registers a command, then asserts the event carries them.
+/// resolved settings, command-list, and tool metadata) into a `FrontendState`
+/// event so a VM-less frontend can render the user's customizations over the
+/// wire. Boots a real ExtensionManager whose `init.lua` sets a dynamic
+/// highlight, a banner, and registers a command, then asserts the event carries
+/// them.
 #[tokio::test]
-async fn frontend_state_carries_theme_banner_and_commands() {
+async fn frontend_state_carries_settings_banner_and_commands() {
     let config_dir = std::env::temp_dir().join(format!(
         "bone-frontend-{}-{}",
         std::process::id(),
@@ -803,14 +838,13 @@ async fn frontend_state_carries_theme_banner_and_commands() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&config_dir).unwrap();
-    // init.lua: a theme color, a banner, and a registered command.
+    // init.lua: a dynamic highlight, a banner, and a registered command.
     std::fs::write(
         config_dir.join("init.lua"),
         r##"
-bone.theme = bone.theme or {}
-bone.theme.tool_call = "#FF0000"
+bone.api.ui.set_highlight("tool_call", "#FF0000")
 function bone.banner() return { "hello from the daemon" } end
-bone.register_command("ping", {
+bone.command.register("ping", {
   description = "pong",
   handler = function(_i, _c) return { submit = false } end,
 })
@@ -836,7 +870,7 @@ bone.register_command("ping", {
 
     let RuntimeEvent::FrontendState {
         banner,
-        theme,
+        settings,
         commands,
         tool_defs,
         ..
@@ -855,19 +889,21 @@ bone.register_command("ping", {
         banner.contains("hello from the daemon"),
         "banner from bone.banner() must cross the wire, got {banner:?}"
     );
-    assert_eq!(
-        theme.get("tool_call").and_then(|v| v.as_str()),
-        Some("#FF0000"),
-        "theme color must be serialized into the event"
+    let resolved: bone_core::ext::snapshots::ResolvedFrontendSettings =
+        serde_json::from_value(settings).expect("resolved settings JSON deserializes");
+    assert!(matches!(
+        resolved.settings.theme.highlights.get("tool_call"),
+        Some(bone_core::config::settings::ThemeStyleSpec::Color(color)) if color == "#FF0000"
+    ));
+    assert!(
+        resolved
+            .spinner_styles
+            .iter()
+            .any(|preset| preset.name == "braille" && !preset.frames.is_empty()),
+        "renderer presets must travel in the unified settings snapshot"
     );
     assert!(
         commands.iter().any(|(n, d)| n == "ping" && d == "pong"),
         "registered command must be listed for autocomplete, got {commands:?}"
     );
-
-    // The client's `apply_frontend_state` deserializes the JSON blob back into
-    // the same `Lua*Snapshot` type the boot path uses — prove that round-trips.
-    let theme_snap: bone_core::ext::snapshots::LuaThemeSnapshot =
-        serde_json::from_value(theme).expect("theme JSON deserializes back to LuaThemeSnapshot");
-    assert_eq!(theme_snap.tool_call.as_deref(), Some("#FF0000"));
 }

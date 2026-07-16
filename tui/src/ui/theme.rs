@@ -334,25 +334,33 @@ impl Theme {
         true
     }
 
-    fn apply_highlight_spec(&mut self, name: &str, spec: &crate::ext::snapshots::LuaStyleSpec) {
+    fn apply_highlight_spec(&mut self, name: &str, spec: &crate::config::settings::ThemeStyleSpec) {
         match spec {
-            crate::ext::snapshots::LuaStyleSpec::Color(s) => {
+            crate::config::settings::ThemeStyleSpec::Color(s) => {
                 if let Some(c) = self.resolve_color_ref(s) {
                     if !self.set_named_color(name, c) {
-                        eprintln!("bone-lua warn: unknown highlight group: {name}");
+                        bone_core::ext::ctx::runtime_warn_once(format!(
+                            "bone-lua warn: unknown highlight group: {name}"
+                        ));
                     }
                 } else {
-                    eprintln!("bone-lua warn: invalid highlight color for {name}: {s}");
+                    bone_core::ext::ctx::runtime_warn_once(format!(
+                        "bone-lua warn: invalid highlight color for {name}: {s}"
+                    ));
                 }
             }
-            crate::ext::snapshots::LuaStyleSpec::Style { fg, bg, .. } => {
+            crate::config::settings::ThemeStyleSpec::Style { fg, bg, .. } => {
                 if let Some(fg) = fg {
                     if let Some(c) = self.resolve_color_ref(fg) {
                         if !self.set_named_color(name, c) {
-                            eprintln!("bone-lua warn: unknown highlight group: {name}");
+                            bone_core::ext::ctx::runtime_warn_once(format!(
+                                "bone-lua warn: unknown highlight group: {name}"
+                            ));
                         }
                     } else {
-                        eprintln!("bone-lua warn: invalid highlight fg for {name}: {fg}");
+                        bone_core::ext::ctx::runtime_warn_once(format!(
+                            "bone-lua warn: invalid highlight fg for {name}: {fg}"
+                        ));
                     }
                 }
                 if let Some(bg) = bg {
@@ -364,24 +372,27 @@ impl Theme {
                         };
                         if let Some(bg_name) = bg_name {
                             if !self.set_named_color(bg_name, c) {
-                                eprintln!("bone-lua warn: unknown highlight bg group: {bg_name}");
+                                bone_core::ext::ctx::runtime_warn_once(format!(
+                                    "bone-lua warn: unknown highlight bg group: {bg_name}"
+                                ));
                             }
                         } else {
-                            eprintln!("bone-lua warn: highlight has no bg role: {name}");
+                            bone_core::ext::ctx::runtime_warn_once(format!(
+                                "bone-lua warn: highlight has no bg role: {name}"
+                            ));
                         }
                     } else {
-                        eprintln!("bone-lua warn: invalid highlight bg for {name}: {bg}");
+                        bone_core::ext::ctx::runtime_warn_once(format!(
+                            "bone-lua warn: invalid highlight bg for {name}: {bg}"
+                        ));
                     }
                 }
             }
         }
     }
 
-    /// Apply a Lua theme snapshot, overriding defaults with set values.
-    ///
-    /// This is the UI boundary where raw color strings (stored in the snapshot)
-    /// are parsed into `ratatui::style::Color` values.
-    pub fn apply_snapshot(&mut self, snap: &crate::ext::snapshots::LuaThemeSnapshot) {
+    /// Apply resolved theme settings, overriding defaults with set values.
+    pub fn apply_snapshot(&mut self, snap: &crate::config::settings::ThemeSettings) {
         let mut theme = Theme::default();
         macro_rules! apply_palette {
             ($field:ident) => {
@@ -389,10 +400,10 @@ impl Theme {
                     if let Some(c) = theme.resolve_color_ref(s) {
                         theme.palette.$field = c;
                     } else {
-                        eprintln!(
+                        bone_core::ext::ctx::runtime_warn_once(format!(
                             "bone-lua warn: invalid theme palette color for {}: {s}",
                             stringify!($field)
-                        );
+                        ));
                     }
                 }
             };
@@ -400,7 +411,9 @@ impl Theme {
         if let Some(ref s) = snap.palette.bg {
             match theme.resolve_color_ref(s) {
                 Some(c) => theme.palette.bg = Some(c),
-                None => eprintln!("bone-lua warn: invalid theme palette color for bg: {s}"),
+                None => bone_core::ext::ctx::runtime_warn_once(format!(
+                    "bone-lua warn: invalid theme palette color for bg: {s}"
+                )),
             }
         }
         apply_palette!(fg);
@@ -420,10 +433,10 @@ impl Theme {
                     if let Some(c) = theme.resolve_color_ref(s) {
                         theme.$target = c;
                     } else {
-                        eprintln!(
+                        bone_core::ext::ctx::runtime_warn_once(format!(
                             "bone-lua warn: invalid theme color for {}: {s}",
                             stringify!($target)
-                        );
+                        ));
                     }
                 }
             };
@@ -526,7 +539,9 @@ impl Theme {
                             true
                         }
                         None => {
-                            eprintln!("bone-lua warn: invalid highlight color for {name}: {s}");
+                            bone_core::ext::ctx::runtime_warn_once(format!(
+                                "bone-lua warn: invalid highlight color for {name}: {s}"
+                            ));
                             false
                         }
                     },
@@ -546,7 +561,9 @@ impl Theme {
                             true
                         }
                         None => {
-                            eprintln!("bone-lua warn: invalid highlight color for {name}: {s}");
+                            bone_core::ext::ctx::runtime_warn_once(format!(
+                                "bone-lua warn: invalid highlight color for {name}: {s}"
+                            ));
                             false
                         }
                     },
@@ -598,7 +615,9 @@ impl Theme {
             "syntax_markup" => set!(syntax_markup),
             "syntax_invalid" => set!(syntax_invalid),
             other => {
-                eprintln!("bone-lua warn: unknown highlight group: {other}");
+                bone_core::ext::ctx::runtime_warn_once(format!(
+                    "bone-lua warn: unknown highlight group: {other}"
+                ));
                 false
             }
         };

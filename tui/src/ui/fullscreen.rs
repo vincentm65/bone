@@ -35,7 +35,9 @@ impl Drop for RawModeGuard {
         if !self.was_enabled
             && let Err(e) = crossterm::terminal::disable_raw_mode()
         {
-            eprintln!("bone: warning: failed to disable raw mode: {e}");
+            bone_core::ext::ctx::runtime_warn(format!(
+                "bone: warning: failed to disable raw mode: {e}"
+            ));
         }
     }
 }

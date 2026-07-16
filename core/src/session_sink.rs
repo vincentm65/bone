@@ -136,7 +136,9 @@ impl UsageOnlySessionSink {
         let db = match SessionDb::open(&db_path()) {
             Ok(db) => Some(db),
             Err(e) => {
-                eprintln!("bone: warning: session db open failed (usage-only sink): {e}");
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone: warning: session db open failed (usage-only sink): {e}"
+                ));
                 None
             }
         };
@@ -163,7 +165,7 @@ impl UsageOnlySessionSink {
 
     fn note_failure(&self, op: &str, err: &rusqlite::Error) {
         self.failures.fetch_add(1, Ordering::Relaxed);
-        eprintln!("bone: warning: session db {op} failed: {err}");
+        crate::ext::ctx::runtime_warn(format!("bone: warning: session db {op} failed: {err}"));
     }
 }
 

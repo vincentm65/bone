@@ -61,24 +61,6 @@ fn wrap_plain_line(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// How many visual lines does `text` need at `width` display columns?
-/// Handles hard newlines and uses Unicode display width (correct for CJK).
-pub fn visual_line_count(text: &str, width: usize) -> usize {
-    let width = width.max(1);
-    if text.is_empty() {
-        return 1;
-    }
-    text.split('\n')
-        .map(|line| {
-            if line.is_empty() {
-                return 1;
-            }
-            let w = UnicodeWidthStr::width(line);
-            w.div_ceil(width).max(1)
-        })
-        .sum()
-}
-
 /// Return a byte index that fits within `width`, preferring the last whitespace break.
 fn take_breakable_width(text: &str, width: usize) -> usize {
     let hard = take_width(text, width);

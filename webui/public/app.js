@@ -381,7 +381,7 @@ function dispatchEvent(ev) {
 function onFrontendState(ev) {
   if (Array.isArray(ev.tool_defs)) state.toolDefs = ev.tool_defs;
   if (Array.isArray(ev.commands)) state.commands = ev.commands;
-  applyTheme(ev.theme);
+  applyTheme(ev.settings?.theme);
 }
 
 function plainTerminalText(text) {
@@ -398,7 +398,10 @@ async function applyCommandAction(action) {
   }
   const config = action.config_action;
   if (config === "reload_tools") await send("reload_extensions");
-  else if (config === "apply") await send({ switch_provider: { provider_id: state.providerId } });
+  else if (config === "apply" || config === "apply_restart_required") {
+    await send("reload_settings");
+    await send({ switch_provider: { provider_id: state.providerId } });
+  }
   else if (config?.switch_provider?.id) await send({ switch_provider: { provider_id: config.switch_provider.id } });
 }
 
@@ -751,7 +754,7 @@ function formatToolOutput(s) {
 // ── sub-agents ────────────────────────────────────────────────────────────────
 //
 // The runtime's `subagent` tool dispatches tasks to agents registered via
-// bone.register_subagent in init.lua. There is no dedicated protocol: calls
+// bone.subagent.register in init.lua. There is no dedicated protocol: calls
 // arrive as ordinary tool_call/tool_result events, and results of background
 // (non-blocking) dispatches are injected by the daemon as an automated turn.
 // We give the call a dedicated card — one row per dispatched task with a live
@@ -827,7 +830,7 @@ function applySubagentResult(card, content) {
 // The daemon injects finished background job results as an automated turn (see
 // rpc's next_background_prompt). No dedicated event exists, but an injected
 // turn is the only turn this client didn't submit itself — use that to flip
-// lingering background rows to done. (A bone.api.submit prompt also matches;
+// lingering background rows to done. (A bone.submit prompt also matches;
 // resolving on it is harmless since those rows' jobs report via injection too.)
 function resolveBackgroundAgents() {
   if (!bgAgentRows.length) return;
@@ -1755,8 +1758,9 @@ function parseTaskLines(lines) {
 }
 function applyTheme(theme) {
   if (prefs.theme !== "auto" || !theme) return;
-  const hi = theme.highlights || theme;
-  const accent = hi.tool_call?.fg || hi.accent?.fg;
+  const hi = theme.highlights || {};
+  const color = (value) => typeof value === "string" ? value : value?.fg;
+  const accent = color(hi.tool_call) || color(theme.tool_call) || theme.palette?.accent;
   if (typeof accent === "string" && /^#/.test(accent)) document.documentElement.style.setProperty("--accent", accent);
 }
 
@@ -2445,7 +2449,7 @@ function renderTools() {
   if (!state.toolDefs.length) { wrap.appendChild(el("div", "set-desc", "Tool list loads once connected.")); return; }
   const disabled = new Set(configCache.toolsDisabled || []);
   // Registered sub-agents (from the subagent tool's dynamic description).
-  // Read-only here — they're defined in init.lua via bone.register_subagent;
+  // Read-only here — they're defined in init.lua via bone.subagent.register;
   // the subagent entry in the tool list below toggles the whole feature.
   const agents = registeredAgents();
   if (agents.length) {

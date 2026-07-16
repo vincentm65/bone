@@ -1,6 +1,6 @@
 use super::{
-    ChatEvent, ChatRequest, OpenAiCompatProvider, cached_tokens_from_usage, openai_messages,
-    openai_tools, process_sse_chunk, stream_usage_enabled,
+    ChatEvent, ChatRequest, OpenAiCompatProvider, cached_tokens_from_usage, flush_stream_end,
+    openai_messages, openai_tools, process_sse_chunk, stream_usage_enabled,
 };
 use crate::llm::{ChatMessage, ChatRole, ImageData};
 use std::collections::BTreeMap;
@@ -30,6 +30,31 @@ fn reads_deepseek_style_top_level_cache_hit_tokens() {
 fn no_cache_field_yields_none() {
     let usage = serde_json::json!({ "prompt_tokens": 100 });
     assert_eq!(cached_tokens_from_usage(&usage), None);
+}
+
+#[test]
+fn stream_end_emits_captured_usage_once() {
+    let mut partial_tool_calls = BTreeMap::new();
+    let mut usage = Some(serde_json::json!({
+        "prompt_tokens": 42,
+        "completion_tokens": 7,
+        "prompt_cache_hit_tokens": 30,
+        "cost": 0.001,
+    }));
+
+    let events = flush_stream_end(&mut partial_tool_calls, &mut usage);
+    assert!(usage.is_none());
+    assert!(matches!(
+        events.as_slice(),
+        [ChatEvent::TokenUsage {
+            prompt_tokens: 42,
+            completion_tokens: 7,
+            cached_tokens: Some(30),
+            cost: Some(cost),
+        }] if (*cost - 0.001).abs() < f64::EPSILON
+    ));
+
+    assert!(flush_stream_end(&mut partial_tool_calls, &mut usage).is_empty());
 }
 
 #[test]

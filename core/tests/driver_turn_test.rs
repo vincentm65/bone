@@ -867,6 +867,88 @@ impl LlmProvider for CapturingProvider {
 }
 
 #[tokio::test]
+async fn driver_propagates_parent_context_to_lua_tools() {
+    let config_dir = common::temp_dir("driver-lua-tool-context");
+    let tools_dir = config_dir.join("lua/tools");
+    std::fs::create_dir_all(&tools_dir).unwrap();
+    std::fs::write(
+        tools_dir.join("inspect_context.lua"),
+        r#"
+bone.tool.register({
+  name = "inspect_context",
+  description = "returns the live parent context",
+  safety = "read_only",
+  parameters = { type = "object", properties = {} },
+  execute = function(_args, ctx)
+    local info = ctx.runtime.info()
+    return tostring(info.session_id) .. ":" .. tostring(info.provider) .. ":" .. tostring(info.model)
+  end,
+})
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        BootOptions::default(),
+        "boot-model",
+        "BootProvider",
+    );
+    let prompt = "inspect";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-ctx".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![ChatEvent::ToolCall(ToolCall {
+                id: "ctx-1".into(),
+                name: "inspect_context".into(),
+                arguments: serde_json::json!({}),
+            })],
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: booted.manager,
+        tools: booted.tools,
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: Some(77),
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
+    };
+
+    driver.run(prompt).await.expect("driver run");
+
+    let captured = llm.captured.lock().unwrap();
+    let tool_result = captured[1]
+        .iter()
+        .find(|message| message.role == ChatRole::Tool)
+        .expect("second request contains Lua tool result");
+    assert_eq!(tool_result.content, "77:mock:mock-ctx");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[tokio::test]
 async fn driver_keeps_tool_preamble_as_assistant_content() {
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];

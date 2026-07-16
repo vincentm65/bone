@@ -8,12 +8,17 @@ use super::ctx::SharedState;
 use super::engine;
 use super::lua_tool::LuaTool;
 use super::types::{BootOptions, BootResult, ExtensionManager};
+use crate::config::settings::Settings;
+
+fn log_boot_warning(config_dir: &Path, message: impl std::fmt::Display) {
+    super::ctx::lua_log(&config_dir.to_string_lossy(), "warn", &message.to_string());
+}
 
 /// Boot the Lua extension system.
 ///
 /// 1. Creates the Lua VM with the `bone` global table.
 /// 2. Executes `~/.bone-rust/init.lua` if it exists.
-/// 3. Collects any tools registered via `bone.register_tool()`.
+/// 3. Collects any tools registered via `bone.tool.register()`.
 /// 4. Returns a `BootResult` owning the Lua VM and registered tools.
 ///
 /// Errors during Lua construction or init.lua execution are logged and
@@ -32,6 +37,29 @@ pub fn boot(
     // TUI can drain diffs even while a tool blocks on ctx.ui.key().
     let shared_ui = super::api_ui::new_shared();
 
+    // Load the canonical resolved settings (shared between engine and manager).
+    let settings = match Settings::load() {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            let s = Settings::migrate_from_pages(&[]);
+            if let Err(e) = s.save() {
+                log_boot_warning(
+                    config_dir,
+                    format_args!("could not write canonical settings: {e}"),
+                );
+            }
+            s
+        }
+        Err(e) => {
+            log_boot_warning(
+                config_dir,
+                format_args!("could not load canonical settings: {e}"),
+            );
+            Settings::defaults()
+        }
+    };
+    let settings_arc = Arc::new(Mutex::new(settings));
+
     let lua = match engine::create_engine(
         version,
         cwd,
@@ -40,10 +68,11 @@ pub fn boot(
         model,
         provider,
         shared_ui.clone(),
+        settings_arc.clone(),
     ) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("bone: warning: Lua engine creation failed: {e}");
+            log_boot_warning(config_dir, format_args!("Lua engine creation failed: {e}"));
             return BootResult {
                 manager: ExtensionManager::unloaded(),
                 tools: Vec::new(),
@@ -60,7 +89,7 @@ pub fn boot(
     let loaded = match engine::run_init(&lua, config_dir) {
         Ok(loaded) => loaded,
         Err(e) => {
-            eprintln!("bone: warning: init.lua failed: {e}");
+            log_boot_warning(config_dir, format_args!("init.lua failed: {e}"));
             false
         }
     };
@@ -91,13 +120,13 @@ pub fn boot(
     if let Err(e) =
         super::run_lua_tool_files(&lua, &config_dir.join("lua/tools"), tool_allow.as_ref())
     {
-        eprintln!("bone: warning: Lua tools failed: {e}");
+        log_boot_warning(config_dir, format_args!("Lua tools failed: {e}"));
     }
     if !subagent
         && let Err(e) =
             super::run_lua_command_files(&lua, &config_dir.join("lua/commands"), cmd_allow.as_ref())
     {
-        eprintln!("bone: warning: Lua commands failed: {e}");
+        log_boot_warning(config_dir, format_args!("Lua commands failed: {e}"));
     }
 
     // Conversation-scoped ctx.state map: one Arc per boot so concurrent session
@@ -112,19 +141,12 @@ pub fn boot(
 
     let commands = collect_commands(&lua_arc);
 
-    // Collect Lua config, theme, and keymap snapshots.
-    let config_snapshot = collect_config_snapshot(&lua_arc);
-    let theme_snapshot = collect_theme_snapshot(&lua_arc);
-    let keymap_snapshot = collect_keymap_snapshot(&lua_arc);
-
     let manager = ExtensionManager::from_arc(
         lua_arc,
         true, // engine_ok
         loaded,
         commands,
-        config_snapshot,
-        theme_snapshot,
-        keymap_snapshot,
+        settings_arc,
         shared_ui,
     );
     BootResult {
@@ -149,7 +171,7 @@ fn with_bone<T: Default>(
     let lua = match lua_arc.lock() {
         Ok(guard) => guard,
         Err(e) => {
-            eprintln!("bone: warning: Lua mutex poisoned: {e}");
+            super::ctx::runtime_warn(format!("bone: warning: Lua mutex poisoned: {e}"));
             return T::default();
         }
     };
@@ -191,7 +213,7 @@ fn collect_tools(
                 shared_ui.clone(),
             ) {
                 Ok(tool) => tools.push(tool),
-                Err(e) => eprintln!("bone: warning: {e}"),
+                Err(e) => super::ctx::runtime_warn_once(format!("bone: warning: {e}")),
             }
         }
 
@@ -220,12 +242,16 @@ fn collect_commands(
                 Ok(mlua::Value::String(s)) => match s.to_str() {
                     Ok(s) => s.to_string(),
                     Err(_) => {
-                        eprintln!("bone: warning: command has invalid UTF-8; skipping");
+                        super::ctx::runtime_warn_once(
+                            "bone: warning: command has invalid UTF-8; skipping",
+                        );
                         continue;
                     }
                 },
                 _ => {
-                    eprintln!("bone: warning: command entry missing name; skipping");
+                    super::ctx::runtime_warn_once(
+                        "bone: warning: command entry missing name; skipping",
+                    );
                     continue;
                 }
             };
@@ -244,60 +270,6 @@ fn collect_commands(
         }
 
         commands
-    })
-}
-
-/// Collect `bone.config` snapshot from Lua.
-fn collect_config_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaConfigSnapshot {
-    with_bone(lua_arc, |lua, bone_table| {
-        let mut snapshot = match bone_table.get::<Option<mlua::Table>>("config") {
-            Ok(Some(t)) => match super::snapshots::LuaConfigSnapshot::from_lua_table(lua, &t) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("bone-lua warn: config snapshot failed: {e}");
-                    super::snapshots::LuaConfigSnapshot::default()
-                }
-            },
-            _ => super::snapshots::LuaConfigSnapshot::default(),
-        };
-
-        // Spinner/text presets come from the seeded ui.spinners lib, not bone.config.
-        let (spinners, texts) = super::snapshots::collect_presets(lua);
-        snapshot.spinners = spinners;
-        snapshot.texts = texts;
-        snapshot
-    })
-}
-
-/// Collect `bone.theme` snapshot from Lua.
-fn collect_theme_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaThemeSnapshot {
-    with_bone(lua_arc, |lua, bone_table| {
-        match bone_table.get::<Option<mlua::Table>>("theme") {
-            Ok(Some(t)) => match super::snapshots::LuaThemeSnapshot::from_lua_table(lua, &t) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("bone-lua warn: theme snapshot failed: {e}");
-                    super::snapshots::LuaThemeSnapshot::default()
-                }
-            },
-            _ => super::snapshots::LuaThemeSnapshot::default(),
-        }
-    })
-}
-
-/// Collect `bone.keymap` snapshot from Lua.
-fn collect_keymap_snapshot(lua_arc: &Arc<Mutex<mlua::Lua>>) -> super::snapshots::LuaKeymapSnapshot {
-    with_bone(lua_arc, |lua, bone_table| {
-        match bone_table.get::<Option<mlua::Table>>("keymap") {
-            Ok(Some(t)) => match super::snapshots::LuaKeymapSnapshot::from_lua_table(lua, &t) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("bone-lua warn: keymap snapshot failed: {e}");
-                    super::snapshots::LuaKeymapSnapshot::default()
-                }
-            },
-            _ => super::snapshots::LuaKeymapSnapshot::default(),
-        }
     })
 }
 

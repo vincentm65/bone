@@ -49,14 +49,13 @@ fn unloaded_has_no_commands() {
 }
 
 #[test]
-fn unloaded_snapshots_are_defaults() {
-    // Snapshots reflect empty/default boot state, not a loaded config.
-    let m = ExtensionManager::unloaded();
-    assert!(m.config_snapshot().approval_mode.is_none());
-    assert!(m.config_snapshot().status_show.is_empty());
-    assert!(m.theme_snapshot().user_msg.is_none());
-    assert!(m.keymap_snapshot().normal.is_empty());
-    assert!(m.keymap_snapshot().insert.is_empty());
+fn unloaded_settings_are_defaults() {
+    let resolved = ExtensionManager::unloaded().frontend_settings();
+    let settings = resolved.settings;
+    assert_eq!(settings.general.approval, "safe");
+    assert!(settings.ui.status_show_model);
+    assert!(settings.theme.highlights.is_empty());
+    assert!(settings.keymaps.bindings.is_empty());
 }
 
 #[test]

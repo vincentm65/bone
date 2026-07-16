@@ -259,6 +259,13 @@ fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
 }
 
+fn approval_mode(value: &str) -> bone::tools::ApprovalMode {
+    match value {
+        "danger" => bone::tools::ApprovalMode::Danger,
+        _ => bone::tools::ApprovalMode::Safe,
+    }
+}
+
 /// Resolve when stdin reaches EOF. Parent-managed `bone serve` processes can
 /// opt into this so they shut down when the parent closes their stdin pipe.
 async fn wait_stdin_eof() {
@@ -353,10 +360,6 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");
 
-    let approval_mode = match custom.get_value("general", "approval_mode").as_str() {
-        "danger" => bone::tools::ApprovalMode::Danger,
-        _ => bone::tools::ApprovalMode::Safe,
-    };
     let (session_manager, manager_rx) = bone::rpc::SessionManager::new();
     let factory_provider = provider.clone();
     let factory = move |target: bone::rpc::SessionTarget| {
@@ -364,6 +367,9 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         // The provider HTTP client is safe to share and each actor may still
         // switch its own provider later through the existing command.
         let mut custom = CustomConfigs::load();
+        // Read this per actor, not once when `bone serve` starts: settings may
+        // change while the server stays alive.
+        let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
         let mut boot = boot_runtime_host_for(factory_provider.clone(), &mut custom, target)
             .map_err(|err| err.to_string())?;
         let conversation_id = boot
@@ -436,7 +442,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             None,
             true,
             // Remote clients of `bone serve` cannot self-inject background
-            // sub-agent results / `bone.api.submit` prompts, so the daemon does.
+            // sub-agent results / `bone.submit` prompts, so the daemon does.
             true,
         ));
         Ok(bone::rpc::ManagedRuntime {
@@ -804,7 +810,9 @@ async fn main() -> std::io::Result<()> {
 
     // Normal TUI mode
     let mut custom = CustomConfigs::load();
-    let cfg = UserConfig::from_custom_configs(&custom);
+    let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
+    // Frontend settings arrive from the daemon-owned FrontendState snapshot.
+    let cfg = UserConfig::default();
     let mut providers_config = custom.derive_providers_config();
 
     let cli_options = parse_cli_options(&args).map_err(std::io::Error::other)?;
@@ -901,7 +909,7 @@ async fn main() -> std::io::Result<()> {
                 boot.provider,
                 boot.manager,
                 boot.session,
-                bone::tools::ApprovalMode::Safe,
+                approval_mode,
                 None,
                 true, // forward view diffs: the TUI is a pure client
                 // The in-process TUI drains background jobs / inbox itself

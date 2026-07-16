@@ -415,19 +415,15 @@ impl Drop for RemoteClient {
     }
 }
 
-/// Build the [`RuntimeEvent::FrontendState`] carrying the daemon VM's boot-time
-/// display state (theme/keymap/banner/commands/config) for a VM-less frontend.
-/// Snapshots are serialized to JSON so the protocol crate stays free of the
-/// core's Lua snapshot types; the client deserializes them back.
+/// Build the [`RuntimeEvent::FrontendState`] carrying the daemon-owned resolved
+/// settings and extension display metadata for a VM-less frontend.
 pub fn frontend_state(
     extensions: &crate::ext::ExtensionManager,
     tools: &crate::tools::registry::ToolHandler,
 ) -> RuntimeEvent {
     RuntimeEvent::FrontendState {
         banner: extensions.frontend_banner(),
-        theme: serde_json::to_value(extensions.frontend_theme_snapshot()).unwrap_or_default(),
-        keymap: serde_json::to_value(extensions.keymap_snapshot()).unwrap_or_default(),
-        config: serde_json::to_value(extensions.config_snapshot()).unwrap_or_default(),
+        settings: serde_json::to_value(extensions.frontend_settings()).unwrap_or_default(),
         commands: extensions
             .commands()
             .iter()
@@ -598,6 +594,54 @@ impl DaemonCtx {
         });
     }
 
+    fn persist_mode(&self, mode_str: &str) {
+        self.set_mode(mode_str);
+        let result = crate::config::settings::Settings::load().and_then(|settings| {
+            let mut settings = settings.ok_or_else(|| {
+                crate::config::settings::SettingsError::Validation(
+                    "config.yaml does not exist".into(),
+                )
+            })?;
+            settings.set_value("general", "approval_mode", mode_str.to_string())?;
+            Ok(settings.into_resolved())
+        });
+        match result {
+            Ok(settings) => {
+                self.extensions.replace_settings(settings);
+                self.hub.publish(frontend_state(
+                    &self.extensions,
+                    &self.session.lock().unwrap().tools,
+                ));
+            }
+            Err(err) => self.hub.publish(RuntimeEvent::Status {
+                message: format!("could not save approval mode: {err}"),
+            }),
+        }
+    }
+
+    /// Reload only the canonical settings file. This is the safe `/config`
+    /// apply path: extension/tool/provider state is left untouched, while all
+    /// frontend-owned settings and the approval gate update atomically.
+    fn reload_settings(&self) {
+        match crate::config::settings::Settings::load() {
+            Ok(Some(settings)) => {
+                let resolved = settings.into_resolved();
+                self.set_mode(&resolved.general.approval);
+                self.extensions.replace_settings(resolved);
+                self.hub.publish(frontend_state(
+                    &self.extensions,
+                    &self.session.lock().unwrap().tools,
+                ));
+            }
+            Ok(None) => self.hub.publish(RuntimeEvent::Status {
+                message: "settings reload failed: config.yaml does not exist".into(),
+            }),
+            Err(err) => self.hub.publish(RuntimeEvent::Status {
+                message: format!("settings reload failed: {err}"),
+            }),
+        }
+    }
+
     /// Sync terminal width from the frontend so Lua panes wrap correctly.
     fn set_width(&self, width: u16) {
         let ui_handle = self.extensions.ui_handle();
@@ -626,13 +670,13 @@ impl DaemonCtx {
     }
 
     /// Next queued background prompt to inject as a turn when the daemon is idle,
-    /// or `None` when nothing is pending. Lua-submitted prompts (`bone.api.submit`)
+    /// or `None` when nothing is pending. Lua-submitted prompts (`bone.submit`)
     /// go first, one per idle tick; otherwise a batch of this conversation's
     /// finished sub-agent jobs is formatted into a single turn and marked
     /// consumed so it is never injected twice. Only called when
     /// `inject_background` is set (i.e. `bone serve`).
     fn next_background_prompt(&self) -> Option<String> {
-        // `bone.api.submit` prompts first — steering should win over passively
+        // `bone.submit` prompts first — steering should win over passively
         // arriving job results.
         if let Some(text) = crate::ext::inbox::pop() {
             return Some(text);
@@ -907,7 +951,7 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::SetApprovalMode { mode: mode_str } => {
-                self.set_mode(&mode_str);
+                self.persist_mode(&mode_str);
                 Flow::Continue
             }
             RuntimeCommand::AppendMessage { role, content } => {
@@ -988,6 +1032,10 @@ impl DaemonCtx {
                 // the frontend's `await_state_snapshot` unblocks instead of
                 // hanging forever waiting on a snapshot that never comes.
                 self.publish_snapshot();
+                Flow::Continue
+            }
+            RuntimeCommand::ReloadSettings => {
+                self.reload_settings();
                 Flow::Continue
             }
             RuntimeCommand::ReloadExtensions => {
@@ -1106,8 +1154,22 @@ impl DaemonCtx {
                 // than telling the frontend to wait for a turn that will not start.
                 let submit = ret.submit && !reply_bearing && operations.is_empty();
                 let action = ret.action.as_ref().and_then(|a| a.to_command_action());
+                let output = if ret.output.is_empty() {
+                    match ret.action.as_ref().and_then(|a| a.config_action.as_ref()) {
+                        Some(crate::ext::types::ConfigAction::Apply) => {
+                            "Configuration applied.".to_string()
+                        }
+                        Some(crate::ext::types::ConfigAction::ApplyRestartRequired) => {
+                            "Configuration saved. Restart required for tool/command changes."
+                                .to_string()
+                        }
+                        _ => String::new(),
+                    }
+                } else {
+                    ret.output.clone()
+                };
                 self.hub.publish(RuntimeEvent::CommandComplete {
-                    output: ret.output.clone(),
+                    output,
                     submit,
                     display_role: ret.display_role.clone(),
                     action,
@@ -1140,6 +1202,11 @@ impl DaemonCtx {
                     self.publish_snapshot();
                     Flow::Continue
                 }
+            }
+            RuntimeCommand::KeymapDispatch { action } => {
+                let kind = self.extensions.dispatch_keymap(&action);
+                self.hub.publish(RuntimeEvent::KeymapDispatched { kind });
+                Flow::Continue
             }
             // Fire-and-forget Lua hook on the daemon's VM.
             RuntimeCommand::DispatchHook { name, payload } => {
@@ -1240,7 +1307,8 @@ impl DaemonCtx {
                     | RuntimeCommand::KeyReply { .. })) => conn.send(cmd),
                     // Mid-turn Safe/Danger toggle: applies to the rest of the turn
                     // (the gate reads the shared atomic per call).
-                    Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.set_mode(&mode_str),
+                    Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.persist_mode(&mode_str),
+                    Some(RuntimeCommand::ReloadSettings) => self.reload_settings(),
                     // A second submit mid-turn is dropped (the runtime is busy
                     // running one turn at a time). Tell the client so it isn't
                     // left waiting on a prompt that will never run, mirroring the

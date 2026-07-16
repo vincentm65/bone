@@ -1,9 +1,60 @@
-<!-- bone-agents-reference-version: 2 -->
+<!-- bone-agents-reference-version: 3 -->
 # Bone Agent Reference
 
-This is Bone-owned reference material for both the coding agent and humans who
-write Bone extensions. Bone refreshes this file from the running build. Put
-user-authored instructions in `AGENTS.local.md`; Bone never modifies that file.
+Bone refreshes this reference from the running build. Put user instructions in
+`AGENTS.local.md`; Bone never modifies that file.
+
+## Start Here: Task to File
+
+Paths are relative to the resolved Bone config directory.
+
+| Task | File or API |
+|---|---|
+| Change persistent settings | `/config`, `config.yaml`, or `bone.settings.*` |
+| Change providers or credentials | `config/providers.yaml` (restart required) |
+| Change shell safety policy | `command-policy.yaml` (restart required) |
+| Add an agent-callable tool | `lua/tools/<name>.lua` with `bone.tool.register` |
+| Add a slash command | `lua/commands/<name>.lua` with `bone.command.register` |
+| Add a theme | `lua/themes/<name>.lua`; load with `bone.theme.load` |
+| Add shared Lua logic | `lua/lib/<name>.lua`; load with `require` |
+| Add a plugin | `lua/plugins/<name>/init.lua`; load with `bone.plugin.load` |
+| Wire keymaps, subagents, plugins, or modules at startup | `init.lua` |
+| Add persistent agent instructions | `AGENTS.local.md` |
+
+Keep `init.lua` as lightweight wiring. Put substantial implementations in the
+purpose-specific `lua/` directories.
+
+### Minimal Examples
+
+```lua
+-- init.lua
+bone.keymap.set("<C-p>", "toggle_panes")
+bone.keymap.set("<C-r>", "/review")
+bone.keymap.set("<C-g>", "summarize these changes")
+bone.keymap.set("<C-b>", function() return "/usage" end)
+
+bone.subagent.register({
+    name = "reviewer",
+    description = "Review changes for regressions",
+    system_prompt = "Review the requested changes and report verified issues.",
+})
+
+bone.theme.load("nord")
+bone.plugin.load("my-plugin")
+require("my_startup")
+```
+
+```lua
+-- lua/themes/nord.lua
+return { palette = { accent = "#88c0d0", error = "#bf616a" } }
+```
+
+```lua
+bone.settings.get("general.approval")
+bone.settings.set("general.approval", "danger")
+bone.settings.reset("general.approval")
+bone.submit("Continue with the next task")
+```
 
 ## Agent Operating Instructions
 
@@ -21,19 +72,20 @@ user-authored instructions in `AGENTS.local.md`; Bone never modifies that file.
 The resolved config directory is provided in the system prompt.
 
 ```
-init.lua                 — Lua configuration and customization (optional)
+init.lua                 — Lua behavior and orchestration (optional)
 lua/tools/               — Custom + catalog Lua tools (installed via /catalog)
 lua/commands/            — Custom + bundled/catalog Lua commands
 lua/plugins/             — Lua plugins (optional)
 lua/lib/                 — Lua library modules (optional, bundled: history.lua, ui/)
-config/general.yaml      — Approval, input, and compaction settings
-config/status.yaml       — Status-bar and spinner settings
+config.yaml              — Canonical approval, UI, theme, and keymap settings
+config/general.yaml      — `/config` page schema and compaction settings
+config/status.yaml       — `/config` page schema for canonical status settings
 config/providers.yaml    — LLM provider entries
 config/tools.yaml        — Tool enable/disable toggles
 config/commands.yaml     — Command enable/disable toggles
 command-policy.yaml      — Shell command safety tiers
 memory/                  — Scoped user memory maintained by /memory
-AGENTS.local.md          — Optional user-authored agent instructions
+AGENTS.local.md          — Optional user-authored instructions; never generated
 ```
 
 ## Lua Extension System
@@ -64,14 +116,14 @@ bone.log.warn("message")
 bone.log.error("message")
 
 -- Tool registration
-bone.register_tool({ ... })
+bone.tool.register({ ... })
 
 -- Sub-agent registration
-bone.register_subagent({ name = "...", description = "...", system_prompt = "...", provider = "...", model = "...", approval = "..." })
+bone.subagent.register({ name = "...", description = "...", system_prompt = "...", provider = "...", model = "...", approval = "..." })
 
 -- Command registration
-bone.register_command("name", { description = "...", handler = function(args, ctx) ... end })
-bone.register_command("name", function(args, ctx) ... end)  -- short form
+bone.command.register("name", { description = "...", handler = function(args, ctx) ... end })
+bone.command.register("name", function(args, ctx) ... end)  -- short form
 
 -- Event hooks
 bone.on("event_name", function(event, ctx) ... end)
@@ -246,12 +298,12 @@ end
 ```
 Opts: `{ approval = "safe" | "read_only" | "danger" }`. Max nesting depth: 4 levels of tool calls from Lua.
 
-#### `bone.register_subagent`
+#### `bone.subagent.register`
 
 Declare a named sub-agent in `init.lua`. The `subagent` tool (auto-created when agents are registered) uses these definitions to dispatch tasks.
 
 ```lua
-bone.register_subagent({
+bone.subagent.register({
     name = "researcher",
     description = "Searches the web and summarizes findings",
     system_prompt = "You are a researcher.",
@@ -495,12 +547,12 @@ Show token usage stats for the current session.
 
 ## Creating Custom Tools
 
-Tools are Lua files in `lua/tools/` that call `bone.register_tool()`. The agent calls them as typed functions with args, and they return a string to the agent.
+Tools are Lua files in `lua/tools/` that call `bone.tool.register()`. The agent calls them as typed functions with args, and they return a string to the agent.
 
 ### Minimal Tool
 
 ```lua
-bone.register_tool({
+bone.tool.register({
     name = "my_tool",
     description = "Short description of what the tool does and when to use it.",
     parameters = {
@@ -646,12 +698,12 @@ Tools that need to remember data between invocations use `ctx.state`:
 
 ## Creating Custom Commands
 
-Commands are slash-commands (`/name args`) registered via `bone.register_command()`. They live as Lua files in `lua/commands/`.
+Commands are slash-commands (`/name args`) registered via `bone.command.register()`. They live as Lua files in `lua/commands/`.
 
 ### Long Form
 
 ```lua
-bone.register_command("deploy", {
+bone.command.register("deploy", {
     description = "Deploy current project",
     handler = function(args, ctx)
         local result = ctx.shell("./deploy.sh " .. args)
@@ -667,7 +719,7 @@ bone.register_command("deploy", {
 ### Short Form
 
 ```lua
-bone.register_command("hello", function(args, ctx)
+bone.command.register("hello", function(args, ctx)
     return "Hello " .. args
 end)
 ```
@@ -837,21 +889,22 @@ Key differences from other events:
 
 This is the mechanism behind automatic context compaction. The default `lua/commands/compact.lua` registers a `before_turn` handler that summarizes older messages when context exceeds a threshold. It preserves complete tool-call chains and drops incomplete chains at the compaction boundary so provider history stays valid.
 
-## Runtime API (`bone.api`)
+## Runtime APIs
 
-Where `ctx.*` is handed to a tool/command only while it runs, `bone.api` is the
-always-available runtime surface — usable from `init.lua`, autocmd handlers, and
-tools alike.
+Most user-facing operations live directly under a purpose-specific `bone`
+namespace. `bone.api.ui` is reserved for low-level drawing primitives.
 
 ```lua
-bone.api.autocmd(event, handler)   -- alias of bone.on
-bone.api.emit(event, payload?)     -- fire an event's handlers synchronously
-bone.api.submit(text)              -- queue a prompt as if typed by the user
-bone.api.keymap.set/del/get(...)   -- mutate bone.keymap at runtime
-bone.api.config.set/get(...)       -- mutate bone.config at runtime
+bone.on(event, handler)             -- register an event handler
+bone.api.emit(event, payload?)      -- fire handlers synchronously
+bone.submit(text)                   -- queue a prompt as if typed
+bone.keymap.set(key, rhs)           -- declare a runtime keymap
+bone.settings.get/set/reset(...)    -- canonical persistent settings
+bone.theme.list()                   -- list lua/themes/*.lua
+bone.theme.load(name)               -- load and persist a theme
 ```
 
-### `bone.api.submit(text)`
+### `bone.submit(text)`
 
 Queues `text` for the frontend to submit like typed input. When the app is idle
 it submits immediately; mid-turn it waits in the input queue (shown as `Q:` in
@@ -902,163 +955,144 @@ bone.on("turn_end",   function() bone.api.ui.set_highlight("input_border", nil) 
 
 ## Config, Theme, and Keymaps
 
-Set these in `init.lua`. Rust snapshots them once at boot; no per-frame Lua reads.
+`~/.bone-rust/config.yaml` is the canonical source for declarative settings. Use
+`/config` for supported scalar changes, `bone.settings.get/set/reset` from Lua,
+or edit YAML directly. The daemon validates and resolves the file, then sends
+one complete settings snapshot to each frontend. `init.lua` may wire runtime
+keymaps and select themes, but it must not define competing settings tables.
 
-### Config
+The file is created automatically on first boot. Its default shape is:
 
-```lua
-bone.config = {
-    approval_mode = "safe",               -- "safe" | "danger"
-    status_show = {
-        status_show_model = true,
-        status_show_approval = true,
-        status_show_tokens_curr = true,
-        status_show_tokens_in = true,
-        status_show_tokens_out = true,
-        status_show_tokens_total = true,
-        status_show_queue = true,
-        status_show_spinner = true,
-        status_show_timer = true,
-    },
-    ui = {
-        input = {
-            -- `/config` selects custom/lines/box/filled. When set to custom,
-            -- this preset is used; the remaining fields always customize it.
-            preset = "lines",
-            prefix = "> ",               -- text before the first input line
-            show_prefix = true,           -- false hides the prefix
-            horizontal_padding = 0,       -- box/filled default to 1
-            vertical_padding = 0,         -- filled defaults to 1 (three rows)
-            fill = false,                 -- filled defaults to true
-            border = {                    -- each override must be one cell wide
-                horizontal = "─", vertical = "│",
-                top_left = "╭", top_right = "╮",
-                bottom_left = "╰", bottom_right = "╯",
-            },
-        },
-    },
-}
+```yaml
+version: 1
+
+general:
+  approval: safe                 # safe | danger
+  show_reasoning: false
+
+ui:
+  input:
+    preset: null                 # custom | lines | box | filled
+    prefix: null
+    show_prefix: true
+    horizontal_padding: null
+    vertical_padding: null
+    fill: null
+    border:
+      horizontal: null
+      vertical: null
+      top_left: null
+      top_right: null
+      bottom_left: null
+      bottom_right: null
+  status_show_model: true
+  status_show_approval: true
+  status_show_tokens_curr: true
+  status_show_tokens_in: true
+  status_show_tokens_out: true
+  status_show_tokens_total: true
+  status_show_queue: true
+  status_show_spinner: true
+  status_show_timer: true
+  spinner_style: braille
+  spinner_text: thinking
+  spinner_custom: ""
+  spinner_speed: 0
+  spinner_text_rotate: true
+  spinner_text_speed: 0
+
+theme:
+  palette: {}
+  shell: {}
+  syntax: {}
+  highlights: {}
+
+keymaps:
+  bindings: []
 ```
 
-Use `/config` → **General** → **Input style** to switch between `lines`,
-`box`, and `filled`. Choose `custom` to use the preset from `init.lua`. The
-other `ui.input` fields remain sourced from `init.lua` for every menu choice, so
-prefix, padding, fill, and border customizations are preserved while switching
-presets.
-
-Input layout is rendered natively in Rust, so Unicode wrapping, cursor placement,
-autocomplete, viewport sizing, and small-terminal clipping remain consistent.
-Omitted input settings use the selected preset's defaults; omitting `ui.input`
-preserves the legacy two-line `lines` composer.
-
-Invalid values warn and fall back to Rust defaults. `init.lua` is the source of truth.
+Null or omitted input fields use the selected preset's defaults. Input layout is
+rendered natively, so Unicode wrapping, cursor placement, autocomplete, viewport
+sizing, and small-terminal clipping remain consistent.
 
 ### Theme
 
-Most users only need the palette:
+Theme modules live at `lua/themes/<name>.lua`, return a settings table, and are
+listed/loaded with `bone.theme.list()` and `bone.theme.load(name)`. Loading a
+theme validates it, records its name and resolved values in `config.yaml`, and
+reloads the module on the next boot.
 
 ```lua
-bone.theme = {
-    palette = {
-        -- bg is optional; omit it to keep your terminal background.
-        -- When set, supported terminals use it while bone is running and reset on exit.
-        fg = "#ffffff",
-        muted = "#808080",
-        subtle = "#303030",
-        border = "#808080",
-        accent = "#8cdcdc",
-        good = "#78b373",
-        warn = "#d7ba7d",
-        error = "#e05050",
-        selection = "#303030",
-    },
+-- lua/themes/nord.lua
+return {
+  palette = { accent = "#88c0d0", good = "#a3be8c", error = "#bf616a" },
+  thinking = "accent",
 }
 ```
 
-Shell command and code-block colors are separate so the basic palette stays small:
+Most users only need palette values. Shell, syntax, and exact UI-role overrides
+use separate maps:
 
-```lua
-bone.theme = {
-    shell = {
-        program = "#b4c896",
-        separator = "#5a5a5a",
-        redirect = "#787878",
-        flag = "#96b4dc",
-        string = "#c8aa78",
-        variable = "#b4a0dc",
-        comment = "#808080",
-        path = "#8cbebe",
-    },
-
-    syntax = {
-        text = "#d4d4d4",
-        comment = "#6a9955",
-        string = "#ce9178",
-        number = "#b5cea8",
-        constant = "#569cd6",
-        escape = "#d7ba7d",
-        regex = "#646695",
-        keyword = "#569cd6",
-        keyword_control = "#c586c0",
-        type = "#4ec9b0",
-        function_name = "#dcdcaa",
-        variable = "#9cdcfe",
-        tag = "#569cd6",
-        attribute = "#9cdcfe",
-        punctuation = "#d4d4d4",
-        subtle = "#808080",
-        markup = "#569cd6",
-        invalid = "#f44747",
-    },
-}
+```yaml
+theme:
+  palette:
+    accent: "#8cdcdc"
+    good: "#78b373"
+    warn: "#d7ba7d"
+    error: "#e05050"
+    selection: "#303030"
+  shell:
+    program: "#b4c896"
+    flag: "#96b4dc"
+    string: "#c8aa78"
+  syntax:
+    comment: "#6a9955"
+    keyword: "#569cd6"
+    function_name: "#dcdcaa"
+  highlights:
+    user_msg: { fg: fg, bg: selection }
+    input_border: border
+    tool_error: error
 ```
 
-Advanced exact UI-role overrides use `highlights`. Values can be colors or palette names:
-
-```lua
-bone.theme = {
-    palette = { accent = "#8cdcdc" },
-    highlights = {
-        user_msg = { fg = "fg", bg = "selection" },
-        input_border = "border",
-        input_bg = "selection",
-        input_prefix = "fg",
-        input_cursor = "accent",
-        tool_error = "error",
-        syntax_keyword = "accent",
-    },
-}
-```
-
-Colors: hex (`#RRGGBB`) or named (`white`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`, `darkgray`, `lightred`, `lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`). Missing keys fall back to defaults. Legacy flat keys (`user_msg`, `shell_program`, `syntax_keyword`, etc.) still work.
+Colors may be hex (`#RRGGBB`) or named (`white`, `black`, `red`, `green`,
+`yellow`, `blue`, `magenta`, `cyan`, `gray`, `darkgray`, `lightred`,
+`lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`). Missing
+keys use native defaults.
 
 ### Keymaps
 
-```lua
-bone.keymap = {
-    n = {
-        ["<C-p>"] = "toggle_panes",
-        ["<S-Tab>"] = "cycle_approval_mode",
-    },
-    i = {
-        ["<C-a>"] = "cursor_to_start",
-        ["<C-e>"] = "cursor_to_end",
-        ["<C-v>"] = "paste_image",
-        ["<A-v>"] = "paste_image",
-        ["<C-S-v>"] = "paste_image",
-    },
-}
+Bindings are a single ordered list. YAML bindings persist string actions:
+
+```yaml
+keymaps:
+  bindings:
+    - { key: "<C-p>", action: toggle_panes }
+    - { key: "<S-Tab>", action: cycle_approval_mode }
+    - { key: "<C-a>", action: cursor_to_start }
+    - { key: "<C-e>", action: cursor_to_end }
+    - { key: "<C-v>", action: paste_image }
 ```
 
-Modes: `n` (normal), `i` (insert). Values are built-in action names. Unknown actions are ignored with a warning.
+`bone.keymap.set(key, rhs)` adds runtime bindings from `init.lua` or a plugin. A
+string `rhs` may be a built-in action, a slash command, or prompt text; a
+function may return any of those strings or `nil` for no action.
+
+```lua
+bone.keymap.set("<C-p>", "toggle_panes")
+bone.keymap.set("<C-r>", "/review")
+bone.keymap.set("<C-g>", "summarize these changes")
+bone.keymap.set("<C-b>", function() return "/usage" end)
+```
+
+Keys and actions must not be empty, and each key may be bound only once.
 
 Built-in actions:
-  - `toggle_panes` — show/hide the bottom pane area (normal mode)
-  - `cycle_approval_mode` — rotate through approval modes (normal mode)
-  - `cursor_to_start` — move cursor to start of line (insert mode)
-  - `cursor_to_end` — move cursor to end of line (insert mode)
-  - `paste_image` — paste clipboard image as attachment (insert mode; hardcoded to <C-v>, <A-v>, and <C-S-v> when no Lua binding set)
-  - any custom action name registered via `bone.api.keymap.set(<mode>, <key>, <name>)`
+  - `toggle_panes` — show/hide the bottom pane area
+  - `cycle_approval_mode` — rotate through approval modes
+  - `cursor_to_start` — move cursor to start of line
+  - `cursor_to_end` — move cursor to end of line
+  - `paste_image` — paste clipboard image as attachment (hardcoded to <C-v>, <A-v>, and <C-S-v> when no Lua binding is set)
 
 ## Plugin System
 
@@ -1079,14 +1113,15 @@ Plugins do not auto-run. Repeated `load` is a no-op.
 
 ```
 <config-dir>/
-  init.lua                     -- main Lua config (optional)
+  config.yaml                  -- canonical approval/UI/theme/keymap settings
+  init.lua                     -- optional Lua behavior and orchestration
   command-policy.yaml          -- shell command safety tiers
   AGENTS.md                    -- Bone-owned reference; refreshed by each build
   AGENTS.local.md              -- optional user-authored agent instructions
   .setup.json                  -- onboarding selection/marker
   config/
-    general.yaml               -- approval, input, and compaction settings
-    status.yaml                -- status-bar and spinner settings
+    general.yaml               -- `/config` page schema and compaction settings
+    status.yaml                -- `/config` page schema for canonical status settings
     providers.yaml             -- LLM provider entries
     tools.yaml                 -- tool enable/disable toggles
     commands.yaml              -- command enable/disable toggles
@@ -1105,8 +1140,11 @@ Plugins do not auto-run. Repeated `load` is a no-op.
       memory.lua               -- optional catalog command
       my_custom_command.lua    -- user-created
     lib/
+      banner.lua               -- seeded startup banner implementation
       history.lua              -- seeded default
       ui/                      -- seeded default UI helpers
+    themes/
+      my_theme.lua             -- returns a theme settings table
     plugins/
       tokyonight/
         init.lua
