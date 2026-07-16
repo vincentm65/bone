@@ -47,6 +47,7 @@ pub fn boot(
             return BootResult {
                 manager: ExtensionManager::unloaded(),
                 tools: Vec::new(),
+                shared_state: crate::ext::ctx::new_shared_state(),
             };
         }
     };
@@ -99,9 +100,9 @@ pub fn boot(
         eprintln!("bone: warning: Lua commands failed: {e}");
     }
 
-    // Shared mutable state for ctx.state — the single process-wide map, so
-    // tools, commands, and before_turn hooks all see the same scratch space.
-    let shared_state: SharedState = crate::ext::ctx::process_shared_state();
+    // Conversation-scoped ctx.state map: one Arc per boot so concurrent session
+    // actors and subagent boots never share checklist / host tool state.
+    let shared_state: SharedState = crate::ext::ctx::new_shared_state();
 
     // Wrap the Lua in Arc<Mutex> so LuaTool and ExtensionManager share it.
     let lua_arc = Arc::new(Mutex::new(lua));
@@ -126,7 +127,11 @@ pub fn boot(
         keymap_snapshot,
         shared_ui,
     );
-    BootResult { manager, tools }
+    BootResult {
+        manager,
+        tools,
+        shared_state,
+    }
 }
 
 /// Get the `bone` global table from the Lua VM.

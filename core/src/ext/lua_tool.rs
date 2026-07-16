@@ -188,10 +188,19 @@ impl LuaTool {
             .to_value(arguments)
             .map_err(|e| format!("lua tool '{name}': failed to convert arguments: {e}"))?;
 
-        let mut ctx_cfg = CtxConfig::new(config_dir, shared_state);
+        // Prefer the session ToolHandler's map (survives ReloadExtensions and
+        // is conversation-scoped). Fall back to the Arc captured at collect
+        // time for bare execute paths that have no handler.
+        let session_state = context
+            .tool_handler
+            .as_ref()
+            .map(|h| h.shared_state.clone())
+            .unwrap_or(shared_state);
+        let mut ctx_cfg = CtxConfig::new(config_dir, session_state);
         // App-derived fields (session/provider/model/usage/history/approval_mode)
         // so tools see the same `ctx` as slash commands. `None` for non-live
-        // calls, which keeps the previous all-default behavior.
+        // calls, which keeps the previous all-default behavior. `apply_to` also
+        // re-points `shared_state` at the session map.
         if let Some(state) = &context.app_state {
             state.apply_to(&mut ctx_cfg);
         }
@@ -200,7 +209,10 @@ impl LuaTool {
         ctx_cfg.call_id = Some(context.call_id.clone());
         // tool_handler comes from the per-call context (may differ from the
         // snapshot's handler for nested delegation), so set it after apply_to.
-        ctx_cfg.tool_handler = context.tool_handler.clone();
+        if let Some(handler) = context.tool_handler.clone() {
+            ctx_cfg.shared_state = handler.shared_state.clone();
+            ctx_cfg.tool_handler = Some(handler);
+        }
         ctx_cfg.tool_call_depth = context.tool_call_depth;
         ctx_cfg.agent_depth = context.agent_depth;
         ctx_cfg.cancelled = context.cancelled.clone();

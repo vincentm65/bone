@@ -460,6 +460,9 @@ pub struct BootResult {
     pub manager: ExtensionManager,
     /// Tools registered via `bone.register_tool()` during init.lua.
     pub tools: Vec<super::lua_tool::LuaTool>,
+    /// Conversation-scoped `ctx.state` map shared by the collected Lua tools.
+    /// The boot path installs this Arc on the resulting [`crate::tools::registry::ToolHandler`].
+    pub shared_state: super::ctx::SharedState,
 }
 
 /// Fully booted tool system: extension manager + configured tool handler.

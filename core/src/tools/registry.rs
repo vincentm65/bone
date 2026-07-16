@@ -203,6 +203,10 @@ pub struct ToolHandler {
     /// `ToolHandler` per turn but never swaps this `Arc`, so snapshots persist
     /// for the whole session.
     pub snapshots: std::sync::Arc<std::sync::RwLock<crate::tools::snapshot::SnapshotStore>>,
+    /// Conversation-scoped `ctx.state` map. Shared (via `Arc`) with Lua tools,
+    /// slash commands, and `before_turn` so they see the same keys within one
+    /// session without a process-global singleton.
+    pub shared_state: crate::ext::ctx::SharedState,
 }
 
 impl ToolHandler {
@@ -242,6 +246,7 @@ impl ToolHandler {
             snapshots: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::tools::snapshot::SnapshotStore::new(),
             )),
+            shared_state: crate::ext::ctx::new_shared_state(),
         }
     }
 
@@ -267,11 +272,19 @@ impl ToolHandler {
             snapshots: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::tools::snapshot::SnapshotStore::new(),
             )),
+            shared_state: crate::ext::ctx::new_shared_state(),
         }
     }
 
     pub fn with_working_dir(mut self, working_dir: impl Into<std::path::PathBuf>) -> Self {
         self.working_dir = Some(working_dir.into());
+        self
+    }
+
+    /// Use a pre-allocated conversation-scoped `ctx.state` map (e.g. the Arc
+    /// already captured by Lua tools during boot).
+    pub fn with_shared_state(mut self, shared_state: crate::ext::ctx::SharedState) -> Self {
+        self.shared_state = shared_state;
         self
     }
 
@@ -285,10 +298,23 @@ impl ToolHandler {
         self.snapshots = previous.snapshots.clone();
         self.working_dir = previous.working_dir.clone();
         self.state_map = previous.state_map.clone();
+        self.shared_state = previous.shared_state.clone();
         self.approval_gate = previous.approval_gate.clone();
         self.cancel_token = previous.cancel_token.clone();
         self.app_state = previous.app_state.clone();
         self.owner = previous.owner.clone();
+    }
+
+    /// Drop host-held tool state for a conversation reset (`/new`, `/clear`,
+    /// load another chat). Clears both the driver `state_map` and the live
+    /// `ctx.state` map used by Lua tools / `before_turn`.
+    pub fn clear_host_state(&mut self) {
+        self.state_map.clear();
+        let mut map = self
+            .shared_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.clear();
     }
 
     pub fn is_enabled(&self, name: &str) -> bool {

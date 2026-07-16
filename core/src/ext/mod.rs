@@ -142,6 +142,7 @@ pub fn boot_with_tools(
     let BootResult {
         manager: extensions,
         tools: lua_tools,
+        shared_state,
     } = boot(config_dir, cwd, opts, model, provider);
 
     let mut loaded = super::tools::load_tools();
@@ -178,7 +179,9 @@ pub fn boot_with_tools(
         loaded.dynamic_safety,
         loaded.dynamic_state,
     )
-    .with_working_dir(cwd);
+    .with_working_dir(cwd)
+    // Same Arc the Lua tools captured at collect time, so ctx.state is one map.
+    .with_shared_state(shared_state);
 
     BootedTools {
         manager: extensions,

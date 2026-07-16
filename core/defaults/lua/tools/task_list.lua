@@ -153,7 +153,7 @@ local function execute(params, ctx)
         return emit(state)
     end
 
-    return "ERROR: Action must be 'write' or 'clear'."
+    return "ERROR: Action must be 'write', 'complete', or 'clear'."
 end
 
 bone.register_tool({

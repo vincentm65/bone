@@ -17,6 +17,10 @@ fn test_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+    test_lock().lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn boot(config_dir: &std::path::Path) -> bone_core::ext::BootedTools {
     let tools_dir = config_dir.join("lua/tools");
     std::fs::create_dir_all(&tools_dir).unwrap();
@@ -63,7 +67,7 @@ fn run(
 
 #[test]
 fn tasklist_create_pushes_pane_to_shared_ui() {
-    let _guard = test_lock().lock().unwrap();
+    let _guard = lock_tests();
     let config_dir = common::temp_dir("tasklist-pane-create");
     let booted = boot(&config_dir);
 
@@ -95,7 +99,7 @@ fn tasklist_create_pushes_pane_to_shared_ui() {
 
 #[test]
 fn tasklist_complete_updates_state_through_ctx() {
-    let _guard = test_lock().lock().unwrap();
+    let _guard = lock_tests();
     let config_dir = common::temp_dir("tasklist-complete");
     let booted = boot(&config_dir);
 
@@ -125,7 +129,7 @@ fn tasklist_complete_updates_state_through_ctx() {
 
 #[test]
 fn tasklist_kill_pushes_pane_removal() {
-    let _guard = test_lock().lock().unwrap();
+    let _guard = lock_tests();
     let config_dir = common::temp_dir("tasklist-pane-kill");
     let booted = boot(&config_dir);
 
@@ -145,4 +149,126 @@ fn tasklist_kill_pushes_pane_removal() {
         ViewDiff::Remove { id } => assert_eq!(id, "task_list"),
         other => panic!("expected Remove, got {other:?}"),
     }
+}
+
+/// Two independent boots (parent vs subagent, or two conversation actors)
+/// must not share `ctx.state` — otherwise a child task_list write overwrites
+/// the parent's checklist.
+#[test]
+fn tasklist_state_is_isolated_across_boots() {
+    let _guard = lock_tests();
+    let parent_dir = common::temp_dir("tasklist-iso-parent");
+    let child_dir = common::temp_dir("tasklist-iso-child");
+    let parent = boot(&parent_dir);
+    let child = boot(&child_dir);
+
+    assert!(
+        !std::sync::Arc::ptr_eq(&parent.tools.shared_state, &child.tools.shared_state),
+        "each boot must allocate its own shared_state Arc"
+    );
+
+    run(
+        &parent,
+        serde_json::json!({ "action": "write", "tasks": ["parent-only"] }),
+    );
+    run(
+        &child,
+        serde_json::json!({ "action": "write", "tasks": ["child-only"] }),
+    );
+
+    let parent_raw = parent
+        .tools
+        .shared_state
+        .lock()
+        .unwrap()
+        .get("task_list")
+        .cloned();
+    let child_raw = child
+        .tools
+        .shared_state
+        .lock()
+        .unwrap()
+        .get("task_list")
+        .cloned();
+
+    let parent_state: serde_json::Value =
+        serde_json::from_str(parent_raw.as_deref().expect("parent list")).unwrap();
+    let child_state: serde_json::Value =
+        serde_json::from_str(child_raw.as_deref().expect("child list")).unwrap();
+
+    assert_eq!(parent_state["tasks"][0]["text"], "parent-only");
+    assert_eq!(child_state["tasks"][0]["text"], "child-only");
+    assert_ne!(
+        parent_raw, child_raw,
+        "parent and child maps must hold distinct checklist blobs"
+    );
+}
+
+/// `/new` / `/clear` / load call `clear_host_state` so the next turn's
+/// before_turn and tool path don't resurrect a stale list.
+#[test]
+fn tasklist_clear_host_state_drops_ctx_and_state_map() {
+    let _guard = lock_tests();
+    let config_dir = common::temp_dir("tasklist-clear-host");
+    let mut booted = boot(&config_dir);
+
+    run(
+        &booted,
+        serde_json::json!({ "action": "write", "tasks": ["stale"] }),
+    );
+    // Mirror what the driver does after a successful stateful write.
+    if let Some(state) = booted
+        .tools
+        .shared_state
+        .lock()
+        .unwrap()
+        .get("task_list")
+        .cloned()
+    {
+        booted.tools.state_map.set("task_list", "default", state);
+    }
+
+    booted.tools.clear_host_state();
+
+    assert!(
+        booted
+            .tools
+            .shared_state
+            .lock()
+            .unwrap()
+            .get("task_list")
+            .is_none(),
+        "ctx.state map must be empty after clear_host_state"
+    );
+    assert!(
+        booted.tools.state_map.get("task_list", "default").is_none(),
+        "state_map must be empty after clear_host_state"
+    );
+
+    // A subsequent complete without a list should fail cleanly, not complete
+    // a ghost list. Lua ERROR strings return as content (is_error may stay false).
+    let res = run(&booted, serde_json::json!({ "action": "complete" }));
+    assert!(
+        res.content.contains("No active task list"),
+        "unexpected complete result: {}",
+        res.content
+    );
+    assert!(res.state.is_none(), "ghost list must not return state");
+}
+
+#[test]
+fn tasklist_invalid_action_mentions_complete() {
+    let _guard = lock_tests();
+    let config_dir = common::temp_dir("tasklist-bad-action");
+    let booted = boot(&config_dir);
+
+    let res = run(
+        &booted,
+        serde_json::json!({ "action": "nope" }),
+    );
+    assert!(
+        res.content.contains("complete"),
+        "error should list complete as a valid action: {}",
+        res.content
+    );
 }

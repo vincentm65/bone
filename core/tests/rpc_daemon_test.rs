@@ -329,6 +329,7 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
         .state_map
         .set("task_list", "default", r#"{"items":["a"]}"#.into());
     let snapshots_before = initial.snapshots.clone();
+    let shared_state_before = initial.shared_state.clone();
     let session = Arc::new(Mutex::new(RuntimeSession::new(initial)));
     assert!(
         !session.lock().unwrap().tools.definitions().is_empty(),
@@ -391,6 +392,10 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
     assert!(
         Arc::ptr_eq(&tools.snapshots, &snapshots_before),
         "snapshot store Arc must be preserved across ReloadExtensions",
+    );
+    assert!(
+        Arc::ptr_eq(&tools.shared_state, &shared_state_before),
+        "ctx.state shared_state Arc must survive ReloadExtensions",
     );
 }
 

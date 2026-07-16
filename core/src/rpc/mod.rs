@@ -572,6 +572,23 @@ impl DaemonCtx {
         }
     }
 
+    /// Drop conversation-scoped host tool state (task_list, …) and remove the
+    /// task_list pane. Used on `/new`, `/clear`, and conversation load so
+    /// checklists never leak across chats.
+    fn reset_host_tool_state(&self) {
+        {
+            let mut s = self.session.lock().unwrap();
+            s.tools.clear_host_state();
+        }
+        let ui = self.extensions.ui_handle();
+        crate::ext::api_ui::lock_shared(&ui).apply(crate::runtime::ViewDiff::Remove {
+            id: "task_list".into(),
+        });
+        if self.forward_view_diffs {
+            self.drain_diffs();
+        }
+    }
+
     /// Apply a Safe/Danger toggle. The gate reads the shared atomic per call, so
     /// this takes effect immediately — even mid-turn.
     fn set_mode(&self, mode_str: &str) {
@@ -698,7 +715,7 @@ impl DaemonCtx {
             // Not found: the only case that should surface as "unknown command".
             let handler = crate::ext::ops_commands::find_handler(&lua_guard, &name)?;
             let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
-            let shared_state = crate::ext::ctx::process_shared_state();
+            let shared_state = app_state.tool_handler.shared_state.clone();
             let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
             app_state.apply_to(&mut ctx_cfg);
             ctx_cfg.key_sender = Some(live_tx);
@@ -826,6 +843,7 @@ impl DaemonCtx {
                     s.transcript.clear();
                     s.token_stats.reset();
                 }
+                self.reset_host_tool_state();
                 self.publish_snapshot();
                 Flow::Continue
             }
@@ -870,6 +888,9 @@ impl DaemonCtx {
                         s.restore_usage_and_context();
                         s.snapshot(self.llm.id(), self.llm.model())
                     };
+                    // Host tool state is in-memory only today; never carry the
+                    // previous chat's task_list into a loaded conversation.
+                    self.reset_host_tool_state();
                     self.hub
                         .publish(RuntimeEvent::ConversationLoaded { messages, snapshot });
                 } else {
@@ -908,6 +929,7 @@ impl DaemonCtx {
                     s.transcript.clear();
                     s.token_stats.reset();
                 }
+                self.reset_host_tool_state();
                 self.publish_snapshot();
                 Flow::Continue
             }

@@ -328,7 +328,11 @@ impl RuntimeSession {
         } = outcome;
         self.transcript = transcript;
         self.token_stats = token_stats;
+        // Host tool state: state_map is owned per ToolHandler clone; shared_state
+        // is an Arc so the turn already mutated the session map in place. Still
+        // re-adopt both so a future isolation change can't drift.
         self.tools.state_map = tools.state_map;
+        self.tools.shared_state = tools.shared_state;
 
         // Persist the turn's new messages + usage in one atomic transaction (a
         // single WAL sync) instead of one commit per row.

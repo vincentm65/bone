@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 
@@ -69,23 +69,18 @@ fn agent_err(lua: &Lua, msg: impl mlua::IntoLua) -> Result<Value, mlua::Error> {
     Ok(Value::Table(t))
 }
 
-/// Shared mutable state accessible via ctx.state.
-pub(crate) type SharedState = Arc<Mutex<HashMap<String, String>>>;
-
-/// The single process-wide [`SharedState`] backing `ctx.state`.
+/// Shared mutable state accessible via `ctx.state`.
 ///
-/// Tools, slash commands, and `before_turn` hooks all resolve `ctx.state` to
-/// this one map, so a value set in one context is visible in the others — e.g.
-/// the `task_list` tool writes the checklist and the `task_list` `before_turn`
-/// hook reads it back to keep the list salient. Because it lives in process
-/// memory rather than the transcript, it also survives compaction
-/// (`conversation.replace`). Previously each construction site created its own
-/// empty map, so cross-context reads always saw `nil`.
-pub fn process_shared_state() -> SharedState {
-    static STATE: OnceLock<SharedState> = OnceLock::new();
-    STATE
-        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
-        .clone()
+/// Session-scoped: each [`crate::tools::registry::ToolHandler`] owns one map
+/// (cloned as an `Arc` into tools, slash commands, and `before_turn` hooks).
+/// Tools and hooks that share a handler therefore see the same keys — e.g.
+/// `task_list` writes the checklist and its `before_turn` hook reads it back —
+/// without leaking across conversations or concurrent session actors.
+pub type SharedState = Arc<Mutex<HashMap<String, String>>>;
+
+/// Allocate a fresh empty [`SharedState`] for one conversation / tool handler.
+pub fn new_shared_state() -> SharedState {
+    Arc::new(Mutex::new(HashMap::new()))
 }
 
 pub use bone_protocol::UsageProviderContext;
@@ -232,6 +227,9 @@ impl AppCtxState {
         cfg.system_prompt_override = self.system_prompt_override.clone();
         cfg.approval_mode = self.approval_mode;
         cfg.tool_handler = Some((*self.tool_handler).clone());
+        // Route `ctx.state` at the session's map so tools, slash commands, and
+        // before_turn share one conversation-scoped store.
+        cfg.shared_state = self.tool_handler.shared_state.clone();
         cfg.usage = Some(self.usage.clone());
         cfg.conversation_history = Some(self.conversation_history.clone());
         cfg.turn_nudge = self.turn_nudge.clone();
@@ -840,7 +838,7 @@ fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::E
     Ok(conversation_table)
 }
 
-/// Build the `ctx.state` table: get/set/clear over the per-process shared
+/// Build the `ctx.state` table: get/set/clear over the session-scoped shared
 /// key/value map (`cfg.shared_state`).
 fn build_state_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let state_get = lua.create_function({
@@ -2434,11 +2432,12 @@ pub(crate) fn build_usage_context(
 
 /// Build the `CtxConfig` passed to the `before_turn` hook before each provider
 /// request, from a shared app-state snapshot. The snapshot is the single source
-/// of truth for app-derived fields ([`AppCtxState::apply_to`]).
+/// of truth for app-derived fields ([`AppCtxState::apply_to`]), including the
+/// conversation-scoped `ctx.state` map on the tool handler.
 pub(crate) fn build_before_turn_config(state: &AppCtxState) -> CtxConfig {
     let mut cfg = CtxConfig::new(
         crate::config::bone_dir().to_string_lossy().to_string(),
-        process_shared_state(),
+        state.tool_handler.shared_state.clone(),
     );
     state.apply_to(&mut cfg);
     cfg

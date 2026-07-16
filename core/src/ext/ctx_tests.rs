@@ -662,15 +662,16 @@ fn wall_elapsed_none_stays_pending() {
     );
 }
 
-// Regression: `ctx.state` must resolve to a single process-wide map so a value
-// written by one context (e.g. the `task_list` tool) is readable from another
-// (e.g. the `task_list` before_turn hook). Previously each construction site
-// allocated its own empty map, so cross-context reads always saw nil — which
-// made the task list silently disappear after compaction.
+// Regression: tools and before_turn must share one session-scoped map so a
+// value written by a tool (e.g. task_list) is readable from before_turn.
+// Passing the same Arc into both CtxConfigs is the host contract; separate
+// `new_shared_state()` calls intentionally isolate conversations.
 #[test]
 fn ctx_state_is_shared_across_contexts() {
+    let shared = new_shared_state();
+
     // Writer context (stands in for a tool invocation).
-    let writer_cfg = CtxConfig::new("/tmp".to_string(), process_shared_state());
+    let writer_cfg = CtxConfig::new("/tmp".to_string(), shared.clone());
     let lua_w = Lua::new();
     let ctx_w = create_ctx_table(&lua_w, &writer_cfg).unwrap();
     lua_w.globals().set("ctx", ctx_w).unwrap();
@@ -680,7 +681,7 @@ fn ctx_state_is_shared_across_contexts() {
         .unwrap();
 
     // Reader context, built the same way the before_turn hook is.
-    let reader_cfg = CtxConfig::new("/tmp".to_string(), process_shared_state());
+    let reader_cfg = CtxConfig::new("/tmp".to_string(), shared);
     let lua_r = Lua::new();
     let ctx_r = create_ctx_table(&lua_r, &reader_cfg).unwrap();
     lua_r.globals().set("ctx", ctx_r).unwrap();
@@ -692,5 +693,16 @@ fn ctx_state_is_shared_across_contexts() {
     assert_eq!(
         got, "checklist",
         "value set in one ctx.state must be visible from another (shared map)"
+    );
+}
+
+#[test]
+fn ctx_state_is_isolated_across_fresh_maps() {
+    let a = new_shared_state();
+    let b = new_shared_state();
+    a.lock().unwrap().insert("task_list".into(), "parent".into());
+    assert!(
+        b.lock().unwrap().get("task_list").is_none(),
+        "fresh shared_state must not see another conversation's keys"
     );
 }
