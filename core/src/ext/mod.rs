@@ -86,12 +86,13 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
                 || !existing.contains("label_modifiers")))
         // History now includes aggregate message and token counts/status.
         || (name == "history.lua" && !existing.contains("total_token_count"))
-        // task_list reminders are now deduped per conversation; refresh older
-        // seeded copies that would re-emit identical turn messages every tool round,
-        // as well as copies that predate the complete action.
+        // task_list: refresh copies missing conversation-deduped reminders,
+        // complete, or the low-friction advance action / prior-step auto-close.
         || (name == "task_list.lua"
             && (!existing.contains("emit_turn_message_once")
-                || !existing.contains("if action == \"complete\" then")))
+                || !existing.contains("if action == \"complete\" then")
+                || !existing.contains("action == \"advance\"")
+                || !existing.contains("close_prior_to_in_progress")))
         // subagent's eager-render + dispatch label moved from hardcoded host
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.

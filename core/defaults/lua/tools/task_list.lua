@@ -56,12 +56,43 @@ local function empty_pane(name)
     }
 end
 
-local function emit(state, all_done_msg)
-    local tasks = state.tasks or {}
+local function count_done(tasks)
     local done = 0
     for _, t in ipairs(tasks) do
         if t.status == "done" then done = done + 1 end
     end
+    return done
+end
+
+local function all_done(tasks)
+    if #tasks == 0 then return false end
+    for _, t in ipairs(tasks) do
+        if t.status ~= "done" then return false end
+    end
+    return true
+end
+
+-- When a later item is in_progress, earlier incomplete items are finished work
+-- the model forgot to mark — close them so the list doesn't stall half-open.
+local function close_prior_to_in_progress(tasks)
+    local ip = nil
+    for i, t in ipairs(tasks) do
+        if t.status == "in_progress" then
+            ip = i
+            break
+        end
+    end
+    if not ip then return end
+    for i = 1, ip - 1 do
+        if tasks[i].status ~= "done" then
+            tasks[i].status = "done"
+        end
+    end
+end
+
+local function emit(state, all_done_msg)
+    local tasks = state.tasks or {}
+    local done = count_done(tasks)
     local total = #tasks
     local name = state.name or DEFAULT_NAME
 
@@ -87,6 +118,64 @@ local function emit(state, all_done_msg)
     return cjson.encode(output)
 end
 
+local function load_state(ctx)
+    local raw = ctx.state.get("task_list")
+    if not raw or raw == "" then
+        return nil, "ERROR: No active task list."
+    end
+    local ok, state = pcall(cjson.decode, raw)
+    if not ok or type(state) ~= "table" or type(state.tasks) ~= "table" or #state.tasks == 0 then
+        return nil, "ERROR: Active task list is unavailable or invalid."
+    end
+    return state, nil
+end
+
+local function persist(ctx, state)
+    ctx.state.set("task_list", cjson.encode(state))
+end
+
+-- Mark the current step done and open the next pending one. Cheap progress
+-- tick so the model does not have to rewrite the full list every step.
+local function advance(ctx)
+    local state, err = load_state(ctx)
+    if not state then return err end
+
+    local tasks = state.tasks
+    local idx = nil
+    for i, t in ipairs(tasks) do
+        if t.status == "in_progress" then
+            idx = i
+            break
+        end
+    end
+    if not idx then
+        for i, t in ipairs(tasks) do
+            if t.status ~= "done" then
+                idx = i
+                break
+            end
+        end
+    end
+
+    if not idx then
+        return emit(state, "All tasks complete.")
+    end
+
+    tasks[idx].status = "done"
+    for i = idx + 1, #tasks do
+        if tasks[i].status ~= "done" then
+            tasks[i].status = "in_progress"
+            break
+        end
+    end
+
+    persist(ctx, state)
+    if all_done(tasks) then
+        return emit(state, "All tasks complete.")
+    end
+    return emit(state)
+end
+
 local function execute(params, ctx)
     local action = params.action or ""
 
@@ -99,19 +188,22 @@ local function execute(params, ctx)
     end
 
     if action == "complete" then
-        local raw = ctx.state.get("task_list")
-        if not raw or raw == "" then
-            return "ERROR: No active task list to complete."
-        end
-        local ok, state = pcall(cjson.decode, raw)
-        if not ok or type(state) ~= "table" or type(state.tasks) ~= "table" or #state.tasks == 0 then
-            return "ERROR: Active task list is unavailable or invalid."
+        local state, err = load_state(ctx)
+        if not state then
+            if err and err:find("No active", 1, true) then
+                return "ERROR: No active task list to complete."
+            end
+            return err or "ERROR: Active task list is unavailable or invalid."
         end
         for _, task in ipairs(state.tasks) do
             task.status = "done"
         end
-        ctx.state.set("task_list", cjson.encode(state))
+        persist(ctx, state)
         return emit(state, "All tasks complete.")
+    end
+
+    if action == "advance" then
+        return advance(ctx)
     end
 
     if action == "write" then
@@ -140,25 +232,23 @@ local function execute(params, ctx)
             return "ERROR: Keep at most one task 'in_progress' at a time."
         end
 
-        local state = { name = params.name or DEFAULT_NAME, tasks = tasks }
-        ctx.state.set("task_list", cjson.encode(state))
+        close_prior_to_in_progress(tasks)
 
-        local all_done = true
-        for _, t in ipairs(tasks) do
-            if t.status ~= "done" then all_done = false break end
-        end
-        if all_done then
+        local state = { name = params.name or DEFAULT_NAME, tasks = tasks }
+        persist(ctx, state)
+
+        if all_done(tasks) then
             return emit(state, "All tasks complete.")
         end
         return emit(state)
     end
 
-    return "ERROR: Action must be 'write', 'complete', or 'clear'."
+    return "ERROR: Action must be 'write', 'advance', 'complete', or 'clear'."
 end
 
 bone.register_tool({
     name = "task_list",
-    description = "Maintain a visible checklist (TUI pane) for the user. Use it for any task with ~3+ distinct steps or work spanning multiple files. Call 'write' with the FULL list every time — it replaces the whole list, so there are no indices to track. Keep at most one item 'in_progress' (the step you're working on now); flip it to 'done' when finished. Once the work is genuinely complete, call 'complete' to mark the whole current list done. Call 'clear' only when the user confirms. State is host-held; no state arg. Actions: write (pass tasks, optional name, max 15), complete, clear.",
+    description = "Maintain a visible checklist (TUI pane) for multi-step work. Prefer action=advance after each finished step (marks the current item done and starts the next) — do not leave steps open when you move on. Use action=write with the FULL list to create/reorder/rename (at most one in_progress). When the whole job is done, call action=complete before your final answer so the pane shows N/N. Call clear only after the user confirms. State is host-held. Actions: write (tasks, optional name, max 15), advance, complete, clear.",
     safety = "read_only",
     -- Host-managed state: the host serializes batched calls and threads the
     -- prior list back in (state_key defaults to the tool name, "task_list").
@@ -168,8 +258,8 @@ bone.register_tool({
         properties = {
             action = {
                 type = "string",
-                description = "'write' (replace the full list), 'complete' (mark every current task done), or 'clear' (remove the list).",
-                enum = { "write", "complete", "clear" },
+                description = "'write' (replace the full list), 'advance' (finish current step and open the next), 'complete' (mark every task done), or 'clear' (remove the list).",
+                enum = { "write", "advance", "complete", "clear" },
             },
             name = {
                 type = "string",
@@ -265,13 +355,17 @@ bone.on("before_turn", function(_event, ctx)
     end
 
     local tasks = state.tasks
-    local done = 0
+    local done = count_done(tasks)
     local current = nil
+    local remaining = {}
     for _, t in ipairs(tasks) do
         if t.status == "done" then
-            done = done + 1
+            -- counted above
         elseif t.status == "in_progress" and not current then
             current = t.text
+            table.insert(remaining, t.text)
+        else
+            table.insert(remaining, t.text)
         end
     end
 
@@ -284,11 +378,14 @@ bone.on("before_turn", function(_event, ctx)
     -- Active list: always emit the full list (no dedup) so the model can
     -- reproduce it even after compaction drops its prior tool-call args.
     local current_line = current
-        and string.format("In-progress: \"%s\".", current)
-        or "No item is in_progress — mark the next one you're working on."
+        and string.format("In-progress: \"%s\". When this step is finished, call task_list (action=advance) before starting the next.", current)
+        or "No item is in_progress — call task_list (action=advance) or write with the next step in_progress."
+    local remain_line = (#remaining > 0)
+        and string.format(" Remaining (%d): %s.", #remaining, table.concat(remaining, "; "))
+        or ""
     return {
         turn_message = string.format(
-            "Active task list (%d/%d done). %s\n%s\nUse task_list (action=write) to update progress. Once the work is genuinely complete, call task_list (action=complete) before your final answer.",
-            done, #tasks, current_line, render_list_text(tasks)),
+            "Active task list (%d/%d done).%s %s\n%s\nDo not give a final answer while items remain open: call task_list (action=advance) after each finished step, or action=complete once the whole job is done.",
+            done, #tasks, remain_line, current_line, render_list_text(tasks)),
     }
 end)
