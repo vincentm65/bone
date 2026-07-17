@@ -337,6 +337,7 @@ impl Driver {
             approval: approval_label.to_string(),
             task: prompt.to_string(),
             model: llm.model().to_string(),
+            display: None,
         });
         extensions.dispatch_simple("session_start", serde_json::json!({}));
         extensions.dispatch_simple(

@@ -649,9 +649,8 @@ pub fn status_sym(status: JobStatus) -> &'static str {
 /// prompt handed to the model (`turn_text`) and a short label for the frontend
 /// scrollback (`display_text`). `None` when `finished` is empty.
 ///
-/// Shared by the interactive TUI (`tick_jobs`) and the daemon's background
-/// injection so both frontends deliver identical job results. `still_running`
-/// is appended as a note so the model doesn't assume outstanding jobs failed.
+/// Used by daemon-owned background injection. `still_running` is appended as a
+/// note so the model doesn't assume outstanding jobs failed.
 pub fn format_results_for_injection(
     finished: &[Job],
     still_running: &[Job],

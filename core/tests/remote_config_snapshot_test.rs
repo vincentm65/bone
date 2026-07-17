@@ -130,7 +130,6 @@ bone.command.register("cfgapply", {
         bone_core::tools::ApprovalMode::Safe,
         None,
         true,
-        false,
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

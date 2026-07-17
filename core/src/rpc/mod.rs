@@ -522,7 +522,10 @@ where
 /// start a turn; every other command is `Continue`.
 enum Flow {
     Continue,
-    StartTurn(String),
+    StartTurn {
+        text: String,
+        display: Option<String>,
+    },
 }
 
 /// The daemon's shared state, threaded through command handling so each
@@ -545,10 +548,9 @@ struct DaemonCtx {
     // instead of re-reading disk and booting a second VM. `None` (e.g. `bone
     // serve`) falls back to booting from disk.
     reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
-    // Forward Lua `ViewDiff`s (pane/UI updates) as `RuntimeEvent::ViewDiff` so a
-    // *remote* frontend renders them. The in-process TUI shares the VM and
-    // drains the `UiState` itself, so it passes `false` to avoid a double-drain
-    // race; `bone serve` passes `true`.
+    // Forward Lua `ViewDiff`s (pane/UI updates) as `RuntimeEvent::ViewDiff`.
+    // Pure-client frontends (in-process TUI and remote) pass `true` so the
+    // daemon is the sole drain of the VM's `UiState`.
     forward_view_diffs: bool,
 }
 
@@ -679,9 +681,19 @@ impl DaemonCtx {
         ui.terminal_width = width;
     }
 
-    /// Fire-and-forget Lua hook on the daemon's VM.
+    /// Fire a Lua hook and perform any daemon-owned lifecycle side effect.
     fn dispatch_hook(&self, name: String, payload: serde_json::Value) {
         self.extensions.dispatch_simple(&name, payload);
+        if name == "session_end" {
+            let session = self.session.lock().unwrap();
+            if let (Some(db), Some(id)) = (session.session_db.as_ref(), session.conversation_id)
+                && let Err(err) = db.end_conversation(id)
+            {
+                self.hub.publish(RuntimeEvent::Status {
+                    message: format!("failed to end conversation: {err}"),
+                });
+            }
+        }
     }
 
     /// Terminate every running background sub-agent for this session, surfacing
@@ -699,17 +711,28 @@ impl DaemonCtx {
         }
     }
 
+    fn cancel_job(&self, id: &str) {
+        let scope = self.session.lock().unwrap().conversation_id;
+        let registry = crate::ext::jobs::registry();
+        if registry
+            .all_jobs()
+            .iter()
+            .any(|job| job.id == id && job.scope == scope)
+        {
+            registry.cancel(id);
+        }
+    }
+
     /// Next queued background prompt to inject as a turn when the daemon is idle,
     /// or `None` when nothing is pending. Lua-submitted prompts (`bone.submit`)
     /// go first, one per idle tick; otherwise a batch of this conversation's
     /// finished sub-agent jobs is formatted into a single turn and marked
-    /// consumed so it is never injected twice. Only called when
-    /// `inject_background` is set (i.e. `bone serve`).
-    fn next_background_prompt(&self) -> Option<String> {
+    /// consumed so it is never injected twice.
+    fn next_background_prompt(&self) -> Option<(String, Option<String>)> {
         // `bone.submit` prompts first — steering should win over passively
         // arriving job results.
         if let Some(text) = crate::ext::inbox::pop() {
-            return Some(text);
+            return Some((text, None));
         }
         let scope = self.session.lock().unwrap().conversation_id;
         let registry = crate::ext::jobs::registry();
@@ -718,11 +741,11 @@ impl DaemonCtx {
             return None;
         }
         let running = registry.running_jobs_scoped(scope);
-        let (turn_text, _display) =
+        let (turn_text, display) =
             crate::ext::jobs::format_results_for_injection(&finished, &running)?;
         let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
         registry.mark_consumed(&ids);
-        Some(turn_text)
+        Some((turn_text, Some(display)))
     }
 
     /// Run a registered Lua slash command inside the daemon, forwarding its pane
@@ -740,9 +763,9 @@ impl DaemonCtx {
     ///
     /// [`parse_lua_command_return`]: crate::ext::types::parse_lua_command_return
     ///
-    /// This is the daemon-side equivalent of the TUI's `run_lua_command`: it lets a
-    /// remote frontend run interactive commands against the daemon's Lua VM.
-    /// The pure-client TUI also routes slash commands over this path.
+    /// Daemon-side slash-command runner: lets a frontend run interactive
+    /// commands against the daemon's Lua VM. The pure-client TUI routes all
+    /// slash commands over this path.
     async fn run_interactive_command(
         &self,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
@@ -784,7 +807,7 @@ impl DaemonCtx {
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
 
         // The handler call blocks (Lua + nested tool calls), so run it off the
-        // async runtime. Mirrors the TUI's spawn_blocking in `run_lua_command`.
+        // async runtime (spawn_blocking — the handler may nest tool calls).
         // Outer `Option` = "was the command found?"; inner `Option` = the parsed
         // result (a found handler may legitimately return a no-op `None`).
         let mut handle = tokio::task::spawn_blocking(move || {
@@ -902,10 +925,10 @@ impl DaemonCtx {
     }
 
     /// Handle one command received while the runtime is idle. Returns [`Flow`]:
-    /// `Continue` once the command is fully serviced, or `StartTurn(text)` when
-    /// the command should run a model turn (`SubmitPrompt`, or a `RunCommand`
-    /// whose handler asked to submit its output). `commands` is borrowed so an
-    /// interactive `RunCommand` can pump replies while its handler runs.
+    /// `Continue` once the command is fully serviced, or `StartTurn` when the
+    /// command should run a model turn (`SubmitPrompt`, a submitting
+    /// `RunCommand`, or a daemon background inject). `commands` is borrowed so
+    /// an interactive `RunCommand` can pump replies while its handler runs.
     async fn handle_idle_command(
         &mut self,
         cmd: RuntimeCommand,
@@ -938,7 +961,10 @@ impl DaemonCtx {
                     "message",
                     serde_json::json!({ "role": "user", "content": text }),
                 );
-                Flow::StartTurn(text)
+                Flow::StartTurn {
+                    text,
+                    display: None,
+                }
             }
             // ── Lifecycle commands (idle only) ──────────────────────────
             RuntimeCommand::NewConversation => {
@@ -1224,7 +1250,10 @@ impl DaemonCtx {
                         "message",
                         serde_json::json!({ "role": "user", "content": ret.output }),
                     );
-                    Flow::StartTurn(ret.output)
+                    Flow::StartTurn {
+                        text: ret.output,
+                        display: None,
+                    }
                 } else {
                     self.publish_snapshot();
                     Flow::Continue
@@ -1235,14 +1264,19 @@ impl DaemonCtx {
                 self.hub.publish(RuntimeEvent::KeymapDispatched { kind });
                 Flow::Continue
             }
-            // Fire-and-forget Lua hook on the daemon's VM.
+            // Lua hook on the daemon's VM; snapshot acknowledges completion.
             RuntimeCommand::DispatchHook { name, payload } => {
                 self.dispatch_hook(name, payload);
+                self.publish_snapshot();
                 Flow::Continue
             }
             // Sync terminal width from the frontend so Lua panes wrap correctly.
             RuntimeCommand::SetTerminalWidth { width } => {
                 self.set_width(width);
+                Flow::Continue
+            }
+            RuntimeCommand::CancelJob { id } => {
+                self.cancel_job(&id);
                 Flow::Continue
             }
             // A cancel while idle has no turn to stop, but background
@@ -1267,7 +1301,12 @@ impl DaemonCtx {
     /// into the turn and a mid-turn `SetApprovalMode`/width/hook still applies
     /// (via the same shared mutators the idle path uses). After it drains, the
     /// session reabsorbs the outcome and a fresh `StateSnapshot` is published.
-    async fn run_turn(&self, text: String, commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>) {
+    async fn run_turn(
+        &self,
+        text: String,
+        mut display: Option<String>,
+        commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
+    ) {
         use crate::runtime::{ChannelApprovalGate, LocalConn, RuntimeConn};
         use std::sync::atomic::AtomicBool;
 
@@ -1317,7 +1356,12 @@ impl DaemonCtx {
         loop {
             tokio::select! {
                 ev = conn.next_event() => match ev {
-                    Some(ev) => self.hub.publish(ev),
+                    Some(mut ev) => {
+                        if let RuntimeEvent::Started { display: event_display, .. } = &mut ev {
+                            *event_display = display.take();
+                        }
+                        self.hub.publish(ev);
+                    }
                     None => break, // turn drained
                 },
                 _ = diff_timer.tick(), if self.forward_view_diffs => self.drain_diffs(),
@@ -1332,6 +1376,7 @@ impl DaemonCtx {
                     }
                     Some(cmd @ (RuntimeCommand::ApprovalReply { .. }
                     | RuntimeCommand::KeyReply { .. })) => conn.send(cmd),
+                    Some(RuntimeCommand::CancelJob { id }) => self.cancel_job(&id),
                     // Mid-turn Safe/Danger toggle: applies to the rest of the turn
                     // (the gate reads the shared atomic per call).
                     Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.persist_mode(&mode_str),
@@ -1343,8 +1388,14 @@ impl DaemonCtx {
                     Some(RuntimeCommand::SubmitPrompt { .. }) => self.hub.publish(RuntimeEvent::Status {
                         message: "busy: a turn is in progress; prompt ignored".into(),
                     }),
-                    // Width updates and hooks are safe mid-turn.
+                    // Width updates and ordinary hooks are safe mid-turn. Ending
+                    // the conversation must wait until no turn can still persist.
                     Some(RuntimeCommand::SetTerminalWidth { width }) => self.set_width(width),
+                    Some(RuntimeCommand::DispatchHook { name, .. }) if name == "session_end" => {
+                        self.hub.publish(RuntimeEvent::Status {
+                            message: "busy: cannot end the conversation during a turn".into(),
+                        });
+                    }
                     Some(RuntimeCommand::DispatchHook { name, payload }) => self.dispatch_hook(name, payload),
                     Some(cmd @ RuntimeCommand::Steer { .. }) => conn.send(cmd),
                     Some(_) => {}
@@ -1414,15 +1465,10 @@ pub async fn run_daemon(
     // instead of re-reading disk and booting a second VM. `None` (e.g. `bone
     // serve`) falls back to booting from disk.
     reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
-    // Forward Lua `ViewDiff`s (pane/UI updates) as `RuntimeEvent::ViewDiff` so a
-    // *remote* frontend renders them. The in-process TUI shares the VM and
-    // drains the `UiState` itself, so it passes `false` to avoid a double-drain
-    // race; `bone serve` passes `true`.
+    // Forward Lua `ViewDiff`s (pane/UI updates) as `RuntimeEvent::ViewDiff`.
+    // Both in-process and remote pure-client frontends pass `true` so the
+    // daemon is the sole drain of the VM's `UiState`.
     forward_view_diffs: bool,
-    // Inject background sub-agent results / Lua-submitted prompts as turns from
-    // the daemon when idle. `true` for `bone serve` (remote clients cannot
-    // self-inject); `false` for the in-process TUI (it injects locally).
-    inject_background: bool,
 ) {
     let mut ctx = DaemonCtx {
         hub: hub.into(),
@@ -1436,12 +1482,11 @@ pub async fn run_daemon(
         forward_view_diffs,
     };
 
-    // Each command is serviced by `handle_idle_command`; the two that run a model
-    // turn (`SubmitPrompt` / a submitting `RunCommand`) return `StartTurn(text)`,
-    // which `run_turn` builds and pumps to completion. When `inject_background`
-    // is set, an idle poll also drains background sub-agent results and
-    // Lua-submitted prompts and runs them as turns — the daemon-side equivalent
-    // of the TUI's `tick_jobs` / `tick_inbox`, so remote clients reach parity.
+    // Each command is serviced by `handle_idle_command`; commands that start a
+    // model turn return `StartTurn`, which `run_turn` builds and pumps to
+    // completion. An idle poll always drains background sub-agent results and
+    // Lua-submitted prompts (`bone.submit`) so injection is daemon-owned for
+    // both the in-process TUI and remote clients.
     let mut inject_timer = tokio::time::interval(std::time::Duration::from_millis(200));
     loop {
         let flow = tokio::select! {
@@ -1450,23 +1495,29 @@ pub async fn run_daemon(
                 Some(cmd) => ctx.handle_idle_command(cmd, &mut commands).await,
                 None => break,
             },
-            _ = inject_timer.tick(), if inject_background => {
+            _ = inject_timer.tick() => {
                 match ctx.next_background_prompt() {
                     // Route through the same `SubmitPrompt` handling as a typed
-                    // prompt (transcript push, DB persist, `message` hook).
-                    Some(text) => {
-                        ctx.handle_idle_command(
-                            RuntimeCommand::SubmitPrompt { text, images: vec![] },
-                            &mut commands,
-                        )
-                        .await
+                    // prompt (transcript push, DB persist, `message` hook), then
+                    // attach the short display label for job-result injects.
+                    Some((text, display)) => {
+                        match ctx
+                            .handle_idle_command(
+                                RuntimeCommand::SubmitPrompt { text, images: vec![] },
+                                &mut commands,
+                            )
+                            .await
+                        {
+                            Flow::StartTurn { text, .. } => Flow::StartTurn { text, display },
+                            other => other,
+                        }
                     }
                     None => Flow::Continue,
                 }
             }
         };
-        if let Flow::StartTurn(text) = flow {
-            ctx.run_turn(text, &mut commands).await;
+        if let Flow::StartTurn { text, display } = flow {
+            ctx.run_turn(text, display, &mut commands).await;
         }
     }
 }

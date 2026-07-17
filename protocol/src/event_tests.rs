@@ -18,6 +18,7 @@ fn every_runtime_event_variant_round_trips() {
             approval: "safe".into(),
             task: "do it".into(),
             model: "m".into(),
+            display: Some("[job results: reviewer ✓]".into()),
         },
         RuntimeEvent::Status {
             message: "thinking".into(),
@@ -191,6 +192,7 @@ fn every_runtime_command_variant_round_trips() {
             },
         },
         RuntimeCommand::Cancel,
+        RuntimeCommand::CancelJob { id: "job-1".into() },
         RuntimeCommand::RunCommand {
             name: "usage".into(),
             input: "".into(),

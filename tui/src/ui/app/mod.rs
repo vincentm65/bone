@@ -52,6 +52,144 @@ fn finish_queue_edit(
     true
 }
 
+/// Result of an agents-pane key handled by [`apply_agents_nav_key`].
+pub(crate) enum AgentsKeyResult {
+    Unhandled,
+    SelectionChanged,
+    OpenJob,
+    Cancelled(String),
+}
+
+/// Shared queue-pane navigation for idle `handle_key` and streaming `drain_keys`.
+/// Mutates queue/selection/edit state; returns true when the key was consumed.
+pub(crate) fn apply_queue_nav_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    queue: &mut VecDeque<String>,
+    queue_selected: &mut usize,
+    queue_editing: &mut Option<(usize, String)>,
+    input: &mut InputState,
+) -> bool {
+    if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        return false;
+    }
+    let index = (*queue_selected).min(queue.len().saturating_sub(1));
+    match code {
+        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) && index > 0 => {
+            queue.swap(index, index - 1);
+            *queue_selected = index - 1;
+            true
+        }
+        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) && index + 1 < queue.len() => {
+            queue.swap(index, index + 1);
+            *queue_selected = index + 1;
+            true
+        }
+        KeyCode::Up if modifiers.is_empty() => {
+            *queue_selected = index.saturating_sub(1);
+            true
+        }
+        KeyCode::Down if modifiers.is_empty() => {
+            *queue_selected = (index + 1).min(queue.len().saturating_sub(1));
+            true
+        }
+        KeyCode::Enter if modifiers.is_empty() && input.buffer.trim().is_empty() => {
+            if let Some(text) = queue.remove(index) {
+                queue.push_front(text);
+                *queue_selected = 0;
+            }
+            true
+        }
+        KeyCode::F(2) if modifiers.is_empty() && input.buffer.is_empty() => {
+            if let Some(text) = queue.remove(index) {
+                input.buffer = text.clone();
+                input.cursor_pos = input.buffer.chars().count();
+                *queue_editing = Some((index, text));
+            }
+            true
+        }
+        KeyCode::Delete if modifiers.is_empty() => {
+            queue.remove(index);
+            *queue_selected = index.min(queue.len().saturating_sub(1));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Shared agents/jobs-pane navigation for idle `handle_key` and streaming `drain_keys`.
+pub(crate) fn apply_agents_nav_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    selected_job_id: &mut Option<String>,
+    input: &InputState,
+) -> AgentsKeyResult {
+    if !modifiers.is_empty() {
+        return AgentsKeyResult::Unhandled;
+    }
+    let jobs = crate::ext::jobs::registry().running_jobs();
+    let current = selected_job_id
+        .as_deref()
+        .and_then(|id| jobs.iter().position(|j| j.id == id))
+        .unwrap_or(0);
+    match code {
+        KeyCode::Up if !jobs.is_empty() => {
+            *selected_job_id = Some(jobs[current.saturating_sub(1)].id.clone());
+            AgentsKeyResult::SelectionChanged
+        }
+        KeyCode::Down if !jobs.is_empty() => {
+            *selected_job_id = Some(jobs[(current + 1).min(jobs.len() - 1)].id.clone());
+            AgentsKeyResult::SelectionChanged
+        }
+        KeyCode::Enter if should_open_agent_log(input) => AgentsKeyResult::OpenJob,
+        KeyCode::Char('k') => selected_job_id
+            .clone()
+            .map_or(AgentsKeyResult::Unhandled, AgentsKeyResult::Cancelled),
+        _ => AgentsKeyResult::Unhandled,
+    }
+}
+
+/// Shared pane Tab / PageUp / PageDown / Ctrl+Up / Ctrl+Down navigation.
+/// Returns true when the key was consumed.
+pub(crate) fn apply_pane_nav_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    pages: &mut [PanePage],
+    active_page: &mut usize,
+) -> bool {
+    if pages.is_empty() {
+        return false;
+    }
+    *active_page = (*active_page).min(pages.len() - 1);
+    match (code, modifiers) {
+        (KeyCode::Tab, m) if m.is_empty() => {
+            *active_page = (*active_page + 1) % pages.len();
+            true
+        }
+        (KeyCode::PageUp, m) if m.is_empty() => {
+            let page = &mut pages[*active_page];
+            page.scroll = page.scroll.saturating_sub(MAX_PANE_ROWS);
+            true
+        }
+        (KeyCode::PageDown, m) if m.is_empty() => {
+            let page = &mut pages[*active_page];
+            page.scroll = (page.scroll + MAX_PANE_ROWS).min(page.max_scroll());
+            true
+        }
+        (KeyCode::Up, m) if m.contains(KeyModifiers::CONTROL) => {
+            let page = &mut pages[*active_page];
+            page.scroll = page.scroll.saturating_sub(1);
+            true
+        }
+        (KeyCode::Down, m) if m.contains(KeyModifiers::CONTROL) => {
+            let page = &mut pages[*active_page];
+            page.scroll = (page.scroll + 1).min(page.max_scroll());
+            true
+        }
+        _ => false,
+    }
+}
+
 /// A tool-call approval awaiting a user decision. Held in `App` while the
 /// bottom-pane prompt is shown so the streaming loop keeps pumping (spinner,
 /// events, subagent panes) instead of blocking on a nested poll loop. The
@@ -114,7 +252,7 @@ pub struct App {
     pub session_db: Option<crate::session_db::SessionDb>,
     pub input: InputState,
     pub streaming: bool,
-    /// A live Lua command is running through `run_remote_command`. This needs
+    /// A live slash command is running through `run_remote_command`. This needs
     /// the same cancellation plumbing as streaming, but it is not a model turn
     /// and should not show the thinking spinner.
     pub live_command: bool,
@@ -377,11 +515,9 @@ impl App {
             | RuntimeEvent::ConversationLoadFailed { message, .. } => {
                 self.messages.push(Message::system(message));
             }
-            // The daemon VM's boot-time display state. Adopt it so the frontend
-            // renders the daemon's theme/keymap/config/commands rather than its
-            // own local VM's — the step toward a VM-less client. Sent on attach
-            // and after a remote `ReloadExtensions`. The local VM (still present)
-            // remains the fallback for anything not carried here.
+            // The daemon's boot-time display state. Adopt it so the frontend
+            // renders the daemon's theme/keymap/config/commands. Sent on attach
+            // and after a remote `ReloadExtensions`.
             RuntimeEvent::FrontendState {
                 banner,
                 settings,
@@ -391,8 +527,9 @@ impl App {
             } => {
                 self.apply_frontend_state(banner, settings, commands, tool_defs, tool_display);
             }
-            // Pane/UI diff from a remote daemon (e.g. a command's pane between
-            // turns). In-process these come from the shared UiState drain.
+            // Pane/UI diff from the daemon (e.g. a command's pane between turns).
+            // Both in-process and remote clients receive these via the event bus
+            // when `forward_view_diffs` is enabled.
             RuntimeEvent::ViewDiff { diff } => {
                 self.apply_view_diff(diff);
             }
@@ -475,14 +612,19 @@ impl App {
         }
     }
 
-    /// Dispatch a `session_end` hook on the daemon's Lua VM.
-    pub fn dispatch_session_end(&self) {
-        let _ = self
-            .command_tx
-            .send(crate::runtime::RuntimeCommand::DispatchHook {
-                name: "session_end".into(),
-                payload: serde_json::json!({}),
-            });
+    /// Dispatch a hook on the daemon and wait briefly for its acknowledgement.
+    /// For `session_end`, the daemon also closes the authoritative DB conversation.
+    pub async fn dispatch_session_end(&mut self) {
+        let command = crate::runtime::RuntimeCommand::DispatchHook {
+            name: "session_end".into(),
+            payload: serde_json::json!({}),
+        };
+        // A user hook must not leave the terminal in raw mode forever on exit.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            self.send_and_await_snapshot(command),
+        )
+        .await;
     }
 
     /// Apply a generic action returned by a Lua command or hook.
@@ -908,43 +1050,30 @@ impl App {
             while let Ok(ev) = self.events_rx.try_recv() {
                 replaced_scrollback |=
                     matches!(&ev, crate::runtime::RuntimeEvent::ConversationLoaded { .. });
-                if let crate::runtime::RuntimeEvent::ApprovalRequest {
-                    id,
-                    call_id,
-                    name,
-                    arguments,
-                    auto_allows,
-                    preview,
-                    ..
-                } = ev
-                {
-                    let call = ToolCall {
-                        id: call_id,
+                match ev {
+                    crate::runtime::RuntimeEvent::Started { task, display, .. } => {
+                        self.adopt_daemon_turn(task, display, &mut terminal).await?;
+                    }
+                    crate::runtime::RuntimeEvent::ApprovalRequest {
+                        id,
+                        call_id,
                         name,
                         arguments,
-                    };
-                    if let Some(preview) = preview.as_deref() {
-                        self.pump_show_edit_preview(&call.id, preview, &mut terminal)?;
+                        auto_allows,
+                        preview,
+                        ..
+                    } => {
+                        self.handle_approval_request(
+                            id,
+                            call_id,
+                            name,
+                            arguments,
+                            auto_allows,
+                            preview.as_deref(),
+                            &mut terminal,
+                        )?;
                     }
-                    // Danger UI means every tool is allowed. Even if the daemon
-                    // still sent a prompt (mode desync), auto-accept and reassert
-                    // Danger so the gate catches up for subsequent calls.
-                    if auto_allows || matches!(self.approval_mode, ApprovalMode::Danger) {
-                        if !auto_allows {
-                            self.user_config.approval_mode = ApprovalMode::Danger;
-                            self.persist_runtime_config();
-                        }
-                        let _ =
-                            self.command_tx
-                                .send(crate::runtime::RuntimeCommand::ApprovalReply {
-                                    id,
-                                    outcome: crate::tools::CallOutcome::Approve,
-                                });
-                    } else {
-                        self.begin_approval(&call, id, &mut terminal)?;
-                    }
-                } else {
-                    self.apply_idle_event(ev);
+                    ev => self.apply_idle_event(ev),
                 }
             }
             // Loading a conversation replaces native terminal scrollback; a
@@ -962,11 +1091,10 @@ impl App {
                 self.redraw(&mut terminal)?;
             }
 
-            // Tick background jobs: refresh pane + auto-inject finished results.
-            self.tick_jobs(&mut terminal).await?;
-
-            // Drain prompts queued by Lua via `bone.submit`.
-            self.tick_inbox(&mut terminal).await?;
+            // Keep native process/sub-agent panes live; turn injection is daemon-owned.
+            if self.maybe_refresh_jobs_pane() {
+                self.redraw(&mut terminal)?;
+            }
         }
 
         // Finalize any in-progress streaming message before clearing the
@@ -989,7 +1117,7 @@ impl App {
                 .flush_new_to_scrollback(&self.messages, &mut terminal)?;
         }
 
-        self.dispatch_session_end();
+        self.dispatch_session_end().await;
 
         self.reset_terminal_background();
         Renderer::prepare_exit(&mut terminal)?;
@@ -1203,73 +1331,6 @@ impl App {
         Ok(())
     }
 
-    /// Tick background-job status: refresh pane if needed, auto-inject
-    /// finished results when the TUI is idle.
-    async fn tick_jobs(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        // 1. Pane refresh: version change, or ~1s ticker while jobs run.
-        if self.maybe_refresh_jobs_pane() {
-            self.redraw(term)?;
-        }
-
-        // 2. Auto-injection: only when idle. Peek first; mark the jobs
-        //    consumed only after the injection actually went through.
-        if self.active_prompt.is_none() && !self.streaming && self.queue.is_empty() {
-            let finished = crate::ext::jobs::registry().peek_finished_unconsumed();
-            if let Some((text, display)) = Self::format_job_results(&finished) {
-                let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
-                let draft = std::mem::take(&mut self.input.buffer);
-                let draft_cursor = self.input.cursor_pos.min(draft.chars().count());
-                let mut draft_pastes = std::mem::take(&mut self.input.pastes);
-                let mut draft_images = std::mem::take(&mut self.input.images);
-                self.input.cursor_pos = 0;
-                self.submit_user_turn(text, Some(display), Vec::new(), term)
-                    .await?;
-                crate::ext::jobs::registry().mark_consumed(&ids);
-
-                // The injected turn resets the input. Preserve both the draft that
-                // existed before injection and anything typed while it streamed.
-                let fresh = std::mem::take(&mut self.input.buffer);
-                let mut fresh_pastes = std::mem::take(&mut self.input.pastes);
-                let mut fresh_images = std::mem::take(&mut self.input.images);
-                let byte_cursor = draft
-                    .char_indices()
-                    .nth(draft_cursor)
-                    .map(|(index, _)| index)
-                    .unwrap_or(draft.len());
-                self.input.buffer = draft;
-                self.input.buffer.insert_str(byte_cursor, &fresh);
-                self.input.cursor_pos = draft_cursor + fresh.chars().count();
-                draft_pastes.append(&mut fresh_pastes);
-                draft_images.append(&mut fresh_images);
-                self.input.pastes = draft_pastes;
-                self.input.images = draft_images;
-
-                self.drain_queue_when_input_empty(term).await?;
-                self.redraw(term)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Drain prompts queued by Lua (`bone.submit`) and feed them through the
-    /// normal input path. When idle they submit immediately; mid-turn they wait
-    /// in `self.queue` and drain when the active turn ends (the same path typed
-    /// input uses), so the status bar's `Q:` count reflects them.
-    async fn tick_inbox(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let texts = crate::ext::inbox::drain();
-        for text in texts {
-            self.queue.push_back(text);
-        }
-        if self.active_prompt.is_none() && !self.streaming {
-            self.drain_queue_when_input_empty(term).await?;
-        } else if !self.queue.is_empty() {
-            self.refresh_queue_pane();
-            self.redraw(term)?;
-        }
-        Ok(())
-    }
-
     /// Refresh the jobs pane when the registry version changed or, while
     /// jobs are running, at least once per second so elapsed time and token
     /// counters stay live. Returns `true` when the pane was refreshed.
@@ -1397,14 +1458,6 @@ impl App {
                 self.active_page,
             );
         }
-    }
-
-    /// Format finished background-job results for auto-injection. Operates on
-    /// the generic job registry, independent of which tool dispatched them.
-    /// Returns `(turn_text, display_text)` or `None` when no finished jobs.
-    fn format_job_results(jobs: &[crate::ext::jobs::Job]) -> Option<(String, String)> {
-        let still_running = crate::ext::jobs::registry().running_jobs();
-        crate::ext::jobs::format_results_for_injection(jobs, &still_running)
     }
 }
 
@@ -1684,19 +1737,6 @@ impl App {
         }
     }
 
-    fn begin_queue_edit(&mut self) {
-        if !self.input.buffer.is_empty() || self.queue.is_empty() {
-            return;
-        }
-        let index = self.queue_selected.min(self.queue.len() - 1);
-        if let Some(text) = self.queue.remove(index) {
-            self.input.buffer = text.clone();
-            self.input.cursor_pos = self.input.buffer.chars().count();
-            self.queue_editing = Some((index, text));
-            self.refresh_queue_pane();
-        }
-    }
-
     fn finish_queue_edit(&mut self, save: bool) {
         if finish_queue_edit(
             &mut self.queue,
@@ -1715,26 +1755,6 @@ impl App {
                 .pages
                 .get(self.active_page)
                 .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE)
-    }
-
-    fn move_job_selection(&mut self, down: bool) {
-        let jobs = crate::ext::jobs::registry().running_jobs();
-        if jobs.is_empty() {
-            self.selected_job_id = None;
-            return;
-        }
-        let current = self
-            .selected_job_id
-            .as_deref()
-            .and_then(|id| jobs.iter().position(|j| j.id == id))
-            .unwrap_or(0);
-        let next = if down {
-            (current + 1).min(jobs.len() - 1)
-        } else {
-            current.saturating_sub(1)
-        };
-        self.selected_job_id = Some(jobs[next].id.clone());
-        self.refresh_jobs_pane();
     }
 
     fn open_selected_job(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
@@ -1789,115 +1809,45 @@ impl App {
         }
 
         if self.queue_pane_active()
-            && self.input.buffer.is_empty()
             && self.queue_editing.is_none()
-            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && apply_queue_nav_key(
+                code,
+                modifiers,
+                &mut self.queue,
+                &mut self.queue_selected,
+                &mut self.queue_editing,
+                &mut self.input,
+            )
         {
-            let index = self.queue_selected.min(self.queue.len().saturating_sub(1));
-            match code {
-                KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) && index > 0 => {
-                    self.queue.swap(index, index - 1);
-                    self.queue_selected = index - 1;
-                    self.refresh_queue_pane();
-                    return self.redraw(term);
-                }
-                KeyCode::Down
-                    if modifiers.contains(KeyModifiers::SHIFT) && index + 1 < self.queue.len() =>
-                {
-                    self.queue.swap(index, index + 1);
-                    self.queue_selected = index + 1;
-                    self.refresh_queue_pane();
-                    return self.redraw(term);
-                }
-                KeyCode::Up if modifiers.is_empty() => {
-                    self.queue_selected = index.saturating_sub(1);
-                    self.refresh_queue_pane();
-                    return self.redraw(term);
-                }
-                KeyCode::Down if modifiers.is_empty() => {
-                    self.queue_selected = (index + 1).min(self.queue.len().saturating_sub(1));
-                    self.refresh_queue_pane();
-                    return self.redraw(term);
-                }
-                KeyCode::Enter if modifiers.is_empty() && self.input.buffer.trim().is_empty() => {
-                    if let Some(text) = self.queue.remove(index) {
-                        self.queue.push_front(text);
-                        self.queue_selected = 0;
-                    }
-                    self.refresh_queue_pane();
-                    return self.redraw(term);
-                }
-                KeyCode::F(2) if modifiers.is_empty() => {
-                    self.begin_queue_edit();
-                    return self.redraw(term);
-                }
-                KeyCode::Delete if modifiers.is_empty() => {
-                    self.queue.remove(index);
-                    self.queue_selected = index.min(self.queue.len().saturating_sub(1));
-                    self.refresh_queue_pane();
-                    return self.redraw(term);
-                }
-                _ => {}
-            }
+            self.refresh_queue_pane();
+            return self.redraw(term);
         }
 
-        if self.agents_pane_active() && modifiers.is_empty() {
-            match code {
-                KeyCode::Up => {
-                    self.move_job_selection(false);
-                    return self.redraw(term);
-                }
-                KeyCode::Down => {
-                    self.move_job_selection(true);
-                    return self.redraw(term);
-                }
-                KeyCode::Enter if should_open_agent_log(&self.input) => {
-                    return self.open_selected_job(term);
-                }
-                KeyCode::Char('k') => {
-                    if let Some(id) = self.selected_job_id.as_deref() {
-                        crate::ext::jobs::registry().cancel(id);
-                    }
+        if self.agents_pane_active() {
+            match apply_agents_nav_key(code, modifiers, &mut self.selected_job_id, &self.input) {
+                AgentsKeyResult::Unhandled => {}
+                AgentsKeyResult::SelectionChanged => {
                     self.refresh_jobs_pane();
                     return self.redraw(term);
                 }
-                _ => {}
+                AgentsKeyResult::Cancelled(id) => {
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::CancelJob { id });
+                    self.refresh_jobs_pane();
+                    return self.redraw(term);
+                }
+                AgentsKeyResult::OpenJob => {
+                    return self.open_selected_job(term);
+                }
             }
         }
 
-        if self.panes_visible && !self.pages.is_empty() && modifiers.is_empty() {
-            // BackTab is reserved for approval-mode cycle (see CycleMode below).
-            match code {
-                KeyCode::Tab => {
-                    self.active_page = (self.active_page + 1) % self.pages.len();
-                    return self.redraw(term);
-                }
-                KeyCode::PageUp => {
-                    let page = &mut self.pages[self.active_page];
-                    page.scroll = page.scroll.saturating_sub(MAX_PANE_ROWS);
-                    return self.redraw(term);
-                }
-                KeyCode::PageDown => {
-                    let page = &mut self.pages[self.active_page];
-                    page.scroll = (page.scroll + MAX_PANE_ROWS).min(page.max_scroll());
-                    return self.redraw(term);
-                }
-                _ => {}
-            }
-        }
-
-        // Ctrl+Up / Ctrl+Down: scroll pane pages
-        if self.panes_visible && !self.pages.is_empty() {
-            if matches!(code, KeyCode::Up) && modifiers.contains(KeyModifiers::CONTROL) {
-                let page = &mut self.pages[self.active_page];
-                page.scroll = page.scroll.saturating_sub(1);
-                return self.redraw(term);
-            }
-            if matches!(code, KeyCode::Down) && modifiers.contains(KeyModifiers::CONTROL) {
-                let page = &mut self.pages[self.active_page];
-                page.scroll = (page.scroll + 1).min(page.max_scroll());
-                return self.redraw(term);
-            }
+        // BackTab is reserved for approval-mode cycle (see CycleMode below).
+        if self.panes_visible
+            && apply_pane_nav_key(code, modifiers, &mut self.pages, &mut self.active_page)
+        {
+            return self.redraw(term);
         }
 
         if self.active_prompt.is_some() {
@@ -2052,12 +2002,6 @@ impl App {
                 names.join(", ")
             ));
         }
-        // Best-effort end conversation in DB
-        if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id
-        {
-            db.end_conversation(conv_id).ok();
-        }
         self.should_quit = true;
         None
     }
@@ -2132,6 +2076,48 @@ impl App {
             }
         }
         Ok(None)
+    }
+
+    /// Handle a daemon `ApprovalRequest` from any event pump (idle, turn, or
+    /// command). Shows the edit preview if present, auto-approves when the
+    /// gate says so or the UI is in Danger mode (reasserting Danger on desync),
+    /// otherwise raises the interactive prompt.
+    pub(crate) fn handle_approval_request(
+        &mut self,
+        id: u64,
+        call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+        auto_allows: bool,
+        preview: Option<&str>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        let call = ToolCall {
+            id: call_id,
+            name,
+            arguments,
+        };
+        if let Some(preview) = preview {
+            self.pump_show_edit_preview(&call.id, preview, term)?;
+        }
+        // Danger UI means every tool is allowed. Even if the daemon still sent
+        // a prompt (mode desync), auto-accept and reassert Danger so the gate
+        // catches up for subsequent calls.
+        if auto_allows || matches!(self.approval_mode, ApprovalMode::Danger) {
+            if !auto_allows {
+                self.user_config.approval_mode = ApprovalMode::Danger;
+                self.persist_runtime_config();
+            }
+            let _ = self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::ApprovalReply {
+                    id,
+                    outcome: CallOutcome::Approve,
+                });
+        } else {
+            self.begin_approval(&call, id, term)?;
+        }
+        Ok(())
     }
 
     /// Show an approval prompt for a tool call in the fixed bottom pane and
@@ -2372,7 +2358,7 @@ impl App {
             && cmd == "provider"
             && arg.is_empty()
             && self
-                .run_lua_command("config", "providers", term)
+                .run_remote_command("config", "providers", term)
                 .await
                 .is_some()
         {
@@ -2385,7 +2371,7 @@ impl App {
                 "tools"
             };
             if self
-                .run_lua_command("config", config_arg, term)
+                .run_remote_command("config", config_arg, term)
                 .await
                 .is_some()
             {
@@ -2394,7 +2380,10 @@ impl App {
         }
         if has_lua_config
             && cmd == "config"
-            && self.run_lua_command("config", &arg, term).await.is_some()
+            && self
+                .run_remote_command("config", &arg, term)
+                .await
+                .is_some()
         {
             return Ok(());
         }
@@ -2416,7 +2405,7 @@ impl App {
                 enabled_commands
             };
             if enabled.contains(&cmd)
-                && let Some(_reply) = self.run_lua_command(&cmd, &arg, term).await
+                && let Some(_reply) = self.run_remote_command(&cmd, &arg, term).await
             {
                 return Ok(());
             }
@@ -2561,17 +2550,6 @@ impl App {
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
         Ok(())
-    }
-
-    /// Run a Lua slash command on the daemon's VM over the protocol. Returns
-    /// `Some(())` if handled, `None` if the daemon reported the command unknown.
-    async fn run_lua_command(
-        &mut self,
-        cmd: &str,
-        arg: &str,
-        term: &mut BoneTerminal,
-    ) -> Option<()> {
-        self.run_remote_command(cmd, arg, term).await
     }
 
     fn show_reply(&mut self, reply: impl Into<String>, term: &mut BoneTerminal) -> io::Result<()> {

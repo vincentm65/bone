@@ -16,6 +16,9 @@ pub enum RuntimeEvent {
         approval: String,
         task: String,
         model: String,
+        /// Optional short user-row label when the daemon starts an automated turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
     Status {
         message: String,
@@ -186,15 +189,17 @@ pub enum ConfigAction {
 /// # Ownership (who needs each variant)
 ///
 /// Both the in-process TUI and `bone serve` / `--connect` share one daemon
-/// control plane (`run_daemon`). Flags differ (`forward_view_diffs`,
-/// `inject_background`); the command set does not. Freeze remote-only growth
-/// until serve is a committed product surface.
+/// control plane (`run_daemon`). Background job / `bone.submit` injection is
+/// always daemon-owned; `forward_view_diffs` still selects whether the daemon
+/// drains Lua `UiState` onto the event bus. Freeze remote-only growth until
+/// serve is a committed product surface.
 ///
 /// | Command | Owner path | Why it exists |
 /// |---------|------------|---------------|
 /// | `SubmitPrompt` | both | start a model turn |
 /// | `ApprovalReply` / `KeyReply` | both | interactive gates mid-turn |
 /// | `Cancel` / `Steer` | both | turn control |
+/// | `CancelJob` | both | cancel one background sub-agent by id |
 /// | `RunCommand` | both | slash commands on the daemon VM |
 /// | `NewConversation` / `LoadConversation` / `ClearConversation` | both | durable chat lifecycle |
 /// | `ReplaceConversation` | both | bulk transcript replace (e.g. compact) |
@@ -204,9 +209,6 @@ pub enum ConfigAction {
 /// | `SetTerminalWidth` | both | Lua `ctx.ui.width` on the daemon VM |
 /// | `DispatchHook` | both (esp. remote) | fire Lua hooks when the client has no local VM |
 /// | `KeymapDispatch` | both | resolve keymap rhs on the daemon |
-///
-/// Product intent for serve is **status quo (local-first + optional TCP)**:
-/// document the dual flags, do not add a third control path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeCommand {
@@ -224,6 +226,10 @@ pub enum RuntimeCommand {
         key: KeyEvent,
     },
     Cancel,
+    /// Cancel one background sub-agent owned by this conversation.
+    CancelJob {
+        id: String,
+    },
     RunCommand {
         name: String,
         input: String,

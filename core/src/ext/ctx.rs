@@ -2400,6 +2400,7 @@ fn dispatch_event(
             approval,
             task,
             model,
+            ..
         } => {
             if let Some(cb) = &cbs.on_started {
                 let t = lua.create_table()?;

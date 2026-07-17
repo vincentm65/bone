@@ -275,6 +275,7 @@ pub(crate) fn emit_event(
             approval,
             task,
             model,
+            ..
         } => {
             let task_preview = truncate_str(task, 200);
             serde_json::json!({

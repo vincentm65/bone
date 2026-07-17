@@ -1,9 +1,11 @@
 use super::{
-    WireTools, configured_input_style, edit_diff_message, job_snapshot_messages,
-    should_open_agent_log,
+    WireTools, apply_queue_nav_key, configured_input_style, edit_diff_message,
+    job_snapshot_messages, should_open_agent_log,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
+use crossterm::event::{KeyCode, KeyModifiers};
+use std::collections::VecDeque;
 
 #[test]
 fn config_preset_override_preserves_explicit_lua_input_customization() {
@@ -46,6 +48,44 @@ fn agent_log_enter_submits_nonempty_input() {
     input.buffer = "queue this message".into();
 
     assert!(!should_open_agent_log(&input));
+}
+
+#[test]
+fn queue_enter_with_input_falls_through_to_submission() {
+    let mut queue = VecDeque::from(["queued".to_string()]);
+    let mut selected = 0;
+    let mut editing = None;
+    let mut input = InputState::default();
+    input.buffer = "typed message".into();
+
+    assert!(!apply_queue_nav_key(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        &mut queue,
+        &mut selected,
+        &mut editing,
+        &mut input,
+    ));
+    assert_eq!(queue.front().map(String::as_str), Some("queued"));
+}
+
+#[test]
+fn queue_navigation_still_works_with_input() {
+    let mut queue = VecDeque::from(["first".to_string(), "second".to_string()]);
+    let mut selected = 0;
+    let mut editing = None;
+    let mut input = InputState::default();
+    input.buffer = "typed message".into();
+
+    assert!(apply_queue_nav_key(
+        KeyCode::Down,
+        KeyModifiers::NONE,
+        &mut queue,
+        &mut selected,
+        &mut editing,
+        &mut input,
+    ));
+    assert_eq!(selected, 1);
 }
 
 fn job_with_events(events: Vec<crate::ext::jobs::JobEvent>) -> crate::ext::jobs::Job {

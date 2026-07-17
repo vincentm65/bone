@@ -135,6 +135,7 @@ fn fake_managed_runtime(
                     approval: "safe".into(),
                     task: String::new(),
                     model: "test".into(),
+                    display: None,
                 });
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                 publisher.publish(RuntimeEvent::Finished {

@@ -14,7 +14,10 @@ use std::io;
 use std::time::Instant;
 use tokio::time::Duration;
 
-use super::{App, apply_input_key_with_paste_burst, should_open_agent_log};
+use super::{
+    AgentsKeyResult, App, apply_agents_nav_key, apply_input_key_with_paste_burst,
+    apply_pane_nav_key, apply_queue_nav_key, finish_queue_edit,
+};
 
 /// One place that resolves a `KeyEvent` to a blocked `ctx.ui.key()` request.
 /// The daemon asks for a key via `RuntimeEvent::KeyRequest`, and the reply goes
@@ -302,15 +305,7 @@ impl App {
         self.renderer
             .flush_new_to_scrollback(&self.messages, term)?;
         self.redraw(term)?;
-        self.streaming = true;
-        self.cancel_streaming = false;
-        self.shown_tool_rows.clear();
-        // Seed the live output-token estimate from the running total so the
-        // status bar ticks up from where it left off as text/tools stream in.
-        self.stream_estimated_received = Some(self.view.received);
-        self.turn_start = Some(std::time::Instant::now());
-        self.turn_paused_duration = std::time::Duration::ZERO;
-        self.turn_pause_start = None;
+        self.begin_streaming();
 
         // Send the turn to the daemon (it handles message push, Driver, and persistence).
         let _ = self
@@ -323,6 +318,34 @@ impl App {
         self.run_event_pump(term).await
     }
 
+    fn begin_streaming(&mut self) {
+        self.streaming = true;
+        self.cancel_streaming = false;
+        self.shown_tool_rows.clear();
+        self.stream_estimated_received = Some(self.view.received);
+        self.turn_start = Some(std::time::Instant::now());
+        self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_pause_start = None;
+    }
+
+    /// Adopt an automated turn started by the daemon while the frontend is idle.
+    /// The current input draft stays untouched while the injected user row and
+    /// response use the normal streaming path.
+    pub(super) async fn adopt_daemon_turn(
+        &mut self,
+        task: String,
+        display: Option<String>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        self.messages
+            .push(Message::user(display.as_deref().unwrap_or(&task)));
+        self.renderer
+            .flush_new_to_scrollback(&self.messages, term)?;
+        self.begin_streaming();
+        self.redraw(term)?;
+        self.run_event_pump(term).await
+    }
+
     /// Pump the daemon's `RuntimeEvent` stream for the in-flight turn until
     /// `TurnComplete`, rendering text/tool/approval/key events and forwarding
     /// interactive replies. Assumes the streaming flags + timers were already
@@ -331,7 +354,6 @@ impl App {
     /// turn render identically.
     pub(super) async fn run_event_pump(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         use crate::runtime::RuntimeEvent;
-        use crate::tools::CallOutcome;
 
         let mut cur_idx: Option<usize> = None;
         let mut pending: std::collections::HashMap<String, crate::tools::ToolCall> =
@@ -404,33 +426,19 @@ impl App {
                     // The daemon signals turn completion with TurnComplete.
                     Ok(RuntimeEvent::TurnComplete) => break,
                     // Approval requests are handled here because collecting a
-                    // decision may block the turn. The daemon supplies any edit
-                    // preview, so the frontend never resolves tool paths itself.
+                    // decision may block the turn. Shared with idle/command pumps.
                     Ok(RuntimeEvent::ApprovalRequest {
                         id, call_id, name, arguments, auto_allows, preview, ..
                     }) => {
-                        let call = crate::tools::ToolCall { id: call_id, name, arguments };
-                        if let Some(preview) = preview.as_deref() {
-                            self.pump_show_edit_preview(&call.id, preview, term)?;
-                        }
-                        // Danger UI means every tool is allowed. Even if the daemon
-                        // still sent a prompt (mode desync), auto-accept and reassert
-                        // Danger so the gate catches up for subsequent calls.
-                        if auto_allows || matches!(self.approval_mode, crate::tools::ApprovalMode::Danger) {
-                            if !auto_allows {
-                                self.user_config.approval_mode = crate::tools::ApprovalMode::Danger;
-                                self.persist_runtime_config();
-                            }
-                            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
-                                id,
-                                outcome: CallOutcome::Approve,
-                            });
-                        } else {
-                            // Show the prompt; the decision is collected by
-                            // drain_approval_keys at the top of the loop and
-                            // routed back through the daemon command channel.
-                            self.begin_approval(&call, id, term)?;
-                        }
+                        self.handle_approval_request(
+                            id,
+                            call_id,
+                            name,
+                            arguments,
+                            auto_allows,
+                            preview.as_deref(),
+                            term,
+                        )?;
                     }
                     Ok(ev) => {
                         self.pump_apply_event(ev, &mut cur_idx, &mut pending, &mut pending_key, term)?;
@@ -504,16 +512,15 @@ impl App {
         Ok(())
     }
 
-    /// Run a slash command on a *remote* daemon's Lua VM over the protocol.
+    /// Run a slash command on the daemon's Lua VM over the protocol.
     ///
-    /// The in-process path (`run_lua_command`) runs the handler against the
-    /// TUI's own VM; this is its remote counterpart. It sends
-    /// `RuntimeCommand::RunCommand` and pumps the daemon's interactive event
-    /// stream — pane diffs (`ViewDiff`), key requests (`KeyRequest`, answered
-    /// with `KeyReply`), and notices (`Status`) — until `CommandComplete`. If
-    /// the handler asked to submit its output as a turn, the daemon runs that
-    /// turn itself; we push the `/cmd` echo and hand off to [`run_event_pump`]
-    /// to render it. Display-only output is shown via `show_reply`.
+    /// Sends `RuntimeCommand::RunCommand` and pumps the daemon's interactive
+    /// event stream — pane diffs (`ViewDiff`), key requests (`KeyRequest`,
+    /// answered with `KeyReply`), and notices (`Status`) — until
+    /// `CommandComplete`. If the handler asked to submit its output as a turn,
+    /// the daemon runs that turn itself; we push the `/cmd` echo and hand off
+    /// to [`run_event_pump`] to render it. Display-only output is shown via
+    /// `show_reply`. Used for both in-process and remote clients.
     pub(super) async fn run_remote_command(
         &mut self,
         cmd: &str,
@@ -522,7 +529,7 @@ impl App {
     ) -> Option<()> {
         use crate::runtime::RuntimeEvent;
 
-        // Mirror `run_lua_command`'s turn-timer/flag setup so the status bar
+        // Set turn-timer/flag so the status bar
         // ticks elapsed time while the command works.
         self.live_command = true;
         self.cancel_streaming = false;
@@ -608,30 +615,21 @@ impl App {
                     Ok(RuntimeEvent::KeyRequest { id }) => {
                         pending_key.set_daemon(id, self.command_tx.clone());
                     }
-                    // A tool the command invoked needs approval. Mirror the turn
-                    // pump: show the edit preview, auto-allow if permitted, else
-                    // raise the prompt (resolved by drain_approval_keys above).
-                    // Without this arm the request falls into `Ok(_) => {}` and
-                    // the user is never asked.
+                    // A tool the command invoked needs approval. Without this arm
+                    // the request falls into `Ok(_) => {}` and the user is never asked.
                     Ok(RuntimeEvent::ApprovalRequest {
                         id, call_id, name, arguments, auto_allows, preview, ..
                     }) => {
-                        let call = crate::tools::ToolCall { id: call_id, name, arguments };
-                        if let Some(preview) = preview.as_deref() {
-                            self.pump_show_edit_preview(&call.id, preview, term).ok();
-                        }
-                        if auto_allows || matches!(self.approval_mode, crate::tools::ApprovalMode::Danger) {
-                            if !auto_allows {
-                                self.user_config.approval_mode = crate::tools::ApprovalMode::Danger;
-                                self.persist_runtime_config();
-                            }
-                            let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
-                                id,
-                                outcome: crate::tools::CallOutcome::Approve,
-                            });
-                        } else {
-                            self.begin_approval(&call, id, term).ok();
-                        }
+                        self.handle_approval_request(
+                            id,
+                            call_id,
+                            name,
+                            arguments,
+                            auto_allows,
+                            preview.as_deref(),
+                            term,
+                        )
+                        .ok();
                     }
                     Ok(RuntimeEvent::Status { message }) => {
                         // Surface daemon notices (incl. the deferred-config note)
@@ -666,7 +664,7 @@ impl App {
             }
         }
 
-        // Tear down the command's turn-timer/flags (mirrors `run_lua_command`).
+        // Tear down the command's turn-timer/flags.
         self.live_command = false;
         self.turn_start = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
@@ -686,7 +684,7 @@ impl App {
         let (mut output, submit, display_role, action) = completion?;
 
         // Apply any frontend action the handler requested, mirroring the local
-        // path (`run_lua_command` → `apply_lua_action`). A reply-bearing action
+        // path (`apply_lua_action`). A reply-bearing action
         // (config_action) replaces the displayed output with its status reply;
         // submit is already false in that case (enforced daemon-side), so this
         // only affects rendering.
@@ -828,12 +826,13 @@ impl App {
             // turn pump; if one arrives here it's a no-op.
             | RuntimeEvent::CommandComplete { .. }
             | RuntimeEvent::KeymapDispatched { .. }
-            // Boot-time display state; consumed at attach (apply_idle_event),
-            // not mid-turn. A no-op here.
+            // Boot/lifecycle display state is consumed while idle, never during
+            // a turn. Ignoring it here avoids invalidating live message indices.
             | RuntimeEvent::FrontendState { .. }
+            | RuntimeEvent::ConversationLoaded { .. }
             | RuntimeEvent::TurnComplete => {}
-            // A pane/UI diff forwarded by a remote daemon (in-process we drain
-            // the shared UiState directly, so this only fires over a socket).
+            // Pane/UI diff from the daemon (forwarded when `forward_view_diffs`
+            // is enabled — both in-process and remote clients).
             RuntimeEvent::ViewDiff { diff } => {
                 self.apply_view_diff(diff);
             }
@@ -842,20 +841,6 @@ impl App {
             // the view in sync); post-turn / on attach it's the primary source.
             RuntimeEvent::StateSnapshot { snapshot } => {
                 self.apply_snapshot(snapshot);
-            }
-            // Conversation lifecycle: update the view and rebuild scrollback
-            // from the loaded messages. Arrives on /history load or attach.
-            RuntimeEvent::ConversationLoaded { messages, snapshot } => {
-                self.reset_transient_ui_state(true);
-                self.cancel_streaming = false;
-                self.apply_snapshot(snapshot);
-                self.messages.clear();
-                let rows = self.rebuild_scrollback_from_transcript(&messages);
-                self.messages.extend(rows);
-                self.renderer.scrollback_cursor = 0;
-                let _ = self
-                    .renderer
-                    .flush_new_to_scrollback(&self.messages, term);
             }
             RuntimeEvent::ToolCall {
                 id,
@@ -1284,7 +1269,7 @@ impl App {
                         && key.modifiers.is_empty()
                         && matches!(key.code, KeyCode::Enter | KeyCode::Esc)
                     {
-                        super::finish_queue_edit(
+                        finish_queue_edit(
                             queue,
                             queue_selected,
                             queue_editing,
@@ -1307,102 +1292,45 @@ impl App {
                             .get(*active_page)
                             .is_some_and(|p| p.source == crate::ui::queue_pane::PANE_SOURCE);
                     if queue_active
-                        && !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && apply_queue_nav_key(
+                            key.code,
+                            key.modifiers,
+                            queue,
+                            queue_selected,
+                            queue_editing,
+                            input,
+                        )
                     {
-                        let index = (*queue_selected).min(queue.len().saturating_sub(1));
-                        let handled = match key.code {
-                            KeyCode::Up
-                                if key.modifiers.contains(KeyModifiers::SHIFT) && index > 0 =>
-                            {
-                                queue.swap(index, index - 1);
-                                *queue_selected = index - 1;
-                                true
-                            }
-                            KeyCode::Down
-                                if key.modifiers.contains(KeyModifiers::SHIFT)
-                                    && index + 1 < queue.len() =>
-                            {
-                                queue.swap(index, index + 1);
-                                *queue_selected = index + 1;
-                                true
-                            }
-                            KeyCode::Up if key.modifiers.is_empty() => {
-                                *queue_selected = index.saturating_sub(1);
-                                true
-                            }
-                            KeyCode::Down if key.modifiers.is_empty() => {
-                                *queue_selected = (index + 1).min(queue.len().saturating_sub(1));
-                                true
-                            }
-                            KeyCode::Enter if key.modifiers.is_empty() => {
-                                if let Some(text) = queue.remove(index) {
-                                    queue.push_front(text);
-                                    *queue_selected = 0;
-                                }
-                                true
-                            }
-                            KeyCode::F(2) if key.modifiers.is_empty() => {
-                                if let Some(text) = queue.remove(index) {
-                                    input.buffer = text.clone();
-                                    input.cursor_pos = input.buffer.chars().count();
-                                    *queue_editing = Some((index, text));
-                                }
-                                true
-                            }
-                            KeyCode::Delete if key.modifiers.is_empty() => {
-                                queue.remove(index);
-                                *queue_selected = index.min(queue.len().saturating_sub(1));
-                                true
-                            }
-                            _ => false,
-                        };
-                        if handled {
-                            refresh_queue_page(
-                                queue,
-                                queue_selected,
-                                pages,
-                                active_page,
-                                panes_visible,
-                            );
-                            continue;
-                        }
+                        refresh_queue_page(
+                            queue,
+                            queue_selected,
+                            pages,
+                            active_page,
+                            panes_visible,
+                        );
+                        continue;
                     }
                     let agents_active = *panes_visible
                         && pages
                             .get(*active_page)
                             .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE);
-                    if agents_active && key.modifiers.is_empty() {
-                        let jobs = crate::ext::jobs::registry().running_jobs();
-                        let current = selected_job_id
-                            .as_deref()
-                            .and_then(|id| jobs.iter().position(|j| j.id == id))
-                            .unwrap_or(0);
-                        match key.code {
-                            KeyCode::Up if !jobs.is_empty() => {
-                                *selected_job_id = Some(jobs[current.saturating_sub(1)].id.clone());
+                    if agents_active {
+                        match apply_agents_nav_key(key.code, key.modifiers, selected_job_id, input)
+                        {
+                            AgentsKeyResult::Unhandled => {}
+                            AgentsKeyResult::SelectionChanged => {
                                 result.jobs_changed = true;
                                 continue;
                             }
-                            KeyCode::Down if !jobs.is_empty() => {
-                                *selected_job_id =
-                                    Some(jobs[(current + 1).min(jobs.len() - 1)].id.clone());
+                            AgentsKeyResult::Cancelled(id) => {
+                                let _ = command_tx.send(RuntimeCommand::CancelJob { id });
                                 result.jobs_changed = true;
                                 continue;
                             }
-                            KeyCode::Enter if should_open_agent_log(input) => {
+                            AgentsKeyResult::OpenJob => {
                                 result.open_job = true;
                                 continue;
                             }
-                            KeyCode::Char('k') => {
-                                if let Some(id) = selected_job_id.as_deref() {
-                                    crate::ext::jobs::registry().cancel(id);
-                                }
-                                result.jobs_changed = true;
-                                continue;
-                            }
-                            _ => {}
                         }
                     }
                     // Ctrl+Enter during streaming: steer the agent mid-turn.
@@ -1414,45 +1342,12 @@ impl App {
                         }
                         continue;
                     }
-                    // ── Page navigation (Tab/PageUp/PageDown) ─────
+                    // ── Page navigation (Tab/PageUp/PageDown/Ctrl+arrows) ─────
                     // BackTab is reserved for approval-mode cycle (CycleMode below).
-                    if *panes_visible && !pages.is_empty() {
-                        *active_page = (*active_page).min(pages.len() - 1);
-                        match (key.code, key.modifiers) {
-                            (KeyCode::Tab, m) if m.is_empty() => {
-                                *active_page = (*active_page + 1) % pages.len();
-                                continue;
-                            }
-                            _ => {}
-                        }
-                        let page = &mut pages[*active_page];
-                        match (key.code, key.modifiers) {
-                            (KeyCode::PageUp, m) if m.is_empty() => {
-                                page.scroll =
-                                    page.scroll.saturating_sub(crate::ui::render::MAX_PANE_ROWS);
-                                continue;
-                            }
-                            (KeyCode::PageDown, m) if m.is_empty() => {
-                                let max_scroll = page.content.len().saturating_sub(
-                                    crate::ui::render::clamped_pane_visible_rows(page.visible_rows),
-                                );
-                                page.scroll = (page.scroll + crate::ui::render::MAX_PANE_ROWS)
-                                    .min(max_scroll);
-                                continue;
-                            }
-                            (KeyCode::Up, m) if m.contains(KeyModifiers::CONTROL) => {
-                                page.scroll = page.scroll.saturating_sub(1);
-                                continue;
-                            }
-                            (KeyCode::Down, m) if m.contains(KeyModifiers::CONTROL) => {
-                                let max_scroll = page.content.len().saturating_sub(
-                                    crate::ui::render::clamped_pane_visible_rows(page.visible_rows),
-                                );
-                                page.scroll = (page.scroll + 1).min(max_scroll);
-                                continue;
-                            }
-                            _ => {}
-                        }
+                    if *panes_visible
+                        && apply_pane_nav_key(key.code, key.modifiers, pages, active_page)
+                    {
+                        continue;
                     }
                     let mut next = Some(Event::Key(key));
                     while let Some(event) = next {
