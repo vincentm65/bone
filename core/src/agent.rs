@@ -388,13 +388,10 @@ struct AgentSetup {
 /// provider creation, Lua boot, tool registry). Designed to run on the
 /// blocking thread pool so concurrent headless agents don't starve the tokio
 /// runtime.
-/// Resolve the LLM provider for an agent run — the Step 0 injection seam.
+/// Resolve the LLM provider for an agent run.
 ///
-/// If `request.llm` is set, the injected provider is reused verbatim and no
-/// config side-effects run (no last_provider persistence, no model override,
-/// no api-key warning). Otherwise the provider is constructed from config with
-/// the same behavior as before. Lets tests and a future Driver own the provider
-/// instead of the loop constructing one internally.
+/// An injected provider is reused without config side effects or overrides.
+/// Otherwise the provider is constructed from config.
 pub fn resolve_provider(
     request: &AgentRequest,
     custom: &mut CustomConfigs,
@@ -429,6 +426,96 @@ pub fn resolve_provider(
         create_provider_with_config(&provider_id, providers_config).map_err(crate::util::errstr)?;
     boxed.set_max_tokens(request.max_tokens);
     Ok(Arc::from(boxed))
+}
+
+#[cfg(test)]
+mod resolve_provider_tests {
+    use super::{AgentRequest, resolve_provider};
+    use crate::config::custom::CustomConfigs;
+    use crate::llm::provider::{ChatMessage, LlmError, LlmProvider, ResponseStream};
+    use crate::tools::{ApprovalMode, ToolDefinition};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct MockProvider;
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        fn id(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &str {
+            "Mock"
+        }
+        fn model(&self) -> &str {
+            "mock-1"
+        }
+        fn set_model(&mut self, _model: String) {}
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<ResponseStream, LlmError> {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+    }
+
+    fn request(llm: Arc<dyn LlmProvider>) -> AgentRequest {
+        AgentRequest {
+            prompt: "hi".into(),
+            approval_mode: ApprovalMode::Safe,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            events: false,
+            event_sender: None,
+            agent_depth: 0,
+            on_token_usage: None,
+            activity: None,
+            llm: Some(llm),
+            session_sink: None,
+            tool_allowlist: None,
+            max_tokens: None,
+            approval_gate: None,
+            transcript: None,
+            cancel: None,
+        }
+    }
+
+    fn resolve(request: &AgentRequest) -> Result<Arc<dyn LlmProvider>, String> {
+        let mut custom = CustomConfigs::default();
+        let mut providers = custom.derive_providers_config();
+        resolve_provider(request, &mut custom, &mut providers)
+    }
+
+    #[test]
+    fn reuses_injected_provider_arc() {
+        let injected: Arc<dyn LlmProvider> = Arc::new(MockProvider);
+        let request = request(injected.clone());
+        let resolved = resolve(&request).unwrap();
+        assert!(Arc::ptr_eq(&injected, &resolved));
+    }
+
+    #[test]
+    fn injection_bypasses_provider_config_without_side_effects() {
+        let mut custom = CustomConfigs::default();
+        let mut providers = custom.derive_providers_config();
+        let request = request(Arc::new(MockProvider));
+        let resolved = resolve_provider(&request, &mut custom, &mut providers).unwrap();
+        assert_eq!(resolved.id(), "mock");
+        assert!(custom.get_last_provider().is_empty());
+    }
+
+    #[test]
+    fn injection_rejects_max_tokens() {
+        let mut request = request(Arc::new(MockProvider));
+        request.max_tokens = Some(1);
+        assert_eq!(
+            resolve(&request).err().as_deref(),
+            Some("max_tokens is not supported with an injected provider")
+        );
+    }
 }
 
 fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {

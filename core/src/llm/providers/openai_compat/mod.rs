@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
-    http_error, streaming_client,
+    http_error, parse_tool_arguments, streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -273,24 +273,10 @@ pub fn flush_partial_tool_calls(
         if call.id.is_empty() || call.name.is_empty() {
             continue;
         }
-        // A non-empty but unparseable argument string means the JSON was cut
-        // off mid-stream (typically the output-token cap). Wrap the raw text in
-        // a valid object keyed by `TRUNCATED_ARGS_KEY` rather than collapsing to
-        // `Null` or keeping a bare string: the assistant message is persisted to
-        // history and re-serialized on the next request, so it must stay valid
-        // JSON (a bare string would be double-encoded into a malformed
-        // `function.arguments`). The tool validator keys on the marker to report
-        // truncation instead of an identical retry.
-        let arguments = serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
-            Value::Object(serde_json::Map::from_iter([(
-                crate::tools::TRUNCATED_ARGS_KEY.to_string(),
-                Value::String(call.arguments),
-            )]))
-        });
         events.push(ChatEvent::ToolCall(ToolCall {
             id: call.id,
             name: call.name,
-            arguments,
+            arguments: parse_tool_arguments(&call.arguments),
         }));
     }
     events
@@ -384,25 +370,32 @@ impl ThinkParser {
     }
 }
 
-/// Returns true when the SSE chunk's `delta` carries reasoning text in a
-/// provider-specific dedicated field (e.g. DeepSeek's `reasoning_content`,
-/// MiniMax's `thoughts`). Used to skip the inline `<think>…</think>`
-/// pathway in the same delta so the same thought text isn't published
-/// twice.
-pub fn delta_has_reasoning_field(data: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(data) else {
-        return false;
-    };
-    let Some(delta) = value
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("delta"))
-    else {
-        return false;
-    };
-    ["reasoning_content", "thoughts"]
+fn split_reasoning_events(events: Vec<ChatEvent>, think: &mut ThinkParser) -> Vec<ChatEvent> {
+    let dedicated = events
         .iter()
-        .any(|key| delta.get(*key).and_then(|v| v.as_str()).is_some())
+        .any(|event| matches!(event, ChatEvent::ReasoningDelta { .. }));
+    let mut out = Vec::new();
+    for event in events {
+        if let ChatEvent::TextDelta(content) = event {
+            let (text, thoughts) = if dedicated {
+                (content, String::new())
+            } else {
+                think.feed(&content)
+            };
+            if !text.is_empty() {
+                out.push(ChatEvent::TextDelta(text));
+            }
+            if !thoughts.is_empty() {
+                out.push(ChatEvent::ReasoningDelta {
+                    text: thoughts,
+                    echo_field: Some("thoughts".to_string()),
+                });
+            }
+        } else {
+            out.push(event);
+        }
+    }
+    out
 }
 
 /// Extract cache-hit tokens from a provider `usage` block. Providers disagree
@@ -647,33 +640,10 @@ impl LlmProvider for OpenAiCompatProvider {
                     continue;
                 }
 
-                // If the delta already carries reasoning via a dedicated
-                // field (DeepSeek's `reasoning_content`, etc.), the inline
-                // `<think>…</think>` pathway is not the source of truth
-                // for this delta — skip it to avoid publishing the same
-                // thought text twice.
-                let reasoning_via_field = delta_has_reasoning_field(data);
-                for event in process_sse_chunk(data, &mut partial_tool_calls, &mut last_usage)? {
-                    match event {
-                        ChatEvent::TextDelta(content) => {
-                            let (text, thoughts) = if reasoning_via_field {
-                                (content, String::new())
-                            } else {
-                                think.feed(&content)
-                            };
-                            if !text.is_empty() {
-                                yield ChatEvent::TextDelta(text);
-                            }
-                            if !thoughts.is_empty() {
-                                yield ChatEvent::ReasoningDelta {
-                                    text: thoughts,
-                                    echo_field: Some("thoughts".to_string()),
-                                };
-                            }
-                        }
-                        ChatEvent::ReasoningDelta { .. } => yield event,
-                        other => yield other,
-                    }
+                let chunk_events =
+                    process_sse_chunk(data, &mut partial_tool_calls, &mut last_usage)?;
+                for event in split_reasoning_events(chunk_events, &mut think) {
+                    yield event;
                 }
             }
 

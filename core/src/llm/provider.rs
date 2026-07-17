@@ -13,7 +13,18 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use crate::tools::ToolDefinition;
+use crate::tools::{TRUNCATED_ARGS_KEY, ToolDefinition};
+
+/// Parse streamed tool arguments without discarding malformed/truncated JSON.
+/// Empty input is the canonical no-argument object; invalid input is retained
+/// under the marker consumed by tool validation.
+pub(crate) fn parse_tool_arguments(raw: &str) -> serde_json::Value {
+    if raw.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ TRUNCATED_ARGS_KEY: raw }))
+    }
+}
 
 // Re-export wire-format types from protocol.
 pub use bone_protocol::{
@@ -178,5 +189,26 @@ pub trait LlmProvider: Send + Sync {
 
     async fn validate(&self) -> Result<(), LlmError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tool_arguments;
+    use crate::tools::TRUNCATED_ARGS_KEY;
+    use serde_json::json;
+
+    #[test]
+    fn tool_argument_contract() {
+        assert_eq!(parse_tool_arguments(""), json!({}));
+        assert_eq!(parse_tool_arguments(" \n\t"), json!({}));
+        assert_eq!(
+            parse_tool_arguments(r#"{"path":"x"}"#),
+            json!({"path": "x"})
+        );
+        assert_eq!(
+            parse_tool_arguments(r#"{"path":"x"#),
+            json!({TRUNCATED_ARGS_KEY: r#"{"path":"x"#})
+        );
     }
 }

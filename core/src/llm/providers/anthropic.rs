@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
-    http_error, streaming_client,
+    http_error, parse_tool_arguments, streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -227,17 +227,10 @@ fn finish_tool_use(partial: PartialToolUse) -> Option<ChatEvent> {
     if partial.id.is_empty() || partial.name.is_empty() {
         return None;
     }
-    // Empty input means a no-argument tool call: `{}`.
-    let arguments = if partial.input.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(&partial.input)
-            .unwrap_or_else(|_| json!({ crate::tools::TRUNCATED_ARGS_KEY: partial.input }))
-    };
     Some(ChatEvent::ToolCall(ToolCall {
         id: partial.id,
         name: partial.name,
-        arguments,
+        arguments: parse_tool_arguments(&partial.input),
     }))
 }
 

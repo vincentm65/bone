@@ -173,8 +173,6 @@ fn test_codex_request_serializes_prompt_cache_key() {
         reasoning: Some(bone_core::llm::providers::codex::CodexReasoning {
             effort: "high".to_string(),
         }),
-        temperature: None,
-        top_p: None,
         tools: None,
         tool_choice: None,
         prompt_cache_key: Some("bone-codex-thread-42".to_string()),
@@ -197,8 +195,6 @@ fn test_codex_request_omits_optional_fields_when_unset() {
         stream: true,
         store: false,
         reasoning: None,
-        temperature: None,
-        top_p: None,
         tools: None,
         tool_choice: None,
         prompt_cache_key: None,
@@ -210,5 +206,7 @@ fn test_codex_request_omits_optional_fields_when_unset() {
     assert!(!obj.contains_key("prompt_cache_key"));
     assert!(!obj.contains_key("tool_choice"));
     assert!(!obj.contains_key("tools"));
+    assert!(!obj.contains_key("temperature"));
+    assert!(!obj.contains_key("top_p"));
     assert_eq!(json["store"], false);
 }

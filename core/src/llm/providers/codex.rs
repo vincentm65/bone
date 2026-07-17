@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ProviderRequestContext,
-    ResponseStream, http_error, streaming_client,
+    ResponseStream, http_error, parse_tool_arguments, streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -63,10 +63,6 @@ pub struct CodexRequest {
     pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<CodexReasoning>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<CodexTool>>,
     /// Mirror the Codex CLI request shape: when tools are present it sends an
@@ -347,12 +343,10 @@ fn extract_response_events(
                 if id.is_empty() || name.is_empty() {
                     continue;
                 }
-                let args = serde_json::from_str(item.arguments.as_deref().unwrap_or("null"))
-                    .unwrap_or(Value::Null);
                 events.push(ChatEvent::ToolCall(ToolCall {
                     id,
                     name,
-                    arguments: args,
+                    arguments: parse_tool_arguments(item.arguments.as_deref().unwrap_or("")),
                 }));
             }
             "reasoning" => {
@@ -391,6 +385,10 @@ fn extract_response_events(
     });
 
     (events, usage)
+}
+
+fn output_index(raw: &Value) -> usize {
+    raw.get("output_index").and_then(Value::as_u64).unwrap_or(0) as usize
 }
 
 /// Resolve the event type. First checks the JSON `type` field (Responses API
@@ -539,8 +537,6 @@ impl LlmProvider for CodexProvider {
                 .reasoning_effort
                 .clone()
                 .map(|effort| CodexReasoning { effort }),
-            temperature: None,
-            top_p: None,
             tools,
             tool_choice,
             prompt_cache_key,
@@ -641,11 +637,7 @@ impl LlmProvider for CodexProvider {
 
                     // ── Tool call streaming (output item lifecycle) ────
                     "response.output_item.added" => {
-                        let output_index = raw
-                            .get("output_index")
-                            .and_then(|v| v.as_u64())
-                            .map(|v| v as usize)
-                            .unwrap_or(0);
+                        let output_index = output_index(&raw);
                         if let Some(item) = raw.get("item")
                             && item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
                                 let mut partial = PartialToolCall::default();
@@ -693,11 +685,7 @@ impl LlmProvider for CodexProvider {
                     }
 
                     "response.output_item.done" => {
-                        let output_index = raw
-                            .get("output_index")
-                            .and_then(|v| v.as_u64())
-                            .map(|v| v as usize)
-                            .unwrap_or(0);
+                        let output_index = output_index(&raw);
                         // Encrypted reasoning items: emit for in-memory replay.
                         if let Some(item) = raw.get("item")
                             && item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
@@ -712,14 +700,11 @@ impl LlmProvider for CodexProvider {
                             }
                         if let Some(partial) = partial_tool_calls.remove(&output_index)
                             && !partial.id.is_empty() && !partial.name.is_empty() {
-                                let arguments =
-                                    serde_json::from_str(&partial.arguments)
-                                        .unwrap_or(Value::Null);
                                 emitted_tool_call_ids.insert(partial.id.clone());
                                 yield ChatEvent::ToolCall(ToolCall {
                                     id: partial.id,
                                     name: partial.name,
-                                    arguments,
+                                    arguments: parse_tool_arguments(&partial.arguments),
                                 });
                             }
                     }
@@ -808,6 +793,38 @@ impl LlmProvider for CodexProvider {
         };
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodexResponse, extract_response_events, output_index};
+    use crate::llm::provider::ChatEvent;
+    use crate::tools::TRUNCATED_ARGS_KEY;
+    use serde_json::json;
+
+    #[test]
+    fn completed_tool_calls_follow_argument_contract() {
+        let response: CodexResponse = serde_json::from_value(json!({
+            "output": [
+                {"type": "function_call", "call_id": "ok", "name": "tool", "arguments": "  "},
+                {"type": "function_call", "call_id": "bad", "name": "tool", "arguments": "{\"x\":"},
+                {"type": "function_call", "call_id": "", "name": "tool", "arguments": "{}"}
+            ]
+        }))
+        .unwrap();
+        let (events, _) = extract_response_events(&response);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ChatEvent::ToolCall(call) if call.arguments == json!({})));
+        assert!(
+            matches!(&events[1], ChatEvent::ToolCall(call) if call.arguments[TRUNCATED_ARGS_KEY] == "{\"x\":")
+        );
+    }
+
+    #[test]
+    fn output_index_defaults_to_zero() {
+        assert_eq!(output_index(&json!({})), 0);
+        assert_eq!(output_index(&json!({"output_index": 3})), 3);
     }
 }
 

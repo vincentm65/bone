@@ -1,6 +1,7 @@
 use super::{
-    ChatEvent, ChatRequest, OpenAiCompatProvider, cached_tokens_from_usage, flush_stream_end,
-    openai_messages, openai_tools, process_sse_chunk, stream_usage_enabled,
+    ChatEvent, ChatRequest, OpenAiCompatProvider, ThinkParser, cached_tokens_from_usage,
+    flush_stream_end, openai_messages, openai_tools, process_sse_chunk, split_reasoning_events,
+    stream_usage_enabled,
 };
 use crate::llm::{ChatMessage, ChatRole, ImageData};
 use std::collections::BTreeMap;
@@ -60,6 +61,49 @@ fn stream_end_emits_captured_usage_once() {
 #[test]
 fn requests_stream_usage_from_grok_proxy() {
     assert!(stream_usage_enabled("https://cli-chat-proxy.grok.com/v1"));
+}
+
+fn reasoning_events(data: serde_json::Value, think: &mut ThinkParser) -> Vec<ChatEvent> {
+    let mut calls = BTreeMap::new();
+    let mut usage = None;
+    let events = process_sse_chunk(&data.to_string(), &mut calls, &mut usage).unwrap();
+    split_reasoning_events(events, think)
+}
+
+#[test]
+fn handles_inline_and_dedicated_reasoning_without_duplication() {
+    let mut think = ThinkParser::new();
+    let inline = reasoning_events(
+        serde_json::json!({"choices": [{"delta": {"content": "<think>why</think>answer"}}]}),
+        &mut think,
+    );
+    assert!(
+        matches!(&inline[..], [ChatEvent::TextDelta(text), ChatEvent::ReasoningDelta { text: reason, .. }] if text == "answer" && reason == "why")
+    );
+
+    for key in ["reasoning_content", "thoughts"] {
+        let mut delta = serde_json::Map::new();
+        delta.insert(
+            "content".into(),
+            serde_json::json!("<think>why</think>answer"),
+        );
+        delta.insert(key.into(), serde_json::json!("why"));
+        let events = reasoning_events(
+            serde_json::json!({"choices": [{"delta": delta}]}),
+            &mut ThinkParser::new(),
+        );
+        assert!(
+            matches!(&events[..], [ChatEvent::TextDelta(text), ChatEvent::ReasoningDelta { text: reason, echo_field: Some(field) }] if text.contains("<think>") && reason == "why" && field == key)
+        );
+    }
+}
+
+#[test]
+fn handles_think_tags_split_across_chunks() {
+    let mut think = ThinkParser::new();
+    assert_eq!(think.feed("<thi"), (String::new(), String::new()));
+    assert_eq!(think.feed("nk>why</th"), (String::new(), "why".into()));
+    assert_eq!(think.feed("ink>answer"), ("answer".into(), String::new()));
 }
 
 #[test]
