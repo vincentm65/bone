@@ -12,6 +12,7 @@ mod common;
 
 use std::time::Duration;
 
+use bone_core::processes;
 use bone_core::tools::types::ToolCall;
 use serde_json::Value;
 
@@ -239,6 +240,86 @@ fn assert_no_boolean_required(value: &Value, path: &str) {
         }
         _ => {}
     }
+}
+
+#[test]
+fn lua_shell_primitives_use_tool_working_directory() {
+    let config_dir = common::temp_dir("lua-shell-cwd");
+    let working_dir = config_dir.join("project");
+    let tools_dir = config_dir.join("lua/tools");
+    std::fs::create_dir_all(&working_dir).unwrap();
+    std::fs::create_dir_all(&tools_dir).unwrap();
+    std::fs::write(
+        tools_dir.join("cwd_probe.lua"),
+        r#"
+bone.tool.register({
+  name = "cwd_probe",
+  description = "checks shell working directories",
+  safety = "read_only",
+  parameters = { type = "object", properties = {} },
+  execute = function(_args, ctx)
+    local direct = ctx.shell("pwd").stdout:gsub("%s+$", "")
+    local streamed = ""
+    ctx.shell_streaming("pwd", function(line) streamed = line end)
+    local process = ctx.process.spawn("pwd")
+    return direct .. "|" .. streamed .. "|" .. process.id
+  end,
+})
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = bone_core::ext::boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone_core::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let tools = booted.tools.with_working_dir(&working_dir);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let results = rt.block_on(tools.execute_all(
+        vec![ToolCall {
+            id: "call-cwd".into(),
+            name: "cwd_probe".into(),
+            arguments: serde_json::json!({}),
+        }],
+        0,
+    ));
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].is_error, "{}", results[0].content);
+    let parts: Vec<_> = results[0].content.split('|').collect();
+    assert_eq!(parts.len(), 3, "{}", results[0].content);
+    let process_id = parts[2];
+    let snapshot = rt
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let snapshot = processes::registry().get(process_id).unwrap();
+                    if !snapshot.running {
+                        break snapshot;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+        })
+        .expect("background pwd should finish");
+    rt.shutdown_timeout(Duration::from_secs(1));
+
+    let expected = working_dir.to_string_lossy();
+    assert_eq!(parts[0], expected);
+    assert_eq!(parts[1], expected);
+    assert_eq!(snapshot.stdout.trim(), expected);
+
+    std::fs::remove_dir_all(&config_dir).ok();
 }
 
 // ── 8c. ctx.tools.call depth limit ──────────────────────────────────────────

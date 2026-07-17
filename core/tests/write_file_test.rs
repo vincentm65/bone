@@ -95,67 +95,100 @@ async fn refuses_dangling_symlink() {
 }
 
 #[tokio::test]
-async fn live_writes_are_confined_to_working_directory() {
-    let root = temp_path("confined");
+async fn live_writes_allow_parent_and_absolute_paths_and_snapshot_canonical_path() {
+    let root = temp_path("anchored");
     fs::create_dir_all(&root).await.unwrap();
-    let outside = root.parent().unwrap().join(format!(
-        "{}-outside.txt",
-        root.file_name().unwrap().to_string_lossy()
-    ));
-    let nested_escape = PathBuf::from("missing")
-        .join("..")
-        .join("..")
-        .join(outside.file_name().unwrap());
+    let parent_path = root.join("../parent.txt");
+    let absolute_path = temp_path("absolute.txt");
     let context = ToolExecutionContext::default().with_working_dir(root.clone());
 
-    for path in [
-        PathBuf::from("../escape.txt"),
-        outside.clone(),
-        nested_escape,
-    ] {
-        let result = WriteFileTool
+    for path in [parent_path, absolute_path] {
+        WriteFileTool
             .execute_output_live(
-                json!({ "path": path, "content": "escape" }),
+                json!({ "path": path, "content": "outside" }),
                 None,
                 context.clone(),
             )
-            .await;
+            .await
+            .expect("write outside working directory should succeed");
+        let canonical = fs::canonicalize(&path).await.unwrap();
+        assert_eq!(fs::read_to_string(&canonical).await.unwrap(), "outside");
         assert!(
-            result
-                .unwrap_err()
-                .contains("outside the working directory"),
-            "{path:?}"
+            context
+                .snapshots
+                .read()
+                .unwrap()
+                .head(&canonical.to_string_lossy())
+                .is_some()
         );
+        fs::remove_file(canonical).await.unwrap();
     }
-    assert!(!outside.exists());
     let _ = fs::remove_dir_all(root).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn live_writes_reject_symlinked_parent_escape() {
+async fn live_writes_allow_symlinked_parent_and_snapshot_canonical_path() {
     use std::os::unix::fs::symlink;
 
-    let root = temp_path("confined-link");
-    let outside = temp_path("confined-link-target");
+    let root = temp_path("linked-parent");
+    let outside = temp_path("linked-target");
     fs::create_dir_all(&root).await.unwrap();
     fs::create_dir_all(&outside).await.unwrap();
     symlink(&outside, root.join("link")).unwrap();
+    let context = ToolExecutionContext::default().with_working_dir(root.clone());
 
-    let result = WriteFileTool
+    WriteFileTool
         .execute_output_live(
-            json!({ "path": "link/escape.txt", "content": "escape" }),
+            json!({ "path": "link/outside.txt", "content": "outside" }),
             None,
-            ToolExecutionContext::default().with_working_dir(root.clone()),
+            context.clone(),
         )
-        .await;
+        .await
+        .expect("write through symlinked parent should succeed");
+    let canonical = fs::canonicalize(outside.join("outside.txt")).await.unwrap();
     assert!(
-        result
-            .unwrap_err()
-            .contains("outside the working directory")
+        context
+            .snapshots
+            .read()
+            .unwrap()
+            .head(&canonical.to_string_lossy())
+            .is_some()
     );
-    assert!(!outside.join("escape.txt").exists());
 
     let _ = fs::remove_dir_all(root).await;
     let _ = fs::remove_dir_all(outside).await;
+}
+
+#[tokio::test]
+async fn live_write_recovers_poisoned_snapshot_store() {
+    let root = temp_path("poisoned-snapshot");
+    fs::create_dir_all(&root).await.unwrap();
+    let context = ToolExecutionContext::default().with_working_dir(root.clone());
+    let snapshots = context.snapshots.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = snapshots.write().unwrap();
+        panic!("poison snapshot lock");
+    })
+    .join();
+
+    WriteFileTool
+        .execute_output_live(
+            json!({ "path": "created.txt", "content": "created" }),
+            None,
+            context.clone(),
+        )
+        .await
+        .expect("poisoned snapshot lock should be recovered");
+    let canonical = fs::canonicalize(root.join("created.txt")).await.unwrap();
+    assert!(
+        context
+            .snapshots
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .head(&canonical.to_string_lossy())
+            .is_some()
+    );
+
+    let _ = fs::remove_dir_all(root).await;
 }

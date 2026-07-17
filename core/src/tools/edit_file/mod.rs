@@ -6,14 +6,13 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::fs;
 
-use crate::tools::snapshot::{self, SnapshotStore};
+use crate::tools::snapshot::{self, Snapshots};
 use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 use crate::tools::write_atomic::write_atomic_if_unchanged;
 
@@ -25,8 +24,6 @@ pub struct EditPreview {
     pub before_hash: String,
     pub diff: String,
 }
-
-type Snapshots = Arc<RwLock<SnapshotStore>>;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,7 +1,7 @@
 use serde_json::json;
 
-use bone_core::tools::ApprovalMode;
-use bone_core::tools::ToolCall;
+use bone_core::tools::command_policy::CommandSafety;
+use bone_core::tools::{ApprovalMode, ToolCall};
 
 fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     ToolCall {
@@ -11,40 +11,47 @@ fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     }
 }
 
+fn allows(mode: ApprovalMode, name: &str, arguments: serde_json::Value) -> bool {
+    mode.allows_safety(CommandSafety::for_call(&call(name, arguments)))
+}
+
 #[test]
 fn safe_mode_only_allows_read_only() {
-    assert!(ApprovalMode::Safe.allows_call(&call("read_file", json!({ "path": "Cargo.toml" }))));
-    assert!(ApprovalMode::Safe.allows_call(&call(
+    assert!(allows(
+        ApprovalMode::Safe,
+        "read_file",
+        json!({ "path": "Cargo.toml" })
+    ));
+    assert!(allows(
+        ApprovalMode::Safe,
         "shell",
         json!({ "command": "pwd", "classification": "read_only" })
-    )));
-    assert!(!ApprovalMode::Safe.allows_call(&call("edit_file", json!({ "path": "Cargo.toml" }))));
-    assert!(!ApprovalMode::Safe.allows_call(&call(
+    ));
+    assert!(!allows(
+        ApprovalMode::Safe,
+        "edit_file",
+        json!({ "path": "Cargo.toml" })
+    ));
+    assert!(!allows(
+        ApprovalMode::Safe,
         "shell",
         json!({ "command": "cargo fmt", "classification": "edit" })
-    )));
+    ));
 }
 
 #[test]
 fn danger_mode_allows_all() {
-    assert!(ApprovalMode::Danger.allows_call(&call(
-        "shell",
-        json!({ "command": "rm -rf target", "classification": "danger" })
-    )));
-    assert!(ApprovalMode::Danger.allows_call(&call(
-        "shell",
-        json!({ "command": "git status", "classification": "read_only" })
-    )));
-    assert!(ApprovalMode::Danger.allows_call(&call(
-        "shell",
-        json!({ "command": "git diff", "classification": "read_only" })
-    )));
-    assert!(ApprovalMode::Danger.allows_call(&call(
-        "shell",
-        json!({ "command": "cd repo && git commit -am x", "classification": "danger" })
-    )));
-    assert!(ApprovalMode::Danger.allows_call(&call(
-        "shell",
-        json!({ "command": "git push", "classification": "danger" })
-    )));
+    for command in [
+        "rm -rf target",
+        "git status",
+        "git diff",
+        "cd repo && git commit -am x",
+        "git push",
+    ] {
+        assert!(allows(
+            ApprovalMode::Danger,
+            "shell",
+            json!({ "command": command })
+        ));
+    }
 }

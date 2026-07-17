@@ -119,11 +119,6 @@ impl ApprovalMode {
         }
     }
 
-    pub fn allows_call(&self, call: &ToolCall) -> bool {
-        let safety = CommandSafety::for_call(call);
-        self.allows_safety(safety)
-    }
-
     pub fn cycle(self) -> Self {
         match self {
             Self::Safe => Self::Danger,

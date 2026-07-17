@@ -197,6 +197,9 @@ impl LuaTool {
             .map(|h| h.shared_state.clone())
             .unwrap_or(shared_state);
         let mut ctx_cfg = CtxConfig::new(config_dir, session_state);
+        if let Some(working_dir) = &context.working_dir {
+            ctx_cfg.cwd = working_dir.to_string_lossy().into_owned();
+        }
         // App-derived fields (session/provider/model/usage/history/approval_mode)
         // so tools see the same `ctx` as slash commands. `None` for non-live
         // calls, which keeps the previous all-default behavior. `apply_to` also

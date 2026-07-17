@@ -228,6 +228,11 @@ fn tasklist_clear_host_state_drops_ctx_and_state_map() {
         booted.tools.state_map.set("task_list", "default", state);
     }
 
+    {
+        let mut snapshots = booted.tools.snapshots.write().unwrap();
+        snapshots.record("stale.txt", "stale", Some(&[1]));
+    }
+
     booted.tools.clear_host_state();
 
     assert!(
@@ -243,6 +248,17 @@ fn tasklist_clear_host_state_drops_ctx_and_state_map() {
     assert!(
         booted.tools.state_map.get("task_list", "default").is_none(),
         "state_map must be empty after clear_host_state"
+    );
+
+    assert!(
+        booted
+            .tools
+            .snapshots
+            .read()
+            .unwrap()
+            .head("stale.txt")
+            .is_none(),
+        "snapshots must be empty after clear_host_state"
     );
 
     // A subsequent complete without a list should fail cleanly, not complete

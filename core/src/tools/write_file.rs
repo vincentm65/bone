@@ -5,7 +5,6 @@
 //! `edit_file` can validate a simple exact-text replacement.
 
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -13,12 +12,9 @@ use serde_json::{Value, json};
 use std::io::ErrorKind;
 use tokio::fs;
 
-use crate::tools::snapshot::{self, SnapshotStore};
+use crate::tools::snapshot::{self, Snapshots};
 use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 use crate::tools::write_atomic::write_atomic;
-
-/// Shared snapshot store type (mirrors the alias in `edit_file`/`read_file`).
-type Snapshots = Arc<RwLock<SnapshotStore>>;
 
 pub struct WriteFileTool;
 
@@ -78,7 +74,7 @@ async fn write_file_inner(
     working_dir: Option<&Path>,
 ) -> Result<String, String> {
     let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-    let path = snapshot::resolve_new_path(&args.path, working_dir).await?;
+    let path = snapshot::resolve_path(&args.path, working_dir)?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -107,19 +103,28 @@ async fn write_file_inner(
     // emit for the same bytes (both normalize identically).
     let normalized = snapshot::normalize_text(&args.content);
     let n = snapshot::numbered_lines(&normalized).len();
-    let snapshot_path = fs::canonicalize(&path)
-        .await
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned();
-    if let Some(store) = snapshots
-        && let Ok(mut guard) = store.write()
-    {
-        guard.record(
-            &snapshot_path,
-            &normalized,
-            Some(&(1..=n).collect::<Vec<_>>()),
-        );
+    let canonical = match fs::canonicalize(&path).await {
+        Ok(path) => path,
+        Err(error) => {
+            return Ok(format!(
+                "wrote {} ({} bytes, {} line{}), but could not record an edit snapshot: {error}. Run read_file before edit_file.",
+                path.display(),
+                args.content.len(),
+                n,
+                if n == 1 { "" } else { "s" },
+            ));
+        }
+    };
+    let snapshot_path = canonical.to_string_lossy().into_owned();
+    if let Some(store) = snapshots {
+        store
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .record(
+                &snapshot_path,
+                &normalized,
+                Some(&(1..=n).collect::<Vec<_>>()),
+            );
     }
 
     Ok(format!(

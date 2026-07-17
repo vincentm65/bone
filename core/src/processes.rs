@@ -35,7 +35,13 @@ pub struct ProcessRegistry {
 }
 
 impl ProcessRegistry {
-    pub fn spawn(&self, command: String, owner: String, timeout_ms: u64) -> String {
+    pub fn spawn(
+        &self,
+        command: String,
+        owner: String,
+        timeout_ms: u64,
+        working_dir: Option<std::path::PathBuf>,
+    ) -> String {
         let id = format!("process-{}", self.next.fetch_add(1, Ordering::Relaxed));
         let cancel = Arc::new(AtomicBool::new(false));
         self.processes.lock().unwrap().insert(
@@ -61,6 +67,7 @@ impl ProcessRegistry {
                 command,
                 env: Vec::new(),
                 timeout_ms,
+                working_dir,
                 cancel: Some(cancel),
             })
             .await;
