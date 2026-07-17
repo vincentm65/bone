@@ -41,16 +41,15 @@ fn is_retryable_stream_error(kind: &LlmErrorKind) -> bool {
     )
 }
 
-fn apply_turn_messages(history: &[ChatMessage], turn_messages: &[String]) -> Vec<ChatMessage> {
+fn append_turn_messages(request_history: &mut Vec<ChatMessage>, turn_messages: &[String]) {
     if turn_messages.is_empty() {
-        return history.to_vec();
+        return;
     }
 
     let reminder = format!(
         "<system-reminder>\n{}\n</system-reminder>",
         turn_messages.join("\n\n")
     );
-    let mut request_history = history.to_vec();
     match request_history.last_mut() {
         // Mid-loop: keep reminders inside the final tool result. Adding a fresh
         // trailing user message here makes Qwen-family chat templates discard
@@ -62,7 +61,6 @@ fn apply_turn_messages(history: &[ChatMessage], turn_messages: &[String]) -> Vec
         }
         _ => request_history.push(ChatMessage::new(ChatRole::User, reminder)),
     }
-    request_history
 }
 
 #[cfg(test)]
@@ -367,6 +365,12 @@ impl Driver {
         let mut error_loop_steer: Option<String> = None;
         const MAX_REPEATED_ERROR_ROUNDS: u32 = 3;
         let mut turns: usize = 0;
+        // Request-only history retains transient reminders at their original
+        // insertion point for the rest of this user turn. Keeping them fixed
+        // lets each tool round extend the previous provider-cache prefix while
+        // still leaving them out of the persisted transcript.
+        let mut request_history = history.clone();
+        let mut last_turn_messages: Vec<String> = Vec::new();
         // The Codex backend returns routing state on the first request of a
         // user turn. Keep it across retries and tool rounds in this run, but
         // create a fresh cell for every later submitted user message/run.
@@ -474,6 +478,8 @@ impl Driver {
                         transcript_replaced = true;
                         history =
                             build_chat_history(&transcript, system_prompt_override.as_deref());
+                        request_history = history.clone();
+                        last_turn_messages.clear();
                         // The rewrite invalidates the provider-report anchor
                         // (its char count belongs to the discarded history).
                         token_stats.clear_context_anchor();
@@ -500,6 +506,8 @@ impl Driver {
                         .unwrap_or_else(crate::llm::prompts::system_prompt);
                     let combined = format!("{base}\n\n{}", sys_appends.join("\n\n"));
                     history = build_chat_history(&transcript, Some(&combined));
+                    request_history = history.clone();
+                    last_turn_messages.clear();
                     let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
                     token_stats.context_length =
                         token_stats.anchored_context_estimate(prompt_chars);
@@ -525,11 +533,13 @@ impl Driver {
             // that window must return control now rather than waiting out the
             // request or the 2s backoff.
             let mut stream = None;
-            // Request-only copy of the history: transient turn messages are
-            // re-derived fresh each provider request, so they never land in
-            // `history`/`transcript` where they would sit mid-conversation on
-            // later turns and break the cached prefix.
-            let request_history = apply_turn_messages(&history, &turn_messages);
+            // Add changed transient guidance to the request-only history. It
+            // stays at this insertion point for later tool rounds, preserving
+            // an append-only provider-cache prefix without entering transcript.
+            if turn_messages != last_turn_messages {
+                append_turn_messages(&mut request_history, &turn_messages);
+                last_turn_messages = turn_messages;
+            }
             'request: for attempt in 1..=3 {
                 let send = llm.chat_stream_with_context(
                     request_history.clone(),
@@ -815,6 +825,7 @@ impl Driver {
             }
             assistant.output_sequence = std::mem::take(&mut output_sequence);
             history.push(assistant.clone());
+            request_history.push(assistant.clone());
             transcript.push(assistant.clone());
             persist_messages.push(assistant);
             session_seq += 1;
@@ -906,6 +917,7 @@ impl Driver {
                 );
                 let message = ChatMessage::tool(result.clone());
                 history.push(message.clone());
+                request_history.push(message.clone());
                 transcript.push(message.clone());
                 persist_messages.push(message);
 
@@ -931,6 +943,7 @@ impl Driver {
                     );
                     let relay = ChatMessage::user_with_images(note, result.images.clone());
                     history.push(relay.clone());
+                    request_history.push(relay.clone());
                     transcript.push(relay.clone());
                     persist_messages.push(relay);
                 }

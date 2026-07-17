@@ -299,30 +299,11 @@ bone.tool.register({
 
 -- ---------------------------------------------------------------------------
 -- before_turn: keep the list salient and nudge the model to maintain it.
--- Root agent only (the pane renders only at depth 0). Uses turn_message (a
--- transient trailing input item), not system_prompt_append: this text changes
--- as the list changes, and a mutating system prompt busts the provider's
--- prefix cache for the whole conversation.
+-- Root agent only (the pane renders only at depth 0). Uses turn_message (kept
+-- in request-only history), not system_prompt_append: this text changes as the
+-- list changes, and a mutating system prompt busts the provider's prefix cache
+-- for the whole conversation.
 -- ---------------------------------------------------------------------------
-
-local last_turn_message = {}
-
-local function conversation_key(ctx)
-    local conv = ctx.conversation and ctx.conversation.current and ctx.conversation.current() or nil
-    if conv and conv.id then
-        return tostring(conv.id)
-    end
-    return "default"
-end
-
-local function emit_turn_message_once(ctx, message)
-    local key = conversation_key(ctx)
-    if last_turn_message[key] == message then
-        return nil
-    end
-    last_turn_message[key] = message
-    return { turn_message = message }
-end
 
 local function render_list_text(tasks)
     local lines = {}
@@ -350,8 +331,8 @@ bone.on("before_turn", function(_event, ctx)
 
     -- No active list → brief suggestion to use one for multi-step work.
     if not state or type(state.tasks) ~= "table" or #state.tasks == 0 then
-        return emit_turn_message_once(ctx,
-            "For any task with ~3+ steps or multi-file work, call task_list (action=write) to track progress in a visible checklist.")
+        return { turn_message =
+            "For any task with ~3+ steps or multi-file work, call task_list (action=write) to track progress in a visible checklist." }
     end
 
     local tasks = state.tasks
@@ -371,21 +352,20 @@ bone.on("before_turn", function(_event, ctx)
 
     -- All done → offer to clear (dedup ok: situational, not state-bearing).
     if done >= #tasks then
-        return emit_turn_message_once(ctx,
-            "Your task list is complete. Leave it visible, and call task_list (action=clear) only once the user has confirmed you're finished.")
+        return { turn_message =
+            "Your task list is complete. Leave it visible, and call task_list (action=clear) only once the user has confirmed you're finished." }
     end
 
-    -- Active list: always emit the full list (no dedup) so the model can
-    -- reproduce it even after compaction drops its prior tool-call args.
+    -- The Driver deduplicates unchanged guidance while retaining each emitted
+    -- state in request-only history for later tool rounds.
     local current_line = current
         and string.format("In-progress: \"%s\". When this step is finished, call task_list (action=advance) before starting the next.", current)
         or "No item is in_progress — call task_list (action=advance) or write with the next step in_progress."
     local remain_line = (#remaining > 0)
         and string.format(" Remaining (%d): %s.", #remaining, table.concat(remaining, "; "))
         or ""
-    return {
-        turn_message = string.format(
-            "Active task list (%d/%d done).%s %s\n%s\nDo not give a final answer while items remain open: call task_list (action=advance) after each finished step, or action=complete once the whole job is done.",
-            done, #tasks, remain_line, current_line, render_list_text(tasks)),
-    }
+    local message = string.format(
+        "Active task list (%d/%d done).%s %s\n%s\nDo not give a final answer while items remain open: call task_list (action=advance) after each finished step, or action=complete once the whole job is done.",
+        done, #tasks, remain_line, current_line, render_list_text(tasks))
+    return { turn_message = message }
 end)

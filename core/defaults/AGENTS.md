@@ -788,12 +788,13 @@ return {
   only for text that stays constant across the conversation: the system prompt
   renders before the whole history, so turn-to-turn variation here invalidates
   the provider's prefix cache for every request.
-- **`turn_message`** — transient message appended as the *last* input item of
-  this turn's requests (wrapped in `<system-reminder>` tags, never persisted to
-  the transcript; multiple handlers concatenate in order). Because it sits at
-  the prompt tail, its content can change every turn at a cost of only its own
-  tokens — use it for turn-varying nudges like task-list state or iteration
-  counters.
+- **`turn_message`** — transient guidance inserted at the request tail when the
+  handler emits it, then retained at that position for later tool rounds in the
+  same user turn (wrapped in `<system-reminder>` tags and never persisted to the
+  transcript; multiple handlers concatenate in order). Keeping its position
+  stable lets later requests extend the provider's cached prefix. Use it for
+  turn-varying nudges like task-list state or iteration counters; unchanged
+  guidance is deduplicated within the user turn.
 - **`tool_filter`** — a per-turn allow-list of tool names. Only these tools are
   shown to the model this turn; an empty list hides every tool. This filters
   what the model *sees* — it does not change the approval policy. Omit (or
