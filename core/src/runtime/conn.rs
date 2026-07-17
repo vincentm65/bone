@@ -60,7 +60,7 @@ pub trait RuntimeConn {
 /// [`DriverOutcome`] is stashed for the runtime to reabsorb via
 /// [`take_outcome`]. Approval/key replies resolve the shared registries the
 /// turn's `ChannelApprovalGate` / `ctx.ui.key` block on; `Cancel` flips the flag
-/// the Driver and its tools observe.
+/// and drains both registries so no interactive waiter can wedge the turn.
 ///
 /// [`take_outcome`]: LocalConn::take_outcome
 pub struct LocalConn {
@@ -133,7 +133,11 @@ impl RuntimeConn for LocalConn {
             RuntimeCommand::KeyReply { id, key } => {
                 self.key_registry.resolve(id, key);
             }
-            RuntimeCommand::Cancel => self.cancel.store(true, Ordering::Relaxed),
+            RuntimeCommand::Cancel => {
+                self.cancel.store(true, Ordering::Relaxed);
+                self.approval_registry.cancel_all();
+                self.key_registry.cancel_all();
+            }
             RuntimeCommand::Steer { text } => {
                 // Stash the steer text in the shared `turn_nudge`; the driver
                 // consumes it at the top of its next loop iteration and injects
@@ -172,6 +176,8 @@ impl RuntimeConn for LocalConn {
                         // any still buffered before signalling idle with `None`.
                         self.outcome = Some(outcome);
                         self.run_fut = None;
+                        self.approval_registry.cancel_all();
+                        self.key_registry.cancel_all();
                         self.events_rx.try_recv().ok()
                     }
                     Some(ev) = self.events_rx.recv() => Some(ev),
@@ -251,9 +257,8 @@ where
         loop {
             match self.reader.read::<RuntimeEvent>().await {
                 Some(Ok(ev)) => return Some(ev),
-                // Skip a malformed frame; the connection is still healthy.
-                Some(Err(_)) => continue,
-                None => return None, // connection closed
+                Some(Err(err)) if err.is_recoverable() => continue,
+                Some(Err(_)) | None => return None,
             }
         }
     }

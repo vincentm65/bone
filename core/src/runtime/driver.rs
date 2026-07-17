@@ -1120,7 +1120,9 @@ pub(crate) async fn execute_tool_calls(
                     // Pane diffs go through the shared UiState handle.
                     if let Some(registry) = &key_reply_registry {
                         let id = registry.register(req);
-                        let _ = events_out.send(RuntimeEvent::KeyRequest { id });
+                        if events_out.send(RuntimeEvent::KeyRequest { id }).is_err() {
+                            registry.remove(id);
+                        }
                     }
                 }
             });

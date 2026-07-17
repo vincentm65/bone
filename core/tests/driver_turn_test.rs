@@ -18,7 +18,10 @@ use bone_core::llm::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream, TokenStats,
 };
 use bone_core::pane_content::KeyRequest;
-use bone_core::runtime::{ChannelApprovalGate, Driver, RuntimeEvent};
+use bone_core::runtime::{
+    ApprovalReplyRegistry, ChannelApprovalGate, Driver, KeyReplyRegistry, LocalConn,
+    RuntimeCommand, RuntimeConn, RuntimeEvent,
+};
 use bone_core::session_db::SessionDb;
 use bone_core::session_sink::{NullSessionSink, SessionSink, UsageOnlySessionSink};
 use bone_core::tools::registry::ToolHandler;
@@ -218,7 +221,9 @@ async fn runtime_session_accumulates_state_across_turns() {
         });
         while conn.next_event().await.is_some() {}
         let outcome = conn.take_outcome().expect("turn produced an outcome");
-        session.apply_outcome(outcome).expect("turn ok");
+        let (result, persistence_error) = session.apply_outcome(outcome);
+        result.expect("turn ok");
+        assert!(persistence_error.is_none());
     }
 
     run_turn(&mut session, llm.clone(), "hi").await;
@@ -592,6 +597,66 @@ async fn run_with_channel_decision(label: &str, decision: CallOutcome, expect_er
     );
 
     std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+async fn local_cancel_unblocks_pending_approval() {
+    use std::sync::atomic::AtomicBool;
+
+    let approvals = ApprovalReplyRegistry::new();
+    let keys = KeyReplyRegistry::new();
+    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let gate: Arc<dyn ApprovalGate> = Arc::new(ChannelApprovalGate::new(
+        events_tx.clone(),
+        approvals.clone(),
+        None,
+        None,
+    ));
+    let (mut driver, prompt) = driver_with_gate(
+        vec![ChatEvent::ToolCall(ToolCall {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "missing"}),
+        })],
+        ApprovalMode::Safe,
+        gate,
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    driver.cancel = Some(cancel.clone());
+    driver.runtime_events = Some(events_tx.clone());
+    driver.key_reply_registry = Some(keys.clone());
+    let mut conn = LocalConn::new(
+        events_rx,
+        events_tx,
+        driver,
+        cancel,
+        approvals.clone(),
+        keys,
+        Arc::new(Mutex::new(None)),
+    );
+    conn.send(RuntimeCommand::SubmitPrompt {
+        text: prompt.into(),
+        images: vec![],
+    });
+
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), conn.next_event())
+            .await
+            .expect("approval request timed out")
+            .expect("turn ended before approval");
+        if matches!(event, RuntimeEvent::ApprovalRequest { .. }) {
+            break;
+        }
+    }
+    assert_eq!(approvals.pending_count(), 1);
+    conn.send(RuntimeCommand::Cancel);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while conn.next_event().await.is_some() {}
+    })
+    .await
+    .expect("cancel left approval blocked");
+    assert_eq!(approvals.pending_count(), 0);
 }
 
 struct KeyTool;

@@ -299,3 +299,177 @@ async fn managed_load_failure_is_correlated() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn socket_conn_skips_decode_errors_then_reads_next_event() {
+    use crate::runtime::{RuntimeConn, SocketConn};
+
+    let (read_side, mut peer) = tokio::io::duplex(4096);
+    let mut conn = SocketConn::new(read_side, tokio::io::sink());
+    peer.write_all(b"not json\n").await.unwrap();
+    codec::write_message(
+        &mut peer,
+        &RuntimeEvent::Status {
+            message: "healthy".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), conn.next_event())
+        .await
+        .expect("socket read timed out");
+    assert!(matches!(event, Some(RuntimeEvent::Status { message }) if message == "healthy"));
+}
+
+#[tokio::test]
+async fn socket_conn_terminates_on_oversized_frame() {
+    use crate::runtime::{RuntimeConn, SocketConn};
+
+    let input = std::io::Cursor::new(vec![b'x'; codec::MAX_LINE_BYTES + 1]);
+    let mut conn = SocketConn::new(input, tokio::io::sink());
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), conn.next_event())
+        .await
+        .expect("oversized frame caused a retry loop");
+    assert!(event.is_none());
+}
+
+#[tokio::test]
+async fn socket_conn_terminates_on_io_error() {
+    use crate::runtime::{RuntimeConn, SocketConn};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
+
+    struct ErrorReader;
+    impl AsyncRead for ErrorReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::other("read failed")))
+        }
+    }
+
+    let mut conn = SocketConn::new(ErrorReader, tokio::io::sink());
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), conn.next_event())
+        .await
+        .expect("I/O error caused a retry loop");
+    assert!(event.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_actor_panic_does_not_stop_other_sessions() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (manager, receiver) = SessionManager::new();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                let id = match target {
+                    SessionTarget::Conversation(id) => id,
+                    _ => return Err("explicit conversation required".into()),
+                };
+                if id == 1 {
+                    let (hub, _commands) = Hub::new();
+                    Ok(ManagedRuntime {
+                        conversation_id: id,
+                        hub,
+                        initial: Arc::new(Vec::new),
+                        task: Box::pin(async { panic!("actor boom") }),
+                    })
+                } else {
+                    Ok(fake_managed_runtime(id, active.clone(), max_active.clone()))
+                }
+            }));
+
+            let mut failed = manager
+                .attach(SessionTarget::Conversation(1))
+                .await
+                .unwrap();
+            let panic_status =
+                tokio::time::timeout(std::time::Duration::from_secs(1), failed.events.recv())
+                    .await
+                    .expect("panic status timed out")
+                    .unwrap();
+            assert!(matches!(
+                panic_status,
+                RuntimeEvent::Status { message } if message.contains("actor boom")
+            ));
+
+            let mut healthy = manager
+                .attach(SessionTarget::Conversation(2))
+                .await
+                .expect("manager stopped after another actor panicked");
+            healthy
+                .commands
+                .send(RuntimeCommand::SubmitPrompt {
+                    text: "still alive".into(),
+                    images: vec![],
+                })
+                .unwrap();
+            let content = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    if let RuntimeEvent::Finished { content } = healthy.events.recv().await.unwrap()
+                    {
+                        break content;
+                    }
+                }
+            })
+            .await
+            .expect("healthy actor did not respond");
+            assert_eq!(content, "session-2:still alive");
+
+            runner.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_event_channel_closure_writes_one_status_then_eof() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (manager, receiver) = SessionManager::new();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, |_| {
+                let (hub, _commands) = Hub::new();
+                Ok(ManagedRuntime {
+                    conversation_id: 1,
+                    hub,
+                    initial: Arc::new(Vec::new),
+                    task: Box::pin(async {}),
+                })
+            }));
+            let (client, server) = tokio::io::duplex(4096);
+            let serve = tokio::task::spawn_local(serve_managed_connection(
+                server,
+                manager,
+                SessionTarget::Latest,
+            ));
+            let mut reader = codec::MessageReader::new(client);
+
+            let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
+                .await
+                .expect("terminal status timed out")
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                terminal,
+                RuntimeEvent::Status { message } if message == "conversation runtime stopped"
+            ));
+            let eof = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                reader.read::<RuntimeEvent>(),
+            )
+            .await
+            .expect("managed connection did not close after terminal status");
+            assert!(eof.is_none());
+            serve.await.unwrap().unwrap();
+
+            runner.abort();
+        })
+        .await;
+}

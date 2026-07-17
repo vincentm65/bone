@@ -66,3 +66,43 @@ async fn approval_preview_uses_daemon_session_working_dir() {
 
     std::fs::remove_dir_all(root).ok();
 }
+
+#[tokio::test]
+async fn approval_registry_cleans_up_when_frontend_is_gone() {
+    let registry = ApprovalReplyRegistry::new();
+    let (events, receiver) = mpsc::unbounded_channel();
+    drop(receiver);
+    let gate = ChannelApprovalGate::new(events, registry.clone(), None, None);
+
+    let outcome = gate
+        .decide(
+            None,
+            true,
+            &ToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "missing"}),
+            },
+        )
+        .await;
+
+    assert_eq!(outcome, CallOutcome::Approve);
+    assert_eq!(registry.pending_count(), 0);
+}
+
+#[tokio::test]
+async fn cancelling_registries_unblocks_pending_replies() {
+    let approvals = ApprovalReplyRegistry::new();
+    let (approval_tx, approval_rx) = oneshot::channel();
+    approvals.register(approval_tx);
+    approvals.cancel_all();
+    assert_eq!(approval_rx.await.unwrap(), CallOutcome::Denied);
+    assert_eq!(approvals.pending_count(), 0);
+
+    let keys = KeyReplyRegistry::new();
+    let (key_tx, key_rx) = oneshot::channel();
+    keys.register(KeyRequest { reply: key_tx });
+    keys.cancel_all();
+    assert!(key_rx.await.is_err());
+    assert_eq!(keys.pending_count(), 0);
+}

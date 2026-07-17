@@ -311,12 +311,13 @@ impl RuntimeSession {
     /// authoritative transcript/token-stats/tool-state and persist the turn's
     /// explicit new-message list + usage in one transaction.
     ///
-    /// Returns the turn's `result` so the frontend can surface a failure —
-    /// persistence and state adoption happen regardless of success.
+    /// Returns the turn's model `result` plus an optional persistence error.
+    /// State adoption happens regardless, so callers can keep the in-memory
+    /// conversation usable while surfacing durable-write failures.
     pub fn apply_outcome(
         &mut self,
         outcome: DriverOutcome,
-    ) -> Result<crate::agent::AgentResponse, String> {
+    ) -> (Result<crate::agent::AgentResponse, String>, Option<String>) {
         let DriverOutcome {
             result,
             tools,
@@ -336,19 +337,25 @@ impl RuntimeSession {
 
         // Persist the turn's new messages + usage in one atomic transaction (a
         // single WAL sync) instead of one commit per row.
-        if let Some(ref db) = self.session_db
-            && let Some(conv_id) = self.conversation_id
-            && let Ok(next) = db.append_turn_with_checkpoint(
-                conv_id,
-                self.session_seq,
-                &persist_messages,
-                &usage,
-                transcript_replaced.then_some(self.transcript.as_slice()),
-            )
-        {
-            self.session_seq = next;
-        }
-        result
+        let persistence_error =
+            if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id) {
+                match db.append_turn_with_checkpoint(
+                    conv_id,
+                    self.session_seq,
+                    &persist_messages,
+                    &usage,
+                    transcript_replaced.then_some(self.transcript.as_slice()),
+                ) {
+                    Ok(next) => {
+                        self.session_seq = next;
+                        None
+                    }
+                    Err(err) => Some(err.to_string()),
+                }
+            } else {
+                None
+            };
+        (result, persistence_error)
     }
 
     /// Snapshot the cumulative session state for a frontend. Carries the token

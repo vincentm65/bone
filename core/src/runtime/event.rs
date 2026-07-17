@@ -21,17 +21,76 @@ use crate::tools::{ApprovalGate, CallOutcome, ToolCall, decide_call};
 // Re-export wire-format types from protocol.
 pub use bone_protocol::{CommandAction, RuntimeCommand, RuntimeEvent, SessionSnapshot};
 
+/// Shared id allocation and pending-sender lifecycle for interactive replies.
+struct ReplyRegistry<T> {
+    inner: Arc<Mutex<RegistryInner<T>>>,
+}
+
+struct RegistryInner<T> {
+    next_id: u64,
+    pending: HashMap<u64, oneshot::Sender<T>>,
+}
+
+impl<T> Default for ReplyRegistry<T> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RegistryInner {
+                next_id: 0,
+                pending: HashMap::new(),
+            })),
+        }
+    }
+}
+
+impl<T> Clone for ReplyRegistry<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T> ReplyRegistry<T> {
+    fn register(&self, reply: oneshot::Sender<T>) -> (u64, bool) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = inner.next_id;
+        inner.next_id = inner.next_id.wrapping_add(1);
+        let was_empty = inner.pending.is_empty();
+        inner.pending.insert(id, reply);
+        (id, was_empty)
+    }
+
+    fn remove(&self, id: u64) -> (Option<oneshot::Sender<T>>, bool) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let sender = inner.pending.remove(&id);
+        let now_empty = sender.is_some() && inner.pending.is_empty();
+        (sender, now_empty)
+    }
+
+    fn drain(&self) -> Vec<oneshot::Sender<T>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect()
+    }
+
+    fn pending_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .len()
+    }
+}
+
 /// Routes key replies from the frontend back to blocked callers.
 #[derive(Clone, Default)]
 pub struct KeyReplyRegistry {
-    inner: Arc<Mutex<RegistryInner>>,
+    replies: ReplyRegistry<KeyEvent>,
     timer: Arc<Mutex<Option<WorkTimer>>>,
-}
-
-#[derive(Default)]
-struct RegistryInner {
-    next_id: u64,
-    pending: HashMap<u64, oneshot::Sender<KeyEvent>>,
 }
 
 impl KeyReplyRegistry {
@@ -45,58 +104,63 @@ impl KeyReplyRegistry {
 
     /// Take ownership of `req`'s reply channel and assign it an id.
     pub fn register(&self, req: KeyRequest) -> u64 {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let id = g.next_id;
-        g.next_id = g.next_id.wrapping_add(1);
-        let was_empty = g.pending.is_empty();
-        g.pending.insert(id, req.reply);
+        let (id, was_empty) = self.replies.register(req.reply);
         if was_empty {
-            if let Some(timer) = self
-                .timer
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-            {
-                timer.pause();
-            }
+            self.pause_timer();
         }
         id
     }
 
     /// Deliver `key` to the caller blocked on request `id`.
     pub fn resolve(&self, id: u64, key: KeyEvent) -> bool {
-        let (sender, now_empty) = {
-            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let sender = g.pending.remove(&id);
-            let now_empty = sender.is_some() && g.pending.is_empty();
-            (sender, now_empty)
-        };
-        match sender {
-            Some(tx) => {
-                if now_empty {
-                    if let Some(timer) = self
-                        .timer
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .as_ref()
-                    {
-                        timer.resume();
-                    }
-                }
-                let _ = tx.send(key);
-                true
-            }
-            None => false,
+        let (sender, now_empty) = self.replies.remove(id);
+        if now_empty {
+            self.resume_timer();
+        }
+        sender.is_some_and(|tx| tx.send(key).is_ok())
+    }
+
+    /// Remove an abandoned request, dropping its reply sender.
+    pub fn remove(&self, id: u64) -> bool {
+        let (sender, now_empty) = self.replies.remove(id);
+        if now_empty {
+            self.resume_timer();
+        }
+        sender.is_some()
+    }
+
+    /// Drop every pending key request, unblocking cancelled tools.
+    pub fn cancel_all(&self) {
+        if !self.replies.drain().is_empty() {
+            self.resume_timer();
         }
     }
 
     /// Number of keys still awaiting a reply (for diagnostics/tests).
     pub fn pending_count(&self) -> usize {
-        self.inner
+        self.replies.pending_count()
+    }
+
+    fn pause_timer(&self) {
+        if let Some(timer) = self
+            .timer
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .len()
+            .as_ref()
+        {
+            timer.pause();
+        }
+    }
+
+    fn resume_timer(&self) {
+        if let Some(timer) = self
+            .timer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            timer.resume();
+        }
     }
 }
 
@@ -110,13 +174,7 @@ impl KeyReplyRegistry {
 /// `id` back to the waiting gate. This is what lets approval flow over RPC.
 #[derive(Clone, Default)]
 pub struct ApprovalReplyRegistry {
-    inner: Arc<Mutex<ApprovalRegistryInner>>,
-}
-
-#[derive(Default)]
-struct ApprovalRegistryInner {
-    next_id: u64,
-    pending: HashMap<u64, oneshot::Sender<CallOutcome>>,
+    replies: ReplyRegistry<CallOutcome>,
 }
 
 impl ApprovalReplyRegistry {
@@ -126,34 +184,32 @@ impl ApprovalReplyRegistry {
 
     /// Take ownership of a reply channel and assign it an id.
     pub fn register(&self, reply: oneshot::Sender<CallOutcome>) -> u64 {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let id = g.next_id;
-        g.next_id = g.next_id.wrapping_add(1);
-        g.pending.insert(id, reply);
-        id
+        self.replies.register(reply).0
     }
 
     /// Deliver `outcome` to the gate blocked on request `id`.
     pub fn resolve(&self, id: u64, outcome: CallOutcome) -> bool {
-        let sender = self
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .remove(&id);
-        match sender {
-            Some(tx) => tx.send(outcome).is_ok(),
-            None => false,
+        self.replies
+            .remove(id)
+            .0
+            .is_some_and(|tx| tx.send(outcome).is_ok())
+    }
+
+    /// Remove an abandoned request, dropping its reply sender.
+    pub fn remove(&self, id: u64) -> bool {
+        self.replies.remove(id).0.is_some()
+    }
+
+    /// Deny and remove every pending approval so cancellation cannot wedge a turn.
+    pub fn cancel_all(&self) {
+        for sender in self.replies.drain() {
+            let _ = sender.send(CallOutcome::Denied);
         }
     }
 
     /// Number of approvals still awaiting a reply (for diagnostics/tests).
     pub fn pending_count(&self) -> usize {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .len()
+        self.replies.pending_count()
     }
 }
 
@@ -223,7 +279,8 @@ impl ApprovalGate for ChannelApprovalGate {
             preview,
         };
         if self.events.send(event).is_err() {
-            // Frontend detached: fall back without wedging the loop.
+            // Frontend detached: unregister before falling back.
+            self.registry.remove(id);
             return decide_call(blocked, auto_allows);
         }
         if let Some(timer) = &self.timer {

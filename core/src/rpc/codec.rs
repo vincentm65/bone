@@ -23,6 +23,26 @@ pub enum ReadError {
     TooLong { len: usize },
 }
 
+impl ReadError {
+    /// Whether the full bad frame was consumed and the stream can continue.
+    pub fn is_recoverable(&self) -> bool {
+        matches!(self, Self::Decode(_))
+    }
+
+    /// Convert terminal framing/transport failures to I/O errors.
+    /// Decode failures are recoverable because their full line was consumed.
+    pub fn into_fatal_io(self) -> Option<std::io::Error> {
+        match self {
+            Self::Decode(_) => None,
+            Self::Io(err) => Some(err),
+            Self::TooLong { len } => Some(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("framed message is {len} bytes; max is {MAX_LINE_BYTES}"),
+            )),
+        }
+    }
+}
+
 /// Write one message as a JSON line and flush it.
 pub async fn write_message<W, T>(w: &mut W, msg: &T) -> std::io::Result<()>
 where
@@ -52,6 +72,7 @@ where
 pub struct MessageReader<R> {
     reader: BufReader<R>,
     buf: Vec<u8>,
+    scan_start: usize,
 }
 
 impl<R> MessageReader<R>
@@ -62,6 +83,7 @@ where
         Self {
             reader: BufReader::with_capacity(64 * 1024, reader),
             buf: Vec::new(),
+            scan_start: 0,
         }
     }
 
@@ -87,8 +109,10 @@ where
 
     async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
         loop {
-            if let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            if let Some(offset) = self.buf[self.scan_start..].iter().position(|&b| b == b'\n') {
+                let pos = self.scan_start + offset;
                 let mut line = self.buf.drain(..=pos).collect::<Vec<u8>>();
+                self.scan_start = 0;
                 line.pop(); // drop '\n'
                 if line.last() == Some(&b'\r') {
                     line.pop();
@@ -105,6 +129,9 @@ where
                     len: self.buf.len(),
                 });
             }
+            // Only scan bytes appended by the next read; the current buffer has
+            // already been checked for a delimiter.
+            self.scan_start = self.buf.len();
             // Grow by filling the BufReader; stop if nothing more arrives.
             let mut tmp = [0_u8; 8 * 1024];
             match tokio::io::AsyncReadExt::read(&mut self.reader, &mut tmp).await {
@@ -119,6 +146,7 @@ where
                         });
                     }
                     let line = std::mem::take(&mut self.buf);
+                    self.scan_start = 0;
                     return String::from_utf8(line).map(Some).map_err(|e| {
                         ReadError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
                     });

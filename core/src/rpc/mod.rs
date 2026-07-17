@@ -20,7 +20,7 @@ pub mod codec;
 
 use std::sync::{Arc, Mutex};
 
-use futures_util::future::LocalBoxFuture;
+use futures_util::future::{FutureExt, LocalBoxFuture};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -225,7 +225,22 @@ where
                         if let std::collections::hash_map::Entry::Vacant(entry) =
                             sessions.entry(id)
                         {
-                            actors.push(Box::pin(async move { (id, runtime.task.await) }));
+                            let publisher = runtime.hub.publisher();
+                            let task = runtime.task;
+                            actors.push(Box::pin(async move {
+                                if let Err(payload) = std::panic::AssertUnwindSafe(task)
+                                    .catch_unwind()
+                                    .await
+                                {
+                                    publisher.publish(RuntimeEvent::Status {
+                                        message: format!(
+                                            "conversation runtime panicked: {}",
+                                            crate::runtime::panic_message(payload.as_ref())
+                                        ),
+                                    });
+                                }
+                                (id, ())
+                            }));
                             entry.insert(ManagedEntry {
                                 hub: runtime.hub,
                                 initial: runtime.initial,
@@ -312,19 +327,13 @@ where
                             &mut write_half,
                             &RuntimeEvent::Status { message: "conversation runtime stopped".into() },
                         ).await?;
+                        return Ok(());
                     }
                 }
-                Some(Err(codec::ReadError::Decode(_))) => continue,
-                Some(Err(codec::ReadError::Io(err))) => return Err(err),
-                Some(Err(codec::ReadError::TooLong { len })) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "framed message is {len} bytes; max is {}",
-                            codec::MAX_LINE_BYTES
-                        ),
-                    ));
-                }
+                Some(Err(err)) => match err.into_fatal_io() {
+                    Some(err) => return Err(err),
+                    None => continue,
+                },
                 None => return Ok(()),
             },
             event = attachment.events.recv() => match event {
@@ -335,6 +344,7 @@ where
                         &mut write_half,
                         &RuntimeEvent::Status { message: "conversation runtime stopped".into() },
                     ).await?;
+                    return Ok(());
                 }
             }
         }
@@ -491,21 +501,12 @@ where
                     break; // runtime gone
                 }
             }
-            // Skip malformed frames rather than dropping the connection.
-            Err(codec::ReadError::Decode(_)) => continue,
-            Err(codec::ReadError::Io(e)) => {
+            Err(err) => {
+                let Some(err) = err.into_fatal_io() else {
+                    continue;
+                };
                 writer.abort();
-                return Err(e);
-            }
-            Err(codec::ReadError::TooLong { len }) => {
-                writer.abort();
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "framed message is {len} bytes; max is {}",
-                        codec::MAX_LINE_BYTES
-                    ),
-                ));
+                return Err(err);
             }
         }
     }
@@ -1373,7 +1374,12 @@ impl DaemonCtx {
         }
 
         if let Some(outcome) = conn.take_outcome() {
-            let _ = self.session.lock().unwrap().apply_outcome(outcome);
+            let (_, persistence_error) = self.session.lock().unwrap().apply_outcome(outcome);
+            if let Some(err) = persistence_error {
+                self.hub.publish(RuntimeEvent::Status {
+                    message: format!("failed to persist turn: {err}"),
+                });
+            }
         }
         // Publish the post-turn state so clients can sync their view-model.
         self.key_registry.set_timer(None);
