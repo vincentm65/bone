@@ -1,6 +1,9 @@
 # Build
 /target/
 /npm/dist/
+# Rust generated docs (rustdoc output) and stray compiler artifacts
+/doc/
+*.rlib
 
 # Temp/scratch
 .temp/
