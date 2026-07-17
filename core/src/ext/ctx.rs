@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 
-use crate::tools::shell::{ScriptRequest, run_script};
+use crate::tools::shell::{ScriptRequest, run_script, run_script_lines};
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
 
@@ -484,18 +484,16 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
     let process_cwd = std::path::PathBuf::from(&cfg.cwd);
+    let process_scope = crate::processes::conversation_scope(cfg.session_id);
+    let spawn_scope = process_scope.clone();
     let spawn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
         require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
         let timeout_ms = opt_u64(&opts, "timeout_ms")
             .unwrap_or(3_600_000)
             .clamp(1_000, 3_600_000);
-        let owner = opts
-            .as_ref()
-            .and_then(|o| o.get::<Option<String>>("owner").ok().flatten())
-            .unwrap_or_else(|| "extension".into());
         let id = crate::processes::registry().spawn(
             command,
-            owner,
+            spawn_scope.clone(),
             timeout_ms,
             Some(process_cwd.clone()),
         );
@@ -504,8 +502,9 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         Ok(Value::Table(result))
     })?;
     process.set("spawn", spawn)?;
-    let status = lua.create_function(|lua, id: String| {
-        let Some(p) = crate::processes::registry().get(&id) else {
+    let status_scope = process_scope.clone();
+    let status = lua.create_function(move |lua, id: String| {
+        let Some(p) = crate::processes::registry().get_scoped(&status_scope, &id) else {
             return Ok(Value::Nil);
         };
         let t = lua.create_table()?;
@@ -518,8 +517,9 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         Ok(Value::Table(t))
     })?;
     process.set("status", status)?;
-    let output = lua.create_function(|lua, id: String| {
-        let Some(p) = crate::processes::registry().get(&id) else {
+    let output_scope = process_scope.clone();
+    let output = lua.create_function(move |lua, id: String| {
+        let Some(p) = crate::processes::registry().get_scoped(&output_scope, &id) else {
             return Ok(Value::Nil);
         };
         let t = lua.create_table()?;
@@ -528,10 +528,11 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         Ok(Value::Table(t))
     })?;
     process.set("output", output)?;
-    let list = lua.create_function(|lua, (): ()| {
+    let list_scope = process_scope.clone();
+    let list = lua.create_function(move |lua, (): ()| {
         let result = lua.create_table()?;
         for (i, p) in crate::processes::registry()
-            .list(None)
+            .list(Some(&list_scope))
             .into_iter()
             .enumerate()
         {
@@ -544,29 +545,31 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         Ok(Value::Table(result))
     })?;
     process.set("list", list)?;
+    let kill_scope = process_scope;
     process.set(
         "kill",
-        lua.create_function(|_, id: String| Ok(crate::processes::registry().kill(&id)))?,
+        lua.create_function(move |_, id: String| {
+            Ok(crate::processes::registry().kill_scoped(&kill_scope, &id))
+        })?,
     )?;
     ctx.set("process", process)?;
     // ctx.shell(command, opts?) → { stdout, stderr, exit_code }
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
     let shell_cwd = std::path::PathBuf::from(&cfg.cwd);
+    let shell_cancel = cfg.cancelled.clone();
     let shell_fn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
         require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
-        // Parse opts.
         let timeout_ms = opt_u64(&opts, "timeout_ms")
             .unwrap_or(120_000)
             .clamp(1_000, 300_000);
 
-        // We need to run an async function from this synchronous Lua callback.
         let output = block_on(run_script(ScriptRequest {
             command,
             env: Vec::new(),
             timeout_ms,
             working_dir: Some(shell_cwd.clone()),
-            cancel: None,
+            cancel: shell_cancel.clone(),
         }));
 
         match output {
@@ -583,112 +586,32 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     ctx.set("shell", shell_fn)?;
 
     // ctx.shell_streaming(command, callback, opts?) → { stdout, stderr, exit_code }
-    // Runs command via bash, reads stdout line-by-line, calls callback(line) for each.
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
-    let streaming_cwd = cfg.cwd.clone();
+    let streaming_cwd = std::path::PathBuf::from(&cfg.cwd);
+    let streaming_cancel = cfg.cancelled.clone();
     let shell_streaming_fn = lua.create_function(
         move |lua, (command, callback, opts): (String, mlua::Function, Option<Table>)| {
             require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
             let timeout_ms = opt_u64(&opts, "timeout_ms")
                 .unwrap_or(300_000)
                 .clamp(1_000, 300_000);
-
-            use std::io::{BufRead, BufReader, Read};
-            use std::process::{Command, Stdio};
-            use std::sync::mpsc;
-            use std::time::{Duration, Instant};
-
-            let mut child = Command::new("bash")
-                .arg("-c")
-                .arg(&command)
-                .current_dir(&streaming_cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| mlua::Error::external(format!("failed to spawn: {e}")))?;
-
-            let stdout = child.stdout.take().unwrap();
-            let stderr_handle = child.stderr.take().unwrap();
-
-            // Spawn a reader thread that sends each stdout line through a channel.
-            let (tx, rx) = mpsc::channel::<Result<String, String>>();
-            let reader_thread = std::thread::spawn(move || {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines() {
-                    match line {
-                        Ok(l) => {
-                            if tx.send(Ok(l)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            });
-
-            // Also read stderr in the background so the child doesn't block on a full pipe.
-            let stderr_thread = std::thread::spawn(move || {
-                let mut buf = String::new();
-                let _ = BufReader::new(stderr_handle).read_to_string(&mut buf);
-                buf
-            });
-
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-            let mut stdout_acc = String::new();
-            let mut timed_out = false;
-
-            loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    timed_out = true;
-                    break;
-                }
-
-                match rx.recv_timeout(remaining) {
-                    Ok(Ok(line)) => {
-                        callback.call::<()>(line.clone())?;
-                        stdout_acc.push_str(&line);
-                        stdout_acc.push('\n');
-                    }
-                    Ok(Err(e)) => {
-                        return Err(mlua::Error::external(format!("read error: {e}")));
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        timed_out = true;
-                        break;
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-
-            if timed_out {
-                let _ = child.kill();
-            }
-
-            let _ = reader_thread.join();
-            let stderr_content = stderr_thread.join().unwrap_or_default();
-
-            let exit_status = child.wait().ok();
-
-            let exit_code = if timed_out {
-                -1i64
-            } else {
-                exit_status
-                    .and_then(|s| s.code())
-                    .map(|c| c as i64)
-                    .unwrap_or(-1)
-            };
+            let output = block_on(run_script_lines(
+                ScriptRequest {
+                    command,
+                    env: Vec::new(),
+                    timeout_ms,
+                    working_dir: Some(streaming_cwd.clone()),
+                    cancel: streaming_cancel.clone(),
+                },
+                |line| callback.call::<()>(line).map_err(crate::util::errstr),
+            ))
+            .map_err(mlua::Error::external)?;
 
             let result = lua.create_table()?;
-            result.set("stdout", stdout_acc)?;
-            result.set("stderr", stderr_content)?;
-            result.set("exit_code", exit_code)?;
+            result.set("stdout", output.stdout)?;
+            result.set("stderr", output.stderr)?;
+            result.set("exit_code", output.exit_code.map(i64::from).unwrap_or(-1))?;
             Ok(Value::Table(result))
         },
     )?;

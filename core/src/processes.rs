@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::tools::shell::{ScriptRequest, run_script};
-use crate::tools::{Tool, ToolDefinition};
+use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -92,6 +92,10 @@ impl ProcessRegistry {
             .get(id)
             .map(|p| p.snapshot.clone())
     }
+    pub fn get_scoped(&self, scope: &str, id: &str) -> Option<ProcessSnapshot> {
+        self.get(id).filter(|process| process.owner == scope)
+    }
+
     pub fn list(&self, owner: Option<&str>) -> Vec<ProcessSnapshot> {
         self.processes
             .lock()
@@ -101,6 +105,21 @@ impl ProcessRegistry {
             .map(|p| p.snapshot.clone())
             .collect()
     }
+    pub fn kill_scoped(&self, scope: &str, id: &str) -> bool {
+        let processes = self.processes.lock().unwrap();
+        let Some(p) = processes
+            .get(id)
+            .filter(|process| process.snapshot.owner == scope)
+        else {
+            return false;
+        };
+        if !p.snapshot.running {
+            return false;
+        }
+        p.cancel.store(true, Ordering::Relaxed);
+        true
+    }
+
     pub fn kill(&self, id: &str) -> bool {
         let processes = self.processes.lock().unwrap();
         let Some(p) = processes.get(id) else {
@@ -113,6 +132,13 @@ impl ProcessRegistry {
         true
     }
 }
+pub fn conversation_scope(session_id: Option<i64>) -> String {
+    session_id.map_or_else(
+        || "conversation:local".into(),
+        |id| format!("conversation:{id}"),
+    )
+}
+
 pub fn registry() -> &'static ProcessRegistry {
     static REG: OnceLock<ProcessRegistry> = OnceLock::new();
     REG.get_or_init(|| ProcessRegistry {
@@ -131,6 +157,54 @@ struct ProcessArgs {
     #[serde(default)]
     id: Option<String>,
 }
+
+fn execute_action(args: ProcessArgs, scope: Option<&str>) -> Result<String, String> {
+    match args.action.as_str() {
+        "list" => Ok(registry()
+            .list(scope)
+            .into_iter()
+            .map(|p| {
+                format!(
+                    "{} {} {}",
+                    p.id,
+                    if p.running { "running" } else { "finished" },
+                    p.command
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")),
+        "status" => {
+            let id = args.id.ok_or("id is required for status")?;
+            let process = match scope {
+                Some(scope) => registry().get_scoped(scope, &id),
+                None => registry().get(&id),
+            }
+            .ok_or("unknown process")?;
+            Ok(format!(
+                "{}\nrunning: {}\nstdout:\n{}\nstderr:\n{}\n{}",
+                process.id,
+                process.running,
+                process.stdout,
+                process.stderr,
+                process.error.unwrap_or_default()
+            ))
+        }
+        "kill" => {
+            let id = args.id.ok_or("id is required for kill")?;
+            let killed = match scope {
+                Some(scope) => registry().kill_scoped(scope, &id),
+                None => registry().kill(&id),
+            };
+            if killed {
+                Ok(format!("stop requested for {id}"))
+            } else {
+                Err(format!("process {id} is unknown or already finished"))
+            }
+        }
+        _ => Err("action must be list, status, or kill".into()),
+    }
+}
+
 #[async_trait]
 impl Tool for ProcessTool {
     fn definition(&self) -> ToolDefinition {
@@ -142,41 +216,22 @@ impl Tool for ProcessTool {
     }
     async fn execute(&self, arguments: Value) -> Result<String, String> {
         let args: ProcessArgs = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-        match args.action.as_str() {
-            "list" => Ok(registry()
-                .list(None)
-                .into_iter()
-                .map(|p| {
-                    format!(
-                        "{} {} {}",
-                        p.id,
-                        if p.running { "running" } else { "finished" },
-                        p.command
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")),
-            "status" => {
-                let id = args.id.ok_or("id is required for status")?;
-                let p = registry().get(&id).ok_or("unknown process")?;
-                Ok(format!(
-                    "{}\nrunning: {}\nstdout:\n{}\nstderr:\n{}\n{}",
-                    p.id,
-                    p.running,
-                    p.stdout,
-                    p.stderr,
-                    p.error.unwrap_or_default()
-                ))
-            }
-            "kill" => {
-                let id = args.id.ok_or("id is required for kill")?;
-                if registry().kill(&id) {
-                    Ok(format!("stop requested for {id}"))
-                } else {
-                    Err(format!("process {id} is unknown or already finished"))
-                }
-            }
-            _ => Err("action must be list, status, or kill".into()),
-        }
+        execute_action(args, None)
+    }
+
+    async fn execute_output_live(
+        &self,
+        arguments: Value,
+        _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput, String> {
+        let args: ProcessArgs = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
+        let scope = conversation_scope(
+            context
+                .app_state
+                .as_ref()
+                .and_then(|state| state.session_id),
+        );
+        execute_action(args, Some(&scope)).map(ToolOutput::text)
     }
 }

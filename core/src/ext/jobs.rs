@@ -300,6 +300,8 @@ impl JobRegistry {
                 event,
                 edit_preview,
             });
+            drop(jobs);
+            self.version.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -712,11 +714,15 @@ pub fn truncate_for_injection(s: &str, max_chars: usize) -> String {
         .map(|(idx, _)| idx)
         .unwrap_or(s.len());
     let truncated = &s[..cutoff_byte];
-    // Try to break at a word boundary.
-    let kept = match truncated.rfind(' ') {
-        Some(space) if space > 0 => &truncated[..space],
-        _ => truncated,
-    };
+    // Prefer a nearby whitespace boundary, but do not discard most of the
+    // budget just because the previous word is unusually long.
+    let boundary_window = max_chars.div_ceil(10).max(1);
+    let kept = truncated
+        .char_indices()
+        .rev()
+        .take(boundary_window)
+        .find(|(idx, ch)| *idx > 0 && ch.is_whitespace())
+        .map_or(truncated, |(idx, _)| &truncated[..idx]);
     format!("{kept}{TRUNCATION_MARKER}")
 }
 

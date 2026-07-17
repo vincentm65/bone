@@ -11,8 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 
 use crate::tools::truncate_line;
 use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
@@ -48,10 +47,9 @@ pub struct ScriptRequest {
     pub env: Vec<(String, String)>,
     pub timeout_ms: u64,
     pub working_dir: Option<PathBuf>,
-    /// Cooperative cancel flag. When set (Esc/Ctrl+C mid-turn), `run_script`
+    /// Cooperative cancel flag. When set (Esc/Ctrl+C mid-turn), the executor
     /// kills the process tree and returns promptly with partial output instead
-    /// of blocking until `timeout_ms`. `None` for the context-less paths
-    /// (`ctx.shell`), where the wall-clock timeout is the only backstop.
+    /// of blocking until `timeout_ms`. `None` only for context-less callers.
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -130,83 +128,15 @@ fn spawn_script(
 }
 
 pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
-    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
-    let cancel = request.cancel.clone();
-    let (mut child, mut stdout, mut stderr) = spawn_script(request)?;
-
-    // Read stdout/stderr in dedicated tasks so partial output survives a
-    // timeout. With an inline read_to_end inside the wait future, data already
-    // pulled from the pipe is lost when the future is cancelled — the
-    // post-timeout drain would see an empty buffer.
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf).await;
-        buf
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        buf
-    });
-
-    // Race the child against both the wall-clock timeout and a cooperative
-    // cancel (Esc). Whichever fires first wins; `select!` drops the losing
-    // branch future, which releases the `&mut child` borrow held by the
-    // `child.wait()` future so the kill/reap below can run.
-    let outcome = tokio::select! {
-        biased;
-        _ = await_cancel(cancel.as_ref()) => WaitOutcome::Cancelled,
-        r = timeout(Duration::from_millis(timeout_ms), child.wait()) => match r {
-            Ok(Ok(status)) => WaitOutcome::Exited(status),
-            Ok(Err(e)) => return Err(crate::util::errstr(e)),
-            Err(_) => WaitOutcome::TimedOut,
-        },
-    };
-
-    match outcome {
-        WaitOutcome::Exited(status) => {
-            let out = stdout_task.await.unwrap_or_default();
-            let err = stderr_task.await.unwrap_or_default();
-            Ok(ScriptOutput {
-                exit_code: status.code(),
-                signal: exit_signal(&status),
-                stdout: truncate_output(&String::from_utf8_lossy(&out), 500),
-                stderr: truncate_output(&String::from_utf8_lossy(&err), 100),
-            })
-        }
-        WaitOutcome::TimedOut => {
-            let (stdout_str, stderr_str) =
-                kill_and_drain(&mut child, stdout_task, stderr_task).await;
-            let mut msg =
-                format!("[timed out after {timeout_ms}ms; partial output]\nstdout:\n{stdout_str}");
-            if !stderr_str.is_empty() {
-                msg.push_str(&format!("\nstderr:\n{stderr_str}"));
-            }
-            Err(msg)
-        }
-        WaitOutcome::Cancelled => {
-            // Esc/Ctrl+C mid-command: kill the whole tree and return whatever
-            // output was captured, so a stuck download no longer freezes the
-            // machine until the wall-clock timeout.
-            let (stdout_str, stderr_str) =
-                kill_and_drain(&mut child, stdout_task, stderr_task).await;
-            let mut msg = format!("[cancelled by user; partial output]\nstdout:\n{stdout_str}");
-            if !stderr_str.is_empty() {
-                msg.push_str(&format!("\nstderr:\n{stderr_str}"));
-            }
-            Err(msg)
-        }
-    }
+    run_script_stream(request, |_, _| Ok(())).await
 }
 
-/// As [`run_script`], but emits bounded chunks as they arrive.  The final
-/// result is deliberately identical, so callers can opt into live rendering
-/// without changing model-visible output or cancellation semantics.
-pub async fn run_script_live(
-    request: ScriptRequest,
-    output_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
-    call_id: String,
-) -> Result<ScriptOutput, String> {
+/// Run a script while observing each stdout/stderr chunk. The shared executor
+/// owns timeout, cancellation, process-tree cleanup, reaping, and final output.
+async fn run_script_stream<F>(request: ScriptRequest, mut emit: F) -> Result<ScriptOutput, String>
+where
+    F: FnMut(bool, &[u8]) -> Result<(), String>,
+{
     let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
     let cancel = request.cancel.clone();
     let (mut child, stdout, stderr) = spawn_script(request)?;
@@ -248,6 +178,7 @@ pub async fn run_script_live(
     let mut status = None;
     let mut timed_out = false;
     let mut cancelled = false;
+    let mut emit_error = None;
     let mut output_open = true;
     loop {
         tokio::select! {
@@ -257,8 +188,11 @@ pub async fn run_script_live(
             r = child.wait() => { status = Some(r.map_err(crate::util::errstr)?); break; }
             chunk = rx.recv(), if output_open => match chunk {
                 Some((is_err, bytes)) => {
-                    if let Some(events) = &output_events { let _ = events.send(crate::runtime::RuntimeEvent::ToolOutput { call_id: call_id.clone(), content: String::from_utf8_lossy(&bytes).into_owned(), stderr: is_err }); }
-                    if is_err { err.extend(bytes) } else { out.extend(bytes) }
+                    if is_err { err.extend(&bytes) } else { out.extend(&bytes) }
+                    if let Err(error) = emit(is_err, &bytes) {
+                        emit_error = Some(error);
+                        break;
+                    }
                 }
                 // Once both pipe readers have stopped, disable this select
                 // branch. Otherwise `recv()` would repeatedly resolve to
@@ -267,7 +201,7 @@ pub async fn run_script_live(
             }
         }
     }
-    if timed_out || cancelled {
+    if timed_out || cancelled || emit_error.is_some() {
         #[cfg(unix)]
         if let Some(pid) = child.id() {
             kill_process_group(pid);
@@ -277,13 +211,23 @@ pub async fn run_script_live(
     }
     while let Some((is_err, bytes)) = rx.recv().await {
         if is_err {
-            err.extend(bytes)
+            err.extend(&bytes)
         } else {
-            out.extend(bytes)
+            out.extend(&bytes)
+        }
+        if !timed_out
+            && !cancelled
+            && emit_error.is_none()
+            && let Err(error) = emit(is_err, &bytes)
+        {
+            emit_error = Some(error);
         }
     }
     let stdout = truncate_output(&String::from_utf8_lossy(&out), 500);
     let stderr = truncate_output(&String::from_utf8_lossy(&err), 100);
+    if let Some(error) = emit_error {
+        return Err(error);
+    }
     if cancelled || timed_out {
         let why = if cancelled {
             "cancelled by user".to_string()
@@ -305,12 +249,62 @@ pub async fn run_script_live(
     })
 }
 
-/// How the child's `wait()` resolved: it exited, the wall-clock timeout fired,
-/// or the user cancelled mid-run.
-enum WaitOutcome {
-    Exited(std::process::ExitStatus),
-    TimedOut,
-    Cancelled,
+/// As [`run_script`], but emits bounded chunks as they arrive. The final
+/// result is deliberately identical, so callers can opt into live rendering
+/// without changing model-visible output or cancellation semantics.
+pub async fn run_script_live(
+    request: ScriptRequest,
+    output_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
+    call_id: String,
+) -> Result<ScriptOutput, String> {
+    run_script_stream(request, |is_err, bytes| {
+        if let Some(events) = &output_events {
+            let _ = events.send(crate::runtime::RuntimeEvent::ToolOutput {
+                call_id: call_id.clone(),
+                content: String::from_utf8_lossy(bytes).into_owned(),
+                stderr: is_err,
+            });
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// As [`run_script`], but invokes `callback` for each complete stdout line.
+/// Callback failures stop and reap the whole process tree before returning.
+pub async fn run_script_lines<F>(
+    request: ScriptRequest,
+    mut callback: F,
+) -> Result<ScriptOutput, String>
+where
+    F: FnMut(String) -> Result<(), String>,
+{
+    let mut pending = Vec::new();
+    let result = run_script_stream(request, |is_err, bytes| {
+        if is_err {
+            return Ok(());
+        }
+        pending.extend_from_slice(bytes);
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<_> = pending.drain(..=newline).collect();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            callback(String::from_utf8_lossy(&line).into_owned())?;
+        }
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(output) => {
+            if !pending.is_empty() {
+                callback(String::from_utf8_lossy(&pending).into_owned())?;
+            }
+            Ok(output)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Awaitable cancel: resolves once the shared flag flips, so a `select!` can
@@ -326,32 +320,6 @@ async fn await_cancel(cancel: Option<&Arc<AtomicBool>>) {
         }
         None => std::future::pending::<()>().await,
     }
-}
-
-/// Kill the child and its whole process tree, reap it, and drain the captured
-/// stdout/stderr so partial output survives. Shared by the timeout and cancel
-/// paths. The pipes close once the process group dies, so the read tasks
-/// started in `run_script` finish and return everything buffered so far.
-async fn kill_and_drain(
-    child: &mut tokio::process::Child,
-    stdout_task: JoinHandle<Vec<u8>>,
-    stderr_task: JoinHandle<Vec<u8>>,
-) -> (String, String) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        kill_process_group(pid);
-    }
-    // Cross-platform backstop: signal the direct child even where the group
-    // kill above is a no-op (non-Unix) or the pid was already reaped. Ignored
-    // errors are fine — the child may already be dead.
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-    let out = stdout_task.await.unwrap_or_default();
-    let err = stderr_task.await.unwrap_or_default();
-    (
-        truncate_output(&String::from_utf8_lossy(&out), 500),
-        truncate_output(&String::from_utf8_lossy(&err), 100),
-    )
 }
 
 /// Deserialize `shell` arguments: the command plus a clamped timeout.
@@ -542,9 +510,15 @@ impl Tool for ShellTool {
         // of blocking until the wall-clock timeout.
         let (command, timeout_ms, background) = parse_shell_args(arguments)?;
         if background {
+            let scope = crate::processes::conversation_scope(
+                context
+                    .app_state
+                    .as_ref()
+                    .and_then(|state| state.session_id),
+            );
             let id = crate::processes::registry().spawn(
                 command,
-                context.owner.clone(),
+                scope,
                 timeout_ms,
                 context.working_dir.clone(),
             );

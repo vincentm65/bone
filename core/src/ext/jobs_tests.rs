@@ -318,6 +318,28 @@ fn pruning_keeps_unconsumed_jobs() {
 }
 
 #[test]
+fn note_event_bumps_version_only_for_known_job() {
+    let reg = fresh_registry();
+    let id = create_default(&reg, "a", "t");
+    let version = reg.version();
+    reg.note_event(
+        &id,
+        crate::runtime::RuntimeEvent::TextDelta { text: "x".into() },
+        None,
+    );
+    assert_eq!(reg.version(), version + 1);
+    assert_eq!(reg.all_jobs()[0].events.len(), 1);
+
+    let version = reg.version();
+    reg.note_event(
+        "unknown",
+        crate::runtime::RuntimeEvent::TextDelta { text: "x".into() },
+        None,
+    );
+    assert_eq!(reg.version(), version);
+}
+
+#[test]
 fn truncate_for_injection_respects_boundary() {
     let long = "a".repeat(20_000);
     let truncated = truncate_for_injection(&long, MAX_INJECT_CHARS);
@@ -339,6 +361,19 @@ fn truncate_for_injection_word_boundary() {
     // Should break at a word boundary, not in the middle of a word.
     let kept = truncated.trim_end_matches(TRUNCATION_MARKER);
     assert!(s.split(' ').any(|w| kept.ends_with(w)), "kept: {kept}");
+}
+
+#[test]
+fn truncate_for_injection_ignores_distant_boundary() {
+    let max_chars = 1_000;
+    let source = format!("prefix {}", "x".repeat(max_chars * 2));
+    let truncated = truncate_for_injection(&source, max_chars);
+    let kept = truncated.trim_end_matches(TRUNCATION_MARKER);
+    assert!(
+        kept.chars().count() >= 900,
+        "kept only {} chars",
+        kept.chars().count()
+    );
 }
 
 #[test]

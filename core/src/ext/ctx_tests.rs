@@ -565,6 +565,111 @@ async fn extension_shell_primitives_use_approval_gate() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_shell_primitives_honor_cancellation() {
+    for expression in [
+        r#"ctx.shell("sleep 30 & wait")"#,
+        r#"ctx.shell_streaming("sleep 30 & wait", function() end)"#,
+    ] {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+        cfg.cancelled = Some(cancelled.clone());
+        let lua = Lua::new();
+        let ctx = create_ctx_table(&lua, &cfg).unwrap();
+        lua.globals().set("ctx", ctx).unwrap();
+        let cancel_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            cancelled.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let (ok, error): (bool, String) = lua
+            .load(format!(
+                "local ok, err = pcall(function() {expression} end); return ok, tostring(err)"
+            ))
+            .eval()
+            .unwrap();
+        cancel_thread.join().unwrap();
+        assert!(!ok, "{expression} unexpectedly succeeded");
+        assert!(error.contains("cancelled by user"), "{expression}: {error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{expression} did not cancel promptly"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_streaming_callback_error_reaps_process_tree() {
+    let cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+    let started = std::time::Instant::now();
+    let (ok, error): (bool, String) = lua
+        .load(
+            r#"
+            local ok, err = pcall(function()
+                ctx.shell_streaming("echo first; sleep 30 & wait", function()
+                    error("callback failed")
+                end)
+            end)
+            return ok, tostring(err)
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(!ok);
+    assert!(error.contains("callback failed"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_processes_are_conversation_scoped() {
+    let mut cfg_a = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg_a.session_id = Some(101);
+    let lua_a = Lua::new();
+    let ctx_a = create_ctx_table(&lua_a, &cfg_a).unwrap();
+    lua_a.globals().set("ctx", ctx_a).unwrap();
+    let id: String = lua_a
+        .load(r#"return ctx.process.spawn("sleep 30", { owner = "conversation:202" }).id"#)
+        .eval()
+        .unwrap();
+
+    let mut cfg_b = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg_b.session_id = Some(202);
+    let lua_b = Lua::new();
+    let ctx_b = create_ctx_table(&lua_b, &cfg_b).unwrap();
+    lua_b.globals().set("ctx", ctx_b).unwrap();
+    lua_b.globals().set("foreign_id", id.clone()).unwrap();
+    let (status_hidden, output_hidden, kill_denied, listed): (bool, bool, bool, bool) = lua_b
+        .load(
+            r#"
+            local listed = false
+            for _, process in ipairs(ctx.process.list()) do
+                if process.id == foreign_id then listed = true end
+            end
+            return ctx.process.status(foreign_id) == nil,
+                   ctx.process.output(foreign_id) == nil,
+                   ctx.process.kill(foreign_id),
+                   listed
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(status_hidden);
+    assert!(output_hidden);
+    assert!(!kill_denied);
+    assert!(!listed);
+
+    lua_a.globals().set("own_id", id).unwrap();
+    assert!(
+        lua_a
+            .load("return ctx.process.kill(own_id)")
+            .eval::<bool>()
+            .unwrap()
+    );
+}
+
 #[test]
 fn runtime_info_exposes_read_only_execution_metadata() {
     let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());

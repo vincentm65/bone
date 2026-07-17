@@ -278,9 +278,10 @@ local function load_inbox(ctx, p)
 end
 
 local function clear_inbox(ctx, p)
-    if ctx.fs.is_file(p.inbox) then
-        write_or_rewrite(ctx, p.inbox, "")
+    if not ctx.fs.is_file(p.inbox) then
+        return true
     end
+    return write_or_rewrite(ctx, p.inbox, "")
 end
 
 local function append_inbox(ctx, p, content, scope, source)
@@ -467,7 +468,10 @@ bone.command.register("memory", {
         local inbox_text = load_inbox(ctx, p)
         if #findings == 0 and trim(inbox_text) == "" then
             state.last_conversation_id = max_id
-            state_write(ctx, p, state)
+            local state_ok, state_err = state_write(ctx, p, state)
+            if not state_ok then
+                return { display = "Memory checkpoint failed: " .. tostring(state_err), submit = false }
+            end
             return { display = string.format("Processed %d conversation(s). No durable preferences found.", #cids_rows), submit = false }
         end
 
@@ -481,7 +485,10 @@ bone.command.register("memory", {
         if not state_ok then
             return { display = "Memory updated, but checkpoint failed: " .. tostring(state_err), submit = false }
         end
-        clear_inbox(ctx, p)
+        local inbox_ok, inbox_err = clear_inbox(ctx, p)
+        if not inbox_ok then
+            return { display = "Memory updated, but inbox clear failed: " .. tostring(inbox_err), submit = false }
+        end
         return { display = message, submit = false }
     end,
 })

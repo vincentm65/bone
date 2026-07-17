@@ -7,8 +7,7 @@ use std::time::Instant;
 use serde_json::json;
 
 use bone_core::processes;
-use bone_core::tools::shell::ShellTool;
-use bone_core::tools::shell::truncate_output;
+use bone_core::tools::shell::{ScriptRequest, ShellTool, run_script_lines, truncate_output};
 use bone_core::tools::types::{Tool, ToolExecutionContext};
 #[tokio::test]
 async fn timeout_returns_partial_stdout() {
@@ -219,4 +218,44 @@ async fn cancel_kills_promptly_and_returns_partial_output() {
         elapsed.as_secs() < 5,
         "cancel took {elapsed:?}, expected < 5s"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_does_not_invoke_callbacks_for_buffered_output() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_after_first = cancel.clone();
+    let (first_line_tx, first_line_rx) = std::sync::mpsc::channel();
+    let cancel_thread = std::thread::spawn(move || {
+        first_line_rx.recv().unwrap();
+        cancel_after_first.store(true, Ordering::Relaxed);
+    });
+    let mut first_line_tx = Some(first_line_tx);
+    let mut lines = Vec::new();
+
+    let result = run_script_lines(
+        ScriptRequest {
+            command: "printf 'first\\n'; sleep 0.05; printf 'second\\n'; sleep 30".into(),
+            env: Vec::new(),
+            timeout_ms: 30_000,
+            working_dir: None,
+            cancel: Some(cancel),
+        },
+        |line| {
+            lines.push(line);
+            if let Some(tx) = first_line_tx.take() {
+                tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Ok(())
+        },
+    )
+    .await;
+    cancel_thread.join().unwrap();
+
+    let error = match result {
+        Ok(_) => panic!("command should be cancelled"),
+        Err(error) => error,
+    };
+    assert!(error.contains("cancelled by user"));
+    assert_eq!(lines, ["first"]);
 }
