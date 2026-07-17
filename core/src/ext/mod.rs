@@ -110,18 +110,10 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
         || (name == "subagent.lua" && !existing.contains("eager"))
-        // compact's announcements moved from `ctx.ui.status` (surfaced by a
-        // host substring match on "compact") to `ctx.ui.notice`; refresh older
-        // seeded copies so their announcements still reach the transcript.
-        || (name == "compact.lua" && !existing.contains("ctx.ui.notice"))
         // config's providers page replaced the "Edit provider..." menu row with
         // an `[e] edit` action key; refresh older seeded copies that predate the
         // `action_keys` wiring so `e` opens the provider editor again.
-        || (name == "config.lua" && !existing.contains("action_keys"))
-        // Refresh memory copies using either removed edit_file contract.
-        || (name == "memory.lua"
-            && (existing.contains("mode = \"rewrite\"")
-                || existing.contains("input = patch"))))
+        || (name == "config.lua" && !existing.contains("action_keys")))
 }
 
 /// Boot the Lua extension system.

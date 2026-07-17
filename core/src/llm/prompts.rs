@@ -1,88 +1,6 @@
-//! System-prompt assembly: working dir, scoped user memory, and the default bone prompt.
+//! System-prompt assembly for Bone and delegated agents.
 
 use crate::config::bone_dir;
-use std::path::Path;
-
-const MAX_MEMORY_CHARS: usize = 1600;
-
-fn truncate_utf8(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let suffix = "...";
-    let limit = max_bytes.saturating_sub(suffix.len());
-    for cut in (limit.saturating_sub(4)..=limit).rev() {
-        if s.is_char_boundary(cut) {
-            return format!("{}{}", &s[..cut], suffix);
-        }
-    }
-    suffix.to_string()
-}
-
-fn project_key(cwd: &str) -> String {
-    let mut key: String = cwd
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if key.len() > 96 {
-        key = key[key.len() - 96..].to_string();
-    }
-    if key.is_empty() {
-        "unknown".to_string()
-    } else {
-        key
-    }
-}
-
-fn read_trimmed(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn read_scoped_or_legacy(scoped: &Path, legacy: &Path) -> Option<String> {
-    read_trimmed(scoped).or_else(|| read_trimmed(legacy))
-}
-
-fn memory_block(cwd: &str) -> String {
-    let dir = bone_dir();
-    let memory_dir = dir.join("memory");
-    let global = read_scoped_or_legacy(&memory_dir.join("global.md"), &dir.join("memory.md"));
-    let project = read_trimmed(
-        &memory_dir
-            .join("projects")
-            .join(format!("{}.md", project_key(cwd))),
-    );
-
-    let mut sections = Vec::new();
-    if let Some(global) = global {
-        sections.push(format!(
-            "## Global\n{}",
-            truncate_utf8(&global, MAX_MEMORY_CHARS)
-        ));
-    }
-    if let Some(project) = project {
-        sections.push(format!(
-            "## Current project\n{}",
-            truncate_utf8(&project, MAX_MEMORY_CHARS)
-        ));
-    }
-    if sections.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n# User Memory\nThe following scoped preferences were extracted from past conversations:\n\n{}\n",
-            sections.join("\n\n")
-        )
-    }
-}
 
 /// Default system prompt injected at the start of every conversation.
 pub fn system_prompt() -> String {
@@ -90,15 +8,12 @@ pub fn system_prompt() -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let bone = bone_dir().display().to_string();
-    let memory = memory_block(&cwd);
-    format!(
-        "{SYSTEM_PROMPT}Resolved config directory: {bone}\nCurrent working directory: {cwd}\n{memory}"
-    )
+    format!("{SYSTEM_PROMPT}Resolved config directory: {bone}\nCurrent working directory: {cwd}\n")
 }
 
 /// System prompt for any headless delegated agent (`ctx.agent.run`/`spawn` at
-/// depth > 0) — not specific to the `subagent` tool: `compact`, `memory` and
-/// `shotgun` runs get the same contract. A fixed environment/tool scaffold
+/// depth > 0) — not specific to the `subagent` tool: `compact` and `shotgun`
+/// runs get the same contract. A fixed environment/tool scaffold
 /// composed with an optional caller-supplied persona; the persona replaces only
 /// the identity line, while the environment facts and non-interactive rules
 /// (the runtime's contract for delegated agents) are always included.

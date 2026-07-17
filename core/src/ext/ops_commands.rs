@@ -119,10 +119,35 @@ pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), Stri
         })
         .map_err(crate::util::errstr)?;
 
+    // Keep pre-2.4 catalog commands working while they migrate to the
+    // namespaced API.
+    bone.set("register_command", register_fn.clone())
+        .map_err(crate::util::errstr)?;
+
     let command = lua.create_table().map_err(crate::util::errstr)?;
     command
         .set("register", register_fn)
         .map_err(crate::util::errstr)?;
     bone.set("command", command).map_err(crate::util::errstr)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_register_command_alias_still_registers_handlers() {
+        let lua = Lua::new();
+        let bone = lua.create_table().unwrap();
+        lua.globals().set("bone", bone.clone()).unwrap();
+        setup_register_command(&lua, &bone).unwrap();
+
+        lua.load("bone.register_command('legacy', function() return 'ok' end)")
+            .exec()
+            .unwrap();
+
+        let handler = find_handler(&lua, "legacy").unwrap();
+        assert_eq!(handler.call::<String>(()).unwrap(), "ok");
+    }
 }

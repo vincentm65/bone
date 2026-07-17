@@ -84,7 +84,7 @@ config/providers.yaml    — LLM provider entries
 config/tools.yaml        — Tool enable/disable toggles
 config/commands.yaml     — Command enable/disable toggles
 command-policy.yaml      — Shell command safety tiers
-memory/                  — Scoped user memory maintained by /memory
+memory/                  — Optional catalog /memory extension data
 AGENTS.local.md          — Optional user-authored instructions; never generated
 ```
 
@@ -472,9 +472,9 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 
 ## Commands
 
-### /compact
+### /compact (optional catalog extension)
 
-Reliable context compaction using a versioned `[Context checkpoint v1]`. Older complete turns are folded into a validated checkpoint while recent complete turns remain verbatim. Existing checkpoints are updated incrementally instead of repeatedly summarizing the full transcript.
+Install `compact.lua` through `/catalog` to add reliable context compaction using a versioned `[Context checkpoint v1]`. Older complete turns are folded into a validated checkpoint while recent complete turns remain verbatim. Existing checkpoints are updated incrementally instead of repeatedly summarizing the full transcript.
 
 Usage:
 
@@ -519,29 +519,26 @@ The transcript replacement is returned as a `conversation.replace` action (see [
 
 Open the interactive config editor. See [Config, Theme, and Keymaps](#config-theme-and-keymaps) for the full API.
 
-### /memory
+### /memory (optional catalog extension)
 
-Incremental memory builder. Processes new conversations and queued explicit preference signals, then quietly updates scoped memory files without submitting a follow-up chat turn. Global memory lives in `memory/global.md`; current-project memory lives in `memory/projects/<cwd-key>.md`; pending cheap captures live in `memory/inbox.jsonl`; checkpoints live in `memory/state.json`. A legacy `memory.md` is still read as a fallback until scoped memory exists. A legacy `memory.last_run` timestamp is read only to migrate into `memory/state.json` when that state file does not yet exist; current versions do not write `memory.last_run`.
+Automated long-term memory is not bundled with Bone. Install `memory.lua` through
+`/catalog` to add capture, scoped storage, prompt injection, and the `/memory`
+commands. The extension owns all memory behavior through Lua, including
+`before_turn` prompt injection.
 
-Usage:
-- `/memory` — process new conversations and queued preference signals.
-- `/memory show`, `/memory view`, `/memory list` — display global and current-project memory.
-- `/memory remember <text>` — queue an explicit memory signal and run the normal merge.
-- `/memory remember --global <text>` — force the signal into global memory.
-- `/memory remember --project <text>` — force the signal into current-project memory.
+For explicit persistence without automated capture, put stable user or project
+instructions in `AGENTS.local.md`. Bone loads that file as instructions and never
+modifies it.
 
-If scoped memory exists in the config directory, global memory plus the current project's memory are loaded into the system prompt with size caps.
+Existing `memory.md` and `memory/` data are preserved during migration, while the
+legacy `lua/commands/memory.lua` is removed. Legacy `memory.md` is copied to
+`memory/global.md` only when the scoped file is absent; existing scoped data is
+never overwritten. Install the catalog extension to restore `/memory`.
 
-Bundled as `lua/commands/memory.lua` and seeded into the config directory when enabled by setup.
+### /usage (optional catalog extension)
 
-Run manually with `/memory`, or schedule daily:
-```
-cron(action=add, name=memory, time=03:00, approval=danger, prompt=/memory)
-```
-
-### /usage
-
-Show token usage stats for the current session.
+Install `usage.lua` through `/catalog` to show token usage stats for the current
+session.
 
 
 
@@ -888,7 +885,10 @@ Key differences from other events:
 - **Not blockable** — Unlike `tool_call`, `before_turn` cannot block the turn (only mutate it).
 - **Multiple handlers** — All handlers run; return actions apply in registration order.
 
-This is the mechanism behind automatic context compaction. The default `lua/commands/compact.lua` registers a `before_turn` handler that summarizes older messages when context exceeds a threshold. It preserves complete tool-call chains and drops incomplete chains at the compaction boundary so provider history stays valid.
+This is the mechanism used by the optional catalog `compact.lua` extension. Its
+`before_turn` handler summarizes older messages when context exceeds a threshold,
+preserves complete tool-call chains, and drops incomplete chains at the
+compaction boundary so provider history stays valid.
 
 ## Runtime APIs
 
@@ -1126,18 +1126,18 @@ Plugins do not auto-run. Repeated `load` is a no-op.
     providers.yaml             -- LLM provider entries
     tools.yaml                 -- tool enable/disable toggles
     commands.yaml              -- command enable/disable toggles
-  memory/
-    global.md                  -- global user preferences
+  memory/                       -- optional catalog /memory extension data
+    global.md                   -- global user preferences
     projects/<cwd-key>.md       -- project-scoped preferences
-    inbox.jsonl                -- queued explicit preference signals
-    state.json                 -- /memory processing checkpoint
+    inbox.jsonl                 -- queued explicit preference signals
+    state.json                  -- processing checkpoint
   lua/
     tools/
       my_custom_tool.lua       -- user-created or installed via /catalog
     commands/
-      compact.lua              -- seeded default
       config.lua               -- seeded default
-      usage.lua                -- seeded default
+      compact.lua              -- optional catalog command
+      usage.lua                -- optional catalog command
       memory.lua               -- optional catalog command
       my_custom_command.lua    -- user-created
     lib/
@@ -1151,12 +1151,12 @@ Plugins do not auto-run. Repeated `load` is a no-op.
         init.lua
 ```
 
-Legacy root files `memory.md` and `memory.last_run` may remain for migration as
-described under `/memory`. Bone refreshes `AGENTS.md` from the bundled reference
-at startup and never modifies `AGENTS.local.md`. Other seeded Lua files are
-created on first launch and do not overwrite existing files. Catalog
-tools/commands are installed only when selected during onboarding or via
-`/catalog`.
+Legacy root files `memory.md` and `memory.last_run` may remain after the
+one-time catalog migration; they are not deleted. Bone refreshes `AGENTS.md`
+from the bundled reference at startup and never modifies `AGENTS.local.md`.
+Other seeded Lua files are created on first launch and do not overwrite existing
+files. Catalog tools/commands are installed only when selected during onboarding
+or via `/catalog`.
 
 ## Tool vs Command
 

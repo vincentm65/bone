@@ -7,6 +7,8 @@ pub mod settings;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::ext;
 use crate::tools::ApprovalMode;
 pub use providers_config::{ProviderEntry, ProvidersConfig};
@@ -230,7 +232,7 @@ pub fn seed_file_forced(path: &Path, content: &str) {
 pub struct SetupSelection {
     /// Chosen tool filenames, e.g. `["subagent.lua", "web_search.lua"]`.
     pub tools: Vec<String>,
-    /// Chosen command filenames, e.g. `["compact.lua", "memory.lua"]`.
+    /// Chosen command filenames, e.g. `["compact.lua"]`.
     pub commands: Vec<String>,
 }
 
@@ -279,8 +281,79 @@ pub fn needs_onboarding() -> bool {
 pub fn seed_base() {
     seed_command_policy_if_missing();
     sync_agents_md();
+    migrate_memory_to_catalog(&bone_dir());
     custom::seed_builtin_pages(None, false);
     ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
+}
+
+const MEMORY_CATALOG_MIGRATION_MARKER: &str = ".memory-catalog-migrated";
+const LEGACY_BUNDLED_MEMORY_COMMAND_SHA256: &str =
+    "4da7cd58831fa28cedeec77ade6bdce907d95c7fa667b8c663dcf3ceeefa0ec8";
+
+fn has_sha256(path: &Path, expected: &str) -> bool {
+    let Ok(content) = fs::read(path) else {
+        return false;
+    };
+    format!("{:x}", Sha256::digest(content)) == expected
+}
+
+/// One-time, data-preserving migration for the extraction of `/memory` from
+/// bundled defaults. A known bundled command is renamed to a non-loadable backup;
+/// catalog-installed and customized commands are left untouched. Legacy
+/// `memory.md` is copied only when scoped global memory does not already exist.
+fn migrate_memory_to_catalog(dir: &Path) {
+    migrate_memory_to_catalog_with_hash(dir, LEGACY_BUNDLED_MEMORY_COMMAND_SHA256);
+}
+
+fn migrate_memory_to_catalog_with_hash(dir: &Path, bundled_command_sha256: &str) {
+    let marker = dir.join(MEMORY_CATALOG_MIGRATION_MARKER);
+    if marker.exists() {
+        return;
+    }
+
+    let legacy = dir.join("memory.md");
+    let scoped = dir.join("memory/global.md");
+    let installed_command = dir.join("lua/commands/memory.lua");
+    let bundled_command = has_sha256(&installed_command, bundled_command_sha256);
+    let has_memory = legacy.exists() || dir.join("memory").exists();
+
+    if legacy.exists() && !scoped.exists() {
+        let Some(parent) = scoped.parent() else {
+            return;
+        };
+        if let Err(e) =
+            fs::create_dir_all(parent).and_then(|_| fs::copy(&legacy, &scoped).map(|_| ()))
+        {
+            crate::ext::ctx::runtime_warn(format!(
+                "bone: warning: could not copy legacy memory.md to memory/global.md: {e}"
+            ));
+            return;
+        }
+    }
+
+    if bundled_command {
+        let backup = dir.join("lua/commands/memory.lua.bundled-backup");
+        if let Err(e) = fs::rename(&installed_command, &backup) {
+            crate::ext::ctx::runtime_warn(format!(
+                "bone: warning: could not back up legacy lua/commands/memory.lua: {e}"
+            ));
+            return;
+        }
+    }
+
+    if has_memory || bundled_command {
+        let notice = if bundled_command {
+            "bone: /memory is now an optional bone-catalog extension; the legacy memory.lua command was backed up and existing memory data was preserved"
+        } else {
+            "bone: /memory is now an optional bone-catalog extension; existing memory data was preserved"
+        };
+        crate::ext::ctx::runtime_warn(notice);
+    }
+    if let Err(e) = fs::write(&marker, "memory moved to bone-catalog\n") {
+        crate::ext::ctx::runtime_warn(format!(
+            "bone: warning: could not record /memory migration notice: {e}"
+        ));
+    }
 }
 
 /// Seed base config plus default tools, filtered by the onboarding selection.
@@ -408,8 +481,25 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::{preserve_divergent_agents_md, sync_bundled_file};
+    use super::{
+        migrate_memory_to_catalog, migrate_memory_to_catalog_with_hash,
+        preserve_divergent_agents_md, sync_bundled_file,
+    };
+    use sha2::{Digest, Sha256};
     use std::fs;
+    use std::path::PathBuf;
+
+    fn migration_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "bone-memory-catalog-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    fn sha256(content: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(content))
+    }
 
     #[test]
     fn bone_dir_prefers_bone_dir_env() {
@@ -529,6 +619,127 @@ mod tests {
             fs::read_to_string(&local_path).unwrap(),
             "my custom instructions"
         );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clean_memory_migration_marks_complete_before_catalog_install() {
+        let dir = migration_test_dir("clean");
+        fs::create_dir_all(&dir).unwrap();
+
+        migrate_memory_to_catalog(&dir);
+        assert!(dir.join(".memory-catalog-migrated").exists());
+
+        let command = dir.join("lua/commands/memory.lua");
+        fs::create_dir_all(command.parent().unwrap()).unwrap();
+        fs::write(&command, "-- catalog command").unwrap();
+        migrate_memory_to_catalog(&dir);
+        assert_eq!(fs::read_to_string(&command).unwrap(), "-- catalog command");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn known_bundled_memory_command_is_backed_up() {
+        let dir = migration_test_dir("bundled");
+        let command = dir.join("lua/commands/memory.lua");
+        fs::create_dir_all(command.parent().unwrap()).unwrap();
+        let bundled = b"-- bundled command";
+        fs::write(&command, bundled).unwrap();
+
+        migrate_memory_to_catalog_with_hash(&dir, &sha256(bundled));
+
+        assert!(!command.exists());
+        assert_eq!(
+            fs::read(dir.join("lua/commands/memory.lua.bundled-backup")).unwrap(),
+            bundled
+        );
+        assert!(dir.join(".memory-catalog-migrated").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn catalog_memory_command_present_before_migration_is_preserved() {
+        let dir = migration_test_dir("catalog");
+        let command = dir.join("lua/commands/memory.lua");
+        fs::create_dir_all(command.parent().unwrap()).unwrap();
+        fs::write(&command, "-- catalog command").unwrap();
+
+        migrate_memory_to_catalog(&dir);
+
+        assert_eq!(fs::read_to_string(&command).unwrap(), "-- catalog command");
+        assert!(dir.join(".memory-catalog-migrated").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn user_modified_bundled_memory_command_is_preserved() {
+        let dir = migration_test_dir("modified");
+        let command = dir.join("lua/commands/memory.lua");
+        fs::create_dir_all(command.parent().unwrap()).unwrap();
+        let bundled = b"-- bundled command";
+        let modified = b"-- bundled command\n-- user customization";
+        fs::write(&command, modified).unwrap();
+
+        migrate_memory_to_catalog_with_hash(&dir, &sha256(bundled));
+
+        assert_eq!(fs::read(&command).unwrap(), modified);
+        assert!(dir.join(".memory-catalog-migrated").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn memory_catalog_migration_does_not_overwrite_scoped_data() {
+        let dir = migration_test_dir("scoped");
+        fs::create_dir_all(dir.join("memory")).unwrap();
+        fs::write(dir.join("memory.md"), "legacy memory").unwrap();
+        fs::write(dir.join("memory/global.md"), "scoped memory").unwrap();
+
+        migrate_memory_to_catalog(&dir);
+
+        assert_eq!(
+            fs::read_to_string(dir.join("memory/global.md")).unwrap(),
+            "scoped memory"
+        );
+        assert!(dir.join(".memory-catalog-migrated").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_memory_command_backup_leaves_migration_unmarked() {
+        let dir = migration_test_dir("failed-backup");
+        let command = dir.join("lua/commands/memory.lua");
+        fs::create_dir_all(command.parent().unwrap()).unwrap();
+        let bundled = b"-- bundled command";
+        fs::write(&command, bundled).unwrap();
+        fs::create_dir(dir.join("lua/commands/memory.lua.bundled-backup")).unwrap();
+
+        migrate_memory_to_catalog_with_hash(&dir, &sha256(bundled));
+
+        assert!(command.exists());
+        assert!(!dir.join(".memory-catalog-migrated").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn memory_catalog_migration_copies_legacy_data() {
+        let dir = migration_test_dir("legacy-data");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("memory.md"), "legacy memory").unwrap();
+
+        migrate_memory_to_catalog(&dir);
+
+        assert_eq!(
+            fs::read_to_string(dir.join("memory/global.md")).unwrap(),
+            "legacy memory"
+        );
+        assert!(dir.join(".memory-catalog-migrated").exists());
 
         fs::remove_dir_all(dir).unwrap();
     }

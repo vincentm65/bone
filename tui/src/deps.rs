@@ -21,11 +21,6 @@ const DEPS: &[Dep] = &[
         pkg: None,
         label: "git (needed by /r command and git workflow)",
     },
-    Dep {
-        bin: "sqlite3",
-        pkg: Some("sqlite3"),
-        label: "sqlite3 (needed by /memory command)",
-    },
 ];
 
 fn have_bin(name: &str) -> bool {
@@ -66,7 +61,6 @@ fn try_install(bin: &str, pkg: Option<&str>) -> bool {
         let winget_id = match bin {
             "uv" => "astral-sh.uv",
             "git" => "Git.Git",
-            "sqlite3" => return false,
             _ => return false,
         };
         return run_silent(

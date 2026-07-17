@@ -39,9 +39,6 @@ fn kill_process_group(pid: u32) {
     }
 }
 
-#[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {}
-
 pub struct ScriptRequest {
     pub command: String,
     pub env: Vec<(String, String)>,

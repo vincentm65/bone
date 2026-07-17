@@ -186,9 +186,15 @@ fn default_tools_boot_cleanly() {
         .map(|c| c.name.as_str())
         .collect();
     assert!(
-        cmd_names.contains(&"usage"),
-        "default command 'usage' not found; commands: {cmd_names:?}",
+        cmd_names.contains(&"config"),
+        "default command 'config' not found; commands: {cmd_names:?}",
     );
+    for catalog_command in ["compact", "usage"] {
+        assert!(
+            !cmd_names.contains(&catalog_command),
+            "catalog command '{catalog_command}' should not be bundled; commands: {cmd_names:?}",
+        );
+    }
 
     std::fs::remove_dir_all(&config_dir).ok();
 }

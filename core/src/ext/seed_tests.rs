@@ -14,6 +14,24 @@ fn extract_description_prefers_field_then_comment() {
 }
 
 #[test]
+fn catalog_commands_are_not_bundled_defaults() {
+    for command in ["compact.lua", "memory.lua", "usage.lua"] {
+        assert!(
+            !DEFAULT_LUA_COMMANDS
+                .iter()
+                .any(|(name, _)| *name == command),
+            "{command} should not be embedded as a default command"
+        );
+        assert!(
+            !default_command_catalog()
+                .iter()
+                .any(|(name, _)| *name == command),
+            "{command} should not appear in the default command catalog"
+        );
+    }
+}
+
+#[test]
 fn allow_filter_seeds_only_named_files() {
     let dir = std::env::temp_dir().join(format!(
         "bone-seed-test-{}-{:?}",
@@ -55,20 +73,15 @@ fn force_overwrites_existing_file() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 
-    // Use a bundled command that `should_refresh_seeded_lua` doesn't
-    // force-refresh by name, which would defeat the "preserved" check below.
-    let (first, content) = *DEFAULT_LUA_COMMANDS
-        .iter()
-        .find(|(name, _)| !matches!(*name, "compact.lua" | "config.lua"))
-        .expect("a non-auto-refreshed bundled command");
+    let (first, content) = DEFAULT_LUA_COMMANDS[0];
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(first), "-- user edit\n").unwrap();
+    std::fs::write(dir.join(first), "-- user edit with action_keys\n").unwrap();
 
-    // Without force, an existing file is left untouched.
+    // Without force, an existing current-format file is left untouched.
     seed_default_lua_commands(&dir, None, false);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
-        "-- user edit\n",
+        "-- user edit with action_keys\n",
         "without force, existing file should be preserved"
     );
 
