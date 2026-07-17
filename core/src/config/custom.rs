@@ -3,7 +3,7 @@
 //! Each page file (e.g. `general.yaml`, `tools.yaml`) contains both the field
 //! schema *and* the current values. No separate values file is needed.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -78,12 +78,9 @@ pub fn config_dir() -> PathBuf {
     bone_dir().join("config")
 }
 
-/// Report a malformed config page once without writing over an active TUI.
-fn warn_parse_failure(path: &Path) {
-    crate::ext::ctx::runtime_warn_once(format!(
-        "bone: warning: failed to parse {}",
-        path.display()
-    ));
+/// Report a malformed config page once with the specific parse error.
+fn warn_parse_failure(detail: &str) {
+    crate::ext::ctx::runtime_warn_once(format!("bone: warning: {detail}"));
 }
 
 // ── Built-in seed pages ────────────────────────────────────────────────────
@@ -169,24 +166,30 @@ impl CustomConfigs {
             // Tools and commands use deny-list format; everything else uses field format.
             let is_denylist = stem == "tools" || stem == "commands";
             if is_denylist {
-                if let Some(deny) = load_yaml::<DenyListPage>(&path) {
-                    configs.pages.push((
-                        stem,
-                        CustomConfigPage {
-                            title: deny.title,
-                            fields: Vec::new(),
-                        },
-                    ));
-                } else if let Some(page) = load_yaml::<CustomConfigPage>(&path) {
-                    // Old format — will be migrated by rebuild_denylist_pages().
-                    configs.pages.push((stem, page));
-                } else {
-                    warn_parse_failure(&path);
+                match load_yaml::<DenyListPage>(&path) {
+                    Ok(deny) => {
+                        configs.pages.push((
+                            stem,
+                            CustomConfigPage {
+                                title: deny.title,
+                                fields: Vec::new(),
+                            },
+                        ));
+                    }
+                    Err(_) => {
+                        // Old field-based format – will be migrated by
+                        // rebuild_denylist_pages().
+                        match load_yaml::<CustomConfigPage>(&path) {
+                            Ok(page) => configs.pages.push((stem, page)),
+                            Err(e) => warn_parse_failure(&e),
+                        }
+                    }
                 }
-            } else if let Some(page) = load_yaml::<CustomConfigPage>(&path) {
-                configs.pages.push((stem, page));
             } else {
-                warn_parse_failure(&path);
+                match load_yaml::<CustomConfigPage>(&path) {
+                    Ok(page) => configs.pages.push((stem, page)),
+                    Err(e) => warn_parse_failure(&e),
+                }
             }
         }
 
@@ -367,7 +370,7 @@ impl CustomConfigs {
         }
 
         // Try old field-based format first and migrate
-        if let Some(page) = load_yaml::<CustomConfigPage>(&path) {
+        if let Ok(page) = load_yaml::<CustomConfigPage>(&path) {
             if !page.fields.is_empty() {
                 let disabled: Vec<String> = page
                     .fields
@@ -397,7 +400,7 @@ impl CustomConfigs {
         }
 
         // Try new deny-list format
-        if let Some(deny) = load_yaml::<DenyListPage>(&path) {
+        if let Ok(deny) = load_yaml::<DenyListPage>(&path) {
             return (deny.disabled, deny.title);
         }
 
@@ -469,10 +472,10 @@ impl CustomConfigs {
     /// all status fields) through [`Settings`] when available.
     pub fn get_value(&self, namespace: &str, key: &str) -> String {
         // Route canonical keys through settings.
-        if let Some(ref settings) = self.settings {
-            if Settings::is_canonical(namespace, key) {
-                return settings.get_value(namespace, key);
-            }
+        if Settings::is_canonical(namespace, key)
+            && let Some(settings) = self.settings.as_ref()
+        {
+            return settings.get_value(namespace, key);
         }
         let Some(page) = self.page_ref(namespace) else {
             return String::new();
@@ -500,11 +503,10 @@ impl CustomConfigs {
         key: &str,
         value: String,
     ) -> Result<(), String> {
-        if self.settings.is_some() && Settings::is_canonical(namespace, key) {
-            return self
-                .settings
-                .as_mut()
-                .expect("checked above")
+        if Settings::is_canonical(namespace, key)
+            && let Some(settings) = self.settings.as_mut()
+        {
+            return settings
                 .set_value(namespace, key, value)
                 .map_err(|e| e.to_string());
         }
@@ -688,14 +690,12 @@ fn migrate_providers_file() {
         return;
     }
     // If the file already parses as a CustomConfigPage, no migration needed
-    if load_yaml::<CustomConfigPage>(&old_path).is_some() {
+    if load_yaml::<CustomConfigPage>(&old_path).is_ok() {
         return;
     }
     // Parse as old ProvidersConfig format
-    let old_config = load_yaml::<crate::config::ProvidersConfig>(&old_path);
-    let old_config = match old_config {
-        Some(c) => c,
-        None => return,
+    let Ok(old_config) = load_yaml::<crate::config::ProvidersConfig>(&old_path) else {
+        return;
     };
 
     let mut fields: Vec<ConfigField> = Vec::new();
@@ -754,7 +754,7 @@ fn migrate_old_values_file() {
         if !page_path.exists() {
             continue;
         }
-        let Some(mut page) = load_yaml::<CustomConfigPage>(&page_path) else {
+        let Ok(mut page) = load_yaml::<CustomConfigPage>(&page_path) else {
             continue;
         };
         for field in &mut page.fields {
@@ -770,7 +770,7 @@ fn migrate_old_values_file() {
     if let Some(kv) = values.get("general") {
         let page_path = dir.join("status.yaml");
         if page_path.exists()
-            && let Some(mut page) = load_yaml::<CustomConfigPage>(&page_path)
+            && let Ok(mut page) = load_yaml::<CustomConfigPage>(&page_path)
         {
             let mut changed = false;
             for field in &mut page.fields {
@@ -801,10 +801,10 @@ fn migrate_status_values_from_general() {
         return;
     }
 
-    let Some(general) = load_yaml::<CustomConfigPage>(&general_path) else {
+    let Ok(general) = load_yaml::<CustomConfigPage>(&general_path) else {
         return;
     };
-    let Some(mut status) = load_yaml::<CustomConfigPage>(&status_path) else {
+    let Ok(mut status) = load_yaml::<CustomConfigPage>(&status_path) else {
         return;
     };
 
@@ -846,10 +846,10 @@ fn backfill_fields(file: &str, seed_yaml: &str) {
     if !path.exists() {
         return;
     }
-    let Some(mut page) = load_yaml::<CustomConfigPage>(&path) else {
+    let Ok(mut page) = load_yaml::<CustomConfigPage>(&path) else {
         return;
     };
-    let Some(seed) = serde_yaml::from_str::<CustomConfigPage>(seed_yaml).ok() else {
+    let Ok(seed) = serde_yaml::from_str::<CustomConfigPage>(seed_yaml) else {
         return;
     };
 

@@ -5,10 +5,10 @@
 //! theme, and keymaps.  `CustomConfigs` routes legacy `/config` page keys
 //! through this module.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -367,18 +367,41 @@ pub struct KeymapSettings {
     pub bindings: Vec<KeyBinding>,
 }
 
+// ── Cross-process advisory lock ──────────────────────────────────────────────
+
+fn lock_path_for(settings_path: &Path) -> PathBuf {
+    let mut path = settings_path.as_os_str().to_owned();
+    path.push(".lock");
+    path.into()
+}
+
+fn acquire_settings_write_lock(
+    path: &Path,
+) -> Result<(MutexGuard<'static, ()>, File), SettingsError> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let mutex = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock_path = lock_path_for(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    file.lock()?;
+    Ok((mutex, file))
+}
+
 // ── Settings wrapper ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub(crate) inner: BoneSettings,
-}
-
-fn settings_write_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Settings {
@@ -431,7 +454,7 @@ impl Settings {
     }
 
     pub(crate) fn save_path(&self, path: &std::path::Path) -> Result<(), SettingsError> {
-        let _guard = settings_write_lock();
+        let _guard = acquire_settings_write_lock(path)?;
         self.write_path(path)
     }
 
@@ -455,7 +478,7 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<(), SettingsError>,
     {
-        let _guard = settings_write_lock();
+        let _guard = acquire_settings_write_lock(path)?;
         let mut candidate = Self::load_path(path)?.unwrap_or_else(|| self.clone());
         mutate(&mut candidate)?;
         validate_settings(&candidate.inner)?;
@@ -1091,5 +1114,30 @@ mod tests {
         assert!(migrated.inner.general.show_reasoning);
         assert_eq!(migrated.inner.ui.input.preset.as_deref(), Some("box"));
         assert!(!migrated.inner.ui.status_show_timer);
+    }
+
+    // ── Cross-process lock tests ──────────────────────────────────────────
+
+    #[test]
+    fn lock_path_is_sibling_with_dot_lock_suffix() {
+        let p = Path::new("/home/user/.bone-rust/config.yaml");
+        let lock = lock_path_for(p);
+        assert_eq!(
+            lock,
+            PathBuf::from("/home/user/.bone-rust/config.yaml.lock")
+        );
+
+        // Works with just a filename too.
+        let bare = Path::new("config.yaml");
+        assert_eq!(lock_path_for(bare), PathBuf::from("config.yaml.lock"));
+    }
+
+    #[test]
+    fn save_creates_lock_file() {
+        let path = temp_path("lock-create");
+        Settings::defaults().save_path(&path).unwrap();
+        assert!(lock_path_for(&path).exists());
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
     }
 }

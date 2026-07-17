@@ -107,17 +107,17 @@ fn run_command(cmd: &mut Command) -> Result<(), String> {
     }
 }
 
-fn cache_dir() -> PathBuf {
-    crate::config::bone_dir()
+fn cache_dir() -> Option<PathBuf> {
+    crate::config::try_bone_dir()
 }
 
-fn cache_file(kind: &InstallKind, suffix: &str) -> PathBuf {
-    cache_dir().join(format!("update_{}_{}", kind.key(), suffix))
+fn cache_file(kind: &InstallKind, suffix: &str) -> Option<PathBuf> {
+    cache_dir().map(|d| d.join(format!("update_{}_{}", kind.key(), suffix)))
 }
 
 fn check_due(kind: &InstallKind) -> bool {
-    let last = std::fs::read_to_string(cache_file(kind, "checked_at"))
-        .ok()
+    let last = cache_file(kind, "checked_at")
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
     check_due_from(
@@ -134,16 +134,21 @@ fn check_due_from(latest: Option<&str>, last: u64, current: &str, now: u64) -> b
 }
 
 fn mark_checked(kind: &InstallKind) {
-    let _ = std::fs::create_dir_all(cache_dir());
-    let _ = std::fs::write(
-        cache_file(kind, "checked_at"),
-        crate::util::now_secs().to_string(),
-    );
+    if let Some(dir) = cache_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        if let Some(path) = cache_file(kind, "checked_at") {
+            let _ = std::fs::write(path, crate::util::now_secs().to_string());
+        }
+    }
 }
 
 fn write_latest(kind: &InstallKind, version: &str) {
-    let _ = std::fs::create_dir_all(cache_dir());
-    let _ = std::fs::write(cache_file(kind, "latest"), version.trim());
+    if let Some(dir) = cache_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        if let Some(path) = cache_file(kind, "latest") {
+            let _ = std::fs::write(path, version.trim());
+        }
+    }
 }
 
 fn detect_install_kind() -> InstallKind {
@@ -238,7 +243,8 @@ pub fn run_interactive_update(assume_yes: bool) -> Result<bool, String> {
 }
 
 fn latest_seen(kind: &InstallKind) -> Option<String> {
-    let s = std::fs::read_to_string(cache_file(kind, "latest")).ok()?;
+    let path = cache_file(kind, "latest")?;
+    let s = std::fs::read_to_string(path).ok()?;
     let s = s.trim();
     (!s.is_empty()).then(|| s.to_string())
 }

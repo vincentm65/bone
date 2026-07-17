@@ -1,6 +1,43 @@
-use super::{InstallKind, THROTTLE, check_due_from, is_newer_version, shell_quote};
+use super::{InstallKind, THROTTLE, cache_file, check_due_from, is_newer_version, shell_quote};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+
+fn without_config_dir<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let old_home = std::env::var_os("HOME");
+    let old_userprofile = std::env::var_os("USERPROFILE");
+    unsafe {
+        std::env::remove_var("BONE_DIR");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+    }
+    let result = f();
+    unsafe {
+        for (key, value) in [
+            ("BONE_DIR", old_bone),
+            ("XDG_CONFIG_HOME", old_xdg),
+            ("HOME", old_home),
+            ("USERPROFILE", old_userprofile),
+        ] {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+    result
+}
+
+#[test]
+fn missing_config_dir_disables_update_cache() {
+    let cached = without_config_dir(|| cache_file(&InstallKind::Unknown, "latest"));
+    assert_eq!(cached, None);
+}
 
 #[test]
 fn compares_versions_as_versions() {

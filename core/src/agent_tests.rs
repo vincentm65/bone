@@ -1,4 +1,5 @@
-use super::{AgentRequest, session_sink_for_request, summarize_call_args};
+use super::{AgentRequest, SessionWriter, session_sink_for_request, summarize_call_args};
+use crate::session_db::SessionDb;
 use crate::session_sink::SessionSink;
 use crate::tools::ApprovalMode;
 use crate::tools::ToolCall;
@@ -47,6 +48,7 @@ fn delegated_agents_honor_an_explicit_session_sink() {
             _: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
+            _: bool,
             _: i64,
         ) {
         }
@@ -66,6 +68,37 @@ fn delegated_agents_honor_an_explicit_session_sink() {
 
     let sink = session_sink_for_request(&nested_request(Some(Arc::new(Sink))), "test", "test");
     assert_eq!(sink.conv_id(), Some(42));
+}
+
+#[test]
+fn session_writer_persists_tool_error_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.db");
+    let db = SessionDb::open(&path).unwrap();
+    let conv_id = db.create_conversation("test", "test").unwrap();
+    let writer = SessionWriter {
+        db: std::sync::Mutex::new(Some(db)),
+        conv_id: Some(conv_id),
+        failures: std::sync::atomic::AtomicU64::new(0),
+    };
+
+    writer.append_message(
+        "tool",
+        "failed",
+        Some("shell"),
+        Some("call-1"),
+        None,
+        None,
+        true,
+        1,
+    );
+    drop(writer);
+
+    let messages = SessionDb::open(&path)
+        .unwrap()
+        .load_messages(conv_id)
+        .unwrap();
+    assert!(messages[0].is_error);
 }
 
 #[test]

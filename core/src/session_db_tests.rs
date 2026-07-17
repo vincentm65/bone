@@ -388,6 +388,59 @@ fn malformed_latest_checkpoint_falls_back_to_an_older_revision() {
 }
 
 #[test]
+fn all_checkpoints_malformed_falls_back_to_raw_messages() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.append_message(conv, "user", "first", None, None, None, None, false, 1)
+        .unwrap();
+    db.append_message(
+        conv,
+        "assistant",
+        "second",
+        None,
+        None,
+        None,
+        None,
+        false,
+        2,
+    )
+    .unwrap();
+    db.append_message(
+        conv,
+        "tool",
+        "error result",
+        Some("shell"),
+        Some("c1"),
+        None,
+        None,
+        true,
+        3,
+    )
+    .unwrap();
+
+    // Insert only malformed checkpoints (invalid JSON).
+    for id_offset in [1, 2] {
+        db.conn
+            .execute(
+                "INSERT INTO conversation_context_checkpoints
+                 (id, conversation_id, through_seq, messages_json, created_at)
+                 VALUES (?1, ?2, ?3, '{{{broken', '2026-01-01T00:00:00Z')",
+                rusqlite::params![id_offset, conv, id_offset],
+            )
+            .unwrap();
+    }
+
+    let effective = db.load_effective_transcript(conv).unwrap();
+    assert_eq!(effective.len(), 3);
+    assert_eq!(effective[0].content, "first");
+    assert_eq!(effective[1].content, "second");
+    assert_eq!(effective[2].content, "error result");
+    assert!(effective[2].is_error, "is_error must survive raw fallback");
+}
+
+#[test]
 fn v6_migration_rebuilds_drifted_fts_index_without_changing_messages() {
     let conn = Connection::open_in_memory().unwrap();
     let db = SessionDb { conn };

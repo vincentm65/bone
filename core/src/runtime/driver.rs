@@ -301,7 +301,7 @@ impl Driver {
             transcript.push(message.clone());
             persist_messages.push(message);
         }
-        session.append_message("user", prompt, None, None, None, None, session_seq);
+        session.append_message("user", prompt, None, None, None, None, false, session_seq);
 
         // Rich frontend event stream (best-effort; ignored if no consumer).
         let remit = |event: RuntimeEvent| {
@@ -804,6 +804,7 @@ impl Driver {
                     None,
                     None,
                     None,
+                    false,
                     session_seq,
                 );
                 break Ok(assistant_text);
@@ -837,6 +838,7 @@ impl Driver {
                 None,
                 tool_calls_json.as_deref(),
                 None,
+                false,
                 session_seq,
             );
 
@@ -913,6 +915,7 @@ impl Driver {
                     Some(&result.call_id),
                     None,
                     None,
+                    result.is_error,
                     session_seq,
                 );
                 let message = ChatMessage::tool(result.clone());
@@ -939,6 +942,7 @@ impl Driver {
                         None,
                         None,
                         images_json.as_deref(),
+                        false,
                         session_seq,
                     );
                     let relay = ChatMessage::user_with_images(note, result.images.clone());

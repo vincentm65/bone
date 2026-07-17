@@ -11,10 +11,13 @@ use crate::ext;
 use crate::tools::ApprovalMode;
 pub use providers_config::{ProviderEntry, ProvidersConfig};
 
-pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    let raw = std::fs::read_to_string(path).ok()?;
+/// Load and deserialize a YAML file, preserving I/O and parse errors.
+/// Returns `Err` with a human-readable message that includes the file path.
+pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let raw = raw.trim_start_matches('\u{feff}');
-    serde_yaml::from_str(raw).ok()
+    serde_yaml::from_str(raw).map_err(|e| format!("parse error in {}: {e}", path.display()))
 }
 
 /// Config / Lua / DB root.

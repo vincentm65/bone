@@ -308,11 +308,8 @@ fn command_policy() -> &'static CommandPolicy {
 fn load_command_policy() -> CommandPolicy {
     let path = config::command_policy_path();
     let raw = if path.exists() {
-        config::load_yaml::<RawCommandPolicy>(&path).unwrap_or_else(|| {
-            crate::ext::ctx::runtime_warn_once(format!(
-                "bone: warning: failed to parse {}",
-                path.display()
-            ));
+        config::load_yaml::<RawCommandPolicy>(&path).unwrap_or_else(|e| {
+            crate::ext::ctx::runtime_warn_once(format!("bone: warning: {e}"));
             default_raw_command_policy()
         })
     } else {

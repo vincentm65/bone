@@ -1472,6 +1472,21 @@ impl SessionDb {
             .map(|rows| rows.into_iter().map(stored_to_chat_message).collect())
     }
 
+    /// Map a rusqlite row (seq, role, content, tool_name, tool_call_id,
+    /// tool_calls, images, is_error) into a [`StoredMessage`].
+    fn stored_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<StoredMessage> {
+        Ok(StoredMessage {
+            seq: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            tool_name: row.get(3)?,
+            tool_call_id: row.get(4)?,
+            tool_calls: row.get(5)?,
+            images: row.get(6)?,
+            is_error: row.get::<_, i64>(7)? != 0,
+        })
+    }
+
     fn query_messages_after(
         &self,
         conversation_id: i64,
@@ -1482,18 +1497,10 @@ impl SessionDb {
              FROM messages WHERE conversation_id = ?1 AND seq > ?2
              ORDER BY seq ASC, id ASC",
         )?;
-        let rows = stmt.query_map(params![conversation_id, after_seq], |row| {
-            Ok(StoredMessage {
-                seq: row.get(0)?,
-                role: row.get(1)?,
-                content: row.get(2)?,
-                tool_name: row.get(3)?,
-                tool_call_id: row.get(4)?,
-                tool_calls: row.get(5)?,
-                images: row.get(6)?,
-                is_error: row.get::<_, i64>(7)? != 0,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![conversation_id, after_seq],
+            Self::stored_message_from_row,
+        )?;
         rows.collect()
     }
 
@@ -1508,18 +1515,10 @@ impl SessionDb {
              ORDER BY seq ASC, id ASC LIMIT ?2",
         )?;
         let sql_limit = limit.map(|value| value as i64).unwrap_or(-1);
-        let rows = stmt.query_map(params![conversation_id, sql_limit], |row| {
-            Ok(StoredMessage {
-                seq: row.get(0)?,
-                role: row.get(1)?,
-                content: row.get(2)?,
-                tool_name: row.get(3)?,
-                tool_call_id: row.get(4)?,
-                tool_calls: row.get(5)?,
-                images: row.get(6)?,
-                is_error: row.get::<_, i64>(7)? != 0,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![conversation_id, sql_limit],
+            Self::stored_message_from_row,
+        )?;
         rows.collect()
     }
 }

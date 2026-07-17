@@ -29,6 +29,7 @@ pub trait SessionSink: Send + Sync {
     fn conv_id(&self) -> Option<i64>;
 
     /// Append a message (user/assistant/tool) to the session transcript.
+    /// `is_error` indicates a tool-result that failed; ignored for non-tool roles.
     #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
@@ -38,6 +39,7 @@ pub trait SessionSink: Send + Sync {
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
         images: Option<&str>,
+        is_error: bool,
         seq: i64,
     );
 
@@ -89,6 +91,7 @@ impl SessionSink for NullSessionSink {
         _tool_call_id: Option<&str>,
         _tool_calls: Option<&str>,
         _images: Option<&str>,
+        _is_error: bool,
         _seq: i64,
     ) {
     }
@@ -178,6 +181,7 @@ impl SessionSink for UsageOnlySessionSink {
         _tool_call_id: Option<&str>,
         _tool_calls: Option<&str>,
         _images: Option<&str>,
+        _is_error: bool,
         _seq: i64,
     ) {
         // Nested agents must not write transcript rows into the parent chat.

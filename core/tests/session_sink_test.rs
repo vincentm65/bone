@@ -52,12 +52,13 @@ impl SessionSink for RecordingSink {
         _tool_call_id: Option<&str>,
         _tool_calls: Option<&str>,
         _images: Option<&str>,
+        is_error: bool,
         _seq: i64,
     ) {
         self.messages
             .lock()
             .unwrap()
-            .push(format!("{role}: {content}"));
+            .push(format!("{role}: {content} (error: {is_error})"));
     }
 
     fn record_usage(
@@ -81,14 +82,17 @@ impl SessionSink for RecordingSink {
 #[test]
 fn trait_is_externally_implementable_and_records() {
     let sink = RecordingSink::new();
-    sink.append_message("user", "hello", None, None, None, None, 0);
-    sink.append_message("assistant", "hi there", None, None, None, None, 1);
+    sink.append_message("user", "hello", None, None, None, None, false, 0);
+    sink.append_message("assistant", "hi there", None, None, None, None, true, 1);
     sink.record_usage("openai", "gpt-4", 100, 50, None, None, false);
     sink.end();
 
     assert_eq!(
         sink.messages.lock().unwrap().as_slice(),
-        &["user: hello".to_string(), "assistant: hi there".to_string()]
+        &[
+            "user: hello (error: false)".to_string(),
+            "assistant: hi there (error: true)".to_string()
+        ]
     );
     assert_eq!(*sink.usages.lock().unwrap(), 100);
     assert!(*sink.ended.lock().unwrap());
@@ -101,7 +105,7 @@ fn null_sink_is_inert() {
     assert_eq!(sink.conv_id(), None);
 
     // Every write method must be a no-op (not panic).
-    sink.append_message("user", "ignored", None, None, None, None, 0);
+    sink.append_message("user", "ignored", None, None, None, None, false, 0);
     sink.record_usage("p", "m", 1, 1, None, None, false);
     sink.end();
     // Nothing to assert beyond "didn't panic" — that IS the contract.
@@ -112,7 +116,7 @@ fn sink_is_object_safe_via_arc_dyn() {
     // Arc<dyn SessionSink> is the injection type on AgentRequest.
     let sink: Arc<dyn SessionSink> = Arc::new(RecordingSink::new());
     assert_eq!(sink.conv_id(), Some(42));
-    sink.append_message("user", "test", None, None, None, None, 0);
+    sink.append_message("user", "test", None, None, None, None, false, 0);
     assert_eq!(sink.conv_id(), Some(42)); // still works after a call
 }
 
@@ -179,6 +183,7 @@ fn usage_only_sink_records_usage_against_parent_without_messages() {
         None,
         None,
         None,
+        false,
         1,
     );
     sink.append_message(
@@ -188,6 +193,7 @@ fn usage_only_sink_records_usage_against_parent_without_messages() {
         None,
         None,
         None,
+        false,
         2,
     );
     // Must not end (or delete) the parent conversation.

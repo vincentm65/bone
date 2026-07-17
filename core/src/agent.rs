@@ -54,6 +54,7 @@ impl SessionWriter {
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
         images: Option<&str>,
+        is_error: bool,
         seq: i64,
     ) {
         let Some(conv_id) = self.conv_id else {
@@ -71,9 +72,7 @@ impl SessionWriter {
             tool_call_id,
             tool_calls,
             images,
-            // The incremental SessionSink path doesn't carry an error flag; the
-            // authoritative tool-error state is persisted via `append_turn`.
-            false,
+            is_error,
             seq,
         ) {
             self.note_failure("append_message", &e);
@@ -147,6 +146,7 @@ impl SessionSink for SessionWriter {
         tool_call_id: Option<&str>,
         tool_calls: Option<&str>,
         images: Option<&str>,
+        is_error: bool,
         seq: i64,
     ) {
         SessionWriter::append_message(
@@ -157,6 +157,7 @@ impl SessionSink for SessionWriter {
             tool_call_id,
             tool_calls,
             images,
+            is_error,
             seq,
         )
     }
