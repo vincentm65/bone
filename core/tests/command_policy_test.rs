@@ -12,6 +12,16 @@ fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     }
 }
 
+trait StaticCallApproval {
+    fn allows_call(self, call: &ToolCall) -> bool;
+}
+
+impl StaticCallApproval for ApprovalMode {
+    fn allows_call(self, call: &ToolCall) -> bool {
+        self.allows_safety(CommandSafety::for_call(call))
+    }
+}
+
 #[test]
 fn missing_shell_command_is_danger() {
     assert_eq!(

@@ -483,6 +483,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     let process = lua.create_table()?;
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
+    let process_cwd = std::path::PathBuf::from(&cfg.cwd);
     let spawn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
         require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
         let timeout_ms = opt_u64(&opts, "timeout_ms")
@@ -492,7 +493,12 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             .as_ref()
             .and_then(|o| o.get::<Option<String>>("owner").ok().flatten())
             .unwrap_or_else(|| "extension".into());
-        let id = crate::processes::registry().spawn(command, owner, timeout_ms);
+        let id = crate::processes::registry().spawn(
+            command,
+            owner,
+            timeout_ms,
+            Some(process_cwd.clone()),
+        );
         let result = lua.create_table()?;
         result.set("id", id)?;
         Ok(Value::Table(result))
@@ -546,6 +552,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     // ctx.shell(command, opts?) → { stdout, stderr, exit_code }
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
+    let shell_cwd = std::path::PathBuf::from(&cfg.cwd);
     let shell_fn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
         require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
         // Parse opts.
@@ -558,6 +565,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             command,
             env: Vec::new(),
             timeout_ms,
+            working_dir: Some(shell_cwd.clone()),
             cancel: None,
         }));
 
@@ -578,6 +586,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     // Runs command via bash, reads stdout line-by-line, calls callback(line) for each.
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
+    let streaming_cwd = cfg.cwd.clone();
     let shell_streaming_fn = lua.create_function(
         move |lua, (command, callback, opts): (String, mlua::Function, Option<Table>)| {
             require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
@@ -593,6 +602,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             let mut child = Command::new("bash")
                 .arg("-c")
                 .arg(&command)
+                .current_dir(&streaming_cwd)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()

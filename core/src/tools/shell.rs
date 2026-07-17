@@ -1,5 +1,6 @@
 //! The `shell` / `bash` tool: runs commands with streaming output and timeouts.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -46,6 +47,7 @@ pub struct ScriptRequest {
     pub command: String,
     pub env: Vec<(String, String)>,
     pub timeout_ms: u64,
+    pub working_dir: Option<PathBuf>,
     /// Cooperative cancel flag. When set (Esc/Ctrl+C mid-turn), `run_script`
     /// kills the process tree and returns promptly with partial output instead
     /// of blocking until `timeout_ms`. `None` for the context-less paths
@@ -87,21 +89,31 @@ fn which(name: &str) -> bool {
         .is_ok()
 }
 
-pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
+fn spawn_script(
+    request: ScriptRequest,
+) -> Result<
+    (
+        tokio::process::Child,
+        tokio::process::ChildStdout,
+        tokio::process::ChildStderr,
+    ),
+    String,
+> {
     if request.command.contains('\0') {
         return Err("shell command must not contain NUL bytes".to_string());
     }
-    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
-    let cancel = request.cancel.clone();
     let (shell, shell_arg, _) = shell_command();
     let mut cmd = Command::new(shell);
     cmd.arg(shell_arg)
-        .arg(&request.command)
+        .arg(request.command)
         .envs(request.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(working_dir) = request.working_dir {
+        cmd.current_dir(working_dir);
+    }
     // Detach controlling tty so sudo/ssh (reading /dev/tty) fail cleanly
     // instead of corrupting the TUI and swallowing keystrokes.
     #[cfg(unix)]
@@ -112,9 +124,15 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
         });
     }
     let mut child = cmd.spawn().map_err(crate::util::errstr)?;
+    let stdout = child.stdout.take().ok_or("failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("failed to capture stderr")?;
+    Ok((child, stdout, stderr))
+}
 
-    let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
-    let mut stderr = child.stderr.take().ok_or("failed to capture stderr")?;
+pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
+    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
+    let cancel = request.cancel.clone();
+    let (mut child, mut stdout, mut stderr) = spawn_script(request)?;
 
     // Read stdout/stderr in dedicated tasks so partial output survives a
     // timeout. With an inline read_to_end inside the wait future, data already
@@ -191,25 +209,7 @@ pub async fn run_script_live(
 ) -> Result<ScriptOutput, String> {
     let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
     let cancel = request.cancel.clone();
-    let (shell, shell_arg, _) = shell_command();
-    let mut cmd = Command::new(shell);
-    cmd.arg(shell_arg)
-        .arg(&request.command)
-        .envs(request.env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            setsid();
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().map_err(crate::util::errstr)?;
-    let stdout = child.stdout.take().ok_or("failed to capture stdout")?;
-    let stderr = child.stderr.take().ok_or("failed to capture stderr")?;
+    let (mut child, stdout, stderr) = spawn_script(request)?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(bool, Vec<u8>)>();
     let tx_out = tx.clone();
     tokio::spawn(async move {
@@ -382,7 +382,7 @@ fn reject_obvious_file_write(command: &str) -> Result<(), String> {
             .split_whitespace()
             .skip(1)
             .take_while(|token| token.starts_with('-'))
-            .any(|token| token == "-i" || token.starts_with("-i."));
+            .any(|token| token.starts_with("-i") || token.starts_with("--in-place"));
     if sed_in_place {
         return Err(
             "use read_file followed by edit_file instead of `sed -i` for file contents".to_string(),
@@ -517,13 +517,14 @@ impl Tool for ShellTool {
         // the live path below wires in cancellation.
         let (command, timeout_ms, background) = parse_shell_args(arguments)?;
         if background {
-            let id = crate::processes::registry().spawn(command, "shell".into(), timeout_ms);
+            let id = crate::processes::registry().spawn(command, "shell".into(), timeout_ms, None);
             return Ok(format!("background process started: {id}"));
         }
         let output = run_script(ScriptRequest {
             command,
             env: Vec::new(),
             timeout_ms,
+            working_dir: None,
             cancel: None,
         })
         .await?;
@@ -541,7 +542,12 @@ impl Tool for ShellTool {
         // of blocking until the wall-clock timeout.
         let (command, timeout_ms, background) = parse_shell_args(arguments)?;
         if background {
-            let id = crate::processes::registry().spawn(command, context.owner.clone(), timeout_ms);
+            let id = crate::processes::registry().spawn(
+                command,
+                context.owner.clone(),
+                timeout_ms,
+                context.working_dir.clone(),
+            );
             return Ok(ToolOutput::text(format!(
                 "background process started: {id}"
             )));
@@ -551,6 +557,7 @@ impl Tool for ShellTool {
                 command,
                 env: Vec::new(),
                 timeout_ms,
+                working_dir: context.working_dir.clone(),
                 cancel: context.cancelled.clone(),
             },
             context.runtime_events.clone(),

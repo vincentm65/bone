@@ -12,10 +12,13 @@
 //! actually saw, so the visibility guard can reject edits to elided lines.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
 use tokio::fs;
+
+pub type Snapshots = Arc<RwLock<SnapshotStore>>;
 
 /// Anchor a path to the session working directory. Absolute paths are unchanged.
 pub fn resolve_path(path: &str, working_dir: Option<&Path>) -> Result<PathBuf, String> {
@@ -42,58 +45,6 @@ pub async fn resolve_existing_path(
         .map_err(|e| format!("could not resolve `{path}`: {e}"))
 }
 
-/// Resolve a not-yet-created path without allowing it to escape `working_dir`.
-/// Canonicalizing the nearest existing ancestor handles both `..` and symlinked
-/// parent directories while still permitting missing intermediate directories.
-pub async fn resolve_new_path(path: &str, working_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let target = resolve_path(path, working_dir)?;
-    let Some(working_dir) = working_dir else {
-        return Ok(target);
-    };
-    let boundary = fs::canonicalize(working_dir)
-        .await
-        .map_err(|e| format!("could not resolve working directory: {e}"))?;
-
-    let mut ancestor = target.as_path();
-    loop {
-        match fs::symlink_metadata(ancestor).await {
-            Ok(_) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                ancestor = ancestor
-                    .parent()
-                    .ok_or_else(|| format!("could not resolve `{path}`"))?;
-            }
-            Err(e) => return Err(format!("could not resolve `{path}`: {e}")),
-        }
-    }
-    let mut resolved = fs::canonicalize(ancestor)
-        .await
-        .map_err(|e| format!("could not resolve `{path}`: {e}"))?;
-    for component in target
-        .strip_prefix(ancestor)
-        .map_err(crate::util::errstr)?
-        .components()
-    {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                resolved.pop();
-            }
-            std::path::Component::Normal(component) => resolved.push(component),
-            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
-                return Err(format!("could not resolve `{path}`"));
-            }
-        }
-    }
-    if !resolved.starts_with(&boundary) {
-        return Err(format!(
-            "path `{path}` is outside the working directory `{}`",
-            working_dir.display()
-        ));
-    }
-    Ok(resolved)
-}
-
 /// Most recently recorded state of a file.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -113,10 +64,6 @@ pub struct SnapshotStore {
 }
 
 impl SnapshotStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Most recent snapshot for `path`, if any.
     pub fn head(&self, path: &str) -> Option<&Snapshot> {
         self.paths.get(path)

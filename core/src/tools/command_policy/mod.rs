@@ -163,24 +163,6 @@ fn classify_segment(command: &str) -> CommandSafety {
         return CommandSafety::Danger;
     }
 
-    for (i, token) in names.iter().enumerate() {
-        if token == "systemctl"
-            && let Some(sub) = names.get(i + 1)
-            && matches!(sub.as_str(), "stop" | "restart" | "disable" | "mask")
-        {
-            return CommandSafety::Danger;
-        }
-    }
-
-    for (i, token) in names.iter().enumerate() {
-        if token == "service"
-            && let Some(action) = names.get(i + 2)
-            && matches!(action.as_str(), "stop" | "restart")
-        {
-            return CommandSafety::Danger;
-        }
-    }
-
     if names
         .iter()
         .any(|token| matches!(token.as_str(), "systemctl" | "service"))
@@ -194,13 +176,6 @@ fn classify_segment(command: &str) -> CommandSafety {
         && (command.contains(" -O") || command.contains(" -o ") || command.contains('>'))
     {
         return CommandSafety::Danger;
-    }
-
-    if let Some(idx) = command.find("> /").or_else(|| command.find(">> /")) {
-        let after = &command[idx..];
-        if !after.starts_with("> /dev") && !after.starts_with(">> /dev") {
-            return CommandSafety::Danger;
-        }
     }
 
     if has_dangerous_git_command(&names) {

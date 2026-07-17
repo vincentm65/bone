@@ -6,7 +6,6 @@
 //! custom patch language. Image files are returned as attachments unchanged.
 
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -16,12 +15,9 @@ use std::io::ErrorKind;
 use tokio::fs;
 
 use crate::llm::ImageData;
-use crate::tools::snapshot::{self, SnapshotStore};
+use crate::tools::snapshot::{self, Snapshots};
 use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 use crate::tools::{MAX_TOOL_LINE_CHARS, truncate_line};
-
-/// Shared snapshot store type (mirrors the alias in `edit_file`).
-type Snapshots = Arc<RwLock<SnapshotStore>>;
 
 pub struct ReadFileTool;
 

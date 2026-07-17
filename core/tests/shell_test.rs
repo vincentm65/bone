@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use serde_json::json;
 
+use bone_core::processes;
 use bone_core::tools::shell::ShellTool;
 use bone_core::tools::shell::truncate_output;
 use bone_core::tools::types::{Tool, ToolExecutionContext};
@@ -41,6 +42,66 @@ async fn successful_command_returns_exit_code_and_stdout() {
     assert!(result.contains("hello"));
 }
 
+#[tokio::test]
+async fn live_foreground_uses_context_working_directory() {
+    let cwd = common::temp_path("shell-foreground-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let output = ShellTool
+        .execute_output_live(
+            json!({ "command": "pwd" }),
+            None,
+            ToolExecutionContext::default().with_working_dir(cwd.clone()),
+        )
+        .await
+        .expect("pwd should succeed");
+    assert!(output.content.contains(&cwd.to_string_lossy().to_string()));
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn live_background_uses_context_working_directory() {
+    let cwd = common::temp_path("shell-background-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let output = ShellTool
+        .execute_output_live(
+            json!({ "command": "pwd", "background": true }),
+            None,
+            ToolExecutionContext::default().with_working_dir(cwd.clone()),
+        )
+        .await
+        .expect("background pwd should start");
+    let id = output
+        .content
+        .strip_prefix("background process started: ")
+        .unwrap();
+    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let snapshot = processes::registry().get(id).unwrap();
+            if !snapshot.running {
+                break snapshot;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background pwd should finish");
+    assert_eq!(snapshot.stdout.trim(), cwd.to_string_lossy());
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn live_shell_rejects_nul_bytes() {
+    let error = ShellTool
+        .execute_output_live(
+            json!({ "command": "echo before\0after" }),
+            None,
+            ToolExecutionContext::default(),
+        )
+        .await
+        .expect_err("live shell should reject NUL bytes");
+    assert!(error.contains("must not contain NUL bytes"));
+}
+
 #[test]
 fn truncates_single_huge_line() {
     let output = truncate_output(&"x".repeat(10 * 1024 * 1024), 500);
@@ -70,6 +131,8 @@ async fn obvious_shell_file_writes_redirect_to_dedicated_tools() {
     let tool = ShellTool;
     for command in [
         "sed -i 's/old/new/' file.txt",
+        "sed -ibak 's/old/new/' file.txt",
+        "sed --in-place=.bak 's/old/new/' file.txt",
         "tee file.txt",
         "printf hello > file.txt",
         "echo hello | tee file.txt",

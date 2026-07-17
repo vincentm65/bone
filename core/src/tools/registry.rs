@@ -243,9 +243,7 @@ impl ToolHandler {
             approval_gate: None,
             app_state: None,
             working_dir: std::env::current_dir().ok(),
-            snapshots: std::sync::Arc::new(std::sync::RwLock::new(
-                crate::tools::snapshot::SnapshotStore::new(),
-            )),
+            snapshots: std::sync::Arc::new(std::sync::RwLock::new(Default::default())),
             shared_state: crate::ext::ctx::new_shared_state(),
         }
     }
@@ -257,23 +255,12 @@ impl ToolHandler {
         dynamic_safety: HashMap<String, CommandSafety>,
         host_state_keys: HashMap<String, String>,
     ) -> Self {
-        Self {
-            registry,
-            enabled: enabled.iter().cloned().collect(),
-            dynamic_display,
-            dynamic_safety,
-            host_state_keys,
-            state_map: ToolStateMap::default(),
-            owner: String::new(),
-            cancel_token: None,
-            approval_gate: None,
-            app_state: None,
-            working_dir: std::env::current_dir().ok(),
-            snapshots: std::sync::Arc::new(std::sync::RwLock::new(
-                crate::tools::snapshot::SnapshotStore::new(),
-            )),
-            shared_state: crate::ext::ctx::new_shared_state(),
-        }
+        let mut handler = Self::new(registry);
+        handler.enabled = enabled.iter().cloned().collect();
+        handler.dynamic_display = dynamic_display;
+        handler.dynamic_safety = dynamic_safety;
+        handler.host_state_keys = host_state_keys;
+        handler
     }
 
     pub fn with_working_dir(mut self, working_dir: impl Into<std::path::PathBuf>) -> Self {
@@ -306,10 +293,14 @@ impl ToolHandler {
     }
 
     /// Drop host-held tool state for a conversation reset (`/new`, `/clear`,
-    /// load another chat). Clears both the driver `state_map` and the live
-    /// `ctx.state` map used by Lua tools / `before_turn`.
+    /// load another chat). Clears the driver `state_map`, file snapshots, and
+    /// the live `ctx.state` map used by Lua tools / `before_turn`.
     pub fn clear_host_state(&mut self) {
         self.state_map.clear();
+        self.snapshots
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         let mut map = self.shared_state.lock().unwrap_or_else(|e| e.into_inner());
         map.clear();
     }

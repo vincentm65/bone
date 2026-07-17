@@ -1014,6 +1014,106 @@ bone.tool.register({
 }
 
 #[tokio::test]
+async fn driver_uses_dynamic_safety_for_extension_hooks_and_approval() {
+    let config_dir = common::temp_dir("driver-dynamic-safety");
+    let tools_dir = config_dir.join("lua/tools");
+    std::fs::create_dir_all(&tools_dir).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"
+bone.on("tool_call", function(event)
+  _TOOL_SAFETY = event.safety
+  if event.safety ~= "read_only" then
+    return { block = true, reason = "unexpected safety: " .. tostring(event.safety) }
+  end
+end)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tools_dir.join("dynamic_read.lua"),
+        r#"
+bone.tool.register({
+  name = "dynamic_read",
+  description = "read-only dynamically registered tool",
+  safety = "read_only",
+  parameters = { type = "object", properties = {} },
+  execute = function() return "dynamic-ok" end,
+})
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        BootOptions::default(),
+        "boot-model",
+        "BootProvider",
+    );
+    let lua = booted.manager.lua_arc();
+    let prompt = "inspect";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-dynamic".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![ChatEvent::ToolCall(ToolCall {
+                id: "dynamic-1".into(),
+                name: "dynamic_read".into(),
+                arguments: serde_json::json!({}),
+            })],
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: booted.manager,
+        tools: booted.tools,
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
+    };
+
+    driver.run(prompt).await.expect("driver run");
+
+    let captured = llm.captured.lock().unwrap();
+    let tool_result = captured[1]
+        .iter()
+        .find(|message| message.role == ChatRole::Tool)
+        .expect("second request contains dynamic tool result");
+    assert_eq!(tool_result.content, "dynamic-ok");
+    drop(captured);
+    let safety: String = lua
+        .lock()
+        .unwrap()
+        .globals()
+        .get("_TOOL_SAFETY")
+        .expect("tool_call hook recorded safety");
+    assert_eq!(safety, "read_only");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[tokio::test]
 async fn driver_keeps_tool_preamble_as_assistant_content() {
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];

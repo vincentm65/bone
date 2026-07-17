@@ -1,7 +1,7 @@
 use super::*;
 
 fn store_with(path: &str, text: &str) -> (SnapshotStore, String) {
-    let mut store = SnapshotStore::new();
+    let mut store = SnapshotStore::default();
     let tag = store.record(path, text, None);
     (store, tag)
 }
@@ -37,7 +37,7 @@ fn head_returns_latest_snapshot() {
 
 #[test]
 fn repeated_read_merges_seen_lines() {
-    let mut store = SnapshotStore::new();
+    let mut store = SnapshotStore::default();
     store.record("a.txt", "value\n", Some(&[1]));
     store.record("a.txt", "value\n", Some(&[2]));
     assert_eq!(

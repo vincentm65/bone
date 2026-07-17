@@ -1066,7 +1066,8 @@ pub(crate) async fn execute_tool_calls(
     let mut approved: Vec<(usize, ToolCall)> = Vec::new();
 
     for (i, call) in calls.into_iter().enumerate() {
-        let safety_str = match crate::tools::command_policy::CommandSafety::for_call(&call) {
+        let safety = tools.safety_for_call(&call);
+        let safety_str = match safety {
             crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
             crate::tools::command_policy::CommandSafety::Danger => "danger",
         };
@@ -1079,7 +1080,7 @@ pub(crate) async fn execute_tool_calls(
             crate::ext::EventDispatchResult::Blocked { reason } => Some(reason),
             crate::ext::EventDispatchResult::Continue => None,
         };
-        let auto_allows = tools.allows_call(*mode, &call);
+        let auto_allows = mode.allows_safety(safety);
 
         match gate.decide(blocked, auto_allows, &call).await {
             CallOutcome::Approve => approved.push((i, call)),
@@ -1090,7 +1091,6 @@ pub(crate) async fn execute_tool_calls(
                 ));
             }
             CallOutcome::Denied => {
-                let safety = crate::tools::command_policy::CommandSafety::for_call(&call);
                 out.push((
                     i,
                     ToolResult::error(
