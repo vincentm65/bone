@@ -39,6 +39,19 @@ pub struct CatalogEntry {
 }
 
 impl CatalogEntry {
+    fn validate(&self) -> Result<(), String> {
+        if !super::is_safe_leaf_name(&self.name) || !self.name.ends_with(".lua") {
+            return Err(format!(
+                "invalid catalog name '{}': expected one .lua file name",
+                self.name
+            ));
+        }
+        if !matches!(self.kind.as_str(), "tool" | "command") {
+            return Err(format!("invalid catalog kind '{}'", self.kind));
+        }
+        Ok(())
+    }
+
     fn is_command(&self) -> bool {
         self.kind == "command"
     }
@@ -109,7 +122,19 @@ fn lua_dir(entry: &CatalogEntry) -> PathBuf {
 }
 
 fn parse_index(bytes: &[u8]) -> Option<Vec<CatalogEntry>> {
-    serde_json::from_slice(bytes).ok()
+    let entries: Vec<CatalogEntry> = serde_json::from_slice(bytes).ok()?;
+    Some(
+        entries
+            .into_iter()
+            .filter(|entry| match entry.validate() {
+                Ok(()) => true,
+                Err(error) => {
+                    super::ctx::runtime_warn_once(format!("bone: warning: {error}; skipping"));
+                    false
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Fetch the catalog index. On success the result is cached; on network
@@ -147,7 +172,7 @@ fn cached_index() -> Vec<CatalogEntry> {
 
 /// True if the item's file is present on disk.
 pub fn is_installed(entry: &CatalogEntry) -> bool {
-    lua_dir(entry).join(&entry.name).exists()
+    entry.validate().is_ok() && lua_dir(entry).join(&entry.name).exists()
 }
 
 /// Installed catalog commands that are not bundled defaults.
@@ -183,7 +208,7 @@ fn bundled_sha256(entry: &CatalogEntry) -> Option<String> {
 /// published) disables detection and returns `false`, so the feature stays dark
 /// until the catalog ships hashes — never a false positive.
 pub fn needs_update(entry: &CatalogEntry) -> bool {
-    if entry.sha256.is_empty() {
+    if entry.validate().is_err() || entry.sha256.is_empty() {
         return false;
     }
     let path = lua_dir(entry).join(&entry.name);
@@ -223,6 +248,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Verifies the sha256 when the entry declares one. Returns an error string on
 /// failure (caller decides whether to surface it).
 pub fn install(entry: &CatalogEntry) -> Result<(), String> {
+    entry.validate()?;
     let rel = format!("{}/{}", entry.dir_segment(), entry.name);
     let bytes = fetch(&base_url(), &rel)
         .ok_or_else(|| format!("could not download {} from catalog", entry.name))?;
@@ -241,13 +267,15 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let path = dir.join(&entry.name);
-    std::fs::write(&path, &bytes)
+    let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
+    crate::tools::write_atomic::write_atomic_sync(&path, &bytes, permissions)
         .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     Ok(())
 }
 
 /// Remove an installed catalog item (delete the file, forget its version).
 pub fn remove(entry: &CatalogEntry) -> Result<(), String> {
+    entry.validate()?;
     let path = lua_dir(entry).join(&entry.name);
     if path.exists() {
         std::fs::remove_file(&path)

@@ -95,16 +95,16 @@ fn history_and_menu_seeds_refresh_pre_feature_copies() {
 
     let history = dir.join("history.lua");
     std::fs::write(&history, "-- old history helper\n").unwrap();
-    assert!(should_refresh_seeded_lua(&history, "history.lua"));
+    assert!(should_refresh_seeded_lua(&history, "history.lua").unwrap());
 
     // Older history helpers that already had token counts still need the
     // candidate-first list query refresh.
     std::fs::write(&history, "function M.list() return total_token_count end\n").unwrap();
-    assert!(should_refresh_seeded_lua(&history, "history.lua"));
+    assert!(should_refresh_seeded_lua(&history, "history.lua").unwrap());
 
     let menu = dir.join("menu.lua");
     std::fs::write(&menu, "local pane = require(\"ui.pane\")\n").unwrap();
-    assert!(should_refresh_seeded_lua(&menu, "ui/menu.lua"));
+    assert!(should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -121,11 +121,11 @@ fn seeds_refresh_pre_namespace_registration_apis() {
 
     let tool = dir.join("tool.lua");
     std::fs::write(&tool, "bone.register_tool({})\n").unwrap();
-    assert!(should_refresh_seeded_lua(&tool, "tool.lua"));
+    assert!(should_refresh_seeded_lua(&tool, "tool.lua").unwrap());
 
     let command = dir.join("command.lua");
     std::fs::write(&command, "bone.register_command('x', function() end)\n").unwrap();
-    assert!(should_refresh_seeded_lua(&command, "command.lua"));
+    assert!(should_refresh_seeded_lua(&command, "command.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -142,7 +142,49 @@ fn task_list_seed_refreshes_when_complete_action_is_missing() {
     let path = dir.join("task_list.lua");
     std::fs::write(&path, "-- emit_turn_message_once\n").unwrap();
 
-    assert!(should_refresh_seeded_lua(&path, "task_list.lua"));
+    assert!(should_refresh_seeded_lua(&path, "task_list.lua").unwrap());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lua_loading_continues_after_unreadable_and_invalid_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "bone-lua-continuation-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("a.lua")).unwrap();
+    std::fs::write(dir.join("b.lua"), "this is not valid lua (").unwrap();
+    std::fs::write(dir.join("c.lua"), "loaded_after_failure = true").unwrap();
+
+    let lua = mlua::Lua::new();
+    run_lua_files_filtered(&lua, &dir, |_| true).unwrap();
+    assert!(lua.globals().get::<bool>("loaded_after_failure").unwrap());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unreadable_seed_target_is_preserved() {
+    let dir = std::env::temp_dir().join(format!(
+        "bone-unreadable-seed-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let target = dir.join("locked.lua");
+    std::fs::create_dir_all(&target).unwrap();
+
+    seed_default_lua(&dir, &[("locked.lua", "replacement")], None, false);
+    assert!(
+        target.is_dir(),
+        "unreadable existing target was not preserved"
+    );
+
+    seed_default_lua(&dir, &[("locked.lua", "replacement")], None, true);
+    assert!(target.is_dir(), "force replaced a directory with a file");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

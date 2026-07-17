@@ -183,8 +183,6 @@ async fn expand_lua_command(
             ext::BootOptions {
                 agent_depth: 0,
                 headless: true,
-                model: model.clone().unwrap_or_default(),
-                provider: provider.clone().unwrap_or_default(),
                 tool_allowlist: None,
             },
             &model.clone().unwrap_or_default(),

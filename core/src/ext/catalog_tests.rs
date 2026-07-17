@@ -38,3 +38,36 @@ fn sha256_matches_known_vector() {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
+
+#[test]
+fn malformed_entries_are_filtered_from_the_index() {
+    let json = br#"[
+        { "name": "good.lua", "kind": "tool" },
+        { "name": "../escape.lua", "kind": "tool" },
+        { "name": "nested/escape.lua", "kind": "command" },
+        { "name": "backslash\\escape.lua", "kind": "tool" },
+        { "name": "nul\u0000escape.lua", "kind": "tool" },
+        { "name": "", "kind": "tool" },
+        { "name": "not-lua.txt", "kind": "tool" },
+        { "name": "other.lua", "kind": "unknown" }
+    ]"#;
+
+    let entries = parse_index(json).expect("valid JSON index");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "good.lua");
+}
+
+#[test]
+fn catalog_operations_reject_malformed_entries() {
+    let invalid = CatalogEntry {
+        name: "../escape.lua".into(),
+        kind: "tool".into(),
+        description: String::new(),
+        sha256: String::new(),
+    };
+
+    assert!(!is_installed(&invalid));
+    assert!(!needs_update(&invalid));
+    assert!(install(&invalid).is_err());
+    assert!(remove(&invalid).is_err());
+}

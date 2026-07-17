@@ -535,8 +535,6 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         crate::ext::BootOptions {
             agent_depth: request.agent_depth,
             headless: true,
-            model: model.clone(),
-            provider: provider.clone(),
             tool_allowlist: request.tool_allowlist.clone(),
         },
         &model,

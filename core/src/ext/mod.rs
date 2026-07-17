@@ -28,7 +28,16 @@ include!(concat!(env!("OUT_DIR"), "/default_lua_commands.rs"));
 include!(concat!(env!("OUT_DIR"), "/default_lua_libs.rs"));
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Component, Path};
+
+fn is_safe_leaf_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains(['/', '\\', '\0'])
+        && matches!(
+            Path::new(name).components().collect::<Vec<_>>().as_slice(),
+            [Component::Normal(_)]
+        )
+}
 
 /// Extract a one-line description from bundled default Lua content for the
 /// setup wizard's pickers. Prefers a `description = "..."` field (as used by
@@ -73,11 +82,9 @@ pub fn default_command_catalog() -> Vec<(&'static str, String)> {
     catalog(DEFAULT_LUA_COMMANDS)
 }
 
-fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
-    let Ok(existing) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    existing.contains("ctx.ui.interact")
+fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
+    let existing = std::fs::read_to_string(path)?;
+    Ok(existing.contains("ctx.ui.interact")
         // Refresh bundled extensions that use the pre-namespace registration API.
         || existing.contains("bone.register_tool")
         || existing.contains("bone.register_command")
@@ -114,7 +121,7 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
         // Refresh memory copies using either removed edit_file contract.
         || (name == "memory.lua"
             && (existing.contains("mode = \"rewrite\"")
-                || existing.contains("input = patch")))
+                || existing.contains("input = patch"))))
 }
 
 /// Boot the Lua extension system.
@@ -231,13 +238,32 @@ fn seed_default_lua(
             ));
             continue;
         }
-        if (force || !path.exists() || should_refresh_seeded_lua(&path, name))
-            && let Err(e) = std::fs::write(&path, content)
-        {
-            ctx::runtime_warn(format!(
-                "bone: warning: could not write {}: {e}",
-                path.display()
-            ));
+        let refresh = if force || !path.exists() {
+            true
+        } else {
+            match should_refresh_seeded_lua(&path, name) {
+                Ok(refresh) => refresh,
+                Err(e) => {
+                    ctx::runtime_warn(format!(
+                        "bone: warning: could not inspect {}; preserving it: {e}",
+                        path.display()
+                    ));
+                    false
+                }
+            }
+        };
+        if refresh {
+            let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
+            if let Err(e) = crate::tools::write_atomic::write_atomic_sync(
+                &path,
+                content.as_bytes(),
+                permissions,
+            ) {
+                ctx::runtime_warn(format!(
+                    "bone: warning: could not write {}: {e}",
+                    path.display()
+                ));
+            }
         }
     }
 }
@@ -323,12 +349,22 @@ fn run_lua_files_filtered(
         if !keep(&name) {
             continue;
         }
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        lua.load(&source)
-            .set_name(&name)
-            .exec()
-            .map_err(|e| format!("error executing {}: {e}", path.display()))?;
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(e) => {
+                ctx::runtime_warn(format!(
+                    "bone: warning: failed to read {}: {e}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if let Err(e) = lua.load(&source).set_name(&name).exec() {
+            ctx::runtime_warn(format!(
+                "bone: warning: error executing {}: {e}",
+                path.display()
+            ));
+        }
     }
 
     Ok(())

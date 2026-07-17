@@ -13,6 +13,16 @@ fn plugins_dir(config_dir: &str) -> PathBuf {
     PathBuf::from(config_dir).join("lua/plugins")
 }
 
+fn validate_plugin_name(name: &str) -> Result<(), mlua::Error> {
+    if super::is_safe_leaf_name(name) {
+        Ok(())
+    } else {
+        Err(mlua::Error::external(format!(
+            "invalid plugin name '{name}': expected one directory name"
+        )))
+    }
+}
+
 #[cfg(unix)]
 fn symlink_plugin_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(src, dest)
@@ -54,6 +64,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
     // bone.plugin.load("name")
     let load_fn = lua
         .create_function(|lua, name: String| {
+            validate_plugin_name(&name)?;
             let bone: Table = lua.globals().get::<Table>("bone")?;
             let loaded: Table = bone.get::<Table>("_loaded_plugins")?;
 
@@ -133,6 +144,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
                     .ok_or_else(|| mlua::Error::external("invalid repo path"))?
                     .to_string()
             };
+            validate_plugin_name(&name)?;
             let dest = dir.join(&name);
             if dest.exists() {
                 return Err(mlua::Error::external(format!(
@@ -168,6 +180,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
     // bone.plugin.remove("name")
     let remove_fn = lua
         .create_function(|lua, name: String| {
+            validate_plugin_name(&name)?;
             let bone: Table = lua.globals().get::<Table>("bone")?;
             let config_dir: String = bone.get::<String>("config_dir")?;
             let dir = plugins_dir(&config_dir).join(&name);
@@ -231,6 +244,7 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
     // bone.plugin.update("name")
     let update_fn = lua
         .create_function(|lua, name: String| {
+            validate_plugin_name(&name)?;
             let bone: Table = lua.globals().get::<Table>("bone")?;
             let config_dir: String = bone.get::<String>("config_dir")?;
             let dir = plugins_dir(&config_dir).join(&name);
@@ -258,4 +272,49 @@ pub(crate) fn setup_plugin(lua: &Lua, bone: &Table) -> Result<(), String> {
     bone.set("plugin", plugin_table)
         .map_err(crate::util::errstr)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_operations_reject_traversal_names() {
+        let lua = Lua::new();
+        let bone = lua.create_table().unwrap();
+        bone.set("config_dir", "/tmp/bone-plugin-test").unwrap();
+        bone.set("cwd", "/tmp").unwrap();
+        lua.globals().set("bone", bone.clone()).unwrap();
+        setup_plugin(&lua, &bone).unwrap();
+
+        for operation in ["load", "remove", "update"] {
+            let result: mlua::Result<Value> = lua
+                .load(format!("return bone.plugin.{operation}('../escape')"))
+                .eval();
+            let error = result.expect_err("traversal name should fail").to_string();
+            assert!(
+                error.contains("invalid plugin name"),
+                "unexpected {operation} error: {error}"
+            );
+        }
+
+        let install: mlua::Result<Value> = lua.load("return bone.plugin.install('user/..')").eval();
+        assert!(
+            install
+                .expect_err("traversal-derived install name should fail")
+                .to_string()
+                .contains("invalid plugin name")
+        );
+    }
+
+    #[test]
+    fn plugin_names_are_single_path_components() {
+        for invalid in ["", ".", "..", "../x", "x/y", r"x\y", "x\0y"] {
+            assert!(
+                validate_plugin_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(validate_plugin_name("example.nvim").is_ok());
+    }
 }

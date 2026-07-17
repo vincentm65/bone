@@ -75,8 +75,6 @@ fn boot_runtime_host_for(
         bone::ext::BootOptions {
             agent_depth: 0,
             headless: false,
-            model: model.clone(),
-            provider: provider_label.clone(),
             tool_allowlist: None,
         },
         &model,

@@ -1091,8 +1091,6 @@ impl DaemonCtx {
                             crate::ext::BootOptions {
                                 agent_depth: 0,
                                 headless: true,
-                                model: model.clone(),
-                                provider: provider.clone(),
                                 tool_allowlist: None,
                             },
                             &model,
