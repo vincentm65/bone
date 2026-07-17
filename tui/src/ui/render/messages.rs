@@ -288,7 +288,8 @@ fn split_content_into_links_and_text(text: &str) -> Vec<ContentPart> {
                 parts.push(ContentPart::Link(text[link_start..end].to_string()));
                 start = end;
             } else {
-                start = len;
+                parts.push(ContentPart::Text(text[link_start..].to_string()));
+                break;
             }
         } else {
             parts.push(ContentPart::Text(text[start..].to_string()));
@@ -304,29 +305,26 @@ fn split_content_into_links_and_text(text: &str) -> Vec<ContentPart> {
 
 fn find_link_start(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
     let len = bytes.len();
-    if start >= len {
-        return None;
-    }
 
-    // Check for URL schemes
-    for scheme in ["http://", "https://", "file://"] {
-        if let Some(rest) = bytes[start..].windows(scheme.len()).next() {
-            if rest == scheme.as_bytes() {
-                return Some((start, start + scheme.len()));
+    for index in start..len {
+        // Check for URL schemes.
+        for scheme in ["http://", "https://", "file://"] {
+            if bytes[index..].starts_with(scheme.as_bytes()) {
+                return Some((index, index + scheme.len()));
             }
         }
-    }
 
-    // Check for file paths
-    let b = bytes[start];
-    if b == b'/' || b == b'$' {
-        return Some((start, start + 1));
-    }
-    if b == b'~' && start + 1 < len && bytes[start + 1] == b'/' {
-        return Some((start, start + 2));
-    }
-    if b == b'.' && start + 1 < len && (bytes[start + 1] == b'/' || bytes[start + 1] == b'.') {
-        return Some((start, start + 1));
+        // Check for file paths.
+        let b = bytes[index];
+        if b == b'/' || b == b'$' {
+            return Some((index, index + 1));
+        }
+        if b == b'~' && index + 1 < len && bytes[index + 1] == b'/' {
+            return Some((index, index + 2));
+        }
+        if b == b'.' && index + 1 < len && (bytes[index + 1] == b'/' || bytes[index + 1] == b'.') {
+            return Some((index, index + 1));
+        }
     }
 
     None

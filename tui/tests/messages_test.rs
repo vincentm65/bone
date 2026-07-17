@@ -18,6 +18,52 @@ fn span_color(line: &Line<'static>, text: &str) -> Option<ratatui::style::Color>
         .and_then(|span| span.style.fg)
 }
 
+fn plain_tool() -> ToolDisplay {
+    ToolDisplay {
+        label: String::new(),
+        is_error: false,
+        is_shell: false,
+    }
+}
+
+#[test]
+fn tool_content_preserves_incomplete_url_scheme() {
+    let mut lines = Vec::new();
+    render_tool(
+        &plain_tool(),
+        "file://",
+        0,
+        &Theme::default(),
+        &mut lines,
+        80,
+        true,
+    );
+
+    assert_eq!(line_text(&lines[0]), "file://");
+}
+
+#[test]
+fn tool_content_highlights_links_after_plain_text() {
+    let theme = Theme::default();
+    let mut lines = Vec::new();
+    render_tool(
+        &plain_tool(),
+        "see /tmp/foo and https://example.com",
+        0,
+        &theme,
+        &mut lines,
+        80,
+        true,
+    );
+
+    assert_eq!(line_text(&lines[0]), "see /tmp/foo and https://example.com");
+    assert_eq!(span_color(&lines[0], "/tmp/foo"), Some(theme.shell_path));
+    assert_eq!(
+        span_color(&lines[0], "https://example.com"),
+        Some(theme.shell_path)
+    );
+}
+
 #[test]
 fn file_tool_labels_highlight_path_and_mute_summary() {
     let theme = Theme::default();

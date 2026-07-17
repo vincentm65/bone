@@ -90,6 +90,24 @@ fn rendered_text(markdown: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+fn flush_streamed_text(
+    content: &str,
+    width: usize,
+    end: usize,
+    stable_source: &mut usize,
+    inserted: &mut Vec<String>,
+) {
+    if end <= *stable_source {
+        return;
+    }
+    let mut rendered = rendered_text(&content[*stable_source..end], width);
+    if !rendered.is_empty() && *stable_source > 0 {
+        rendered.insert(0, String::new());
+    }
+    inserted.append(&mut rendered);
+    *stable_source = end;
+}
+
 fn streamed_text(chunks: &[&str], width: usize) -> Vec<String> {
     let mut content = String::new();
     let mut inserted = Vec::new();
@@ -97,26 +115,18 @@ fn streamed_text(chunks: &[&str], width: usize) -> Vec<String> {
     // Mirrors Renderer::flush_fragment: each flush renders only the new
     // block-complete slice and re-inserts the seam blank that render_markdown
     // trims at fragment edges.
-    let mut flush = |end: usize, content: &str, inserted: &mut Vec<String>| {
-        if end <= stable_source {
-            return;
-        }
-        let mut rendered = rendered_text(&content[stable_source..end], width);
-        if !rendered.is_empty() && stable_source > 0 {
-            rendered.insert(0, String::new());
-        }
-        inserted.append(&mut rendered);
-        stable_source = end;
-    };
     for chunk in chunks {
         content.push_str(chunk);
-        flush(
-            safe_markdown_prefix_end(&content, 0),
-            &content,
-            &mut inserted,
-        );
+        let end = safe_markdown_prefix_end(&content, stable_source);
+        flush_streamed_text(&content, width, end, &mut stable_source, &mut inserted);
     }
-    flush(content.len(), &content, &mut inserted);
+    flush_streamed_text(
+        &content,
+        width,
+        content.len(),
+        &mut stable_source,
+        &mut inserted,
+    );
     inserted
 }
 
