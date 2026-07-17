@@ -1,13 +1,14 @@
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::*;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use super::{
+    ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs, config_dir, seed_builtin_pages,
+};
+use crate::config::{bone_dir, load_yaml};
 
 fn with_temp_config_home(test: impl FnOnce()) {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::util::test_env_lock();
     let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let old_bone = std::env::var_os("BONE_DIR");
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -16,10 +17,15 @@ fn with_temp_config_home(test: impl FnOnce()) {
     std::fs::create_dir_all(&dir).unwrap();
 
     unsafe {
+        std::env::remove_var("BONE_DIR");
         std::env::set_var("XDG_CONFIG_HOME", &dir);
     }
     test();
     unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
         match old_xdg {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
             None => std::env::remove_var("XDG_CONFIG_HOME"),

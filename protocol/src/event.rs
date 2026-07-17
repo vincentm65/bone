@@ -182,6 +182,31 @@ pub enum ConfigAction {
 }
 
 /// Frontend → daemon command.
+///
+/// # Ownership (who needs each variant)
+///
+/// Both the in-process TUI and `bone serve` / `--connect` share one daemon
+/// control plane (`run_daemon`). Flags differ (`forward_view_diffs`,
+/// `inject_background`); the command set does not. Freeze remote-only growth
+/// until serve is a committed product surface.
+///
+/// | Command | Owner path | Why it exists |
+/// |---------|------------|---------------|
+/// | `SubmitPrompt` | both | start a model turn |
+/// | `ApprovalReply` / `KeyReply` | both | interactive gates mid-turn |
+/// | `Cancel` / `Steer` | both | turn control |
+/// | `RunCommand` | both | slash commands on the daemon VM |
+/// | `NewConversation` / `LoadConversation` / `ClearConversation` | both | durable chat lifecycle |
+/// | `ReplaceConversation` | both | bulk transcript replace (e.g. compact) |
+/// | `AppendMessage` | both | frontend-local context (e.g. `!shell`) into daemon transcript |
+/// | `SwitchProvider` / `ReloadExtensions` / `ReloadSettings` | both | runtime config |
+/// | `SetApprovalMode` | both | UI Safe/Danger → daemon gate |
+/// | `SetTerminalWidth` | both | Lua `ctx.ui.width` on the daemon VM |
+/// | `DispatchHook` | both (esp. remote) | fire Lua hooks when the client has no local VM |
+/// | `KeymapDispatch` | both | resolve keymap rhs on the daemon |
+///
+/// Product intent for serve is **status quo (local-first + optional TCP)**:
+/// document the dual flags, do not add a third control path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeCommand {

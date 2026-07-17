@@ -2,9 +2,9 @@
 //!
 //! Carries [`RuntimeEvent`] (core → frontend) and [`RuntimeCommand`]
 //! (frontend → core) over a byte stream as newline-delimited JSON. The same
-//! `serde` types flow over an in-process channel (Phase 3) and here over a
-//! socket — only the framing differs. (msgpack via `rmpv` could replace the
-//! JSONL codec later without touching the protocol types.)
+//! `serde` types flow over an in-process channel and over a socket — only the
+//! framing differs. (msgpack via `rmpv` could replace the JSONL codec later
+//! without touching the protocol types.)
 //!
 //! Pieces:
 //! - [`codec`]: read/write one framed message over any `AsyncRead`/`AsyncWrite`.
@@ -316,6 +316,15 @@ where
                 }
                 Some(Err(codec::ReadError::Decode(_))) => continue,
                 Some(Err(codec::ReadError::Io(err))) => return Err(err),
+                Some(Err(codec::ReadError::TooLong { len })) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "framed message is {len} bytes; max is {}",
+                            codec::MAX_LINE_BYTES
+                        ),
+                    ));
+                }
                 None => return Ok(()),
             },
             event = attachment.events.recv() => match event {
@@ -488,6 +497,16 @@ where
                 writer.abort();
                 return Err(e);
             }
+            Err(codec::ReadError::TooLong { len }) => {
+                writer.abort();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "framed message is {len} bytes; max is {}",
+                        codec::MAX_LINE_BYTES
+                    ),
+                ));
+            }
         }
     }
 
@@ -586,16 +605,26 @@ impl DaemonCtx {
     }
 
     /// Apply a Safe/Danger toggle. The gate reads the shared atomic per call, so
-    /// this takes effect immediately — even mid-turn.
-    fn set_mode(&self, mode_str: &str) {
-        self.mode.set(match mode_str {
-            "danger" => crate::tools::ApprovalMode::Danger,
-            _ => crate::tools::ApprovalMode::Safe,
-        });
+    /// this takes effect immediately — even mid-turn. Unknown values are
+    /// rejected (not silently coerced to Safe) so a bad setting/client is
+    /// visible.
+    fn set_mode(&self, mode_str: &str) -> bool {
+        match crate::tools::ApprovalMode::parse(mode_str) {
+            Ok(mode) => {
+                self.mode.set(mode);
+                true
+            }
+            Err(err) => {
+                self.hub.publish(RuntimeEvent::Status { message: err });
+                false
+            }
+        }
     }
 
     fn persist_mode(&self, mode_str: &str) {
-        self.set_mode(mode_str);
+        if !self.set_mode(mode_str) {
+            return;
+        }
         let result = crate::config::settings::Settings::load().and_then(|settings| {
             let mut settings = settings.ok_or_else(|| {
                 crate::config::settings::SettingsError::Validation(
@@ -711,9 +740,8 @@ impl DaemonCtx {
     /// [`parse_lua_command_return`]: crate::ext::types::parse_lua_command_return
     ///
     /// This is the daemon-side equivalent of the TUI's `run_lua_command`: it lets a
-    /// *remote* frontend run interactive commands against the daemon's Lua VM
-    /// instead of a local one (Phase 3-pure). The in-process TUI keeps running
-    /// commands locally against the shared VM.
+    /// remote frontend run interactive commands against the daemon's Lua VM.
+    /// The pure-client TUI also routes slash commands over this path.
     async fn run_interactive_command(
         &self,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,

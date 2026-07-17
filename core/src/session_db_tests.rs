@@ -781,3 +781,43 @@ fn latest_conversation_reports_id_and_emptiness() {
     assert_eq!(db.latest_conversation().unwrap(), Some((c2, false)));
     assert!(c2 > c1, "latest is the highest id");
 }
+
+/// `db_path` must track `bone_dir()` (XDG/`HOME`), not a hard-coded home path.
+/// Serializes env mutations so parallel tests don't race on `XDG_CONFIG_HOME`.
+#[test]
+fn db_path_follows_bone_dir() {
+    let _guard = crate::util::test_env_lock();
+
+    let xdg = std::env::temp_dir().join(format!(
+        "bone-db-path-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&xdg).unwrap();
+
+    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let old_bone = std::env::var_os("BONE_DIR");
+    // SAFETY: held under test_env_lock; restored below.
+    unsafe {
+        std::env::remove_var("BONE_DIR");
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+    }
+
+    let expected = xdg.join("bone-rust/data/conversations.db");
+    let got = super::db_path();
+
+    match old_bone {
+        Some(v) => unsafe { std::env::set_var("BONE_DIR", v) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
+    match old_xdg {
+        Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+    }
+    let _ = std::fs::remove_dir_all(&xdg);
+
+    assert_eq!(got, expected);
+}

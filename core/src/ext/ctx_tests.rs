@@ -842,3 +842,19 @@ fn ui_apply_accepts_protocol_view_diffs() {
         [crate::runtime::view::ViewDiff::SetHighlight { name, .. }] if name == "accent"
     ));
 }
+
+#[test]
+fn db_query_prefix_allows_select_and_with() {
+    assert!(is_allowed_db_query_prefix("SELECT 1"));
+    assert!(is_allowed_db_query_prefix("  select 1"));
+    assert!(is_allowed_db_query_prefix(
+        "WITH recent AS (SELECT 1) SELECT * FROM recent"
+    ));
+    assert!(is_allowed_db_query_prefix(
+        "\n  with recent as (select 1 as id) select * from recent"
+    ));
+    assert!(!is_allowed_db_query_prefix("INSERT INTO t VALUES (1)"));
+    assert!(!is_allowed_db_query_prefix("DELETE FROM t"));
+    assert!(!is_allowed_db_query_prefix("UPDATE t SET x = 1"));
+    assert!(!is_allowed_db_query_prefix("PRAGMA table_info(t)"));
+}

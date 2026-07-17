@@ -926,7 +926,14 @@ impl App {
                     if let Some(preview) = preview.as_deref() {
                         self.pump_show_edit_preview(&call.id, preview, &mut terminal)?;
                     }
-                    if auto_allows {
+                    // Danger UI means every tool is allowed. Even if the daemon
+                    // still sent a prompt (mode desync), auto-accept and reassert
+                    // Danger so the gate catches up for subsequent calls.
+                    if auto_allows || matches!(self.approval_mode, ApprovalMode::Danger) {
+                        if !auto_allows {
+                            self.user_config.approval_mode = ApprovalMode::Danger;
+                            self.persist_runtime_config();
+                        }
                         let _ =
                             self.command_tx
                                 .send(crate::runtime::RuntimeCommand::ApprovalReply {
@@ -1859,17 +1866,10 @@ impl App {
         }
 
         if self.panes_visible && !self.pages.is_empty() && modifiers.is_empty() {
+            // BackTab is reserved for approval-mode cycle (see CycleMode below).
             match code {
                 KeyCode::Tab => {
                     self.active_page = (self.active_page + 1) % self.pages.len();
-                    return self.redraw(term);
-                }
-                KeyCode::BackTab => {
-                    self.active_page = if self.active_page == 0 {
-                        self.pages.len() - 1
-                    } else {
-                        self.active_page - 1
-                    };
                     return self.redraw(term);
                 }
                 KeyCode::PageUp => {
@@ -1989,12 +1989,7 @@ impl App {
                 self.refresh_queue_pane();
                 self.redraw(term)
             }
-            InputAction::CycleMode => {
-                self.approval_mode = self.approval_mode.cycle();
-                self.user_config.approval_mode = self.approval_mode;
-                self.persist_runtime_config();
-                self.redraw(term)
-            }
+            InputAction::CycleMode => self.cycle_approval_mode(term),
             InputAction::Redraw | InputAction::Escape => {
                 // Mid-burst (non-bracketed paste flood on Windows conhost):
                 // the buffer insert already happened in apply_key; defer the
@@ -2237,6 +2232,15 @@ impl App {
     pub(crate) fn drain_approval_keys(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         while self.pending_approval.is_some() && event::poll(std::time::Duration::from_millis(0))? {
             let event = event::read()?;
+            // BackTab always cycles approval mode — even mid-prompt / mid-advise —
+            // and auto-accepts when the result is Danger (see cycle_approval_mode).
+            if let Event::Key(key) = &event
+                && key.kind == KeyEventKind::Press
+                && key.code == KeyCode::BackTab
+            {
+                self.cycle_approval_mode(term)?;
+                continue;
+            }
             let advising = self.pending_approval.as_ref().is_some_and(|p| p.advising);
             if advising {
                 if let Some(decision) = self.handle_advising_input_event(event, term)? {
@@ -2303,6 +2307,27 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Cycle Safe ↔ Danger, push the new mode to the daemon, and — when a tool
+    /// approval is still waiting — auto-accept if the result is Danger. Danger
+    /// means every tool is allowed, so the prompt is obsolete. If the UI was
+    /// already Danger while still pending (UI/daemon desync), reassert Danger
+    /// and accept instead of flipping to Safe.
+    fn cycle_approval_mode(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        let pending = self.pending_approval.is_some();
+        if pending && matches!(self.approval_mode, ApprovalMode::Danger) {
+            self.user_config.approval_mode = ApprovalMode::Danger;
+            self.persist_runtime_config();
+            return self.resolve_approval(Decision::Accept, term);
+        }
+        self.approval_mode = self.approval_mode.cycle();
+        self.user_config.approval_mode = self.approval_mode;
+        self.persist_runtime_config();
+        if pending && matches!(self.approval_mode, ApprovalMode::Danger) {
+            return self.resolve_approval(Decision::Accept, term);
+        }
+        self.redraw(term)
     }
 
     /// Send the final [`CallOutcome`] to the waiting tool, clear prompt state,
@@ -2759,10 +2784,8 @@ fn apply_settings_to_user_config(
     cfg: &mut crate::config::UserConfig,
     settings: &crate::config::settings::BoneSettings,
 ) {
-    cfg.approval_mode = match settings.general.approval.as_str() {
-        "danger" => crate::tools::ApprovalMode::Danger,
-        _ => crate::tools::ApprovalMode::Safe,
-    };
+    cfg.approval_mode =
+        crate::tools::ApprovalMode::parse_lenient(settings.general.approval.as_str());
     cfg.show_thinking = settings.general.show_reasoning;
     cfg.input_preset = settings.ui.input.preset.clone();
     for (key, value) in [

@@ -1103,17 +1103,13 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                 );
 
                 let mode = match mode_str.as_deref() {
-                    Some("safe") | Some("read_only") => crate::tools::ApprovalMode::Safe,
-                    Some("danger") => crate::tools::ApprovalMode::Danger,
+                    Some(s) => match crate::tools::ApprovalMode::parse(s) {
+                        Ok(m) => m,
+                        Err(msg) => {
+                            return tool_err(lua, name, call_id.clone(), msg);
+                        }
+                    },
                     None => inherited_approval,
-                    Some(mode_str) => {
-                        return tool_err(
-                            lua,
-                            name,
-                            call_id.clone(),
-                            format!("Unknown approval mode: {mode_str}"),
-                        );
-                    }
                 };
 
                 // Convert args table to serde_json::Value
@@ -1269,15 +1265,22 @@ fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
     Ok(session_table)
 }
 
+/// Cheap prefix check for `ctx.db.query`. Accepts `SELECT` and CTE form
+/// `WITH ... SELECT`. Actual write protection is enforced after prepare via
+/// `Statement::readonly()` — `WITH` can also introduce mutating statements.
+fn is_allowed_db_query_prefix(sql: &str) -> bool {
+    let head = sql.trim_start().to_ascii_lowercase();
+    head.starts_with("select") || head.starts_with("with")
+}
+
 /// Build the `ctx.db` table: `query(sql, params?)` runs a read-only (SELECT)
 /// statement against the session db and returns an array of row tables.
 fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
     let db_query_fn = lua.create_function(|lua, (sql, params): (String, Option<Vec<Value>>)| {
         let db = open_session_db()?;
 
-        // Read-only: only allow SELECT statements.
-        let sql_trimmed = sql.trim();
-        if !sql_trimmed.to_lowercase().starts_with("select") {
+        // Read-only: only allow SELECT / CTE SELECT statements.
+        if !is_allowed_db_query_prefix(&sql) {
             return Err(mlua::Error::external(
                 "ctx.db.query only allows SELECT statements",
             ));
@@ -1305,6 +1308,11 @@ fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
             .conn_ref()
             .prepare(&sql)
             .map_err(|e| mlua::Error::external(format!("SQL error: {e}")))?;
+        if !stmt.readonly() {
+            return Err(mlua::Error::external(
+                "ctx.db.query only allows read-only SELECT statements",
+            ));
+        }
 
         let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
@@ -2317,9 +2325,7 @@ fn parse_agent_opts(
     warn_unknown_opts(opts, allowed_keys);
 
     let approval = match opt_str(opts, "approval").as_deref() {
-        Some("safe") | Some("read_only") => crate::tools::ApprovalMode::Safe,
-        Some("danger") => crate::tools::ApprovalMode::Danger,
-        Some(s) => return Err(format!("Unknown approval mode: {s}")),
+        Some(s) => crate::tools::ApprovalMode::parse(s)?,
         None => inherited_approval,
     };
 

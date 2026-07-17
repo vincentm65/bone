@@ -1,4 +1,4 @@
-use super::{approval_mode, has_flag, parse_provider_model};
+use super::cli::{approval_mode, has_flag, parse_provider_model};
 use bone::tools::ApprovalMode;
 
 fn args(parts: &[&str]) -> Vec<String> {

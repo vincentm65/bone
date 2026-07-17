@@ -80,7 +80,10 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
 
     Ok(RunRequest {
         prompt,
-        approval_mode: parse_approval(approval.as_deref())?,
+        approval_mode: match approval.as_deref() {
+            Some(s) => ApprovalMode::parse(s)?,
+            None => ApprovalMode::Safe,
+        },
         provider,
         model,
         system_prompt,
@@ -214,15 +217,6 @@ async fn expand_lua_command(
     })
     .await
     .ok()?
-}
-
-pub(crate) fn parse_approval(value: Option<&str>) -> Result<ApprovalMode, String> {
-    match value {
-        Some("read_only") | Some("safe") => Ok(ApprovalMode::Safe),
-        Some("danger") => Ok(ApprovalMode::Danger),
-        None => Ok(ApprovalMode::Safe),
-        Some(other) => Err(format!("unknown approval mode: {other}")),
-    }
 }
 
 fn run_usage() -> String {

@@ -48,7 +48,9 @@ pub fn help(downloaded_commands: &[(String, String)]) -> String {
     lines.push(format!("{bold}Pane navigation{reset}"));
     lines.push("  Ctrl+T       — toggle pane visibility".to_string());
     lines.push("  Tab          — cycle active pane (when panes visible)".to_string());
-    lines.push("  Shift+Tab    — cycle approval mode (or pane when visible)".to_string());
+    lines.push(
+        "  Shift+Tab    — cycle approval mode (auto-accepts pending tools in Danger)".to_string(),
+    );
     lines.push("  PageUp/Down  — scroll active pane".to_string());
     lines.push("  Ctrl+Up/Down — scroll active pane by one line".to_string());
     lines.join("\n")

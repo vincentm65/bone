@@ -282,25 +282,15 @@ impl Renderer {
         }
         let lines = &lines[..];
 
-        let size = term.size()?;
-        let w = size.width.max(1);
-
+        // `insert_before` allocates its temp buffer with `viewport_area.width`,
+        // which can lag `term.size().width` until the next autoresize/draw (e.g.
+        // a pending Resize). Counting rows against the live size while rendering
+        // into the narrower viewport buffer under-allocates and panics inside
+        // ratatui's Buffer index. Always measure against the viewport width.
+        let w = scrollback_insert_width(term);
         let row_count = logical_lines_row_count(lines, w);
         term.insert_before(row_count, |buf| {
-            let mut row = 0u16;
-            for line in lines {
-                let height = wrapped_line_count(line, buf.area.width.max(1));
-                let area = Rect {
-                    x: 0,
-                    y: row,
-                    width: buf.area.width,
-                    height,
-                };
-                Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .render(area, buf);
-                row = row.saturating_add(height);
-            }
+            render_scrollback_lines(lines, buf);
         })
     }
 
@@ -376,7 +366,9 @@ impl Renderer {
         } else {
             None
         };
-        let terminal_width = term.size()?.width;
+        // Match `insert_before`'s buffer width (viewport), not the possibly-stale
+        // live terminal size — see `insert_lines_to_scrollback`.
+        let terminal_width = scrollback_insert_width(term);
         let rendered =
             messages::msg_to_lines(new_msgs, &self.theme, prev_role, terminal_width, false);
         // Collapse a leading blank against an already-blank scrollback tail so
@@ -387,30 +379,7 @@ impl Renderer {
 
         let row_count = logical_lines_row_count(&rendered, terminal_width);
         term.insert_before(row_count, |buf| {
-            let mut row = 0u16;
-            for line in &rendered {
-                let height = wrapped_line_count(line, buf.area.width.max(1));
-                let msg_area = Rect {
-                    x: 0,
-                    y: row,
-                    width: buf.area.width,
-                    height,
-                };
-                if line
-                    .spans
-                    .iter()
-                    .any(|span| span.style.bg == Some(user_background))
-                {
-                    buf.set_style(
-                        msg_area,
-                        ratatui::style::Style::default().bg(user_background),
-                    );
-                }
-                Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .render(msg_area, buf);
-                row = row.saturating_add(height);
-            }
+            render_scrollback_lines_with_bg(&rendered, buf, Some(user_background));
         })?;
 
         self.scrollback_cursor = messages.len();
@@ -460,7 +429,7 @@ impl Renderer {
         if end <= self.streaming_source_flushed {
             return Ok(());
         }
-        let width = term.size()?.width.max(1);
+        let width = scrollback_insert_width(term);
         let fragment = &content[self.streaming_source_flushed..end];
         let mut rendered = messages::assistant_markdown_to_lines(fragment, width, &self.theme);
         if !rendered.is_empty() && self.streaming_source_flushed > 0 {
@@ -494,6 +463,52 @@ fn logical_lines_row_count(lines: &[Line<'static>], width: u16) -> u16 {
         .iter()
         .map(|line| wrapped_line_count(line, width))
         .sum()
+}
+
+/// Width of the temporary buffer `Terminal::insert_before` will allocate.
+///
+/// Must be used for both row-count precomputation and content wrapping so the
+/// draw closure never writes past the allocated height.
+fn scrollback_insert_width(term: &mut BoneTerminal) -> u16 {
+    term.get_frame().area().width.max(1)
+}
+
+/// Paint logical lines into an `insert_before` temp buffer, wrapping each line
+/// to `buf.area.width` and never advancing past `buf.area.height`.
+fn render_scrollback_lines(lines: &[Line<'static>], buf: &mut ratatui::buffer::Buffer) {
+    render_scrollback_lines_with_bg(lines, buf, None);
+}
+
+fn render_scrollback_lines_with_bg(
+    lines: &[Line<'static>],
+    buf: &mut ratatui::buffer::Buffer,
+    user_background: Option<Color>,
+) {
+    let mut row = 0u16;
+    let width = buf.area.width;
+    for line in lines {
+        let remaining = buf.area.height.saturating_sub(row);
+        if remaining == 0 {
+            break;
+        }
+        // Clamp to remaining rows so a line_count/render mismatch cannot OOB.
+        let height = wrapped_line_count(line, width.max(1)).min(remaining);
+        let area = Rect {
+            x: 0,
+            y: row,
+            width,
+            height,
+        };
+        if let Some(bg) = user_background {
+            if line.spans.iter().any(|span| span.style.bg == Some(bg)) {
+                buf.set_style(area, ratatui::style::Style::default().bg(bg));
+            }
+        }
+        Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+        row = row.saturating_add(height);
+    }
 }
 
 pub fn safe_markdown_prefix_end(content: &str, from: usize) -> usize {

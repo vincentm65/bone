@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::{RuntimeCommand, RuntimeEvent};
+use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
 async fn round_trips_event_over_duplex() {
@@ -40,4 +41,29 @@ async fn decode_error_is_recoverable() {
         reader.read::<RuntimeCommand>().await,
         Some(Ok(RuntimeCommand::Cancel))
     ));
+}
+
+#[tokio::test]
+async fn rejects_oversized_line() {
+    // Generous duplex capacity so the writer isn't tightly coupled to the
+    // reader's 8 KiB fill steps under load.
+    let (a, mut b) = tokio::io::duplex(1024 * 1024);
+    // Concurrent writer: stream past MAX_LINE_BYTES without a newline.
+    let writer = tokio::spawn(async move {
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut sent = 0usize;
+        while sent <= MAX_LINE_BYTES {
+            if b.write_all(&chunk).await.is_err() {
+                break;
+            }
+            sent += chunk.len();
+        }
+    });
+
+    let mut reader = MessageReader::new(a);
+    match reader.read::<RuntimeCommand>().await {
+        Some(Err(ReadError::TooLong { len })) => assert!(len > MAX_LINE_BYTES),
+        other => panic!("expected TooLong, got {other:?}"),
+    }
+    let _ = writer.await;
 }

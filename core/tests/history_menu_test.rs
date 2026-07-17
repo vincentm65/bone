@@ -101,6 +101,22 @@ fn history_query_classifies_and_counts_conversations() {
 }
 
 #[test]
+fn history_list_sql_uses_candidate_first_cte() {
+    let sql = history_sql();
+    assert!(
+        sql.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("with recent as"),
+        "history.list must use the candidate-first CTE so large histories stay cheap"
+    );
+    assert!(sql.contains("LIMIT ?"));
+    assert!(
+        !sql.to_ascii_lowercase().contains("from conversations c"),
+        "candidate-first query should drive from recent, not scan conversations first"
+    );
+}
+
+#[test]
 fn history_list_defaults_to_fifty() {
     let lua = Lua::new();
     let module: Table = lua.load(HISTORY_LUA).eval().unwrap();

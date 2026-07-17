@@ -97,6 +97,11 @@ fn history_and_menu_seeds_refresh_pre_feature_copies() {
     std::fs::write(&history, "-- old history helper\n").unwrap();
     assert!(should_refresh_seeded_lua(&history, "history.lua"));
 
+    // Older history helpers that already had token counts still need the
+    // candidate-first list query refresh.
+    std::fs::write(&history, "function M.list() return total_token_count end\n").unwrap();
+    assert!(should_refresh_seeded_lua(&history, "history.lua"));
+
     let menu = dir.join("menu.lua");
     std::fs::write(&menu, "local pane = require(\"ui.pane\")\n").unwrap();
     assert!(should_refresh_seeded_lua(&menu, "ui/menu.lua"));

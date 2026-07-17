@@ -164,6 +164,21 @@ impl ApprovalMode {
             _ => Self::Safe,
         }
     }
+
+    /// Parse a mode string. Accepts `safe`, `read_only` (legacy alias), and
+    /// `danger`. Unknown values error so CLI/Lua surfaces can report them.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "safe" | "read_only" => Ok(Self::Safe),
+            "danger" => Ok(Self::Danger),
+            other => Err(format!("unknown approval mode: {other}")),
+        }
+    }
+
+    /// Like [`parse`] but unknown / empty values become [`Safe`].
+    pub fn parse_lenient(s: &str) -> Self {
+        Self::parse(s).unwrap_or(Self::Safe)
+    }
 }
 
 /// A handle to the current [`ApprovalMode`] that can be read and written from

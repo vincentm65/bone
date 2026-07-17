@@ -75,12 +75,7 @@ impl App {
                 self.panes_visible = !self.panes_visible;
                 self.redraw(term)
             }
-            "cycle_approval_mode" => {
-                self.approval_mode = self.approval_mode.cycle();
-                self.user_config.approval_mode = self.approval_mode;
-                self.persist_runtime_config();
-                self.redraw(term)
-            }
+            "cycle_approval_mode" => self.cycle_approval_mode(term),
             "cursor_to_start" => {
                 self.input.cursor_to_start();
                 self.redraw(term)

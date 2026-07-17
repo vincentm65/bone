@@ -17,17 +17,40 @@ pub(crate) fn load_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T
     serde_yaml::from_str(raw).ok()
 }
 
+/// Config / Lua / DB root.
+///
+/// Resolution order:
+/// 1. `$BONE_DIR` — explicit absolute (or relative) override
+/// 2. `$XDG_CONFIG_HOME/bone-rust`
+/// 3. `$HOME/.bone-rust` (or `$USERPROFILE` on Windows)
+///
+/// Fails closed when none of these are set (no shared `/tmp/.bone-rust` fallback).
 pub fn bone_dir() -> PathBuf {
+    try_bone_dir().unwrap_or_else(|| {
+        panic!(
+            "bone: neither $BONE_DIR, $HOME, $USERPROFILE nor $XDG_CONFIG_HOME is set; \
+             set BONE_DIR to a config root"
+        )
+    })
+}
+
+/// Like [`bone_dir`] but returns `None` when no config root can be resolved.
+/// Use for best-effort bootstrap (e.g. deps marker) so `--help` still works
+/// in a stripped environment.
+pub fn try_bone_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("BONE_DIR") {
+        let path = PathBuf::from(dir);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("bone-rust");
+        return Some(PathBuf::from(xdg).join("bone-rust"));
     }
     if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        return PathBuf::from(home).join(".bone-rust");
+        return Some(PathBuf::from(home).join(".bone-rust"));
     }
-    eprintln!(
-        "bone: warning: neither $HOME, $USERPROFILE nor $XDG_CONFIG_HOME is set; using /tmp/.bone-rust"
-    );
-    PathBuf::from("/tmp/.bone-rust")
+    None
 }
 
 pub fn providers_path() -> PathBuf {
@@ -332,9 +355,9 @@ fn is_local_base_url(base_url: &str) -> bool {
 }
 
 fn has_codex_auth_token() -> bool {
-    let path = bone_dir()
-        .parent()
-        .map_or_else(dirs::home_dir, |p| Some(p.to_path_buf()))
+    // Codex auth lives under the user home, not under bone_dir (which may be
+    // `$XDG_CONFIG_HOME/bone-rust` — its parent is not `$HOME`).
+    let path = dirs::home_dir()
         .unwrap_or_default()
         .join(".codex/auth.json");
     let Ok(data) = fs::read_to_string(path) else {
@@ -384,6 +407,67 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
 mod tests {
     use super::{preserve_divergent_agents_md, sync_bundled_file};
     use std::fs;
+
+    #[test]
+    fn bone_dir_prefers_bone_dir_env() {
+        let _guard = crate::util::test_env_lock();
+
+        let dir = std::env::temp_dir().join(format!(
+            "bone-dir-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let old_bone = std::env::var_os("BONE_DIR");
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: held under test_env_lock; restored below.
+        unsafe {
+            std::env::set_var("BONE_DIR", &dir);
+            std::env::set_var("XDG_CONFIG_HOME", "/should/not/win");
+        }
+        let got = super::bone_dir();
+        match old_bone {
+            Some(v) => unsafe { std::env::set_var("BONE_DIR", v) },
+            None => unsafe { std::env::remove_var("BONE_DIR") },
+        }
+        match old_xdg {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        assert_eq!(got, dir);
+    }
+
+    #[test]
+    fn bone_dir_uses_xdg_when_bone_dir_unset() {
+        let _guard = crate::util::test_env_lock();
+
+        let xdg = std::env::temp_dir().join(format!(
+            "bone-dir-xdg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let old_bone = std::env::var_os("BONE_DIR");
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::remove_var("BONE_DIR");
+            std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        }
+        let got = super::bone_dir();
+        match old_bone {
+            Some(v) => unsafe { std::env::set_var("BONE_DIR", v) },
+            None => unsafe { std::env::remove_var("BONE_DIR") },
+        }
+        match old_xdg {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        assert_eq!(got, xdg.join("bone-rust"));
+    }
 
     #[test]
     fn bundled_file_is_created_and_stale_content_is_replaced() {

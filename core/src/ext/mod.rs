@@ -87,8 +87,11 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> bool {
                 || !existing.contains("SELECTED_BG")
                 || !existing.contains("description_spans")
                 || !existing.contains("label_modifiers")))
-        // History now includes aggregate message and token counts/status.
-        || (name == "history.lua" && !existing.contains("total_token_count"))
+        // History now includes aggregate message and token counts/status,
+        // and lists via a candidate-first CTE instead of a full messages join.
+        || (name == "history.lua"
+            && (!existing.contains("total_token_count")
+                || !existing.contains("WITH recent AS")))
         // task_list: refresh copies missing conversation-deduped reminders,
         // complete, or the low-friction advance action / prior-step auto-close.
         || (name == "task_list.lua"

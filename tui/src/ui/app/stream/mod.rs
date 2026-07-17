@@ -413,7 +413,14 @@ impl App {
                         if let Some(preview) = preview.as_deref() {
                             self.pump_show_edit_preview(&call.id, preview, term)?;
                         }
-                        if auto_allows {
+                        // Danger UI means every tool is allowed. Even if the daemon
+                        // still sent a prompt (mode desync), auto-accept and reassert
+                        // Danger so the gate catches up for subsequent calls.
+                        if auto_allows || matches!(self.approval_mode, crate::tools::ApprovalMode::Danger) {
+                            if !auto_allows {
+                                self.user_config.approval_mode = crate::tools::ApprovalMode::Danger;
+                                self.persist_runtime_config();
+                            }
                             let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
                                 id,
                                 outcome: CallOutcome::Approve,
@@ -613,7 +620,11 @@ impl App {
                         if let Some(preview) = preview.as_deref() {
                             self.pump_show_edit_preview(&call.id, preview, term).ok();
                         }
-                        if auto_allows {
+                        if auto_allows || matches!(self.approval_mode, crate::tools::ApprovalMode::Danger) {
+                            if !auto_allows {
+                                self.user_config.approval_mode = crate::tools::ApprovalMode::Danger;
+                                self.persist_runtime_config();
+                            }
                             let _ = self.command_tx.send(crate::runtime::RuntimeCommand::ApprovalReply {
                                 id,
                                 outcome: crate::tools::CallOutcome::Approve,
@@ -1403,20 +1414,13 @@ impl App {
                         }
                         continue;
                     }
-                    // ── Page navigation (Tab/BackTab/PageUp/PageDown) ─────
+                    // ── Page navigation (Tab/PageUp/PageDown) ─────
+                    // BackTab is reserved for approval-mode cycle (CycleMode below).
                     if *panes_visible && !pages.is_empty() {
                         *active_page = (*active_page).min(pages.len() - 1);
                         match (key.code, key.modifiers) {
                             (KeyCode::Tab, m) if m.is_empty() => {
                                 *active_page = (*active_page + 1) % pages.len();
-                                continue;
-                            }
-                            (KeyCode::BackTab, m) if m.is_empty() => {
-                                *active_page = if *active_page == 0 {
-                                    pages.len() - 1
-                                } else {
-                                    *active_page - 1
-                                };
                                 continue;
                             }
                             _ => {}

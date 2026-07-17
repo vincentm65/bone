@@ -1,10 +1,18 @@
 //! Binary entry point: arg parsing, provider setup, and TUI / headless dispatch.
 
+mod cli;
+mod deps;
+mod install;
+
 use bone::config::{UserConfig, custom::CustomConfigs};
 use bone::llm::provider::LlmProvider;
 use bone::llm::providers;
 use bone::run;
 use bone::ui::app::App;
+
+use cli::{approval_mode, has_flag, parse_cli_options, parse_listen_addr, parse_provider_model};
+use deps::ensure_deps;
+use install::do_install;
 
 /// Wrap a future so a panic inside it is logged instead of silently killing
 /// the spawned task.
@@ -24,245 +32,6 @@ where
             "bone: fatal: {label} task panicked: {}",
             bone::runtime::panic_message(&*payload)
         );
-    }
-}
-struct CliOptions {
-    provider: Option<String>,
-    model: Option<String>,
-    /// `--connect <addr>`: run the full TUI against a remote `bone serve`
-    /// daemon instead of an in-process one.
-    connect: Option<String>,
-    changed: bool,
-}
-
-fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
-    let mut provider = None;
-    let mut model = None;
-    let mut connect = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--provider" => {
-                i += 1;
-                provider = Some(args.get(i).ok_or("--provider requires a value")?.clone());
-            }
-            "--model" => {
-                i += 1;
-                model = Some(args.get(i).ok_or("--model requires a value")?.clone());
-            }
-            "--connect" => {
-                i += 1;
-                connect = Some(args.get(i).ok_or("--connect requires an address")?.clone());
-            }
-            "--help" | "-h" => return Err(usage()),
-            other => return Err(format!("unknown argument: {other}\n{}", usage())),
-        }
-        i += 1;
-    }
-
-    let changed = provider.is_some() || model.is_some();
-    Ok(CliOptions {
-        provider,
-        model,
-        connect,
-        changed,
-    })
-}
-
-/// Deps that bone tools need at runtime. None are required for the base app.
-struct Dep {
-    bin: &'static str,
-    /// Package name if different from binary name. None = same as bin.
-    pkg: Option<&'static str>,
-    label: &'static str,
-}
-
-const DEPS: &[Dep] = &[
-    Dep {
-        bin: "uv",
-        pkg: None,
-        label: "uv (needed by web_search, task_list, cron, browser/browser-use)",
-    },
-    Dep {
-        bin: "git",
-        pkg: None,
-        label: "git (needed by /r command and git workflow)",
-    },
-    Dep {
-        bin: "sqlite3",
-        pkg: Some("sqlite3"),
-        label: "sqlite3 (needed by /memory command)",
-    },
-];
-
-fn have_bin(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-}
-
-fn try_install(bin: &str, pkg: Option<&str>) -> bool {
-    let pkg = pkg.unwrap_or(bin);
-
-    // macOS: brew
-    if cfg!(target_os = "macos") && have_bin("brew") {
-        return run_silent("brew", &["install", pkg]);
-    }
-
-    // Linux package managers
-    if cfg!(target_os = "linux") {
-        if have_bin("apt-get") {
-            return run_silent("sudo", &["apt-get", "install", "-y", pkg]);
-        }
-        if have_bin("dnf") {
-            return run_silent("sudo", &["dnf", "install", "-y", pkg]);
-        }
-        if have_bin("pacman") {
-            return run_silent("sudo", &["pacman", "-S", "--noconfirm", pkg]);
-        }
-        if have_bin("apk") {
-            return run_silent("apk", &["add", pkg]);
-        }
-    }
-
-    // Windows: winget
-    if cfg!(windows) && have_bin("winget") {
-        let winget_id = match bin {
-            "uv" => "astral-sh.uv",
-            "git" => "Git.Git",
-            "sqlite3" => return false,
-            _ => return false,
-        };
-        return run_silent(
-            "winget",
-            &[
-                "install",
-                "--id",
-                winget_id,
-                "-e",
-                "--source",
-                "winget",
-                "--accept-package-agreements",
-            ],
-        );
-    }
-
-    // Fallback for uv: official installer
-    if bin == "uv" {
-        if cfg!(windows) {
-            return run_silent(
-                "powershell",
-                &[
-                    "-ExecutionPolicy",
-                    "ByPass",
-                    "-c",
-                    "irm https://astral.sh/uv/install.ps1 | iex",
-                ],
-            );
-        }
-        return run_silent(
-            "sh",
-            &["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-        );
-    }
-
-    false
-}
-
-fn run_silent(program: &str, args: &[&str]) -> bool {
-    std::process::Command::new(program)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn ensure_deps() {
-    // Only check/install once
-    let marker = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".bone-rust")
-        .join(".deps-warned");
-    if marker.exists() {
-        return;
-    }
-
-    let mut missing = Vec::new();
-    for dep in DEPS {
-        if have_bin(dep.bin) {
-            continue;
-        }
-        eprintln!("bone: installing {} ...", dep.bin);
-        if try_install(dep.bin, dep.pkg) && have_bin(dep.bin) {
-            eprintln!("bone: installed {}.", dep.label);
-        } else {
-            missing.push(dep);
-        }
-    }
-
-    if !missing.is_empty() {
-        eprintln!();
-        eprintln!("bone: couldn't auto-install:");
-        for dep in missing {
-            eprintln!("  - {}: {}", dep.bin, dep.label);
-        }
-        eprintln!(
-            "The base app works without these. They're only needed for the tools listed above."
-        );
-    }
-
-    let _ = std::fs::write(&marker, "");
-}
-
-fn usage() -> String {
-    "Usage: bone [--provider <id>] [--model <name>]\n       bone --connect <addr>          # run the TUI against a remote `bone serve`\n       bone agent [--provider <id>] [--model <name>] ...\n       bone serve [--listen <addr>]   # run as a daemon (default 127.0.0.1:7878)\n       bone connect [--listen <addr>] # line-oriented RPC client\n       bone web                       # launch the web UI (http://localhost:4577)".to_string()
-}
-
-/// Parse `--listen <addr>` from args, falling back to the default.
-fn parse_listen_addr(args: &[String]) -> String {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--listen"
-            && let Some(v) = args.get(i + 1)
-        {
-            return v.clone();
-        }
-        i += 1;
-    }
-    "127.0.0.1:7878".to_string()
-}
-
-/// Tolerantly pull `--provider <id>` / `--model <name>` out of a subcommand's
-/// args (ignores everything else, unlike [`parse_cli_options`] which rejects
-/// unknown flags). Used by `bone serve` to honor provider/model overrides.
-fn parse_provider_model(args: &[String]) -> (Option<String>, Option<String>) {
-    let (mut provider, mut model) = (None, None);
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--provider" => provider = args.get(i + 1).cloned(),
-            "--model" => model = args.get(i + 1).cloned(),
-            _ => {}
-        }
-        i += 1;
-    }
-    (provider, model)
-}
-
-fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|a| a == flag)
-}
-
-fn approval_mode(value: &str) -> bone::tools::ApprovalMode {
-    match value {
-        "danger" => bone::tools::ApprovalMode::Danger,
-        _ => bone::tools::ApprovalMode::Safe,
     }
 }
 
@@ -332,6 +101,9 @@ fn boot_runtime_host_for(
 /// `bone serve` — bind a socket, run the headless runtime, and fan its events
 /// out to every attached frontend. Each `SubmitPrompt` drives a full agent turn
 /// whose events stream back over the protocol.
+///
+/// Trust model: local-first, optional TCP. There is no auth; bind to loopback
+/// (the default) unless you intentionally expose the daemon on a trusted network.
 async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let addr = parse_listen_addr(args);
     let shutdown_on_eof = has_flag(args, "--shutdown-on-stdin-eof");
@@ -359,6 +131,16 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");
+    if !addr.starts_with("127.")
+        && !addr.starts_with("localhost")
+        && !addr.starts_with("[::1]")
+        && !addr.starts_with("::1")
+    {
+        eprintln!(
+            "bone: warning: listening on non-loopback address {addr}; \
+             there is no auth — only use on a trusted network"
+        );
+    }
 
     let (session_manager, manager_rx) = bone::rpc::SessionManager::new();
     let factory_provider = provider.clone();
@@ -612,94 +394,6 @@ async fn run_connect(args: &[String]) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-/// Pick a suitable install directory for the bone symlink.
-/// Prefers a user-local bin that is already on PATH; falls back to standard locations.
-fn install_dir() -> Result<std::path::PathBuf, String> {
-    let candidates = if cfg!(windows) {
-        // Windows: use the user's local AppData bin
-        let appdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        vec![
-            format!("{appdata}\\Microsoft\\WindowsApps"),
-            format!("{appdata}\\Programs\\bone"),
-        ]
-    } else {
-        // Unix (Linux, macOS, Termux, etc.)
-        let home = std::env::var("HOME").unwrap_or_default();
-        vec![
-            format!("{home}/.local/bin"),
-            "/usr/local/bin".to_string(),
-            format!("{home}/bin"),
-        ]
-    };
-
-    // Pick the first candidate that exists (or that we can create)
-    for dir in &candidates {
-        let path = std::path::Path::new(dir);
-        if path.exists() {
-            return Ok(path.to_path_buf());
-        }
-        // Try to create it
-        if std::fs::create_dir_all(path).is_ok() {
-            return Ok(path.to_path_buf());
-        }
-    }
-    Err("could not find or create a suitable install directory".to_string())
-}
-
-fn do_install() -> std::io::Result<()> {
-    let exe = std::env::current_exe().map_err(|e| {
-        std::io::Error::other(format!("cannot determine current executable path: {e}"))
-    })?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-
-    let dir = install_dir().map_err(std::io::Error::other)?;
-    let link = dir.join("bone");
-
-    // Remove old symlink/file if it exists
-    let _ = std::fs::remove_file(&link);
-
-    #[cfg(windows)]
-    {
-        // On Windows, copy the binary instead of symlinking (symlinks need admin)
-        std::fs::copy(&exe, &link)?;
-    }
-    #[cfg(not(windows))]
-    {
-        std::os::unix::fs::symlink(&exe, &link)?;
-    }
-
-    println!("Installed: {} -> {}", link.display(), exe.display());
-
-    // Warn if the install dir is not on PATH
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    let dir_str = dir.to_string_lossy();
-    let on_path = if cfg!(windows) {
-        // Windows PATH uses ; separator and is case-insensitive
-        path_var
-            .split(';')
-            .any(|p| p.eq_ignore_ascii_case(&dir_str))
-    } else {
-        path_var.split(':').any(|p| p == dir_str)
-    };
-
-    if !on_path {
-        eprintln!("\nWarning: {} is not on your PATH.", dir.display());
-        eprintln!("Add it with:");
-        let profile = if cfg!(target_os = "macos") {
-            "~/.zprofile"
-        } else {
-            "~/.profile"
-        };
-        eprintln!(
-            "  echo 'export PATH=\"{}:$PATH\"' >> {}",
-            dir.display(),
-            profile
-        );
-        eprintln!("  source {}", profile);
-    }
-
-    std::process::exit(0)
 }
 
 #[tokio::main]

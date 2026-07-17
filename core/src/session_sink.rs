@@ -1,23 +1,18 @@
-//! Session persistence sink — the injectable seam for conversation/usage
-//! recording (Step 3 of the TUI/runtime decoupling).
+//! Session persistence sink — injectable seam for conversation/usage recording.
 //!
-//! Historically the agent loop owned a private `SessionWriter` struct that
-//! opened the SQLite DB on every call. That struct was constructed inside
-//! `agent_setup` with no injection point, so the loop could not be driven or
-//! unit-tested without a real database file.
+//! `SessionSink` is the object-safe trait for the four operations the agent
+//! loop performs (`conv_id`, `append_message`, `record_usage`, `end`).
+//! `AgentRequest` accepts `Option<Arc<dyn SessionSink>>`: when present it is
+//! used verbatim. Without one, top-level headless runs construct a real
+//! [`SessionWriter`]; delegated agents use either [`UsageOnlySessionSink`]
+//! (parent conversation id known — nested tokens show in `/stats`) or
+//! [`NullSessionSink`] (no parent / no DB).
 //!
-//! This module defines `SessionSink` — the object-safe trait capturing the
-//! four operations the loop performs (`conv_id`, `append_message`,
-//! `record_usage`, `end`). `agent_setup` now accepts an
-//! `Option<Arc<dyn SessionSink>>` on `AgentRequest`: when present it is used
-//! verbatim. Without one, top-level headless runs construct a real
-//! `SessionWriter`; delegated agents use either [`UsageOnlySessionSink`]
-//! (when a parent conversation id is known — so nested tokens appear in
-//! `/stats`) or [`NullSessionSink`] (no parent / no DB).
+//! [`NullSessionSink`] is a no-op (`conv_id == None`), for tests and drivers
+//! that need zero side-effects and zero file I/O.
 //!
-//! `NullSessionSink` is a no-op implementation (matching the `conv_id == None`
-//! fast-path `SessionWriter` already had internally), letting tests and a
-//! future Driver run the loop with zero side-effects and zero file I/O.
+//! Note: the interactive daemon path owns transcript via `RuntimeSession`;
+//! this sink is the headless / sub-agent write path. Do not invent a third.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -77,7 +72,7 @@ pub trait SessionSink: Send + Sync {
 ///
 /// Equivalent to a `SessionWriter` whose DB write failed to open a
 /// conversation — every method is a no-op because `conv_id` is `None`.
-/// Used by tests and (eventually) a Driver that does not persist locally.
+/// Used by tests and nested agents that must not touch the DB.
 pub struct NullSessionSink;
 
 impl SessionSink for NullSessionSink {

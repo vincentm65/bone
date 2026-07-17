@@ -886,3 +886,7 @@ fn value_for_field(field: &ConfigField, value: String) -> serde_yaml::Value {
         _ => serde_yaml::Value::String(value),
     }
 }
+
+#[cfg(test)]
+#[path = "custom_tests.rs"]
+mod custom_tests;

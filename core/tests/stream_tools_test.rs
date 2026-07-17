@@ -267,3 +267,16 @@ fn approval_mode_labels() {
     assert_eq!(ApprovalMode::Safe.label(), "Safe");
     assert_eq!(ApprovalMode::Danger.label(), "Danger");
 }
+
+#[test]
+fn approval_mode_parse() {
+    assert_eq!(ApprovalMode::parse("safe").unwrap(), ApprovalMode::Safe);
+    assert_eq!(
+        ApprovalMode::parse("read_only").unwrap(),
+        ApprovalMode::Safe
+    );
+    assert_eq!(ApprovalMode::parse("danger").unwrap(), ApprovalMode::Danger);
+    assert!(ApprovalMode::parse("prompt").is_err());
+    assert_eq!(ApprovalMode::parse_lenient("nope"), ApprovalMode::Safe);
+    assert_eq!(ApprovalMode::parse_lenient("danger"), ApprovalMode::Danger);
+}

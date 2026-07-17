@@ -26,3 +26,12 @@ pub fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+/// Global lock for tests that mutate process-wide env vars (`BONE_DIR`,
+/// `XDG_CONFIG_HOME`, …). Every such test must take this guard so parallel
+/// `cargo test` threads do not clobber each other.
+#[cfg(test)]
+pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
