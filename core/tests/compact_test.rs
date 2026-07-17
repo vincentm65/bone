@@ -1375,14 +1375,9 @@ fn compact_empty_summary_uses_notice_not_notify() {
 
 #[test]
 fn compact_is_not_a_protected_builtin() {
-    // The builtin list is in src/ui/commands/mod.rs BUILTINS.
-    // Verify /compact is NOT in it (it's Lua-defined).
-    let builtins = &[
-        "clear", "config", "edit", "e", "exit", "help", "model", "new", "provider", "quit",
-        "stats", "tools",
-    ];
+    // /compact is Lua-defined and must remain overridable.
     assert!(
-        !builtins.contains(&"compact"),
+        !bone_core::commands::is_protected_builtin("compact"),
         "/compact must not be a protected builtin; it should be Lua-overridable",
     );
 }

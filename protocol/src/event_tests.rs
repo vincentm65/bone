@@ -39,6 +39,11 @@ fn every_runtime_event_variant_round_trips() {
             is_error: false,
             content: "files".into(),
         },
+        RuntimeEvent::ToolOutput {
+            call_id: "c1".into(),
+            content: "partial\n".into(),
+            stderr: false,
+        },
         RuntimeEvent::TokenUsage {
             sent: 10,
             received: 2,

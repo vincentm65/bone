@@ -1,4 +1,4 @@
-use super::{SessionDb, civil_from_days, iso_from_unix_secs};
+use super::{SCHEMA_VERSION, SessionDb, civil_from_days, iso_from_unix_secs};
 use rusqlite::Connection;
 
 /// The original v1 schema, before `is_estimated` and the created_at index.
@@ -53,7 +53,10 @@ fn migrate_v1_preserves_user_data() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9, "schema should be migrated to latest version");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "schema should be migrated to latest version"
+    );
 
     // Pre-existing rows survive the migration.
     let conversations: i64 = db
@@ -133,7 +136,7 @@ fn legacy_unversioned_database_migrates_without_data_loss() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, SCHEMA_VERSION);
 
     // Data untouched.
     let count: i64 = db
@@ -164,7 +167,7 @@ fn fresh_database_initializes_at_latest_version() {
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, SCHEMA_VERSION);
 
     // record_usage relies on the is_estimated column being present.
     db.create_conversation("openai", "gpt-4").unwrap();
@@ -198,7 +201,7 @@ fn v8_migration_adds_context_checkpoints_without_touching_messages() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, SCHEMA_VERSION);
     assert_eq!(checkpoint_table, 1);
     assert_eq!(db.load_messages(conv).unwrap()[0].content, "preserved");
 }

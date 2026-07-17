@@ -300,6 +300,16 @@ fn strikethrough_text_is_rendered() {
         rendered_text("This is ~~deleted~~ text.", 80),
         vec!["This is deleted text."]
     );
+    let lines = render_markdown("This is ~~deleted~~ text.", 80);
+    let deleted = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content == "deleted")
+        .expect("deleted span should be present");
+    assert!(
+        deleted.style.add_modifier.contains(Modifier::CROSSED_OUT),
+        "strikethrough should set CROSSED_OUT"
+    );
 }
 
 #[test]

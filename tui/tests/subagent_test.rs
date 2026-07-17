@@ -503,16 +503,54 @@ fn depth_guard_rejects_spawn_at_depth_1() {
 
 #[test]
 fn rust_jobs_pane_returns_valid_panepage() {
-    // The pane is driven purely by the job registry — no registered-agent list
-    // is consulted, so the agent labels come from the jobs themselves.
-    let registry = bone::ext::jobs::registry();
-    let id1 = registry.create(test_job("render-researcher", "search query"));
-    let _id2 = registry.create(test_job("render-coder", "fix bug in module"));
-    // Complete one job so only one is running (pane should still show).
-    registry.complete(&id1, Ok("found 3 relevant papers".into()));
+    // Local jobs only — avoid the process-global registry so parallel tests
+    // cannot pollute the pane contents. Labels come from the jobs themselves.
+    let jobs = vec![
+        bone::ext::jobs::Job {
+            id: "render-1".into(),
+            agent: "render-researcher".into(),
+            task: "search query".into(),
+            title: String::new(),
+            status: bone::ext::jobs::JobStatus::Done,
+            result: Some("found 3 relevant papers".into()),
+            started_at: bone::ext::jobs::current_unix_seconds(),
+            finished_at: Some(bone::ext::jobs::current_unix_seconds()),
+            consumed: false,
+            token_sent: 0,
+            token_received: 0,
+            result_file: None,
+            max_concurrency: 1,
+            activity: None,
+            trace: Vec::new(),
+            events: Vec::new(),
+            transcript: None,
+            scope: None,
+            cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        },
+        bone::ext::jobs::Job {
+            id: "render-2".into(),
+            agent: "render-coder".into(),
+            task: "fix bug in module".into(),
+            title: String::new(),
+            status: bone::ext::jobs::JobStatus::Running,
+            result: None,
+            started_at: bone::ext::jobs::current_unix_seconds(),
+            finished_at: None,
+            consumed: false,
+            token_sent: 0,
+            token_received: 0,
+            result_file: None,
+            max_concurrency: 1,
+            activity: None,
+            trace: Vec::new(),
+            events: Vec::new(),
+            transcript: None,
+            scope: None,
+            cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        },
+    ];
 
-    // Call the Rust-side pane renderer directly.
-    let pane = bone::ui::jobs_pane::render(&registry.all_jobs());
+    let pane = bone::ui::jobs_pane::render(&jobs);
     assert!(
         pane.is_some(),
         "jobs pane renderer should return Some for running jobs; got None",
@@ -521,7 +559,20 @@ fn rust_jobs_pane_returns_valid_panepage() {
     let pane = pane.unwrap();
     assert_eq!(pane.source, "jobs");
     assert!(pane.title.contains("Agents"));
-    assert!(pane.content.len() >= 2); // at least one line for running agent + separator
+    assert!(pane.content.len() >= 2); // running agent line + separator
+    let text: String = pane
+        .content
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+    assert!(
+        text.contains("render-coder"),
+        "running job label missing: {text}"
+    );
+    assert!(
+        !text.contains("render-researcher"),
+        "completed job should not be listed: {text}"
+    );
 }
 
 // ── 5. Cancel through the Lua tool (ctx.agent.cancel → flag) ─────────────────

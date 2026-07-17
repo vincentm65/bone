@@ -119,6 +119,20 @@ fn multiline_input_is_clipped_to_a_short_frame() {
             )
         })
         .unwrap();
+
+    let screen = screen_text(&terminal, 20, 8);
+    // 80-line buffer cannot fit an 8-row frame; late lines are clipped while
+    // the start of the buffer remains visible.
+    assert!(
+        screen.contains("line 0"),
+        "start of input should remain visible: {screen:?}"
+    );
+    assert!(
+        !screen.contains("line 79"),
+        "overflowing input lines should be clipped: {screen:?}"
+    );
+    // The short frame must not expand to fit the whole buffer.
+    assert_eq!(terminal.backend().buffer().area().height, 8);
 }
 
 #[test]

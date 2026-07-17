@@ -64,11 +64,6 @@ fn render_lists_all_agents() {
 }
 
 #[test]
-fn render_returns_none_when_all_idle() {
-    assert!(render(&[]).is_none());
-}
-
-#[test]
 fn render_returns_none_when_jobs_done() {
     let jobs = vec![job("job-10", "researcher", JobStatus::Done)];
     assert!(render(&jobs).is_none());

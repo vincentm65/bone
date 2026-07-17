@@ -424,6 +424,10 @@ const BUCKET_AGG_COLS: &str = "COALESCE(SUM(prompt_tokens),0) AS prompt, \
 const BUCKET_PROJECTION: &str = "COALESCE(usage.prompt,0), COALESCE(usage.completion,0), \
      COALESCE(usage.cached,0), COALESCE(usage.cost,0.0), COALESCE(usage.requests,0)";
 
+/// Latest conversations.db schema version. Bumped when `setup_schema` gains a
+/// new migration step; tests assert against this instead of a bare literal.
+pub(crate) const SCHEMA_VERSION: u32 = 9;
+
 /// SQLite-backed conversation and usage storage.
 pub struct SessionDb {
     conn: Connection,
@@ -461,8 +465,6 @@ impl SessionDb {
             )
             .map(|count| count > 0)
         }
-
-        const SCHEMA_VERSION: u32 = 9;
 
         let current_version: u32 = self
             .conn

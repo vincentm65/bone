@@ -166,8 +166,11 @@ async fn cancel_kills_promptly_and_returns_partial_output() {
     // proving the process tree is killed on cancel, not waited out.
     let tool = ShellTool;
     let cancel = Arc::new(AtomicBool::new(false));
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut ctx = ToolExecutionContext::default();
+    ctx.call_id = "cancel-test".into();
     ctx.cancelled = Some(cancel.clone());
+    ctx.runtime_events = Some(events_tx);
 
     let cmd = tokio::spawn(async move {
         tool.execute_output_live(
@@ -181,8 +184,26 @@ async fn cancel_kills_promptly_and_returns_partial_output() {
         .await
     });
 
-    // Let the echo land, then cancel.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Wait until live output carries the echo, then cancel.
+    let saw_output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match events_rx.recv().await {
+                Some(bone_core::runtime::RuntimeEvent::ToolOutput { content, .. })
+                    if content.contains("starting download") =>
+                {
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("event channel closed before shell output"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        saw_output.is_ok(),
+        "timed out waiting for live shell output before cancel"
+    );
+
     let start = Instant::now();
     cancel.store(true, Ordering::Relaxed);
 
