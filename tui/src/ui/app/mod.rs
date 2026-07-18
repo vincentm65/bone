@@ -342,9 +342,9 @@ pub struct App {
     lua_status: Vec<(String, Vec<crate::runtime::view::StatusSegment>)>,
     /// Call IDs that already have a tool row in chat (to avoid duplicates).
     shown_tool_rows: std::collections::HashSet<String>,
-    /// In-flight shell commands (call_id, formatted label), shown as a
-    /// transient strip above the input while running.
-    running_shells: Vec<(String, String)>,
+    /// In-flight shell commands (call_id, formatted label, start time), shown as
+    /// a transient strip above the input while running.
+    running_shells: Vec<(String, String, std::time::Instant)>,
     /// Shell calls waiting for a display threshold before promotion to
     /// `running_shells`, so sub-second commands don't flash the strip.
     pending_shells: Vec<(String, String, std::time::Instant)>,

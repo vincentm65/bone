@@ -80,6 +80,84 @@ fn screen_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> Str
 }
 
 #[test]
+fn running_shell_row_shows_state_elapsed_time_and_syntax_colors() {
+    let renderer = Renderer::new();
+    let input = InputState::default();
+    let mut status = status_info();
+    status.spinner_frames = vec!["⠋".to_string()];
+    let running = vec![(
+        "call-1".to_string(),
+        "shell rg -n \"needle\" tui/src".to_string(),
+        std::time::Instant::now() - std::time::Duration::from_secs(2),
+    )];
+    let args = PaneDraw {
+        input: &input,
+        status_info: &status,
+        pages: &[],
+        active_page: 0,
+        autocomplete: None,
+        running: &running,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
+
+    terminal
+        .draw(|frame| renderer.draw_bottom_pane(frame, &args, None))
+        .unwrap();
+
+    let row = row_text(&terminal, 0, 60);
+    assert!(row.starts_with("⠋ RUNNING  2."), "row: {row:?}");
+    assert!(row.contains("rg -n \"needle\" tui/src"), "row: {row:?}");
+    assert!(!row.contains("shell rg"), "row: {row:?}");
+
+    let theme = bone::ui::theme::Theme::default();
+    let program_col = unicode_width::UnicodeWidthStr::width(row.split("rg").next().unwrap()) as u16;
+    let flag_col = unicode_width::UnicodeWidthStr::width(row.split("-n").next().unwrap()) as u16;
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        buffer.cell((program_col, 0)).unwrap().fg,
+        theme.shell_program
+    );
+    assert_eq!(buffer.cell((flag_col, 0)).unwrap().fg, theme.shell_flag);
+}
+
+#[test]
+fn running_shell_rows_show_parallel_position_and_truncate() {
+    let renderer = Renderer::new();
+    let input = InputState::default();
+    let running = vec![
+        (
+            "call-1".to_string(),
+            "shell cargo test --workspace".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(3),
+        ),
+        (
+            "call-2".to_string(),
+            "shell cargo clippy --workspace --all-targets".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(4),
+        ),
+    ];
+    let status = status_info();
+    let args = PaneDraw {
+        input: &input,
+        status_info: &status,
+        pages: &[],
+        active_page: 0,
+        autocomplete: None,
+        running: &running,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(34, 6)).unwrap();
+
+    terminal
+        .draw(|frame| renderer.draw_bottom_pane(frame, &args, None))
+        .unwrap();
+
+    let first = row_text(&terminal, 0, 34);
+    let second = row_text(&terminal, 1, 34);
+    assert!(first.contains("[1/2] cargo test"), "row: {first:?}");
+    assert!(second.contains("[2/2] cargo clippy…"), "row: {second:?}");
+}
+
+#[test]
 fn expanded_command_preview_is_clipped_to_a_short_frame() {
     let renderer = Renderer::new();
     let mut prompt = Prompt::new("shell", vec!["Accept", "Advise", "Cancel"]);

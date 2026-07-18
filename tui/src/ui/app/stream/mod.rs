@@ -901,7 +901,8 @@ impl App {
                 // every later keystroke this turn buffers instead of reaching
                 // the chat input.
                 pending_key.clear_owner();
-                self.running_shells.retain(|(cid, _)| cid != &call_id);
+                self.running_shells
+                    .retain(|(cid, _, _)| cid != &call_id);
                 self.pending_shells.retain(|(cid, _, _)| cid != &call_id);
                 if let Some(idx) = cur_idx.take() {
                     self.renderer
@@ -1128,7 +1129,7 @@ impl App {
         let mut promoted = Vec::new();
         self.pending_shells.retain(|(id, label, start)| {
             if now.duration_since(*start) >= SHELL_DISPLAY_DELAY {
-                promoted.push((id.clone(), label.clone()));
+                promoted.push((id.clone(), label.clone(), *start));
                 false
             } else {
                 true
