@@ -631,9 +631,9 @@ impl App {
                         )
                         .ok();
                     }
-                    Ok(RuntimeEvent::Status { message }) => {
-                        // Surface daemon notices (incl. the deferred-config note)
-                        // in scrollback, like `pump_notice`.
+                    Ok(RuntimeEvent::Status { message })
+                    | Ok(RuntimeEvent::Notice { message }) => {
+                        // Surface daemon messages emitted while a command runs.
                         self.messages.push(Message::system(message));
                         self.renderer.flush_new_to_scrollback(&self.messages, term).ok();
                     }

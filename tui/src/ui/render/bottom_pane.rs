@@ -631,15 +631,7 @@ impl super::Renderer {
                     ));
                     spans.push(Span::raw(" "));
                 }
-                spans.push(Span::styled(
-                    "RUNNING",
-                    Style::default()
-                        .fg(self.theme.thinking)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                prefix_width += 7;
-
-                let elapsed = format!("  {}  ", running_elapsed(*started_at));
+                let elapsed = format!("{}  ", running_elapsed(*started_at));
                 prefix_width += UnicodeWidthStr::width(elapsed.as_str());
                 spans.push(Span::styled(
                     elapsed,

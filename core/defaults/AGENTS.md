@@ -493,7 +493,7 @@ Reliability properties:
 - Replacement happens only after deterministic schema, size, and protected-text validation, and only when the resulting provider context estimate is smaller. Failure preserves the original transcript.
 - Turn boundaries keep user, assistant, and associated tool messages together. The legacy message-count setting is rounded out to complete turns.
 - Summarization runs without tools and with explicit output and wall-clock limits.
-- Automatic compaction emits transient status while working and a persistent notice only on failure.
+- Automatic compaction emits transient status while working and a persistent notice on success, failure, or rejection.
 
 Configuration is stored in `config/general.yaml` and read by the command through
 `ctx.config.get("general", key)`. Change it through `/config` or edit that YAML;

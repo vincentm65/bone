@@ -804,6 +804,7 @@ impl DaemonCtx {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_ctx = cancel.clone();
         let (live_tx, mut live_rx) = mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
+        let (status_tx, mut status_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
 
         // The handler call blocks (Lua + nested tool calls), so run it off the
@@ -819,6 +820,7 @@ impl DaemonCtx {
             let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
             app_state.apply_to(&mut ctx_cfg);
             ctx_cfg.key_sender = Some(live_tx);
+            ctx_cfg.runtime_status = Some(status_tx);
             ctx_cfg.ui = Some(shared_ui);
             ctx_cfg.cancelled = Some(cancel_for_ctx);
             ctx_cfg.conversation_operations = Some(conversation_tx);
@@ -847,10 +849,14 @@ impl DaemonCtx {
         loop {
             tokio::select! {
                 res = &mut handle => {
-                    // Flush any trailing pane diffs the handler emitted.
+                    // Flush any trailing pane diffs and UI messages the handler emitted.
                     self.drain_diffs();
+                    while let Ok(event) = status_rx.try_recv() {
+                        self.hub.publish(event);
+                    }
                     return res.ok().flatten();
                 }
+                Some(event) = status_rx.recv() => self.hub.publish(event),
                 Some(req) = live_rx.recv() => {
                     let id = self.key_registry.register(req);
                     self.hub.publish(RuntimeEvent::KeyRequest { id });

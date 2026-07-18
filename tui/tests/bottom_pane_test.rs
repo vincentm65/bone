@@ -80,7 +80,7 @@ fn screen_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> Str
 }
 
 #[test]
-fn running_shell_row_shows_state_elapsed_time_and_syntax_colors() {
+fn running_shell_row_shows_elapsed_time_and_syntax_colors() {
     let renderer = Renderer::new();
     let input = InputState::default();
     let mut status = status_info();
@@ -105,7 +105,8 @@ fn running_shell_row_shows_state_elapsed_time_and_syntax_colors() {
         .unwrap();
 
     let row = row_text(&terminal, 0, 60);
-    assert!(row.starts_with("⠋ RUNNING  2."), "row: {row:?}");
+    assert!(row.starts_with("⠋ 2."), "row: {row:?}");
+    assert!(!row.contains("RUNNING"), "row: {row:?}");
     assert!(row.contains("rg -n \"needle\" tui/src"), "row: {row:?}");
     assert!(!row.contains("shell rg"), "row: {row:?}");
 
@@ -154,7 +155,10 @@ fn running_shell_rows_show_parallel_position_and_truncate() {
     let first = row_text(&terminal, 0, 34);
     let second = row_text(&terminal, 1, 34);
     assert!(first.contains("[1/2] cargo test"), "row: {first:?}");
-    assert!(second.contains("[2/2] cargo clippy…"), "row: {second:?}");
+    assert!(
+        second.contains("[2/2] cargo clippy --worksp…"),
+        "row: {second:?}"
+    );
 }
 
 #[test]
