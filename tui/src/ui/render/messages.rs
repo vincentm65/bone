@@ -82,8 +82,7 @@ pub(crate) fn render_tool_with_hint(
                     } else {
                         raw_line
                     };
-                    let tokens = lex_shell(rest);
-                    let mut spans = shell_spans_from_tokens(&tokens, theme);
+                    let mut spans = shell_spans(rest, theme);
                     if is_first_logical {
                         spans.insert(
                             0,
@@ -474,6 +473,10 @@ fn shell_output_lines(content: &str) -> Vec<String> {
     }
 
     content.lines().map(str::to_string).collect()
+}
+
+pub(crate) fn shell_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
+    shell_spans_from_tokens(&lex_shell(line), theme)
 }
 
 fn shell_spans_from_tokens(tokens: &[ShellToken], theme: &Theme) -> Vec<Span<'static>> {

@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::wrap;
 use super::{InputState, Prompt, StatusInfo};
@@ -21,9 +21,9 @@ pub struct PaneDraw<'a> {
     pub pages: &'a [PanePage],
     pub active_page: usize,
     pub autocomplete: Option<&'a AutocompleteState>,
-    /// In-flight shell commands (call_id, formatted label), shown as a
-    /// transient strip above the input while running.
-    pub running: &'a [(String, String)],
+    /// In-flight shell commands (call_id, formatted label, start time), shown as
+    /// a transient strip above the input while running.
+    pub running: &'a [(String, String, std::time::Instant)],
 }
 fn push_metric(parts: &mut Vec<Span<'static>>, style: Style, label: &str) {
     if !parts.is_empty() {
@@ -225,6 +225,37 @@ fn shell_command_preview_lines(command: &str, width: usize) -> Vec<String> {
         .into_iter()
         .flat_map(|line| wrap::wrap_text_with_prefix(&line, "  ", "  ", width))
         .collect()
+}
+
+fn running_elapsed(started_at: std::time::Instant) -> String {
+    let elapsed = started_at.elapsed();
+    if elapsed.as_secs() < 60 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}m {:02}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+    }
+}
+
+fn truncate_display_width(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let mut width = 0;
+    let mut truncated = String::new();
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width >= max_width {
+            break;
+        }
+        truncated.push(ch);
+        width += ch_width;
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn prompt_option_line(
@@ -583,13 +614,17 @@ impl super::Renderer {
         // ── Running shell commands strip (above the separator) ───────────
         if !args.running.is_empty() && y < content_bottom {
             let spinner = spinner_frame(status_info);
-            for (_, label) in args.running {
+            let total = args.running.len();
+            for (index, (_, label, started_at)) in args.running.iter().enumerate() {
                 if y >= content_bottom {
                     break;
                 }
                 let first_line = label.lines().next().unwrap_or(label);
+                let command = first_line.strip_prefix("shell ").unwrap_or(first_line);
                 let mut spans = Vec::new();
+                let mut prefix_width = 0;
                 if let Some(ref s) = spinner {
+                    prefix_width += UnicodeWidthStr::width(s.as_str()) + 1;
                     spans.push(Span::styled(
                         s.clone(),
                         Style::default().fg(self.theme.thinking),
@@ -597,9 +632,34 @@ impl super::Renderer {
                     spans.push(Span::raw(" "));
                 }
                 spans.push(Span::styled(
-                    first_line.to_string(),
-                    Style::default().fg(self.theme.tool_call),
+                    "RUNNING",
+                    Style::default()
+                        .fg(self.theme.thinking)
+                        .add_modifier(Modifier::BOLD),
                 ));
+                prefix_width += 7;
+
+                let elapsed = format!("  {}  ", running_elapsed(*started_at));
+                prefix_width += UnicodeWidthStr::width(elapsed.as_str());
+                spans.push(Span::styled(
+                    elapsed,
+                    Style::default().fg(self.theme.status_text),
+                ));
+
+                if total > 1 {
+                    let position = format!("[{}/{}] ", index + 1, total);
+                    prefix_width += UnicodeWidthStr::width(position.as_str());
+                    spans.push(Span::styled(
+                        position,
+                        Style::default().fg(self.theme.status_text),
+                    ));
+                }
+
+                let command = truncate_display_width(
+                    command,
+                    (area.width as usize).saturating_sub(prefix_width),
+                );
+                spans.extend(super::messages::shell_spans(&command, &self.theme));
                 frame.render_widget(
                     Paragraph::new(Line::from(spans)),
                     Rect {
