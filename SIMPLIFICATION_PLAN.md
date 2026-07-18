@@ -54,7 +54,7 @@ Reduce product surface, maintenance cost, and duplicated UX while preserving Bon
 
 ## 2. Move `/memory` to `bone-catalog`
 
-**Target:** Make automated long-term memory an optional catalog extension. Bundled Bone should favor explicit project/user instructions such as `AGENTS.local.md`.
+**Target:** Make automated long-term memory an optional catalog extension. Persistent user and project preferences use the scoped memory files managed by that extension.
 
 ### Work
 
@@ -64,7 +64,7 @@ Reduce product surface, maintenance cost, and duplicated UX while preserving Bon
 - [x] Remove `memory.lua` from default command selection/seeding and refresh logic.
 - [x] Remove bundled-memory documentation and replace it with a short catalog pointer.
 - [x] Remove or update tests that assume `/memory` is bundled.
-- [x] Document `AGENTS.local.md` as the default explicit persistence mechanism.
+- [x] Document scoped memory files as the persistent preference mechanism.
 
 ### Migration
 

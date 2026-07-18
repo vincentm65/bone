@@ -1,8 +1,8 @@
 <!-- bone-agents-reference-version: 3 -->
 # Bone Agent Reference
 
-Bone refreshes this reference from the running build. Put user instructions in
-`AGENTS.local.md`; Bone never modifies that file.
+Bone refreshes this reference from the running build. It documents how to
+configure and extend Bone.
 
 ## Start Here: Task to File
 
@@ -19,7 +19,7 @@ Paths are relative to the resolved Bone config directory.
 | Add shared Lua logic | `lua/lib/<name>.lua`; load with `require` |
 | Add a plugin | `lua/plugins/<name>/init.lua`; load with `bone.plugin.load` |
 | Wire keymaps, subagents, plugins, or modules at startup | `init.lua` |
-| Add persistent agent instructions | `AGENTS.local.md` |
+| Manage persistent preferences | `memory/global.md` and `memory/projects/<cwd-key>.md` via `/memory` |
 
 Keep `init.lua` as lightweight wiring. Put substantial implementations in the
 purpose-specific `lua/` directories.
@@ -85,7 +85,6 @@ config/tools.yaml        — Tool enable/disable toggles
 config/commands.yaml     — Command enable/disable toggles
 command-policy.yaml      — Shell command safety tiers
 memory/                  — Optional catalog /memory extension data
-AGENTS.local.md          — Optional user-authored instructions; never generated
 ```
 
 ## Lua Extension System
@@ -526,9 +525,9 @@ Automated long-term memory is not bundled with Bone. Install `memory.lua` throug
 commands. The extension owns all memory behavior through Lua, including
 `before_turn` prompt injection.
 
-For explicit persistence without automated capture, put stable user or project
-instructions in `AGENTS.local.md`. Bone loads that file as instructions and never
-modifies it.
+Persistent preferences live in `memory/global.md` and
+`memory/projects/<cwd-key>.md`. They can be edited directly or managed through
+the catalog-installed `/memory` extension.
 
 Existing `memory.md` and `memory/` data are preserved during migration, while the
 legacy `lua/commands/memory.lua` is removed. Legacy `memory.md` is copied to
@@ -657,8 +656,8 @@ local menu = require("ui.menu")
 local result = menu.select(ctx, {
     question = "Which branch?",
     options = { "main", "dev" },
-    visible_rows = 12,          -- requested pane height; defaults to 12
     default = 1,                 -- 1-based initial highlighted option (optional)
+    visible_rows = 12,          -- requested pane height; defaults to 12
     allow_custom = true,         -- offer a free-text "Custom:" row (optional)
 })
 -- single_select → { value = "main" }  or  { value = "...", custom = true }
@@ -671,6 +670,7 @@ local result = menu.select(ctx, {
 -- text_input    → menu.text_input(ctx, { initial = "prior text" }) returns { value = "typed text" }
 -- cancelled     → { cancelled = true }
 ```
+
 An object option may include a generic rich preview. When any option has one,
 the menu shows a compact option rail beside the highlighted option's preview
 (and stacks them on narrow terminals). Preview lines use the same plain-string
@@ -721,13 +721,9 @@ limit. An explicit `visible_rows` keeps a fixed height. Use **Tab** to focus the
 preview and arrow/Page keys to scroll it. Selection, multi-select toggles,
 custom input, and return values are unchanged.
 
-
 For lower-level input, `ctx.ui.key()` blocks until the next key and returns a
 table such as `{ code = "Up", char = nil, ctrl = false, alt = false, shift = false }`.
 Ctrl+C remains host-owned cancellation; Esc is delivered to Lua.
-
-The catalog `ask_user` tool is built on `ui.menu`; install it with `/catalog`
-for a worked example of multi-question flows.
 
 #### Lifecycle & cancellation
 
@@ -1174,7 +1170,6 @@ Plugins do not auto-run. Repeated `load` is a no-op.
   init.lua                     -- optional Lua behavior and orchestration
   command-policy.yaml          -- shell command safety tiers
   AGENTS.md                    -- Bone-owned reference; refreshed by each build
-  AGENTS.local.md              -- optional user-authored agent instructions
   .setup.json                  -- onboarding selection/marker
   config/
     general.yaml               -- `/config` page schema and compaction settings
@@ -1209,10 +1204,9 @@ Plugins do not auto-run. Repeated `load` is a no-op.
 
 Legacy root files `memory.md` and `memory.last_run` may remain after the
 one-time catalog migration; they are not deleted. Bone refreshes `AGENTS.md`
-from the bundled reference at startup and never modifies `AGENTS.local.md`.
-Other seeded Lua files are created on first launch and do not overwrite existing
-files. Catalog tools/commands are installed only when selected during onboarding
-or via `/catalog`.
+from the bundled reference at startup. Other seeded Lua files are created on
+first launch and do not overwrite existing files. Catalog tools/commands are
+installed only when selected during onboarding or via `/catalog`.
 
 ## Tool vs Command
 

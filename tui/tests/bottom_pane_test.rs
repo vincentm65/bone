@@ -265,10 +265,10 @@ fn pane_page_adds_height_to_viewport() {
         4
     );
 
-    // With 3-line page: base(4) + blank separator(1) + content(3) = 8
+    // With 3-line page: base(4) + top/bottom spacers(2) + content(3) = 9
     assert_eq!(
         Renderer::new().desired_height(&input, None, 80, &pages, 0, None, 0),
-        8
+        9
     );
 }
 
@@ -285,10 +285,10 @@ fn pane_page_honors_visible_rows() {
         scroll: 0,
     }];
 
-    // base(4) + blank separator(1) + tool-requested content rows(12)
+    // base(4) + top/bottom spacers(2) + tool-requested content rows(12)
     assert_eq!(
         Renderer::new().desired_height(&input, None, 80, &pages, 0, None, 0),
-        17
+        18
     );
 }
 
@@ -312,10 +312,10 @@ fn pane_page_with_two_pages_renders_content() {
         },
     ];
 
-    // base(4) + blank separator(1) + content(1) = 6
+    // base(4) + top/bottom spacers(2) + content(1) = 7
     assert_eq!(
         Renderer::new().desired_height(&input, None, 80, &pages, 0, None, 0),
-        6
+        7
     );
 }
 
@@ -361,7 +361,7 @@ fn pane_page_renders_content_between_input_and_status() {
         visible_rows: bone::ui::render::DEFAULT_PANE_ROWS,
         scroll: 0,
     }];
-    let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(40, 7)).unwrap();
 
     terminal
         .draw(|frame| {
@@ -373,17 +373,19 @@ fn pane_page_renders_content_between_input_and_status() {
         })
         .unwrap();
 
-    // Row layout (6 rows total):
+    // Row layout (7 rows total):
     // 0: top sep
     // 1: input "> "
     // 2: input bottom border
     // 3: blank pane separator
     // 4: "hello pane"
-    // 5: status bar
+    // 5: blank status separator
+    // 6: status bar
     assert!(row_text(&terminal, 2, 40).contains('─'));
     assert!(row_text(&terminal, 3, 40).trim().is_empty());
     assert!(row_text(&terminal, 4, 40).contains("hello pane"));
-    assert!(row_text(&terminal, 5, 40).contains("test-model"));
+    assert!(row_text(&terminal, 5, 40).trim().is_empty());
+    assert!(row_text(&terminal, 6, 40).contains("test-model"));
 }
 
 #[test]

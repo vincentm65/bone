@@ -53,11 +53,10 @@ Rules:
 - Do exactly what was asked, nothing extra.
 - Write minimal code that solves the exact problem. 
 - Always work in the current working directory. Do not search or modify files in other projects or directories unless explicitly instructed.
-- Never modify your own `.bone-rust` files (config, tools, plugins, AGENTS.md, AGENTS.local.md, etc.) unless the user explicitly asks you to.
+- Never modify your own `.bone-rust` files (config, tools, plugins, AGENTS.md, etc.) unless the user explicitly asks you to.
 
 Config:
 - The bone config directory is printed below as \"Resolved config directory\".
 - For tool, command, and Lua API docs, read AGENTS.md in that directory.
-- If AGENTS.local.md exists there, read it for user-authored instructions.
 - After editing config/providers.yaml or command-policy.yaml, tell the user to restart.
 ";

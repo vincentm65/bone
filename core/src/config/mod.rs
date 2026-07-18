@@ -154,42 +154,9 @@ pub fn seed_command_policy_if_missing() {
 }
 
 /// Keep the application-owned agent reference synchronized with this build.
-/// User-authored instructions belong in `AGENTS.local.md` and are never touched.
-///
-/// If an existing `AGENTS.md` diverges from the bundled reference and
-/// `AGENTS.local.md` is missing, the previous content is copied there once so
-/// in-place customizations are not silently lost on upgrade.
 pub fn sync_agents_md() {
-    let dir = bone_dir();
-    let path = dir.join("AGENTS.md");
-    preserve_divergent_agents_md(&path, &dir.join("AGENTS.local.md"), DEFAULT_AGENTS_MD);
+    let path = bone_dir().join("AGENTS.md");
     sync_bundled_file(&path, DEFAULT_AGENTS_MD);
-}
-
-/// One-time migration: when `agents_path` exists with content different from
-/// `bundled` and `local_path` is absent, copy the old content to `local_path`.
-fn preserve_divergent_agents_md(agents_path: &Path, local_path: &Path, bundled: &str) {
-    if local_path.exists() {
-        return;
-    }
-    let Ok(existing) = fs::read_to_string(agents_path) else {
-        return;
-    };
-    if existing == bundled {
-        return;
-    }
-    match fs::write(local_path, &existing) {
-        Ok(()) => {
-            crate::ext::ctx::runtime_warn(
-                "bone: previous AGENTS.md customizations preserved in AGENTS.local.md",
-            );
-        }
-        Err(e) => {
-            crate::ext::ctx::runtime_warn(format!(
-                "bone: warning: could not preserve previous AGENTS.md to AGENTS.local.md: {e}"
-            ));
-        }
-    }
 }
 
 fn sync_bundled_file(path: &Path, content: &str) {
@@ -482,8 +449,7 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
 #[cfg(test)]
 mod tests {
     use super::{
-        migrate_memory_to_catalog, migrate_memory_to_catalog_with_hash,
-        preserve_divergent_agents_md, sync_bundled_file,
+        migrate_memory_to_catalog, migrate_memory_to_catalog_with_hash, sync_bundled_file,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -570,9 +536,7 @@ mod tests {
             std::thread::current().id()
         ));
         let path = dir.join("AGENTS.md");
-        let local_path = dir.join("AGENTS.local.md");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(&local_path, "user instructions").unwrap();
 
         sync_bundled_file(&path, "version 1");
         assert_eq!(fs::read_to_string(&path).unwrap(), "version 1");
@@ -580,45 +544,6 @@ mod tests {
         fs::write(&path, "stale").unwrap();
         sync_bundled_file(&path, "version 2");
         assert_eq!(fs::read_to_string(&path).unwrap(), "version 2");
-        assert_eq!(
-            fs::read_to_string(&local_path).unwrap(),
-            "user instructions"
-        );
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn divergent_agents_md_is_preserved_to_local_when_missing() {
-        let dir = std::env::temp_dir().join(format!(
-            "bone-sync-agents-migrate-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let path = dir.join("AGENTS.md");
-        let local_path = dir.join("AGENTS.local.md");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(&path, "my custom instructions").unwrap();
-        assert!(!local_path.exists());
-
-        let bundled = "bundled version";
-        preserve_divergent_agents_md(&path, &local_path, bundled);
-        sync_bundled_file(&path, bundled);
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), bundled);
-        assert_eq!(
-            fs::read_to_string(&local_path).unwrap(),
-            "my custom instructions"
-        );
-
-        // Second pass must not overwrite an existing AGENTS.local.md.
-        fs::write(&path, "stale again").unwrap();
-        preserve_divergent_agents_md(&path, &local_path, bundled);
-        sync_bundled_file(&path, bundled);
-        assert_eq!(
-            fs::read_to_string(&local_path).unwrap(),
-            "my custom instructions"
-        );
 
         fs::remove_dir_all(dir).unwrap();
     }

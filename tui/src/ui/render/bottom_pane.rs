@@ -45,7 +45,7 @@ pub const MAX_PANE_ROWS: usize = 24;
 struct PageLayout {
     /// Number of content rows that will be rendered.
     content_rows: u16,
-    /// Total height: top sep + content.
+    /// Total height: top spacer + content + bottom spacer.
     total_height: u16,
 }
 
@@ -61,8 +61,8 @@ impl PageLayout {
         let page_idx = active_page.min(pages.len() - 1);
         let wanted = page_visible_rows(&pages[page_idx]) as u16;
         let content_rows = wanted.min(max_content);
-        // Chrome: 1 top sep
-        let chrome: u16 = 1;
+        // Chrome: one spacer above and below the page content.
+        let chrome: u16 = 2;
         Self {
             content_rows,
             total_height: chrome.saturating_add(content_rows),
