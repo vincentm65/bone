@@ -116,7 +116,11 @@ fn history_and_menu_seeds_refresh_pre_feature_copies() {
     assert!(should_refresh_seeded_lua(&history, "history.lua").unwrap());
 
     let menu = dir.join("menu.lua");
-    std::fs::write(&menu, "local pane = require(\"ui.pane\")\n").unwrap();
+    std::fs::write(
+        &menu,
+        "local pane = require(\"ui.pane\")\n-- SELECTED_BG description_spans label_modifiers\n",
+    )
+    .unwrap();
     assert!(should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);

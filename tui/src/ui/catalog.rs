@@ -1,6 +1,7 @@
 //! `/catalog` — a fullscreen popup for browsing, installing, and removing the
-//! optional tools and commands hosted in the catalog. Tools are unchecked by
-//! default; applying only acts on items the user explicitly toggled, so
+//! optional tools and commands hosted in the catalog. Rows are grouped into
+//! Updates, Installed, and Available sections. Installed items are checked and
+//! labeled; applying only acts on items the user explicitly toggled, so
 //! already-installed items are preserved unless the user unchecks them.
 //!
 //! The list/detail rendering is shared with the onboarding wizard via
@@ -27,31 +28,115 @@ pub struct Outcome {
     pub message: String,
 }
 
-/// Build picker rows for the given catalog entries. Tools are unchecked by
-/// default; already-installed items are preserved on apply unless the user
-/// explicitly unchecks them.
+/// Build picker rows for the given catalog entries. Installed items are checked
+/// and tagged "installed"; other items are unchecked by default. Untouched items
+/// are preserved on apply.
 ///
 /// Items whose on-disk content differs from the catalog are tagged "update" and
 /// pre-checked (so a plain Enter pulls every pending update at once).
 pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
     entries
         .iter()
-        .map(|e| {
-            let update = catalog::is_installed(e) && catalog::needs_update(e);
-            let mut item = Item::new(e.name.clone(), e.description.clone(), false);
-            item.category = if e.kind == "command" {
-                "command"
-            } else {
-                "tool"
-            };
-            if update {
-                item.tag = Some("update".to_string());
-                item.checked = true;
-                item.user_touched = true;
-            }
-            item
+        .map(|entry| {
+            let installed = catalog::is_installed(entry);
+            build_item(entry, installed, installed && catalog::needs_update(entry))
         })
         .collect()
+}
+
+fn grouped_catalog(entries: Vec<CatalogEntry>) -> (Vec<CatalogEntry>, Vec<Item>) {
+    let items = build_items(&entries);
+    group_rows(entries, items)
+}
+
+fn group_rows(entries: Vec<CatalogEntry>, items: Vec<Item>) -> (Vec<CatalogEntry>, Vec<Item>) {
+    let mut rows: Vec<_> = entries.into_iter().zip(items).collect();
+    rows.sort_by(|(left_entry, left_item), (right_entry, right_item)| {
+        status_rank(left_item)
+            .cmp(&status_rank(right_item))
+            .then_with(|| {
+                left_entry
+                    .name
+                    .to_lowercase()
+                    .cmp(&right_entry.name.to_lowercase())
+            })
+    });
+
+    let counts = [0, 1, 2].map(|rank| {
+        rows.iter()
+            .filter(|(_, item)| status_rank(item) == rank)
+            .count()
+    });
+    let mut previous_rank = None;
+    for (_, item) in &mut rows {
+        let rank = status_rank(item);
+        if previous_rank != Some(rank) {
+            let label = match rank {
+                0 => "Updates",
+                1 => "Installed",
+                _ => "Available",
+            };
+            item.section = Some(format!("{label} ({})", counts[rank]));
+            previous_rank = Some(rank);
+        }
+    }
+
+    rows.into_iter().unzip()
+}
+
+fn status_rank(item: &Item) -> usize {
+    if item.tag.as_deref() == Some("update") {
+        0
+    } else if item.checked {
+        1
+    } else {
+        2
+    }
+}
+
+fn build_item(entry: &CatalogEntry, installed: bool, update: bool) -> Item {
+    let mut item = Item::new(entry.name.clone(), entry.description.clone(), installed);
+    item.category = if entry.kind == "command" {
+        "command"
+    } else {
+        "tool"
+    };
+    add_detail(&mut item, "Version", entry.version.as_deref());
+    add_detail(&mut item, "Updated", entry.updated_at.as_deref());
+    add_detail(&mut item, "Author", entry.author.as_deref());
+    add_detail(&mut item, "Repository", entry.repository.as_deref());
+    add_detail(&mut item, "Documentation", entry.documentation.as_deref());
+    add_detail(
+        &mut item,
+        "Requires Bone",
+        entry.min_bone_version.as_deref(),
+    );
+    if !entry.dependencies.is_empty() {
+        item.details
+            .push(("Dependencies".to_string(), entry.dependencies.join(", ")));
+    }
+    if !entry.permissions.is_empty() {
+        item.details
+            .push(("Permissions".to_string(), entry.permissions.join(", ")));
+    }
+    item.long_desc = entry
+        .long_description
+        .clone()
+        .filter(|value| !value.is_empty());
+    if update {
+        item.tag = Some("update".to_string());
+        item.user_touched = true;
+    } else if installed {
+        item.tag = Some("installed".to_string());
+        item.tag_color = GOOD;
+    }
+    item
+}
+
+fn add_detail(item: &mut Item, label: &str, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        item.details.push((label.to_string(), value.to_string()));
+    }
 }
 
 /// Per-row outcome of an apply pass, aligned 1:1 with the items slice.
@@ -144,7 +229,7 @@ struct State {
 impl State {
     fn new() -> Self {
         let entries = catalog::sync_quiet();
-        let items = build_items(&entries);
+        let (entries, items) = grouped_catalog(entries);
         Self {
             entries,
             items,
@@ -277,8 +362,9 @@ fn apply_state(state: &mut State) {
         .map(|e| e.name.clone())
         .zip(results)
         .collect();
-    let mut items = build_items(&state.entries);
+    let (entries, mut items) = grouped_catalog(std::mem::take(&mut state.entries));
     overlay_results(&mut items, &name_results);
+    state.entries = entries;
     state.items = items;
     state.cursor = state.cursor.min(state.items.len().saturating_sub(1));
     state.result = Some(banner);
@@ -428,4 +514,143 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, applied: bool) {
         ]
     };
     picker::draw_footer(frame, area, keys);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(kind: &str) -> CatalogEntry {
+        CatalogEntry {
+            name: "demo.lua".to_string(),
+            kind: kind.to_string(),
+            description: "Demo extension".to_string(),
+            ..CatalogEntry::default()
+        }
+    }
+
+    #[test]
+    fn available_item_is_unchecked_without_status() {
+        let item = build_item(&entry("tool"), false, false);
+
+        assert!(!item.checked);
+        assert!(!item.user_touched);
+        assert_eq!(item.tag, None);
+        assert_eq!(item.category, "tool");
+    }
+
+    #[test]
+    fn installed_item_is_checked_and_labeled() {
+        let item = build_item(&entry("command"), true, false);
+
+        assert!(item.checked);
+        assert!(!item.user_touched);
+        assert_eq!(item.tag.as_deref(), Some("installed"));
+        assert_eq!(item.tag_color, GOOD);
+        assert_eq!(item.category, "command");
+    }
+
+    #[test]
+    fn pending_update_takes_precedence_and_is_applied_by_default() {
+        let item = build_item(&entry("tool"), true, true);
+
+        assert!(item.checked);
+        assert!(item.user_touched);
+        assert_eq!(item.tag.as_deref(), Some("update"));
+    }
+
+    #[test]
+    fn metadata_is_added_to_the_detail_pane() {
+        let mut entry = entry("tool");
+        entry.version = Some("1.2.3".to_string());
+        entry.updated_at = Some("2026-03-10".to_string());
+        entry.author = Some("Bone Team".to_string());
+        entry.repository = Some("https://example.com/repo".to_string());
+        entry.documentation = Some("https://example.com/docs".to_string());
+        entry.min_bone_version = Some(">=2.4".to_string());
+        entry.dependencies = vec!["helper.lua".to_string()];
+        entry.permissions = vec!["network".to_string(), "filesystem".to_string()];
+        entry.long_description = Some("A longer explanation.".to_string());
+
+        let item = build_item(&entry, false, false);
+
+        assert_eq!(item.details.len(), 8);
+        assert_eq!(
+            item.details[0],
+            ("Version".to_string(), "1.2.3".to_string())
+        );
+        assert_eq!(item.details[7].0, "Permissions");
+        assert_eq!(item.long_desc.as_deref(), Some("A longer explanation."));
+    }
+
+    #[test]
+    fn rows_are_grouped_as_updates_installed_and_available() {
+        let entries = vec![
+            CatalogEntry {
+                name: "available.lua".to_string(),
+                ..entry("tool")
+            },
+            CatalogEntry {
+                name: "update.lua".to_string(),
+                ..entry("tool")
+            },
+            CatalogEntry {
+                name: "installed.lua".to_string(),
+                ..entry("command")
+            },
+        ];
+        let items = vec![
+            build_item(&entries[0], false, false),
+            build_item(&entries[1], true, true),
+            build_item(&entries[2], true, false),
+        ];
+
+        let (entries, items) = group_rows(entries, items);
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["update.lua", "installed.lua", "available.lua"]
+        );
+        assert_eq!(items[0].section.as_deref(), Some("Updates (1)"));
+        assert_eq!(items[1].section.as_deref(), Some("Installed (1)"));
+        assert_eq!(items[2].section.as_deref(), Some("Available (1)"));
+
+        let width = 100;
+        let height = 20;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                picker::draw_list(
+                    frame,
+                    frame.area(),
+                    "Catalog",
+                    "Grouped extensions",
+                    &items,
+                    0,
+                );
+            })
+            .unwrap();
+        let screen = (0..height)
+            .map(|row| {
+                (0..width)
+                    .map(|column| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell((column, row))
+                            .unwrap()
+                            .symbol()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Updates (1)"), "{screen}");
+        assert!(screen.contains("Installed (1)"), "{screen}");
+        assert!(screen.contains("Available (1)"), "{screen}");
+    }
 }

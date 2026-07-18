@@ -372,8 +372,11 @@ body.hide-meter .meter { display: none; }
 }
 .interact-opt:hover { border-color: var(--border-strong); background: var(--surface-2); }
 .interact-opt.selected { border-color: var(--accent-line); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent-line) inset; }
-.interact-opt-label { flex: 1; min-width: 0; word-break: break-word; }
+.interact-opt-label { color: var(--text); word-break: break-word; }
+.interact-opt-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.interact-opt-description { color: var(--text-faint); font-size: 11.5px; line-height: 1.35; word-break: break-word; }
 .interact-opt-label.placeholder { color: var(--text-faint); font-style: italic; }
+.interact-custom .interact-opt-label { flex: 1; min-width: 0; }
 .interact-check { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; border: 1px solid var(--border-strong); color: var(--on-accent); font-size: 12px; }
 .interact-check.on { background: var(--accent); border-color: var(--accent); }
 .interact-custom { border-style: dashed; }

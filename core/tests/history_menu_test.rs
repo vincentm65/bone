@@ -214,6 +214,71 @@ fn run_menu(keys: &str) -> (Option<i64>, bool, bool) {
 }
 
 #[test]
+fn multi_select_prefills_checked_values_and_ignores_unknown_values() {
+    let lua = Lua::new();
+    lua.load(
+        r#"
+        package.preload["ui.pane"] = function()
+          local P = {}
+          P.span = function(text, fg, modifiers) return { text = text, fg = fg, modifiers = modifiers } end
+          P.line = function(...) return { spans = { ... } } end
+          P.clamp = function(n, lo, hi) return math.max(lo, math.min(n, hi)) end
+          P.wait_key = function(ctx) return ctx.ui.key() end
+          P.key_name = function(key) return key.code end
+          P.is_text_key = function() return false end
+          P.new = function(ctx)
+            return {
+              ctx = ctx,
+              set_lines = function(_, lines)
+                if not _G.initial_menu_lines then _G.initial_menu_lines = lines end
+              end,
+              close = function() end,
+            }
+          end
+          return P
+        end
+        "#,
+    )
+    .exec()
+    .unwrap();
+    let menu: Table = lua.load(MENU_LUA).eval().unwrap();
+    lua.globals().set("menu", menu).unwrap();
+
+    let result: Table = lua
+        .load(
+            r#"
+            local ctx = { ui = {
+              key = function() return { code = "Enter" } end,
+              width = function() return 80 end,
+            } }
+            local result = menu.multi_select(ctx, {
+              options = {
+                "alpha",
+                { label = "Beta", value = "beta-value" },
+                "gamma",
+              },
+              default = 3,
+              initial_checked = { "alpha", "beta-value", "unknown" },
+            })
+            local lines = _G.initial_menu_lines
+            result.rendered_checked = lines[1].spans[2].text == "[x] "
+              and lines[2].spans[2].text == "[x] "
+              and lines[3].spans[2].text == "[ ] "
+            return result
+            "#,
+        )
+        .eval()
+        .unwrap();
+
+    assert!(result.get::<bool>("rendered_checked").unwrap());
+    assert_eq!(result.get::<i64>("selected").unwrap(), 3);
+    let values: Table = result.get("values").unwrap();
+    assert_eq!(values.get::<String>(1).unwrap(), "alpha");
+    assert_eq!(values.get::<String>(2).unwrap(), "beta-value");
+    assert_eq!(values.raw_len(), 2);
+}
+
+#[test]
 fn searchable_menu_filters_only_on_enter_and_supports_jk() {
     let filtered = run_menu(
         r#"{ code = "Char", char = "m" },

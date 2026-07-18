@@ -1417,6 +1417,7 @@ function parseInteractPane(comp) {
   const model = { title: comp.title || "", question: "", options: [], custom: null, text: null,
                   multi: false, scrollAbove: 0, scrollBelow: 0, hint: "", notice: "" };
   let seenInteractive = false;
+  let lastOption = null;
   for (const raw of (comp.lines || [])) {
     const t = paneLineText(raw);
     if (!t) continue;
@@ -1433,12 +1434,23 @@ function parseInteractPane(comp) {
       const selected = m[1] === ">";
       const rest = m[2];
       const cm = rest.match(/^Custom:\s?(.*)$/);
-      if (cm) { model.custom = { value: cm[1].replace(/█$/, ""), selected }; continue; }
+      if (cm) { model.custom = { value: cm[1].replace(/█$/, ""), selected }; lastOption = null; continue; }
       const chk = rest.match(/^\[([ x])\]\s(.*)$/);
-      if (chk) { model.multi = true; model.options.push({ label: chk[2], checked: chk[1] === "x", selected }); continue; }
-      model.options.push({ label: rest, checked: false, selected });
+      if (chk) {
+        model.multi = true;
+        lastOption = { label: chk[2], checked: chk[1] === "x", selected };
+        model.options.push(lastOption);
+        continue;
+      }
+      lastOption = { label: rest, checked: false, selected };
+      model.options.push(lastOption);
       continue;
     }
+    // ui.menu emits an option's description as the immediately following line,
+    // indented five spaces to align below its label.
+    m = t.match(/^ {5}(\S.*)$/);
+    if (m && lastOption) { lastOption.description = m[1]; continue; }
+    lastOption = null;
     // text_input value line: "> value█"
     m = t.match(/^> (.*)$/);
     if (m && !seenInteractive) { model.text = { value: m[1].replace(/█$/, "") }; continue; }
@@ -1462,7 +1474,8 @@ function renderInteractPane(model) {
   interactState.hasCustom = !!model.custom;
 
   $("interact").classList.remove("hidden");
-  $("interact-q").textContent = model.question || model.title || "Choose an option";
+  $("interact-kicker").textContent = model.title || "Question";
+  $("interact-q").textContent = model.question || "Choose an option";
 
   const opts = $("interact-options");
   opts.innerHTML = "";
@@ -1470,9 +1483,16 @@ function renderInteractPane(model) {
   model.options.forEach((o, p) => {
     const b = el("button", "interact-opt" + (o.selected ? " selected" : ""));
     if (model.multi) b.appendChild(el("span", "interact-check" + (o.checked ? " on" : ""), o.checked ? "✓" : ""));
+    const copy = el("span", "interact-opt-copy");
     const lbl = el("span", "interact-opt-label");
     lbl.textContent = o.label;
-    b.appendChild(lbl);
+    copy.appendChild(lbl);
+    if (o.description) {
+      const description = el("span", "interact-opt-description");
+      description.textContent = o.description;
+      copy.appendChild(description);
+    }
+    b.appendChild(copy);
     b.onclick = () => clickInteractOption(p);
     opts.appendChild(b);
   });

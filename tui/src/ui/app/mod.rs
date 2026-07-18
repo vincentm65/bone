@@ -30,6 +30,14 @@ fn should_open_agent_log(input: &InputState) -> bool {
     input.buffer.trim().is_empty()
 }
 
+fn background_pane_needs_refresh(
+    processes_running: bool,
+    processes_pane_visible: bool,
+    agent_jobs_tick_due: bool,
+) -> bool {
+    processes_running || processes_pane_visible || agent_jobs_tick_due
+}
+
 fn finish_queue_edit(
     queue: &mut VecDeque<String>,
     queue_selected: &mut usize,
@@ -1226,6 +1234,15 @@ impl App {
         self.ensure_viewport_and_draw(terminal)
     }
 
+    /// Recreate the inline viewport after another terminal UI temporarily owned
+    /// the screen. A normal redraw can retain ratatui's stale viewport anchor,
+    /// causing the input rows restored by the takeover to overlap the next draw.
+    fn restore_after_takeover(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        let height = self.renderer.viewport_height;
+        Renderer::resize_viewport(terminal, height, height)?;
+        self.force_redraw(terminal)
+    }
+
     /// Pause the turn timer (call before entering approval prompt).
     pub(crate) fn timer_pause(&mut self) {
         if self.turn_start.is_some() && self.turn_pause_start.is_none() {
@@ -1341,11 +1358,20 @@ impl App {
             .list(None)
             .iter()
             .any(|p| p.running);
-        // Process output is a live tail, so refresh it on the normal render
-        // tick; agent jobs only need the cheaper one-second cadence.
-        let periodic = processes_running
-            || (self.jobs_last_refresh.elapsed() >= std::time::Duration::from_secs(1)
-                && !registry.running_ids().is_empty());
+        let processes_pane_visible = self
+            .pages
+            .iter()
+            .any(|page| page.source == crate::ui::processes_pane::PANE_SOURCE);
+        // Keep refreshing for one final tick after the last process exits so
+        // refresh_jobs_pane can remove the now-empty processes pane.
+        let agent_jobs_tick_due = self.jobs_last_refresh.elapsed()
+            >= std::time::Duration::from_secs(1)
+            && !registry.running_ids().is_empty();
+        let periodic = background_pane_needs_refresh(
+            processes_running,
+            processes_pane_visible,
+            agent_jobs_tick_due,
+        );
         if version == self.jobs_seen_version && !periodic {
             return false;
         }
@@ -2598,7 +2624,7 @@ impl App {
             .args(["display-popup", "-E", "-w", width, "-h", height])
             .arg(cmd)
             .status();
-        self.force_redraw(term)?;
+        self.restore_after_takeover(term)?;
         Ok(result.ok())
     }
 
@@ -2627,7 +2653,7 @@ impl App {
             })
         };
 
-        self.force_redraw(term)?;
+        self.restore_after_takeover(term)?;
         if let Err(err) = result {
             return self.show_reply(format!("Stats dashboard failed: {err}"), term);
         }
@@ -2664,7 +2690,7 @@ impl App {
         }
 
         let result = crate::ui::catalog::run();
-        self.force_redraw(term)?;
+        self.restore_after_takeover(term)?;
         match result {
             Ok(outcome) => {
                 let msg = if outcome.changed {
@@ -2713,7 +2739,7 @@ impl App {
 
         if !ran {
             let result = crate::ui::setup::run(false);
-            self.force_redraw(term)?;
+            self.restore_after_takeover(term)?;
             match result {
                 Ok(true) => {}
                 Ok(false) => return self.show_reply("Setup cancelled.".to_string(), term),

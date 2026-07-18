@@ -6,7 +6,9 @@
 //! into `~/.bone-rust/lua/{tools,commands}/` — once on disk the normal loader
 //! runs them like any user file. Updates are detected by comparing the on-disk
 //! file's sha256 against the catalog's, and surfaced to the user (`/catalog`
-//! tag + startup hint); they're applied only when the user asks.
+//! tag + startup hint); they're applied only when the user asks. Index entries
+//! may also publish optional version, authorship, links, compatibility,
+//! dependency, permission, and long-description metadata for catalog clients.
 //!
 //! All operations are offline-safe: a network failure falls back to whatever is
 //! cached/installed and never errors out the app.
@@ -14,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Default catalog location (raw GitHub content). Override with `BONE_CATALOG_URL`
 /// — an `http(s)://` base or a local filesystem path (used by tests / dev).
@@ -24,7 +26,7 @@ const DEFAULT_URL: &str = "https://raw.githubusercontent.com/vincentm65/bone-cat
 const REFRESH_THROTTLE: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// One catalog entry, as listed in `catalog.json`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CatalogEntry {
     /// File name, e.g. `"browser.lua"`.
     pub name: String,
@@ -36,6 +38,42 @@ pub struct CatalogEntry {
     /// update detection; empty disables both.
     #[serde(default)]
     pub sha256: String,
+    /// Published extension version. Numbers are accepted for compatibility with
+    /// older catalog indexes and normalized to strings.
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    pub version: Option<String>,
+    /// ISO 8601 publication or update date.
+    #[serde(default, alias = "updated_date")]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Source repository URL.
+    #[serde(default, alias = "repository_url", alias = "repo_url")]
+    pub repository: Option<String>,
+    /// Documentation URL.
+    #[serde(default, alias = "docs_url")]
+    pub documentation: Option<String>,
+    /// Minimum compatible Bone version or version requirement.
+    #[serde(default, alias = "minimum_bone_version")]
+    pub min_bone_version: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub long_description: Option<String>,
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::String(value) => Some(value),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }))
 }
 
 impl CatalogEntry {

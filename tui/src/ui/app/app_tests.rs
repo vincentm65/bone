@@ -1,6 +1,6 @@
 use super::{
-    WireTools, apply_queue_nav_key, configured_input_style, edit_diff_message,
-    job_snapshot_messages, should_open_agent_log,
+    WireTools, apply_queue_nav_key, background_pane_needs_refresh, configured_input_style,
+    edit_diff_message, job_snapshot_messages, should_open_agent_log,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
@@ -35,6 +35,12 @@ fn config_preset_override_preserves_explicit_lua_input_customization() {
     assert_eq!(box_defaults.preset, InputPreset::Box);
     assert_eq!(box_defaults.horizontal_padding, 1);
     assert!(!box_defaults.fill);
+}
+
+#[test]
+fn finished_process_refreshes_visible_pane_for_removal() {
+    assert!(background_pane_needs_refresh(false, true, false));
+    assert!(!background_pane_needs_refresh(false, false, false));
 }
 
 #[test]

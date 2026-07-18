@@ -97,8 +97,8 @@ fn catalog_fetch_install_update_remove() {
     let bad = CatalogEntry {
         name: "demo.lua".to_string(),
         kind: "tool".to_string(),
-        description: String::new(),
         sha256: "deadbeef".to_string(),
+        ..CatalogEntry::default()
     };
     assert!(catalog::install(&bad).is_err(), "bad sha256 should fail");
 

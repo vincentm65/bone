@@ -32,6 +32,12 @@ pub struct Item {
     pub tag: Option<String>,
     /// Color for `tag`. Defaults to the accent color.
     pub tag_color: Color,
+    /// Optional section heading rendered immediately before this row.
+    pub section: Option<String>,
+    /// Label/value metadata rendered in the detail pane.
+    pub details: Vec<(String, String)>,
+    /// Optional extended description rendered after the summary and metadata.
+    pub long_desc: Option<String>,
 }
 
 impl Item {
@@ -44,6 +50,9 @@ impl Item {
             category: "",
             tag: None,
             tag_color: ACCENT,
+            section: None,
+            details: Vec::new(),
+            long_desc: None,
         }
     }
 }
@@ -109,9 +118,18 @@ pub fn draw_list(
         .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
         .split(rows[3]);
 
-    let (start, end) = visible_window(items.len(), cursor, cols[0].height as usize);
-    let mut list_lines = Vec::with_capacity(end - start);
-    for (i, item) in items.iter().enumerate().take(end).skip(start) {
+    let mut all_lines = Vec::with_capacity(items.len() * 2);
+    let mut selected_row = 0;
+    for (i, item) in items.iter().enumerate() {
+        if let Some(section) = &item.section {
+            all_lines.push(Line::from(Span::styled(
+                section.clone(),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            )));
+        }
+        if i == cursor {
+            selected_row = all_lines.len();
+        }
         let selected = i == cursor;
         let cursor_span = Span::styled(
             if selected { " ▸ " } else { "   " },
@@ -149,9 +167,18 @@ pub fn draw_list(
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        list_lines.push(Line::from(spans));
+        all_lines.push(Line::from(spans));
     }
-    frame.render_widget(Paragraph::new(list_lines), cols[0]);
+    let height = cols[0].height as usize;
+    let start = if all_lines.len() <= height {
+        0
+    } else {
+        selected_row
+            .saturating_sub(height / 2)
+            .min(all_lines.len() - height)
+    };
+    let end = (start + height).min(all_lines.len());
+    frame.render_widget(Paragraph::new(all_lines[start..end].to_vec()), cols[0]);
 
     let detail = cols[1];
     let detail_lines = if let Some(item) = items.get(cursor) {
@@ -171,6 +198,25 @@ pub fn draw_list(
         } else {
             lines.push(Line::from(Span::styled(
                 item.desc.clone(),
+                Style::default().fg(MUTED),
+            )));
+        }
+        if !item.details.is_empty() {
+            lines.push(Line::from(""));
+            for (label, value) in &item.details {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{label}: "),
+                        Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(value.clone(), Style::default().fg(TEXT)),
+                ]));
+            }
+        }
+        if let Some(long_desc) = &item.long_desc {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                long_desc.clone(),
                 Style::default().fg(MUTED),
             )));
         }

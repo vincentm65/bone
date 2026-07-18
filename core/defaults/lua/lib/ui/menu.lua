@@ -105,6 +105,25 @@ local function clip_spans(values, max)
     return out
 end
 
+local function normalize_preview(value)
+    if type(value) ~= "table" or type(value.lines) ~= "table" then return nil end
+    local lines = {}
+    for _, raw in ipairs(value.lines) do
+        if type(raw) == "string" then
+            lines[#lines + 1] = line(span(raw, "gray"))
+        elseif type(raw) == "table" and type(raw.spans) == "table" then
+            local spans = {}
+            for _, value_span in ipairs(raw.spans) do
+                if type(value_span) == "table" and value_span.text ~= nil then
+                    spans[#spans + 1] = span(value_span.text, value_span.fg or "gray", value_span.modifiers)
+                end
+            end
+            lines[#lines + 1] = { spans = spans, bg = raw.bg }
+        end
+    end
+    return { title = value.title and one_line(value.title) or nil, lines = lines }
+end
+
 local function normalize_options(options)
     local out = {}
     for i, opt in ipairs(options or {}) do
@@ -117,6 +136,7 @@ local function normalize_options(options)
                 search_text = one_line(opt.search_text or ""),
                 value = opt.value or opt.label or tostring(i),
                 action = opt.action,
+                preview = normalize_preview(opt.preview),
             }
         else
             out[i] = { label = one_line(opt), value = opt, search_text = "" }
@@ -178,7 +198,156 @@ local function split_leading_circle(label)
     return nil, label
 end
 
+local function line_spans(value, width)
+    if type(value) == "string" then return { span(clip(value, width), "gray") } end
+    return clip_spans(value and value.spans or {}, width)
+end
+
+local function spans_width(values)
+    local width = 0
+    for _, value in ipairs(values or {}) do width = width + #utf8_chars(one_line(value.text)) end
+    return width
+end
+
+local function compact_option_line(state, opt, selected, width)
+    local checked = state.checked and state.checked[opt]
+    local check = state.multi and (checked and "[x] " or "[ ] ") or ""
+    local marker = selected and ">" or " "
+    return line(
+        span(" " .. marker .. " ", selected and "cyan" or "darkgray", selected and { "bold" } or {}),
+        span(check, checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
+        span(clip(opt.label, width - 3 - #check), "white", opt.label_modifiers or (selected and { "bold" } or {}))
+    )
+end
+
+local function join_columns(left, right, left_width, right_width, focused)
+    local left_spans = line_spans(left, left_width)
+    local out = {}
+    for _, value in ipairs(left_spans) do out[#out + 1] = value end
+    out[#out + 1] = span(string.rep(" ", math.max(0, left_width - spans_width(left_spans))), "darkgray")
+    out[#out + 1] = span(" ┃ ", focused and "cyan" or "darkgray", focused and { "bold" } or {})
+    for _, value in ipairs(line_spans(right, right_width)) do out[#out + 1] = value end
+    return { spans = out }
+end
+
+local function selected_preview(state)
+    if state.custom_focused then return nil, nil end
+    local opt = state.options[state.selected]
+    return opt and opt.preview or nil, opt
+end
+
+local function preview_window(state, rows)
+    local preview, opt = selected_preview(state)
+    local values = preview and preview.lines or {}
+    local max_scroll = math.max(0, #values - rows)
+    state.preview_scroll = clamp(state.preview_scroll or 0, 0, max_scroll)
+    state.preview_page_rows = rows
+    state.preview_max_scroll = max_scroll
+    local title = preview and preview.title or (opt and opt.label or "Preview")
+    if #values > rows then
+        title = string.format("%s  %d/%d", title, state.preview_scroll + 1, #values)
+    end
+    local visible = {}
+    for i = state.preview_scroll + 1, math.min(#values, state.preview_scroll + rows) do
+        visible[#visible + 1] = values[i]
+    end
+    if #visible == 0 then visible[1] = line(span("No preview", "darkgray")) end
+    return title, visible
+end
+
+local function render_preview_select(p, state)
+    local lines = {}
+    render_tabs(lines, state.tabs, state.active_tab)
+    if state.question and state.question ~= "" then
+        lines[#lines + 1] = line(span(state.question, "white", { "bold" }))
+    end
+
+    local width = pane_width(p.ctx) or 80
+    local body_rows = math.max(4, rows_for(state) - #lines - 2)
+    local custom_rows = state.allow_custom and 1 or 0
+    local option_rows = math.max(1, body_rows - custom_rows)
+    local total = #state.options
+    state.scroll = clamp(state.scroll or 0, 0, math.max(0, total - option_rows))
+    if state.selected <= state.scroll then state.scroll = state.selected - 1 end
+    if state.selected > state.scroll + option_rows then state.scroll = state.selected - option_rows end
+
+    if width >= 64 then
+        local left_width = clamp(math.floor(width * 0.32), 20, 34)
+        local right_width = math.max(1, width - left_width - 3)
+        local title, preview_lines = preview_window(state, body_rows - 1)
+        local right_lines = { line(span(title, state.preview_focused and "cyan" or "white", { "bold" })) }
+        for _, value in ipairs(preview_lines) do right_lines[#right_lines + 1] = value end
+
+        for row = 1, body_rows do
+            local option_index = state.scroll + row
+            local left
+            if row <= option_rows and option_index <= total then
+                left = compact_option_line(
+                    state,
+                    state.options[option_index],
+                    option_index == state.selected and not state.custom_focused,
+                    left_width
+                )
+            elseif state.allow_custom and row == body_rows then
+                local marker = state.custom_focused and ">" or " "
+                left = line(
+                    span(" " .. marker .. " Custom: ", state.custom_focused and "cyan" or "darkgray", { "bold" }),
+                    span(clip(state.input, left_width - 11), state.custom_focused and "white" or "darkgray")
+                )
+            else
+                left = ""
+            end
+            lines[#lines + 1] = join_columns(
+                left,
+                right_lines[row] or "",
+                left_width,
+                right_width,
+                state.preview_focused
+            )
+        end
+    else
+        local stacked_options = math.min(option_rows, 4)
+        for row = 1, stacked_options do
+            local option_index = state.scroll + row
+            if option_index <= total then
+                lines[#lines + 1] = compact_option_line(
+                    state,
+                    state.options[option_index],
+                    option_index == state.selected and not state.custom_focused,
+                    width
+                )
+            end
+        end
+        if state.allow_custom then
+            local marker = state.custom_focused and ">" or " "
+            lines[#lines + 1] = line(
+                span(" " .. marker .. " Custom: ", state.custom_focused and "cyan" or "darkgray", { "bold" }),
+                span(clip(state.input, width - 11), state.custom_focused and "white" or "darkgray")
+            )
+        end
+        local preview_rows = math.max(1, body_rows - stacked_options - custom_rows - 1)
+        local title, preview_lines = preview_window(state, preview_rows)
+        lines[#lines + 1] = line(
+            span("Preview ─ ", state.preview_focused and "cyan" or "darkgray"),
+            span(title, "white", { "bold" })
+        )
+        for _, value in ipairs(preview_lines) do lines[#lines + 1] = value end
+    end
+
+    if state.notice and state.notice ~= "" then
+        lines[#lines + 1] = line(span(state.notice, "#E5C07B"))
+    end
+    local hints = { "↑↓/j/k " .. (state.preview_focused and "scroll" or "move"), "Tab switch pane" }
+    if state.multi then hints[#hints + 1] = "Space toggle" end
+    hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
+    hints[#hints + 1] = "Esc cancel"
+    lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
+    lines[#lines + 1] = ""
+    p:set_lines(lines, math.min(24, math.max(3, #lines)))
+end
+
 local function render_select(p, state)
+    if state.has_previews then return render_preview_select(p, state) end
     local lines = {}
     render_tabs(lines, state.tabs, state.active_tab)
     if state.question and state.question ~= "" then
@@ -334,6 +503,13 @@ end
 local function select_loop(ctx, spec, multi)
     local p = pane.new(ctx, { id = SOURCE, title = spec.title or "Menu" })
     local all_options = normalize_options(spec.options)
+    local has_previews = false
+    for _, opt in ipairs(all_options) do
+        if opt.preview then
+            has_previews = true
+            break
+        end
+    end
     local state = {
         title = spec.title,
         question = spec.question,
@@ -354,11 +530,24 @@ local function select_loop(ctx, spec, multi)
         action_keys = spec.action_keys or {},
         multi = multi,
         scroll = 0,
+        has_previews = has_previews,
+        preview_focused = false,
+        preview_scroll = 0,
     }
     if #state.options == 0 and not state.allow_custom then
         return { cancelled = true }
     end
     state.selected = clamp(state.selected, 1, math.max(1, #state.options))
+    if multi then
+        for _, initial_value in ipairs(spec.initial_checked or {}) do
+            for _, opt in ipairs(state.all_options) do
+                if opt.value == initial_value then
+                    state.checked[opt] = true
+                    break
+                end
+            end
+        end
+    end
 
     while true do
         render_select(p, state)
@@ -400,6 +589,48 @@ local function select_loop(ctx, spec, multi)
             state.input = state.input:sub(1, -2)
         elseif code == "Esc" then
             return { cancelled = true }
+        elseif state.has_previews and code == "Tab" then
+            if key.shift then
+                if state.custom_focused then
+                    state.custom_focused = false
+                    state.preview_focused = true
+                elseif state.preview_focused then
+                    state.preview_focused = false
+                elseif state.allow_custom then
+                    state.custom_focused = true
+                else
+                    state.preview_focused = true
+                end
+            elseif state.custom_focused then
+                state.custom_focused = false
+            elseif state.preview_focused then
+                state.preview_focused = false
+                state.custom_focused = state.allow_custom
+            else
+                state.preview_focused = true
+            end
+        elseif state.has_previews and state.preview_focused
+            and (code == "Up" or (code == "Char" and key.char == "k")) then
+            state.preview_scroll = clamp((state.preview_scroll or 0) - 1, 0, state.preview_max_scroll or 0)
+        elseif state.has_previews and state.preview_focused
+            and (code == "Down" or (code == "Char" and key.char == "j")) then
+            state.preview_scroll = clamp((state.preview_scroll or 0) + 1, 0, state.preview_max_scroll or 0)
+        elseif state.has_previews and state.preview_focused and code == "PageUp" then
+            state.preview_scroll = clamp(
+                (state.preview_scroll or 0) - (state.preview_page_rows or 1),
+                0,
+                state.preview_max_scroll or 0
+            )
+        elseif state.has_previews and state.preview_focused and code == "PageDown" then
+            state.preview_scroll = clamp(
+                (state.preview_scroll or 0) + (state.preview_page_rows or 1),
+                0,
+                state.preview_max_scroll or 0
+            )
+        elseif state.has_previews and state.preview_focused and code == "Home" then
+            state.preview_scroll = 0
+        elseif state.has_previews and state.preview_focused and code == "End" then
+            state.preview_scroll = state.preview_max_scroll or 0
         elseif code == "Up" or (code == "Char" and key.char == "k" and not state.filter_focused) then
             state.filter_focused = false
             if state.custom_focused then
@@ -462,8 +693,11 @@ local function select_loop(ctx, spec, multi)
                 return { value = state.options[state.selected].value, selected = state.selected }
             end
         end
-        if state.selected ~= prev and spec.on_change and state.options[state.selected] then
-            spec.on_change(state.options[state.selected].value, state)
+        if state.selected ~= prev then
+            state.preview_scroll = 0
+            if spec.on_change and state.options[state.selected] then
+                spec.on_change(state.options[state.selected].value, state)
+            end
         end
     end
 end

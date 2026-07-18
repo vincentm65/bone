@@ -657,12 +657,17 @@ local menu = require("ui.menu")
 local result = menu.select(ctx, {
     question = "Which branch?",
     options = { "main", "dev" },
-    default = 1,                 -- 1-based initial selection (optional)
+    default = 1,                 -- 1-based initial highlighted option (optional)
     allow_custom = true,         -- offer a free-text "Custom:" row (optional)
 })
 -- single_select → { value = "main" }  or  { value = "...", custom = true }
--- multi_select  → menu.multi_select(ctx, spec) returns { values = {...}, custom? = "..." }
--- text_input    → menu.text_input(ctx, spec) returns { value = "typed text" }
+-- multi_select  → menu.multi_select(ctx, {
+--     options = { "main", { label = "Development", value = "dev" } },
+--     default = 2,                         -- initial highlighted option
+--     initial_checked = { "main", "dev" }, -- prechecked normalized option values
+--     initial = "prior custom text",       -- prefilled custom input
+-- }) returns { values = {...}, custom? = "..." }
+-- text_input    → menu.text_input(ctx, { initial = "prior text" }) returns { value = "typed text" }
 -- cancelled     → { cancelled = true }
 ```
 

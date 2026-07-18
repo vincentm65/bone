@@ -39,6 +39,7 @@ test("sidebar is drag-resizable with a persisted, clamped width", () => {
 test("ask_user interact pane renders and maps keys to the runtime", () => {
   assert.match(html, /id="interact"/);
   assert.match(html, /id="interact-options"/);
+  assert.match(html, /id="interact-kicker"/);
   // The interact pane (source="interact") is rendered, not ignored.
   assert.match(js, /comp\.id === "interact"/);
   assert.match(js, /function parseInteractPane/);
@@ -49,6 +50,34 @@ test("ask_user interact pane renders and maps keys to the runtime", () => {
   assert.match(js, /function pumpKeyQueue/);
   assert.match(js, /interactState\.queue/);
   assert.match(css, /\.interact-card \{/);
+});
+
+test("ask_user parses option descriptions without consuming notices", () => {
+  const source = js.slice(js.indexOf("function parseInteractPane"),
+    js.indexOf("function renderInteractPane"));
+  const context = {};
+  vm.runInNewContext(`${source};globalThis.parse = parseInteractPane`, context);
+  const model = context.parse({
+    title: "Question 2 of 4",
+    lines: [
+      "Choose carefully",
+      " > [x] Alpha",
+      "     First description",
+      "   [ ] Beta",
+      "     Second description",
+      "Select at least one option.",
+      "↑↓ move · Enter submit · Esc cancel",
+    ],
+  });
+  assert.equal(model.title, "Question 2 of 4");
+  assert.equal(model.question, "Choose carefully");
+  assert.equal(model.options[0].description, "First description");
+  assert.equal(model.options[1].description, "Second description");
+  assert.equal(model.notice, "Select at least one option.");
+  assert.match(js, /\$\("interact-kicker"\)\.textContent = model\.title \|\| "Question"/);
+  assert.match(js, /el\("span", "interact-opt-description"\)/);
+  assert.match(css, /\.interact-opt-description \{/);
+  assert.match(css, /\.interact-opt-copy \{/);
 });
 
 test("streaming conversations expose reading and recovery controls", () => {
