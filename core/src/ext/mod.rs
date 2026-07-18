@@ -94,7 +94,8 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
                 || !existing.contains("SELECTED_BG")
                 || !existing.contains("description_spans")
                 || !existing.contains("label_modifiers")
-                || !existing.contains("initial_checked")))
+                || !existing.contains("initial_checked")
+                || !existing.contains("preview_row_budget")))
         // History now includes aggregate message and token counts/status,
         // and lists via a candidate-first CTE instead of a full messages join.
         || (name == "history.lua"

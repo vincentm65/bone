@@ -657,6 +657,7 @@ local menu = require("ui.menu")
 local result = menu.select(ctx, {
     question = "Which branch?",
     options = { "main", "dev" },
+    visible_rows = 12,          -- requested pane height; defaults to 12
     default = 1,                 -- 1-based initial highlighted option (optional)
     allow_custom = true,         -- offer a free-text "Custom:" row (optional)
 })
@@ -670,6 +671,56 @@ local result = menu.select(ctx, {
 -- text_input    → menu.text_input(ctx, { initial = "prior text" }) returns { value = "typed text" }
 -- cancelled     → { cancelled = true }
 ```
+An object option may include a generic rich preview. When any option has one,
+the menu shows a compact option rail beside the highlighted option's preview
+(and stacks them on narrow terminals). Preview lines use the same plain-string
+or styled-span format as `ctx.ui.pane`:
+
+```lua
+options = {
+    {
+        label = "Session cookies",
+        preview = {
+            title = "Architecture",
+            lines = {
+                "Browser ──▶ Web app ──▶ Redis",
+                { spans = { { text = "server-side session", fg = "#78B373" } } },
+            },
+        },
+    },
+}
+```
+
+The preview layout can be configured independently of the caller. Omitted fields
+preserve the defaults:
+
+```lua
+local result = menu.select(ctx, {
+    question = "Choose a design",
+    visible_rows = 14,
+    preview = {
+        layout = "auto",       -- "auto" (default), "split", or "stacked"
+        min_width = 64,         -- split threshold used by "auto"
+        focusable = true,       -- Tab can focus the preview
+        scrollable = true,      -- arrow/Page keys scroll while focused
+    },
+    options = options,
+})
+```
+
+`layout = "split"` always uses columns; `layout = "stacked"` always places the
+preview below the options. In `"auto"` mode, `min_width` controls the switch.
+Setting either `focusable` or `scrollable` to `false` makes the preview static:
+it starts at the first line, has no scroll-position suffix, and is skipped by
+Tab. This is useful for short diagrams and other previews that fit within the
+configured `visible_rows`. Invalid layout values fall back to `"auto"`.
+
+By default, preview menus size themselves to the tallest option preview and the
+space required by the active split or stacked layout, up to the 24-row pane
+limit. An explicit `visible_rows` keeps a fixed height. Use **Tab** to focus the
+preview and arrow/Page keys to scroll it. Selection, multi-select toggles,
+custom input, and return values are unchanged.
+
 
 For lower-level input, `ctx.ui.key()` blocks until the next key and returns a
 table such as `{ code = "Up", char = nil, ctrl = false, alt = false, shift = false }`.

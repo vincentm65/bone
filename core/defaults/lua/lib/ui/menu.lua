@@ -13,7 +13,8 @@ local wait_key, key_name, is_text_key = pane.wait_key, pane.key_name, pane.is_te
 local M = {}
 
 local SOURCE = "interact"
-local MAX_ROWS = 12
+local DEFAULT_ROWS = 12
+local MAX_ROWS = 24
 local SELECTED_BG = "#3A3F4B"
 
 -- Current pane width in columns, or nil when the host can't report it (older
@@ -183,7 +184,14 @@ local function render_tabs(lines, tabs, active)
 end
 
 local function rows_for(state)
-    return state.visible_rows or MAX_ROWS
+    if state.visible_rows then return state.visible_rows end
+    return DEFAULT_ROWS
+end
+
+local function preview_uses_columns(state, width)
+    if state.preview_layout == "split" then return true end
+    if state.preview_layout == "stacked" then return false end
+    return width >= state.preview_min_width
 end
 
 local function split_leading_circle(label)
@@ -198,14 +206,38 @@ local function split_leading_circle(label)
     return nil, label
 end
 
+local function clip_line_spans(values, max)
+    local out = {}
+    local remaining = max
+    for _, value in ipairs(values or {}) do
+        if remaining <= 0 then break end
+        local chars = utf8_chars(tostring(value.text or ""))
+        local clipped = #chars > remaining
+        local text
+        if not clipped then
+            text = table.concat(chars)
+        elseif remaining >= 2 then
+            text = table.concat(chars, "", 1, remaining - 1) .. "…"
+        else
+            text = ""
+        end
+        if text ~= "" then
+            out[#out + 1] = span(text, value.fg or "gray", value.modifiers)
+        end
+        remaining = remaining - #utf8_chars(text)
+        if clipped then break end
+    end
+    return out
+end
+
 local function line_spans(value, width)
     if type(value) == "string" then return { span(clip(value, width), "gray") } end
-    return clip_spans(value and value.spans or {}, width)
+    return clip_line_spans(value and value.spans or {}, width)
 end
 
 local function spans_width(values)
     local width = 0
-    for _, value in ipairs(values or {}) do width = width + #utf8_chars(one_line(value.text)) end
+    for _, value in ipairs(values or {}) do width = width + #utf8_chars(tostring(value.text or "")) end
     return width
 end
 
@@ -236,15 +268,58 @@ local function selected_preview(state)
     return opt and opt.preview or nil, opt
 end
 
+local function tallest_preview_rows(state)
+    local rows = 1
+    for _, opt in ipairs(state.all_options) do
+        if opt.preview and opt.preview.lines then
+            rows = math.max(rows, #opt.preview.lines)
+        end
+    end
+    return rows
+end
+
+local function preview_row_budget(state, width, header_rows)
+    local use_columns = preview_uses_columns(state, width)
+    local custom_rows = state.allow_custom and 1 or 0
+    local preview_rows = tallest_preview_rows(state)
+    local raw_body
+    local raw_overflow
+    if use_columns then
+        raw_body = math.max(4, preview_rows + 1, #state.options + custom_rows)
+        raw_overflow = false
+    else
+        local shown_options = math.min(4, #state.options)
+        raw_body = math.max(4, shown_options + custom_rows + 1 + preview_rows)
+        raw_overflow = #state.options > shown_options
+    end
+
+    local notice_rows = state.notice and state.notice ~= "" and 1 or 0
+    local target_rows
+    if state.visible_rows then
+        target_rows = clamp(math.floor(tonumber(state.visible_rows) or DEFAULT_ROWS), 3, MAX_ROWS)
+    else
+        target_rows = clamp(header_rows + raw_body + notice_rows + (raw_overflow and 1 or 0) + 2, 3, MAX_ROWS)
+    end
+
+    local body_rows = math.max(4, target_rows - header_rows - notice_rows - 2)
+    -- The overflow indicator consumes a row only after the option viewport is
+    -- known. Reserve it from the body after calculating whether it is needed.
+    local option_rows = use_columns
+        and math.max(1, body_rows - custom_rows)
+        or math.min(4, math.max(1, body_rows - custom_rows))
+    if #state.options > option_rows and body_rows > 4 then body_rows = body_rows - 1 end
+    return target_rows, body_rows, use_columns
+end
+
 local function preview_window(state, rows)
     local preview, opt = selected_preview(state)
     local values = preview and preview.lines or {}
-    local max_scroll = math.max(0, #values - rows)
+    local max_scroll = state.preview_scrollable and math.max(0, #values - rows) or 0
     state.preview_scroll = clamp(state.preview_scroll or 0, 0, max_scroll)
     state.preview_page_rows = rows
     state.preview_max_scroll = max_scroll
     local title = preview and preview.title or (opt and opt.label or "Preview")
-    if #values > rows then
+    if state.preview_scrollable and #values > rows then
         title = string.format("%s  %d/%d", title, state.preview_scroll + 1, #values)
     end
     local visible = {}
@@ -263,15 +338,17 @@ local function render_preview_select(p, state)
     end
 
     local width = pane_width(p.ctx) or 80
-    local body_rows = math.max(4, rows_for(state) - #lines - 2)
+    local target_rows, body_rows, use_columns = preview_row_budget(state, width, #lines)
     local custom_rows = state.allow_custom and 1 or 0
     local option_rows = math.max(1, body_rows - custom_rows)
+    if not use_columns then option_rows = math.min(option_rows, 4) end
     local total = #state.options
     state.scroll = clamp(state.scroll or 0, 0, math.max(0, total - option_rows))
     if state.selected <= state.scroll then state.scroll = state.selected - 1 end
     if state.selected > state.scroll + option_rows then state.scroll = state.selected - option_rows end
+    local body_start = #lines
 
-    if width >= 64 then
+    if use_columns then
         local left_width = clamp(math.floor(width * 0.32), 20, 34)
         local right_width = math.max(1, width - left_width - 3)
         local title, preview_lines = preview_window(state, body_rows - 1)
@@ -306,7 +383,7 @@ local function render_preview_select(p, state)
             )
         end
     else
-        local stacked_options = math.min(option_rows, 4)
+        local stacked_options = math.min(option_rows, 4, total)
         for row = 1, stacked_options do
             local option_index = state.scroll + row
             if option_index <= total then
@@ -332,18 +409,32 @@ local function render_preview_select(p, state)
             span(title, "white", { "bold" })
         )
         for _, value in ipairs(preview_lines) do lines[#lines + 1] = value end
+        while #lines - body_start < body_rows do lines[#lines + 1] = "" end
     end
 
+    local above = state.scroll or 0
+    local below = math.max(0, total - above - option_rows)
+    if above > 0 or below > 0 then
+        lines[#lines + 1] = line(span(
+            string.format("    ↑ %d more · ↓ %d more", above, below),
+            "darkgray"
+        ))
+    end
     if state.notice and state.notice ~= "" then
         lines[#lines + 1] = line(span(state.notice, "#E5C07B"))
     end
-    local hints = { "↑↓/j/k " .. (state.preview_focused and "scroll" or "move"), "Tab switch pane" }
+    local hints = { "↑↓/j/k " .. (state.preview_focused and "scroll" or "move") }
+    if state.preview_focusable then
+        hints[#hints + 1] = "Tab switch pane"
+    elseif state.allow_custom then
+        hints[#hints + 1] = "Tab custom"
+    end
     if state.multi then hints[#hints + 1] = "Space toggle" end
     hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
     hints[#hints + 1] = "Esc cancel"
     lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
     lines[#lines + 1] = ""
-    p:set_lines(lines, math.min(24, math.max(3, #lines)))
+    p:set_lines(lines, target_rows)
 end
 
 local function render_select(p, state)
@@ -510,6 +601,13 @@ local function select_loop(ctx, spec, multi)
             break
         end
     end
+    local preview_spec = type(spec.preview) == "table" and spec.preview or {}
+    local preview_layout = preview_spec.layout or "auto"
+    if preview_layout ~= "auto" and preview_layout ~= "split" and preview_layout ~= "stacked" then
+        preview_layout = "auto"
+    end
+    local preview_interactive = preview_spec.focusable ~= false and preview_spec.scrollable ~= false
+    local preview_min_width = math.max(1, math.floor(tonumber(preview_spec.min_width) or 64))
     local state = {
         title = spec.title,
         question = spec.question,
@@ -531,6 +629,10 @@ local function select_loop(ctx, spec, multi)
         multi = multi,
         scroll = 0,
         has_previews = has_previews,
+        preview_layout = preview_layout,
+        preview_min_width = preview_min_width,
+        preview_focusable = preview_interactive,
+        preview_scrollable = preview_interactive,
         preview_focused = false,
         preview_scroll = 0,
     }
@@ -589,7 +691,7 @@ local function select_loop(ctx, spec, multi)
             state.input = state.input:sub(1, -2)
         elseif code == "Esc" then
             return { cancelled = true }
-        elseif state.has_previews and code == "Tab" then
+        elseif state.has_previews and state.preview_focusable and code == "Tab" then
             if key.shift then
                 if state.custom_focused then
                     state.custom_focused = false

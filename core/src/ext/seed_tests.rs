@@ -123,6 +123,23 @@ fn history_and_menu_seeds_refresh_pre_feature_copies() {
     .unwrap();
     assert!(should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap());
 
+    std::fs::write(
+        &menu,
+        "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked FULL_PREVIEW_ROWS\n",
+    )
+    .unwrap();
+    assert!(
+        should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap(),
+        "menus predating content-aware preview sizing should refresh"
+    );
+
+    std::fs::write(
+        &menu,
+        "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget\n",
+    )
+    .unwrap();
+    assert!(!should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap());
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -279,6 +279,203 @@ fn multi_select_prefills_checked_values_and_ignores_unknown_values() {
 }
 
 #[test]
+fn preview_menu_switches_options_and_scrolls_styled_content() {
+    let lua = Lua::new();
+    lua.load(
+        r#"
+        package.preload["ui.pane"] = function()
+          local P = {}
+          P.span = function(text, fg, modifiers) return { text = text, fg = fg, modifiers = modifiers } end
+          P.line = function(...) return { spans = { ... } } end
+          P.clamp = function(n, lo, hi) return math.max(lo, math.min(n, hi)) end
+          P.wait_key = function(ctx) return ctx.ui.key() end
+          P.key_name = function(key) return key.code end
+          P.is_text_key = function() return false end
+          P.new = function(ctx)
+            return {
+              ctx = ctx,
+              set_lines = function(_, lines, visible_rows)
+                _G.last_preview_lines = lines
+                _G.last_preview_visible_rows = visible_rows
+              end,
+              close = function() end,
+            }
+          end
+          return P
+        end
+        "#,
+    )
+    .exec()
+    .unwrap();
+    let menu: Table = lua.load(MENU_LUA).eval().unwrap();
+    lua.globals().set("menu", menu).unwrap();
+
+    let result: Table = lua
+        .load(
+            r##"
+            local keys, index = {
+              { code = "Down" },
+              { code = "Tab" },
+              { code = "PageDown" },
+              { code = "Enter" },
+            }, 0
+            local ctx = { ui = {
+              key = function() index = index + 1; return keys[index] end,
+              width = function() return 100 end,
+            } }
+            local preview_lines = {}
+            for i = 1, 21 do
+              preview_lines[i] = { spans = { { text = "   node " .. i, fg = "#78B373" } } }
+            end
+            local result = menu.select(ctx, {
+              question = "Choose",
+              options = {
+                { label = "Alpha", value = "a", preview = { title = "Alpha diagram", lines = { "A" } } },
+                { label = "Beta", value = "b", preview = { title = "Beta diagram", lines = preview_lines } },
+              },
+            })
+            local lines = _G.last_preview_lines
+            local function right_span(row)
+              for i, value in ipairs(lines[row].spans) do
+                if value.text == " ┃ " then return lines[row].spans[i + 1] end
+              end
+            end
+            result.preview_title = right_span(2).text
+            result.preview_line = right_span(3).text
+            result.preview_fg = right_span(3).fg
+            result.visible_rows = _G.last_preview_visible_rows
+            menu.select({ ui = {
+              key = function() return { code = "Enter" } end,
+              width = function() return 100 end,
+            } }, {
+              options = {
+                { label = "Short", preview = { title = "Short diagram", lines = { "A" } } },
+              },
+            })
+            result.short_visible_rows = _G.last_preview_visible_rows
+            result.short_line_count = #_G.last_preview_lines
+
+            local stacked_index = 0
+            local stacked_first_height
+            menu.select({ ui = {
+              key = function()
+                stacked_index = stacked_index + 1
+                if stacked_index == 1 then stacked_first_height = _G.last_preview_visible_rows end
+                return { code = stacked_index == 1 and "Down" or "Enter" }
+              end,
+              width = function() return 40 end,
+            } }, {
+              options = {
+                { label = "Short", preview = { title = "Short", lines = { "A" } } },
+                { label = "Tall", preview = { title = "Tall", lines = { "1", "2", "3", "4", "5" } } },
+              },
+            })
+            result.stacked_first_height = stacked_first_height
+            result.stacked_final_height = _G.last_preview_visible_rows
+            result.stacked_line_count = #_G.last_preview_lines
+            return result
+            "##,
+        )
+        .eval()
+        .unwrap();
+
+    assert_eq!(result.get::<String>("value").unwrap(), "b");
+    assert_eq!(
+        result.get::<String>("preview_title").unwrap(),
+        "Beta diagram  2/21"
+    );
+    assert_eq!(result.get::<String>("preview_line").unwrap(), "   node 2");
+    assert_eq!(result.get::<String>("preview_fg").unwrap(), "#78B373");
+    assert_eq!(result.get::<i64>("visible_rows").unwrap(), 24);
+    assert_eq!(result.get::<i64>("short_visible_rows").unwrap(), 6);
+    assert_eq!(result.get::<i64>("short_line_count").unwrap(), 6);
+    assert_eq!(result.get::<i64>("stacked_first_height").unwrap(), 10);
+    assert_eq!(result.get::<i64>("stacked_final_height").unwrap(), 10);
+    assert_eq!(result.get::<i64>("stacked_line_count").unwrap(), 10);
+}
+
+#[test]
+fn preview_menu_honors_static_stacked_overrides() {
+    let lua = Lua::new();
+    lua.load(
+        r#"
+        package.preload["ui.pane"] = function()
+          local P = {}
+          P.span = function(text, fg, modifiers) return { text = text, fg = fg, modifiers = modifiers } end
+          P.line = function(...) return { spans = { ... } } end
+          P.clamp = function(n, lo, hi) return math.max(lo, math.min(n, hi)) end
+          P.wait_key = function(ctx) return ctx.ui.key() end
+          P.key_name = function(key) return key.code end
+          P.is_text_key = function() return false end
+          P.new = function()
+            return {
+              set_lines = function(_, lines, visible_rows)
+                _G.preview_lines = lines
+                _G.preview_visible_rows = visible_rows
+              end,
+              close = function() end,
+            }
+          end
+          return P
+        end
+        "#,
+    )
+    .exec()
+    .unwrap();
+    let menu: Table = lua.load(MENU_LUA).eval().unwrap();
+    lua.globals().set("menu", menu).unwrap();
+
+    let result: Table = lua
+        .load(
+            r#"
+            local ctx = { ui = {
+              key = function() return { code = "Esc" } end,
+              width = function() return 100 end,
+            } }
+            local preview_lines = {}
+            for i = 1, 20 do preview_lines[i] = "node " .. i end
+            local result = menu.select(ctx, {
+              question = "Choose",
+              visible_rows = 8,
+              preview = {
+                layout = "stacked",
+                focusable = false,
+                scrollable = false,
+              },
+              options = {
+                { label = "Alpha", preview = { title = "Diagram", lines = preview_lines } },
+              },
+            })
+            local text = {}
+            local has_columns = false
+            for _, rendered_line in ipairs(_G.preview_lines) do
+              if type(rendered_line) == "table" then
+                for _, value in ipairs(rendered_line.spans or {}) do
+                  text[#text + 1] = value.text
+                  if value.text == " ┃ " then has_columns = true end
+                end
+              end
+            end
+            result.rendered = table.concat(text, "\n")
+            result.has_columns = has_columns
+            result.visible_rows = _G.preview_visible_rows
+            return result
+            "#,
+        )
+        .eval()
+        .unwrap();
+
+    assert!(result.get::<bool>("cancelled").unwrap());
+    assert!(!result.get::<bool>("has_columns").unwrap());
+    assert_eq!(result.get::<i64>("visible_rows").unwrap(), 8);
+    let rendered = result.get::<String>("rendered").unwrap();
+    assert!(rendered.contains("Preview ─ \nDiagram"));
+    assert!(rendered.contains("node 1"));
+    assert!(!rendered.contains("1/20"));
+    assert!(!rendered.contains("Tab switch pane"));
+}
+
+#[test]
 fn searchable_menu_filters_only_on_enter_and_supports_jk() {
     let filtered = run_menu(
         r#"{ code = "Char", char = "m" },

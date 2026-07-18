@@ -53,7 +53,7 @@ test("ask_user interact pane renders and maps keys to the runtime", () => {
 });
 
 test("ask_user parses option descriptions without consuming notices", () => {
-  const source = js.slice(js.indexOf("function parseInteractPane"),
+  const source = js.slice(js.indexOf("function splitInteractLine"),
     js.indexOf("function renderInteractPane"));
   const context = {};
   vm.runInNewContext(`${source};globalThis.parse = parseInteractPane`, context);
@@ -78,6 +78,44 @@ test("ask_user parses option descriptions without consuming notices", () => {
   assert.match(js, /el\("span", "interact-opt-description"\)/);
   assert.match(css, /\.interact-opt-description \{/);
   assert.match(css, /\.interact-opt-copy \{/);
+});
+
+test("ask_user preview panes preserve diagrams and styled spans", () => {
+  const source = js.slice(js.indexOf("function splitInteractLine"),
+    js.indexOf("function renderInteractPane"));
+  const context = {};
+  vm.runInNewContext(`${source};globalThis.parse = parseInteractPane`, context);
+  const model = context.parse({
+    title: "Menu",
+    lines: [
+      "Choose an architecture",
+      { spans: [
+        { text: " > Sessions" }, { text: "                 " }, { text: " ┃ " },
+        { text: "Architecture", fg: "white", modifiers: ["bold"] },
+      ] },
+      { spans: [
+        { text: "   Tokens" }, { text: "                   " }, { text: " ┃ " },
+        { text: "Browser  ──▶  API", fg: "#78B373" },
+      ] },
+      { spans: [
+        { text: "                             " }, { text: " ┃ " },
+        { text: "   │             │", fg: "gray" },
+      ] },
+      "    ↑ 2 more · ↓ 5 more",
+      "↑↓/j/k move · Tab switch pane · Enter select · Esc cancel",
+    ],
+  });
+  assert.equal(model.options.length, 2);
+  assert.equal(model.options[0].label, "Sessions");
+  assert.equal(model.preview.title, "Architecture");
+  assert.equal(model.preview.lines[0][0].text, "Browser  ──▶  API");
+  assert.equal(model.preview.lines[0][0].fg, "#78B373");
+  assert.equal(model.preview.lines[1][0].text, "   │             │");
+  assert.equal(model.scrollAbove, 2);
+  assert.equal(model.scrollBelow, 5);
+  assert.match(html, /id="interact-preview"/);
+  assert.match(css, /\.interact-body\.previewing/);
+  assert.match(css, /white-space: pre/);
 });
 
 test("streaming conversations expose reading and recovery controls", () => {

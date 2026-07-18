@@ -1411,21 +1411,56 @@ function captureKey(e) {
 
 const interactState = { active: false, multi: false, queue: [], model: null, total: 0, hasCustom: false };
 
+function splitInteractLine(line) {
+  if (typeof line === "string") {
+    const at = line.indexOf("┃");
+    if (at < 0) return { left: line, right: null };
+    return { left: line.slice(0, at).trimEnd(), right: [{ text: line.slice(at + 1).replace(/^ /, "") }] };
+  }
+  if (!line || !line.spans) return { left: "", right: null };
+  const left = [], right = [];
+  let divided = false;
+  for (const value of line.spans) {
+    const text = value.text || "";
+    const at = divided ? -1 : text.indexOf("┃");
+    if (at >= 0) {
+      if (at > 0) left.push({ ...value, text: text.slice(0, at).replace(/ $/, "") });
+      const tail = text.slice(at + 1).replace(/^ /, "");
+      if (tail) right.push({ ...value, text: tail });
+      divided = true;
+    } else if (divided) right.push(value);
+    else left.push(value);
+  }
+  return {
+    left: left.map((value) => value.text || "").join("").trimEnd(),
+    right: divided ? right : null,
+  };
+}
+
 // Parse the `interact` pane's styled lines back into a small semantic model so
 // we can render real buttons instead of the TUI's cursor/checkbox glyphs.
 function parseInteractPane(comp) {
   const model = { title: comp.title || "", question: "", options: [], custom: null, text: null,
-                  multi: false, scrollAbove: 0, scrollBelow: 0, hint: "", notice: "" };
+                  multi: false, scrollAbove: 0, scrollBelow: 0, hint: "", notice: "", preview: null };
   let seenInteractive = false;
   let lastOption = null;
   for (const raw of (comp.lines || [])) {
-    const t = paneLineText(raw);
+    const split = splitInteractLine(raw);
+    const t = split.left;
+    if (split.right) {
+      if (!model.preview) model.preview = { title: "", lines: [] };
+      const previewText = split.right.map((value) => value.text || "").join("");
+      if (!model.preview.title && previewText) model.preview.title = previewText.trim();
+      else model.preview.lines.push(split.right);
+    }
     if (!t) continue;
-    let m = t.match(/^\s*↑\s+(\d+)\s+more/);
+    let m = t.match(/^\s*↑\s+(\d+)\s+more\s*·\s*↓\s+(\d+)\s+more/);
+    if (m) { model.scrollAbove = +m[1]; model.scrollBelow = +m[2]; continue; }
+    m = t.match(/^\s*↑\s+(\d+)\s+more/);
     if (m) { model.scrollAbove = +m[1]; continue; }
     m = t.match(/^\s*↓\s+(\d+)\s+more/);
     if (m) { model.scrollBelow = +m[1]; continue; }
-    if (/·/.test(t) && /(move|submit|select|cancel|toggle)/i.test(t)) { model.hint = t.trim(); continue; }
+    if (/·/.test(t) && /(move|submit|select|cancel|toggle|switch pane|scroll)/i.test(t)) { model.hint = t.trim(); continue; }
     // Interactive rows: " > label" / "   label" (space, cursor, space, then a
     // non-space so wrapped continuation lines are excluded).
     m = t.match(/^ ([ >]) (\S.*)$/);
@@ -1460,11 +1495,6 @@ function parseInteractPane(comp) {
   }
   return model;
 }
-function paneLineText(line) {
-  if (typeof line === "string") return line;
-  if (!line || !line.spans) return "";
-  return line.spans.map((s) => s.text || "").join("");
-}
 
 function renderInteractPane(model) {
   interactState.active = true;
@@ -1476,6 +1506,9 @@ function renderInteractPane(model) {
   $("interact").classList.remove("hidden");
   $("interact-kicker").textContent = model.title || "Question";
   $("interact-q").textContent = model.question || "Choose an option";
+  const hasPreview = !!(model.preview && model.preview.title);
+  $("interact").classList.toggle("has-preview", hasPreview);
+  $("interact-body").classList.toggle("previewing", hasPreview);
 
   const opts = $("interact-options");
   opts.innerHTML = "";
@@ -1496,6 +1529,31 @@ function renderInteractPane(model) {
     b.onclick = () => clickInteractOption(p);
     opts.appendChild(b);
   });
+
+  const preview = $("interact-preview");
+  preview.classList.toggle("hidden", !hasPreview);
+  $("interact-preview-title").textContent = hasPreview ? model.preview.title : "";
+  const previewContent = $("interact-preview-content");
+  previewContent.innerHTML = "";
+  if (hasPreview) {
+    for (const values of model.preview.lines) {
+      const row = el("div", "interact-preview-line");
+      for (const value of values) {
+        const valueSpan = el("span");
+        valueSpan.textContent = value.text || "";
+        if (value.fg) valueSpan.style.color = value.fg;
+        const modifiers = value.modifiers || [];
+        if (modifiers.includes("bold")) valueSpan.style.fontWeight = "700";
+        if (modifiers.includes("dim")) valueSpan.style.opacity = "0.62";
+        if (modifiers.includes("italic")) valueSpan.style.fontStyle = "italic";
+        if (modifiers.includes("strike") || modifiers.includes("crossed_out")) {
+          valueSpan.style.textDecoration = "line-through";
+        }
+        row.appendChild(valueSpan);
+      }
+      previewContent.appendChild(row);
+    }
+  }
   if (model.scrollBelow) opts.appendChild(moreRow("↓ " + model.scrollBelow + " more", K("PageDown")));
 
   if (model.custom) {

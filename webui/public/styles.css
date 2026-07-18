@@ -342,6 +342,7 @@ body.hide-meter .meter { display: none; }
    width, so it reads as growing out of the chat box. The Lua tool drives it
    purely by keystrokes; these controls translate clicks into those same keys. */
 .interact { pointer-events: auto; max-width: 740px; margin: 0 auto 10px; }
+.interact.has-preview { max-width: min(1040px, calc(100vw - 44px)); }
 .interact-card {
   width: 100%;
   background: var(--bg-elev); border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
@@ -361,6 +362,12 @@ body.hide-meter .meter { display: none; }
 .interact-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
 .interact-kicker { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); font-weight: 600; }
 .interact-q { font-size: 15px; font-weight: 550; color: var(--text); line-height: 1.4; margin-bottom: 12px; white-space: pre-wrap; }
+.interact-body.previewing { display: grid; grid-template-columns: minmax(180px, 0.36fr) minmax(0, 0.64fr); gap: 14px; align-items: stretch; }
+.interact-body.previewing .interact-options { max-height: 52vh; }
+.interact-preview { min-width: 0; max-height: 52vh; overflow: auto; padding: 11px 13px; border-left: 1px solid var(--border-strong); background: var(--surface); }
+.interact-preview-title { margin-bottom: 9px; color: var(--text); font-size: 12px; font-weight: 650; }
+.interact-preview-content { min-width: max-content; color: var(--text-dim); font-family: var(--mono); font-size: 12px; line-height: 1.45; }
+.interact-preview-line { min-height: 1.45em; white-space: pre; }
 .interact-options { display: flex; flex-direction: column; gap: 5px; max-height: 46vh; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
 .interact-options::-webkit-scrollbar { width: 8px; }
 .interact-options::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 99px; border: 2px solid var(--bg-elev); }
@@ -792,6 +799,9 @@ body.hide-meter .composer-tokens { display: none; }
   #thread { padding: 18px 14px 190px; overscroll-behavior: contain; }
   .approval { bottom: 158px; }
   #composer-wrap { padding: 0 10px max(10px, env(safe-area-inset-bottom)); }
+  .interact.has-preview { max-width: 100%; }
+  .interact-body.previewing { display: block; }
+  .interact-preview { max-height: 30vh; margin-top: 10px; border-top: 1px solid var(--border-strong); border-left: 0; }
   .composer-bar { gap: 6px; flex-wrap: wrap; }
   .model-pill { max-width: 100%; flex: 1 1 100%; justify-content: flex-start; }
   #mode-toggle { flex: 0 1 auto; }
