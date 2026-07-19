@@ -14,7 +14,14 @@ fn extract_description_prefers_field_then_comment() {
 }
 
 #[test]
-fn catalog_commands_are_not_bundled_defaults() {
+fn catalog_extensions_are_not_bundled_defaults() {
+    assert!(
+        !DEFAULT_LUA_TOOLS
+            .iter()
+            .any(|(name, _)| *name == "task_list.lua"),
+        "task_list.lua should be installed only through the catalog"
+    );
+
     for command in ["compact.lua", "memory.lua", "usage.lua"] {
         assert!(
             !DEFAULT_LUA_COMMANDS
@@ -160,23 +167,6 @@ fn seeds_refresh_pre_namespace_registration_apis() {
     let command = dir.join("command.lua");
     std::fs::write(&command, "bone.register_command('x', function() end)\n").unwrap();
     assert!(should_refresh_seeded_lua(&command, "command.lua").unwrap());
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn task_list_seed_refreshes_when_complete_action_is_missing() {
-    let dir = std::env::temp_dir().join(format!(
-        "bone-task-list-seed-test-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("task_list.lua");
-    std::fs::write(&path, "-- emit_turn_message_once\n").unwrap();
-
-    assert!(should_refresh_seeded_lua(&path, "task_list.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

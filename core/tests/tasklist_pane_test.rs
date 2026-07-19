@@ -10,7 +10,7 @@ use std::time::Duration;
 use bone_core::runtime::view::ViewDiff;
 use bone_core::tools::types::ToolCall;
 
-const TASK_LIST: &str = include_str!("../defaults/lua/tools/task_list.lua");
+const TASK_LIST: &str = include_str!("fixtures/task_list.lua");
 
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
