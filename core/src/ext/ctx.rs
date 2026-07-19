@@ -123,6 +123,7 @@ pub struct CtxConfig {
     pub session_id: Option<i64>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub context_window_tokens: Option<u64>,
     pub system_prompt_override: Option<String>,
     pub agent_depth: usize,
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -161,6 +162,7 @@ impl CtxConfig {
             session_id: None,
             provider: None,
             model: None,
+            context_window_tokens: None,
             system_prompt_override: None,
             agent_depth: 0,
             cancelled: None,
@@ -184,6 +186,7 @@ pub struct AppCtxState {
     pub session_id: Option<i64>,
     pub provider: String,
     pub model: String,
+    pub context_window_tokens: Option<u64>,
     pub system_prompt_override: Option<String>,
     pub approval_mode: crate::tools::ApprovalMode,
     // Boxed to break the `ToolHandler` -> `AppCtxState` -> `ToolHandler` type
@@ -207,6 +210,7 @@ impl AppCtxState {
         session_id: Option<i64>,
         provider: &str,
         model: &str,
+        context_window_tokens: Option<u64>,
         system_prompt_override: Option<String>,
         by_provider: Vec<UsageProviderContext>,
         history: Vec<crate::llm::ChatMessage>,
@@ -217,6 +221,7 @@ impl AppCtxState {
             session_id,
             provider: provider.to_string(),
             model: model.to_string(),
+            context_window_tokens,
             system_prompt_override,
             approval_mode: *approval_mode,
             tool_handler: Box::new(tools.clone()),
@@ -232,6 +237,7 @@ impl AppCtxState {
         cfg.session_id = self.session_id;
         cfg.provider = Some(self.provider.clone());
         cfg.model = Some(self.model.clone());
+        cfg.context_window_tokens = self.context_window_tokens;
         cfg.system_prompt_override = self.system_prompt_override.clone();
         cfg.approval_mode = self.approval_mode;
         cfg.tool_handler = Some((*self.tool_handler).clone());
@@ -343,6 +349,13 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
     // ctx.runtime.info() — read-only execution/session metadata.
     ctx.set("runtime", build_runtime_table(lua, cfg)?)?;
 
+    // ctx.model.context_window_tokens — request-scoped provider metadata.
+    let model = lua.create_table()?;
+    if let Some(tokens) = cfg.context_window_tokens {
+        model.set("context_window_tokens", tokens)?;
+    }
+    ctx.set("model", model)?;
+
     // ctx.state — per-process shared key/value scratch space.
     ctx.set("state", build_state_table(lua, cfg)?)?;
 
@@ -351,6 +364,9 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
 
     // ctx.agent.run(prompt, opts?) → { ok, content, error }
     add_agent_table(lua, &ctx, cfg)?;
+
+    // ctx.settings.get("namespace.key") — read-only resolved extension settings.
+    ctx.set("settings", build_settings_table(lua)?)?;
 
     // ctx.config — access to persisted configuration.
     ctx.set("config", build_config_table(lua, cfg)?)?;
@@ -1309,6 +1325,19 @@ fn canonical_display_value(namespace: &str, key: &str, value: String) -> serde_y
     serde_yaml::Value::String(value)
 }
 
+/// Build the read-only `ctx.settings` extension-settings API.
+fn build_settings_table(lua: &Lua) -> Result<Table, mlua::Error> {
+    let table = lua.create_table()?;
+    let get = lua.create_function(|lua, path: String| {
+        let bone: Table = lua.globals().get("bone")?;
+        let settings: Table = bone.get("settings")?;
+        let get: mlua::Function = settings.get("_get_extension")?;
+        get.call::<Value>(path)
+    })?;
+    table.set("get", get)?;
+    Ok(table)
+}
+
 /// Build the `ctx.config` table: read-only access to persisted YAML config plus
 /// the read/write helpers backing the customize UI (pages, provider entries).
 fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
@@ -1469,6 +1498,30 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
             page_tbl.set("fields", fields_tbl)?;
             pages.push(page_tbl)?;
         }
+
+        let bone: Table = lua.globals().get("bone")?;
+        let settings_api: Table = bone.get("settings")?;
+        let extension_pages: mlua::Function = settings_api.get("_pages")?;
+        for page in extension_pages
+            .call::<Table>(())?
+            .sequence_values::<Table>()
+        {
+            let page = page?;
+            let fields: Table = page.get("fields")?;
+            for field in fields.sequence_values::<Table>() {
+                let field = field?;
+                let value: Value = field.get("value")?;
+                let display = match value {
+                    Value::Boolean(value) => value.to_string(),
+                    Value::Integer(value) => value.to_string(),
+                    Value::Number(value) => value.to_string(),
+                    Value::String(value) => value.to_str()?.to_string(),
+                    _ => String::new(),
+                };
+                field.set("value", display)?;
+            }
+            pages.push(page)?;
+        }
         Ok(Value::Table(pages))
     })?;
     config_table.set("get_pages", get_pages_fn)?;
@@ -1477,7 +1530,38 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     // when canonical validation or atomic persistence fails so `/config` can
     // surface the failure instead of pretending the edit was saved.
     let set_value_fn =
-        lua.create_function(|_, (namespace, key, value): (String, String, String)| {
+        lua.create_function(|lua, (namespace, key, value): (String, String, String)| {
+            let bone: Table = lua.globals().get("bone")?;
+            let settings_api: Table = bone.get("settings")?;
+            let pages: mlua::Function = settings_api.get("_pages")?;
+            for page in pages.call::<Table>(())?.sequence_values::<Table>() {
+                let page = page?;
+                if page.get::<String>("namespace")? != namespace {
+                    continue;
+                }
+                for field in page.get::<Table>("fields")?.sequence_values::<Table>() {
+                    let field = field?;
+                    if field.get::<String>("key")? != key {
+                        continue;
+                    }
+                    let typed = match field.get::<String>("type")?.as_str() {
+                        "bool" => Value::Boolean(value.parse().map_err(|_| {
+                            mlua::Error::external("boolean setting must be true or false")
+                        })?),
+                        "number" => Value::Number(value.parse().map_err(|_| {
+                            mlua::Error::external("number setting must be numeric")
+                        })?),
+                        _ => Value::String(lua.create_string(&value)?),
+                    };
+                    let set: mlua::Function = settings_api.get("_set_extension")?;
+                    set.call::<()>((format!("{namespace}.{key}"), typed))?;
+                    return Ok(true);
+                }
+                return Err(mlua::Error::external(format!(
+                    "unknown config field: {namespace}.{key}"
+                )));
+            }
+
             let mut custom = crate::config::custom::CustomConfigs::load();
             custom
                 .try_set_value(&namespace, &key, value)
@@ -1488,7 +1572,37 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
 
     // ctx.config.cycle_field(namespace, key, current) -> string|nil
     let cycle_field_fn =
-        lua.create_function(|_, (namespace, key, current): (String, String, String)| {
+        lua.create_function(|lua, (namespace, key, current): (String, String, String)| {
+            let bone: Table = lua.globals().get("bone")?;
+            let settings_api: Table = bone.get("settings")?;
+            let pages: mlua::Function = settings_api.get("_pages")?;
+            for page in pages.call::<Table>(())?.sequence_values::<Table>() {
+                let page = page?;
+                if page.get::<String>("namespace")? != namespace {
+                    continue;
+                }
+                for field in page.get::<Table>("fields")?.sequence_values::<Table>() {
+                    let field = field?;
+                    if field.get::<String>("key")? != key {
+                        continue;
+                    }
+                    return match field.get::<String>("type")?.as_str() {
+                        "bool" => Ok(Some((current != "true").to_string())),
+                        "enum" => {
+                            let options: Vec<String> = field
+                                .get::<Table>("options")?
+                                .sequence_values::<String>()
+                                .collect::<mlua::Result<_>>()?;
+                            let index = options
+                                .iter()
+                                .position(|item| item == &current)
+                                .unwrap_or(0);
+                            Ok(options.get((index + 1) % options.len().max(1)).cloned())
+                        }
+                        _ => Ok(None),
+                    };
+                }
+            }
             let custom = crate::config::custom::CustomConfigs::load();
             Ok(custom.cycle_field(&namespace, &key, &current))
         })?;
@@ -1515,6 +1629,9 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
             row.set("handler", entry.handler.as_str())?;
             row.set("api_key", entry.api_key.as_str())?;
             row.set("reasoning_effort", entry.reasoning_effort.as_str())?;
+            if let Some(tokens) = entry.context_window_tokens {
+                row.set("context_window_tokens", tokens)?;
+            }
             row.set("active", id == list_active_provider)?;
             out.push(row)?;
         }
@@ -1537,6 +1654,7 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
                 .get::<Option<String>>("handler")?
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "openai".to_string()),
+            context_window_tokens: entry.get::<Option<u64>>("context_window_tokens")?,
             reasoning_effort: entry
                 .get::<Option<String>>("reasoning_effort")?
                 .unwrap_or_default(),

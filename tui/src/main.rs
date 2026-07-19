@@ -64,22 +64,40 @@ fn boot_runtime_host_for(
     provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
     custom: &mut CustomConfigs,
     target: bone::rpc::SessionTarget,
+    shared_settings: Option<std::sync::Arc<std::sync::Mutex<bone::config::settings::Settings>>>,
 ) -> std::io::Result<RuntimeHostBoot> {
     let model = provider.model().to_string();
     let provider_label = format!("{} ({})", provider.name(), provider.id());
-    let booted = bone::ext::boot_with_tools(
-        &bone::config::bone_dir(),
-        &std::env::current_dir()?,
-        custom,
-        true,
-        bone::ext::BootOptions {
-            agent_depth: 0,
-            headless: false,
-            tool_allowlist: None,
-        },
-        &model,
-        &provider_label,
-    );
+    let booted = if let Some(settings) = shared_settings {
+        bone::ext::boot_with_tools_shared(
+            &bone::config::bone_dir(),
+            &std::env::current_dir()?,
+            custom,
+            true,
+            bone::ext::BootOptions {
+                agent_depth: 0,
+                headless: false,
+                tool_allowlist: None,
+            },
+            &model,
+            &provider_label,
+            settings,
+        )
+    } else {
+        bone::ext::boot_with_tools(
+            &bone::config::bone_dir(),
+            &std::env::current_dir()?,
+            custom,
+            true,
+            bone::ext::BootOptions {
+                agent_depth: 0,
+                headless: false,
+                tool_allowlist: None,
+            },
+            &model,
+            &provider_label,
+        )
+    };
     let mut session = bone::runtime::RuntimeSession::new(booted.tools);
     let warning = match target {
         bone::rpc::SessionTarget::Latest => session.init_db(&*provider),
@@ -108,6 +126,12 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     // Build the provider from config, honoring `--provider`/`--model`.
     let (cli_provider, cli_model) = parse_provider_model(args);
     let mut custom = CustomConfigs::load();
+    let shared_settings = std::sync::Arc::new(std::sync::Mutex::new(
+        custom
+            .settings
+            .clone()
+            .unwrap_or_else(bone::config::settings::Settings::defaults),
+    ));
     let provider_id = cli_provider.unwrap_or_else(|| {
         if custom.get_last_provider().is_empty() {
             "local".to_string()
@@ -141,7 +165,9 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     }
 
     let (session_manager, manager_rx) = bone::rpc::SessionManager::new();
+    let hub_group = bone::rpc::HubGroup::default();
     let factory_provider = provider.clone();
+    let factory_settings = shared_settings.clone();
     let factory = move |target: bone::rpc::SessionTarget| {
         // Each actor gets an independent Lua VM/tool state and RuntimeSession.
         // The provider HTTP client is safe to share and each actor may still
@@ -150,8 +176,13 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         // Read this per actor, not once when `bone serve` starts: settings may
         // change while the server stays alive.
         let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
-        let mut boot = boot_runtime_host_for(factory_provider.clone(), &mut custom, target)
-            .map_err(|err| err.to_string())?;
+        let mut boot = boot_runtime_host_for(
+            factory_provider.clone(),
+            &mut custom,
+            target,
+            Some(factory_settings.clone()),
+        )
+        .map_err(|err| err.to_string())?;
         let conversation_id = boot
             .session
             .lock()
@@ -191,15 +222,14 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
                 }
             }
         }
-        let frontend =
-            bone::rpc::frontend_state(&boot.manager, &boot.session.lock().unwrap().tools);
         let sync_session = boot.session.clone();
         let sync_provider = boot.provider.clone();
+        let sync_manager = boot.manager.clone();
         let initial = std::sync::Arc::new(move || {
             let session = sync_session.lock().unwrap();
             let snapshot = session.snapshot(sync_provider.id(), sync_provider.model());
             vec![
-                frontend.clone(),
+                bone::rpc::frontend_state(&sync_manager, &session.tools),
                 bone::runtime::RuntimeEvent::StateSnapshot {
                     snapshot: snapshot.clone(),
                 },
@@ -211,7 +241,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
                 },
             ]
         });
-        let (hub, commands_rx) = bone::rpc::Hub::new();
+        let (hub, commands_rx) = bone::rpc::Hub::new_grouped(hub_group.clone());
         let task = Box::pin(bone::rpc::run_daemon(
             hub.publisher(),
             commands_rx,
@@ -561,7 +591,7 @@ async fn main() -> std::io::Result<()> {
     // The interactive TUI starts a fresh conversation each launch (clean slate);
     // past chats remain in the DB and are reachable via /history. Only the
     // multi-chat `bone serve` / web UI resumes the latest conversation on attach.
-    let boot = boot_runtime_host_for(provider, &mut custom, bone::rpc::SessionTarget::New)?;
+    let boot = boot_runtime_host_for(provider, &mut custom, bone::rpc::SessionTarget::New, None)?;
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
     let command_tx = hub.command_sender();

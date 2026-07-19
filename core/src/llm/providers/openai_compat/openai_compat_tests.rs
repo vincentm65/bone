@@ -257,6 +257,7 @@ fn from_entry_reads_reasoning_effort() {
         api_key: String::new(),
         endpoint: "/chat/completions".into(),
         handler: "openai".into(),
+        context_window_tokens: Some(131_072),
         reasoning_effort: "HIGH".into(),
     };
     let provider = OpenAiCompatProvider::from_entry("grok", &entry);

@@ -43,6 +43,7 @@ const state = {
   snapshot: {},
   toolDefs: [],
   commands: [],
+  extensionPages: [],
   commandIndex: -1,
   commandRunning: false,
   toolInfo: new Map(),   // call id -> { name, arguments }
@@ -381,6 +382,7 @@ function dispatchEvent(ev) {
 function onFrontendState(ev) {
   if (Array.isArray(ev.tool_defs)) state.toolDefs = ev.tool_defs;
   if (Array.isArray(ev.commands)) state.commands = ev.commands;
+  state.extensionPages = Array.isArray(ev.settings?.extension_pages) ? ev.settings.extension_pages : [];
   applyTheme(ev.settings?.theme);
 }
 
@@ -2061,6 +2063,7 @@ const PROVIDER_FIELDS = [
   { key: "api_key",  label: "API Key",     placeholder: "sk-...",         type: "text" },
   { key: "endpoint", label: "Endpoint",    placeholder: "/chat/completions", type: "text" },
   { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex", "grok_build"] },
+  { key: "context_window_tokens", label: "Context window", placeholder: "Unknown", type: "number" },
   { key: "reasoning_effort", label: "Reasoning effort", placeholder: "Default", type: "select", options: ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"], effortHandlers: ["codex", "openai", "grok_build"] },
 ];
 
@@ -2426,38 +2429,33 @@ function renderBehavior() {
       writeConfig("general", "show_thinking", on, "bool", false);
     })));
 
-  const triggerMode = findField("compact_trigger_mode").value || "absolute";
-  wrap.appendChild(setRow("Compaction trigger", "Use a fixed token threshold or a percentage of model context capacity.",
-    enumEl(triggerMode, ["absolute", "percentage"], (v) =>
-      writeConfig("general", "compact_trigger_mode", v, "enum", true))));
-
-  wrap.appendChild(setRow("Fixed threshold", "Auto-compact at this context size. Blank disables automatic compaction in absolute mode.",
-    numEl(findField("auto_compact_tokens").value || "", "tokens", (v) =>
-      writeConfig("general", "auto_compact_tokens", v, "string", true))));
-
-  wrap.appendChild(setRow("Capacity threshold", "Auto-compact at this percentage when percentage mode is selected.",
-    numEl(findField("compact_trigger_percentage").value || "80", "%", (v) =>
-      writeConfig("general", "compact_trigger_percentage", v, "string", true))));
-
-  wrap.appendChild(setRow("Context capacity", "Override model context capacity when it is not reported automatically.",
-    numEl(findField("compact_context_window_tokens").value || "", "tokens", (v) =>
-      writeConfig("general", "compact_context_window_tokens", v, "string", true))));
-
-  wrap.appendChild(setRow("Keep recent context", "Token budget preserved verbatim at complete turn boundaries.",
-    numEl(findField("compact_keep_tokens").value || "12000", "tokens", (v) =>
-      writeConfig("general", "compact_keep_tokens", v, "string", true))));
-
-  wrap.appendChild(setRow("Checkpoint input", "Maximum summarizer input per incremental folding pass.",
-    numEl(findField("compact_input_tokens").value || "30000", "tokens", (v) =>
-      writeConfig("general", "compact_input_tokens", v, "string", true))));
-
-  wrap.appendChild(setRow("Checkpoint output", "Maximum size of the structured context checkpoint.",
-    numEl(findField("compact_summary_tokens").value || "2500", "tokens", (v) =>
-      writeConfig("general", "compact_summary_tokens", v, "string", true))));
-
-  wrap.appendChild(setRow("Safety reserve", "Capacity held back from percentage-triggered compaction.",
-    numEl(findField("compact_safety_tokens").value || "8000", "tokens", (v) =>
-      writeConfig("general", "compact_safety_tokens", v, "string", true))));
+  for (const page of state.extensionPages) {
+    const heading = el("h3", "settings-section-title");
+    heading.textContent = page.title || page.namespace;
+    wrap.appendChild(heading);
+    for (const field of page.fields || []) {
+      const path = `${page.namespace}.${field.key}`;
+      const save = (value) => send({ set_setting: { path, value } });
+      let control;
+      if (field.type === "bool") {
+        control = switchEl(Boolean(field.value), save);
+      } else if (field.type === "enum") {
+        control = enumEl(String(field.value ?? field.default ?? ""), field.options || [], save);
+      } else {
+        control = document.createElement("input");
+        control.className = "set-num";
+        control.type = field.type === "number" ? "number" : "text";
+        if (field.min != null) control.min = String(field.min);
+        if (field.max != null) control.max = String(field.max);
+        if (field.integer) control.step = "1";
+        control.value = String(field.value ?? field.default ?? "");
+        const commit = () => save(field.type === "number" ? Number(control.value) : control.value);
+        control.onblur = commit;
+        control.onkeydown = (event) => { if (event.key === "Enter") control.blur(); };
+      }
+      wrap.appendChild(setRow(field.label || field.key, path, control));
+    }
+  }
 
   // render the display pane too (shares this load)
   renderDisplay();

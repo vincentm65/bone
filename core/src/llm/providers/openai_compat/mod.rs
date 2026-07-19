@@ -32,6 +32,7 @@ pub struct OpenAiCompatProvider {
     /// Optional Chat Completions `reasoning_effort` (xAI / Grok, etc.).
     /// Empty/default means omit and let the model use its own default.
     reasoning_effort: Option<String>,
+    context_window_tokens: Option<u64>,
     /// Optional transport overrides used by subscription-backed providers
     /// that speak the same Chat Completions wire format.
     api_key_override: Option<String>,
@@ -56,6 +57,7 @@ impl OpenAiCompatProvider {
             endpoint: entry.endpoint.clone(),
             max_tokens: None,
             reasoning_effort: entry.reasoning_effort_opt(),
+            context_window_tokens: entry.context_window_tokens,
             api_key_override: None,
             extra_headers: Vec::new(),
             conversation_header: None,
@@ -542,6 +544,10 @@ impl LlmProvider for OpenAiCompatProvider {
 
     fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
         self.max_tokens = max_tokens;
+    }
+
+    fn context_window_tokens(&self) -> Option<u64> {
+        self.context_window_tokens
     }
 
     async fn validate(&self) -> Result<(), LlmError> {

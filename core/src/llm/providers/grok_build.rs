@@ -39,6 +39,7 @@ pub struct GrokBuildProvider {
     endpoint: String,
     model: String,
     reasoning_effort: String,
+    context_window_tokens: Option<u64>,
     credentials: Arc<Mutex<Option<GrokCredentials>>>,
 }
 
@@ -76,6 +77,7 @@ impl GrokBuildProvider {
                 entry.model.clone()
             },
             reasoning_effort: entry.reasoning_effort.clone(),
+            context_window_tokens: entry.context_window_tokens,
             credentials: Arc::new(Mutex::new(None)),
         }
     }
@@ -123,6 +125,7 @@ impl GrokBuildProvider {
             api_key: String::new(),
             endpoint: self.endpoint.clone(),
             handler: "openai".to_string(),
+            context_window_tokens: self.context_window_tokens,
             reasoning_effort: self.reasoning_effort.clone(),
         }
     }
@@ -149,6 +152,10 @@ impl LlmProvider for GrokBuildProvider {
 
     fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    fn context_window_tokens(&self) -> Option<u64> {
+        self.context_window_tokens
     }
 
     async fn validate(&self) -> Result<(), LlmError> {

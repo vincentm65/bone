@@ -36,11 +36,32 @@ pub struct ProviderEntry {
     )]
     pub handler: String,
 
+    #[serde(default, deserialize_with = "optional_u64")]
+    pub context_window_tokens: Option<u64>,
+
     /// Reasoning effort for backends that expose it (Codex Responses
     /// `reasoning.effort`, OpenAI-compatible Chat Completions
     /// `reasoning_effort` for xAI/Grok, etc.). Empty means model default.
     #[serde(default, deserialize_with = "string_or_default")]
     pub reasoning_effort: String,
+}
+
+fn optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Number(u64),
+        String(String),
+    }
+    match Option::<Value>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(Value::Number(value)) => Ok(Some(value)),
+        Some(Value::String(value)) => value.parse().map(Some).map_err(serde::de::Error::custom),
+    }
 }
 
 fn string_or_default_with<'de, D>(
@@ -120,6 +141,7 @@ impl ProviderEntry {
             api_key: get("api_key"),
             endpoint: get_with_default("endpoint", &default_endpoint()),
             handler: get_with_default("handler", &default_handler()),
+            context_window_tokens: get("context_window_tokens").parse().ok(),
             reasoning_effort: get("reasoning_effort"),
         })
     }

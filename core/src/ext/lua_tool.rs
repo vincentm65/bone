@@ -363,6 +363,12 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
     match serde_json::from_str::<serde_json::Value>(text.trim()) {
         Ok(obj) if obj.is_object() => {
             let map = obj.as_object().unwrap();
+            if !["content", "state", "pane", "images"]
+                .iter()
+                .any(|key| map.contains_key(*key))
+            {
+                return Ok(ToolOutput::text(text.to_string()));
+            }
             let content = map
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -398,5 +404,29 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
             })
         }
         _ => Ok(ToolOutput::text(text.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tool_output;
+
+    #[test]
+    fn preserves_plain_json_object_as_content() {
+        let text = r#"{"cancelled":false,"answers":[{"value":"Blue"}]}"#;
+        let output = parse_tool_output(text).unwrap();
+
+        assert_eq!(output.content, text);
+        assert!(output.images.is_empty());
+        assert!(output.pane_page.is_none());
+        assert!(output.state.is_none());
+    }
+
+    #[test]
+    fn still_parses_tool_output_envelopes() {
+        let output = parse_tool_output(r#"{"content":"done","state":"saved"}"#).unwrap();
+
+        assert_eq!(output.content, "done");
+        assert_eq!(output.state.as_deref(), Some("saved"));
     }
 }

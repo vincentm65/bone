@@ -28,6 +28,7 @@ pub fn setup_api(
     lua: &Lua,
     bone: &Table,
     settings: Arc<Mutex<Settings>>,
+    registry: super::settings_registry::SharedSettingsRegistry,
     settings_path: PathBuf,
 ) -> Result<(), String> {
     let api = api_table(lua, bone).map_err(crate::util::errstr)?;
@@ -131,12 +132,144 @@ pub fn setup_api(
 
     setup_theme_api(lua, bone, Arc::clone(&settings), &settings_path)?;
 
-    // bone.settings.{get,set,reset} — canonical, validated, persistent settings.
+    // bone.settings.{register,get,set,reset} — canonical settings plus
+    // declarative extension-owned schemas.
     let settings_api = lua.create_table().map_err(crate::util::errstr)?;
+
+    let register_registry = Arc::clone(&registry);
+    let register = lua
+        .create_function(move |lua, declaration: Table| {
+            let mut page: super::settings_registry::SettingsPage =
+                lua.from_value(Value::Table(declaration))?;
+            let bone: Table = lua.globals().get("bone")?;
+            page.owner = bone
+                .get::<Option<String>>("_settings_owner")?
+                .unwrap_or_else(|| "init.lua".into());
+            register_registry
+                .write()
+                .map_err(|e| {
+                    mlua::Error::external(format!("settings registry lock poisoned: {e}"))
+                })?
+                .register(page)
+                .map_err(mlua::Error::external)
+        })
+        .map_err(crate::util::errstr)?;
+    settings_api
+        .set("register", register)
+        .map_err(crate::util::errstr)?;
+
+    let rollback_registry = Arc::clone(&registry);
+    let rollback = lua
+        .create_function(move |_, owner: String| {
+            rollback_registry
+                .write()
+                .map_err(|e| {
+                    mlua::Error::external(format!("settings registry lock poisoned: {e}"))
+                })?
+                .remove_owner(&owner);
+            Ok(())
+        })
+        .map_err(crate::util::errstr)?;
+    settings_api
+        .set("_rollback_owner", rollback)
+        .map_err(crate::util::errstr)?;
+
+    let extension_get_store = Arc::clone(&settings);
+    let extension_get_registry = Arc::clone(&registry);
+    let extension_get = lua
+        .create_function(move |lua, path: String| {
+            let store = extension_get_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
+            let value = extension_get_registry
+                .read()
+                .map_err(|e| {
+                    mlua::Error::external(format!("settings registry lock poisoned: {e}"))
+                })?
+                .resolve(&store, &path)
+                .map_err(mlua::Error::external)?;
+            lua.to_value(&value)
+        })
+        .map_err(crate::util::errstr)?;
+    settings_api
+        .set("_get_extension", extension_get)
+        .map_err(crate::util::errstr)?;
+
+    let pages_registry = Arc::clone(&registry);
+    let pages_store = Arc::clone(&settings);
+    let pages = lua
+        .create_function(move |lua, ()| {
+            let registry = pages_registry.read().map_err(|e| {
+                mlua::Error::external(format!("settings registry lock poisoned: {e}"))
+            })?;
+            let settings = pages_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
+            let pages = registry
+                .pages()
+                .into_iter()
+                .map(|page| {
+                    let fields = page
+                        .fields
+                        .into_iter()
+                        .map(|field| {
+                            let path = format!("{}.{}", page.namespace, field.key);
+                            let value = registry.resolve(&settings, &path).unwrap_or(field.default);
+                            serde_json::json!({
+                                "key": field.key,
+                                "label": field.label,
+                                "type": field.field_type,
+                                "options": field.options,
+                                "value": value,
+                                "integer": field.integer,
+                                "min": field.min,
+                                "max": field.max,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    serde_json::json!({
+                        "namespace": page.namespace,
+                        "title": page.title,
+                        "fields": fields,
+                    })
+                })
+                .collect::<Vec<_>>();
+            lua.to_value(&pages)
+        })
+        .map_err(crate::util::errstr)?;
+    settings_api
+        .set("_pages", pages)
+        .map_err(crate::util::errstr)?;
+
+    let extension_set_registry = Arc::clone(&registry);
+    let extension_set_store = Arc::clone(&settings);
+    let extension_set_path = settings_path.clone();
+    let extension_set = lua
+        .create_function(move |lua, (path, value): (String, Value)| {
+            let value: crate::config::settings::ExtensionValue = lua.from_value(value)?;
+            let registry = extension_set_registry.read().map_err(|e| {
+                mlua::Error::external(format!("settings registry lock poisoned: {e}"))
+            })?;
+            let mut settings = extension_set_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
+            registry
+                .set(&mut settings, &path, value, &extension_set_path)
+                .map_err(mlua::Error::external)
+        })
+        .map_err(crate::util::errstr)?;
+    settings_api
+        .set("_set_extension", extension_set)
+        .map_err(crate::util::errstr)?;
 
     let get_store = Arc::clone(&settings);
     let get = lua
         .create_function(move |lua, path: String| {
+            if path == "extensions" || path.starts_with("extensions.") {
+                return Err(mlua::Error::external(
+                    "extension settings are request-scoped; use ctx.settings.get",
+                ));
+            }
             let value = get_store
                 .lock()
                 .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
@@ -151,6 +284,11 @@ pub fn setup_api(
     let set_path = settings_path.clone();
     let set = lua
         .create_function(move |lua, (path, value): (String, Value)| {
+            if path == "extensions" || path.starts_with("extensions.") {
+                return Err(mlua::Error::external(
+                    "extension settings are read-only from Lua commands",
+                ));
+            }
             let value: serde_json::Value = lua.from_value(value)?;
             set_store
                 .lock()
@@ -165,6 +303,11 @@ pub fn setup_api(
     let reset_store = Arc::clone(&settings);
     let reset = lua
         .create_function(move |lua, path: String| {
+            if path == "extensions" || path.starts_with("extensions.") {
+                return Err(mlua::Error::external(
+                    "extension settings cannot be reset from Lua commands",
+                ));
+            }
             let value = reset_store
                 .lock()
                 .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?

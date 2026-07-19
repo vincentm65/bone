@@ -12,6 +12,12 @@ use crate::config::settings::BoneSettings;
 pub struct ResolvedFrontendSettings {
     #[serde(flatten)]
     pub settings: BoneSettings,
+    /// Monotonic in-process revision; rejected writes do not advance it.
+    #[serde(default)]
+    pub revision: u64,
+    /// Active extension schemas. Persisted values stay in `settings.extensions`.
+    #[serde(default)]
+    pub extension_pages: Vec<super::settings_registry::SettingsPage>,
     #[serde(default)]
     pub spinner_styles: Vec<SpinnerPreset>,
     #[serde(default)]

@@ -473,46 +473,33 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 
 ### /compact (optional catalog extension)
 
-Install `compact.lua` through `/catalog` to add reliable context compaction using a versioned `[Context checkpoint v1]`. Older complete turns are folded into a validated checkpoint while recent complete turns remain verbatim. Existing checkpoints are updated incrementally instead of repeatedly summarizing the full transcript.
+Install `compact.lua` through `/catalog` to add reliable context compaction using a versioned `[Context checkpoint v1]`. Older complete turns are folded into a concise state capsule while recent complete turns remain verbatim. Existing checkpoints are updated incrementally instead of repeatedly summarizing the full transcript.
 
 Usage:
 
 ```
 /compact                       # compact now
-/compact preview               # inspect boundaries and budgets without changing history
-/compact inspect               # show the current checkpoint and protected-item count
-/compact pin <exact text>      # preserve text verbatim across later compactions
-/compact pins                  # list protected items
-/compact unpin <number>        # remove a protected item
+/compact now                   # compact now
 ```
 
 Reliability properties:
 
-- The checkpoint has required sections for the current objective, constraints, verified facts, files/symbols, validation, completed work, unresolved issues, pending action, and critical verbatim details.
+- The capsule focuses on the objective, constraints, current state, artifacts and validation, and next actions instead of narrating the conversation.
 - Summarizer input and output are bounded. Large history is split on UTF-8 boundaries and folded incrementally using the previous validated checkpoint.
-- Replacement happens only after deterministic schema, size, and protected-text validation, and only when the resulting provider context estimate is smaller. Failure preserves the original transcript.
-- Turn boundaries keep user, assistant, and associated tool messages together. The legacy message-count setting is rounded out to complete turns.
-- Summarization runs without tools and with explicit output and wall-clock limits.
+- Replacement happens only after deterministic marker and size validation, and only when the resulting provider context estimate is smaller. Failure preserves the original transcript.
+- Turn boundaries keep user, assistant, and associated tool messages together, and recent turns remain unchanged until compaction.
+- Summarization runs without tools and with explicit output and wall-clock limits. An oversized result gets at most one bounded compression attempt.
 - Automatic compaction emits transient status while working and a persistent notice on success, failure, or rejection.
 
-Configuration is stored in `config/general.yaml` and read by the command through
-`ctx.config.get("general", key)`. Change it through `/config` or edit that YAML;
-these are not `bone.config` fields:
+Configuration is stored in `config.yaml` under `extensions.compact` and changed through `/config`:
 
-- `compact_trigger_mode` — `absolute` (default) or `percentage`.
-- `auto_compact_tokens` — positive token threshold used in absolute mode. Blank disables automatic compaction in that mode.
-- `compact_trigger_percentage` — context-capacity percentage used in percentage mode (default `80`).
-- `compact_context_window_tokens` — optional model context-capacity override when runtime metadata does not provide one. Percentage mode is disabled if capacity is unknown.
-- `compact_safety_tokens` — reserve below context capacity (default `8000`); the percentage threshold never exceeds capacity minus this reserve.
-- `compact_keep_tokens` — recent complete-turn token budget preserved verbatim (default `12000`).
-- `compact_input_tokens` — maximum summarizer input per folding pass (default `30000`).
-- `compact_checkpoint_tokens` — maximum fully rendered checkpoint size (default `2500`). The deprecated `compact_summary_tokens` is accepted as a fallback.
-- `compact_generation_tokens` — provider generation allowance for summary and compression passes (default `8000`).
-- `auto_compact_keep_messages` — deprecated compatibility setting. When present, it replaces `compact_keep_tokens` with a recent user/assistant message target, rounded to complete turns.
+- `auto` — enable automatic compaction (default `true`).
+- `trigger_percentage` — context-capacity percentage that triggers compaction (default `80`).
+- `context_window_tokens` — fallback capacity when model metadata is unavailable (default `100000`).
 
 Auto-compaction runs after a user message is appended and before the provider request is built. A per-conversation growth gate prevents repeated retries when context has not grown materially. After a successful replacement, its baseline is reset to the new compacted context estimate.
 
-The transcript replacement is returned as a `conversation.replace` action (see [Return Actions](#command-return-semantics)). The Driver runs `before_turn` on a blocking thread so the UI stays responsive and Esc can cancel an in-flight summarizer. The implementation policy remains entirely in `lua/commands/compact.lua`; Rust supplies generic conversation, request-estimation, agent, and return-action APIs.
+The transcript replacement is returned as a `conversation.replace` action (see [Return Actions](#command-return-semantics)). The Driver runs `before_turn` on a blocking thread so the UI stays responsive and Esc can cancel an in-flight summarizer. The implementation policy remains entirely in catalog-owned `compact.lua`; Rust supplies generic conversation, request-estimation, agent, settings, and return-action APIs.
 
 ### /config
 

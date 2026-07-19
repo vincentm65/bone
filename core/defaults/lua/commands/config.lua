@@ -82,6 +82,7 @@ local function edit_provider(ctx, provider)
       endpoint = provider.endpoint or "",
       handler = provider.handler or "openai",
       api_key = provider.api_key or "",
+      context_window_tokens = provider.context_window_tokens,
    }
 
    while true do
@@ -92,6 +93,7 @@ local function edit_provider(ctx, provider)
          "endpoint \u{00b7} " .. entry.endpoint,
          "handler \u{00b7} " .. entry.handler,
          "api_key \u{00b7} " .. mask_secret(entry.api_key),
+         "context_window_tokens \u{00b7} " .. tostring(entry.context_window_tokens or "unknown"),
          "Save changes",
       }
       local result = ask(ctx, {
@@ -120,6 +122,9 @@ local function edit_provider(ctx, provider)
          local value = edit_text(ctx, "api_key", "")
          if value ~= nil and value ~= "" then entry.api_key = value end
       elseif choice == labels[7] then
+         local value = edit_text(ctx, "context_window_tokens", entry.context_window_tokens or "")
+         if value ~= nil then entry.context_window_tokens = tonumber(value) end
+      elseif choice == labels[8] then
          ctx.config.set_provider_entry(provider.id, entry)
          return true
       end

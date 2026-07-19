@@ -182,58 +182,6 @@ fn custom_configs_get_value_returns_default_when_no_value_set() {
 }
 
 #[test]
-fn custom_configs_set_value_overrides_default() {
-    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
-
-    let mut configs = CustomConfigs::default();
-    configs.pages.push((
-        "test".to_string(),
-        CustomConfigPage {
-            title: "Test".to_string(),
-            fields: vec![ConfigField {
-                key: "mode".to_string(),
-                label: None,
-                field_type: ConfigFieldType::Enum,
-                options: vec!["safe".into(), "edit".into(), "danger".into()],
-                default: Some(serde_yaml::Value::String("safe".into())),
-                value: None,
-            }],
-        },
-    ));
-
-    assert_eq!(configs.get_value("test", "mode"), "safe");
-    configs.set_value("test", "mode", "danger".to_string());
-    assert_eq!(configs.get_value("test", "mode"), "danger");
-}
-
-#[test]
-fn custom_configs_number_field_stores_yaml_number() {
-    use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
-
-    let mut configs = CustomConfigs::default();
-    configs.pages.push((
-        "test".to_string(),
-        CustomConfigPage {
-            title: "Test".to_string(),
-            fields: vec![ConfigField {
-                key: "max".to_string(),
-                label: None,
-                field_type: ConfigFieldType::Number,
-                options: Vec::new(),
-                default: None,
-                value: None,
-            }],
-        },
-    ));
-
-    configs.set_value("test", "max", "200".to_string());
-    let field = configs.find_field("test", "max").unwrap();
-    // Should be stored as a YAML number, not a string
-    assert!(matches!(field.value, Some(serde_yaml::Value::Number(_))));
-    assert_eq!(configs.get_value("test", "max"), "200");
-}
-
-#[test]
 fn enabled_tool_names_only_includes_true_and_unset() {
     use bone::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage, CustomConfigs};
 

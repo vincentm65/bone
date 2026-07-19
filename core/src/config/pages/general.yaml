@@ -14,45 +14,4 @@ fields:
     type: enum
     options: [custom, lines, box, filled]
     default: custom
-  - key: auto_compact_tokens
-    label: "Auto-compact threshold (tokens)"
-    type: string
-    default: ""
-  - key: compact_trigger_mode
-    label: "Compaction trigger mode"
-    type: enum
-    options: [absolute, percentage]
-    default: absolute
-  - key: compact_trigger_percentage
-    label: "Context capacity trigger (%)"
-    type: string
-    default: "80"
-  - key: compact_context_window_tokens
-    label: "Context capacity override (tokens)"
-    type: string
-    default: ""
-  - key: compact_keep_tokens
-    label: "Recent context to preserve (tokens)"
-    type: string
-    default: "12000"
-  - key: compact_input_tokens
-    label: "Summarizer input budget (tokens)"
-    type: string
-    default: "30000"
-  - key: compact_checkpoint_tokens
-    label: "Final checkpoint budget (tokens)"
-    type: string
-    default: "2500"
-  - key: compact_generation_tokens
-    label: "Summarizer generation allowance (tokens)"
-    type: string
-    default: "8000"
-  - key: compact_safety_tokens
-    label: "Context safety reserve (tokens)"
-    type: string
-    default: "8000"
-  - key: auto_compact_keep_messages
-    label: "Legacy recent message count"
-    type: string
-    default: ""
 

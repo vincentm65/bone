@@ -173,6 +173,8 @@ pub struct ExtensionManager {
     commands: Vec<super::ops_commands::RegisteredLuaCommand>,
     /// Canonical resolved settings owned by this daemon runtime.
     settings: Arc<Mutex<Settings>>,
+    /// Declarative schemas registered by installed Lua modules.
+    settings_registry: super::settings_registry::SharedSettingsRegistry,
     /// Standalone shared UI-state handle. Lives outside the Lua VM mutex so
     /// the TUI can drain diffs even while a tool blocks on `ctx.ui.key()`.
     /// Also cloned into every `ctx.ui.pane` closure.
@@ -188,6 +190,7 @@ impl ExtensionManager {
         loaded: bool,
         commands: Vec<super::ops_commands::RegisteredLuaCommand>,
         settings: Arc<Mutex<Settings>>,
+        settings_registry: super::settings_registry::SharedSettingsRegistry,
         ui: super::api_ui::SharedUi,
     ) -> Self {
         Self {
@@ -196,6 +199,7 @@ impl ExtensionManager {
             loaded,
             commands,
             settings,
+            settings_registry,
             ui,
         }
     }
@@ -221,6 +225,7 @@ impl ExtensionManager {
             loaded: false,
             commands: Vec::new(),
             settings: Arc::new(Mutex::new(Settings::defaults())),
+            settings_registry: Arc::new(std::sync::RwLock::new(Default::default())),
             ui: super::api_ui::new_shared(),
         }
     }
@@ -242,6 +247,10 @@ impl ExtensionManager {
     pub fn lua_arc(&self) -> Arc<Mutex<Lua>> {
         self.lua_handle()
     }
+    pub fn settings_handle(&self) -> Arc<Mutex<Settings>> {
+        Arc::clone(&self.settings)
+    }
+
     /// Clone the standalone shared UI-state handle.
     pub fn ui_handle(&self) -> super::api_ui::SharedUi {
         self.ui.clone()
@@ -267,12 +276,10 @@ impl ExtensionManager {
     /// Get the daemon-owned resolved settings, including dynamic UI highlights
     /// and renderer presets from the booted UI module.
     pub fn frontend_settings(&self) -> super::snapshots::ResolvedFrontendSettings {
-        let mut settings = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .resolved()
-            .clone();
+        let (mut settings, revision) = {
+            let store = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            (store.resolved().clone(), store.revision())
+        };
         let view = super::api_ui::snapshot(&self.ui);
         for (name, color) in view.highlights {
             if name == "bg" {
@@ -290,18 +297,60 @@ impl ExtensionManager {
             .map(|lua| super::snapshots::collect_presets(&lua))
             .unwrap_or_default();
         super::snapshots::ResolvedFrontendSettings {
-            settings,
+            settings: settings.clone(),
+            revision,
+            extension_pages: {
+                let registry = self
+                    .settings_registry
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let store = Settings {
+                    inner: settings.clone(),
+                    revision,
+                };
+                let mut pages = registry.pages();
+                for page in &mut pages {
+                    for field in &mut page.fields {
+                        let path = format!("{}.{}", page.namespace, field.key);
+                        field.value = registry.resolve(&store, &path).ok();
+                    }
+                }
+                pages
+            },
             spinner_styles,
             spinner_texts,
         }
     }
 
+    /// Validate and atomically persist one registered extension setting.
+    pub fn set_extension_setting(
+        &self,
+        path: &str,
+        value: crate::config::settings::ExtensionValue,
+    ) -> Result<(), String> {
+        let registry = self
+            .settings_registry
+            .read()
+            .map_err(|e| format!("settings registry lock poisoned: {e}"))?;
+        let mut settings = self
+            .settings
+            .lock()
+            .map_err(|e| format!("settings lock poisoned: {e}"))?;
+        registry
+            .set(
+                &mut settings,
+                path,
+                value,
+                &crate::config::settings::settings_path(),
+            )
+            .map_err(|e| e.to_string())
+    }
+
     /// Replace the daemon's resolved settings after a validated full-file reload.
     pub fn replace_settings(&self, settings: BoneSettings) {
-        self.settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .inner = settings;
+        let mut store = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        store.inner = settings;
+        store.revision = store.revision.saturating_add(1);
     }
 
     /// The base banner lines from `bone.banner()` (no client-side update/catalog

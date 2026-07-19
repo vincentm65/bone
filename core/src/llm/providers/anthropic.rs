@@ -39,6 +39,7 @@ pub struct AnthropicProvider {
     id: String,
     label: String,
     max_tokens: Option<u32>,
+    context_window_tokens: Option<u64>,
 }
 
 impl AnthropicProvider {
@@ -57,6 +58,7 @@ impl AnthropicProvider {
             api_key: entry.api_key.clone(),
             endpoint: entry.endpoint.clone(),
             max_tokens: None,
+            context_window_tokens: entry.context_window_tokens,
         }
     }
 
@@ -254,6 +256,10 @@ impl LlmProvider for AnthropicProvider {
 
     fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
         self.max_tokens = max_tokens;
+    }
+
+    fn context_window_tokens(&self) -> Option<u64> {
+        self.context_window_tokens
     }
 
     async fn chat_stream(

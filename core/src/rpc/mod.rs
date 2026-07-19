@@ -34,7 +34,12 @@ use crate::runtime::{RuntimeCommand, RuntimeEvent};
 pub struct Hub {
     events_tx: broadcast::Sender<RuntimeEvent>,
     commands_tx: mpsc::UnboundedSender<RuntimeCommand>,
+    group: Option<HubGroup>,
 }
+
+/// Event fan-out shared by all conversation hubs in one daemon.
+#[derive(Clone, Default)]
+pub struct HubGroup(Arc<Mutex<Vec<broadcast::Sender<RuntimeEvent>>>>);
 
 /// Runtime-side half of a [`Hub`]. It can publish events but deliberately does
 /// not retain a command sender, so dropping every client closes the command
@@ -42,12 +47,24 @@ pub struct Hub {
 #[derive(Clone)]
 pub struct HubPublisher {
     events_tx: broadcast::Sender<RuntimeEvent>,
+    group: Option<HubGroup>,
 }
 
 impl HubPublisher {
     /// Broadcast an event to every attached client.
     pub fn publish(&self, event: RuntimeEvent) {
         let _ = self.events_tx.send(event);
+    }
+
+    /// Broadcast daemon-global state to clients attached to every conversation.
+    pub fn publish_global(&self, event: RuntimeEvent) {
+        if let Some(group) = &self.group {
+            for sender in group.0.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+                let _ = sender.send(event.clone());
+            }
+        } else {
+            self.publish(event);
+        }
     }
 }
 
@@ -57,6 +74,7 @@ impl From<Hub> for HubPublisher {
         // runtime cannot accidentally keep its own command receiver alive.
         Self {
             events_tx: hub.events_tx,
+            group: hub.group,
         }
     }
 }
@@ -64,12 +82,28 @@ impl From<Hub> for HubPublisher {
 impl Hub {
     /// Create a hub and the single command receiver the runtime reads from.
     pub fn new() -> (Self, mpsc::UnboundedReceiver<RuntimeCommand>) {
+        Self::new_inner(None)
+    }
+
+    pub fn new_grouped(group: HubGroup) -> (Self, mpsc::UnboundedReceiver<RuntimeCommand>) {
+        Self::new_inner(Some(group))
+    }
+
+    fn new_inner(group: Option<HubGroup>) -> (Self, mpsc::UnboundedReceiver<RuntimeCommand>) {
         let (events_tx, _) = broadcast::channel(1024);
+        if let Some(group) = &group {
+            group
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(events_tx.clone());
+        }
         let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         (
             Self {
                 events_tx,
                 commands_tx,
+                group,
             },
             commands_rx,
         )
@@ -86,6 +120,7 @@ impl Hub {
     pub fn publisher(&self) -> HubPublisher {
         HubPublisher {
             events_tx: self.events_tx.clone(),
+            group: self.group.clone(),
         }
     }
 
@@ -624,6 +659,27 @@ impl DaemonCtx {
         }
     }
 
+    fn set_extension_setting(&self, path: &str, value: serde_json::Value) {
+        let value = match serde_json::from_value(value) {
+            Ok(value) => value,
+            Err(err) => {
+                self.hub.publish(RuntimeEvent::Status {
+                    message: format!("could not save {path}: setting must be a scalar: {err}"),
+                });
+                return;
+            }
+        };
+        match self.extensions.set_extension_setting(path, value) {
+            Ok(()) => self.hub.publish_global(frontend_state(
+                &self.extensions,
+                &self.session.lock().unwrap().tools,
+            )),
+            Err(err) => self.hub.publish(RuntimeEvent::Status {
+                message: format!("could not save {path}: {err}"),
+            }),
+        }
+    }
+
     fn persist_mode(&self, mode_str: &str) {
         if !self.set_mode(mode_str) {
             return;
@@ -640,7 +696,7 @@ impl DaemonCtx {
         match result {
             Ok(settings) => {
                 self.extensions.replace_settings(settings);
-                self.hub.publish(frontend_state(
+                self.hub.publish_global(frontend_state(
                     &self.extensions,
                     &self.session.lock().unwrap().tools,
                 ));
@@ -660,7 +716,7 @@ impl DaemonCtx {
                 let resolved = settings.into_resolved();
                 self.set_mode(&resolved.general.approval);
                 self.extensions.replace_settings(resolved);
-                self.hub.publish(frontend_state(
+                self.hub.publish_global(frontend_state(
                     &self.extensions,
                     &self.session.lock().unwrap().tools,
                 ));
@@ -792,6 +848,7 @@ impl DaemonCtx {
                 s.conversation_id,
                 self.llm.id(),
                 self.llm.model(),
+                self.llm.context_window_tokens(),
                 None,
                 by_provider,
                 s.transcript.clone(),
@@ -1099,37 +1156,52 @@ impl DaemonCtx {
                 self.reload_settings();
                 Flow::Continue
             }
+            RuntimeCommand::SetSetting { path, value } => {
+                self.set_extension_setting(&path, value);
+                Flow::Continue
+            }
             RuntimeCommand::ReloadExtensions => {
                 // An in-process frontend boots the extensions itself and leaves
                 // the cloned result in the inbox; adopt it (shared Lua VM, no
                 // disk read). Otherwise boot from disk.
-                let booted = match self
+                let (booted, disk_boot) = match self
                     .reload_inbox
                     .as_ref()
                     .and_then(|m| m.lock().unwrap().take())
                 {
-                    Some(booted) => booted,
+                    Some(booted) => (booted, false),
                     None => {
                         let config_dir = crate::config::bone_dir();
                         let cwd = std::env::current_dir().unwrap_or_default();
                         let mut custom = crate::config::custom::CustomConfigs::load();
                         let model = self.llm.model().to_string();
                         let provider = format!("{} ({})", self.llm.name(), self.llm.id());
-                        crate::ext::boot_with_tools(
-                            &config_dir,
-                            &cwd,
-                            &mut custom,
+                        (
+                            crate::ext::boot_with_tools_shared(
+                                &config_dir,
+                                &cwd,
+                                &mut custom,
+                                true,
+                                crate::ext::BootOptions {
+                                    agent_depth: 0,
+                                    headless: true,
+                                    tool_allowlist: None,
+                                },
+                                &model,
+                                &provider,
+                                self.extensions.settings_handle(),
+                            ),
                             true,
-                            crate::ext::BootOptions {
-                                agent_depth: 0,
-                                headless: true,
-                                tool_allowlist: None,
-                            },
-                            &model,
-                            &provider,
                         )
                     }
                 };
+                if disk_boot && !booted.manager.is_available() {
+                    self.hub.publish(RuntimeEvent::Status {
+                        message: "Lua extension reload failed; previous extensions remain active"
+                            .into(),
+                    });
+                    return Flow::Continue;
+                }
                 self.extensions = booted.manager;
                 {
                     let mut s = self.session.lock().unwrap();
@@ -1387,6 +1459,9 @@ impl DaemonCtx {
                     // (the gate reads the shared atomic per call).
                     Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.persist_mode(&mode_str),
                     Some(RuntimeCommand::ReloadSettings) => self.reload_settings(),
+                    Some(RuntimeCommand::SetSetting { path, value }) => {
+                        self.set_extension_setting(&path, value)
+                    }
                     // A second submit mid-turn is dropped (the runtime is busy
                     // running one turn at a time). Tell the client so it isn't
                     // left waiting on a prompt that will never run, mirroring the

@@ -171,6 +171,10 @@ pub trait LlmProvider: Send + Sync {
     fn model(&self) -> &str;
     fn set_model(&mut self, model: String);
     fn set_max_tokens(&mut self, _max_tokens: Option<u32>) {}
+    /// Maximum model context in tokens, or `None` when unknown.
+    fn context_window_tokens(&self) -> Option<u64> {
+        None
+    }
 
     async fn chat_stream(
         &self,

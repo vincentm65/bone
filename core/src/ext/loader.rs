@@ -29,6 +29,7 @@ pub fn boot(
     opts: BootOptions,
     model: &str,
     provider: &str,
+    shared_settings: Option<Arc<Mutex<Settings>>>,
 ) -> BootResult {
     let subagent = opts.agent_depth > 0;
     let version = env!("CARGO_PKG_VERSION");
@@ -37,28 +38,36 @@ pub fn boot(
     // TUI can drain diffs even while a tool blocks on ctx.ui.key().
     let shared_ui = super::api_ui::new_shared();
 
-    // Load the canonical resolved settings (shared between engine and manager).
-    let settings = match Settings::load() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            let s = Settings::migrate_from_pages(&[]);
-            if let Err(e) = s.save() {
+    // Load the canonical resolved settings unless the daemon supplied its
+    // process-wide service shared by all conversation actors.
+    let settings_arc = if let Some(settings) = shared_settings {
+        settings
+    } else {
+        let settings = match Settings::load() {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                let s = Settings::migrate_from_pages(&[]);
+                if let Err(e) = s.save() {
+                    log_boot_warning(
+                        config_dir,
+                        format_args!("could not write canonical settings: {e}"),
+                    );
+                }
+                s
+            }
+            Err(e) => {
                 log_boot_warning(
                     config_dir,
-                    format_args!("could not write canonical settings: {e}"),
+                    format_args!("could not load canonical settings: {e}"),
                 );
+                Settings::defaults()
             }
-            s
-        }
-        Err(e) => {
-            log_boot_warning(
-                config_dir,
-                format_args!("could not load canonical settings: {e}"),
-            );
-            Settings::defaults()
-        }
+        };
+        Arc::new(Mutex::new(settings))
     };
-    let settings_arc = Arc::new(Mutex::new(settings));
+    let settings_registry = Arc::new(std::sync::RwLock::new(
+        super::settings_registry::SettingsRegistry::default(),
+    ));
 
     let lua = match engine::create_engine(
         version,
@@ -69,6 +78,7 @@ pub fn boot(
         provider,
         shared_ui.clone(),
         settings_arc.clone(),
+        settings_registry.clone(),
     ) {
         Ok(l) => l,
         Err(e) => {
@@ -117,16 +127,26 @@ pub fn boot(
     // onboarding selection is enforced here too, not just at seed time: a
     // previously seeded bundled file the user later deselected stays on disk
     // but must not load.
+    let mut fatal_loader_failure = false;
     if let Err(e) =
         super::run_lua_tool_files(&lua, &config_dir.join("lua/tools"), tool_allow.as_ref())
     {
         log_boot_warning(config_dir, format_args!("Lua tools failed: {e}"));
+        fatal_loader_failure = true;
     }
     if !subagent
         && let Err(e) =
             super::run_lua_command_files(&lua, &config_dir.join("lua/commands"), cmd_allow.as_ref())
     {
         log_boot_warning(config_dir, format_args!("Lua commands failed: {e}"));
+        fatal_loader_failure = true;
+    }
+    if fatal_loader_failure {
+        return BootResult {
+            manager: ExtensionManager::unloaded(),
+            tools: Vec::new(),
+            shared_state: crate::ext::ctx::new_shared_state(),
+        };
     }
 
     // Conversation-scoped ctx.state map: one Arc per boot so concurrent session
@@ -147,6 +167,7 @@ pub fn boot(
         loaded,
         commands,
         settings_arc,
+        settings_registry,
         shared_ui,
     );
     BootResult {

@@ -17,6 +17,7 @@ pub mod ops_commands;
 pub mod ops_events;
 pub mod ops_plugins;
 pub mod ops_tools;
+pub mod settings_registry;
 pub mod snapshots;
 pub mod types;
 
@@ -123,7 +124,19 @@ pub fn boot(
     model: &str,
     provider: &str,
 ) -> BootResult {
-    loader::boot(config_dir, cwd, opts, model, provider)
+    loader::boot(config_dir, cwd, opts, model, provider, None)
+}
+
+/// Boot using one canonical settings store shared by all daemon conversation actors.
+pub fn boot_shared(
+    config_dir: &Path,
+    cwd: &Path,
+    opts: BootOptions,
+    model: &str,
+    provider: &str,
+    settings: std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>,
+) -> BootResult {
+    loader::boot(config_dir, cwd, opts, model, provider, Some(settings))
 }
 
 /// Full boot sequence: load tools, boot extensions, register Lua tools,
@@ -138,13 +151,53 @@ pub fn boot_with_tools(
     model: &str,
     provider: &str,
 ) -> BootedTools {
+    boot_with_tools_inner(config_dir, cwd, custom, sync, opts, model, provider, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn boot_with_tools_shared(
+    config_dir: &Path,
+    cwd: &Path,
+    custom: &mut super::config::custom::CustomConfigs,
+    sync: bool,
+    opts: BootOptions,
+    model: &str,
+    provider: &str,
+    settings: std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>,
+) -> BootedTools {
+    boot_with_tools_inner(
+        config_dir,
+        cwd,
+        custom,
+        sync,
+        opts,
+        model,
+        provider,
+        Some(settings),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn boot_with_tools_inner(
+    config_dir: &Path,
+    cwd: &Path,
+    custom: &mut super::config::custom::CustomConfigs,
+    sync: bool,
+    opts: BootOptions,
+    model: &str,
+    provider: &str,
+    settings: Option<std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>>,
+) -> BootedTools {
     // Per-agent tool allowlist, captured before `opts` is moved into `boot`.
     let tool_allowlist = opts.tool_allowlist.clone();
     let BootResult {
         manager: extensions,
         tools: lua_tools,
         shared_state,
-    } = boot(config_dir, cwd, opts, model, provider);
+    } = match settings {
+        Some(settings) => boot_shared(config_dir, cwd, opts, model, provider, settings),
+        None => boot(config_dir, cwd, opts, model, provider),
+    };
 
     let mut loaded = super::tools::load_tools();
     super::tools::register_lua_tools(&mut loaded, lua_tools);
@@ -346,11 +399,27 @@ fn run_lua_files_filtered(
                 continue;
             }
         };
+        let owner = path.to_string_lossy().to_string();
+        let bone = lua.globals().get::<mlua::Table>("bone").ok();
+        if let Some(bone) = &bone {
+            bone.set("_settings_owner", owner.as_str())
+                .map_err(crate::util::errstr)?;
+        }
         if let Err(e) = lua.load(&source).set_name(&name).exec() {
+            if let Some(bone) = &bone
+                && let Ok(settings) = bone.get::<mlua::Table>("settings")
+                && let Ok(rollback) = settings.get::<mlua::Function>("_rollback_owner")
+            {
+                let _ = rollback.call::<()>(owner);
+            }
             ctx::runtime_warn(format!(
                 "bone: warning: error executing {}: {e}",
                 path.display()
             ));
+        }
+        if let Some(bone) = bone {
+            bone.set("_settings_owner", mlua::Value::Nil)
+                .map_err(crate::util::errstr)?;
         }
     }
 

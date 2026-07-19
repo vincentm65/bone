@@ -7,7 +7,8 @@ fn lua_with_api() -> Lua {
     super::super::ops_events::setup_on(&lua, &bone).unwrap();
     let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
     let path = std::env::temp_dir().join("test-settings.yaml");
-    setup_api(&lua, &bone, settings, path).unwrap();
+    let registry = Arc::new(std::sync::RwLock::new(Default::default()));
+    setup_api(&lua, &bone, settings, registry, path).unwrap();
     lua.globals().set("bone", bone).unwrap();
     lua
 }
@@ -45,6 +46,7 @@ fn top_level_keymap_accepts_strings_and_callbacks() {
         &lua,
         &bone,
         Arc::clone(&settings),
+        Arc::new(std::sync::RwLock::new(Default::default())),
         std::env::temp_dir().join("unused-keymap-settings.yaml"),
     )
     .unwrap();
@@ -84,6 +86,7 @@ fn top_level_keymap_accepts_strings_and_callbacks() {
         true,
         Vec::new(),
         settings,
+        Arc::new(std::sync::RwLock::new(Default::default())),
         crate::ext::api_ui::new_shared(),
     );
     assert!(matches!(
@@ -147,7 +150,14 @@ fn theme_list_load_and_reload_selected_theme() {
     let lua = Lua::new();
     let bone = lua.create_table().unwrap();
     super::super::ops_events::setup_on(&lua, &bone).unwrap();
-    setup_api(&lua, &bone, Arc::clone(&settings), settings_path.clone()).unwrap();
+    setup_api(
+        &lua,
+        &bone,
+        Arc::clone(&settings),
+        Arc::new(std::sync::RwLock::new(Default::default())),
+        settings_path.clone(),
+    )
+    .unwrap();
     lua.globals().set("bone", bone).unwrap();
     lua.load(
         r#"
@@ -180,7 +190,14 @@ fn theme_list_load_and_reload_selected_theme() {
     let lua = Lua::new();
     let bone = lua.create_table().unwrap();
     super::super::ops_events::setup_on(&lua, &bone).unwrap();
-    setup_api(&lua, &bone, Arc::clone(&settings), settings_path).unwrap();
+    setup_api(
+        &lua,
+        &bone,
+        Arc::clone(&settings),
+        Arc::new(std::sync::RwLock::new(Default::default())),
+        settings_path,
+    )
+    .unwrap();
     assert_eq!(
         settings
             .lock()
@@ -209,7 +226,14 @@ fn settings_get_set_reset_persist_and_validate() {
             .unwrap()
             .as_nanos()
     ));
-    setup_api(&lua, &bone, Arc::clone(&settings), path.clone()).unwrap();
+    setup_api(
+        &lua,
+        &bone,
+        Arc::clone(&settings),
+        Arc::new(std::sync::RwLock::new(Default::default())),
+        path.clone(),
+    )
+    .unwrap();
     lua.globals().set("bone", bone).unwrap();
 
     lua.load(
@@ -228,5 +252,66 @@ fn settings_get_set_reset_persist_and_validate() {
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(raw.contains("approval: safe"));
     assert_eq!(settings.lock().unwrap().resolved().general.approval, "safe");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn extension_settings_register_resolve_validate_and_persist() {
+    let lua = Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+    let registry = Arc::new(std::sync::RwLock::new(Default::default()));
+    let path = std::env::temp_dir().join(format!(
+        "bone-extension-settings-{}-{}.yaml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    setup_api(
+        &lua,
+        &bone,
+        Arc::clone(&settings),
+        Arc::clone(&registry),
+        path.clone(),
+    )
+    .unwrap();
+    lua.globals().set("bone", bone).unwrap();
+    lua.load(
+        r#"
+        bone.settings.register({
+          namespace = "example",
+          title = "Example",
+          fields = {
+            { key = "enabled", label = "Enabled", type = "bool", default = true },
+            { key = "limit", label = "Limit", type = "number", default = 10,
+              integer = true, min = 1, max = 100 },
+            { key = "mode", label = "Mode", type = "enum", default = "fast",
+              options = { "fast", "safe" } },
+          },
+        })
+        assert(bone.settings._get_extension("example.enabled") == true)
+        assert(not pcall(bone.settings._set_extension, "example.limit", 1.5))
+        bone.settings._set_extension("example.limit", 25)
+        assert(bone.settings._get_extension("example.limit") == 25)
+        assert(not pcall(bone.settings.register, {
+          namespace = "example", title = "Duplicate",
+          fields = {{ key = "x", label = "X", type = "bool", default = true }},
+        }))
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    assert_eq!(registry.read().unwrap().pages().len(), 1);
+    assert_eq!(
+        settings.lock().unwrap().extension_value("example.limit"),
+        Some(&crate::config::settings::ExtensionValue::Number(25.0))
+    );
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("extensions:"));
+    assert!(raw.contains("limit: 25"));
     let _ = std::fs::remove_file(path);
 }

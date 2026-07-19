@@ -28,6 +28,7 @@ pub struct CodexProvider {
     id: String,
     label: String,
     reasoning_effort: Option<String>,
+    context_window_tokens: Option<u64>,
 }
 
 impl CodexProvider {
@@ -46,6 +47,7 @@ impl CodexProvider {
             api_key: entry.api_key.clone(),
             endpoint: entry.endpoint.clone(),
             reasoning_effort: entry.reasoning_effort_opt(),
+            context_window_tokens: entry.context_window_tokens,
         }
     }
 
@@ -494,6 +496,10 @@ impl LlmProvider for CodexProvider {
 
     fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    fn context_window_tokens(&self) -> Option<u64> {
+        self.context_window_tokens
     }
 
     async fn validate(&self) -> Result<(), LlmError> {

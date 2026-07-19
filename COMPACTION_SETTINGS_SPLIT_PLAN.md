@@ -1,90 +1,108 @@
-# Catalog Extension Settings Split Plan
+# Extension Settings and Compaction Split Plan
 
 ## Goal
 
-Make `/compact` a fully catalog-owned extension while Bone owns only generic settings registration, persistence, protocol transport, and UI rendering.
+Give every Lua command the same small settings contract:
 
-## Target ownership
+1. Declare a namespaced page once at module load.
+2. Read resolved values from `ctx.settings` in handlers and hooks.
+3. Let the daemon own validation, persistence, protocol updates, and UI snapshots.
 
-### Bone
+`/compact` is the first consumer, not a special case. Bone must contain no command-specific settings code except isolated legacy migration.
 
-- Generic namespaced settings schema registration for Lua extensions.
-- Schema validation and namespace collision checks.
-- Canonical value persistence in `config.yaml`.
-- Daemon-authoritative settings snapshots and mutations.
-- Generic TUI and web rendering of registered fields.
-- One-time migration of legacy built-in compaction values.
+## Command author experience
 
-### `bone-catalog/commands/compact.lua`
-
-- Compaction settings schema and defaults.
-- Manual and automatic compaction policy.
-- Prompts, internal budgets, validation, retries, and failure messages.
-- Temporary reads of legacy settings during rollout only.
-
-## Public compaction settings
-
-Expose only:
-
-1. `compact.auto` — enable automatic compaction; manual `/compact` remains available.
-2. `compact.trigger_percentage` — context-capacity threshold, default `80`.
-
-Keep these as internal constants in `compact.lua`:
-
-- Recent-context keep budget.
-- Summarizer input budget.
-- Checkpoint budget.
-- Generation allowance.
-- Context safety reserve.
-- Retry count and compression targets.
-
-Require provider context-window metadata for automatic percentage triggering. If capacity is unavailable, disable automatic compaction with a clear reason rather than falling back to a guessed absolute threshold.
-
-## Lua API
-
-Add a generic registration API:
+A future catalog command should need only this:
 
 ```lua
 bone.settings.register({
-    namespace = "compact",
-    title = "Compaction",
+    namespace = "example",
+    title = "Example",
     fields = {
-        {
-            key = "auto",
-            label = "Automatic compaction",
-            type = "bool",
-            default = true,
-        },
-        {
-            key = "trigger_percentage",
-            label = "Compact at context capacity",
-            type = "number",
-            default = 80,
-            min = 50,
-            max = 95,
-        },
+        { key = "enabled", label = "Enabled", type = "bool", default = true },
+        { key = "limit", label = "Limit", type = "number", integer = true, default = 10, min = 1, max = 100 },
     },
+})
+
+bone.command.register({
+    name = "example",
+    handler = function(ctx)
+        local enabled = ctx.settings.get("example.enabled")
+        local limit = ctx.settings.get("example.limit")
+        -- command behavior
+    end,
 })
 ```
 
-Extend the existing `bone.settings.{get,set,reset}` API with registration, and add request-scoped `ctx.settings.{get,set,reset}` access backed by the same daemon-owned store. Catalog handlers should read `ctx.settings.get("compact.auto")`; clients and Lua must not maintain separate copies.
+That registration automatically creates the TUI and web settings page. Commands do not read page YAML, parse defaults, write `config.yaml`, or add Rust/UI branches.
 
-Registration requirements:
+Initial scope is deliberately small:
 
-- Validate namespace, keys, field types, defaults, options, and numeric bounds.
-- Add optional numeric `min` and `max` to the shared `ConfigField`/protocol field representation; absent bounds remain valid for existing YAML pages.
-- Bind each namespace to the canonical path of the Lua module that first registered it. Reject a second module claiming that namespace; allow idempotent re-registration by the same module during reload.
-- Reserve built-in namespaces and reject extension collisions with them.
-- Enforce bounds and field types in the daemon, not only in clients.
-- Keep schema runtime-owned; do not persist extension schemas into user configuration.
+- Field types: `string`, `number`, `bool`, and `enum`; `number` may require an integer.
+- Scalar defaults and values only.
+- `ctx.settings.get(path)` is read-only.
+- UI writes use the daemon protocol. Add command-side mutation later only when a real command needs it, through the same daemon service.
 
-Registration is transactional per module: if a module fails after registering, discard that module's schema so a broken extension cannot leave a stale settings page.
+## Ownership
 
-`bone.settings.register`, `ctx.settings`, and the registry do not exist yet; only `bone.settings.{get,set,reset}` exists. Implement registration during installed Lua module boot and keep one daemon-owned in-memory registry. Do not create a second client-side source of truth.
+### Bone
+
+- A daemon-global settings service shared by all conversation actors.
+- Schema registration, validation, collision detection, and reload staging.
+- Canonical value persistence in `config.yaml`.
+- One resolved page snapshot used by Lua, TUI, and web.
+- Protocol-authoritative mutation and broadcasts.
+- Provider context-window metadata and legacy compaction migration.
+
+### Catalog commands
+
+- Their namespace, labels, fields, and defaults.
+- Their policy and internal constants.
+- Reads through `ctx.settings.get` only.
+
+### `/compact`
+
+Expose only:
+
+- `compact.auto`, default `true`.
+- `compact.trigger_percentage`, default `80`, bounds `50..95`.
+- `compact.context_window_tokens`, default `100000`, minimum `10000`.
+
+Keep budgets, prompts, retries, reserves, and compression targets as constants in `compact.lua`.
+
+## Registration and lifecycle
+
+`bone.settings.register` runs only while a Lua module is loading. Bone records the canonical module path automatically; command authors do not pass it.
+
+The loader builds a fresh staged registry on every extension reload:
+
+1. Start an empty registry.
+2. Stage registrations separately for each module.
+3. Commit that module only if it finishes successfully.
+4. Reject duplicate namespaces from different modules and built-in namespace collisions.
+5. After discovery completes, atomically publish the completed registry. A fatal loader failure keeps the previous registry active.
+
+This makes update, failure, and uninstall behavior deterministic. Removing a module removes its page on reload, but never deletes its persisted values.
+
+Validate namespace and key syntax, supported types, enum options, defaults, and numeric bounds. Add optional `min` and `max` to the shared page field representation. The daemon repeats value validation on every write; client validation is only immediate feedback.
+
+## Daemon-global settings service
+
+Do not put the authoritative store only inside a per-conversation `ExtensionManager`. `bone serve` has multiple conversation actors, so they must share one service containing:
+
+- The current registry snapshot.
+- Canonical `BoneSettings` values.
+- The resolved settings pages.
+- Atomic load/update/save operations.
+- A revision number and broadcast channel.
+
+Every actor and client reads the same revision. A successful mutation broadcasts a fresh resolved settings snapshot to all attached actors/clients, not only the conversation that initiated it.
+
+`ctx.settings.get(path)` reads from this service. Lua handlers never cache settings.
 
 ## Persistence
 
-Persist only values in canonical `config.yaml`:
+Persist values, not schemas, in canonical `config.yaml`:
 
 ```yaml
 extensions:
@@ -93,138 +111,115 @@ extensions:
     trigger_percentage: 80
 ```
 
-Add a declared `extensions` field to `BoneSettings`, for example a nested map of namespace to key to generic scalar value. Keep `BoneSettings`'s top-level `deny_unknown_fields`: `extensions` becomes a known top-level key while misspelled peers remain errors. Preserve every unknown namespace and key across load/save even when no active schema recognizes it.
+Add a declared `extensions` scalar map to `BoneSettings` and retain top-level `deny_unknown_fields`. Preserve unknown extension namespaces and keys across load/save so uninstall/reinstall restores values.
 
-Registered extension fields are limited to the declared scalar field types, so persistence does not need to preserve arbitrary YAML tags or formatting.
+Resolution rules:
 
-Behavior:
+- A valid persisted value wins.
+- A missing value resolves to the registered default.
+- An invalid persisted value resolves to the default and emits a warning, but is not silently rewritten.
+- A namespace without an active schema remains stored but is absent from settings pages.
 
-- Installing the Lua file causes it to register its schema on the next runtime reload, making the settings page visible.
-- Disabling the command keeps settings visible because the module remains installed and loaded.
-- Uninstalling removes the Lua file; the next reload omits its schema but leaves its value map untouched.
-- Reinstalling reloads the module, re-registers the schema, validates the dormant values, and restores them.
-- Invalid dormant values fall back to registered defaults with a warning; they are not silently rewritten.
+No catalog-owned `config/<command>.yaml`, uninstall hook, or lifecycle database is needed.
 
-No catalog uninstall hook or separate lifecycle database is needed: schema presence follows successful Lua registration, while durable values are independent of schema presence.
+## One settings-page pipeline
 
-Do not introduce a catalog-owned `config/compact.yaml`; that would continue coupling schema and values and complicate uninstall behavior.
+Define one resolved protocol page model containing namespace, title, fields, resolved values, bounds, and validation metadata.
 
-## Protocol and clients
+- Registry pages are produced from Lua declarations plus `config.yaml` values.
+- Existing YAML pages are adapted into the same resolved model during migration.
+- `ctx.config.get_pages()`, TUI, and web consume the daemon snapshot instead of rereading page files in a render loop.
+- TUI and web render fields generically.
+- The web bridge stops parsing or writing `general.yaml` for represented fields.
 
-The daemon resolves built-in and extension schemas, combines them with persisted values, and exposes one protocol-authoritative settings snapshot and mutation API.
+Add `RuntimeCommand::SetSetting { path, value }`. Its daemon handler validates against the active schema, atomically updates the latest `config.yaml`, updates the shared service, increments the revision, and broadcasts the new snapshot. Remote and in-process clients use this identical path.
 
-Extend the resolved frontend state with generic settings pages containing namespace, title, field schema, resolved value, and validation metadata. Add protocol types for those pages, a namespaced `SetSetting { path, value }` runtime command, and a refreshed settings event/snapshot. The daemon handler validates against the active registry, persists `config.yaml` atomically, and broadcasts the refreshed resolved state. Do not let clients edit YAML directly.
+## Compaction prerequisites
 
-The existing `CustomConfigPage` and `ctx.config.get_pages()` path is the current generic page mechanism, but it reloads page YAML from disk on each call. Reuse its field model where practical, add bounds, and initially return a merged daemon-resolved view of legacy YAML pages plus registry pages. Remove disk reloads from the settings UI hot path. Do not leave two long-term generic settings systems: built-in legacy pages must either be adapted into the same resolved-page representation or explicitly remain a temporary adapter until canonical migration is complete.
+Percentage triggering needs maximum context capacity, not current token use. Add context-window capacity to provider/model metadata and resolve it for each request. Expose the result read-only as `ctx.model.context_window_tokens` (or `nil` when unknown).
 
-- TUI renders all pages generically from the resolved frontend state instead of only deserializing fixed `BoneSettings` fields.
-- Web UI renders all pages generically from the same daemon snapshot.
-- Replace the web bridge's direct `general.yaml` parser/writer with protocol calls.
-- Remove all compaction-specific field names and rendering branches from the web client and bridge.
-- Remote and in-process clients must have identical settings behavior.
+`compact.lua` prefers provider metadata and falls back to its user-configurable `context_window_tokens` setting, which defaults to `100000`.
 
 ## Legacy migration
 
-Bone owns migration because Bone originally seeded the legacy fields.
+Bone owns one isolated, idempotent migration because Bone seeded the old fields. Run it before publishing registered defaults to Lua:
 
-Migrate values from the user's `config/general.yaml` page into `config.yaml`:
+1. Lock and reload the latest `config.yaml`.
+2. For each missing destination, derive `extensions.compact.auto`, `extensions.compact.trigger_percentage`, and `extensions.compact.context_window_tokens` from `config/general.yaml`.
+3. Never overwrite a destination key that is already present, even when invalid.
+4. Atomically save `config.yaml`.
+5. Only after that succeeds, remove all legacy compaction field blocks from `general.yaml` atomically.
+6. If cleanup fails, retry it at the next startup; the existing destination values make the migration safe to repeat.
 
-- Never overwrite an already-present `extensions.compact.auto` or `extensions.compact.trigger_percentage`; migrate each missing destination independently.
-- Infer `extensions.compact.auto` as `true` when legacy mode is `percentage`, or when legacy mode is `absolute` and `auto_compact_tokens` is a positive integer. Otherwise preserve the old disabled behavior with `false`.
-- Copy `compact_trigger_percentage` only when it is numeric and within the new schema bounds; otherwise use `80`.
-- Treat page defaults as legacy values when no explicit `value` exists, matching current `ctx.config.get` behavior.
-- Preserve unrelated General fields and values.
-- Drop implementation-only values with no public destination. In particular, the context-window override is intentionally removed because automatic compaction now requires provider metadata, and `auto_compact_keep_messages` is superseded by the internal recent-context budget.
-- Stop backfilling legacy fields from the built-in seed, remove them from the built-in page, and remove their field blocks from existing user pages after their supported values have been persisted.
-- Make migration crash-safe and idempotent: atomically write `config.yaml` first, then atomically clean `general.yaml`; never delete source fields if the destination write fails. A single atomic transaction across both files is not required. If cleanup fails after the destination is durable, retry cleanup on later starts whenever legacy blocks remain.
-- Retain the isolated idempotent Bone migration reader so users can skip the compatibility release; remove catalog runtime fallbacks after the compatibility window.
+Migration mapping:
 
-Legacy keys recognized only by migration/cleanup:
+- `auto = true` for legacy percentage mode, or for absolute mode with a positive `auto_compact_tokens`; otherwise `false`.
+- Copy an in-range numeric `compact_trigger_percentage`; otherwise use `80`.
+- Copy a legacy `compact_context_window_tokens` value of at least `10000`; otherwise use `100000`.
+- Treat a page default as its value when no explicit value exists, matching current behavior.
+- Preserve unrelated General settings.
+- Drop old implementation budgets; they have no public destination.
 
-- `auto_compact_tokens`
-- `compact_trigger_mode`
-- `compact_trigger_percentage`
-- `compact_context_window_tokens`
-- `compact_keep_tokens`
-- `compact_input_tokens`
-- `compact_checkpoint_tokens`
-- `compact_generation_tokens`
-- `compact_safety_tokens`
-- `auto_compact_keep_messages`
-- `compact_summary_tokens` (deprecated, not in the current seed page, but accepted by the catalog fallback)
+Remove the old fields from the built-in General seed in the same release so backfill cannot restore them. Keep the migration reader permanently as upgrade-only code for users who skip releases; do not expose legacy aliases to commands.
 
-Do not create permanent runtime aliases for removed implementation settings. The isolated upgrade migration may continue recognizing their names.
+This ordering removes the need for a catalog fallback and avoids the ambiguity between “missing persisted value” and “resolved registered default.”
 
-## Rollout
+## Delivery order
 
-### Phase 1: Generic Bone support
+### 1. Build the generic settings foundation
 
-- Add a typed generic `extensions` map to `BoneSettings` while retaining strict validation for other top-level fields.
-- Extend the shared field schema and protocol representation with numeric bounds and build the daemon-owned schema registry.
-- Add `bone.settings.register` plus request-scoped `ctx.settings` reads and mutations backed by the same store.
-- Persist namespaced extension values in `config.yaml` without dropping unknown dormant namespaces or keys.
-- Add generic settings pages to resolved frontend state, `SetSetting` to `RuntimeCommand`, and a refreshed settings event/snapshot.
-- Adapt `ctx.config.get_pages()` and `/config` to a merged registry view so the old and new paths do not diverge; stop reloading YAML on every UI iteration.
-- Add generic TUI and web field rendering; remove direct web YAML mutation for fields represented by the registry.
-- Keep legacy General compaction fields temporarily.
+- Add the extension scalar map and resolved page protocol types.
+- Build the daemon-global store, staged registry, generic `SetSetting`, revisions, and broadcasts.
+- Add `bone.settings.register` and read-only `ctx.settings.get`.
+- Discover schema from every installed module, including disabled commands. Command enablement controls dispatch, not schema discovery.
+- Adapt existing YAML pages to the resolved page model.
+- Render all supported fields generically in TUI and web.
 
-### Phase 2: Catalog adoption
+### 2. Add compaction prerequisites and migration
 
-- Update `compact.lua` to register the two public settings.
-- Read namespaced settings first.
-- Temporarily fall back to the exact legacy `ctx.config.get("general", key)` values when a namespaced value is absent.
-- Move all implementation budgets to constants and keep the deprecated `compact_summary_tokens` read only inside the temporary fallback.
-- Publish the catalog manifest/checksum and test install/update behavior.
+- Add provider/model context-window metadata and the request-scoped Lua value.
+- Run the durable migration before extension boot.
+- Remove compaction fields from the General seed and user pages.
+- Remove compaction-specific web and bridge branches.
 
-### Phase 3: Bone migration and cleanup
+### 3. Publish catalog `/compact`
 
-- Migrate supported legacy values without overwriting existing namespaced values.
-- Remove compaction fields from the built-in General page and stop `backfill_fields` from restoring them.
-- Clean migrated compaction field blocks from existing user `general.yaml` files only after `config.yaml` is durable.
-- Remove compaction-specific web UI and bridge code, including the current mismatch where the web UI writes deprecated `compact_summary_tokens` while the seeded page defines `compact_checkpoint_tokens`.
-- Preserve dormant extension values when `/compact` is not installed.
+- Register its three fields.
+- Read only `ctx.settings` and prefer provider capacity over the configured fallback.
+- Move private controls into Lua constants.
+- Publish and verify catalog manifest/checksum changes.
 
-### Phase 4: Remove catalog fallback
+## Required tests
 
-After one compatibility release in which Bone performs the durable migration:
+### Registry and persistence
 
-- Remove reads from `ctx.config.get("general", ...)` in `compact.lua`.
-- Remove deprecated key parsing and compatibility branches from the catalog extension.
-- Keep Bone's isolated idempotent upgrade migration for users who skip releases; it must not expose aliases to runtime code.
+- Valid registration succeeds; invalid schema, collisions, and failed-module partial registrations do not enter the live registry.
+- Failed full reload leaves the previous registry active.
+- Disabled installed commands retain their pages; uninstall hides a page; reinstall restores its values.
+- Scalar types, integer constraints, enums, and numeric bounds are enforced by the daemon.
+- Unknown namespaces and keys survive load/save.
+- Invalid dormant values resolve to defaults with a visible warning and are not rewritten.
 
-## Validation
+### Shared runtime and protocol
 
-### Core
+- A mutation from one conversation is immediately visible to another conversation and to every connected client.
+- Rejected writes change neither disk, revision, nor live snapshot.
+- In-process and remote clients receive equivalent pages and errors.
+- TUI and web render a new test command's page without command-specific code.
 
-- Schema registration accepts valid namespaced fields and rejects collisions, invalid definitions, out-of-range defaults, and partial registrations from failed modules.
-- Extension values round-trip through `config.yaml`.
-- Unknown extension namespaces and keys survive load/save.
-- Invalid active values resolve to defaults with a warning but are not silently rewritten.
-- Uninstalled extension schemas are absent while values remain.
-- `SetSetting` rejects unknown paths, wrong types, and out-of-range values without changing disk or the live snapshot.
-- In-process and daemon-connected clients receive identical resolved settings and updates.
-- Migration preserves unrelated General settings, preserves existing namespaced values, handles page defaults, and is crash-safe and idempotent.
+### Migration and compaction
 
-### Catalog
-
-- Installing `/compact` exposes exactly two settings.
-- Disabling it does not erase values.
-- Uninstalling hides settings; reinstalling restores values.
-- Manual compaction works when automatic compaction is disabled.
-- Automatic compaction clearly reports unavailable context-window metadata.
-- Legacy fallback works during the compatibility phase and is later removed.
-
-### UI
-
-- TUI and web render the registered fields without compaction-specific code.
-- Both clients validate numeric bounds and display daemon errors consistently.
-- No compaction controls appear when the extension is absent.
+- Existing destination keys win; missing keys migrate independently.
+- Migration handles page defaults and invalid legacy values, preserves unrelated fields, and survives failure between the two file writes.
+- Legacy-disabled users remain disabled after migration.
+- `/compact` exposes exactly three settings and has no General-page fallback.
+- Manual compaction works independently of automatic compaction settings.
+- Missing provider capacity uses the configured compaction fallback.
 
 ## Completion criteria
 
-- Bone has no compaction schema, defaults, policy, or rendering branches outside the isolated legacy migration.
-- `core/src/config/pages/general.yaml` contains only core General settings, and existing user pages are cleaned after migration.
-- Web and TUI have no compaction-specific settings branches.
-- `compact.lua` declares its own two-field schema and owns all implementation constants.
-- `config.yaml` is the sole durable store for compaction values.
-- Legacy fields are migrated once per installation, catalog fallbacks are removed, and no permanent runtime compatibility aliases remain.
+- A new command can declare a settings page entirely in Lua and read it through `ctx.settings` with no Rust, TUI, web, or YAML-page change.
+- All actors and clients use one daemon-owned settings revision and mutation path.
+- Bone has no compaction policy, schema, defaults, or UI branches outside isolated migration and generic provider metadata.
+- `config.yaml` is the sole durable store for extension values.
+- The built-in General page no longer contains or restores compaction fields.

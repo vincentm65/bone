@@ -101,3 +101,146 @@ fn general_page_status_toggles_migrate_to_status_page() {
         assert_eq!(configs.get_value("status", "status_show_spinner"), "false");
     });
 }
+
+#[test]
+fn compaction_migration_preserves_destinations_and_cleans_legacy_page() {
+    with_temp_config_home(|| {
+        seed_builtin_pages(None, false);
+        let general_path = config_dir().join("general.yaml");
+        let mut general = load_yaml::<CustomConfigPage>(&general_path).unwrap();
+        general.fields.extend([
+            ConfigField {
+                key: "compact_trigger_mode".into(),
+                label: None,
+                field_type: ConfigFieldType::Enum,
+                options: vec!["absolute".into(), "percentage".into()],
+                default: Some(serde_yaml::Value::String("absolute".into())),
+                value: Some(serde_yaml::Value::String("percentage".into())),
+            },
+            ConfigField {
+                key: "compact_trigger_percentage".into(),
+                label: None,
+                field_type: ConfigFieldType::String,
+                options: Vec::new(),
+                default: Some(serde_yaml::Value::String("80".into())),
+                value: Some(serde_yaml::Value::String("90".into())),
+            },
+            ConfigField {
+                key: "compact_context_window_tokens".into(),
+                label: None,
+                field_type: ConfigFieldType::String,
+                options: Vec::new(),
+                default: Some(serde_yaml::Value::String("100000".into())),
+                value: Some(serde_yaml::Value::String("131072".into())),
+            },
+        ]);
+        std::fs::write(&general_path, serde_yaml::to_string(&general).unwrap()).unwrap();
+
+        let mut settings = crate::config::settings::Settings::defaults();
+        settings
+            .inner
+            .extensions
+            .entry("compact".into())
+            .or_default()
+            .insert(
+                "auto".into(),
+                crate::config::settings::ExtensionValue::String("invalid".into()),
+            );
+        settings.save().unwrap();
+
+        let configs = CustomConfigs::load();
+        let settings = configs.settings.unwrap();
+        assert_eq!(
+            settings.extension_value("compact.auto"),
+            Some(&crate::config::settings::ExtensionValue::String(
+                "invalid".into()
+            ))
+        );
+        assert_eq!(
+            settings.extension_value("compact.trigger_percentage"),
+            Some(&crate::config::settings::ExtensionValue::Number(90.0))
+        );
+        assert_eq!(
+            settings.extension_value("compact.context_window_tokens"),
+            Some(&crate::config::settings::ExtensionValue::Number(131_072.0))
+        );
+        let cleaned = load_yaml::<CustomConfigPage>(&general_path).unwrap();
+        assert!(
+            cleaned
+                .fields
+                .iter()
+                .all(|field| !field.key.contains("compact"))
+        );
+    });
+}
+
+#[test]
+fn compaction_migration_renames_fallback_extension_key() {
+    with_temp_config_home(|| {
+        seed_builtin_pages(None, false);
+        let mut settings = crate::config::settings::Settings::defaults();
+        settings
+            .inner
+            .extensions
+            .entry("compact".into())
+            .or_default()
+            .insert(
+                "fallback_context_window_tokens".into(),
+                crate::config::settings::ExtensionValue::Number(100_000.0),
+            );
+        settings.save().unwrap();
+
+        let configs = CustomConfigs::load();
+        let settings = configs.settings.unwrap();
+        assert_eq!(
+            settings.extension_value("compact.context_window_tokens"),
+            Some(&crate::config::settings::ExtensionValue::Number(100_000.0))
+        );
+        assert_eq!(
+            settings.extension_value("compact.fallback_context_window_tokens"),
+            None
+        );
+    });
+}
+
+#[test]
+fn set_value_tests_use_an_isolated_config_home() {
+    with_temp_config_home(|| {
+        std::fs::create_dir_all(config_dir()).unwrap();
+        let mut configs = CustomConfigs::default();
+        configs.pages.push((
+            "test".to_string(),
+            CustomConfigPage {
+                title: "Test".to_string(),
+                fields: vec![
+                    ConfigField {
+                        key: "mode".to_string(),
+                        label: None,
+                        field_type: ConfigFieldType::Enum,
+                        options: vec!["safe".into(), "edit".into(), "danger".into()],
+                        default: Some(serde_yaml::Value::String("safe".into())),
+                        value: None,
+                    },
+                    ConfigField {
+                        key: "max".to_string(),
+                        label: None,
+                        field_type: ConfigFieldType::Number,
+                        options: Vec::new(),
+                        default: None,
+                        value: None,
+                    },
+                ],
+            },
+        ));
+
+        assert_eq!(configs.get_value("test", "mode"), "safe");
+        configs.set_value("test", "mode", "danger".to_string());
+        assert_eq!(configs.get_value("test", "mode"), "danger");
+
+        configs.set_value("test", "max", "200".to_string());
+        let field = configs.find_field("test", "max").unwrap();
+        assert!(matches!(field.value, Some(serde_yaml::Value::Number(_))));
+        assert_eq!(configs.get_value("test", "max"), "200");
+        assert!(config_dir().join("test.yaml").exists());
+    });
+}

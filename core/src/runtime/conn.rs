@@ -163,6 +163,7 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::SetTerminalWidth { .. }
             | RuntimeCommand::KeymapDispatch { .. }
             | RuntimeCommand::ReloadSettings
+            | RuntimeCommand::SetSetting { .. }
             | RuntimeCommand::ReloadExtensions => {}
         }
     }

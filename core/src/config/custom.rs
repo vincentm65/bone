@@ -198,8 +198,102 @@ impl CustomConfigs {
 
         // Load or migrate canonical settings after pages are populated.
         configs.settings = Self::load_or_migrate_settings(&configs.pages);
+        configs.migrate_compaction_settings();
 
         configs
+    }
+
+    fn migrate_compaction_settings(&mut self) {
+        if let Some(settings) = self.settings.as_mut()
+            && let Err(err) =
+                settings.migrate_compaction_fallback_at(&super::settings::settings_path())
+        {
+            crate::ext::ctx::runtime_warn_once(format!(
+                "bone: warning: could not migrate compaction fallback setting: {err}"
+            ));
+        }
+
+        const LEGACY_KEYS: &[&str] = &[
+            "auto_compact_tokens",
+            "compact_trigger_mode",
+            "compact_trigger_percentage",
+            "compact_context_window_tokens",
+            "compact_keep_tokens",
+            "compact_input_tokens",
+            "compact_checkpoint_tokens",
+            "compact_summary_tokens",
+            "compact_generation_tokens",
+            "compact_safety_tokens",
+            "auto_compact_keep_messages",
+        ];
+        let Some(index) = self.pages.iter().position(|(ns, _)| ns == "general") else {
+            return;
+        };
+        let page = &self.pages[index].1;
+        if !page
+            .fields
+            .iter()
+            .any(|field| LEGACY_KEYS.contains(&field.key.as_str()))
+        {
+            return;
+        }
+        let value = |key: &str| {
+            page.fields
+                .iter()
+                .find(|field| field.key == key)
+                .and_then(|field| field.value.as_ref().or(field.default.as_ref()))
+                .map(|value| match value {
+                    serde_yaml::Value::String(value) => value.clone(),
+                    serde_yaml::Value::Number(value) => value.to_string(),
+                    serde_yaml::Value::Bool(value) => value.to_string(),
+                    _ => String::new(),
+                })
+                .unwrap_or_default()
+        };
+        let mode = value("compact_trigger_mode");
+        let auto_tokens = value("auto_compact_tokens").parse::<u64>().unwrap_or(0);
+        let auto = mode == "percentage" || auto_tokens > 0;
+        let percentage = value("compact_trigger_percentage")
+            .parse::<u64>()
+            .ok()
+            .filter(|value| (50..=95).contains(value))
+            .unwrap_or(80) as f64;
+        let context_window_tokens = value("compact_context_window_tokens")
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value >= 10_000)
+            .unwrap_or(100_000) as f64;
+
+        let Some(settings) = self.settings.as_mut() else {
+            return;
+        };
+        if let Err(err) = settings.migrate_compaction_at(
+            auto,
+            percentage,
+            context_window_tokens,
+            &super::settings::settings_path(),
+        ) {
+            crate::ext::ctx::runtime_warn_once(format!(
+                "bone: warning: could not migrate compaction settings: {err}"
+            ));
+            return;
+        }
+
+        let page = &mut self.pages[index].1;
+        page.fields
+            .retain(|field| !LEGACY_KEYS.contains(&field.key.as_str()));
+        let path = config_dir().join("general.yaml");
+        let Ok(yaml) = serde_yaml::to_string(page) else {
+            return;
+        };
+        let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
+        if let Err(err) =
+            crate::tools::write_atomic::write_atomic_sync(&path, yaml.as_bytes(), permissions)
+        {
+            crate::ext::ctx::runtime_warn_once(format!(
+                "bone: warning: could not clean legacy compaction settings: {err}"
+            ));
+        }
     }
 
     /// Load canonical settings from `config.yaml`, or migrate from pages if

@@ -21,6 +21,26 @@ async fn publisher_does_not_keep_command_channel_open() {
 }
 
 #[tokio::test]
+async fn grouped_hubs_broadcast_global_events() {
+    let group = HubGroup::default();
+    let (hub_a, _commands_a) = Hub::new_grouped(group.clone());
+    let (hub_b, _commands_b) = Hub::new_grouped(group);
+    let mut events_a = hub_a.subscribe();
+    let mut events_b = hub_b.subscribe();
+
+    hub_a.publisher().publish_global(RuntimeEvent::Status {
+        message: "global".into(),
+    });
+
+    assert!(
+        matches!(events_a.recv().await.unwrap(), RuntimeEvent::Status { message } if message == "global")
+    );
+    assert!(
+        matches!(events_b.recv().await.unwrap(), RuntimeEvent::Status { message } if message == "global")
+    );
+}
+
+#[tokio::test]
 async fn dropping_remote_client_closes_its_transport() {
     let (client_io, mut peer_io) = tokio::io::duplex(4096);
     let (read_half, write_half) = tokio::io::split(client_io);

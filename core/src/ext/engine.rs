@@ -45,6 +45,7 @@ pub fn blank_init_lua() -> String {
 }
 
 /// Build a ready-to-use Lua state with the `bone` table populated.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_engine(
     version: &str,
     cwd: &Path,
@@ -54,6 +55,7 @@ pub(crate) fn create_engine(
     provider: &str,
     shared_ui: super::api_ui::SharedUi,
     settings: std::sync::Arc<std::sync::Mutex<crate::config::settings::Settings>>,
+    settings_registry: super::settings_registry::SharedSettingsRegistry,
 ) -> Result<Lua, String> {
     let lua = Lua::new();
 
@@ -153,7 +155,13 @@ pub(crate) fn create_engine(
     super::api_ui::setup_api_ui(&lua, bone, shared_ui)?;
     // bone.api.{autocmd,emit,keymap,config} — the always-available runtime API
     // (Phase 6). Must run after `setup_on` so `bone.api.autocmd` can alias it.
-    super::api::setup_api(&lua, bone, settings, config_dir.join("config.yaml"))?;
+    super::api::setup_api(
+        &lua,
+        bone,
+        settings,
+        settings_registry,
+        config_dir.join("config.yaml"),
+    )?;
 
     Ok(lua)
 }
@@ -176,6 +184,12 @@ pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
     match lua.load(&source).set_name("init.lua").exec() {
         Ok(()) => Ok(true),
         Err(e) => {
+            if let Ok(bone) = lua.globals().get::<Table>("bone")
+                && let Ok(settings) = bone.get::<Table>("settings")
+                && let Ok(rollback) = settings.get::<Function>("_rollback_owner")
+            {
+                let _ = rollback.call::<()>("init.lua");
+            }
             super::ctx::lua_log(
                 &config_dir.to_string_lossy(),
                 "warn",

@@ -274,6 +274,7 @@ fn sample_app_state() -> AppCtxState {
         Some(42),
         "openrouter",
         "gemini",
+        Some(131_072),
         None,
         Vec::new(),
         history,
@@ -298,6 +299,7 @@ fn app_ctx_state_apply_to_populates_all_app_fields() {
     assert_eq!(cfg.session_id, Some(42));
     assert_eq!(cfg.provider.as_deref(), Some("openrouter"));
     assert_eq!(cfg.model.as_deref(), Some("gemini"));
+    assert_eq!(cfg.context_window_tokens, Some(131_072));
     assert_eq!(cfg.approval_mode, crate::tools::ApprovalMode::Danger);
     assert!(cfg.tool_handler.is_some());
     assert_eq!(cfg.usage.as_ref().unwrap().sent, 1234);
@@ -330,6 +332,11 @@ fn app_ctx_state_exposes_app_fields_through_lua_ctx() {
 
     let sent: u64 = lua.load("return ctx.usage.snapshot().sent").eval().unwrap();
     assert_eq!(sent, 1234);
+    let capacity: u64 = lua
+        .load("return ctx.model.context_window_tokens")
+        .eval()
+        .unwrap();
+    assert_eq!(capacity, 131_072);
 }
 
 #[test]

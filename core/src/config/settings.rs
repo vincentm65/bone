@@ -5,6 +5,7 @@
 //! theme, and keymaps.  `CustomConfigs` routes legacy `/config` page keys
 //! through this module.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -58,6 +59,16 @@ pub fn settings_path() -> PathBuf {
 
 // ── Top-level schema ─────────────────────────────────────────────────────────
 
+/// Scalar value persisted for an extension-owned setting. Null and structured
+/// values are intentionally unsupported by the initial registry contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ExtensionValue {
+    Bool(bool),
+    Number(f64),
+    String(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoneSettings {
@@ -70,6 +81,9 @@ pub struct BoneSettings {
     pub theme: ThemeSettings,
     #[serde(default)]
     pub keymaps: KeymapSettings,
+    /// Persisted extension values. Schemas remain owned by installed Lua modules.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
 }
 
 impl Default for BoneSettings {
@@ -80,6 +94,7 @@ impl Default for BoneSettings {
             ui: UiSettings::default(),
             theme: ThemeSettings::default(),
             keymaps: KeymapSettings::default(),
+            extensions: BTreeMap::new(),
         }
     }
 }
@@ -402,17 +417,23 @@ fn acquire_settings_write_lock(
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub(crate) inner: BoneSettings,
+    pub(crate) revision: u64,
 }
 
 impl Settings {
     pub fn defaults() -> Self {
         Self {
             inner: BoneSettings::default(),
+            revision: 0,
         }
     }
 
     pub fn resolved(&self) -> &BoneSettings {
         &self.inner
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn into_resolved(self) -> BoneSettings {
@@ -445,7 +466,7 @@ impl Settings {
         validate_theme(&inner.theme)?;
         validate_keymaps(&inner.keymaps)?;
 
-        Ok(Some(Self { inner }))
+        Ok(Some(Self { inner, revision: 0 }))
     }
 
     /// Atomically write to `config.yaml` via a same-directory temporary file.
@@ -482,9 +503,97 @@ impl Settings {
         let mut candidate = Self::load_path(path)?.unwrap_or_else(|| self.clone());
         mutate(&mut candidate)?;
         validate_settings(&candidate.inner)?;
+        candidate.revision = self.revision.saturating_add(1);
         candidate.write_path(path)?;
         self.inner = candidate.inner;
+        self.revision = candidate.revision;
         Ok(())
+    }
+
+    /// Rename the short-lived compaction fallback key without overwriting the
+    /// canonical destination when both are present.
+    pub fn migrate_compaction_fallback_at(
+        &mut self,
+        settings_path: &Path,
+    ) -> Result<(), SettingsError> {
+        if self
+            .extension_value("compact.fallback_context_window_tokens")
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.update_path(settings_path, |candidate| {
+            let compact = candidate
+                .inner
+                .extensions
+                .entry("compact".into())
+                .or_default();
+            if let Some(value) = compact.remove("fallback_context_window_tokens") {
+                compact
+                    .entry("context_window_tokens".into())
+                    .or_insert(value);
+            }
+            Ok(())
+        })
+    }
+
+    /// Migrate the three public compaction settings in one atomic update, while
+    /// preserving destination values that already exist (including invalid ones).
+    pub fn migrate_compaction_at(
+        &mut self,
+        auto: bool,
+        trigger_percentage: f64,
+        context_window_tokens: f64,
+        settings_path: &Path,
+    ) -> Result<(), SettingsError> {
+        self.update_path(settings_path, |candidate| {
+            let compact = candidate
+                .inner
+                .extensions
+                .entry("compact".into())
+                .or_default();
+            compact
+                .entry("auto".into())
+                .or_insert(ExtensionValue::Bool(auto));
+            compact
+                .entry("trigger_percentage".into())
+                .or_insert(ExtensionValue::Number(trigger_percentage));
+            compact
+                .entry("context_window_tokens".into())
+                .or_insert(ExtensionValue::Number(context_window_tokens));
+            Ok(())
+        })
+    }
+
+    /// Persist one extension value against the latest settings document.
+    pub fn set_extension_value_at(
+        &mut self,
+        path: &str,
+        value: ExtensionValue,
+        settings_path: &Path,
+    ) -> Result<(), SettingsError> {
+        let (namespace, key) = path.split_once('.').ok_or_else(|| {
+            SettingsError::Validation("extension setting path must be namespace.key".into())
+        })?;
+        if namespace.is_empty() || key.is_empty() || key.contains('.') {
+            return Err(SettingsError::Validation(
+                "extension setting path must be namespace.key".into(),
+            ));
+        }
+        self.update_path(settings_path, |candidate| {
+            candidate
+                .inner
+                .extensions
+                .entry(namespace.to_string())
+                .or_default()
+                .insert(key.to_string(), value);
+            Ok(())
+        })
+    }
+
+    pub fn extension_value(&self, path: &str) -> Option<&ExtensionValue> {
+        let (namespace, key) = path.split_once('.')?;
+        self.inner.extensions.get(namespace)?.get(key)
     }
 
     // ── Canonical key routing (legacy page keys → new hierarchy) ──────────
@@ -768,7 +877,9 @@ impl Settings {
                 ui,
                 theme: ThemeSettings::default(),
                 keymaps: KeymapSettings::default(),
+                extensions: BTreeMap::new(),
             },
+            revision: 0,
         }
     }
 

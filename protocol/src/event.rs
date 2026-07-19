@@ -249,6 +249,11 @@ pub enum RuntimeCommand {
     /// Reload only canonical `config.yaml`, preserving extension/tool runtime
     /// state, then broadcast a fresh full frontend settings snapshot.
     ReloadSettings,
+    /// Validate and atomically persist one registered extension setting.
+    SetSetting {
+        path: String,
+        value: serde_json::Value,
+    },
     /// Set the daemon's authoritative approval mode (`"safe"` / `"danger"`).
     /// The frontend sends this whenever the user cycles Safe/Danger so the
     /// daemon's `SharedApprovalMode` — which actually gates tool calls — tracks
