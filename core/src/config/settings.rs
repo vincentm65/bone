@@ -408,7 +408,7 @@ fn acquire_settings_write_lock(
         .read(true)
         .write(true)
         .open(lock_path)?;
-    file.lock()?;
+    fs2::FileExt::lock_exclusive(&file)?;
     Ok((mutex, file))
 }
 

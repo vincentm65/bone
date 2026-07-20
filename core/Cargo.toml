@@ -25,6 +25,7 @@ tempfile = "3"
 rusqlite = { version = "0.34", features = ["bundled"] }
 mlua = { version = "0.11", features = ["lua54", "vendored", "send", "serialize"] }
 crossterm = { version = "0.28", optional = true }
+fs2 = "0.4"
 bone-protocol = { path = "../protocol" }
 
 [features]
