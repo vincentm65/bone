@@ -69,6 +69,42 @@ pub enum ExtensionValue {
     String(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentSettings {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default = "default_approval")]
+    pub approval: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for SubagentSettings {
+    fn default() -> Self {
+        Self {
+            description: String::new(),
+            system_prompt: None,
+            provider: None,
+            model: None,
+            approval: default_approval(),
+            timeout_ms: None,
+            max_concurrency: None,
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoneSettings {
@@ -81,6 +117,9 @@ pub struct BoneSettings {
     pub theme: ThemeSettings,
     #[serde(default)]
     pub keymaps: KeymapSettings,
+    /// Named, static sub-agent definitions managed by `/agents`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subagents: BTreeMap<String, SubagentSettings>,
     /// Persisted extension values. Schemas remain owned by installed Lua modules.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
@@ -94,6 +133,7 @@ impl Default for BoneSettings {
             ui: UiSettings::default(),
             theme: ThemeSettings::default(),
             keymaps: KeymapSettings::default(),
+            subagents: BTreeMap::new(),
             extensions: BTreeMap::new(),
         }
     }
@@ -465,6 +505,7 @@ impl Settings {
         validate_general(&inner.general)?;
         validate_theme(&inner.theme)?;
         validate_keymaps(&inner.keymaps)?;
+        validate_subagents(&inner.subagents)?;
 
         Ok(Some(Self { inner, revision: 0 }))
     }
@@ -594,6 +635,50 @@ impl Settings {
     pub fn extension_value(&self, path: &str) -> Option<&ExtensionValue> {
         let (namespace, key) = path.split_once('.')?;
         self.inner.extensions.get(namespace)?.get(key)
+    }
+
+    pub fn upsert_subagent(
+        &mut self,
+        agent: bone_protocol::SubagentDefinition,
+    ) -> Result<(), SettingsError> {
+        validate_subagent_name(&agent.name)?;
+        let name = agent.name.clone();
+        let value = SubagentSettings {
+            description: agent.description,
+            system_prompt: nonempty(agent.system_prompt),
+            provider: nonempty(agent.provider),
+            model: nonempty(agent.model),
+            approval: agent.approval,
+            timeout_ms: agent.timeout_ms,
+            max_concurrency: agent.max_concurrency,
+            enabled: agent.enabled,
+        };
+        validate_subagent(&name, &value)?;
+        self.update_path(&settings_path(), move |candidate| {
+            candidate.inner.subagents.insert(name, value);
+            Ok(())
+        })
+    }
+
+    pub fn delete_subagent(&mut self, name: &str) -> Result<(), SettingsError> {
+        validate_subagent_name(name)?;
+        let name = name.to_string();
+        self.update_path(&settings_path(), move |candidate| {
+            candidate.inner.subagents.remove(&name);
+            Ok(())
+        })
+    }
+
+    pub fn set_subagent_enabled(&mut self, name: &str, enabled: bool) -> Result<(), SettingsError> {
+        validate_subagent_name(name)?;
+        let name = name.to_string();
+        self.update_path(&settings_path(), move |candidate| {
+            let agent = candidate.inner.subagents.get_mut(&name).ok_or_else(|| {
+                SettingsError::Validation(format!("unknown config sub-agent: {name}"))
+            })?;
+            agent.enabled = enabled;
+            Ok(())
+        })
     }
 
     // ── Canonical key routing (legacy page keys → new hierarchy) ──────────
@@ -877,6 +962,7 @@ impl Settings {
                 ui,
                 theme: ThemeSettings::default(),
                 keymaps: KeymapSettings::default(),
+                subagents: BTreeMap::new(),
                 extensions: BTreeMap::new(),
             },
             revision: 0,
@@ -984,7 +1070,60 @@ fn validate_settings(settings: &BoneSettings) -> Result<(), SettingsError> {
     }
     validate_general(&settings.general)?;
     validate_theme(&settings.theme)?;
-    validate_keymaps(&settings.keymaps)
+    validate_keymaps(&settings.keymaps)?;
+    validate_subagents(&settings.subagents)
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn validate_subagent_name(name: &str) -> Result<(), SettingsError> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(SettingsError::Validation(format!(
+            "sub-agent name must contain only ASCII letters, digits, '-' or '_', got {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_subagent(name: &str, agent: &SubagentSettings) -> Result<(), SettingsError> {
+    validate_subagent_name(name)?;
+    if agent.description.trim().is_empty() {
+        return Err(SettingsError::Validation(format!(
+            "subagents.{name}.description must not be empty"
+        )));
+    }
+    if !matches!(agent.approval.as_str(), "safe" | "danger") {
+        return Err(SettingsError::Validation(format!(
+            "subagents.{name}.approval must be 'safe' or 'danger'"
+        )));
+    }
+    if agent
+        .timeout_ms
+        .is_some_and(|timeout| timeout == 0 || timeout > 900_000)
+    {
+        return Err(SettingsError::Validation(format!(
+            "subagents.{name}.timeout_ms must be between 1 and 900000"
+        )));
+    }
+    if agent.max_concurrency == Some(0) {
+        return Err(SettingsError::Validation(format!(
+            "subagents.{name}.max_concurrency must be at least 1"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_subagents(agents: &BTreeMap<String, SubagentSettings>) -> Result<(), SettingsError> {
+    for (name, agent) in agents {
+        validate_subagent(name, agent)?;
+    }
+    Ok(())
 }
 
 fn validate_theme(theme: &ThemeSettings) -> Result<(), SettingsError> {
@@ -1128,6 +1267,14 @@ mod tests {
         let mut settings = Settings::defaults();
         settings.inner.general.approval = "danger".into();
         settings.inner.ui.input.preset = Some("box".into());
+        settings.inner.subagents.insert(
+            "researcher".into(),
+            SubagentSettings {
+                description: "Investigates the codebase".into(),
+                system_prompt: Some("Report file and line references.".into()),
+                ..Default::default()
+            },
+        );
         settings.save_path(&path).unwrap();
         settings.inner.general.approval = "safe".into();
         settings.save_path(&path).unwrap();
@@ -1135,6 +1282,12 @@ mod tests {
         let loaded = Settings::load_path(&path).unwrap().unwrap();
         assert_eq!(loaded.inner.general.approval, "safe");
         assert_eq!(loaded.inner.ui.input.preset.as_deref(), Some("box"));
+        assert_eq!(
+            loaded.inner.subagents["researcher"]
+                .system_prompt
+                .as_deref(),
+            Some("Report file and line references.")
+        );
         let raw = fs::read_to_string(&path).unwrap();
         assert!(raw.contains("version: 1"));
         assert!(!raw.contains("label:"));

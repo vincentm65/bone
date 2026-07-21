@@ -198,8 +198,14 @@ test("subagent calls render as agent cards with live per-task status", () => {
   // Persisted injected results replay as a compact card, not a "You" bubble.
   assert.match(js, /BG_RESULTS_PREFIX/);
   assert.match(js, /function jobResultsCard/);
-  // Registered agents surface in settings, parsed from the tool description.
-  assert.match(js, /function registeredAgents/);
+  // Registered agents surface as structured daemon state with CRUD controls.
+  assert.match(html, /data-tab="agents"[^>]*>Agents</);
+  assert.match(html, /data-pane="agents"/);
+  assert.match(js, /function renderAgents/);
+  assert.match(js, /upsert_subagent/);
+  assert.match(js, /set_subagent_enabled/);
+  assert.match(js, /max_concurrency/);
+  assert.doesNotMatch(js, /Lua · read-only/);
   assert.match(css, /\.agent-row \{/);
   assert.match(css, /\.tool-status\.bg/);
 

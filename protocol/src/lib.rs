@@ -19,7 +19,7 @@ pub use input::KeyEvent;
 pub use message::{
     ChatMessage, ChatRole, ImageData, OutputItem, Reasoning, ReasoningItem, ToolCall, ToolResult,
 };
-pub use session::{SessionSnapshot, UsageProviderContext};
+pub use session::{SessionSnapshot, SubagentDefinition, UsageProviderContext};
 pub use tokens::{CHARS_PER_TOKEN, TokenStats, format_tokens};
 pub use tools::{CallOutcome, ToolDefinition, ToolOutput};
 pub use view::{

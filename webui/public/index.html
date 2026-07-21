@@ -198,6 +198,7 @@
         <nav class="settings-tabs">
           <button class="stab active" role="tab" aria-selected="true" data-tab="behavior">Behavior</button>
           <button class="stab" role="tab" aria-selected="false" data-tab="display">Appearance</button>
+          <button class="stab" role="tab" aria-selected="false" data-tab="agents">Agents</button>
           <button class="stab" role="tab" aria-selected="false" data-tab="tools">Tools</button>
           <button class="stab" role="tab" aria-selected="false" data-tab="session">Session</button>
         </nav>
@@ -208,6 +209,10 @@
 
         <section class="settings-pane hidden" data-pane="display">
           <div id="display-fields"></div>
+        </section>
+
+        <section class="settings-pane hidden" data-pane="agents">
+          <div id="agents-fields" class="tools-list"></div>
         </section>
 
         <section class="settings-pane hidden" data-pane="tools">

@@ -43,6 +43,7 @@ const state = {
   snapshot: {},
   toolDefs: [],
   commands: [],
+  subagents: [],
   extensionPages: [],
   commandIndex: -1,
   commandRunning: false,
@@ -382,8 +383,10 @@ function dispatchEvent(ev) {
 function onFrontendState(ev) {
   if (Array.isArray(ev.tool_defs)) state.toolDefs = ev.tool_defs;
   if (Array.isArray(ev.commands)) state.commands = ev.commands;
+  if (Array.isArray(ev.subagents)) state.subagents = ev.subagents;
   state.extensionPages = Array.isArray(ev.settings?.extension_pages) ? ev.settings.extension_pages : [];
   applyTheme(ev.settings?.theme);
+  if ($("agents-fields")) renderAgents();
 }
 
 function plainTerminalText(text) {
@@ -873,23 +876,6 @@ function jobResultsCard(content) {
   head.onclick = toggle;
   head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
   $("thread").appendChild(card);
-}
-
-// Registered sub-agents, parsed from the subagent tool's dynamic description
-// ("Registered agents:" list) so no extra endpoint is needed.
-function registeredAgents() {
-  const def = state.toolDefs.find((t) => t.name === "subagent");
-  if (!def) return [];
-  const out = [];
-  let inList = false;
-  for (const line of (def.description || "").split("\n")) {
-    if (/^Registered agents:/.test(line)) { inList = true; continue; }
-    if (!inList) continue;
-    const m = line.match(/^\s+-\s+([^:]+):\s+(.*)$/);
-    if (!m) break;
-    out.push({ name: m[1], description: m[2].replace(/\s*\[[^\]]*\]$/, "") });
-  }
-  return out;
 }
 
 // ── canvas: split-screen artifact / diff viewer ──────────────────────────────
@@ -2519,20 +2505,116 @@ function renderDisplay() {
     switchEl(prefs.showMeter, (on) => { prefs.showMeter = on; savePrefs(); applyPrefs(); })));
 }
 
+function agentInput(value, multiline = false) {
+  const input = document.createElement(multiline ? "textarea" : "input");
+  input.className = multiline ? "agent-textarea" : "set-input";
+  input.value = value || "";
+  return input;
+}
+
+function renderAgentEditor(agent = null) {
+  const wrap = $("agents-fields");
+  wrap.innerHTML = "";
+  const draft = agent || { name: "", description: "", system_prompt: "", provider: "", model: "", approval: "safe", timeout_ms: "", max_concurrency: 1, enabled: true, source: "config" };
+  const fields = {
+    name: agentInput(draft.name),
+    description: agentInput(draft.description),
+    system_prompt: agentInput(draft.system_prompt, true),
+    provider: agentInput(draft.provider),
+    model: agentInput(draft.model),
+    approval: enumEl(draft.approval || "safe", ["safe", "danger"], () => {}),
+    timeout_ms: agentInput(draft.timeout_ms == null ? "" : String(draft.timeout_ms)),
+    max_concurrency: agentInput(draft.max_concurrency == null ? "1" : String(draft.max_concurrency)),
+    enabled: switchEl(draft.enabled !== false, () => {}),
+  };
+  if (agent) fields.name.disabled = true;
+  for (const [key, label, desc] of [
+    ["name", "Name", "Letters, digits, - and _"],
+    ["description", "Description", "Shown to the parent agent"],
+    ["system_prompt", "System prompt", "Optional role and operating instructions"],
+    ["provider", "Provider", "Blank inherits the active provider"],
+    ["model", "Model", "Blank inherits the active model"],
+    ["approval", "Approval", "Safe asks before risky tools"],
+    ["timeout_ms", "Timeout (ms)", "Optional, maximum 900000"],
+    ["max_concurrency", "Max concurrency", "Maximum simultaneous jobs for this agent"],
+    ["enabled", "Enabled", "Available to the delegation tool"],
+  ]) wrap.appendChild(setRow(label, desc, fields[key]));
+
+  const actions = el("div", "agent-actions");
+  const cancel = el("button", "ghost-btn", "Cancel");
+  cancel.onclick = renderAgents;
+  const save = el("button", "btn", "Save agent");
+  save.onclick = async () => {
+    const name = fields.name.value.trim();
+    const description = fields.description.value.trim();
+    const timeoutText = fields.timeout_ms.value.trim();
+    const maxConcurrency = Number(fields.max_concurrency.value.trim());
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) return toast("Name may contain only letters, digits, - and _");
+    if (!description) return toast("Description is required");
+    const timeout = timeoutText ? Number(timeoutText) : null;
+    if (timeout != null && (!Number.isInteger(timeout) || timeout < 1 || timeout > 900000)) return toast("Timeout must be 1–900000 ms");
+    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) return toast("Max concurrency must be a positive integer");
+    const definition = {
+      name,
+      description,
+      system_prompt: fields.system_prompt.value.trim() || null,
+      provider: fields.provider.value.trim() || null,
+      model: fields.model.value.trim() || null,
+      approval: fields.approval.value,
+      timeout_ms: timeout,
+      max_concurrency: maxConcurrency,
+      enabled: fields.enabled.querySelector("input").checked,
+      source: "config",
+    };
+    if (await send({ upsert_subagent: { agent: definition } })) {
+      await send("reload_extensions");
+      toast(`saved ${name}`);
+    }
+  };
+  actions.append(cancel, save);
+  wrap.appendChild(actions);
+  fields.name.focus();
+}
+
+function renderAgents() {
+  const wrap = $("agents-fields");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const head = el("div", "agent-actions");
+  head.appendChild(el("div", "section-title", "Named sub-agents"));
+  const add = el("button", "btn", "Add agent");
+  add.onclick = () => renderAgentEditor();
+  head.appendChild(add);
+  wrap.appendChild(head);
+  if (!state.subagents.length) wrap.appendChild(el("div", "set-desc", "No sub-agents configured."));
+  for (const agent of state.subagents) {
+    const control = el("div", "agent-row-actions");
+    const edit = el("button", "ghost-btn", "Edit");
+    edit.onclick = () => renderAgentEditor(agent);
+    control.appendChild(edit);
+    if (agent.source === "config") {
+      const remove = el("button", "ghost-btn", "Delete");
+      remove.onclick = async () => {
+        if (!confirm(`Delete sub-agent “${agent.name}”?`)) return;
+        if (await send({ delete_subagent: { name: agent.name } })) await send("reload_extensions");
+      };
+      control.appendChild(remove);
+    } else {
+      control.appendChild(el("span", "agent-chip", "Lua"));
+    }
+    const toggle = switchEl(agent.enabled !== false, async (enabled) => {
+      if (await send({ set_subagent_enabled: { name: agent.name, enabled } })) await send("reload_extensions");
+    });
+    control.appendChild(toggle);
+    wrap.appendChild(setRow(agent.name, agent.description, control));
+  }
+}
+
 function renderTools() {
   const wrap = $("tools-fields");
   wrap.innerHTML = "";
   if (!state.toolDefs.length) { wrap.appendChild(el("div", "set-desc", "Tool list loads once connected.")); return; }
   const disabled = new Set(configCache.toolsDisabled || []);
-  // Registered sub-agents (from the subagent tool's dynamic description).
-  // Read-only here — they're defined in init.lua via bone.subagent.register;
-  // the subagent entry in the tool list below toggles the whole feature.
-  const agents = registeredAgents();
-  if (agents.length) {
-    wrap.appendChild(el("div", "set-group-label", "Sub-agents"));
-    for (const a of agents) wrap.appendChild(setRow(a.name, a.description, el("span", "agent-chip", "agent")));
-    wrap.appendChild(el("div", "set-group-label", "Tools"));
-  }
   for (const t of state.toolDefs) {
     const desc = (t.description || "").split("\n")[0].slice(0, 70);
     wrap.appendChild(setRow(t.name, desc, switchEl(!disabled.has(t.name), (on) => {
@@ -2545,6 +2627,7 @@ function renderTools() {
 
 function openSettings() {
   renderBehavior();
+  renderAgents();
   renderTools();
   renderSettingsStats();
   openDialog("settings-overlay", ".settings-card");

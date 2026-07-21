@@ -39,6 +39,31 @@ fn catalog_extensions_are_not_bundled_defaults() {
 }
 
 #[test]
+fn user_authored_commands_load_even_with_restrictive_selection() {
+    assert!(
+        !DEFAULT_LUA_COMMANDS
+            .iter()
+            .any(|(name, _)| *name == "agents.lua"),
+        "agents.lua is user-owned and must not be embedded"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bone-user-command-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("agents.lua"), "loaded_user_agents = true").unwrap();
+
+    let restrictive: HashSet<String> = HashSet::new();
+    let lua = mlua::Lua::new();
+    run_lua_command_files(&lua, &dir, Some(&restrictive)).unwrap();
+    assert!(lua.globals().get::<bool>("loaded_user_agents").unwrap());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn allow_filter_seeds_only_named_files() {
     let dir = std::env::temp_dir().join(format!(
         "bone-seed-test-{}-{:?}",

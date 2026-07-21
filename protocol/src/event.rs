@@ -112,6 +112,10 @@ pub enum RuntimeEvent {
         /// the protocol crate) so the frontend can render custom tool rows.
         #[serde(default)]
         tool_display: serde_json::Value,
+        /// Structured named sub-agents. Lua-backed entries are promoted into
+        /// canonical config when changed through a frontend.
+        #[serde(default)]
+        subagents: Vec<crate::session::SubagentDefinition>,
     },
     ConversationLoaded {
         messages: Vec<ChatMessage>,
@@ -253,6 +257,19 @@ pub enum RuntimeCommand {
     SetSetting {
         path: String,
         value: serde_json::Value,
+    },
+    /// Create or replace one canonical config-backed sub-agent.
+    UpsertSubagent {
+        agent: crate::session::SubagentDefinition,
+    },
+    /// Remove one canonical config-backed sub-agent.
+    DeleteSubagent {
+        name: String,
+    },
+    /// Enable or disable one canonical config-backed sub-agent.
+    SetSubagentEnabled {
+        name: String,
+        enabled: bool,
     },
     /// Set the daemon's authoritative approval mode (`"safe"` / `"danger"`).
     /// The frontend sends this whenever the user cycles Safe/Danger so the

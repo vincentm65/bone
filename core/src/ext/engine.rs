@@ -146,7 +146,7 @@ pub(crate) fn create_engine(
     // bone.tool.register + bone._tools array
     let bone = &globals.get::<Table>("bone").map_err(crate::util::errstr)?;
     super::ops_tools::setup_register_tool(&lua, bone)?;
-    super::ops_tools::setup_register_subagent(&lua, bone)?;
+    super::ops_tools::setup_register_subagent(&lua, bone, settings.clone())?;
     super::ops_commands::setup_register_command(&lua, bone)?;
     super::ops_events::setup_on(&lua, bone)?;
     super::ops_plugins::setup_plugin(&lua, bone)?;

@@ -91,6 +91,20 @@ pub fn boot(
         }
     };
 
+    if !subagent {
+        let settings = settings_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .resolved()
+            .clone();
+        if let Err(e) = super::ops_tools::register_config_subagents(&lua, &settings) {
+            log_boot_warning(
+                config_dir,
+                format_args!("could not load configured sub-agents: {e}"),
+            );
+        }
+    }
+
     // Seed libraries before init.lua so user startup code can `require` them.
     if !subagent {
         super::seed_default_lua_libs(&config_dir.join("lua/lib"), None, false);

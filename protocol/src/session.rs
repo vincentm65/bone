@@ -2,6 +2,39 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A named sub-agent advertised by the daemon and managed by frontends.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentDefinition {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default = "default_subagent_approval")]
+    pub approval: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Definition origin. Changing a Lua definition through an agent manager
+    /// promotes the edited definition into canonical config.
+    #[serde(default)]
+    pub source: String,
+}
+
+fn default_subagent_approval() -> String {
+    "safe".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct UsageProviderContext {
     pub provider: String,

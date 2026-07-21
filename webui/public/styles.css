@@ -763,6 +763,12 @@ body.hide-meter .composer-tokens { display: none; }
 .swatch .dot { width: 13px; height: 13px; border-radius: 50%; border: 1px solid var(--border-strong); flex: none; }
 
 .tools-list { display: flex; flex-direction: column; }
+.agent-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 2px; }
+.agent-row-actions { display: flex; align-items: center; gap: 6px; }
+.set-input, .agent-textarea { width: 230px; padding: 8px 10px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font: 12px var(--mono); outline: none; }
+.agent-textarea { min-height: 74px; resize: vertical; }
+.set-input:focus, .agent-textarea:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+.set-input:disabled { color: var(--text-faint); }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 11px 16px; font-size: 13px; padding: 4px 2px; }
 .kv .k { color: var(--text-faint); }
 .kv .v { color: var(--text); font-family: var(--mono); text-align: right; word-break: break-all; }

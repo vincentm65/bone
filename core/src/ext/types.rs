@@ -181,6 +181,67 @@ pub struct ExtensionManager {
     ui: super::api_ui::SharedUi,
 }
 
+pub(crate) fn collect_subagents(
+    settings: &BoneSettings,
+    lua: &Lua,
+) -> Vec<bone_protocol::SubagentDefinition> {
+    let mut agents: std::collections::BTreeMap<_, _> = settings
+        .subagents
+        .iter()
+        .map(|(name, agent)| {
+            (
+                name.clone(),
+                bone_protocol::SubagentDefinition {
+                    name: name.clone(),
+                    description: agent.description.clone(),
+                    system_prompt: agent.system_prompt.clone(),
+                    provider: agent.provider.clone(),
+                    model: agent.model.clone(),
+                    approval: agent.approval.clone(),
+                    timeout_ms: agent.timeout_ms,
+                    max_concurrency: agent.max_concurrency,
+                    enabled: agent.enabled,
+                    source: "config".into(),
+                },
+            )
+        })
+        .collect();
+
+    if let Ok(bone) = lua.globals().get::<mlua::Table>("bone")
+        && let Ok(entries) = bone.get::<mlua::Table>("_subagents")
+    {
+        for entry in entries.sequence_values::<mlua::Table>().flatten() {
+            if entry
+                .get::<Option<String>>("_source")
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("config")
+            {
+                continue;
+            }
+            let Ok(name) = entry.get::<String>("name") else {
+                continue;
+            };
+            agents
+                .entry(name.clone())
+                .or_insert_with(|| bone_protocol::SubagentDefinition {
+                    name,
+                    description: entry.get("description").unwrap_or_default(),
+                    system_prompt: entry.get("system_prompt").ok(),
+                    provider: entry.get("provider").ok(),
+                    model: entry.get("model").ok(),
+                    approval: entry.get("approval").unwrap_or_else(|_| "safe".into()),
+                    timeout_ms: entry.get("timeout_ms").ok(),
+                    max_concurrency: entry.get("max_concurrency").ok(),
+                    enabled: true,
+                    source: "lua".into(),
+                });
+        }
+    }
+    agents.into_values().collect()
+}
+
 impl ExtensionManager {
     /// Wrap a pre-created `Arc<Mutex<Lua>>`.
     #[allow(clippy::too_many_arguments)]
@@ -271,6 +332,21 @@ impl ExtensionManager {
     /// Get registered Lua commands.
     pub fn commands(&self) -> &[super::ops_commands::RegisteredLuaCommand] {
         &self.commands
+    }
+
+    /// Structured definitions for frontends. Lua registrations are promoted
+    /// into canonical config when edited or enabled/disabled.
+    pub fn subagents(&self) -> Vec<bone_protocol::SubagentDefinition> {
+        let settings = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resolved()
+            .clone();
+        self.lua
+            .lock()
+            .map(|lua| collect_subagents(&settings, &lua))
+            .unwrap_or_default()
     }
 
     /// Get the daemon-owned resolved settings, including dynamic UI highlights

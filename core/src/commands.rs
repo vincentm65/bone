@@ -32,3 +32,13 @@ pub const BUILTINS: &[(&str, &str)] = &[
 pub fn is_protected_builtin(cmd: &str) -> bool {
     BUILTINS.iter().any(|(name, _)| *name == cmd)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agents_is_dispatched_as_a_lua_command() {
+        assert!(!is_protected_builtin("agents"));
+    }
+}

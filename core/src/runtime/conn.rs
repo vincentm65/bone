@@ -164,6 +164,9 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::KeymapDispatch { .. }
             | RuntimeCommand::ReloadSettings
             | RuntimeCommand::SetSetting { .. }
+            | RuntimeCommand::UpsertSubagent { .. }
+            | RuntimeCommand::DeleteSubagent { .. }
+            | RuntimeCommand::SetSubagentEnabled { .. }
             | RuntimeCommand::ReloadExtensions => {}
         }
     }

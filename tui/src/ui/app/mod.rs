@@ -532,6 +532,7 @@ impl App {
                 commands,
                 tool_defs,
                 tool_display,
+                subagents: _,
             } => {
                 self.apply_frontend_state(banner, settings, commands, tool_defs, tool_display);
             }
@@ -1707,9 +1708,7 @@ impl App {
     /// plus the daemon-advertised Lua commands (`wire_commands` from
     /// `FrontendState`).
     fn collect_commands(&self) -> Vec<(String, String)> {
-        let mut cmds = crate::ui::autocomplete::builtin_commands();
-        cmds.extend(self.wire_commands.iter().cloned());
-        cmds
+        commands::merge_commands(&self.wire_commands)
     }
 
     async fn handle_trailing_input_event(
@@ -2541,16 +2540,7 @@ impl App {
                     }
                 }
             }
-            "help" => {
-                let downloaded = crate::ext::catalog::installed_command_names();
-                let downloaded_commands: Vec<(String, String)> = self
-                    .wire_commands
-                    .iter()
-                    .filter(|(name, _)| downloaded.contains(name))
-                    .cloned()
-                    .collect();
-                commands::help(&downloaded_commands)
-            }
+            "help" => commands::help(&self.wire_commands),
             "quit" | "exit" => {
                 if let Some(notice) = self.request_quit() {
                     self.messages.push(Message::system(notice));

@@ -105,6 +105,7 @@ fn every_runtime_event_variant_round_trips() {
             commands: vec![("config".into(), "Configure Bone".into())],
             tool_defs: vec![],
             tool_display: json!({}),
+            subagents: vec![],
         },
         RuntimeEvent::ConversationLoaded {
             messages: vec![ChatMessage::new(ChatRole::User, "hi")],
@@ -208,6 +209,25 @@ fn every_runtime_command_variant_round_trips() {
         },
         RuntimeCommand::ReloadExtensions,
         RuntimeCommand::ReloadSettings,
+        RuntimeCommand::SetSetting {
+            path: "compact.auto".into(),
+            value: json!(true),
+        },
+        RuntimeCommand::UpsertSubagent {
+            agent: crate::SubagentDefinition {
+                name: "researcher".into(),
+                description: "Investigates code".into(),
+                source: "config".into(),
+                ..Default::default()
+            },
+        },
+        RuntimeCommand::DeleteSubagent {
+            name: "researcher".into(),
+        },
+        RuntimeCommand::SetSubagentEnabled {
+            name: "researcher".into(),
+            enabled: false,
+        },
         RuntimeCommand::SetApprovalMode {
             mode: "danger".into(),
         },

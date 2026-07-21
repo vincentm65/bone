@@ -485,6 +485,7 @@ pub fn frontend_state(
             .collect(),
         tool_defs: tools.definitions(),
         tool_display: serde_json::to_value(tools.display_map()).unwrap_or_default(),
+        subagents: extensions.subagents(),
     }
 }
 
@@ -656,6 +657,28 @@ impl DaemonCtx {
                 self.hub.publish(RuntimeEvent::Status { message: err });
                 false
             }
+        }
+    }
+
+    fn save_subagent_change(
+        &self,
+        change: impl FnOnce(
+            &mut crate::config::settings::Settings,
+        ) -> Result<(), crate::config::settings::SettingsError>,
+    ) {
+        let result = {
+            let handle = self.extensions.settings_handle();
+            let mut settings = handle.lock().unwrap_or_else(|e| e.into_inner());
+            change(&mut settings)
+        };
+        match result {
+            Ok(()) => self.hub.publish_global(frontend_state(
+                &self.extensions,
+                &self.session.lock().unwrap().tools,
+            )),
+            Err(err) => self.hub.publish(RuntimeEvent::Status {
+                message: format!("could not save sub-agent: {err}"),
+            }),
         }
     }
 
@@ -1158,6 +1181,31 @@ impl DaemonCtx {
             }
             RuntimeCommand::SetSetting { path, value } => {
                 self.set_extension_setting(&path, value);
+                Flow::Continue
+            }
+            RuntimeCommand::UpsertSubagent { agent } => {
+                self.save_subagent_change(move |settings| settings.upsert_subagent(agent));
+                Flow::Continue
+            }
+            RuntimeCommand::DeleteSubagent { name } => {
+                self.save_subagent_change(move |settings| settings.delete_subagent(&name));
+                Flow::Continue
+            }
+            RuntimeCommand::SetSubagentEnabled { name, enabled } => {
+                let lua_agent = self
+                    .extensions
+                    .subagents()
+                    .into_iter()
+                    .find(|agent| agent.name == name && agent.source == "lua");
+                self.save_subagent_change(move |settings| {
+                    if let Some(mut agent) = lua_agent {
+                        agent.enabled = enabled;
+                        agent.source = "config".into();
+                        settings.upsert_subagent(agent)
+                    } else {
+                        settings.set_subagent_enabled(&name, enabled)
+                    }
+                });
                 Flow::Continue
             }
             RuntimeCommand::ReloadExtensions => {

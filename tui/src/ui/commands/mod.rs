@@ -9,28 +9,34 @@
 
 pub use bone_core::commands::{BUILTINS, is_protected_builtin};
 
-pub fn help(downloaded_commands: &[(String, String)]) -> String {
+pub fn merge_commands(advertised: &[(String, String)]) -> Vec<(String, String)> {
+    let mut commands: std::collections::BTreeMap<String, String> = BUILTINS
+        .iter()
+        .map(|(name, description)| ((*name).into(), (*description).into()))
+        .collect();
+    for (name, description) in advertised {
+        commands
+            .entry(name.clone())
+            .or_insert_with(|| description.clone());
+    }
+    commands.into_iter().collect()
+}
+
+pub fn help(advertised_commands: &[(String, String)]) -> String {
     let bold = "\x1b[1m";
     let reset = "\x1b[0m";
-    let mut lines: Vec<String> = BUILTINS
+    let commands = merge_commands(advertised_commands);
+    let max_name = commands
         .iter()
-        .map(|(name, desc)| format!("  /{name:10} — {desc}"))
-        .collect();
-    lines.insert(0, format!("{bold}Commands{reset}"));
-    lines.push("  :           — run a shell command inline (: <command>)".to_string());
-    if !downloaded_commands.is_empty() {
-        lines.push(String::new());
-        lines.push(format!("{bold}Downloaded commands{reset}"));
-        let max_name = downloaded_commands
-            .iter()
-            .map(|(n, _)| n.len())
-            .max()
-            .unwrap_or(0)
-            .max(10);
-        for (name, desc) in downloaded_commands {
-            lines.push(format!("  /{name:<max_name$} — {desc}"));
-        }
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        .max(10);
+    let mut lines = vec![format!("{bold}Commands{reset}")];
+    for (name, description) in commands {
+        lines.push(format!("  /{name:<max_name$} — {description}"));
     }
+    lines.push("  :           — run a shell command inline (: <command>)".to_string());
     lines.push(String::new());
     lines.push(format!("{bold}Input shortcuts{reset}"));
     lines.push("  Ctrl+A       — move cursor to start of line".to_string());
@@ -54,4 +60,27 @@ pub fn help(downloaded_commands: &[(String, String)]) -> String {
     lines.push("  PageUp/Down  — scroll active pane".to_string());
     lines.push("  Ctrl+Up/Down — scroll active pane by one line".to_string());
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertised_agents_appears_once_in_help_and_discovery() {
+        let advertised = vec![
+            ("agents".into(), "manage named sub-agents".into()),
+            ("config".into(), "Lua duplicate".into()),
+        ];
+        let commands = merge_commands(&advertised);
+        assert_eq!(
+            commands.iter().filter(|(name, _)| name == "agents").count(),
+            1
+        );
+        assert_eq!(
+            commands.iter().filter(|(name, _)| name == "config").count(),
+            1
+        );
+        assert!(help(&advertised).contains("/agents"));
+    }
 }
