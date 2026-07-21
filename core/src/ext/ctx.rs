@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, LuaSerdeExt, Table, Value};
+use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Table, Value};
 
 use crate::tools::shell::{ScriptRequest, run_script, run_script_lines};
 use crate::tools::types::ToolCall;
@@ -16,6 +16,17 @@ use crate::tools::write_atomic::write_atomic;
 
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+pub(crate) struct ConfigSnapshot(pub Arc<Mutex<crate::config::custom::CustomConfigs>>);
+
+fn config_snapshot(
+    lua: &Lua,
+) -> Result<Arc<Mutex<crate::config::custom::CustomConfigs>>, mlua::Error> {
+    lua.app_data_ref::<ConfigSnapshot>()
+        .map(|snapshot| Arc::clone(&snapshot.0))
+        .ok_or_else(|| mlua::Error::external("daemon configuration snapshot is unavailable"))
+}
 
 /// Run an async future to completion from inside a synchronous Lua callback.
 /// Wraps the `block_in_place` + current-runtime `block_on` dance used by every
@@ -129,6 +140,9 @@ pub struct CtxConfig {
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
     pub conversation_history: Option<Vec<crate::llm::ChatMessage>>,
+    /// Canonical daemon configuration available to interactive Lua commands.
+    pub config_store: Option<crate::config::store::ConfigStore>,
+    pub config_schema: Option<bone_protocol::ConfigSchema>,
     /// Sink for daemon-owned conversation mutations requested by Lua.
     pub conversation_operations: Option<std::sync::mpsc::Sender<ConversationOperation>>,
     /// Sender for the frontend-facing `RuntimeEvent` stream. When set, hooks
@@ -168,6 +182,8 @@ impl CtxConfig {
             cancelled: None,
             usage: None,
             conversation_history: None,
+            config_store: None,
+            config_schema: None,
             conversation_operations: None,
             runtime_status: None,
             turn_nudge: None,
@@ -1288,23 +1304,6 @@ fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
     Ok(db_table)
 }
 
-fn load_section_yaml(
-    config_dir: &str,
-    section: &str,
-) -> Result<Option<serde_yaml::Value>, mlua::Error> {
-    let path = Path::new(config_dir)
-        .join("config")
-        .join(format!("{section}.yaml"));
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| mlua::Error::external(format!("failed to read config: {e}")))?;
-    serde_yaml::from_str(&content)
-        .map(Some)
-        .map_err(|e| mlua::Error::external(format!("invalid YAML in {section}.yaml: {e}")))
-}
-
 fn canonical_display_value(namespace: &str, key: &str, value: String) -> serde_yaml::Value {
     let is_bool = (namespace == "general" && key == "show_thinking")
         || (namespace == "status"
@@ -1338,112 +1337,341 @@ fn build_settings_table(lua: &Lua) -> Result<Table, mlua::Error> {
     Ok(table)
 }
 
+fn find_config_field<'a>(
+    pages: &'a [bone_protocol::ConfigPage],
+    namespace: &str,
+    key: &str,
+) -> Option<&'a bone_protocol::SettingDefinition> {
+    pages.iter().find_map(|page| {
+        if page.namespace == namespace
+            && let Some(field) = page.fields.iter().find(|field| field.key == key)
+        {
+            return Some(field);
+        }
+        find_config_field(&page.pages, namespace, key)
+    })
+}
+
+fn config_field_value(
+    snapshot: &bone_protocol::ConfigSnapshot,
+    field: &bone_protocol::SettingDefinition,
+) -> serde_json::Value {
+    if let Some(name) = field.path.strip_prefix("tools.") {
+        return serde_json::json!(!snapshot.disabled_tools.iter().any(|item| item == name));
+    }
+    if let Some(name) = field.path.strip_prefix("commands.") {
+        return serde_json::json!(!snapshot.disabled_commands.iter().any(|item| item == name));
+    }
+    field
+        .path
+        .split('.')
+        .try_fold(&snapshot.values, |value, part| value.get(part))
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| field.value.clone())
+        .unwrap_or_else(|| field.default.clone())
+}
+
+fn append_config_pages(
+    lua: &Lua,
+    out: &Table,
+    pages: &[bone_protocol::ConfigPage],
+    snapshot: &bone_protocol::ConfigSnapshot,
+) -> Result<(), mlua::Error> {
+    for page in pages {
+        if !page.fields.is_empty()
+            || matches!(page.namespace.as_str(), "providers" | "tools" | "commands")
+        {
+            let page_table = lua.create_table()?;
+            page_table.set("namespace", page.namespace.as_str())?;
+            page_table.set("title", page.title.as_str())?;
+            let fields = lua.create_table()?;
+            for field in &page.fields {
+                let field_table = lua.create_table()?;
+                field_table.set("path", field.path.as_str())?;
+                field_table.set("key", field.key.as_str())?;
+                field_table.set("label", field.label.as_str())?;
+                field_table.set("type", field.value_type.as_str())?;
+                field_table.set("value", lua.to_value(&config_field_value(snapshot, field))?)?;
+                field_table.set("default", lua.to_value(&field.default)?)?;
+                let options = lua.create_table()?;
+                for option in &field.options {
+                    options.push(option.as_str())?;
+                }
+                field_table.set("options", options)?;
+                if let Some(integer) = field.integer {
+                    field_table.set("integer", integer)?;
+                }
+                if let Some(min) = field.min {
+                    field_table.set("min", min)?;
+                }
+                if let Some(max) = field.max {
+                    field_table.set("max", max)?;
+                }
+                field_table.set("reload_behavior", field.reload_behavior.as_str())?;
+                fields.push(field_table)?;
+            }
+            page_table.set("fields", fields)?;
+            out.push(page_table)?;
+        }
+        append_config_pages(lua, out, &page.pages, snapshot)?;
+    }
+    Ok(())
+}
+
+fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
+    let table = lua.create_table()?;
+    table.set("dir", cfg.config_dir.as_str())?;
+    let store = cfg
+        .config_store
+        .as_ref()
+        .expect("canonical config table requires a store")
+        .clone();
+    let schema = Arc::new(
+        cfg.config_schema
+            .clone()
+            .expect("canonical config table requires a schema"),
+    );
+
+    let get_store = store.clone();
+    let get_schema = Arc::clone(&schema);
+    table.set(
+        "get",
+        lua.create_function(move |lua, (namespace, key): (String, String)| {
+            let Some(field) = find_config_field(&get_schema.pages, &namespace, &key) else {
+                return Ok(Value::Nil);
+            };
+            lua.to_value(&config_field_value(&get_store.snapshot(), field))
+        })?,
+    )?;
+
+    let table_store = store.clone();
+    let table_schema = Arc::clone(&schema);
+    table.set(
+        "get_table",
+        lua.create_function(move |lua, namespace: String| {
+            let Some(page) = table_schema
+                .pages
+                .iter()
+                .find(|page| page.namespace == namespace)
+            else {
+                return Ok(Value::Nil);
+            };
+            let snapshot = table_store.snapshot();
+            let values = lua.create_table()?;
+            for field in &page.fields {
+                values.set(
+                    field.key.as_str(),
+                    lua.to_value(&config_field_value(&snapshot, field))?,
+                )?;
+            }
+            Ok(Value::Table(values))
+        })?,
+    )?;
+
+    let pages_store = store.clone();
+    let pages_schema = Arc::clone(&schema);
+    table.set(
+        "get_pages",
+        lua.create_function(move |lua, _: ()| {
+            let snapshot = pages_store.snapshot();
+            let pages = lua.create_table()?;
+            append_config_pages(lua, &pages, &pages_schema.pages, &snapshot)?;
+            Ok(pages)
+        })?,
+    )?;
+
+    let set_store = store.clone();
+    let set_schema = Arc::clone(&schema);
+    table.set(
+        "set_value",
+        lua.create_function(
+            move |lua, (namespace, key, value): (String, String, Value)| {
+                let field =
+                    find_config_field(&set_schema.pages, &namespace, &key).ok_or_else(|| {
+                        mlua::Error::external(format!("unknown setting: {namespace}.{key}"))
+                    })?;
+                let value: serde_json::Value = lua.from_value(value)?;
+                let revision = set_store.snapshot().revision;
+                let result = if let Some(name) = field.path.strip_prefix("tools.") {
+                    let enabled = value.as_bool().ok_or_else(|| {
+                        mlua::Error::external(format!("{} expects a boolean", field.path))
+                    })?;
+                    set_store.set_enabled("tools", name, enabled, revision)
+                } else if let Some(name) = field.path.strip_prefix("commands.") {
+                    let enabled = value.as_bool().ok_or_else(|| {
+                        mlua::Error::external(format!("{} expects a boolean", field.path))
+                    })?;
+                    set_store.set_enabled("commands", name, enabled, revision)
+                } else {
+                    set_store.set_value(&field.path, value, revision)
+                };
+                result.map_err(|(_, error)| mlua::Error::external(error))?;
+                Ok(true)
+            },
+        )?,
+    )?;
+
+    let cycle_schema = Arc::clone(&schema);
+    table.set(
+        "cycle_field",
+        lua.create_function(
+            move |lua, (namespace, key, current): (String, String, Value)| {
+                let Some(field) = find_config_field(&cycle_schema.pages, &namespace, &key) else {
+                    return Ok(Value::Nil);
+                };
+                match field.value_type.as_str() {
+                    "bool" => {
+                        let current = bool::from_lua(current, lua)?;
+                        (!current).into_lua(lua)
+                    }
+                    "enum" => {
+                        let current = String::from_lua(current, lua)?;
+                        let index = field
+                            .options
+                            .iter()
+                            .position(|option| option == &current)
+                            .unwrap_or(field.options.len().saturating_sub(1));
+                        field
+                            .options
+                            .get((index + 1) % field.options.len().max(1))
+                            .cloned()
+                            .into_lua(lua)
+                    }
+                    _ => Ok(Value::Nil),
+                }
+            },
+        )?,
+    )?;
+
+    let providers_store = store.clone();
+    table.set(
+        "list_providers",
+        lua.create_function(move |lua, _: ()| {
+            let snapshot = providers_store.snapshot();
+            let providers = lua.create_table()?;
+            for provider in snapshot.providers {
+                let row = lua.create_table()?;
+                row.set("id", provider.id.as_str())?;
+                row.set("label", provider.label)?;
+                row.set("model", provider.model)?;
+                row.set("base_url", provider.base_url)?;
+                row.set("endpoint", provider.endpoint)?;
+                row.set("handler", provider.handler)?;
+                row.set("reasoning_effort", provider.reasoning_effort)?;
+                row.set("api_key_configured", provider.api_key_configured)?;
+                if let Some(tokens) = provider.context_window_tokens {
+                    row.set("context_window_tokens", tokens)?;
+                }
+                row.set("active", provider.id == snapshot.active_provider)?;
+                providers.push(row)?;
+            }
+            Ok(providers)
+        })?,
+    )?;
+
+    let provider_store = store;
+    table.set(
+        "set_provider_entry",
+        lua.create_function(move |_, (id, entry): (String, Table)| {
+            let update = bone_protocol::ProviderUpdate {
+                id,
+                label: entry.get::<Option<String>>("label")?.unwrap_or_default(),
+                base_url: entry.get::<Option<String>>("base_url")?.unwrap_or_default(),
+                model: entry.get::<Option<String>>("model")?.unwrap_or_default(),
+                endpoint: entry
+                    .get::<Option<String>>("endpoint")?
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "/chat/completions".into()),
+                handler: entry
+                    .get::<Option<String>>("handler")?
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "openai".into()),
+                context_window_tokens: entry.get("context_window_tokens")?,
+                reasoning_effort: entry
+                    .get::<Option<String>>("reasoning_effort")?
+                    .unwrap_or_default(),
+                api_key: entry
+                    .get::<Option<String>>("api_key")?
+                    .filter(|value| !value.is_empty()),
+            };
+            let revision = provider_store.snapshot().revision;
+            provider_store
+                .upsert_provider(update, revision)
+                .map_err(|(_, error)| mlua::Error::external(error))?;
+            Ok(true)
+        })?,
+    )?;
+
+    Ok(table)
+}
+
 /// Build the `ctx.config` table: read-only access to persisted YAML config plus
 /// the read/write helpers backing the customize UI (pages, provider entries).
 fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
+    if cfg.config_store.is_some() {
+        return build_canonical_config_table(lua, cfg);
+    }
     let config_table = lua.create_table()?;
     config_table.set("dir", cfg.config_dir.as_str())?;
 
     // ctx.config.get(section, key)
-    let config_dir_for_get = cfg.config_dir.clone();
-    let config_get_fn = lua.create_function(move |lua, (section, key): (String, String)| {
+    let config_get_fn = lua.create_function(|lua, (section, key): (String, String)| {
+        let snapshot = config_snapshot(lua)?;
+        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
         if crate::config::settings::Settings::is_canonical(&section, &key) {
-            let custom = crate::config::custom::CustomConfigs::load();
             let value = canonical_display_value(&section, &key, custom.get_value(&section, &key));
             return yaml_to_lua(lua, &value);
         }
-        let Some(doc) = load_section_yaml(&config_dir_for_get, &section)? else {
-            return Ok(Value::Nil);
-        };
-        let Some(mapping) = doc.as_mapping() else {
-            return Ok(Value::Nil);
-        };
-        // Look in fields array for matching key, then top-level mapping.
-        if let Some(fields) = mapping.get(serde_yaml::Value::String("fields".into()))
-            && let Some(fields_arr) = fields.as_sequence()
-        {
-            for field in fields_arr {
-                if let Some(field_map) = field.as_mapping() {
-                    let field_key = field_map.get(serde_yaml::Value::String("key".into()));
-                    if field_key.and_then(|v| v.as_str()) == Some(&key) {
-                        // Prefer "value", fall back to "default".
-                        let val = field_map
-                            .get(serde_yaml::Value::String("value".into()))
-                            .or_else(|| field_map.get(serde_yaml::Value::String("default".into())));
-                        if let Some(v) = val {
-                            return yaml_to_lua(lua, v);
-                        }
-                    }
-                }
-            }
+        let value = custom
+            .pages
+            .iter()
+            .find(|(namespace, _)| namespace == &section)
+            .and_then(|(_, page)| page.fields.iter().find(|field| field.key == key))
+            .and_then(|field| field.value.as_ref().or(field.default.as_ref()));
+        match value {
+            Some(value) => yaml_to_lua(lua, value),
+            None => Ok(Value::Nil),
         }
-        // Fall back to top-level key in the mapping.
-        if let Some(v) = mapping.get(serde_yaml::Value::String(key.clone())) {
-            return yaml_to_lua(lua, v);
-        }
-        Ok(Value::Nil)
     })?;
     config_table.set("get", config_get_fn)?;
 
     // ctx.config.get_table(section)
-    let config_dir_for_table = cfg.config_dir.clone();
-    let config_get_table_fn = lua.create_function(move |lua, section: String| {
-        let has_canonical = crate::config::settings::Settings::canonical_keys()
-            .iter()
-            .any(|(namespace, _)| *namespace == section);
-        if has_canonical || matches!(section.as_str(), "theme" | "keymaps") {
-            let custom = crate::config::custom::CustomConfigs::load();
-            if let Some(settings) = custom.settings.as_ref() {
-                if section == "theme" {
-                    let value = serde_yaml::to_value(&settings.resolved().theme)
-                        .map_err(mlua::Error::external)?;
-                    return yaml_to_lua(lua, &value);
-                }
-                if section == "keymaps" {
-                    let value = serde_yaml::to_value(&settings.resolved().keymaps)
-                        .map_err(mlua::Error::external)?;
-                    return yaml_to_lua(lua, &value);
-                }
+    let config_get_table_fn = lua.create_function(|lua, section: String| {
+        let snapshot = config_snapshot(lua)?;
+        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(settings) = custom.settings.as_ref() {
+            if section == "theme" {
+                let value = serde_yaml::to_value(&settings.resolved().theme)
+                    .map_err(mlua::Error::external)?;
+                return yaml_to_lua(lua, &value);
             }
-
-            let Some(mut doc) = load_section_yaml(&config_dir_for_table, &section)? else {
-                return Ok(Value::Nil);
-            };
-            if let Some(fields) = doc
-                .as_mapping_mut()
-                .and_then(|mapping| mapping.get_mut(serde_yaml::Value::String("fields".into())))
-                .and_then(serde_yaml::Value::as_sequence_mut)
-            {
-                for field in fields {
-                    let Some(field_map) = field.as_mapping_mut() else {
-                        continue;
-                    };
-                    let Some(key) = field_map
-                        .get(serde_yaml::Value::String("key".into()))
-                        .and_then(serde_yaml::Value::as_str)
-                        .map(str::to_string)
-                    else {
-                        continue;
-                    };
-                    if crate::config::settings::Settings::is_canonical(&section, &key) {
-                        field_map.insert(
-                            serde_yaml::Value::String("value".into()),
-                            canonical_display_value(
-                                &section,
-                                &key,
-                                custom.get_value(&section, &key),
-                            ),
-                        );
-                    }
-                }
+            if section == "keymaps" {
+                let value = serde_yaml::to_value(&settings.resolved().keymaps)
+                    .map_err(mlua::Error::external)?;
+                return yaml_to_lua(lua, &value);
             }
-            return yaml_to_lua(lua, &doc);
         }
 
-        let Some(doc) = load_section_yaml(&config_dir_for_table, &section)? else {
+        let Some((_, page)) = custom
+            .pages
+            .iter()
+            .find(|(namespace, _)| namespace == &section)
+        else {
             return Ok(Value::Nil);
         };
-        yaml_to_lua(lua, &doc)
+        let mut page = page.clone();
+        for field in &mut page.fields {
+            if crate::config::settings::Settings::is_canonical(&section, &field.key) {
+                field.value = Some(canonical_display_value(
+                    &section,
+                    &field.key,
+                    custom.get_value(&section, &field.key),
+                ));
+            }
+        }
+        let value = serde_yaml::to_value(page).map_err(mlua::Error::external)?;
+        yaml_to_lua(lua, &value)
     })?;
     config_table.set("get_table", config_get_table_fn)?;
 
@@ -1451,7 +1679,8 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
 
     // ctx.config.get_pages() -> array of { namespace, title, fields = [...] }
     let get_pages_fn = lua.create_function(|lua, _: ()| {
-        let custom = crate::config::custom::CustomConfigs::load();
+        let snapshot = config_snapshot(lua)?;
+        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
         let mut ordered: Vec<(String, crate::config::custom::CustomConfigPage)> = Vec::new();
         for preferred in ["general", "providers", "tools"] {
             if let Some((ns, page)) = custom.pages.iter().find(|(ns, _)| ns == preferred) {
@@ -1536,33 +1765,15 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
             let pages: mlua::Function = settings_api.get("_pages")?;
             for page in pages.call::<Table>(())?.sequence_values::<Table>() {
                 let page = page?;
-                if page.get::<String>("namespace")? != namespace {
-                    continue;
+                if page.get::<String>("namespace")? == namespace {
+                    return Err(mlua::Error::external(format!(
+                        "extension setting {namespace}.{key} is read-only here; use a daemon config mutation"
+                    )));
                 }
-                for field in page.get::<Table>("fields")?.sequence_values::<Table>() {
-                    let field = field?;
-                    if field.get::<String>("key")? != key {
-                        continue;
-                    }
-                    let typed = match field.get::<String>("type")?.as_str() {
-                        "bool" => Value::Boolean(value.parse().map_err(|_| {
-                            mlua::Error::external("boolean setting must be true or false")
-                        })?),
-                        "number" => Value::Number(value.parse().map_err(|_| {
-                            mlua::Error::external("number setting must be numeric")
-                        })?),
-                        _ => Value::String(lua.create_string(&value)?),
-                    };
-                    let set: mlua::Function = settings_api.get("_set_extension")?;
-                    set.call::<()>((format!("{namespace}.{key}"), typed))?;
-                    return Ok(true);
-                }
-                return Err(mlua::Error::external(format!(
-                    "unknown config field: {namespace}.{key}"
-                )));
             }
 
-            let mut custom = crate::config::custom::CustomConfigs::load();
+            let snapshot = config_snapshot(lua)?;
+            let mut custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
             custom
                 .try_set_value(&namespace, &key, value)
                 .map_err(mlua::Error::external)?;
@@ -1603,7 +1814,8 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
                     };
                 }
             }
-            let custom = crate::config::custom::CustomConfigs::load();
+            let snapshot = config_snapshot(lua)?;
+            let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
             Ok(custom.cycle_field(&namespace, &key, &current))
         })?;
     config_table.set("cycle_field", cycle_field_fn)?;
@@ -1611,7 +1823,8 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     // ctx.config.list_providers() -> sorted provider summaries.
     let list_active_provider = active_provider.clone();
     let list_providers_fn = lua.create_function(move |lua, _: ()| {
-        let custom = crate::config::custom::CustomConfigs::load();
+        let snapshot = config_snapshot(lua)?;
+        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
         let providers = custom.derive_providers_config();
         let mut ids: Vec<String> = providers.providers.keys().cloned().collect();
         ids.sort();
@@ -1640,12 +1853,15 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
     config_table.set("list_providers", list_providers_fn)?;
 
     // ctx.config.set_provider_entry(id, entry)
-    let set_provider_entry_fn = lua.create_function(|_, (id, entry): (String, Table)| {
+    let set_provider_entry_fn = lua.create_function(|lua, (id, entry): (String, Table)| {
         let provider = crate::config::ProviderEntry {
             label: entry.get::<Option<String>>("label")?.unwrap_or_default(),
             base_url: entry.get::<Option<String>>("base_url")?.unwrap_or_default(),
             model: entry.get::<Option<String>>("model")?.unwrap_or_default(),
-            api_key: entry.get::<Option<String>>("api_key")?.unwrap_or_default(),
+            api_key: entry
+                .get::<Option<String>>("api_key")?
+                .unwrap_or_default()
+                .into(),
             endpoint: entry
                 .get::<Option<String>>("endpoint")?
                 .filter(|s| !s.is_empty())
@@ -1659,7 +1875,8 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
                 .get::<Option<String>>("reasoning_effort")?
                 .unwrap_or_default(),
         };
-        let mut custom = crate::config::custom::CustomConfigs::load();
+        let snapshot = config_snapshot(lua)?;
+        let mut custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
         custom.set_provider_entry("providers", &id, &provider);
         Ok(true)
     })?;
@@ -1734,10 +1951,15 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let cancelled_run = cancelled_flag.clone();
     let run_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         let tool_allowlist = extract_tool_allowlist(&opts);
+        let config = config_snapshot(lua)?
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let built = match build_agent_request(
             prompt,
             &opts,
             &inherited_run,
+            config,
             RUN_OPT_KEYS,
             None,
             tool_allowlist,
@@ -1779,10 +2001,15 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
             let tool_allowlist = extract_tool_allowlist(&opts);
+            let config = config_snapshot(lua)?
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
             let built = match build_agent_request(
                 prompt,
                 &opts,
                 &inherited_stream,
+                config,
                 RUN_STREAM_OPT_KEYS,
                 Some(tx),
                 tool_allowlist,
@@ -1866,10 +2093,15 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
         // Build the request first so a bad-opts error never leaves an orphan
         // job in the registry.
+        let config = config_snapshot(lua)?
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let built = match build_agent_request(
             prompt.clone(),
             &opts,
             &inherited_spawn,
+            config,
             SPAWN_OPT_KEYS,
             None,
             tool_allowlist,
@@ -1917,10 +2149,15 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             let handle = tokio::runtime::Handle::try_current().map_err(|e| {
                 mlua::Error::external(format!("followup requires a tokio runtime: {e}"))
             })?;
+            let config = config_snapshot(lua)?
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
             let mut built = match build_agent_request(
                 prompt.clone(),
                 &opts,
                 &inherited_followup,
+                config,
                 SPAWN_OPT_KEYS,
                 None,
                 extract_tool_allowlist(&opts),
@@ -2181,6 +2418,7 @@ fn build_agent_request(
     prompt: String,
     opts: &Option<Table>,
     inherited: &InheritedCtx,
+    config_snapshot: crate::config::custom::CustomConfigs,
     allowed_keys: &[&str],
     event_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentRunEvent>>,
     tool_allowlist: Option<Vec<String>>,
@@ -2233,6 +2471,7 @@ fn build_agent_request(
         max_tokens,
         approval_gate,
         transcript: None,
+        config_snapshot: Some(config_snapshot),
         cancel: None,
     };
     Ok(BuiltAgent {
@@ -2580,6 +2819,9 @@ fn dispatch_event(
         | RuntimeEvent::ApprovalRequest { .. }
         | RuntimeEvent::StateSnapshot { .. }
         | RuntimeEvent::FrontendState { .. }
+        | RuntimeEvent::ConfigSnapshot { .. }
+        | RuntimeEvent::ConfigChanged { .. }
+        | RuntimeEvent::ConfigMutationRejected { .. }
         | RuntimeEvent::ConversationLoaded { .. }
         | RuntimeEvent::ConversationLoadFailed { .. }
         | RuntimeEvent::ViewDiff { .. }

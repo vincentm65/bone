@@ -48,12 +48,17 @@ impl CommandSafety {
         match call.name.as_str() {
             "read_file" => Self::ReadOnly,
             "write_file" | "edit_file" => Self::Danger,
-            "shell" => call
-                .arguments
-                .get("command")
-                .and_then(Value::as_str)
-                .map(classify_command)
-                .unwrap_or(Self::Danger),
+            "shell" => match call.arguments.get("action").and_then(Value::as_str) {
+                Some("list" | "status") => Self::ReadOnly,
+                Some("kill") => Self::Danger,
+                Some("run") | None => call
+                    .arguments
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(classify_command)
+                    .unwrap_or(Self::Danger),
+                Some(_) => Self::Danger,
+            },
             _ => Self::Danger,
         }
     }
@@ -281,6 +286,7 @@ fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCommandPolicy {
     #[serde(default)]
     shell_wrappers: Vec<String>,
@@ -292,8 +298,8 @@ struct RawCommandPolicy {
     package_managers: Vec<String>,
 }
 
-#[derive(Debug)]
-struct CommandPolicy {
+#[derive(Debug, Clone)]
+pub(crate) struct CommandPolicy {
     shell_wrappers: Vec<String>,
     read_only: Vec<String>,
     danger: Vec<String>,
@@ -302,20 +308,37 @@ struct CommandPolicy {
 
 fn command_policy() -> &'static CommandPolicy {
     static POLICY: OnceLock<CommandPolicy> = OnceLock::new();
-    POLICY.get_or_init(load_command_policy)
+    POLICY.get_or_init(|| {
+        load_command_policy().unwrap_or_else(|error| {
+            crate::ext::ctx::runtime_warn_once(format!("bone: warning: {error}"));
+            resolve_command_policy(default_raw_command_policy())
+        })
+    })
 }
 
-fn load_command_policy() -> CommandPolicy {
+pub(crate) fn load_command_policy() -> Result<CommandPolicy, crate::config::error::ConfigError> {
     let path = config::command_policy_path();
     let raw = if path.exists() {
-        config::load_yaml::<RawCommandPolicy>(&path).unwrap_or_else(|e| {
-            crate::ext::ctx::runtime_warn_once(format!("bone: warning: {e}"));
-            default_raw_command_policy()
-        })
+        load_raw_command_policy(&path)?
     } else {
         default_raw_command_policy()
     };
+    Ok(resolve_command_policy(raw))
+}
 
+pub(crate) fn validate_command_policy_path(
+    path: &std::path::Path,
+) -> Result<(), crate::config::error::ConfigError> {
+    load_raw_command_policy(path).map(|_| ())
+}
+
+fn load_raw_command_policy(
+    path: &std::path::Path,
+) -> Result<RawCommandPolicy, crate::config::error::ConfigError> {
+    config::load_yaml(path).map_err(|error| crate::config::error::ConfigError::load(path, error))
+}
+
+fn resolve_command_policy(raw: RawCommandPolicy) -> CommandPolicy {
     // Merge edit + package_managers into danger (edit mode removed).
     let danger = raw
         .edit
@@ -329,6 +352,10 @@ fn load_command_policy() -> CommandPolicy {
         danger: normalize_list(danger),
         package_managers: normalize_list(raw.package_managers),
     }
+}
+
+pub(crate) fn default_command_policy() -> CommandPolicy {
+    resolve_command_policy(default_raw_command_policy())
 }
 
 fn default_raw_command_policy() -> RawCommandPolicy {

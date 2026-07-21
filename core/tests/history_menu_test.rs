@@ -279,6 +279,61 @@ fn multi_select_prefills_checked_values_and_ignores_unknown_values() {
 }
 
 #[test]
+fn searchable_multi_select_space_unchecks_instead_of_filtering() {
+    let lua = Lua::new();
+    lua.load(
+        r#"
+        package.preload["ui.pane"] = function()
+          local P = {}
+          P.span = function(text, fg, modifiers) return { text = text, fg = fg, modifiers = modifiers } end
+          P.line = function(...) return { spans = { ... } } end
+          P.clamp = function(n, lo, hi) return math.max(lo, math.min(n, hi)) end
+          P.wait_key = function(ctx) return ctx.ui.key() end
+          P.key_name = function(key) return key.code end
+          P.is_text_key = function(key) return key.code == "Char" and key.char and not key.ctrl and not key.alt end
+          P.new = function(ctx)
+            return { ctx = ctx, set_lines = function() end, close = function() end }
+          end
+          return P
+        end
+        "#,
+    )
+    .exec()
+    .unwrap();
+    let menu: Table = lua.load(MENU_LUA).eval().unwrap();
+    lua.globals().set("menu", menu).unwrap();
+
+    let result: Table = lua
+        .load(
+            r#"
+            local keys = {
+              { code = "Char", char = " " },
+              { code = "Enter" },
+            }
+            local next_key = 0
+            local ctx = { ui = {
+              key = function()
+                next_key = next_key + 1
+                return keys[next_key]
+              end,
+              width = function() return 80 end,
+            } }
+            return menu.multi_select(ctx, {
+              options = { "alpha", "beta" },
+              initial_checked = { "alpha", "beta" },
+              searchable = true,
+            })
+            "#,
+        )
+        .eval()
+        .unwrap();
+
+    let values: Table = result.get("values").unwrap();
+    assert_eq!(values.raw_len(), 1);
+    assert_eq!(values.get::<String>(1).unwrap(), "beta");
+}
+
+#[test]
 fn preview_menu_switches_options_and_scrolls_styled_content() {
     let lua = Lua::new();
     lua.load(

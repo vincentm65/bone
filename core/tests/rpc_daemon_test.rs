@@ -65,6 +65,29 @@ impl LlmProvider for MockProvider {
     }
 }
 
+struct PendingProvider;
+
+#[async_trait]
+impl LlmProvider for PendingProvider {
+    fn id(&self) -> &str {
+        "mock"
+    }
+    fn name(&self) -> &str {
+        "Mock"
+    }
+    fn model(&self) -> &str {
+        "mock-1"
+    }
+    fn set_model(&mut self, _model: String) {}
+    async fn chat_stream(
+        &self,
+        _messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
+        Ok(futures_util::stream::pending().boxed())
+    }
+}
+
 /// Spawn a daemon owning a fresh persistent session backed by `provider`, plus a
 /// TCP listener serving every client against the hub. Returns the bound address.
 async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, Hub) {
@@ -77,6 +100,7 @@ async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, 
         commands_rx,
         provider,
         ExtensionManager::unloaded(),
+        bone_core::config::store::ConfigStore::new(ExtensionManager::unloaded()),
         session,
         ApprovalMode::Safe,
         None,
@@ -123,6 +147,7 @@ async fn daemon_stops_when_last_command_sender_is_dropped() {
         commands_rx,
         provider,
         ExtensionManager::unloaded(),
+        bone_core::config::store::ConfigStore::new(ExtensionManager::unloaded()),
         session.clone(),
         ApprovalMode::Safe,
         None,
@@ -141,6 +166,46 @@ async fn daemon_stops_when_last_command_sender_is_dropped() {
         weak_session.upgrade().is_none(),
         "daemon retained its RuntimeSession after shutdown"
     );
+}
+
+#[tokio::test]
+async fn busy_turn_services_config_commands() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(PendingProvider);
+    let (_addr, hub) = spawn_daemon(provider).await;
+    let mut events = hub.subscribe();
+    let commands = hub.command_sender();
+
+    commands
+        .send(RuntimeCommand::SubmitPrompt {
+            text: "wait".into(),
+            images: vec![],
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(events.recv().await.unwrap(), RuntimeEvent::Started { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("turn did not start");
+
+    commands.send(RuntimeCommand::GetConfig).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                events.recv().await.unwrap(),
+                RuntimeEvent::ConfigSnapshot { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("busy turn consumed GetConfig");
+
+    commands.send(RuntimeCommand::Cancel).unwrap();
 }
 
 #[tokio::test]
@@ -346,6 +411,7 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
         commands_rx,
         provider,
         ExtensionManager::unloaded(),
+        bone_core::config::store::ConfigStore::new(ExtensionManager::unloaded()),
         session.clone(),
         ApprovalMode::Safe,
         Some(inbox.clone()),
@@ -542,7 +608,8 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
         hub.publisher(),
         commands_rx,
         provider,
-        extensions,
+        extensions.clone(),
+        bone_core::config::store::ConfigStore::new(extensions),
         session,
         ApprovalMode::Safe,
         None,
@@ -641,7 +708,8 @@ bone.command.register("restart", {
         hub.publisher(),
         commands_rx,
         provider,
-        extensions,
+        extensions.clone(),
+        bone_core::config::store::ConfigStore::new(extensions),
         session,
         ApprovalMode::Safe,
         None,
@@ -764,7 +832,8 @@ bone.command.register("noop", {
         hub.publisher(),
         commands_rx,
         provider,
-        extensions,
+        extensions.clone(),
+        bone_core::config::store::ConfigStore::new(extensions),
         session,
         ApprovalMode::Safe,
         None,

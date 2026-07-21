@@ -319,12 +319,17 @@ async fn await_cancel(cancel: Option<&Arc<AtomicBool>>) {
     }
 }
 
-/// Deserialize `shell` arguments: the command plus a clamped timeout.
-fn parse_shell_args(arguments: Value) -> Result<(String, u64, bool), String> {
-    let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-    reject_obvious_file_write(&args.command)?;
+/// Deserialize `shell` arguments. Calls without an action remain `run` for
+/// compatibility with existing transcripts and clients.
+fn parse_shell_args(arguments: Value) -> Result<Args, String> {
+    serde_json::from_value(arguments).map_err(crate::util::errstr)
+}
+
+fn parse_run_args(args: Args) -> Result<(String, u64, bool), String> {
+    let command = args.command.ok_or("command is required for run")?;
+    reject_obvious_file_write(&command)?;
     let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
-    Ok((args.command, timeout_ms, args.background))
+    Ok((command, timeout_ms, args.background))
 }
 
 /// Reject unmistakable attempts to use shell as a text-file writer while
@@ -436,10 +441,19 @@ pub struct ShellTool;
 
 #[derive(Deserialize)]
 struct Args {
-    command: String,
+    #[serde(default = "default_action")]
+    action: String,
+    #[serde(default)]
+    command: Option<String>,
     timeout_ms: Option<u64>,
     #[serde(default)]
     background: bool,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+fn default_action() -> String {
+    "run".into()
 }
 
 #[async_trait]
@@ -447,30 +461,39 @@ impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         let (_, _, shell_label) = shell_command();
         let desc = format!(
-            "Run a non-interactive shell command with {shell_label}. Do not use shell to read, create, or edit file contents when read_file, write_file, or edit_file can do it. File-tool fallbacks are appropriate only when a file tool recommends shell, for bulk multi-file operations, or when no dedicated tool supports the operation. Returns exit code, stdout, and stderr."
+            "Run a non-interactive shell command with {shell_label}, or manage background commands started by this tool. Use action=run (the default), list, status, or kill. Do not use shell to read, create, or edit file contents when read_file, write_file, or edit_file can do it. File-tool fallbacks are appropriate only when a file tool recommends shell, for bulk multi-file operations, or when no dedicated tool supports the operation. Run returns exit code, stdout, and stderr."
         );
-        let cmd_desc = format!("Command to execute with {shell_label}. Runs without stdin.");
+        let cmd_desc =
+            format!("Command to execute with {shell_label} for action=run. Runs without stdin.");
         ToolDefinition {
             name: "shell".to_string(),
             description: desc,
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["run", "list", "status", "kill"],
+                        "description": "Action to perform. Defaults to run when command is provided."
+                    },
                     "command": {
                         "type": "string",
                         "description": cmd_desc,
                     },
+                    "id": {
+                        "type": "string",
+                        "description": "Managed process id for status or kill."
+                    },
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 1000,
-                        "description": "Timeout in ms. Default 120000. Set higher for long-running commands (e.g. downloads)."
+                        "description": "Timeout in ms for run. Default 120000. Set higher for long-running commands (e.g. downloads)."
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "Run as a managed background process and return its process id immediately."
+                        "description": "For run, start a managed background process and return its id immediately."
                     }
                 },
-                "required": ["command"],
                 "additionalProperties": false
             }),
         }
@@ -480,7 +503,11 @@ impl Tool for ShellTool {
         // Context-less fallback (trait default path / tests). No cancel token
         // is available here, so the wall-clock timeout is the only backstop;
         // the live path below wires in cancellation.
-        let (command, timeout_ms, background) = parse_shell_args(arguments)?;
+        let args = parse_shell_args(arguments)?;
+        if args.action != "run" {
+            return crate::processes::execute_action(&args.action, args.id.as_deref(), None);
+        }
+        let (command, timeout_ms, background) = parse_run_args(args)?;
         if background {
             let id = crate::processes::registry().spawn(command, "shell".into(), timeout_ms, None);
             return Ok(format!("background process started: {id}"));
@@ -505,14 +532,23 @@ impl Tool for ShellTool {
         // Live path used by the driver: thread the turn's cancel flag in so an
         // Esc mid-command kills the process tree and returns promptly instead
         // of blocking until the wall-clock timeout.
-        let (command, timeout_ms, background) = parse_shell_args(arguments)?;
+        let args = parse_shell_args(arguments)?;
+        let scope = crate::processes::conversation_scope(
+            context
+                .app_state
+                .as_ref()
+                .and_then(|state| state.session_id),
+        );
+        if args.action != "run" {
+            return crate::processes::execute_action(
+                &args.action,
+                args.id.as_deref(),
+                Some(&scope),
+            )
+            .map(ToolOutput::text);
+        }
+        let (command, timeout_ms, background) = parse_run_args(args)?;
         if background {
-            let scope = crate::processes::conversation_scope(
-                context
-                    .app_state
-                    .as_ref()
-                    .and_then(|state| state.session_id),
-            );
             let id = crate::processes::registry().spawn(
                 command,
                 scope,

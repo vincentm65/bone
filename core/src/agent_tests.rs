@@ -24,6 +24,7 @@ fn nested_request(session_sink: Option<Arc<dyn SessionSink>>) -> AgentRequest {
         approval_gate: None,
         transcript: None,
         cancel: None,
+        config_snapshot: None,
     }
 }
 

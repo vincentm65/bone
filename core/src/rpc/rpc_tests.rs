@@ -40,6 +40,228 @@ async fn grouped_hubs_broadcast_global_events() {
     );
 }
 
+struct ConfigTestProvider;
+
+#[async_trait::async_trait]
+impl crate::llm::provider::LlmProvider for ConfigTestProvider {
+    fn id(&self) -> &str {
+        "mock"
+    }
+
+    fn name(&self) -> &str {
+        "Mock"
+    }
+
+    fn model(&self) -> &str {
+        "mock-1"
+    }
+
+    fn set_model(&mut self, _: String) {}
+
+    async fn chat_stream(
+        &self,
+        _: Vec<crate::llm::ChatMessage>,
+        _: Vec<crate::tools::ToolDefinition>,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        unreachable!()
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = std::env::temp_dir().join(format!(
+        "bone-provider-preflight-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    unsafe { std::env::set_var("BONE_DIR", &dir) };
+
+    crate::config::custom::seed_builtin_pages(None, false);
+    let mut custom = crate::config::custom::CustomConfigs::load();
+    let provider = |handler: &str| crate::config::ProviderEntry {
+        label: "Mock".into(),
+        base_url: "http://localhost".into(),
+        model: "configured-model".into(),
+        api_key: Default::default(),
+        endpoint: "/chat/completions".into(),
+        handler: handler.into(),
+        context_window_tokens: None,
+        reasoning_effort: String::new(),
+    };
+    custom
+        .upsert_provider_entry("mock", &provider("openai"))
+        .unwrap();
+    custom
+        .upsert_provider_entry("bad", &provider("unsupported"))
+        .unwrap();
+    custom.try_set_last_provider("mock").unwrap();
+
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let config = crate::config::store::ConfigStore::new(extensions.clone());
+    let revision = config.snapshot().revision;
+    let (hub, commands_rx) = Hub::new();
+    let mut events = hub.subscribe();
+    let commands = hub.command_sender();
+    let daemon = tokio::spawn(run_daemon(
+        hub.publisher(),
+        commands_rx,
+        Arc::new(ConfigTestProvider),
+        extensions,
+        config.clone(),
+        Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
+            crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+        ))),
+        crate::tools::ApprovalMode::Safe,
+        None,
+        false,
+    ));
+
+    commands
+        .send(RuntimeCommand::UpsertProvider {
+            provider: bone_protocol::ProviderUpdate {
+                id: "mock".into(),
+                label: "Changed".into(),
+                base_url: "http://changed".into(),
+                model: "changed-model".into(),
+                api_key: None,
+                endpoint: "/chat/completions".into(),
+                handler: "unsupported".into(),
+                context_window_tokens: None,
+                reasoning_effort: String::new(),
+            },
+            expected_revision: revision,
+            request_id: Some("upsert".into()),
+        })
+        .unwrap();
+
+    let mut upsert_rejected = false;
+    let mut upsert_runtime_unchanged = false;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !(upsert_rejected && upsert_runtime_unchanged) {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::ConfigMutationRejected { request_id, .. }
+                    if request_id.as_deref() == Some("upsert") =>
+                {
+                    upsert_rejected = true;
+                }
+                RuntimeEvent::StateSnapshot { snapshot } => {
+                    upsert_runtime_unchanged =
+                        snapshot.provider_id == "mock" && snapshot.provider_model == "mock-1";
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let after_upsert = config.snapshot();
+    assert_eq!(after_upsert.revision, revision);
+    assert_eq!(
+        config.providers_config().providers["mock"].model,
+        "configured-model"
+    );
+
+    commands
+        .send(RuntimeCommand::SetActiveProvider {
+            id: "bad".into(),
+            expected_revision: revision,
+            request_id: Some("activate".into()),
+        })
+        .unwrap();
+    let mut activation_rejected = false;
+    let mut activation_runtime_unchanged = false;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !(activation_rejected && activation_runtime_unchanged) {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::ConfigMutationRejected { request_id, .. }
+                    if request_id.as_deref() == Some("activate") =>
+                {
+                    activation_rejected = true;
+                }
+                RuntimeEvent::StateSnapshot { snapshot } => {
+                    activation_runtime_unchanged =
+                        snapshot.provider_id == "mock" && snapshot.provider_model == "mock-1";
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(config.snapshot().revision, revision);
+    assert_eq!(config.snapshot().active_provider, "mock");
+
+    daemon.abort();
+    std::fs::remove_dir_all(dir).ok();
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn resetting_approval_updates_live_mode() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let config = crate::config::store::ConfigStore::new(extensions.clone());
+    config
+        .set_value(
+            "general.approval",
+            serde_json::json!("danger"),
+            config.snapshot().revision,
+        )
+        .unwrap();
+    let revision = config.snapshot().revision;
+    let (hub, mut commands) = Hub::new();
+    let mode = crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Danger);
+    let mut ctx = DaemonCtx {
+        hub: hub.publisher(),
+        llm: Arc::new(ConfigTestProvider),
+        extensions,
+        session: Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
+            crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+        ))),
+        mode: mode.clone(),
+        approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
+        key_registry: crate::runtime::KeyReplyRegistry::new(),
+        reload_inbox: None,
+        forward_view_diffs: false,
+        config,
+    };
+
+    let _ = ctx
+        .handle_idle_command(
+            RuntimeCommand::ResetConfigValue {
+                path: "general.approval".into(),
+                expected_revision: revision,
+                request_id: Some("reset".into()),
+            },
+            &mut commands,
+        )
+        .await;
+
+    assert_eq!(mode.get(), crate::tools::ApprovalMode::Safe);
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn dropping_remote_client_closes_its_transport() {
     let (client_io, mut peer_io) = tokio::io::duplex(4096);

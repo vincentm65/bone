@@ -96,7 +96,8 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
                 || !existing.contains("description_spans")
                 || !existing.contains("label_modifiers")
                 || !existing.contains("initial_checked")
-                || !existing.contains("preview_row_budget")))
+                || !existing.contains("preview_row_budget")
+                || !existing.contains("multi-space-toggle-v2")))
         // History now includes aggregate message and token counts/status,
         // and lists via a candidate-first CTE instead of a full messages join.
         || (name == "history.lua"
@@ -106,10 +107,9 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
         || (name == "subagent.lua" && !existing.contains("eager"))
-        // config's providers page replaced the "Edit provider..." menu row with
-        // an `[e] edit` action key; refresh older seeded copies that predate the
-        // `action_keys` wiring so `e` opens the provider editor again.
-        || (name == "config.lua" && !existing.contains("action_keys")))
+        // Config now consumes the daemon's typed aggregate schema and preserves
+        // native false values when toggling; refresh older seeded copies.
+        || (name == "config.lua" && !existing.contains("canonical-config-v3")))
 }
 
 /// Boot the Lua extension system.
@@ -198,6 +198,7 @@ fn boot_with_tools_inner(
         Some(settings) => boot_shared(config_dir, cwd, opts, model, provider, settings),
         None => boot(config_dir, cwd, opts, model, provider),
     };
+    extensions.replace_config_snapshot(custom.clone());
 
     let mut loaded = super::tools::load_tools();
     super::tools::register_lua_tools(&mut loaded, lua_tools);

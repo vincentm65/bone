@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, LuaSerdeExt, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Table};
 
 use crate::config::settings::{BoneSettings, Settings};
 
@@ -121,84 +121,8 @@ pub(crate) fn setup_register_subagent(
         .map_err(crate::util::errstr)?;
     subagent.set("list", list).map_err(crate::util::errstr)?;
 
-    let upsert_settings = Arc::clone(&settings);
-    let upsert = lua
-        .create_function(move |lua, value: Value| {
-            let mut agent: bone_protocol::SubagentDefinition = lua.from_value(value)?;
-            agent.source = "config".into();
-            upsert_settings
-                .lock()
-                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
-                .upsert_subagent(agent)
-                .map_err(mlua::Error::external)
-        })
-        .map_err(crate::util::errstr)?;
-    subagent
-        .set("upsert", upsert)
-        .map_err(crate::util::errstr)?;
-
-    let delete_settings = Arc::clone(&settings);
-    let delete = lua
-        .create_function(move |lua, name: String| {
-            reject_lua_only(lua, &delete_settings, &name)?;
-            delete_settings
-                .lock()
-                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
-                .delete_subagent(&name)
-                .map_err(mlua::Error::external)
-        })
-        .map_err(crate::util::errstr)?;
-    subagent
-        .set("delete", delete)
-        .map_err(crate::util::errstr)?;
-
-    let enabled_settings = Arc::clone(&settings);
-    let set_enabled = lua
-        .create_function(move |lua, (name, enabled): (String, bool)| {
-            let resolved = enabled_settings
-                .lock()
-                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
-                .resolved()
-                .clone();
-            let lua_agent = super::types::collect_subagents(&resolved, lua)
-                .into_iter()
-                .find(|agent| agent.name == name && agent.source == "lua");
-            let mut settings = enabled_settings
-                .lock()
-                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
-            if let Some(mut agent) = lua_agent {
-                agent.enabled = enabled;
-                agent.source = "config".into();
-                settings.upsert_subagent(agent)
-            } else {
-                settings.set_subagent_enabled(&name, enabled)
-            }
-            .map_err(mlua::Error::external)
-        })
-        .map_err(crate::util::errstr)?;
-    subagent
-        .set("set_enabled", set_enabled)
-        .map_err(crate::util::errstr)?;
-
     bone.set("subagent", subagent)
         .map_err(crate::util::errstr)?;
-    Ok(())
-}
-
-fn reject_lua_only(lua: &Lua, settings: &Arc<Mutex<Settings>>, name: &str) -> mlua::Result<()> {
-    let resolved = settings
-        .lock()
-        .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
-        .resolved()
-        .clone();
-    if super::types::collect_subagents(&resolved, lua)
-        .iter()
-        .any(|agent| agent.name == name && agent.source == "lua")
-    {
-        return Err(mlua::Error::external(format!(
-            "Lua-defined sub-agent '{name}' is read-only; edit init.lua"
-        )));
-    }
     Ok(())
 }
 

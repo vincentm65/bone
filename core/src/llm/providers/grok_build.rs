@@ -122,7 +122,7 @@ impl GrokBuildProvider {
             model: self.model.clone(),
             // The Chat Completions adapter uses this as an explicit bearer override;
             // the subscription token is loaded immediately before each turn.
-            api_key: String::new(),
+            api_key: Default::default(),
             endpoint: self.endpoint.clone(),
             handler: "openai".to_string(),
             context_window_tokens: self.context_window_tokens,

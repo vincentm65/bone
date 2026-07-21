@@ -11,7 +11,9 @@ Paths are relative to the resolved Bone config directory.
 | Task | File or API |
 |---|---|
 | Change persistent settings | `/config`, `config.yaml`, or `bone.settings.*` |
-| Change providers or credentials | `config/providers.yaml` (restart required) |
+| Change providers or credentials | `providers.yaml` (restart required after direct edits) |
+| Change named subagents | `subagents.yaml` (restart required after direct edits) |
+| Change extension values | `/config`, `extensions.yaml`, or `bone.settings.*` |
 | Change shell safety policy | `command-policy.yaml` (restart required) |
 | Add an agent-callable tool | `lua/tools/<name>.lua` with `bone.tool.register` |
 | Add a slash command | `lua/commands/<name>.lua` with `bone.command.register` |
@@ -61,8 +63,9 @@ bone.submit("Continue with the next task")
 > **Agent rule:** Treat paths below as relative to the resolved Bone config
 > directory unless a path is explicitly absolute.
 
-> **Agent rule:** After editing `config/providers.yaml` or
-> `command-policy.yaml`, tell the user to restart Bone.
+> **Agent rule:** After directly editing `providers.yaml`, `subagents.yaml`,
+> `extensions.yaml`, `config.yaml`, or `command-policy.yaml`, tell the user to
+> restart Bone. Prefer `/config` or another daemon mutation API when available.
 
 > **Agent rule:** Prefer the native file tools for file contents. Read a file
 > before editing it, and use `shell` only when no dedicated file operation fits.
@@ -77,15 +80,18 @@ lua/tools/               — Custom + catalog Lua tools (installed via /catalog)
 lua/commands/            — Custom + bundled/catalog Lua commands
 lua/plugins/             — Lua plugins (optional)
 lua/lib/                 — Lua library modules (optional, bundled: history.lua, ui/)
-config.yaml              — Canonical approval, UI, theme, and keymap settings
-config/general.yaml      — `/config` page schema and compaction settings
-config/status.yaml       — `/config` page schema for canonical status settings
-config/providers.yaml    — LLM provider entries
-config/tools.yaml        — Tool enable/disable toggles
-config/commands.yaml     — Command enable/disable toggles
+config.yaml              — General, UI, theme, keymap, and enablement values
+providers.yaml           — LLM providers, models, endpoints, and credentials
+subagents.yaml           — Named static subagent definitions and prompts
+extensions.yaml          — Namespaced extension values
 command-policy.yaml      — Shell command safety tiers
 memory/                  — Optional catalog /memory extension data
 ```
+
+Core is the only live configuration authority. It validates these domain files,
+combines them into one revisioned snapshot, and sends schemas and values to every
+frontend. Built-in and extension schemas are code; YAML contains user-selected
+values, not labels, field types, defaults, or option lists.
 
 ## Lua Extension System
 
@@ -194,15 +200,15 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | `ctx.agent.followup(id, prompt, opts?)` | `table` | `{ok, id, error}` — continue a completed job from its saved transcript |
 | `ctx.agent.jobs()` | `array` | Snapshot of all jobs (`{id, agent, task, status, result, started_at}`) |
 | `ctx.agent.wait(ids?, opts?)` | `table` | `{ok, jobs, pending, timed_out, cancelled}` — block until jobs finish |
-| **`ctx.config.*`** | | Config access |
+| **`ctx.config.*`** | | Daemon-owned config snapshot access |
 | `ctx.config.dir` | `string` | Same as `ctx.config_dir` |
-| `ctx.config.get(section, key)` | `value\|nil` | Read a value from `config/<section>.yaml` |
-| `ctx.config.get_table(section)` | `table\|nil` | Read entire config section as table |
-| `ctx.config.get_pages()` | `array` | Read ordered custom config pages and fields |
-| `ctx.config.set_value(section, key, value)` | `true` | Persist a scalar config field |
-| `ctx.config.cycle_field(section, key, current)` | `string\|nil` | Next bool/enum value |
-| `ctx.config.list_providers()` | `array` | Provider rows with active marker |
-| `ctx.config.set_provider_entry(id, entry)` | `true` | Persist provider fields |
+| `ctx.config.get(section, key)` | `value\|nil` | Read a resolved value from the installed snapshot |
+| `ctx.config.get_table(section)` | `table\|nil` | Read a resolved config section |
+| `ctx.config.get_pages()` | `array` | Canonical schema pages; fields include `path`, typed `value`, type/options, and validation bounds |
+| `ctx.config.set_value(section, key, value)` | `true` | Validate and persist a typed mutation through the daemon-owned `ConfigStore` |
+| `ctx.config.cycle_field(section, key, current)` | `string\|bool\|nil` | Next bool/enum value from the canonical schema |
+| `ctx.config.list_providers()` | `array` | Redacted provider rows with active and API-key-configured markers |
+| `ctx.config.set_provider_entry(id, entry)` | `true` | Persist a typed provider mutation; an omitted API key preserves the existing secret |
 | **`ctx.session.*`** | | Conversation history |
 | `ctx.session.current()` | `table\|nil` | `{id, provider, model}` for current session |
 | `ctx.session.list(opts?)` | `array` | Recent conversations (default limit 20, max 100) |
@@ -279,10 +285,12 @@ local jobs = ctx.process.list()
 ctx.process.kill(job.id)
 ```
 
-The native `shell` tool also accepts `{ background = true }`, returning a
-managed process id immediately. Use this only for intentionally detached work
-(downloads, servers, long builds); normal commands remain foreground and can
-be cancelled with Ctrl+C.
+The native `shell` tool accepts `{ background = true }`, returning a managed
+process id immediately. It also owns that process lifecycle through
+`{ action = "list" }`, `{ action = "status", id = "..." }`, and
+`{ action = "kill", id = "..." }`. Use background mode only for intentionally
+detached work (downloads, servers, long builds); normal commands remain
+foreground and can be cancelled with Ctrl+C.
 
 #### `ctx.tools.call`
 
@@ -410,11 +418,10 @@ Bone has two categories of tools:
 
 These are compiled into bone and do not require any seeding or installation:
 
-- **shell** — Run a non-interactive shell command with bash -lc
+- **shell** — Run commands and manage their background process lifecycle
 - **read_file** — Read a UTF-8 text file
 - **write_file** — Create a new UTF-8 text file
 - **edit_file** — Replace one exact unique text block in an existing file (`{ path, old_text, new_text }`)
-- **process** — List, inspect, or stop managed background shell processes
 
 Use the dedicated file tools as the default interface for file contents:
 
@@ -444,8 +451,9 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 
 ```lua
 -- Native Rust tool, not Lua. Called by the LLM directly.
--- Parameters: command (string, required), timeout_ms (integer, optional),
--- background (boolean, optional)
+-- Parameters: action? ("run", "list", "status", or "kill"), command?, id?,
+-- timeout_ms?, background?. Calls with command and no action default to "run".
+-- list/status/kill manage commands started with background = true.
 ```
 
 ```lua
@@ -462,11 +470,6 @@ To browse and install catalog tools interactively, run `/catalog` in the TUI. To
 -- Native Rust tool. Parameters: path, old_text, new_text
 -- Read the file first. old_text must be an exact unique block from the shown
 -- lines; new_text replaces it and may be empty to delete it.
-```
-
-```lua
--- Native Rust tool. Parameters: action ("list", "status", or "kill"), id?
--- Manages processes started by shell with background = true.
 ```
 
 ## Commands
@@ -491,7 +494,7 @@ Reliability properties:
 - Summarization runs without tools and with explicit output and wall-clock limits. An oversized result gets at most one bounded compression attempt.
 - Automatic compaction emits transient status while working and a persistent notice on success, failure, or rejection.
 
-Configuration is stored in `config.yaml` under `extensions.compact` and changed through `/config`:
+Configuration values are stored in `extensions.yaml` under `extensions.compact` and changed through `/config`:
 
 - `auto` — enable automatic compaction (default `true`).
 - `trigger_percentage` — context-capacity percentage that triggers compaction (default `80`).
@@ -559,7 +562,7 @@ bone.tool.register({
 
 ### Tool Fields
 
-- **name** — unique string identifier. Native tools (`shell`, `read_file`, `write_file`, `edit_file`, `process`) cannot be overridden.
+- **name** — unique string identifier. Native tools (`shell`, `read_file`, `write_file`, `edit_file`) cannot be overridden.
 - **description** — shown to the LLM when deciding which tool to call.
 - **parameters** — JSON Schema object describing the tool's arguments.
 - **safety** — `"read_only"` or `"danger"`. In safe mode only `read_only` tools auto-run; in danger mode everything auto-runs.
@@ -939,7 +942,8 @@ bone.on(event, handler)             -- register an event handler
 bone.api.emit(event, payload?)      -- fire handlers synchronously
 bone.submit(text)                   -- queue a prompt as if typed
 bone.keymap.set(key, rhs)           -- declare a runtime keymap
-bone.settings.get/set/reset(...)    -- canonical persistent settings
+bone.settings.define(...)            -- declare a namespaced extension schema
+bone.settings.get/set/reset(...)     -- canonical persistent settings
 bone.theme.list()                   -- list lua/themes/*.lua
 bone.theme.load(name)               -- load and persist a theme
 ```
@@ -995,13 +999,38 @@ bone.on("turn_end",   function() bone.api.ui.set_highlight("input_border", nil) 
 
 ## Config, Theme, and Keymaps
 
-`~/.bone-rust/config.yaml` is the canonical source for declarative settings. Use
-`/config` for supported scalar changes, `bone.settings.get/set/reset` from Lua,
-or edit YAML directly. The daemon validates and resolves the file, then sends
-one complete settings snapshot to each frontend. `init.lua` may wire runtime
-keymaps and select themes, but it must not define competing settings tables.
+The daemon is the only live configuration authority. It loads the peer domain
+files `config.yaml`, `providers.yaml`, `subagents.yaml`, `extensions.yaml`, and
+`command-policy.yaml`, validates them, and sends one revisioned schema and
+resolved snapshot to every frontend. Use `/config` for supported changes or
+`bone.settings.get/set/reset` from Lua. Typed mutations are validated against the
+current revision and persist only the affected domain.
 
-The file is created automatically on first boot. Its default shape is:
+Built-in schemas, labels, defaults, field types, and options live in Rust. YAML
+stores only user-selected values. Extensions can add a generic settings page
+without frontend-specific code:
+
+```lua
+bone.settings.define("my_extension", {
+  title = "My extension",
+  fields = {
+    enabled = { type = "bool", default = true, label = "Enabled" },
+  },
+})
+```
+
+Extension values are stored under the matching namespace in `extensions.yaml`.
+Registration does not write defaults, and values remain preserved while an
+extension is unavailable. Provider credentials may be plaintext or an exact
+`${ENV_VAR}` reference; only that complete reference form resolves from the
+environment at runtime.
+
+Mutations report whether they apply immediately, on the next model turn, or
+after extensions reload. Direct YAML edits are read on startup. The daemon owns
+`command-policy.yaml`, but it remains file-edited and restart-required. `init.lua`
+may wire runtime behavior, but it must not define a competing settings table.
+
+`config.yaml` is created automatically on first boot. Its default shape is:
 
 ```yaml
 version: 1
@@ -1153,22 +1182,19 @@ Plugins do not auto-run. Repeated `load` is a no-op.
 
 ```
 <config-dir>/
-  config.yaml                  -- canonical approval/UI/theme/keymap settings
-  init.lua                     -- optional Lua behavior and orchestration
+  config.yaml                  -- general/UI/theme/keymap/enablement values
+  providers.yaml               -- LLM providers, models, endpoints, credentials
+  subagents.yaml               -- named static subagent definitions and prompts
+  extensions.yaml              -- namespaced extension values
   command-policy.yaml          -- shell command safety tiers
+  init.lua                     -- optional Lua behavior and orchestration
   AGENTS.md                    -- Bone-owned reference; refreshed by each build
   .setup.json                  -- onboarding selection/marker
-  config/
-    general.yaml               -- `/config` page schema and compaction settings
-    status.yaml                -- `/config` page schema for canonical status settings
-    providers.yaml             -- LLM provider entries
-    tools.yaml                 -- tool enable/disable toggles
-    commands.yaml              -- command enable/disable toggles
-  memory/                       -- optional catalog /memory extension data
-    global.md                   -- global user preferences
-    projects/<cwd-key>.md       -- project-scoped preferences
-    inbox.jsonl                 -- queued explicit preference signals
-    state.json                  -- processing checkpoint
+  memory/                      -- optional catalog /memory extension data
+    global.md                  -- global user preferences
+    projects/<cwd-key>.md      -- project-scoped preferences
+    inbox.jsonl                -- queued explicit preference signals
+    state.json                 -- processing checkpoint
   lua/
     tools/
       my_custom_tool.lua       -- user-created or installed via /catalog
@@ -1189,11 +1215,12 @@ Plugins do not auto-run. Repeated `load` is a no-op.
         init.lua
 ```
 
-Legacy root files `memory.md` and `memory.last_run` may remain after the
-one-time catalog migration; they are not deleted. Bone refreshes `AGENTS.md`
-from the bundled reference at startup. Other seeded Lua files are created on
-first launch and do not overwrite existing files. Catalog tools/commands are
-installed only when selected during onboarding or via `/catalog`.
+Migration may retain the former `config/*.yaml` inputs and timestamped backups,
+but live runtime paths do not consult them after successful migration. Bone
+refreshes `AGENTS.md` from the bundled reference at startup. Other seeded Lua
+files are created on first launch and do not overwrite existing files. Catalog
+tools/commands are installed only when selected during onboarding or via
+`/catalog`.
 
 ## Tool vs Command
 

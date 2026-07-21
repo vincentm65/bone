@@ -564,6 +564,25 @@ enum Flow {
     },
 }
 
+fn is_config_command(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::GetConfig
+            | RuntimeCommand::SetConfigValue { .. }
+            | RuntimeCommand::ResetConfigValue { .. }
+            | RuntimeCommand::UpsertProvider { .. }
+            | RuntimeCommand::DeleteProvider { .. }
+            | RuntimeCommand::SetActiveProvider { .. }
+            | RuntimeCommand::SetToolEnabled { .. }
+            | RuntimeCommand::SetCommandEnabled { .. }
+            | RuntimeCommand::ReloadSettings
+            | RuntimeCommand::SetSetting { .. }
+            | RuntimeCommand::UpsertSubagent { .. }
+            | RuntimeCommand::DeleteSubagent { .. }
+            | RuntimeCommand::SetSubagentEnabled { .. }
+    )
+}
+
 /// The daemon's shared state, threaded through command handling so each
 /// command's behavior lives in exactly one place (instead of being re-coded in
 /// the idle dispatch, the mid-turn select, and the interactive-command loop).
@@ -588,9 +607,72 @@ struct DaemonCtx {
     // Pure-client frontends (in-process TUI and remote) pass `true` so the
     // daemon is the sole drain of the VM's `UiState`.
     forward_view_diffs: bool,
+    /// Sole live configuration authority for this daemon runtime.
+    config: crate::config::store::ConfigStore,
 }
 
 impl DaemonCtx {
+    fn config_schema(&self) -> bone_protocol::ConfigSchema {
+        let tools = self
+            .session
+            .lock()
+            .unwrap()
+            .tools
+            .all_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        let commands = self
+            .extensions
+            .commands()
+            .iter()
+            .map(|command| command.name.clone())
+            .collect::<Vec<_>>();
+        self.config.schema_for(&tools, &commands)
+    }
+
+    fn config_event(&self) -> RuntimeEvent {
+        RuntimeEvent::ConfigSnapshot {
+            schema: self.config_schema(),
+            snapshot: self.config.snapshot(),
+        }
+    }
+
+    fn publish_config(&self) {
+        self.hub.publish_global(self.config_event());
+    }
+
+    fn finish_config_mutation(
+        &self,
+        changed_paths: Vec<String>,
+        result: Result<(), (u64, String)>,
+        restart_required: bool,
+        request_id: Option<String>,
+    ) {
+        match result {
+            Ok(()) => {
+                self.hub.publish_global(RuntimeEvent::ConfigChanged {
+                    changed_paths,
+                    schema: self.config_schema(),
+                    snapshot: self.config.snapshot(),
+                    restart_required,
+                    request_id,
+                });
+                self.hub.publish_global(frontend_state(
+                    &self.extensions,
+                    &self.session.lock().unwrap().tools,
+                ));
+            }
+            Err((current_revision, error)) => {
+                self.hub.publish(RuntimeEvent::ConfigMutationRejected {
+                    current_revision,
+                    error,
+                    request_id,
+                })
+            }
+        }
+    }
+
     /// Publish a `StateSnapshot` derived from the current session + provider.
     /// Swap the active provider (and model) to the given ids, e.g. when loading
     /// a conversation that was created with a different provider. A no-op when
@@ -600,8 +682,7 @@ impl DaemonCtx {
         if self.llm.id() == provider_id && self.llm.model() == model {
             return;
         }
-        let custom = crate::config::custom::CustomConfigs::load();
-        let providers_config = custom.derive_providers_config();
+        let providers_config = self.config.providers_config();
         match crate::llm::providers::build_provider(provider_id, model, &providers_config) {
             Ok(new_provider) => self.llm = Arc::from(new_provider),
             Err(err) => self.hub.publish(RuntimeEvent::Status {
@@ -660,97 +741,56 @@ impl DaemonCtx {
         }
     }
 
-    fn save_subagent_change(
+    fn finish_subagent_change(
         &self,
-        change: impl FnOnce(
-            &mut crate::config::settings::Settings,
-        ) -> Result<(), crate::config::settings::SettingsError>,
+        path: String,
+        result: Result<(), (u64, String)>,
+        request_id: Option<String>,
     ) {
-        let result = {
-            let handle = self.extensions.settings_handle();
-            let mut settings = handle.lock().unwrap_or_else(|e| e.into_inner());
-            change(&mut settings)
-        };
-        match result {
-            Ok(()) => self.hub.publish_global(frontend_state(
-                &self.extensions,
-                &self.session.lock().unwrap().tools,
-            )),
-            Err(err) => self.hub.publish(RuntimeEvent::Status {
-                message: format!("could not save sub-agent: {err}"),
-            }),
-        }
+        self.finish_config_mutation(vec![path], result, false, request_id);
     }
 
-    fn set_extension_setting(&self, path: &str, value: serde_json::Value) {
-        let value = match serde_json::from_value(value) {
-            Ok(value) => value,
-            Err(err) => {
-                self.hub.publish(RuntimeEvent::Status {
-                    message: format!("could not save {path}: setting must be a scalar: {err}"),
-                });
-                return;
-            }
-        };
-        match self.extensions.set_extension_setting(path, value) {
-            Ok(()) => self.hub.publish_global(frontend_state(
-                &self.extensions,
-                &self.session.lock().unwrap().tools,
-            )),
-            Err(err) => self.hub.publish(RuntimeEvent::Status {
-                message: format!("could not save {path}: {err}"),
-            }),
-        }
+    fn set_extension_setting(
+        &self,
+        path: &str,
+        value: serde_json::Value,
+        expected_revision: u64,
+        request_id: Option<String>,
+    ) {
+        let full_path = format!("extensions.{path}");
+        let result = self.config.set_value(&full_path, value, expected_revision);
+        self.finish_config_mutation(vec![full_path], result, false, request_id);
     }
 
     fn persist_mode(&self, mode_str: &str) {
         if !self.set_mode(mode_str) {
             return;
         }
-        let result = crate::config::settings::Settings::load().and_then(|settings| {
-            let mut settings = settings.ok_or_else(|| {
-                crate::config::settings::SettingsError::Validation(
-                    "config.yaml does not exist".into(),
-                )
-            })?;
-            settings.set_value("general", "approval_mode", mode_str.to_string())?;
-            Ok(settings.into_resolved())
-        });
-        match result {
-            Ok(settings) => {
-                self.extensions.replace_settings(settings);
-                self.hub.publish_global(frontend_state(
-                    &self.extensions,
-                    &self.session.lock().unwrap().tools,
-                ));
-            }
-            Err(err) => self.hub.publish(RuntimeEvent::Status {
-                message: format!("could not save approval mode: {err}"),
-            }),
-        }
+        let revision = self.config.snapshot().revision;
+        let result =
+            self.config
+                .set_value("general.approval", serde_json::json!(mode_str), revision);
+        self.finish_config_mutation(vec!["general.approval".into()], result, false, None);
     }
 
-    /// Reload only the canonical settings file. This is the safe `/config`
-    /// apply path: extension/tool/provider state is left untouched, while all
-    /// frontend-owned settings and the approval gate update atomically.
+    /// Reload canonical settings through the aggregate store so revisioned
+    /// clients receive the same authoritative state as runtime consumers.
     fn reload_settings(&self) {
-        match crate::config::settings::Settings::load() {
-            Ok(Some(settings)) => {
-                let resolved = settings.into_resolved();
-                self.set_mode(&resolved.general.approval);
-                self.extensions.replace_settings(resolved);
-                self.hub.publish_global(frontend_state(
-                    &self.extensions,
-                    &self.session.lock().unwrap().tools,
-                ));
-            }
-            Ok(None) => self.hub.publish(RuntimeEvent::Status {
-                message: "settings reload failed: config.yaml does not exist".into(),
-            }),
-            Err(err) => self.hub.publish(RuntimeEvent::Status {
-                message: format!("settings reload failed: {err}"),
-            }),
+        let result = self.config.reload_settings().map_err(|error| {
+            let revision = self.config.snapshot().revision;
+            (revision, format!("settings reload failed: {error}"))
+        });
+        if result.is_ok()
+            && let Some(approval) = self
+                .config
+                .snapshot()
+                .values
+                .pointer("/general/approval")
+                .and_then(serde_json::Value::as_str)
+        {
+            self.set_mode(approval);
         }
+        self.finish_config_mutation(vec!["config.yaml".into()], result, false, None);
     }
 
     /// Sync terminal width from the frontend so Lua panes wrap correctly.
@@ -846,7 +886,7 @@ impl DaemonCtx {
     /// commands against the daemon's Lua VM. The pure-client TUI routes all
     /// slash commands over this path.
     async fn run_interactive_command(
-        &self,
+        &mut self,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
         name: String,
         input: String,
@@ -879,6 +919,8 @@ impl DaemonCtx {
             )
         };
 
+        let config = self.config.clone();
+        let config_schema = self.config_schema();
         let lua = self.extensions.lua_handle();
         let shared_ui = self.extensions.ui_handle();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -899,6 +941,8 @@ impl DaemonCtx {
             let shared_state = app_state.tool_handler.shared_state.clone();
             let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
             app_state.apply_to(&mut ctx_cfg);
+            ctx_cfg.config_store = Some(config);
+            ctx_cfg.config_schema = Some(config_schema);
             ctx_cfg.key_sender = Some(live_tx);
             ctx_cfg.runtime_status = Some(status_tx);
             ctx_cfg.ui = Some(shared_ui);
@@ -944,6 +988,9 @@ impl DaemonCtx {
                 _ = diff_timer.tick() => self.drain_diffs(),
                 cmd = commands.recv() => match cmd {
                     Some(RuntimeCommand::KeyReply { id, key }) => { self.key_registry.resolve(id, key); }
+                    Some(cmd) if is_config_command(&cmd) => {
+                        let _ = Box::pin(self.handle_idle_command(cmd, commands)).await;
+                    }
                     Some(RuntimeCommand::Cancel) | None => {
                         // Signal the blocking handler, then stop waiting for
                         // it. Cooperative handlers/tools poll this flag and
@@ -1142,8 +1189,7 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::SwitchProvider { provider_id } => {
-                let custom = crate::config::custom::CustomConfigs::load();
-                let providers_config = custom.derive_providers_config();
+                let providers_config = self.config.providers_config();
                 match crate::llm::providers::create_provider_with_config(
                     &provider_id,
                     &providers_config,
@@ -1175,37 +1221,235 @@ impl DaemonCtx {
                 self.publish_snapshot();
                 Flow::Continue
             }
+            RuntimeCommand::GetConfig => {
+                self.publish_config();
+                Flow::Continue
+            }
+            RuntimeCommand::SetConfigValue {
+                path,
+                value,
+                expected_revision,
+                request_id,
+            } => {
+                let approval = (path == "general.approval")
+                    .then(|| value.as_str().map(str::to_owned))
+                    .flatten();
+                let result = self.config.set_value(&path, value, expected_revision);
+                if result.is_ok()
+                    && let Some(approval) = approval
+                {
+                    self.set_mode(&approval);
+                }
+                self.finish_config_mutation(vec![path], result, false, request_id);
+                Flow::Continue
+            }
+            RuntimeCommand::ResetConfigValue {
+                path,
+                expected_revision,
+                request_id,
+            } => {
+                let result = self.config.reset_value(&path, expected_revision);
+                if result.is_ok()
+                    && path == "general.approval"
+                    && let Some(approval) = self
+                        .config
+                        .snapshot()
+                        .values
+                        .pointer("/general/approval")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    self.set_mode(approval);
+                }
+                self.finish_config_mutation(vec![path], result, false, request_id);
+                Flow::Continue
+            }
+            RuntimeCommand::UpsertProvider {
+                provider,
+                expected_revision,
+                request_id,
+            } => {
+                let id = provider.id.clone();
+                let candidate = self
+                    .config
+                    .provider_candidate_config(&provider, expected_revision)
+                    .and_then(|providers| {
+                        crate::llm::providers::create_provider_with_config(&id, &providers)
+                            .map_err(|error| (self.config.snapshot().revision, error.to_string()))
+                    });
+                let candidate = match candidate {
+                    Ok(candidate) => match candidate.validate().await {
+                        Ok(()) => Ok(candidate),
+                        Err(error) => Err((self.config.snapshot().revision, error.to_string())),
+                    },
+                    Err(error) => Err(error),
+                };
+                let (result, candidate) = match candidate {
+                    Ok(candidate) => (
+                        self.config.upsert_provider(provider, expected_revision),
+                        Some(candidate),
+                    ),
+                    Err(error) => (Err(error), None),
+                };
+                if result.is_ok()
+                    && self.llm.id() == id
+                    && let Some(candidate) = candidate
+                {
+                    self.llm = Arc::from(candidate);
+                }
+                self.finish_config_mutation(
+                    vec![format!("providers.{id}")],
+                    result,
+                    false,
+                    request_id,
+                );
+                self.publish_snapshot();
+                Flow::Continue
+            }
+            RuntimeCommand::DeleteProvider {
+                id,
+                expected_revision,
+                request_id,
+            } => {
+                let result = self.config.delete_provider(&id, expected_revision);
+                self.finish_config_mutation(
+                    vec![format!("providers.{id}")],
+                    result,
+                    true,
+                    request_id,
+                );
+                Flow::Continue
+            }
+            RuntimeCommand::SetActiveProvider {
+                id,
+                expected_revision,
+                request_id,
+            } => {
+                let candidate = self
+                    .config
+                    .check_revision(expected_revision)
+                    .and_then(|()| {
+                        crate::llm::providers::create_provider_with_config(
+                            &id,
+                            &self.config.providers_config(),
+                        )
+                        .map_err(|error| (self.config.snapshot().revision, error.to_string()))
+                    });
+                let candidate = match candidate {
+                    Ok(candidate) => match candidate.validate().await {
+                        Ok(()) => Ok(candidate),
+                        Err(error) => Err((self.config.snapshot().revision, error.to_string())),
+                    },
+                    Err(error) => Err(error),
+                };
+                let result = match candidate {
+                    Ok(candidate) => {
+                        let result = self.config.set_active_provider(&id, expected_revision);
+                        if result.is_ok() {
+                            self.llm = Arc::from(candidate);
+                        }
+                        result
+                    }
+                    Err(error) => Err(error),
+                };
+                self.finish_config_mutation(
+                    vec!["providers.active".into()],
+                    result,
+                    false,
+                    request_id,
+                );
+                self.publish_snapshot();
+                Flow::Continue
+            }
+            RuntimeCommand::SetToolEnabled {
+                name,
+                enabled,
+                expected_revision,
+                request_id,
+            } => {
+                let result = self
+                    .config
+                    .set_enabled("tools", &name, enabled, expected_revision);
+                self.finish_config_mutation(
+                    vec![format!("tools.{name}")],
+                    result,
+                    true,
+                    request_id,
+                );
+                Flow::Continue
+            }
+            RuntimeCommand::SetCommandEnabled {
+                name,
+                enabled,
+                expected_revision,
+                request_id,
+            } => {
+                let result = self
+                    .config
+                    .set_enabled("commands", &name, enabled, expected_revision);
+                self.finish_config_mutation(
+                    vec![format!("commands.{name}")],
+                    result,
+                    true,
+                    request_id,
+                );
+                Flow::Continue
+            }
             RuntimeCommand::ReloadSettings => {
                 self.reload_settings();
                 Flow::Continue
             }
-            RuntimeCommand::SetSetting { path, value } => {
-                self.set_extension_setting(&path, value);
+            RuntimeCommand::SetSetting {
+                path,
+                value,
+                expected_revision,
+                request_id,
+            } => {
+                self.set_extension_setting(&path, value, expected_revision, request_id);
                 Flow::Continue
             }
-            RuntimeCommand::UpsertSubagent { agent } => {
-                self.save_subagent_change(move |settings| settings.upsert_subagent(agent));
+            RuntimeCommand::UpsertSubagent {
+                agent,
+                expected_revision,
+                request_id,
+            } => {
+                let name = agent.name.clone();
+                let result = self.config.upsert_subagent(agent, expected_revision);
+                self.finish_subagent_change(format!("subagents.{name}"), result, request_id);
                 Flow::Continue
             }
-            RuntimeCommand::DeleteSubagent { name } => {
-                self.save_subagent_change(move |settings| settings.delete_subagent(&name));
+            RuntimeCommand::DeleteSubagent {
+                name,
+                expected_revision,
+                request_id,
+            } => {
+                let result = self.config.delete_subagent(&name, expected_revision);
+                self.finish_subagent_change(format!("subagents.{name}"), result, request_id);
                 Flow::Continue
             }
-            RuntimeCommand::SetSubagentEnabled { name, enabled } => {
+            RuntimeCommand::SetSubagentEnabled {
+                name,
+                enabled,
+                expected_revision,
+                request_id,
+            } => {
                 let lua_agent = self
                     .extensions
                     .subagents()
                     .into_iter()
                     .find(|agent| agent.name == name && agent.source == "lua");
-                self.save_subagent_change(move |settings| {
-                    if let Some(mut agent) = lua_agent {
-                        agent.enabled = enabled;
-                        agent.source = "config".into();
-                        settings.upsert_subagent(agent)
-                    } else {
-                        settings.set_subagent_enabled(&name, enabled)
-                    }
-                });
+                let result = if let Some(mut agent) = lua_agent {
+                    agent.enabled = enabled;
+                    agent.source = "config".into();
+                    self.config.upsert_subagent(agent, expected_revision)
+                } else {
+                    self.config
+                        .set_subagent_enabled(&name, enabled, expected_revision)
+                };
+                self.finish_subagent_change(
+                    format!("subagents.{name}.enabled"),
+                    result,
+                    request_id,
+                );
                 Flow::Continue
             }
             RuntimeCommand::ReloadExtensions => {
@@ -1221,7 +1465,7 @@ impl DaemonCtx {
                     None => {
                         let config_dir = crate::config::bone_dir();
                         let cwd = std::env::current_dir().unwrap_or_default();
-                        let mut custom = crate::config::custom::CustomConfigs::load();
+                        let mut custom = self.extensions.config_snapshot();
                         let model = self.llm.model().to_string();
                         let provider = format!("{} ({})", self.llm.name(), self.llm.id());
                         (
@@ -1250,7 +1494,9 @@ impl DaemonCtx {
                     });
                     return Flow::Continue;
                 }
-                self.extensions = booted.manager;
+                let old_extensions = std::mem::replace(&mut self.extensions, booted.manager);
+                self.config
+                    .replace_extensions(&old_extensions, self.extensions.clone());
                 {
                     let mut s = self.session.lock().unwrap();
                     // Reloading extensions must not wipe conversation-scoped
@@ -1295,6 +1541,9 @@ impl DaemonCtx {
                     }
                     Some(result) => result,
                 };
+                if name == "config" {
+                    self.publish_config();
+                }
                 let Some(ret) = ret else {
                     self.hub.publish(RuntimeEvent::CommandComplete {
                         output: String::new(),
@@ -1428,7 +1677,7 @@ impl DaemonCtx {
     /// (via the same shared mutators the idle path uses). After it drains, the
     /// session reabsorbs the outcome and a fresh `StateSnapshot` is published.
     async fn run_turn(
-        &self,
+        &mut self,
         text: String,
         mut display: Option<String>,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
@@ -1507,8 +1756,13 @@ impl DaemonCtx {
                     // (the gate reads the shared atomic per call).
                     Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.persist_mode(&mode_str),
                     Some(RuntimeCommand::ReloadSettings) => self.reload_settings(),
-                    Some(RuntimeCommand::SetSetting { path, value }) => {
-                        self.set_extension_setting(&path, value)
+                    Some(RuntimeCommand::SetSetting {
+                        path,
+                        value,
+                        expected_revision,
+                        request_id,
+                    }) => {
+                        self.set_extension_setting(&path, value, expected_revision, request_id)
                     }
                     // A second submit mid-turn is dropped (the runtime is busy
                     // running one turn at a time). Tell the client so it isn't
@@ -1527,6 +1781,9 @@ impl DaemonCtx {
                     }
                     Some(RuntimeCommand::DispatchHook { name, payload }) => self.dispatch_hook(name, payload),
                     Some(cmd @ RuntimeCommand::Steer { .. }) => conn.send(cmd),
+                    Some(cmd) if is_config_command(&cmd) => {
+                        let _ = self.handle_idle_command(cmd, commands).await;
+                    }
                     Some(_) => {}
                     None => break,
                 },
@@ -1586,6 +1843,7 @@ pub async fn run_daemon(
     mut commands: mpsc::UnboundedReceiver<RuntimeCommand>,
     llm: Arc<dyn crate::llm::provider::LlmProvider>,
     extensions: crate::ext::ExtensionManager,
+    config: crate::config::store::ConfigStore,
     session: Arc<Mutex<crate::runtime::RuntimeSession>>,
     approval_mode: crate::tools::ApprovalMode,
     // In-process hand-off for `ReloadExtensions`. When a frontend shares the
@@ -1609,7 +1867,9 @@ pub async fn run_daemon(
         key_registry: crate::runtime::KeyReplyRegistry::new(),
         reload_inbox,
         forward_view_diffs,
+        config,
     };
+    ctx.publish_config();
 
     // Each command is serviced by `handle_idle_command`; commands that start a
     // model turn return `StartTurn`, which `run_turn` builds and pumps to

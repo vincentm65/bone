@@ -212,6 +212,8 @@ fn every_runtime_command_variant_round_trips() {
         RuntimeCommand::SetSetting {
             path: "compact.auto".into(),
             value: json!(true),
+            expected_revision: 7,
+            request_id: Some("setting-1".into()),
         },
         RuntimeCommand::UpsertSubagent {
             agent: crate::SubagentDefinition {
@@ -220,13 +222,19 @@ fn every_runtime_command_variant_round_trips() {
                 source: "config".into(),
                 ..Default::default()
             },
+            expected_revision: 8,
+            request_id: Some("subagent-1".into()),
         },
         RuntimeCommand::DeleteSubagent {
             name: "researcher".into(),
+            expected_revision: 9,
+            request_id: None,
         },
         RuntimeCommand::SetSubagentEnabled {
             name: "researcher".into(),
             enabled: false,
+            expected_revision: 10,
+            request_id: None,
         },
         RuntimeCommand::SetApprovalMode {
             mode: "danger".into(),

@@ -125,7 +125,8 @@ bone.command.register("cfgapply", {
         publisher,
         commands_rx,
         provider,
-        extensions,
+        extensions.clone(),
+        bone_core::config::store::ConfigStore::new(extensions),
         session,
         bone_core::tools::ApprovalMode::Safe,
         None,
@@ -153,11 +154,38 @@ bone.command.register("cfgapply", {
             input: "".into(),
         })
         .unwrap();
+    cmd_tx.send(RuntimeCommand::GetConfig).unwrap();
 
-    // Interactive phase: answer a couple of key requests (a stray key, then
-    // Enter to exit the loop), exactly as the TUI's `drain_keys`/`KeySink` does.
-    reply_next_key(&mut events, &cmd_tx, "Down").await;
-    reply_next_key(&mut events, &cmd_tx, "Enter").await;
+    let first_key = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut key_request = None;
+        let mut config_received = false;
+        while key_request.is_none() || !config_received {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::KeyRequest { id } => key_request = Some(id),
+                RuntimeEvent::ConfigSnapshot { .. } => config_received = true,
+                _ => {}
+            }
+        }
+        key_request.unwrap()
+    })
+    .await
+    .expect("busy interactive command consumed GetConfig");
+    cmd_tx
+        .send(RuntimeCommand::KeyReply {
+            id: first_key,
+            key: key_event("Down"),
+        })
+        .unwrap();
+
+    // Interactive phase: answer Enter to exit the key loop, exactly as the
+    // TUI's `drain_keys`/`KeySink` does. Bound this wait so a regression fails
+    // instead of wedging the workspace test run.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        reply_next_key(&mut events, &cmd_tx, "Enter"),
+    )
+    .await
+    .expect("config request prevented the next interactive key request");
 
     let mut snapshots_before_complete = 0;
     loop {

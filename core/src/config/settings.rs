@@ -30,7 +30,7 @@ impl std::fmt::Display for SettingsError {
         match self {
             Self::Io(e) => write!(f, "settings I/O error: {e}"),
             Self::Parse(s) => write!(f, "settings parse error: {s}"),
-            Self::BadVersion(v) => write!(f, "unsupported settings version {v}; expected 1"),
+            Self::BadVersion(v) => write!(f, "unsupported settings version {v}; expected 1 or 2"),
             Self::Validation(s) => write!(f, "settings validation error: {s}"),
         }
     }
@@ -105,6 +105,13 @@ impl Default for SubagentSettings {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnablementSettings {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoneSettings {
@@ -116,22 +123,30 @@ pub struct BoneSettings {
     #[serde(default)]
     pub theme: ThemeSettings,
     #[serde(default)]
+    pub tools: EnablementSettings,
+    #[serde(default)]
+    pub commands: EnablementSettings,
+    #[serde(default)]
     pub keymaps: KeymapSettings,
-    /// Named, static sub-agent definitions managed by `/agents`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Legacy migration inputs. Canonical values live in `subagents.yaml` and
+    /// are never serialized back into `config.yaml`.
+    #[serde(default, skip_serializing)]
     pub subagents: BTreeMap<String, SubagentSettings>,
-    /// Persisted extension values. Schemas remain owned by installed Lua modules.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Legacy migration inputs. Canonical values live in `extensions.yaml` and
+    /// are never serialized back into `config.yaml`.
+    #[serde(default, skip_serializing)]
     pub extensions: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
 }
 
 impl Default for BoneSettings {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             general: GeneralSettings::default(),
             ui: UiSettings::default(),
             theme: ThemeSettings::default(),
+            tools: EnablementSettings::default(),
+            commands: EnablementSettings::default(),
             keymaps: KeymapSettings::default(),
             subagents: BTreeMap::new(),
             extensions: BTreeMap::new(),
@@ -476,8 +491,21 @@ impl Settings {
         self.revision
     }
 
+    pub(crate) fn validate(&self) -> Result<(), SettingsError> {
+        validate_settings(&self.inner)
+    }
+
     pub fn into_resolved(self) -> BoneSettings {
         self.inner
+    }
+
+    pub(crate) fn replace_domains(
+        &mut self,
+        subagents: BTreeMap<String, SubagentSettings>,
+        extensions: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
+    ) {
+        self.inner.subagents = subagents;
+        self.inner.extensions = extensions;
     }
 
     /// Load from `~/.bone-rust/config.yaml`. Returns `Ok(None)` when the file
@@ -498,7 +526,7 @@ impl Settings {
         let inner: BoneSettings =
             serde_yaml::from_str(raw).map_err(|e| SettingsError::Parse(e.to_string()))?;
 
-        if inner.version != 1 {
+        if !matches!(inner.version, 1 | 2) {
             return Err(SettingsError::BadVersion(inner.version));
         }
 
@@ -551,61 +579,6 @@ impl Settings {
         Ok(())
     }
 
-    /// Rename the short-lived compaction fallback key without overwriting the
-    /// canonical destination when both are present.
-    pub fn migrate_compaction_fallback_at(
-        &mut self,
-        settings_path: &Path,
-    ) -> Result<(), SettingsError> {
-        if self
-            .extension_value("compact.fallback_context_window_tokens")
-            .is_none()
-        {
-            return Ok(());
-        }
-        self.update_path(settings_path, |candidate| {
-            let compact = candidate
-                .inner
-                .extensions
-                .entry("compact".into())
-                .or_default();
-            if let Some(value) = compact.remove("fallback_context_window_tokens") {
-                compact
-                    .entry("context_window_tokens".into())
-                    .or_insert(value);
-            }
-            Ok(())
-        })
-    }
-
-    /// Migrate the three public compaction settings in one atomic update, while
-    /// preserving destination values that already exist (including invalid ones).
-    pub fn migrate_compaction_at(
-        &mut self,
-        auto: bool,
-        trigger_percentage: f64,
-        context_window_tokens: f64,
-        settings_path: &Path,
-    ) -> Result<(), SettingsError> {
-        self.update_path(settings_path, |candidate| {
-            let compact = candidate
-                .inner
-                .extensions
-                .entry("compact".into())
-                .or_default();
-            compact
-                .entry("auto".into())
-                .or_insert(ExtensionValue::Bool(auto));
-            compact
-                .entry("trigger_percentage".into())
-                .or_insert(ExtensionValue::Number(trigger_percentage));
-            compact
-                .entry("context_window_tokens".into())
-                .or_insert(ExtensionValue::Number(context_window_tokens));
-            Ok(())
-        })
-    }
-
     /// Persist one extension value against the latest settings document.
     pub fn set_extension_value_at(
         &mut self,
@@ -635,50 +608,6 @@ impl Settings {
     pub fn extension_value(&self, path: &str) -> Option<&ExtensionValue> {
         let (namespace, key) = path.split_once('.')?;
         self.inner.extensions.get(namespace)?.get(key)
-    }
-
-    pub fn upsert_subagent(
-        &mut self,
-        agent: bone_protocol::SubagentDefinition,
-    ) -> Result<(), SettingsError> {
-        validate_subagent_name(&agent.name)?;
-        let name = agent.name.clone();
-        let value = SubagentSettings {
-            description: agent.description,
-            system_prompt: nonempty(agent.system_prompt),
-            provider: nonempty(agent.provider),
-            model: nonempty(agent.model),
-            approval: agent.approval,
-            timeout_ms: agent.timeout_ms,
-            max_concurrency: agent.max_concurrency,
-            enabled: agent.enabled,
-        };
-        validate_subagent(&name, &value)?;
-        self.update_path(&settings_path(), move |candidate| {
-            candidate.inner.subagents.insert(name, value);
-            Ok(())
-        })
-    }
-
-    pub fn delete_subagent(&mut self, name: &str) -> Result<(), SettingsError> {
-        validate_subagent_name(name)?;
-        let name = name.to_string();
-        self.update_path(&settings_path(), move |candidate| {
-            candidate.inner.subagents.remove(&name);
-            Ok(())
-        })
-    }
-
-    pub fn set_subagent_enabled(&mut self, name: &str, enabled: bool) -> Result<(), SettingsError> {
-        validate_subagent_name(name)?;
-        let name = name.to_string();
-        self.update_path(&settings_path(), move |candidate| {
-            let agent = candidate.inner.subagents.get_mut(&name).ok_or_else(|| {
-                SettingsError::Validation(format!("unknown config sub-agent: {name}"))
-            })?;
-            agent.enabled = enabled;
-            Ok(())
-        })
     }
 
     // ── Canonical key routing (legacy page keys → new hierarchy) ──────────
@@ -954,13 +883,15 @@ impl Settings {
 
         Self {
             inner: BoneSettings {
-                version: 1,
+                version: 2,
                 general: GeneralSettings {
                     approval,
                     show_reasoning,
                 },
                 ui,
                 theme: ThemeSettings::default(),
+                tools: EnablementSettings::default(),
+                commands: EnablementSettings::default(),
                 keymaps: KeymapSettings::default(),
                 subagents: BTreeMap::new(),
                 extensions: BTreeMap::new(),
@@ -1065,17 +996,13 @@ impl Settings {
 // ── Validation ───────────────────────────────────────────────────────────────
 
 fn validate_settings(settings: &BoneSettings) -> Result<(), SettingsError> {
-    if settings.version != 1 {
+    if !matches!(settings.version, 1 | 2) {
         return Err(SettingsError::BadVersion(settings.version));
     }
     validate_general(&settings.general)?;
     validate_theme(&settings.theme)?;
     validate_keymaps(&settings.keymaps)?;
     validate_subagents(&settings.subagents)
-}
-
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
 }
 
 fn validate_subagent_name(name: &str) -> Result<(), SettingsError> {
@@ -1119,7 +1046,9 @@ fn validate_subagent(name: &str, agent: &SubagentSettings) -> Result<(), Setting
     Ok(())
 }
 
-fn validate_subagents(agents: &BTreeMap<String, SubagentSettings>) -> Result<(), SettingsError> {
+pub(crate) fn validate_subagents(
+    agents: &BTreeMap<String, SubagentSettings>,
+) -> Result<(), SettingsError> {
     for (name, agent) in agents {
         validate_subagent(name, agent)?;
     }
@@ -1282,14 +1211,11 @@ mod tests {
         let loaded = Settings::load_path(&path).unwrap().unwrap();
         assert_eq!(loaded.inner.general.approval, "safe");
         assert_eq!(loaded.inner.ui.input.preset.as_deref(), Some("box"));
-        assert_eq!(
-            loaded.inner.subagents["researcher"]
-                .system_prompt
-                .as_deref(),
-            Some("Report file and line references.")
-        );
+        assert!(loaded.inner.subagents.is_empty());
         let raw = fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("version: 1"));
+        assert!(raw.contains("version: 2"));
+        assert!(!raw.contains("subagents:"));
+        assert!(!raw.contains("Report file and line references."));
         assert!(!raw.contains("label:"));
         let _ = fs::remove_file(path);
     }
@@ -1330,10 +1256,10 @@ mod tests {
         );
 
         let bad_version = temp_path("bad-version");
-        fs::write(&bad_version, "version: 2\n").unwrap();
+        fs::write(&bad_version, "version: 3\n").unwrap();
         assert!(matches!(
             Settings::load_path(&bad_version),
-            Err(SettingsError::BadVersion(2))
+            Err(SettingsError::BadVersion(3))
         ));
 
         let _ = fs::remove_file(malformed);

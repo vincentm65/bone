@@ -44,7 +44,6 @@ const state = {
   toolDefs: [],
   commands: [],
   subagents: [],
-  extensionPages: [],
   commandIndex: -1,
   commandRunning: false,
   toolInfo: new Map(),   // call id -> { name, arguments }
@@ -384,7 +383,6 @@ function onFrontendState(ev) {
   if (Array.isArray(ev.tool_defs)) state.toolDefs = ev.tool_defs;
   if (Array.isArray(ev.commands)) state.commands = ev.commands;
   if (Array.isArray(ev.subagents)) state.subagents = ev.subagents;
-  state.extensionPages = Array.isArray(ev.settings?.extension_pages) ? ev.settings.extension_pages : [];
   applyTheme(ev.settings?.theme);
   if ($("agents-fields")) renderAgents();
 }
@@ -2121,8 +2119,8 @@ function renderProviderPicker() {
       const field = el("div", "prov-field");
       const lbl = el("label", null, fd.label);
       const input = fd.type === "select"
-        ? createProvSelect(p.key, fd.key, p[fd.key] || fd.options[0], fd.options)
-        : createProvInput(p.key, fd.key, p[fd.key] || "", fd.placeholder, fd.type, fd.key === "api_key");
+        ? createProvSelect(p.key, fd.key, p[fd.key] ?? "", fd.options)
+        : createProvInput(p.key, fd.key, p[fd.key] ?? "", fd.placeholder, fd.type, fd.key === "api_key");
       field.appendChild(lbl);
       field.appendChild(input);
       editor.appendChild(field);
@@ -2185,6 +2183,12 @@ function createProvInput(providerKey, fieldKey, value, placeholder, type, isApiK
 function createProvSelect(providerKey, fieldKey, value, options) {
   const sel = document.createElement("select");
   sel.className = "prov-select";
+  if (!options.includes(value)) {
+    const unset = document.createElement("option");
+    unset.value = value;
+    unset.textContent = value || "Select…";
+    sel.appendChild(unset);
+  }
   for (const opt of options) {
     const o = document.createElement("option");
     o.value = opt;
@@ -2240,8 +2244,8 @@ function renderAddForm(list) {
       <input class="prov-add-input" id="add-prov-label" placeholder="label" />
     </div>
     <div class="prov-add-row">
-      <input class="prov-add-input" id="add-prov-model" placeholder="model" value="gpt-4o-mini" />
-      <input class="prov-add-input" id="add-prov-url" placeholder="base URL" value="https://api.openai.com/v1" />
+      <input class="prov-add-input" id="add-prov-model" placeholder="model" />
+      <input class="prov-add-input" id="add-prov-url" placeholder="base URL" />
     </div>
     <div class="prov-add-actions">
       <button class="prov-add-submit" id="add-prov-submit">Add</button>
@@ -2265,8 +2269,8 @@ async function submitAddProvider() {
     return;
   }
   const label = labelInput.value.trim() || key;
-  const model = modelInput.value.trim() || "gpt-4o-mini";
-  const base_url = urlInput.value.trim() || "https://api.openai.com/v1";
+  const model = modelInput.value.trim();
+  const base_url = urlInput.value.trim();
   try {
     await requestJson("/api/providers", {
       method: "POST",
@@ -2275,8 +2279,8 @@ async function submitAddProvider() {
     });
     keyInput.value = "";
     labelInput.value = "";
-    modelInput.value = "gpt-4o-mini";
-    urlInput.value = "https://api.openai.com/v1";
+    modelInput.value = "";
+    urlInput.value = "";
     await loadProviders();
     toast(`added "${label}"`);
   } catch (e) {
@@ -2340,30 +2344,65 @@ function positionModelPop() {
 
 // ── settings: behavior / display / tools ─────────────────────────────────────
 
-let configCache = { general: [], toolsDisabled: [] };
+let configCache = { schema: { pages: [] }, snapshot: { revision: 0, values: {}, disabled_tools: [] } };
 
 async function loadConfig() {
   clearError();
   try { configCache = await requestJson("/api/config"); }
-  catch (error) { configCache = { general: [], toolsDisabled: [] }; reportError("Could not load settings", error, loadConfig); }
-  // Sync approval mode from persisted config so the UI matches the daemon's
-  // actual state (the daemon may have been toggled before a page refresh).
-  const am = findField("approval_mode");
-  if (am.value) setMode(am.value === "danger");
+  catch (error) {
+    configCache = { schema: { pages: [] }, snapshot: { revision: 0, values: {}, disabled_tools: [] } };
+    reportError("Could not load settings", error, loadConfig);
+  }
+  syncConfigState();
   renderBehavior();
   renderTools();
 }
 
-function findField(key) { return configCache.general.find((f) => f.key === key) || {}; }
+function* schemaFields(pages = configCache.schema?.pages || []) {
+  for (const page of pages) {
+    yield* page.fields || [];
+    yield* schemaFields(page.pages || []);
+  }
+}
 
-async function writeConfig(namespace, key, value, type, reload) {
-  try { await requestJson("/api/config", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ namespace, key, value, type }),
-  });
-    if (reload) { send("reload_extensions"); toast("Applied — reloading"); }
-    else toast("Saved");
-  } catch (error) { toast(`Save failed: ${error.message}`); await loadConfig(); }
+function findField(path) {
+  return [...schemaFields()].find((field) => field.path === path);
+}
+
+function configValue(field) {
+  let value = configCache.snapshot?.values;
+  for (const part of field.path.split(".")) {
+    if (value == null || !Object.hasOwn(value, part)) {
+      value = undefined;
+      break;
+    }
+    value = value[part];
+  }
+  return value === undefined ? (field.value ?? field.default) : value;
+}
+
+function syncConfigState() {
+  const approval = findField("general.approval");
+  if (approval) setMode(configValue(approval) === "danger");
+  const reasoning = findField("general.show_reasoning");
+  if (reasoning) document.body.classList.toggle("hide-thinking", !configValue(reasoning));
+}
+
+async function writeConfig(change) {
+  try {
+    const result = await requestJson("/api/config", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...change, expected_revision: configCache.snapshot.revision }),
+    });
+    configCache = { schema: result.schema, snapshot: result.snapshot };
+    syncConfigState();
+    renderBehavior();
+    renderTools();
+    toast(result.restart_required ? "Saved — restart required" : "Saved");
+  } catch (error) {
+    toast(`Save failed: ${error.message}`);
+    await loadConfig();
+  }
 }
 
 function setRow(label, desc, control) {
@@ -2391,57 +2430,46 @@ function switchEl(checked, onChange) {
   return wrap;
 }
 
+function configControl(field) {
+  const value = configValue(field);
+  const save = (next) => {
+    if (field.path === "general.approval") setMode(next === "danger");
+    writeConfig({ path: field.path, value: next });
+  };
+  if (field.type === "bool") return switchEl(Boolean(value), save);
+  if (field.type === "enum") return enumEl(String(value ?? ""), field.options || [], save);
+
+  const input = document.createElement("input");
+  input.className = "set-num";
+  input.type = field.type === "number" ? "number" : "text";
+  if (field.min != null) input.min = String(field.min);
+  if (field.max != null) input.max = String(field.max);
+  if (field.integer) input.step = "1";
+  input.value = String(value ?? "");
+  const commit = () => save(field.type === "number" ? Number(input.value) : input.value);
+  input.onblur = commit;
+  input.onkeydown = (event) => { if (event.key === "Enter") input.blur(); };
+  return input;
+}
+
+function renderConfigPage(wrap, page, heading = false) {
+  if (heading && ((page.fields || []).length || (page.pages || []).length)) {
+    wrap.appendChild(el("h3", "settings-section-title", page.title || page.namespace));
+  }
+  for (const field of page.fields || []) {
+    wrap.appendChild(setRow(field.label || field.key, field.path, configControl(field)));
+  }
+  for (const child of page.pages || []) renderConfigPage(wrap, child, true);
+}
+
 function renderBehavior() {
   const wrap = $("behavior-fields");
   wrap.innerHTML = "";
-
-  // approval mode (runtime + persisted)
-  const seg = el("div", "seg");
-  for (const m of ["safe", "danger"]) {
-    const b = el("button", "seg-btn" + (danger === (m === "danger") ? " active" : ""));
-    b.dataset.mode = m;
-    b.textContent = m === "safe" ? "Safe" : "Danger";
-    b.onclick = () => { setMode(m === "danger"); writeConfig("general", "approval_mode", m, "enum", false); };
-    seg.appendChild(b);
-  }
-  seg.id = "behavior-approval-seg";
-  wrap.appendChild(setRow("Tool approval", "Confirm each tool call, or let the agent run freely.", seg));
-
-  // stream reasoning (show_thinking) — persist + drive client visibility
-  const st = findField("show_thinking");
-  wrap.appendChild(setRow("Show reasoning", "Display the model's thinking as it streams.",
-    switchEl(prefs.showThinking, (on) => {
-      prefs.showThinking = on; savePrefs(); applyPrefs();
-      writeConfig("general", "show_thinking", on, "bool", false);
-    })));
-
-  for (const page of state.extensionPages) {
-    const heading = el("h3", "settings-section-title");
-    heading.textContent = page.title || page.namespace;
-    wrap.appendChild(heading);
-    for (const field of page.fields || []) {
-      const path = `${page.namespace}.${field.key}`;
-      const save = (value) => send({ set_setting: { path, value } });
-      let control;
-      if (field.type === "bool") {
-        control = switchEl(Boolean(field.value), save);
-      } else if (field.type === "enum") {
-        control = enumEl(String(field.value ?? field.default ?? ""), field.options || [], save);
-      } else {
-        control = document.createElement("input");
-        control.className = "set-num";
-        control.type = field.type === "number" ? "number" : "text";
-        if (field.min != null) control.min = String(field.min);
-        if (field.max != null) control.max = String(field.max);
-        if (field.integer) control.step = "1";
-        control.value = String(field.value ?? field.default ?? "");
-        const commit = () => save(field.type === "number" ? Number(control.value) : control.value);
-        control.onblur = commit;
-        control.onkeydown = (event) => { if (event.key === "Enter") control.blur(); };
-      }
-      wrap.appendChild(setRow(field.label || field.key, path, control));
-    }
-  }
+  const pages = configCache.schema?.pages || [];
+  const general = pages.find((page) => page.namespace === "general");
+  if (general) renderConfigPage(wrap, general);
+  const extensions = pages.find((page) => page.namespace === "extensions");
+  if (extensions) renderConfigPage(wrap, extensions);
 
   // render the display pane too (shares this load)
   renderDisplay();
@@ -2503,6 +2531,8 @@ function renderDisplay() {
     switchEl(prefs.expandTools, (on) => { prefs.expandTools = on; savePrefs(); })));
   wrap.appendChild(setRow("Context meter", "Show the token/cost meter in the header.",
     switchEl(prefs.showMeter, (on) => { prefs.showMeter = on; savePrefs(); applyPrefs(); })));
+  const status = (configCache.schema?.pages || []).find((page) => page.namespace === "status");
+  if (status) renderConfigPage(wrap, status, true);
 }
 
 function agentInput(value, multiline = false) {
@@ -2614,11 +2644,11 @@ function renderTools() {
   const wrap = $("tools-fields");
   wrap.innerHTML = "";
   if (!state.toolDefs.length) { wrap.appendChild(el("div", "set-desc", "Tool list loads once connected.")); return; }
-  const disabled = new Set(configCache.toolsDisabled || []);
+  const disabled = new Set(configCache.snapshot?.disabled_tools || []);
   for (const t of state.toolDefs) {
     const desc = (t.description || "").split("\n")[0].slice(0, 70);
-    wrap.appendChild(setRow(t.name, desc, switchEl(!disabled.has(t.name), (on) => {
-      writeConfig("tools", t.name, on, "bool", true);
+    wrap.appendChild(setRow(t.name, desc, switchEl(!disabled.has(t.name), (enabled) => {
+      writeConfig({ tool: t.name, enabled });
     })));
   }
 }
@@ -2671,7 +2701,7 @@ function setMode(d) {
 function loadPrefs() {
   let p = {};
   try { p = JSON.parse(localStorage.getItem("bone-studio-prefs") || "{}"); } catch {}
-  return { showThinking: p.showThinking !== false, expandTools: !!p.expandTools, showMeter: p.showMeter !== false, theme: p.theme || "codex-mono", sidebarW: clampSidebarW(p.sidebarW), canvasW: clampCanvasW(p.canvasW), providerId: p.providerId || null };
+  return { expandTools: !!p.expandTools, showMeter: p.showMeter !== false, theme: p.theme || "codex-mono", sidebarW: clampSidebarW(p.sidebarW), canvasW: clampCanvasW(p.canvasW), providerId: p.providerId || null };
 }
 function savePrefs() { localStorage.setItem("bone-studio-prefs", JSON.stringify(prefs)); }
 // Sidebar width is user-draggable; keep it within a sane range and fall back to
@@ -2679,7 +2709,6 @@ function savePrefs() { localStorage.setItem("bone-studio-prefs", JSON.stringify(
 function clampSidebarW(w) { return w ? Math.max(240, Math.min(420, w)) : 0; }
 function clampCanvasW(w) { return w ? Math.max(320, Math.min(innerWidth * .7, w)) : 0; }
 function applyPrefs() {
-  document.body.classList.toggle("hide-thinking", !prefs.showThinking);
   document.body.classList.toggle("hide-meter", !prefs.showMeter);
   if (prefs.sidebarW) document.documentElement.style.setProperty("--sidebar-w", prefs.sidebarW + "px");
   if (prefs.canvasW) document.documentElement.style.setProperty("--canvas-w", prefs.canvasW + "px");

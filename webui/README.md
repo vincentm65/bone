@@ -59,10 +59,9 @@ If no daemon is listening on `127.0.0.1:7878`, the bridge starts one for you
 Common commands are native UI affordances: chat history, settings, usage, and the
 model picker. The composer also provides a searchable slash-command menu for
 daemon-advertised custom commands. Commands with a native web equivalent are
-redirected to it; terminal-only commands are omitted. The sidebar, provider list,
-and config toggles are read from bone's own local data (`conversations.db`,
-`providers.yaml`, `general.yaml`, `tools.yaml`) via extra bridge endpoints, since
-the runtime protocol has no list/config commands.
+redirected to it; terminal-only commands are omitted. The sidebar reads local
+conversation history, while providers and settings are read and mutated through
+the daemon's revisioned configuration protocol via bridge endpoints.
 
 ## Features mapped to the protocol
 
@@ -90,5 +89,5 @@ the runtime protocol has no list/config commands.
 | `GET /api/events`      | SSE stream of `RuntimeEvent`s                        |
 | `POST /api/command`    | one `RuntimeCommand` to the daemon                   |
 | `GET /api/conversations` | recent chats from `conversations.db`               |
-| `GET /api/providers`   | provider list from `providers.yaml`                  |
-| `GET/POST /api/config` | read / write `general.yaml` + `tools.yaml` toggles   |
+| `GET /api/providers`   | redacted provider snapshot from the daemon            |
+| `GET/POST /api/config` | canonical daemon schema/snapshot and typed mutations   |

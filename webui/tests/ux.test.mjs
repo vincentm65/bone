@@ -15,6 +15,105 @@ const [html, css, js, bridge, markdown, canvasCore] = await Promise.all([
 
 const markdownContext = { render: renderMarkdown };
 
+test("daemon config response remains canonical", async () => {
+  const source = bridge.slice(
+    bridge.indexOf("async function getConfigFromDaemon"),
+    bridge.indexOf("async function sendJson"),
+  );
+  const canonical = {
+    schema: {
+      pages: [{
+        namespace: "general",
+        fields: [
+          { key: "approval", path: "general.approval", type: "enum" },
+          { key: "show_reasoning", path: "general.show_reasoning", type: "bool" },
+        ],
+        pages: [],
+      }],
+    },
+    snapshot: {
+      revision: 1,
+      values: { general: { approval: "danger", show_reasoning: true } },
+      disabled_tools: [],
+    },
+  };
+  const context = { daemonConfigCommand: async () => canonical };
+  vm.runInNewContext(`${source};globalThis.load = getConfigFromDaemon`, context);
+
+  assert.deepEqual(await context.load(), canonical);
+  assert.doesNotMatch(source, /approval_mode|show_thinking|toolsDisabled/);
+});
+
+test("web config resolves recursive canonical paths with snapshot precedence", () => {
+  const source = js.slice(
+    js.indexOf("let configCache"),
+    js.indexOf("function syncConfigState"),
+  );
+  const context = {};
+  vm.runInNewContext(`${source};globalThis.setConfig = (value) => { configCache = value; }; globalThis.lookup = findField; globalThis.value = configValue`, context);
+  context.setConfig({
+    schema: { pages: [{ namespace: "extensions", pages: [{ namespace: "demo", fields: [
+      { path: "extensions.demo.count", key: "count", type: "number", value: 5, default: 3 },
+      { path: "extensions.demo.label", key: "label", type: "string", default: "fallback" },
+    ] }] }] },
+    snapshot: { revision: 9, values: { extensions: { demo: { count: 8 } } }, disabled_tools: ["shell"] },
+  });
+
+  assert.equal(context.value(context.lookup("extensions.demo.count")), 8);
+  assert.equal(context.value(context.lookup("extensions.demo.label")), "fallback");
+  assert.match(js, /expected_revision: configCache\.snapshot\.revision/);
+  assert.match(js, /configCache\.snapshot\?\.disabled_tools/);
+  assert.doesNotMatch(js, /["']approval_mode["']|["']show_thinking["']|toolsDisabled|set_setting/);
+});
+
+test("concurrent config mutations resolve only their correlated response", async () => {
+  const source = bridge.slice(
+    bridge.indexOf("async function daemonConfigCommand"),
+    bridge.indexOf("async function daemonConfigSnapshot"),
+  );
+  const links = [];
+  let nextId = 0;
+  const context = {
+    Error,
+    clearTimeout,
+    setTimeout,
+    randomUUID: () => `request-${++nextId}`,
+    createDaemonLink(onLine, onStatus) {
+      const link = {
+        command: null,
+        closed: false,
+        close() { this.closed = true; },
+        write(command) { this.command = command; return true; },
+        emit(event) { onLine(JSON.stringify(event)); },
+      };
+      links.push(link);
+      queueMicrotask(() => onStatus("connected"));
+      return link;
+    },
+  };
+  vm.runInNewContext(`${source};globalThis.send = daemonConfigCommand`, context);
+
+  let firstSettled = false;
+  const first = context.send({ set_tool_enabled: { name: "shell", enabled: false } })
+    .finally(() => { firstSettled = true; });
+  const second = context.send({ set_tool_enabled: { name: "shell", enabled: true } });
+  await new Promise(queueMicrotask);
+
+  const firstId = links[0].command.set_tool_enabled.request_id;
+  const secondId = links[1].command.set_tool_enabled.request_id;
+  assert.notEqual(firstId, secondId);
+  links[0].emit({ config_changed: { request_id: secondId, revision: 2 } });
+  await new Promise(queueMicrotask);
+  assert.equal(firstSettled, false);
+
+  links[1].emit({ config_changed: { request_id: secondId, revision: 2 } });
+  links[0].emit({ config_changed: { request_id: firstId, revision: 3 } });
+  assert.equal((await second).request_id, secondId);
+  assert.equal((await first).request_id, firstId);
+  assert.equal(links[0].closed, true);
+  assert.equal(links[1].closed, true);
+});
+
 test("dialogs expose modal semantics and managed focus", () => {
   assert.match(html, /role="dialog" aria-modal="true"/);
   assert.match(js, /function trapDialogFocus/);

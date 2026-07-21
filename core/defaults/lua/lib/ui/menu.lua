@@ -1,4 +1,5 @@
 -- ui.menu — interactive select / multi_select / text_input panes.
+-- multi-space-toggle-v2
 --
 -- Built on `ui.pane`: the Pane object owns the channel transport (rendering
 -- even while a tool blocks on `ctx.ui.key`), and the shared helpers (`span`,
@@ -667,7 +668,8 @@ local function select_loop(ctx, spec, multi)
         end
 
         local filter_text
-        if state.searchable and not state.custom_focused and is_text_key(key) then
+        if state.searchable and not state.custom_focused and is_text_key(key)
+            and not (multi and key.char == " ") then
             if state.filter_focused then
                 filter_text = key.char
             elseif key.char == "/" then

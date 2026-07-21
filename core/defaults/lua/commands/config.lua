@@ -1,4 +1,5 @@
 -- /config — interactive settings editor.
+-- canonical-config-v3
 --
 -- Renders its own styled bottom pane (full span control) for the tabbed
 -- settings overview, and reuses `ui.menu` only for the isolated sub-prompts
@@ -81,7 +82,8 @@ local function edit_provider(ctx, provider)
       base_url = provider.base_url or "",
       endpoint = provider.endpoint or "",
       handler = provider.handler or "openai",
-      api_key = provider.api_key or "",
+      api_key = "",
+      api_key_configured = provider.api_key_configured == true,
       context_window_tokens = provider.context_window_tokens,
    }
 
@@ -92,7 +94,8 @@ local function edit_provider(ctx, provider)
          "base_url \u{00b7} " .. entry.base_url,
          "endpoint \u{00b7} " .. entry.endpoint,
          "handler \u{00b7} " .. entry.handler,
-         "api_key \u{00b7} " .. mask_secret(entry.api_key),
+         "api_key \u{00b7} " .. (entry.api_key ~= "" and mask_secret(entry.api_key)
+            or (entry.api_key_configured and "(configured)" or "(empty)")),
          "context_window_tokens \u{00b7} " .. tostring(entry.context_window_tokens or "unknown"),
          "Save changes",
       }
@@ -120,7 +123,10 @@ local function edit_provider(ctx, provider)
          entry.handler = entry.handler == "codex" and "openai" or "codex"
       elseif choice == labels[6] then
          local value = edit_text(ctx, "api_key", "")
-         if value ~= nil and value ~= "" then entry.api_key = value end
+         if value ~= nil and value ~= "" then
+            entry.api_key = value
+            entry.api_key_configured = true
+         end
       elseif choice == labels[7] then
          local value = edit_text(ctx, "context_window_tokens", entry.context_window_tokens or "")
          if value ~= nil then entry.context_window_tokens = tonumber(value) end
@@ -164,7 +170,7 @@ local function row_spans(row, selected, pad_w)
       local label = f.label or f.key
       sp[#sp + 1] = span(pad(label, pad_w) .. "  ", fg, mods)
       if f.type == "bool" then
-         local on = f.value == "true"
+         local on = f.value == true or f.value == "true"
          sp[#sp + 1] = span(on and "\u{25cf} " or "\u{25cb} ", on and COL.green or COL.dim)
          sp[#sp + 1] = span(on and "on" or "off", on and COL.green or COL.dim, mods)
       elseif f.type == "enum" then
@@ -305,9 +311,10 @@ local function run(ctx, start_ns)
 
       lines[#lines + 1] = line_of({})
       local enter_label = is_providers and "switch provider" or "edit"
+      local toggle_hint = not is_providers and "  \u{00b7}  Space toggle" or ""
       lines[#lines + 1] = line_of({ span(string.format(
-         "  \u{2191}\u{2193} move  \u{00b7}  Enter %s  \u{00b7}  Tab/\u{2190}\u{2192} switch tab%s  \u{00b7}  Esc exit",
-         enter_label, is_providers and "  \u{00b7}  e edit provider" or ""
+         "  \u{2191}\u{2193} move  \u{00b7}  Enter %s%s  \u{00b7}  Tab/\u{2190}\u{2192} switch tab%s  \u{00b7}  Esc exit",
+         enter_label, toggle_hint, is_providers and "  \u{00b7}  e edit provider" or ""
       ), COL.dim) })
 
       p:set_lines(lines, math.min(20, #lines))
@@ -334,22 +341,25 @@ local function run(ctx, start_ns)
          sel = 1
       elseif code == "End" then
          sel = math.max(1, total)
-      elseif code == "Enter" then
+      elseif code == "Enter" or (code == "Char" and key.char == " ") then
          local row = rows[sel]
-         if row then
+         local space_toggle = code == "Char" and row and row.kind == "field"
+            and (row.field.type == "bool" or row.field.type == "enum")
+         if row and (code == "Enter" or space_toggle) then
             if row.kind == "provider" then
                menu.clear(ctx)
                return { action = "config.switch_provider", provider = row.provider.id, submit = false }
             else
                local f = row.field
                if f.type == "bool" or f.type == "enum" then
-                  local nv = ctx.config.cycle_field(ns, f.key, f.value or "")
-                  if nv and save_value(ctx, ns, f.key, nv) then
+                  local nv = ctx.config.cycle_field(ns, f.key, f.value)
+                  if nv ~= nil and save_value(ctx, ns, f.key, nv) then
                      changed = true
                      restart_required = restart_required or ns == "tools" or ns == "commands"
                   end
                else
                   local v = edit_text(ctx, f.label or f.key, f.value or "")
+                  if v ~= nil and f.type == "number" then v = tonumber(v) end
                   if v ~= nil and save_value(ctx, ns, f.key, v) then
                      changed = true
                      restart_required = restart_required or ns == "tools" or ns == "commands"

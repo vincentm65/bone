@@ -254,7 +254,7 @@ fn from_entry_reads_reasoning_effort() {
         label: "Grok".into(),
         base_url: "https://example.com/v1".into(),
         model: "grok-build".into(),
-        api_key: String::new(),
+        api_key: Default::default(),
         endpoint: "/chat/completions".into(),
         handler: "openai".into(),
         context_window_tokens: Some(131_072),

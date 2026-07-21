@@ -31,6 +31,23 @@ fn missing_shell_command_is_danger() {
 }
 
 #[test]
+fn shell_process_actions_have_action_specific_safety() {
+    for action in ["list", "status"] {
+        assert_eq!(
+            CommandSafety::for_call(&call("shell", json!({ "action": action }))),
+            CommandSafety::ReadOnly
+        );
+    }
+    assert_eq!(
+        CommandSafety::for_call(&call(
+            "shell",
+            json!({ "action": "kill", "id": "process-1" })
+        )),
+        CommandSafety::Danger
+    );
+}
+
+#[test]
 fn for_call_ignores_model_classification() {
     // Model says danger but pwd is ReadOnly — policy wins.
     assert_eq!(

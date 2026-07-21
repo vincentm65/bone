@@ -58,5 +58,5 @@ Rules:
 Config:
 - The bone config directory is printed below as \"Resolved config directory\".
 - For tool, command, and Lua API docs, read AGENTS.md in that directory.
-- After editing config/providers.yaml or command-policy.yaml, tell the user to restart.
+- After directly editing config.yaml, providers.yaml, subagents.yaml, extensions.yaml, or command-policy.yaml, tell the user to restart.
 ";

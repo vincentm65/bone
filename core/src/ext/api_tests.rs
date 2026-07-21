@@ -256,7 +256,7 @@ fn settings_get_set_reset_persist_and_validate() {
 }
 
 #[test]
-fn extension_settings_register_resolve_validate_and_persist() {
+fn extension_settings_define_resolve_and_validate() {
     let lua = Lua::new();
     let bone = lua.create_table().unwrap();
     super::super::ops_events::setup_on(&lua, &bone).unwrap();
@@ -281,21 +281,18 @@ fn extension_settings_register_resolve_validate_and_persist() {
     lua.globals().set("bone", bone).unwrap();
     lua.load(
         r#"
-        bone.settings.register({
-          namespace = "example",
+        bone.settings.define("example", {
           title = "Example",
           fields = {
-            { key = "enabled", label = "Enabled", type = "bool", default = true },
-            { key = "limit", label = "Limit", type = "number", default = 10,
+            enabled = { label = "Enabled", type = "bool", default = true },
+            limit = { label = "Limit", type = "number", default = 10,
               integer = true, min = 1, max = 100 },
-            { key = "mode", label = "Mode", type = "enum", default = "fast",
+            mode = { label = "Mode", type = "enum", default = "fast",
               options = { "fast", "safe" } },
           },
         })
         assert(bone.settings._get_extension("example.enabled") == true)
-        assert(not pcall(bone.settings._set_extension, "example.limit", 1.5))
-        bone.settings._set_extension("example.limit", 25)
-        assert(bone.settings._get_extension("example.limit") == 25)
+        assert(bone.settings._set_extension == nil)
         assert(not pcall(bone.settings.register, {
           namespace = "example", title = "Duplicate",
           fields = {{ key = "x", label = "X", type = "bool", default = true }},
@@ -305,13 +302,15 @@ fn extension_settings_register_resolve_validate_and_persist() {
     .exec()
     .unwrap();
 
-    assert_eq!(registry.read().unwrap().pages().len(), 1);
+    let pages = registry.read().unwrap().pages();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].owner, "init.lua");
     assert_eq!(
         settings.lock().unwrap().extension_value("example.limit"),
-        Some(&crate::config::settings::ExtensionValue::Number(25.0))
+        None
     );
-    let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.contains("extensions:"));
-    assert!(raw.contains("limit: 25"));
-    let _ = std::fs::remove_file(path);
+    assert!(
+        !path.exists(),
+        "schema registration must not persist defaults"
+    );
 }

@@ -4,6 +4,7 @@
 //! frontend↔daemon boundary. `bone-core` depends on it and re-exports
 //! everything; a non-Rust client can depend on just this crate.
 
+pub mod config;
 pub mod event;
 pub mod input;
 pub mod message;
@@ -12,6 +13,9 @@ pub mod tokens;
 pub mod tools;
 pub mod view;
 
+pub use config::{
+    ConfigPage, ConfigSchema, ConfigSnapshot, ProviderConfig, ProviderUpdate, SettingDefinition,
+};
 pub use event::{
     CommandAction, ConfigAction, ConversationLoad, KeymapDispatchKind, RuntimeCommand, RuntimeEvent,
 };

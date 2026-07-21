@@ -228,6 +228,9 @@ pub struct AgentRequest {
     pub max_tokens: Option<u32>,
     pub approval_gate: Option<crate::tools::SharedGate>,
     pub transcript: Option<Vec<ChatMessage>>,
+    /// Daemon-loaded compatibility snapshot inherited by delegated agents so
+    /// they never reload configuration independently.
+    pub config_snapshot: Option<CustomConfigs>,
     /// Shared cancel flag (the driving session's Esc token). Threaded into
     /// the subagent's `Driver` so its tools — including the shell — can be
     /// killed mid-execution when the user cancels, rather than only at the
@@ -349,6 +352,9 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::ApprovalRequest { .. }
         | crate::runtime::RuntimeEvent::StateSnapshot { .. }
         | crate::runtime::RuntimeEvent::FrontendState { .. }
+        | crate::runtime::RuntimeEvent::ConfigSnapshot { .. }
+        | crate::runtime::RuntimeEvent::ConfigChanged { .. }
+        | crate::runtime::RuntimeEvent::ConfigMutationRejected { .. }
         | crate::runtime::RuntimeEvent::ConversationLoaded { .. }
         | crate::runtime::RuntimeEvent::ConversationLoadFailed { .. }
         | crate::runtime::RuntimeEvent::ViewDiff { .. }
@@ -482,6 +488,7 @@ mod resolve_provider_tests {
             approval_gate: None,
             transcript: None,
             cancel: None,
+            config_snapshot: None,
         }
     }
 
@@ -521,8 +528,15 @@ mod resolve_provider_tests {
 }
 
 fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
-    let mut custom = CustomConfigs::load();
-    let mut providers_config = custom.derive_providers_config();
+    let config = match request.config_snapshot.clone() {
+        Some(snapshot) => crate::config::store::ConfigStore::from_legacy(
+            crate::ext::ExtensionManager::unloaded(),
+            snapshot,
+        ),
+        None => crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()),
+    };
+    let mut custom = config.legacy_snapshot();
+    let mut providers_config = config.providers_config();
 
     let llm = resolve_provider(request, &mut custom, &mut providers_config)?;
 
@@ -542,6 +556,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         &model,
         &provider,
     );
+    config.attach_extensions(booted.manager.clone());
     let extensions = booted.manager;
     let tools = booted.tools;
 

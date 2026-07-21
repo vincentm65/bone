@@ -163,6 +163,14 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::SetTerminalWidth { .. }
             | RuntimeCommand::KeymapDispatch { .. }
             | RuntimeCommand::ReloadSettings
+            | RuntimeCommand::GetConfig
+            | RuntimeCommand::SetConfigValue { .. }
+            | RuntimeCommand::ResetConfigValue { .. }
+            | RuntimeCommand::UpsertProvider { .. }
+            | RuntimeCommand::DeleteProvider { .. }
+            | RuntimeCommand::SetActiveProvider { .. }
+            | RuntimeCommand::SetToolEnabled { .. }
+            | RuntimeCommand::SetCommandEnabled { .. }
             | RuntimeCommand::SetSetting { .. }
             | RuntimeCommand::UpsertSubagent { .. }
             | RuntimeCommand::DeleteSubagent { .. }

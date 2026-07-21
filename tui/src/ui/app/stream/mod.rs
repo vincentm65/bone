@@ -641,6 +641,9 @@ impl App {
                         completion = Some((output, submit, display_role, action));
                         break 'command;
                     }
+                    Ok(RuntimeEvent::ConfigSnapshot { schema, snapshot }) => {
+                        self.apply_config_snapshot(schema, snapshot);
+                    }
                     // Keep the view-model synced if the daemon publishes state
                     // (non-submit commands publish a snapshot before completing).
                     Ok(RuntimeEvent::StateSnapshot { snapshot }) => {
@@ -831,6 +834,45 @@ impl App {
             | RuntimeEvent::FrontendState { .. }
             | RuntimeEvent::ConversationLoaded { .. }
             | RuntimeEvent::TurnComplete => {}
+            RuntimeEvent::ConfigSnapshot { schema, snapshot } => {
+                self.apply_config_snapshot(schema, snapshot);
+            }
+            RuntimeEvent::ConfigChanged {
+                schema,
+                snapshot,
+                restart_required,
+                request_id,
+                ..
+            } => {
+                let completed = self.finish_config_change(schema, snapshot, request_id);
+                if let Some(path) = completed {
+                    self.pump_notice(
+                        format!("Configuration updated: {path}."),
+                        cur_idx,
+                        term,
+                    )?;
+                }
+                if restart_required {
+                    self.pump_notice(
+                        "Configuration saved. Restart required to apply this change.".into(),
+                        cur_idx,
+                        term,
+                    )?;
+                }
+            }
+            RuntimeEvent::ConfigMutationRejected {
+                current_revision,
+                error,
+                request_id,
+            } => {
+                let path = self.reject_config_change(current_revision, request_id);
+                let context = path.map_or(String::new(), |path| format!(" for {path}"));
+                self.pump_notice(
+                    format!("Configuration change{context} rejected: {error}"),
+                    cur_idx,
+                    term,
+                )?;
+            }
             // Pane/UI diff from the daemon (forwarded when `forward_view_diffs`
             // is enabled — both in-process and remote clients).
             RuntimeEvent::ViewDiff { diff } => {

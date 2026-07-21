@@ -1,14 +1,16 @@
-//! Custom user-defined config pages loaded from `~/.bone-rust/config/*.yaml`.
+//! Legacy custom-page compatibility types and helpers.
 //!
-//! Each page file (e.g. `general.yaml`, `tools.yaml`) contains both the field
-//! schema *and* the current values. No separate values file is needed.
+//! The daemon's `ConfigStore` is the live authority. These APIs remain for
+//! migration, setup compatibility, and external callers that still construct
+//! page-format values; legacy page files are not live runtime authorities.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::settings::Settings;
-use super::{UserConfig, bone_dir, load_yaml, seed_file_forced, seed_file_if_missing};
+use super::{bone_dir, load_yaml, seed_file_forced, seed_file_if_missing};
 
 // ── Schema types ────────────────────────────────────────────────────────────
 
@@ -24,7 +26,7 @@ pub struct ConfigField {
     pub options: Vec<String>,
     #[serde(default)]
     pub default: Option<serde_yaml::Value>,
-    /// Current runtime value, stored directly in the page YAML.
+    /// Legacy page value retained for migration and compatibility callers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_yaml::Value>,
 }
@@ -83,6 +85,23 @@ fn warn_parse_failure(detail: &str) {
     crate::ext::ctx::runtime_warn_once(format!("bone: warning: {detail}"));
 }
 
+fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(contents)?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())?;
+    }
+    temporary.as_file_mut().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .map(|_| ())
+}
+
 // ── Built-in seed pages ────────────────────────────────────────────────────
 
 const GENERAL_YAML: &str = include_str!("pages/general.yaml");
@@ -100,10 +119,9 @@ const BUILTIN_PAGES: &[(&str, &str)] = &[
     ("commands.yaml", COMMANDS_YAML),
 ];
 
-/// Seed built-in config pages into `~/.bone-rust/config/`. `allow` filters
-/// which pages are written (`None` = all). When `force` is false, existing
-/// files are left untouched; when true, they are overwritten with this build's
-/// defaults (the /setup re-seed action).
+/// Compatibility helper for seeding legacy page fixtures. Live startup does
+/// not call this function. `allow` filters which pages are written (`None` =
+/// all); `force` controls whether existing fixture files are overwritten.
 pub fn seed_builtin_pages(allow: Option<&std::collections::HashSet<String>>, force: bool) {
     let dir = config_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -127,12 +145,6 @@ pub fn seed_builtin_pages(allow: Option<&std::collections::HashSet<String>>, for
 impl CustomConfigs {
     /// Scan `~/.bone-rust/config/` for `*.yaml` files and load them.
     pub fn load() -> Self {
-        migrate_old_values_file();
-        migrate_status_values_from_general();
-        migrate_providers_file();
-        backfill_fields("general.yaml", GENERAL_YAML);
-        backfill_fields("status.yaml", STATUS_YAML);
-
         let dir = config_dir();
         let mut configs = CustomConfigs::default();
 
@@ -198,102 +210,8 @@ impl CustomConfigs {
 
         // Load or migrate canonical settings after pages are populated.
         configs.settings = Self::load_or_migrate_settings(&configs.pages);
-        configs.migrate_compaction_settings();
 
         configs
-    }
-
-    fn migrate_compaction_settings(&mut self) {
-        if let Some(settings) = self.settings.as_mut()
-            && let Err(err) =
-                settings.migrate_compaction_fallback_at(&super::settings::settings_path())
-        {
-            crate::ext::ctx::runtime_warn_once(format!(
-                "bone: warning: could not migrate compaction fallback setting: {err}"
-            ));
-        }
-
-        const LEGACY_KEYS: &[&str] = &[
-            "auto_compact_tokens",
-            "compact_trigger_mode",
-            "compact_trigger_percentage",
-            "compact_context_window_tokens",
-            "compact_keep_tokens",
-            "compact_input_tokens",
-            "compact_checkpoint_tokens",
-            "compact_summary_tokens",
-            "compact_generation_tokens",
-            "compact_safety_tokens",
-            "auto_compact_keep_messages",
-        ];
-        let Some(index) = self.pages.iter().position(|(ns, _)| ns == "general") else {
-            return;
-        };
-        let page = &self.pages[index].1;
-        if !page
-            .fields
-            .iter()
-            .any(|field| LEGACY_KEYS.contains(&field.key.as_str()))
-        {
-            return;
-        }
-        let value = |key: &str| {
-            page.fields
-                .iter()
-                .find(|field| field.key == key)
-                .and_then(|field| field.value.as_ref().or(field.default.as_ref()))
-                .map(|value| match value {
-                    serde_yaml::Value::String(value) => value.clone(),
-                    serde_yaml::Value::Number(value) => value.to_string(),
-                    serde_yaml::Value::Bool(value) => value.to_string(),
-                    _ => String::new(),
-                })
-                .unwrap_or_default()
-        };
-        let mode = value("compact_trigger_mode");
-        let auto_tokens = value("auto_compact_tokens").parse::<u64>().unwrap_or(0);
-        let auto = mode == "percentage" || auto_tokens > 0;
-        let percentage = value("compact_trigger_percentage")
-            .parse::<u64>()
-            .ok()
-            .filter(|value| (50..=95).contains(value))
-            .unwrap_or(80) as f64;
-        let context_window_tokens = value("compact_context_window_tokens")
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value >= 10_000)
-            .unwrap_or(100_000) as f64;
-
-        let Some(settings) = self.settings.as_mut() else {
-            return;
-        };
-        if let Err(err) = settings.migrate_compaction_at(
-            auto,
-            percentage,
-            context_window_tokens,
-            &super::settings::settings_path(),
-        ) {
-            crate::ext::ctx::runtime_warn_once(format!(
-                "bone: warning: could not migrate compaction settings: {err}"
-            ));
-            return;
-        }
-
-        let page = &mut self.pages[index].1;
-        page.fields
-            .retain(|field| !LEGACY_KEYS.contains(&field.key.as_str()));
-        let path = config_dir().join("general.yaml");
-        let Ok(yaml) = serde_yaml::to_string(page) else {
-            return;
-        };
-        let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
-        if let Err(err) =
-            crate::tools::write_atomic::write_atomic_sync(&path, yaml.as_bytes(), permissions)
-        {
-            crate::ext::ctx::runtime_warn_once(format!(
-                "bone: warning: could not clean legacy compaction settings: {err}"
-            ));
-        }
     }
 
     /// Load canonical settings from `config.yaml`, or migrate from pages if
@@ -331,7 +249,13 @@ impl CustomConfigs {
                 Ok(y) => y,
                 Err(_) => return false,
             };
-            return std::fs::write(path, yaml).is_ok();
+            let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
+            return crate::tools::write_atomic::write_atomic_sync(
+                &path,
+                yaml.as_bytes(),
+                permissions,
+            )
+            .is_ok();
         }
         false
     }
@@ -513,7 +437,7 @@ impl CustomConfigs {
             Ok(y) => y,
             Err(_) => return false,
         };
-        std::fs::write(path, yaml).is_ok()
+        write_atomic(&path, yaml.as_bytes()).is_ok()
     }
 
     fn page_ref(&self, namespace: &str) -> Option<&CustomConfigPage> {
@@ -559,6 +483,11 @@ impl CustomConfigs {
     /// Get all enabled command names from the "commands" page.
     pub fn enabled_command_names(&self) -> Vec<String> {
         self.enabled_names("commands")
+    }
+
+    /// Get the persisted deny-list for tools or commands.
+    pub fn disabled_names(&self, namespace: &str) -> Vec<String> {
+        self.read_denylist(namespace).0
     }
 
     /// Get the display value for a field, falling back to the default.
@@ -744,6 +673,66 @@ impl CustomConfigs {
         self.save_or_revert(namespace, key, old_value);
     }
 
+    /// Insert or replace a provider and persist the providers page.
+    pub fn upsert_provider_entry(
+        &mut self,
+        key: &str,
+        entry: &crate::config::ProviderEntry,
+    ) -> Result<(), String> {
+        if key.is_empty()
+            || key.starts_with('_')
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        {
+            return Err(format!("invalid provider id: {key:?}"));
+        }
+        let nested = serde_yaml::to_value(entry).map_err(|e| e.to_string())?;
+        let page = self
+            .page_mut("providers")
+            .ok_or_else(|| "providers config page is missing".to_string())?;
+        let backup = page.fields.clone();
+        if let Some(field) = page.fields.iter_mut().find(|field| field.key == key) {
+            field.label = Some(entry.label.clone());
+            field.field_type = ConfigFieldType::Provider;
+            field.value = Some(nested);
+        } else {
+            page.fields.push(ConfigField {
+                key: key.to_string(),
+                label: Some(entry.label.clone()),
+                field_type: ConfigFieldType::Provider,
+                options: Vec::new(),
+                default: None,
+                value: Some(nested),
+            });
+        }
+        if self.save_page("providers") {
+            Ok(())
+        } else {
+            self.page_mut("providers").unwrap().fields = backup;
+            Err("could not save providers.yaml".into())
+        }
+    }
+
+    /// Delete a provider and persist the providers page.
+    pub fn delete_provider_entry(&mut self, key: &str) -> Result<(), String> {
+        let page = self
+            .page_mut("providers")
+            .ok_or_else(|| "providers config page is missing".to_string())?;
+        let backup = page.fields.clone();
+        let before = page.fields.len();
+        page.fields.retain(|field| field.key != key);
+        if page.fields.len() == before {
+            return Err(format!("unknown provider: {key}"));
+        }
+        if self.save_page("providers") {
+            Ok(())
+        } else {
+            self.page_mut("providers").unwrap().fields = backup;
+            Err("could not save providers.yaml".into())
+        }
+    }
+
     /// Derive a ProvidersConfig from the providers page fields.
     pub fn derive_providers_config(&self) -> crate::config::ProvidersConfig {
         let mut cfg = crate::config::ProvidersConfig::default();
@@ -768,216 +757,17 @@ impl CustomConfigs {
     }
 
     /// Set the last used provider ID.
+    pub fn try_set_last_provider(&mut self, id: &str) -> Result<(), String> {
+        self.try_set_value("providers", "_last_provider", id.to_string())
+    }
+
+    /// Compatibility wrapper for callers that cannot surface persistence errors.
     pub fn set_last_provider(&mut self, id: &str) {
-        self.set_value("providers", "_last_provider", id.to_string());
-    }
-}
-
-// ── Migration ───────────────────────────────────────────────────────────────
-
-/// Migrate old `providers.yaml` (flat map format) to CustomConfigPage format.
-fn migrate_providers_file() {
-    let old_path = bone_dir().join("config/providers.yaml");
-    let new_path = bone_dir().join("config/providers.yaml");
-    // Check if old file exists and new page doesn't exist yet
-    if !old_path.exists() {
-        return;
-    }
-    // If the file already parses as a CustomConfigPage, no migration needed
-    if load_yaml::<CustomConfigPage>(&old_path).is_ok() {
-        return;
-    }
-    // Parse as old ProvidersConfig format
-    let Ok(old_config) = load_yaml::<crate::config::ProvidersConfig>(&old_path) else {
-        return;
-    };
-
-    let mut fields: Vec<ConfigField> = Vec::new();
-    for (id, entry) in &old_config.providers {
-        let label = entry.label.clone();
-        let nested = serde_yaml::to_value(entry).unwrap_or(serde_yaml::Value::Null);
-        fields.push(ConfigField {
-            key: id.clone(),
-            label: Some(label),
-            field_type: ConfigFieldType::Provider,
-            options: Vec::new(),
-            default: None,
-            value: Some(nested),
-        });
-    }
-    fields.push(ConfigField {
-        key: "_last_provider".to_string(),
-        label: None,
-        field_type: ConfigFieldType::String,
-        options: Vec::new(),
-        default: None,
-        value: Some(serde_yaml::Value::String(old_config.last_provider)),
-    });
-
-    let page = CustomConfigPage {
-        title: "Providers".to_string(),
-        fields,
-    };
-    if let Ok(yaml) = serde_yaml::to_string(&page) {
-        let _ = std::fs::write(&new_path, yaml);
-    }
-}
-
-/// Migrate the old `config-values.yaml` into individual page files, then remove it.
-fn migrate_old_values_file() {
-    use std::collections::BTreeMap;
-
-    let values_path = bone_dir().join("config-values.yaml");
-    if !values_path.exists() {
-        return;
-    }
-
-    let Ok(raw) = std::fs::read_to_string(&values_path) else {
-        return;
-    };
-    let raw = raw.trim_start_matches('\u{feff}');
-    let Ok(values): Result<BTreeMap<String, BTreeMap<String, String>>, _> =
-        serde_yaml::from_str(raw)
-    else {
-        return;
-    };
-
-    let dir = config_dir();
-    for (namespace, kv) in &values {
-        let page_path = dir.join(format!("{namespace}.yaml"));
-        if !page_path.exists() {
-            continue;
+        if let Err(error) = self.try_set_last_provider(id) {
+            crate::ext::ctx::runtime_warn(format!(
+                "bone: warning: could not save active provider: {error}"
+            ));
         }
-        let Ok(mut page) = load_yaml::<CustomConfigPage>(&page_path) else {
-            continue;
-        };
-        for field in &mut page.fields {
-            if let Some(val) = kv.get(&field.key) {
-                field.value = Some(serde_yaml::Value::String(val.clone()));
-            }
-        }
-        if let Ok(yaml) = serde_yaml::to_string(&page) {
-            let _ = std::fs::write(&page_path, yaml);
-        }
-    }
-
-    if let Some(kv) = values.get("general") {
-        let page_path = dir.join("status.yaml");
-        if page_path.exists()
-            && let Ok(mut page) = load_yaml::<CustomConfigPage>(&page_path)
-        {
-            let mut changed = false;
-            for field in &mut page.fields {
-                if is_status_toggle_key(&field.key)
-                    && field.value.is_none()
-                    && let Some(val) = kv.get(&field.key)
-                {
-                    field.value = Some(value_for_field(field, val.clone()));
-                    changed = true;
-                }
-            }
-            if changed && let Ok(yaml) = serde_yaml::to_string(&page) {
-                let _ = std::fs::write(&page_path, yaml);
-            }
-        }
-    }
-
-    let _ = std::fs::remove_file(&values_path);
-}
-
-/// Move status toggles that were previously stored on `general.yaml` into
-/// `status.yaml`. This covers users who already migrated from config-values.
-fn migrate_status_values_from_general() {
-    let dir = config_dir();
-    let general_path = dir.join("general.yaml");
-    let status_path = dir.join("status.yaml");
-    if !general_path.exists() || !status_path.exists() {
-        return;
-    }
-
-    let Ok(general) = load_yaml::<CustomConfigPage>(&general_path) else {
-        return;
-    };
-    let Ok(mut status) = load_yaml::<CustomConfigPage>(&status_path) else {
-        return;
-    };
-
-    let mut changed = false;
-    for status_field in &mut status.fields {
-        if !is_status_toggle_key(&status_field.key) || status_field.value.is_some() {
-            continue;
-        }
-        let Some(general_field) = general
-            .fields
-            .iter()
-            .find(|field| field.key == status_field.key)
-        else {
-            continue;
-        };
-        let Some(value) = general_field.value.clone() else {
-            continue;
-        };
-        status_field.value = Some(value);
-        changed = true;
-    }
-
-    if changed && let Ok(yaml) = serde_yaml::to_string(&status) {
-        let _ = std::fs::write(status_path, yaml);
-    }
-}
-
-fn is_status_toggle_key(key: &str) -> bool {
-    UserConfig::STATUS_TOGGLE_KEYS.contains(&key)
-}
-
-/// Append field *definitions* added to a bundled seed page after a user's file
-/// was first written, so new built-in toggles (e.g. `show_thinking`) become
-/// reachable from `/config` without clobbering existing user values/order.
-/// No-op when the file is absent (fresh installs get the full seed) or already
-/// current.
-fn backfill_fields(file: &str, seed_yaml: &str) {
-    let path = config_dir().join(file);
-    if !path.exists() {
-        return;
-    }
-    let Ok(mut page) = load_yaml::<CustomConfigPage>(&path) else {
-        return;
-    };
-    let Ok(seed) = serde_yaml::from_str::<CustomConfigPage>(seed_yaml) else {
-        return;
-    };
-
-    let mut changed = false;
-    for seed_field in seed.fields {
-        if !page.fields.iter().any(|f| f.key == seed_field.key) {
-            page.fields.push(seed_field);
-            changed = true;
-        }
-    }
-
-    if changed
-        && let Ok(yaml) = serde_yaml::to_string(&page)
-        && let Err(e) = std::fs::write(&path, yaml)
-    {
-        crate::ext::ctx::runtime_warn(format!(
-            "bone: warning: could not write {}: {e}",
-            path.display()
-        ));
-    }
-}
-
-fn value_for_field(field: &ConfigField, value: String) -> serde_yaml::Value {
-    match field.field_type {
-        ConfigFieldType::Bool => match value.as_str() {
-            "true" => serde_yaml::Value::Bool(true),
-            "false" => serde_yaml::Value::Bool(false),
-            _ => serde_yaml::Value::String(value),
-        },
-        ConfigFieldType::Number => value
-            .parse::<serde_yaml::Number>()
-            .map(serde_yaml::Value::Number)
-            .unwrap_or_else(|_| serde_yaml::Value::String(value.clone())),
-        _ => serde_yaml::Value::String(value),
     }
 }
 

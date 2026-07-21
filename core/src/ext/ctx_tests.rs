@@ -1,5 +1,98 @@
 use super::*;
 
+#[test]
+fn canonical_config_pages_and_mutations_use_the_daemon_store() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let temp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", temp.path()) };
+
+    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded());
+    let lua = Lua::new();
+    let mut cfg = CtxConfig::new(
+        temp.path().to_string_lossy().into_owned(),
+        new_shared_state(),
+    );
+    cfg.config_store = Some(store.clone());
+    cfg.config_schema = Some(store.schema_for(
+        &["shell".into(), "worker".into()],
+        &["config".into(), "history".into()],
+    ));
+    let config = build_config_table(&lua, &cfg).unwrap();
+
+    let get_pages: mlua::Function = config.get("get_pages").unwrap();
+    let pages: serde_json::Value = lua
+        .from_value(get_pages.call::<Value>(()).unwrap())
+        .unwrap();
+    let namespaces = pages
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|page| page["namespace"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        namespaces,
+        ["general", "providers", "tools", "commands", "status"]
+    );
+    assert_eq!(pages[2]["fields"].as_array().unwrap().len(), 2);
+    assert_eq!(pages[3]["fields"].as_array().unwrap().len(), 1);
+    assert_eq!(pages[3]["fields"][0]["key"], "history");
+    assert_eq!(pages[4]["fields"].as_array().unwrap().len(), 15);
+
+    let set_value: mlua::Function = config.get("set_value").unwrap();
+    assert!(
+        set_value
+            .call::<bool>(("general", "show_reasoning", true))
+            .unwrap()
+    );
+    assert_eq!(store.snapshot().values["general"]["show_reasoning"], true);
+    assert!(set_value.call::<bool>(("tools", "shell", false)).unwrap());
+    assert_eq!(store.snapshot().disabled_tools, ["shell"]);
+    assert!(
+        set_value
+            .call::<bool>(("status", "spinner_speed", 125_i64))
+            .unwrap()
+    );
+    assert_eq!(store.snapshot().values["ui"]["spinner_speed"], 125);
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn config_get_uses_installed_snapshot_instead_of_filesystem() {
+    let temp = tempfile::tempdir().unwrap();
+    let page_dir = temp.path().join("config");
+    std::fs::create_dir(&page_dir).unwrap();
+    std::fs::write(
+        page_dir.join("general.yaml"),
+        "title: General\nfields:\n  - key: approval_mode\n    value: danger\n",
+    )
+    .unwrap();
+
+    let lua = Lua::new();
+    let custom = crate::config::custom::CustomConfigs {
+        pages: Vec::new(),
+        settings: Some(crate::config::settings::Settings::defaults()),
+    };
+    lua.set_app_data(ConfigSnapshot(Arc::new(Mutex::new(custom))));
+    let cfg = CtxConfig::new(
+        temp.path().to_string_lossy().into_owned(),
+        new_shared_state(),
+    );
+    let config = build_config_table(&lua, &cfg).unwrap();
+    let get: mlua::Function = config.get("get").unwrap();
+
+    assert_eq!(
+        get.call::<String>(("general", "approval_mode")).unwrap(),
+        "safe"
+    );
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[test]

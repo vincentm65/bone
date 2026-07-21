@@ -118,6 +118,13 @@ impl SettingsRegistry {
         Ok(field.default.clone())
     }
 
+    pub fn validate(&self, path: &str, value: &ExtensionValue) -> Result<(), String> {
+        let (_, field) = self
+            .field(path)
+            .ok_or_else(|| format!("unknown extension setting: {path}"))?;
+        field.validate(value)
+    }
+
     pub fn set(
         &self,
         settings: &mut Settings,
@@ -125,10 +132,8 @@ impl SettingsRegistry {
         value: ExtensionValue,
         settings_path: &std::path::Path,
     ) -> Result<(), SettingsError> {
-        let (_, field) = self.field(path).ok_or_else(|| {
-            SettingsError::Validation(format!("unknown extension setting: {path}"))
-        })?;
-        field.validate(&value).map_err(SettingsError::Validation)?;
+        self.validate(path, &value)
+            .map_err(SettingsError::Validation)?;
         settings.set_extension_value_at(path, value, settings_path)
     }
 }
@@ -266,18 +271,21 @@ mod tests {
                 ))
                 .is_err()
         );
-        assert!(
-            registry
-                .register(page(
-                    "general",
-                    vec![field(
-                        "other",
-                        SettingsFieldType::String,
-                        ExtensionValue::String(String::new()),
-                    )],
-                ))
-                .is_err()
-        );
+        for namespace in ["general", "ui", "theme", "keymaps"] {
+            assert!(
+                registry
+                    .register(page(
+                        namespace,
+                        vec![field(
+                            "other",
+                            SettingsFieldType::String,
+                            ExtensionValue::String(String::new()),
+                        )],
+                    ))
+                    .is_err(),
+                "accepted reserved namespace {namespace}"
+            );
+        }
         assert!(registry.register(page("empty", Vec::new())).is_err());
         assert!(
             registry

@@ -93,7 +93,6 @@ pub fn builtin_tools() -> ToolRegistry {
         .register(write_file::WriteFileTool)
         .register(edit_file::EditFileTool)
         .register(shell::ShellTool)
-        .register(crate::processes::ProcessTool)
 }
 
 // ── ApprovalMode ────────────────────────────────────────────────────────────

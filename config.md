@@ -22,11 +22,13 @@ Bone Core must be the only authority for loading, validating, mutating, resolvin
 - Make migrations explicit, versioned, idempotent, and covered by fixture tests.
 - Do not combine this refactor with unrelated runtime or UI redesigns.
 
-## Current problems
+## Problems addressed by this redesign
+
+Before this implementation:
 
 - `config.yaml` is canonical for general, UI, status, theme, keymap, extension, and subagent settings, but not for every domain.
 - `config/general.yaml` and `config/status.yaml` contain schemas plus legacy-looking `value` fields even though canonical values are routed through `config.yaml`.
-- `config/providers.yaml`, `config/tools.yaml`, `config/commands.yaml`, and `command-policy.yaml` remain independent authorities.
+- Legacy `config/providers.yaml`, `config/tools.yaml`, and `config/commands.yaml`, plus root `command-policy.yaml`, remain independent authorities.
 - The web bridge reads and writes YAML directly instead of mutating daemon state through the protocol.
 - The web bridge can update `general.yaml` values that Core ignores after `config.yaml` exists.
 - Defaults and field knowledge are duplicated across Rust, seeded YAML, Lua, TUI code, and JavaScript.
@@ -180,6 +182,11 @@ Prefer credential references over plaintext values:
 ```yaml
 api_key: ${OPENROUTER_API_KEY}
 ```
+
+Only a complete `${ENV_VAR}` scalar is resolved from the process environment at
+runtime. Other strings, including partial interpolation such as
+`prefix-${ENV_VAR}`, are preserved exactly. Plaintext credentials remain
+supported.
 
 A future keyring integration may use an explicit reference form, but it is not required for the initial refactor.
 
@@ -422,34 +429,55 @@ After successful migration, legacy page values are never consulted again.
 
 ## Status
 
-- [ ] 0. Confirm product and compatibility decisions
-- [ ] 1. Introduce the aggregate Core config service
-- [ ] 2. Add protocol-authoritative schemas and mutations
-- [ ] 3. Move TUI configuration writes to the daemon
-- [ ] 4. Move web configuration reads and writes to the daemon
-- [ ] 5. Split large domains and migrate legacy files
-- [ ] 6. Remove seeded config-page YAML and dead compatibility paths
-- [ ] 7. Add extension-owned schemas and generic config pages
-- [ ] 8. Move configuration and state to XDG paths
-- [ ] 9. Complete validation, documentation, and cleanup
+- [x] 0. Confirm product and compatibility decisions
+- [x] 1. Introduce the aggregate Core config service
+- [x] 2. Add protocol-authoritative schemas and mutations
+- [x] 3. Move TUI configuration writes to the daemon
+- [x] 4. Move web configuration reads and writes to the daemon
+- [x] 5. Split large domains and migrate legacy files
+- [x] 6. Remove seeded config-page YAML and dead compatibility paths
+- [x] 7. Add extension-owned schemas and generic config pages
+- [ ] 8. Move configuration and state to XDG paths (deferred)
+- [x] 9. Complete validation, documentation, and cleanup
+
+### Implementation audit (2026-07-21)
+
+- Phase 1 is complete: the daemon-owned `ConfigStore` is the sole live aggregate for typed core, provider, subagent, extension-value, enablement, and command-policy state. Runtime and Lua consumers use installed snapshots rather than independently reloading legacy pages.
+- Phase 2 is complete: attach-time schemas and snapshots, aggregate revisions, typed mutations, change/rejection events, stale-write protection, and correlated mutation responses are protocol-authoritative.
+- Phases 3 and 4 are complete: the TUI and web UI render canonical schemas and snapshots and send daemon mutations. Provider editor metadata remains browser-local because the protocol does not expose a provider-field schema; it is not a competing value/default authority.
+- Phase 5 is complete: the five peer domain documents and conservative, marker-last migration preserve precedence, exact values, permissions, legacy inputs, and timestamped backups across retries.
+- Phase 6 is complete: built-in schemas live in Rust, legacy page files are no longer seeded or consulted after migration, and their parser is isolated to migration compatibility.
+- Phase 7 is complete: `bone.settings.define` registers validated namespaced schemas, generic TUI/web pages use the shared schema, values persist in `extensions.yaml`, and unavailable namespaces are preserved.
+- Phase 8 is explicitly deferred; the existing Bone root remains in use.
+- Phase 9 is complete: migration, failure, conflict, extension, store, protocol, TUI, Lua, remote, and web coverage passes alongside the full workspace test/check, Rust formatting, JavaScript syntax/test, and diff-hygiene validation.
 
 ---
 
 ## 0. Confirm product and compatibility decisions
 
+### Confirmed scope
+
+- This implementation covers phases 0–7 and 9. The XDG path move in phase 8 is deferred.
+- The five domain documents are `config.yaml`, `providers.yaml`, `subagents.yaml`, `extensions.yaml`, and `command-policy.yaml`, all peers under the existing Bone root.
+- Plaintext provider credentials remain supported alongside environment references.
+- Migration retains timestamped backups and legacy source files indefinitely. Legacy files become read-only migration inputs and never remain live authorities.
+- Migration has no downgrade compatibility guarantee; older Bone versions are not kept synchronized with the new documents.
+- Command policy remains daemon-owned, file-edited, and restart-required. Generic command-policy UI mutations are deferred.
+- Project-local configuration is out of scope and is never implicitly loaded or merged.
+
 ### Decisions
 
-- [ ] Confirm the five target domain documents and their names.
-- [ ] Confirm whether plaintext provider credentials remain supported alongside environment references.
-- [ ] Decide how long migration backups are retained.
-- [ ] Decide whether command-policy mutations are exposed in the first generic config UI.
-- [ ] Confirm that project-local config is out of scope; do not implicitly execute or merge configuration from the working directory.
-- [ ] Confirm the supported downgrade behavior after migration.
+- [x] Confirm the five target domain documents and their names.
+- [x] Confirm whether plaintext provider credentials remain supported alongside environment references.
+- [x] Decide how long migration backups are retained.
+- [x] Decide whether command-policy mutations are exposed in the first generic config UI.
+- [x] Confirm that project-local config is out of scope; do not implicitly execute or merge configuration from the working directory.
+- [x] Confirm the supported downgrade behavior after migration.
 
 ### Acceptance
 
-- [ ] File ownership and precedence are documented without ambiguous fallback behavior.
-- [ ] No phase requires frontends to read local config files.
+- [x] File ownership and precedence are documented without ambiguous fallback behavior.
+- [x] No phase requires frontends to read local config files.
 
 ---
 
@@ -457,12 +485,12 @@ After successful migration, legacy page values are never consulted again.
 
 ### Work
 
-- [ ] Add `ConfigStore` around existing typed settings, provider config, subagents, extension values, and command policy.
-- [ ] Give the daemon sole ownership of the live store.
-- [ ] Add an aggregate revision and locked atomic mutation path.
-- [ ] Preserve per-domain writes so one changed field does not rewrite unrelated credentials or prompts.
-- [ ] Replace runtime `CustomConfigs::load()` calls with reads from daemon-owned snapshots where possible.
-- [ ] Define parse and validation errors with file and setting paths.
+- [x] Add `ConfigStore` around existing typed settings, provider config, subagents, extension values, and command policy.
+- [x] Give the daemon sole ownership of the live store.
+- [x] Add an aggregate revision and locked atomic mutation path.
+- [x] Preserve per-domain writes so one changed field does not rewrite unrelated credentials or prompts.
+- [x] Replace runtime `CustomConfigs::load()` calls with reads from daemon-owned snapshots where possible.
+- [x] Define parse and validation errors with file and setting paths.
 
 ### Primary areas
 
@@ -475,8 +503,8 @@ After successful migration, legacy page values are never consulted again.
 
 ### Acceptance
 
-- [ ] Runtime consumers do not independently reload competing configuration sources.
-- [ ] A failed mutation leaves disk and active runtime state consistent.
+- [x] Runtime consumers do not independently reload competing configuration sources.
+- [x] A failed mutation leaves disk and active runtime state consistent.
 
 ---
 
@@ -484,17 +512,17 @@ After successful migration, legacy page values are never consulted again.
 
 ### Work
 
-- [ ] Add serializable setting definitions and resolved config snapshots to `protocol`.
-- [ ] Add revision-checked mutation commands.
-- [ ] Add config snapshot/change/rejection events.
-- [ ] Send config schema and state during frontend attach.
-- [ ] Keep provider, subagent, tool, and command operations typed.
-- [ ] Add protocol round-trip and backward-compatibility tests.
+- [x] Add serializable setting definitions and resolved config snapshots to `protocol`.
+- [x] Add revision-checked mutation commands.
+- [x] Add config snapshot/change/rejection events.
+- [x] Send config schema and state during frontend attach.
+- [x] Keep provider, subagent, tool, and command operations typed.
+- [x] Add protocol round-trip and backward-compatibility tests.
 
 ### Acceptance
 
-- [ ] A remote frontend can configure Bone without filesystem access.
-- [ ] Concurrent stale mutations are rejected instead of overwriting newer values.
+- [x] A remote frontend can configure Bone without filesystem access.
+- [x] Concurrent stale mutations are rejected instead of overwriting newer values.
 
 ---
 
@@ -502,16 +530,16 @@ After successful migration, legacy page values are never consulted again.
 
 ### Work
 
-- [ ] Build `/config` pages from protocol schemas.
-- [ ] Replace direct `CustomConfigs` persistence with runtime commands.
-- [ ] Apply authoritative snapshots after mutation success.
-- [ ] Surface validation and restart requirements in the UI.
-- [ ] Preserve immediate feedback while a mutation is pending.
+- [x] Build `/config` pages from protocol schemas.
+- [x] Replace direct `CustomConfigs` persistence with runtime commands.
+- [x] Apply authoritative snapshots after mutation success.
+- [x] Surface validation and restart requirements in the UI.
+- [x] Preserve immediate feedback while a mutation is pending.
 
 ### Acceptance
 
-- [ ] In-process and remote TUI paths behave identically.
-- [ ] The TUI does not write configuration files directly.
+- [x] In-process and remote TUI paths behave identically.
+- [x] The TUI does not write configuration files directly.
 
 ---
 
@@ -519,17 +547,17 @@ After successful migration, legacy page values are never consulted again.
 
 ### Work
 
-- [ ] Remove `parseConfigPage`, `setGeneralValue`, and direct general/tools writes from the bridge.
-- [ ] Remove direct provider YAML CRUD from the bridge after typed provider protocol operations exist.
-- [ ] Proxy daemon configuration operations through the existing bridge transport.
-- [ ] Render daemon-provided schemas and values.
-- [ ] Remove duplicated JavaScript defaults and field metadata.
+- [x] Remove `parseConfigPage`, `setGeneralValue`, and direct general/tools writes from the bridge.
+- [x] Remove direct provider YAML CRUD from the bridge after typed provider protocol operations exist.
+- [x] Proxy daemon configuration operations through the existing bridge transport.
+- [x] Render daemon-provided schemas and values.
+- [x] Remove duplicated JavaScript config defaults and field metadata; retain only provider editor metadata until the protocol exposes a provider-field schema.
 
 ### Acceptance
 
-- [ ] Web and TUI changes produce the same persisted values and runtime behavior.
-- [ ] Web behavior settings no longer write ignored legacy values.
-- [ ] The bridge contains no Bone configuration parser.
+- [x] Web and TUI changes produce the same persisted values and runtime behavior.
+- [x] Web behavior settings no longer write ignored legacy values.
+- [x] The bridge contains no Bone configuration parser.
 
 ---
 
@@ -537,19 +565,19 @@ After successful migration, legacy page values are never consulted again.
 
 ### Work
 
-- [ ] Move providers to root `providers.yaml` under the interim Bone root.
-- [ ] Move subagents out of `config.yaml` into `subagents.yaml`.
-- [ ] Move extension values out of `config.yaml` into `extensions.yaml`.
-- [ ] Keep common settings and tool/command deny lists in compact `config.yaml`.
-- [ ] Implement the versioned migration and backups.
-- [ ] Preserve provider file permissions and credential values.
-- [ ] Add fixtures for every supported legacy shape.
+- [x] Move providers to root `providers.yaml` under the interim Bone root.
+- [x] Move subagents out of `config.yaml` into `subagents.yaml`.
+- [x] Move extension values out of `config.yaml` into `extensions.yaml`.
+- [x] Keep common settings and tool/command deny lists in compact `config.yaml`.
+- [x] Implement the versioned migration and backups.
+- [x] Preserve provider file permissions and credential values.
+- [x] Add fixtures for every supported legacy shape.
 
 ### Acceptance
 
-- [ ] `config.yaml` remains readable and excludes large prompts, provider entries, and extension payloads.
-- [ ] Existing installations preserve all effective values.
-- [ ] Interrupted migration can be rerun safely.
+- [x] `config.yaml` remains readable and excludes large prompts, provider entries, and extension payloads.
+- [x] Existing installations preserve all effective values.
+- [x] Interrupted migration can be rerun safely.
 
 ---
 
@@ -557,17 +585,17 @@ After successful migration, legacy page values are never consulted again.
 
 ### Work
 
-- [ ] Define General and Status schemas in Rust.
-- [ ] Stop seeding `config/general.yaml` and `config/status.yaml`.
-- [ ] Stop seeding `config/tools.yaml` and `config/commands.yaml` after their values migrate.
-- [ ] Remove legacy page routing and fallback logic after the supported migration window.
-- [ ] Delete stale comments claiming page YAML is authoritative.
-- [ ] Keep a read-only migration parser isolated from the live config path.
+- [x] Define General and Status schemas in Rust.
+- [x] Stop seeding `config/general.yaml` and `config/status.yaml`.
+- [x] Stop seeding `config/tools.yaml` and `config/commands.yaml` after their values migrate.
+- [x] Remove legacy page routing and fallback logic from live runtime paths.
+- [x] Delete stale comments claiming page YAML is authoritative.
+- [x] Keep a read-only migration parser isolated from the live config path.
 
 ### Acceptance
 
-- [ ] No user-editable YAML file contains UI labels, types, options, and current values together.
-- [ ] Legacy files cannot override or shadow canonical values after migration.
+- [x] No user-editable YAML file contains UI labels, types, options, and current values together.
+- [x] Legacy files cannot override or shadow canonical values after migration.
 
 ---
 
@@ -575,18 +603,18 @@ After successful migration, legacy page values are never consulted again.
 
 ### Work
 
-- [ ] Implement `bone.settings.define` with namespace validation.
-- [ ] Merge valid extension schemas into the daemon config schema snapshot.
-- [ ] Persist extension values in `extensions.yaml`.
-- [ ] Generate one config page or section for each extension that declares settings.
-- [ ] Preserve values when an extension is disabled or unavailable.
-- [ ] Reject schema collisions and invalid defaults with actionable warnings.
+- [x] Implement `bone.settings.define` with namespace validation.
+- [x] Merge valid extension schemas into the daemon config schema snapshot.
+- [x] Persist extension values in `extensions.yaml`.
+- [x] Generate one config page or section for each extension that declares settings.
+- [x] Preserve values when an extension is disabled or unavailable.
+- [x] Reject schema collisions and invalid defaults with actionable warnings.
 
 ### Acceptance
 
-- [ ] An extension can add a config page without Rust, TUI, or web-specific code.
-- [ ] Extensions without settings do not create empty pages.
-- [ ] Both frontends render extension settings from the same schema.
+- [x] An extension can add a config page without Rust, TUI, or web-specific code.
+- [x] Extensions without settings do not create empty pages.
+- [x] Both frontends render extension settings from the same schema.
 
 ---
 
@@ -612,34 +640,40 @@ After successful migration, legacy page values are never consulted again.
 
 ### Tests
 
-- [ ] Default-only startup creates minimal files rather than serializing every default.
-- [ ] Every built-in setting accepts valid values and rejects invalid values.
-- [ ] Cross-document references reject missing providers or invalid active selections.
-- [ ] TUI, web, Lua, and remote mutations follow the same persistence path.
-- [ ] Revision conflicts do not lose updates.
-- [ ] Atomic write failures preserve the prior active and persisted state.
-- [ ] Provider credentials and permissions survive migration.
-- [ ] Unknown extension values survive load/save cycles.
-- [ ] Invalid extension schemas do not break unrelated config pages.
-- [ ] Restart-required changes are persisted and reported consistently.
-- [ ] Legacy migration is idempotent across all fixtures.
-- [ ] No runtime path reads General/Status page values after migration.
+- [x] Default-only startup creates minimal files rather than serializing every default.
+- [x] Every built-in setting accepts valid values and rejects invalid values.
+- [x] Cross-document references reject missing providers or invalid active selections.
+- [x] TUI, web, Lua, and remote mutations follow the same persistence path.
+- [x] Revision conflicts do not lose updates.
+- [x] Atomic write failures preserve the prior active and persisted state.
+- [x] Provider credentials and permissions survive migration.
+- [x] Unknown extension values survive load/save cycles.
+- [x] Invalid extension schemas do not break unrelated config pages.
+- [x] Restart-required changes are persisted and reported consistently.
+- [x] Legacy migration is idempotent across all fixtures.
+- [x] No runtime path reads General/Status page values after migration.
+
+Verified coverage includes settings values-only/validation tests; migration precedence,
+credential, permission, invalid-input, marker, fixture, and retry tests; store rollback,
+revision, mirror, subagent, and inert-legacy tests; RPC provider preflight and daemon
+subagent tests; Lua schema owner rollback/collision and snapshot tests; protocol
+round trips; TUI schema/pending-response tests; and web canonical-path/correlation tests.
 
 ### Documentation
 
-- [ ] Document the domain files and who owns them.
-- [ ] Document schema versus value separation.
-- [ ] Document provider secret references.
-- [ ] Document Lua extension setting registration.
-- [ ] Document reload behavior and restart requirements.
-- [ ] Update generated `AGENTS.md`, README, setup help, and web documentation together.
+- [x] Document the domain files and who owns them.
+- [x] Document schema versus value separation.
+- [x] Document provider secret references.
+- [x] Document Lua extension setting registration.
+- [x] Document reload behavior and restart requirements.
+- [x] Update generated `AGENTS.md`, README, setup help, and web documentation together.
 
 ### Cleanup
 
-- [ ] Remove obsolete page types and migration branches no longer in the support window.
-- [ ] Remove direct frontend filesystem access.
-- [ ] Remove duplicated defaults and option lists.
-- [ ] Inspect the final diff for unrelated changes and dead code.
+- [x] Remove obsolete page migration branches and dead config methods while retaining live compatibility types.
+- [x] Remove direct frontend filesystem access.
+- [x] Remove duplicated defaults and option lists.
+- [x] Inspect the final diff for unrelated changes and dead code.
 
 ## Final acceptance criteria
 

@@ -33,8 +33,8 @@ const STEP_COUNT: usize = 5;
 
 struct State {
     step: Step,
-    /// Loaded config — provider edits are persisted through it immediately.
-    custom: config::custom::CustomConfigs,
+    /// Daemon configuration authority used during pre-runtime onboarding.
+    config: config::store::ConfigStore,
     /// Available providers as `(id, label)`.
     providers: Vec<(String, String)>,
     provider_cursor: usize,
@@ -55,9 +55,9 @@ struct State {
 
 impl State {
     fn new(fresh: bool) -> Self {
-        let custom = config::custom::CustomConfigs::load();
-        let mut providers: Vec<(String, String)> = custom
-            .derive_providers_config()
+        let config = config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded());
+        let mut providers: Vec<(String, String)> = config
+            .providers_config()
             .providers
             .into_iter()
             .map(|(id, entry)| {
@@ -102,7 +102,7 @@ impl State {
 
         Self {
             step: Step::Welcome,
-            custom,
+            config,
             providers,
             provider_cursor: 0,
             api_key: String::new(),
@@ -165,11 +165,28 @@ impl State {
         let Some((id, _)) = self.providers.get(self.provider_cursor).cloned() else {
             return;
         };
-        if let Some(mut entry) = self.custom.get_provider_entry("providers", &id) {
-            entry.api_key = key.to_string();
-            self.custom.set_provider_entry("providers", &id, &entry);
-            self.custom.set_last_provider(&id);
-            self.provider_saved = Some(id);
+        let config = self.config.providers_config();
+        if let Some(entry) = config.providers.get(&id) {
+            let revision = self.config.snapshot().revision;
+            let update = bone_protocol::ProviderUpdate {
+                id: id.clone(),
+                label: entry.label.clone(),
+                base_url: entry.base_url.clone(),
+                model: entry.model.clone(),
+                endpoint: entry.endpoint.clone(),
+                handler: entry.handler.clone(),
+                context_window_tokens: entry.context_window_tokens,
+                reasoning_effort: entry.reasoning_effort.clone(),
+                api_key: Some(key.to_string()),
+            };
+            if self.config.upsert_provider(update, revision).is_ok()
+                && self
+                    .config
+                    .set_active_provider(&id, revision.saturating_add(1))
+                    .is_ok()
+            {
+                self.provider_saved = Some(id);
+            }
         }
     }
 }
@@ -452,7 +469,7 @@ fn draw_provider(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     if state.providers.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "No providers configured. Edit config/providers.yaml later.",
+                "No providers configured. Add one with /config later.",
                 Style::default().fg(MUTED),
             )))
             .wrap(Wrap { trim: false }),

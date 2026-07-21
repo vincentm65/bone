@@ -117,6 +117,27 @@ pub enum RuntimeEvent {
         #[serde(default)]
         subagents: Vec<crate::session::SubagentDefinition>,
     },
+    /// Daemon-owned schema and redacted resolved configuration.
+    ConfigSnapshot {
+        schema: crate::config::ConfigSchema,
+        snapshot: crate::config::ConfigSnapshot,
+    },
+    /// Successful aggregate mutation. The included snapshot is authoritative.
+    ConfigChanged {
+        changed_paths: Vec<String>,
+        schema: crate::config::ConfigSchema,
+        snapshot: crate::config::ConfigSnapshot,
+        restart_required: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Rejected mutation, including stale-revision conflicts.
+    ConfigMutationRejected {
+        current_revision: u64,
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     ConversationLoaded {
         messages: Vec<ChatMessage>,
         snapshot: SessionSnapshot,
@@ -253,23 +274,82 @@ pub enum RuntimeCommand {
     /// Reload only canonical `config.yaml`, preserving extension/tool runtime
     /// state, then broadcast a fresh full frontend settings snapshot.
     ReloadSettings,
+    /// Request the current schema and redacted aggregate snapshot.
+    GetConfig,
+    SetConfigValue {
+        path: String,
+        value: serde_json::Value,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    ResetConfigValue {
+        path: String,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    UpsertProvider {
+        provider: crate::config::ProviderUpdate,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    DeleteProvider {
+        id: String,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    SetActiveProvider {
+        id: String,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    SetToolEnabled {
+        name: String,
+        enabled: bool,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    SetCommandEnabled {
+        name: String,
+        enabled: bool,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Validate and atomically persist one registered extension setting.
     SetSetting {
         path: String,
         value: serde_json::Value,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Create or replace one canonical config-backed sub-agent.
     UpsertSubagent {
         agent: crate::session::SubagentDefinition,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Remove one canonical config-backed sub-agent.
     DeleteSubagent {
         name: String,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Enable or disable one canonical config-backed sub-agent.
     SetSubagentEnabled {
         name: String,
         enabled: bool,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Set the daemon's authoritative approval mode (`"safe"` / `"danger"`).
     /// The frontend sends this whenever the user cycles Safe/Danger so the

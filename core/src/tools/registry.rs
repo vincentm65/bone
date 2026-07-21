@@ -139,15 +139,11 @@ fn reject_degenerate_arguments(tool: &dyn Tool, arguments: &serde_json::Value) -
             }
         ));
     }
-    if arguments
-        .as_object()
-        .is_some_and(|fields| !fields.is_empty())
-    {
-        return None;
-    }
     let required = required_fields(tool);
-    if required.is_empty() {
-        return None;
+    if let Some(fields) = arguments.as_object() {
+        if !fields.is_empty() || required.is_empty() {
+            return None;
+        }
     }
     let got = match arguments {
         serde_json::Value::Null => "no arguments".to_string(),
@@ -163,9 +159,13 @@ fn reject_degenerate_arguments(tool: &dyn Tool, arguments: &serde_json::Value) -
             }
         ),
     };
-    Some(format!(
-        "tool call arrived with {got}; re-send the call as a JSON object with required field(s): {}",
+    let required = if required.is_empty() {
+        "(see tool schema)".to_string()
+    } else {
         required.join(", ")
+    };
+    Some(format!(
+        "tool call arrived with {got}; re-send the call as a JSON object with required field(s): {required}"
     ))
 }
 
@@ -319,6 +319,14 @@ impl ToolHandler {
     /// ship them to a VM-less frontend so it can render custom tool rows.
     pub fn display_map(&self) -> &HashMap<String, ToolDisplayConfig> {
         &self.dynamic_display
+    }
+
+    pub fn all_definitions(&self) -> Vec<ToolDefinition> {
+        self.registry
+            .definitions()
+            .into_iter()
+            .filter(|tool| !tool.name.starts_with('/'))
+            .collect()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {

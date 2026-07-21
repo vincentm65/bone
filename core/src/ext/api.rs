@@ -132,30 +132,41 @@ pub fn setup_api(
 
     setup_theme_api(lua, bone, Arc::clone(&settings), &settings_path)?;
 
-    // bone.settings.{register,get,set,reset} — canonical settings plus
-    // declarative extension-owned schemas.
+    // bone.settings.{define,get,set,reset} — canonical settings plus
+    // declarative extension-owned schemas. `register` remains as a compatibility
+    // alias for the original declaration-table shape.
     let settings_api = lua.create_table().map_err(crate::util::errstr)?;
 
     let register_registry = Arc::clone(&registry);
     let register = lua
         .create_function(move |lua, declaration: Table| {
-            let mut page: super::settings_registry::SettingsPage =
-                lua.from_value(Value::Table(declaration))?;
-            let bone: Table = lua.globals().get("bone")?;
-            page.owner = bone
-                .get::<Option<String>>("_settings_owner")?
-                .unwrap_or_else(|| "init.lua".into());
-            register_registry
-                .write()
-                .map_err(|e| {
-                    mlua::Error::external(format!("settings registry lock poisoned: {e}"))
-                })?
-                .register(page)
-                .map_err(mlua::Error::external)
+            register_settings_page(lua, declaration, &register_registry)
         })
         .map_err(crate::util::errstr)?;
     settings_api
         .set("register", register)
+        .map_err(crate::util::errstr)?;
+
+    let define_registry = Arc::clone(&registry);
+    let define = lua
+        .create_function(move |lua, (namespace, schema): (String, Table)| {
+            schema.set("namespace", namespace)?;
+            let fields: Table = schema.get("fields")?;
+            let mut declared = fields
+                .pairs::<String, Table>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            declared.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let sequence = lua.create_table()?;
+            for (index, (key, field)) in declared.into_iter().enumerate() {
+                field.set("key", key)?;
+                sequence.set(index + 1, field)?;
+            }
+            schema.set("fields", sequence)?;
+            register_settings_page(lua, schema, &define_registry)
+        })
+        .map_err(crate::util::errstr)?;
+    settings_api
+        .set("define", define)
         .map_err(crate::util::errstr)?;
 
     let rollback_registry = Arc::clone(&registry);
@@ -241,27 +252,6 @@ pub fn setup_api(
         .set("_pages", pages)
         .map_err(crate::util::errstr)?;
 
-    let extension_set_registry = Arc::clone(&registry);
-    let extension_set_store = Arc::clone(&settings);
-    let extension_set_path = settings_path.clone();
-    let extension_set = lua
-        .create_function(move |lua, (path, value): (String, Value)| {
-            let value: crate::config::settings::ExtensionValue = lua.from_value(value)?;
-            let registry = extension_set_registry.read().map_err(|e| {
-                mlua::Error::external(format!("settings registry lock poisoned: {e}"))
-            })?;
-            let mut settings = extension_set_store
-                .lock()
-                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
-            registry
-                .set(&mut settings, &path, value, &extension_set_path)
-                .map_err(mlua::Error::external)
-        })
-        .map_err(crate::util::errstr)?;
-    settings_api
-        .set("_set_extension", extension_set)
-        .map_err(crate::util::errstr)?;
-
     let get_store = Arc::clone(&settings);
     let get = lua
         .create_function(move |lua, path: String| {
@@ -323,6 +313,24 @@ pub fn setup_api(
         .map_err(crate::util::errstr)?;
 
     Ok(())
+}
+
+fn register_settings_page(
+    lua: &Lua,
+    declaration: Table,
+    registry: &super::settings_registry::SharedSettingsRegistry,
+) -> mlua::Result<()> {
+    let mut page: super::settings_registry::SettingsPage =
+        lua.from_value(Value::Table(declaration))?;
+    let bone: Table = lua.globals().get("bone")?;
+    page.owner = bone
+        .get::<Option<String>>("_settings_owner")?
+        .unwrap_or_else(|| "init.lua".into());
+    registry
+        .write()
+        .map_err(|e| mlua::Error::external(format!("settings registry lock poisoned: {e}")))?
+        .register(page)
+        .map_err(mlua::Error::external)
 }
 
 fn setup_theme_api(

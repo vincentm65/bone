@@ -114,6 +114,29 @@ fn boot_runtime_host_for(
     })
 }
 
+fn actor_provider_config(
+    config: &bone::config::store::ConfigStore,
+    cli_provider: Option<&str>,
+    cli_model: Option<&str>,
+) -> Result<(String, bone::config::ProvidersConfig), String> {
+    let mut providers = config.providers_config();
+    let provider_id = cli_provider.map(str::to_owned).unwrap_or_else(|| {
+        if providers.last_provider.is_empty() {
+            "local".to_string()
+        } else {
+            providers.last_provider.clone()
+        }
+    });
+    if let Some(model) = cli_model {
+        let entry = providers
+            .providers
+            .get_mut(&provider_id)
+            .ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
+        entry.model = model.to_string();
+    }
+    Ok((provider_id, providers))
+}
+
 /// `bone serve` — bind a socket, run the headless runtime, and fan its events
 /// out to every attached frontend. Each `SubmitPrompt` drives a full agent turn
 /// whose events stream back over the protocol.
@@ -123,36 +146,19 @@ fn boot_runtime_host_for(
 async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let addr = parse_listen_addr(args);
     let shutdown_on_eof = has_flag(args, "--shutdown-on-stdin-eof");
-    // Build the provider from config, honoring `--provider`/`--model`.
     let (cli_provider, cli_model) = parse_provider_model(args);
-    let mut custom = CustomConfigs::load();
-    let shared_settings = std::sync::Arc::new(std::sync::Mutex::new(
-        custom
-            .settings
-            .clone()
-            .unwrap_or_else(bone::config::settings::Settings::defaults),
-    ));
-    let provider_id = cli_provider.unwrap_or_else(|| {
-        if custom.get_last_provider().is_empty() {
-            "local".to_string()
+    let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded());
+    let configured_provider = config.providers_config().last_provider;
+    let provider_label = cli_provider.as_deref().unwrap_or_else(|| {
+        if configured_provider.is_empty() {
+            "local"
         } else {
-            custom.get_last_provider()
+            &configured_provider
         }
     });
-    if let Some(model) = cli_model.as_ref()
-        && let Some(mut entry) = custom.get_provider_entry("providers", &provider_id)
-    {
-        entry.model = model.clone();
-        custom.set_provider_entry("providers", &provider_id, &entry);
-    }
-    let providers_config = custom.derive_providers_config();
-    let provider = providers::create_provider_with_config(&provider_id, &providers_config)
-        .map_err(std::io::Error::other)?;
-    let provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider> =
-        std::sync::Arc::from(provider);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("bone: serving runtime on {addr} (provider: {provider_id})");
+    eprintln!("bone: serving runtime on {addr} (provider: {provider_label})");
     if !addr.starts_with("127.")
         && !addr.starts_with("localhost")
         && !addr.starts_with("[::1]")
@@ -166,23 +172,23 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
 
     let (session_manager, manager_rx) = bone::rpc::SessionManager::new();
     let hub_group = bone::rpc::HubGroup::default();
-    let factory_provider = provider.clone();
-    let factory_settings = shared_settings.clone();
+    let shared_config = config;
+    let factory_config = shared_config.clone();
     let factory = move |target: bone::rpc::SessionTarget| {
-        // Each actor gets an independent Lua VM/tool state and RuntimeSession.
-        // The provider HTTP client is safe to share and each actor may still
-        // switch its own provider later through the existing command.
-        let mut custom = CustomConfigs::load();
-        // Read this per actor, not once when `bone serve` starts: settings may
-        // change while the server stays alive.
+        // Every actor boots from the current daemon-owned configuration. CLI
+        // provider/model overrides remain fixed for the life of this process.
+        let mut custom = factory_config.legacy_snapshot();
+        let (provider_id, providers_config) = actor_provider_config(
+            &factory_config,
+            cli_provider.as_deref(),
+            cli_model.as_deref(),
+        )?;
+        let provider = providers::create_provider_with_config(&provider_id, &providers_config)
+            .map_err(|error| error.to_string())?;
+        let provider = std::sync::Arc::from(provider);
         let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
-        let mut boot = boot_runtime_host_for(
-            factory_provider.clone(),
-            &mut custom,
-            target,
-            Some(factory_settings.clone()),
-        )
-        .map_err(|err| err.to_string())?;
+        let mut boot = boot_runtime_host_for(provider, &mut custom, target, None)
+            .map_err(|err| err.to_string())?;
         let conversation_id = boot
             .session
             .lock()
@@ -206,7 +212,6 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             let matches =
                 want_provider == boot.provider.id() && want_model == boot.provider.model();
             if !matches {
-                let providers_config = custom.derive_providers_config();
                 match bone::llm::providers::build_provider(
                     &want_provider,
                     &want_model,
@@ -242,11 +247,14 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             ]
         });
         let (hub, commands_rx) = bone::rpc::Hub::new_grouped(hub_group.clone());
+        let config = factory_config.clone();
+        config.attach_extensions(boot.manager.clone());
         let task = Box::pin(bone::rpc::run_daemon(
             hub.publisher(),
             commands_rx,
             boot.provider,
             boot.manager,
+            config,
             boot.session,
             approval_mode,
             None,
@@ -528,28 +536,25 @@ async fn main() -> std::io::Result<()> {
     bone::update_check::check_in_background();
 
     // Normal TUI mode
-    let mut custom = CustomConfigs::load();
+    let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded());
+    let mut custom = config.legacy_snapshot();
     let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
     // Frontend settings arrive from the daemon-owned FrontendState snapshot.
     let cfg = UserConfig::default();
-    let mut providers_config = custom.derive_providers_config();
+    let mut providers_config = config.providers_config();
 
     let cli_options = parse_cli_options(&args).map_err(std::io::Error::other)?;
-    let provider_id = cli_options.provider.unwrap_or_else(|| {
-        if custom.get_last_provider().is_empty() {
+    let provider_id = cli_options.provider.clone().unwrap_or_else(|| {
+        if providers_config.last_provider.is_empty() {
             "local".to_string()
         } else {
-            custom.get_last_provider()
+            providers_config.last_provider.clone()
         }
     });
 
     if let Some(model) = cli_options.model.as_ref() {
-        if let Some(entry) = custom.get_provider_entry("providers", &provider_id) {
-            let mut entry = entry;
+        if let Some(entry) = providers_config.providers.get_mut(&provider_id) {
             entry.model = model.clone();
-            custom.set_provider_entry("providers", &provider_id, &entry);
-            // Update the derived config too
-            providers_config = custom.derive_providers_config();
         } else {
             return Err(std::io::Error::other(format!(
                 "unknown provider `{provider_id}`"
@@ -557,7 +562,9 @@ async fn main() -> std::io::Result<()> {
         }
     }
     if cli_options.changed {
-        custom.set_last_provider(&provider_id);
+        config
+            .set_active_provider(&provider_id, config.snapshot().revision)
+            .map_err(|(_, error)| std::io::Error::other(error))?;
         providers_config.last_provider = provider_id.clone();
     }
     bone::config::warn_if_no_api_key_for(&provider_id, &providers_config);
@@ -622,11 +629,13 @@ async fn main() -> std::io::Result<()> {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
+            config.attach_extensions(boot.manager.clone());
             let daemon = tokio::task::spawn_local(bone::rpc::run_daemon(
                 hub.publisher(),
                 commands_rx,
                 boot.provider,
                 boot.manager,
+                config,
                 boot.session,
                 approval_mode,
                 None,

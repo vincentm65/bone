@@ -14,7 +14,7 @@ use crate::llm::{ChatMessage, LlmProvider};
 use crate::tools::{ApprovalMode, CallOutcome, ToolCall, ToolResult};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::time::Instant;
 use tokio::time::Duration;
@@ -234,6 +234,10 @@ impl WireTools {
     }
 }
 
+fn lua_config_available(commands: &[(String, String)]) -> bool {
+    commands.iter().any(|(name, _)| name == "config")
+}
+
 fn configured_input_style(
     snapshot: &crate::ext::snapshots::InputStyleSnapshot,
     preset: Option<&str>,
@@ -243,6 +247,172 @@ fn configured_input_style(
         snapshot.preset = Some(preset.to_string());
     }
     super::render::InputStyle::from_snapshot(&snapshot)
+}
+
+#[derive(Default)]
+struct ConfigView {
+    schema: Option<bone_protocol::ConfigSchema>,
+    snapshot: Option<bone_protocol::ConfigSnapshot>,
+}
+
+impl ConfigView {
+    fn revision(&self) -> u64 {
+        self.snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.revision)
+    }
+
+    fn field(&self, path: &str) -> Option<&bone_protocol::SettingDefinition> {
+        fn find<'a>(
+            pages: &'a [bone_protocol::ConfigPage],
+            path: &str,
+        ) -> Option<&'a bone_protocol::SettingDefinition> {
+            pages.iter().find_map(|page| {
+                page.fields
+                    .iter()
+                    .find(|field| field.path == path)
+                    .or_else(|| find(&page.pages, path))
+            })
+        }
+        self.schema
+            .as_ref()
+            .and_then(|schema| find(&schema.pages, path))
+    }
+
+    fn value(&self, field: &bone_protocol::SettingDefinition) -> serde_json::Value {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                field
+                    .path
+                    .split('.')
+                    .try_fold(&snapshot.values, |value, part| value.get(part))
+                    .cloned()
+            })
+            .or_else(|| field.value.clone())
+            .unwrap_or_else(|| field.default.clone())
+    }
+
+    fn disabled_commands(&self) -> &[String] {
+        self.snapshot
+            .as_ref()
+            .map_or(&[], |snapshot| snapshot.disabled_commands.as_slice())
+    }
+}
+
+fn parse_config_value(
+    field: &bone_protocol::SettingDefinition,
+    input: &str,
+) -> Result<serde_json::Value, String> {
+    fn validate_bounds(field: &bone_protocol::SettingDefinition, value: f64) -> Result<(), String> {
+        if field.min.is_some_and(|min| value < min) {
+            return Err(format!("must be at least {}", field.min.unwrap()));
+        }
+        if field.max.is_some_and(|max| value > max) {
+            return Err(format!("must be at most {}", field.max.unwrap()));
+        }
+        Ok(())
+    }
+
+    match field.value_type.as_str() {
+        "bool" => match input.to_ascii_lowercase().as_str() {
+            "true" | "on" | "yes" => Ok(serde_json::Value::Bool(true)),
+            "false" | "off" | "no" => Ok(serde_json::Value::Bool(false)),
+            _ => Err("expected true/false, on/off, or yes/no".into()),
+        },
+        "number" => {
+            if field.integer == Some(true) {
+                let value = input
+                    .parse::<i64>()
+                    .map_err(|_| "expected an integer".to_string())?;
+                validate_bounds(field, value as f64)?;
+                Ok(serde_json::Value::from(value))
+            } else {
+                let value = input
+                    .parse::<f64>()
+                    .map_err(|_| "expected a number".to_string())?;
+                if !value.is_finite() {
+                    return Err("expected a finite number".into());
+                }
+                validate_bounds(field, value)?;
+                Ok(serde_json::Value::from(value))
+            }
+        }
+        "enum" => {
+            if field.options.iter().any(|option| option == input) {
+                Ok(serde_json::Value::String(input.into()))
+            } else {
+                Err(format!("expected one of: {}", field.options.join(", ")))
+            }
+        }
+        "string" => Ok(serde_json::Value::String(input.into())),
+        other => Err(format!("unsupported setting type `{other}`")),
+    }
+}
+
+fn take_pending_config(
+    pending: &mut BTreeMap<String, String>,
+    request_id: Option<String>,
+) -> Option<String> {
+    request_id.and_then(|request_id| pending.remove(&request_id))
+}
+
+fn render_config_page(view: &ConfigView, requested: Option<&str>) -> Result<String, String> {
+    fn collect<'a>(
+        pages: &'a [bone_protocol::ConfigPage],
+        requested: Option<&str>,
+        out: &mut Vec<&'a bone_protocol::ConfigPage>,
+    ) {
+        for page in pages {
+            if requested.is_none_or(|name| page.namespace == name) {
+                out.push(page);
+            }
+            collect(&page.pages, requested, out);
+        }
+    }
+
+    let schema = view
+        .schema
+        .as_ref()
+        .ok_or_else(|| "Configuration is still loading; try again shortly.".to_string())?;
+    let mut pages = Vec::new();
+    collect(&schema.pages, requested, &mut pages);
+    if pages.is_empty() {
+        return Err(format!(
+            "Unknown configuration page `{}`.",
+            requested.unwrap_or_default()
+        ));
+    }
+    let mut lines = Vec::new();
+    for page in pages {
+        if page.fields.is_empty() {
+            continue;
+        }
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(page.title.clone());
+        for field in &page.fields {
+            let value = view.value(field);
+            let rendered = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            let options = if field.options.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", field.options.join(" | "))
+            };
+            lines.push(format!(
+                "  {} = {}{} — {}",
+                field.path, rendered, options, field.label
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Set: /config set <path> <value>".into());
+    lines.push("Reset: /config reset <path>".into());
+    Ok(lines.join("\n"))
 }
 
 pub struct App {
@@ -268,6 +438,10 @@ pub struct App {
     pub renderer: Renderer,
     pub user_config: UserConfig,
     pub custom_configs: config::custom::CustomConfigs,
+    /// Latest daemon-owned typed schema/snapshot and correlated mutations.
+    config_view: ConfigView,
+    pending_config: BTreeMap<String, String>,
+    next_config_request: u64,
     pub queue: VecDeque<String>,
     /// Selected row in the native input-queue pane.
     pub queue_selected: usize,
@@ -405,6 +579,7 @@ impl App {
             ..Default::default()
         };
 
+        let _ = command_tx.send(crate::runtime::RuntimeCommand::GetConfig);
         Ok(Self {
             messages,
             command_tx,
@@ -418,6 +593,9 @@ impl App {
             renderer,
             user_config,
             custom_configs,
+            config_view: ConfigView::default(),
+            pending_config: BTreeMap::new(),
+            next_config_request: 0,
             queue: VecDeque::new(),
             queue_selected: 0,
             queue_editing: None,
@@ -536,6 +714,38 @@ impl App {
             } => {
                 self.apply_frontend_state(banner, settings, commands, tool_defs, tool_display);
             }
+            RuntimeEvent::ConfigSnapshot { schema, snapshot } => {
+                self.apply_config_snapshot(schema, snapshot);
+            }
+            RuntimeEvent::ConfigChanged {
+                schema,
+                snapshot,
+                restart_required,
+                request_id,
+                ..
+            } => {
+                let completed = self.finish_config_change(schema, snapshot, request_id);
+                if let Some(path) = completed {
+                    self.messages
+                        .push(Message::system(format!("Configuration updated: {path}.")));
+                }
+                if restart_required {
+                    self.messages.push(Message::system(
+                        "Configuration saved. Restart required to apply this change.",
+                    ));
+                }
+            }
+            RuntimeEvent::ConfigMutationRejected {
+                current_revision,
+                error,
+                request_id,
+            } => {
+                let path = self.reject_config_change(current_revision, request_id);
+                let context = path.map_or(String::new(), |path| format!(" for {path}"));
+                self.messages.push(Message::system(format!(
+                    "Configuration change{context} rejected: {error}"
+                )));
+            }
             // Pane/UI diff from the daemon (e.g. a command's pane between turns).
             // Both in-process and remote clients receive these via the event bus
             // when `forward_view_diffs` is enabled.
@@ -545,6 +755,112 @@ impl App {
             // All other events are turn-scoped and ignored in idle.
             _ => {}
         }
+    }
+
+    fn apply_config_snapshot(
+        &mut self,
+        schema: bone_protocol::ConfigSchema,
+        snapshot: bone_protocol::ConfigSnapshot,
+    ) {
+        let settings_value = snapshot.values.clone();
+        self.config_view = ConfigView {
+            schema: Some(schema),
+            snapshot: Some(snapshot),
+        };
+        if let Ok(settings) =
+            serde_json::from_value::<crate::config::settings::BoneSettings>(settings_value)
+        {
+            self.renderer.theme.apply_snapshot(&settings.theme);
+            apply_settings_to_user_config(&mut self.user_config, &settings);
+            self.keymaps = settings.keymaps;
+            self.approval_mode = self.user_config.approval_mode;
+        }
+    }
+
+    fn finish_config_change(
+        &mut self,
+        schema: bone_protocol::ConfigSchema,
+        snapshot: bone_protocol::ConfigSnapshot,
+        request_id: Option<String>,
+    ) -> Option<String> {
+        self.apply_config_snapshot(schema, snapshot);
+        take_pending_config(&mut self.pending_config, request_id)
+    }
+
+    fn reject_config_change(
+        &mut self,
+        current_revision: u64,
+        request_id: Option<String>,
+    ) -> Option<String> {
+        if let Some(snapshot) = self.config_view.snapshot.as_mut() {
+            snapshot.revision = current_revision;
+        }
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::GetConfig);
+        take_pending_config(&mut self.pending_config, request_id)
+    }
+
+    fn begin_config_change(&mut self, path: impl Into<String>) -> String {
+        self.next_config_request = self.next_config_request.saturating_add(1);
+        let request_id = format!("tui-{}-{}", std::process::id(), self.next_config_request);
+        self.pending_config.insert(request_id.clone(), path.into());
+        request_id
+    }
+
+    fn config_command(&mut self, arg: &str) -> String {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            return render_config_page(&self.config_view, None).unwrap_or_else(|error| error);
+        }
+        if let Some(path) = arg.strip_prefix("reset ").map(str::trim) {
+            if self.config_view.field(path).is_none() {
+                return format!("Unknown configuration setting `{path}`.");
+            }
+            let request_id = self.begin_config_change(path);
+            if self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::ResetConfigValue {
+                    path: path.into(),
+                    expected_revision: self.config_view.revision(),
+                    request_id: Some(request_id.clone()),
+                })
+                .is_err()
+            {
+                self.pending_config.remove(&request_id);
+                return "Configuration daemon is unavailable.".into();
+            }
+            return format!("Resetting {path}…");
+        }
+        if let Some(rest) = arg.strip_prefix("set ") {
+            let Some((path, raw)) = rest.trim().split_once(char::is_whitespace) else {
+                return "Usage: /config set <path> <value>".into();
+            };
+            let raw = raw.trim();
+            let Some(field) = self.config_view.field(path) else {
+                return format!("Unknown configuration setting `{path}`.");
+            };
+            let value = match parse_config_value(field, raw) {
+                Ok(value) => value,
+                Err(error) => return format!("Invalid value for {path}: {error}."),
+            };
+            let request_id = self.begin_config_change(path);
+            if self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::SetConfigValue {
+                    path: path.into(),
+                    value,
+                    expected_revision: self.config_view.revision(),
+                    request_id: Some(request_id.clone()),
+                })
+                .is_err()
+            {
+                self.pending_config.remove(&request_id);
+                return "Configuration daemon is unavailable.".into();
+            }
+            return format!("Saving {path}…");
+        }
+        render_config_page(&self.config_view, Some(arg)).unwrap_or_else(|error| error)
     }
 
     /// Adopt the daemon-owned resolved settings and display metadata from a
@@ -688,12 +1004,12 @@ impl App {
             }
             crate::ext::types::ConfigAction::ReloadTools => self.reload_extensions(),
             crate::ext::types::ConfigAction::SwitchProvider { id } => {
-                let mut custom = config::custom::CustomConfigs::load();
-                custom.set_last_provider(&id);
-                self.custom_configs = custom;
                 let prev = self.view.provider_id.clone();
-                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
-                    provider_id: id,
+                let request_id = self.begin_config_change(format!("providers.active ({id})"));
+                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SetActiveProvider {
+                    id,
+                    expected_revision: self.config_view.revision(),
+                    request_id: Some(request_id),
                 })
                 .await;
                 if self.view.provider_id == prev {
@@ -2377,7 +2693,7 @@ impl App {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0].to_string();
         let arg = parts.get(1).copied().unwrap_or("").to_string();
-        let has_lua_config = self.wire_commands.iter().any(|(name, _)| name == "config");
+        let has_lua_config = lua_config_available(&self.wire_commands);
 
         if has_lua_config
             && cmd == "provider"
@@ -2403,14 +2719,20 @@ impl App {
                 return Ok(());
             }
         }
-        if has_lua_config
-            && cmd == "config"
-            && self
-                .run_remote_command("config", &arg, term)
-                .await
-                .is_some()
-        {
-            return Ok(());
+        // `/config` is protected from arbitrary Lua overrides, but the bundled
+        // Lua command still owns its interactive UI. Keep the native schema
+        // renderer only as a fallback when that command is unavailable.
+        if cmd == "config" {
+            if has_lua_config
+                && self
+                    .run_remote_command("config", &arg, term)
+                    .await
+                    .is_some()
+            {
+                return Ok(());
+            }
+            let reply = self.config_command(&arg);
+            return self.show_reply(reply, term);
         }
 
         // Protected built-ins always win over Lua commands.
@@ -2418,20 +2740,12 @@ impl App {
             // Check if the lua command is enabled in commands config.
             // If the commands page is absent or empty, treat all registered commands as enabled
             // (same fallback semantics as tools).
-            let all_command_names: Vec<String> = self
-                .wire_commands
+            let enabled = !self
+                .config_view
+                .disabled_commands()
                 .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
-            let enabled_commands = self.custom_configs.enabled_command_names();
-            let enabled = if enabled_commands.is_empty() {
-                all_command_names
-            } else {
-                enabled_commands
-            };
-            if enabled.contains(&cmd)
-                && let Some(_reply) = self.run_remote_command(&cmd, &arg, term).await
-            {
+                .any(|name| name == &cmd);
+            if enabled && let Some(_reply) = self.run_remote_command(&cmd, &arg, term).await {
                 return Ok(());
             }
         }
@@ -2463,19 +2777,40 @@ impl App {
                     format!("{} ({})", self.view.provider_model, self.view.provider_id)
                 } else {
                     let provider_id = self.view.provider_id.clone();
-                    // Update the model in custom config for this provider.
-                    if let Some(mut entry) = self
-                        .custom_configs
-                        .get_provider_entry("providers", &provider_id)
-                    {
-                        entry.model = arg.to_string();
-                        self.custom_configs
-                            .set_provider_entry("providers", &provider_id, &entry);
+                    let provider = self
+                        .config_view
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| {
+                            snapshot
+                                .providers
+                                .iter()
+                                .find(|provider| provider.id == provider_id)
+                        })
+                        .cloned();
+                    if let Some(provider) = provider {
+                        let update = bone_protocol::ProviderUpdate {
+                            id: provider.id.clone(),
+                            label: provider.label.clone(),
+                            base_url: provider.base_url.clone(),
+                            model: arg.to_string(),
+                            endpoint: provider.endpoint.clone(),
+                            handler: provider.handler.clone(),
+                            context_window_tokens: provider.context_window_tokens,
+                            reasoning_effort: provider.reasoning_effort.clone(),
+                            api_key: None,
+                        };
+                        let request_id =
+                            self.begin_config_change(format!("providers.{}.model", provider.id));
+                        self.send_and_await_snapshot(
+                            crate::runtime::RuntimeCommand::UpsertProvider {
+                                provider: update,
+                                expected_revision: self.config_view.revision(),
+                                request_id: Some(request_id),
+                            },
+                        )
+                        .await;
                     }
-                    self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
-                        provider_id,
-                    })
-                    .await;
                     // The snapshot is authoritative: if the model didn't actually
                     // change, the switch failed (the daemon also emits the precise
                     // reason as a Status, surfaced by `await_state_snapshot`).
@@ -2498,15 +2833,18 @@ impl App {
                         "Current: {} ({})",
                         self.view.provider_model, self.view.provider_id
                     )];
-                    let providers = self.custom_configs.derive_providers_config().providers;
+                    let providers = self
+                        .config_view
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.providers.as_slice())
+                        .unwrap_or_default();
                     if providers.is_empty() {
-                        lines.push(
-                            "No providers configured. Edit ~/.bone-rust/config/providers.yaml"
-                                .to_string(),
-                        );
+                        lines.push("No providers configured.".to_string());
                     } else {
                         lines.push("Available:".to_string());
-                        for (id, entry) in &providers {
+                        for entry in providers {
+                            let id = &entry.id;
                             let marker = if id == &self.view.provider_id {
                                 " *"
                             } else {
@@ -2520,10 +2858,14 @@ impl App {
                     }
                     lines.join("\n")
                 } else {
-                    self.custom_configs.set_last_provider(&arg);
-                    self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
-                        provider_id: arg.to_string(),
-                    })
+                    let request_id = self.begin_config_change(format!("providers.active ({arg})"));
+                    self.send_and_await_snapshot(
+                        crate::runtime::RuntimeCommand::SetActiveProvider {
+                            id: arg.to_string(),
+                            expected_revision: self.config_view.revision(),
+                            request_id: Some(request_id),
+                        },
+                    )
                     .await;
                     // If the provider id didn't change, the switch failed (e.g.
                     // unknown id); the daemon's Status carries the exact reason.

@@ -55,7 +55,7 @@ impl AnthropicProvider {
             label,
             base_url: entry.base_url.trim_end_matches('/').to_string(),
             model: entry.model.clone(),
-            api_key: entry.api_key.clone(),
+            api_key: entry.api_key.resolve_or_warn(),
             endpoint: entry.endpoint.clone(),
             max_tokens: None,
             context_window_tokens: entry.context_window_tokens,

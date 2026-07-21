@@ -1,8 +1,12 @@
 //! User configuration loading: YAML config files, custom configs, and provider entries.
 
 pub mod custom;
+pub mod domains;
+pub mod error;
+mod migration;
 pub mod providers_config;
 pub mod settings;
+pub mod store;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ext;
 use crate::tools::ApprovalMode;
-pub use providers_config::{ProviderEntry, ProvidersConfig};
+pub use providers_config::{ProviderCredential, ProviderEntry, ProvidersConfig};
 
 /// Load and deserialize a YAML file, preserving I/O and parse errors.
 /// Returns `Err` with a human-readable message that includes the file path.
@@ -59,7 +63,7 @@ pub fn try_bone_dir() -> Option<PathBuf> {
 }
 
 pub fn providers_path() -> PathBuf {
-    bone_dir().join("config/providers.yaml")
+    bone_dir().join("providers.yaml")
 }
 
 pub fn command_policy_path() -> PathBuf {
@@ -244,12 +248,11 @@ pub fn needs_onboarding() -> bool {
 }
 
 /// Seed the always-safe, selection-independent config (command policy, AGENTS,
-/// built-in config pages, Lua libraries). Idempotent.
+/// and Lua libraries). Idempotent.
 pub fn seed_base() {
     seed_command_policy_if_missing();
     sync_agents_md();
     migrate_memory_to_catalog(&bone_dir());
-    custom::seed_builtin_pages(None, false);
     ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
 }
 

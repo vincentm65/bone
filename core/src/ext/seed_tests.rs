@@ -107,13 +107,13 @@ fn force_overwrites_existing_file() {
 
     let (first, content) = DEFAULT_LUA_COMMANDS[0];
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(first), "-- user edit with action_keys\n").unwrap();
+    std::fs::write(dir.join(first), "-- user edit with canonical-config-v3\n").unwrap();
 
     // Without force, an existing current-format file is left untouched.
     seed_default_lua_commands(&dir, None, false);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
-        "-- user edit with action_keys\n",
+        "-- user edit with canonical-config-v3\n",
         "without force, existing file should be preserved"
     );
 
@@ -129,7 +129,7 @@ fn force_overwrites_existing_file() {
 }
 
 #[test]
-fn history_and_menu_seeds_refresh_pre_feature_copies() {
+fn bundled_ui_seeds_refresh_pre_feature_copies() {
     let dir = std::env::temp_dir().join(format!(
         "bone-history-menu-seed-test-{}-{:?}",
         std::process::id(),
@@ -167,10 +167,18 @@ fn history_and_menu_seeds_refresh_pre_feature_copies() {
 
     std::fs::write(
         &menu,
-        "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget\n",
+        "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget multi-space-toggle-v2\n",
     )
     .unwrap();
     assert!(!should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap());
+
+    let config = dir.join("config.lua");
+    std::fs::write(&config, "-- old config command\n").unwrap();
+    assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    std::fs::write(&config, "-- canonical-config-v2\n").unwrap();
+    assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    std::fs::write(&config, "-- canonical-config-v3\n").unwrap();
+    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -213,6 +221,93 @@ fn lua_loading_continues_after_unreadable_and_invalid_files() {
     assert!(lua.globals().get::<bool>("loaded_after_failure").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
+    let dir = std::env::temp_dir().join(format!(
+        "bone-settings-owner-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.lua"),
+        r#"
+        bone.settings.define("original", {
+          title = "Original",
+          fields = { enabled = { label = "Enabled", type = "bool", default = true } },
+        })
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.lua"),
+        r#"
+        bone.settings.define("transient_one", {
+          title = "One",
+          fields = { value = { label = "Value", type = "string", default = "one" } },
+        })
+        bone.settings.define("transient_two", {
+          title = "Two",
+          fields = { value = { label = "Value", type = "string", default = "two" } },
+        })
+        error("fail after registration")
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("c.lua"),
+        r#"
+        assert(not pcall(bone.settings.define, "original", {
+          title = "Collision",
+          fields = { value = { label = "Value", type = "string", default = "bad" } },
+        }))
+        bone.settings.define("survivor", {
+          title = "Survivor",
+          fields = { value = { label = "Value", type = "string", default = "ok" } },
+        })
+        "#,
+    )
+    .unwrap();
+
+    let lua = mlua::Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::ops_events::setup_on(&lua, &bone).unwrap();
+    let registry = std::sync::Arc::new(std::sync::RwLock::new(Default::default()));
+    super::api::setup_api(
+        &lua,
+        &bone,
+        std::sync::Arc::new(std::sync::Mutex::new(
+            crate::config::settings::Settings::defaults(),
+        )),
+        std::sync::Arc::clone(&registry),
+        dir.join("config.yaml"),
+    )
+    .unwrap();
+    lua.globals().set("bone", bone).unwrap();
+
+    run_lua_files_filtered(&lua, &dir, |_| true).unwrap();
+
+    let pages = registry.read().unwrap().pages();
+    assert_eq!(
+        pages
+            .iter()
+            .map(|page| page.namespace.as_str())
+            .collect::<Vec<_>>(),
+        vec!["original", "survivor"]
+    );
+    assert_eq!(pages[0].owner, dir.join("a.lua").to_string_lossy());
+    assert_eq!(pages[1].owner, dir.join("c.lua").to_string_lossy());
+    let bone: mlua::Table = lua.globals().get("bone").unwrap();
+    assert!(
+        bone.get::<Option<String>>("_settings_owner")
+            .unwrap()
+            .is_none()
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

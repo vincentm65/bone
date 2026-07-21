@@ -28,11 +28,16 @@ pub fn write_atomic_sync(
             .open(&temp_path)?;
         file.write_all(content)?;
         file.flush()?;
-        drop(file);
         if let Some(permissions) = permissions {
             std::fs::set_permissions(&temp_path, permissions)?;
         }
-        std::fs::rename(&temp_path, path)
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp_path, path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp_path);

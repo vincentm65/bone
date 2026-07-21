@@ -4,8 +4,8 @@ use crate::config::providers_config::{ProviderEntry, ProvidersConfig};
 
 #[test]
 fn seeded_minimax_providers_use_supported_handler() {
-    // Load the single source of truth: the page-format providers.yaml
-    // that ships to ~/.bone-rust/config/providers.yaml on first run.
+    // Exercise the bundled legacy provider fixture retained for setup and
+    // migration compatibility.
     let page: CustomConfigPage =
         serde_yaml::from_str(include_str!("../../config/pages/providers.yaml")).unwrap();
     let mut config = ProvidersConfig::default();

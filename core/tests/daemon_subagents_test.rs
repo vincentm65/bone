@@ -92,11 +92,14 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let (hub, commands) = Hub::new();
     let mut events = hub.subscribe();
+    let config = bone_core::config::store::ConfigStore::new(booted.manager.clone());
+    let initial_revision = config.snapshot().revision;
     let daemon = tokio::spawn(run_daemon(
         hub.publisher(),
         commands,
         Arc::new(EmptyProvider),
         booted.manager,
+        config,
         session,
         ApprovalMode::Safe,
         None,
@@ -107,6 +110,8 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
         .send(RuntimeCommand::SetSubagentEnabled {
             name: "reviewer".into(),
             enabled: false,
+            expected_revision: initial_revision,
+            request_id: None,
         })
         .unwrap();
     let agents = next_subagents(&mut events).await;
@@ -114,8 +119,10 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
     assert_eq!(agents[0].name, "reviewer");
     assert_eq!(agents[0].source, "config");
     assert!(!agents[0].enabled);
-    let saved = Settings::load().unwrap().unwrap();
-    assert!(!saved.resolved().subagents["reviewer"].enabled);
+    let saved = bone_core::config::domains::load_subagents()
+        .unwrap()
+        .unwrap();
+    assert!(!saved.subagents["reviewer"].enabled);
 
     hub.command_sender()
         .send(RuntimeCommand::UpsertSubagent {
@@ -129,6 +136,8 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
                 source: "lua".into(),
                 ..Default::default()
             },
+            expected_revision: initial_revision + 1,
+            request_id: None,
         })
         .unwrap();
     let agents = next_subagents(&mut events).await;
@@ -141,17 +150,23 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
         .send(RuntimeCommand::SetSubagentEnabled {
             name: "reviewer".into(),
             enabled: false,
+            expected_revision: initial_revision + 2,
+            request_id: None,
         })
         .unwrap();
     let agents = next_subagents(&mut events).await;
     assert_eq!(agents.len(), 1);
     assert!(!agents[0].enabled);
-    let saved = Settings::load().unwrap().unwrap();
-    assert!(!saved.resolved().subagents["reviewer"].enabled);
+    let saved = bone_core::config::domains::load_subagents()
+        .unwrap()
+        .unwrap();
+    assert!(!saved.subagents["reviewer"].enabled);
 
     hub.command_sender()
         .send(RuntimeCommand::DeleteSubagent {
             name: "reviewer".into(),
+            expected_revision: initial_revision + 3,
+            request_id: None,
         })
         .unwrap();
     let agents = next_subagents(&mut events).await;
@@ -160,10 +175,9 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
     assert_eq!(agents[0].source, "lua");
     assert!(agents[0].enabled);
     assert!(
-        Settings::load()
+        bone_core::config::domains::load_subagents()
             .unwrap()
             .unwrap()
-            .resolved()
             .subagents
             .is_empty()
     );

@@ -1,5 +1,11 @@
 use super::*;
 
+#[test]
+fn unloaded_manager_has_a_compatibility_snapshot() {
+    let manager = ExtensionManager::unloaded();
+    assert!(manager.config_snapshot().pages.is_empty());
+}
+
 fn msg_table(lua: &Lua, role: &str, content: &str) -> mlua::Table {
     let t = lua.create_table().unwrap();
     t.set("role", role).unwrap();

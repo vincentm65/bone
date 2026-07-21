@@ -1,11 +1,24 @@
 use super::{
-    WireTools, apply_queue_nav_key, background_pane_needs_refresh, configured_input_style,
-    edit_diff_message, job_snapshot_messages, should_open_agent_log,
+    ConfigView, WireTools, apply_queue_nav_key, background_pane_needs_refresh,
+    configured_input_style, edit_diff_message, job_snapshot_messages, lua_config_available,
+    parse_config_value, render_config_page, should_open_agent_log, take_pending_config,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::VecDeque;
+
+#[test]
+fn bundled_lua_config_is_available_for_interactive_dispatch() {
+    assert!(lua_config_available(&[(
+        "config".into(),
+        "edit configuration".into(),
+    )]));
+    assert!(!lua_config_available(&[(
+        "history".into(),
+        "browse conversations".into(),
+    )]));
+}
 
 #[test]
 fn config_preset_override_preserves_explicit_lua_input_customization() {
@@ -196,4 +209,155 @@ fn restored_edit_result_uses_current_prefix() {
         .expect("edit diff");
     assert_eq!(row.content, "\n--- a/file\n+++ b/file\n");
     assert!(edit_diff_message("edit_file", true, "Edited: file\n--- diff").is_none());
+}
+
+fn config_view() -> ConfigView {
+    let field = bone_protocol::SettingDefinition {
+        path: "general.approval".into(),
+        key: "approval".into(),
+        label: "Approval mode".into(),
+        value_type: "enum".into(),
+        options: vec!["safe".into(), "danger".into()],
+        default: serde_json::json!("safe"),
+        value: Some(serde_json::json!("safe")),
+        integer: None,
+        min: None,
+        max: None,
+        reload_behavior: "immediate".into(),
+    };
+    ConfigView {
+        schema: Some(bone_protocol::ConfigSchema {
+            pages: vec![bone_protocol::ConfigPage {
+                namespace: "general".into(),
+                title: "General".into(),
+                fields: vec![field],
+                pages: Vec::new(),
+            }],
+        }),
+        snapshot: Some(bone_protocol::ConfigSnapshot {
+            revision: 7,
+            values: serde_json::json!({ "general": { "approval": "danger" } }),
+            providers: Vec::new(),
+            active_provider: String::new(),
+            disabled_tools: Vec::new(),
+            disabled_commands: Vec::new(),
+        }),
+    }
+}
+
+#[test]
+fn config_page_uses_schema_and_authoritative_snapshot() {
+    let output = render_config_page(&config_view(), Some("general")).unwrap();
+    assert!(output.contains("General"));
+    assert!(output.contains("general.approval = danger [safe | danger]"));
+}
+
+#[test]
+fn config_value_validation_uses_schema_options() {
+    let view = config_view();
+    let field = view.field("general.approval").unwrap();
+    assert_eq!(
+        parse_config_value(field, "safe").unwrap(),
+        serde_json::json!("safe")
+    );
+    assert_eq!(
+        parse_config_value(field, "invalid").unwrap_err(),
+        "expected one of: safe, danger"
+    );
+}
+
+#[test]
+fn config_value_validation_enforces_number_bounds_and_integer_shape() {
+    let mut field = config_view().field("general.approval").unwrap().clone();
+    field.value_type = "number".into();
+    field.integer = Some(true);
+    field.min = Some(1.0);
+    field.max = Some(3.0);
+
+    assert_eq!(
+        parse_config_value(&field, "2").unwrap(),
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        parse_config_value(&field, "1.5").unwrap_err(),
+        "expected an integer"
+    );
+    assert_eq!(
+        parse_config_value(&field, "0").unwrap_err(),
+        "must be at least 1"
+    );
+    assert_eq!(
+        parse_config_value(&field, "4").unwrap_err(),
+        "must be at most 3"
+    );
+
+    field.integer = None;
+    assert_eq!(
+        parse_config_value(&field, "2.5").unwrap(),
+        serde_json::json!(2.5)
+    );
+    assert_eq!(
+        parse_config_value(&field, "NaN").unwrap_err(),
+        "expected a finite number"
+    );
+}
+
+#[test]
+fn config_bool_aliases_are_ascii_case_insensitive() {
+    let mut field = config_view().field("general.approval").unwrap().clone();
+    field.value_type = "bool".into();
+
+    assert_eq!(
+        parse_config_value(&field, "TRUE").unwrap(),
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        parse_config_value(&field, "Off").unwrap(),
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        parse_config_value(&field, "1").unwrap_err(),
+        "expected true/false, on/off, or yes/no"
+    );
+}
+
+#[test]
+fn config_page_lookup_and_render_are_recursive() {
+    let mut view = config_view();
+    let field = view.schema.as_ref().unwrap().pages[0].fields[0].clone();
+    view.schema.as_mut().unwrap().pages[0].fields.clear();
+    view.schema.as_mut().unwrap().pages[0].pages = vec![bone_protocol::ConfigPage {
+        namespace: "extensions.example".into(),
+        title: "Example extension".into(),
+        fields: vec![bone_protocol::SettingDefinition {
+            path: "extensions.example.mode".into(),
+            key: "mode".into(),
+            ..field
+        }],
+        pages: Vec::new(),
+    }];
+    view.snapshot.as_mut().unwrap().values =
+        serde_json::json!({ "extensions": { "example": { "mode": "danger" } } });
+
+    assert!(view.field("extensions.example.mode").is_some());
+    let output = render_config_page(&view, Some("extensions.example")).unwrap();
+    assert!(output.contains("extensions.example.mode = danger"));
+}
+
+#[test]
+fn pending_config_clears_only_for_matching_response() {
+    let mut pending = std::collections::BTreeMap::from([
+        ("request-1".to_string(), "general.approval".to_string()),
+        ("request-2".to_string(), "ui.status_show_model".to_string()),
+    ]);
+    assert_eq!(
+        take_pending_config(&mut pending, Some("other".into())),
+        None
+    );
+    assert_eq!(pending.len(), 2);
+    assert_eq!(
+        take_pending_config(&mut pending, Some("request-2".into())).as_deref(),
+        Some("ui.status_show_model")
+    );
+    assert_eq!(pending.len(), 1);
 }

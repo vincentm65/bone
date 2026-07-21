@@ -7,8 +7,24 @@ use std::time::Instant;
 use serde_json::json;
 
 use bone_core::processes;
+use bone_core::tools::builtin_tools;
 use bone_core::tools::shell::{ScriptRequest, ShellTool, run_script_lines, truncate_output};
 use bone_core::tools::types::{Tool, ToolExecutionContext};
+
+#[test]
+fn process_lifecycle_is_exposed_only_through_shell() {
+    let definitions = builtin_tools().definitions();
+    assert!(!definitions.iter().any(|tool| tool.name == "process"));
+    let shell = definitions
+        .iter()
+        .find(|tool| tool.name == "shell")
+        .expect("shell should be registered");
+    assert_eq!(
+        shell.input_schema["properties"]["action"]["enum"],
+        json!(["run", "list", "status", "kill"])
+    );
+}
+
 #[tokio::test]
 async fn timeout_returns_partial_stdout() {
     // A command that prints to stdout then sleeps past the timeout. The model
@@ -86,6 +102,43 @@ async fn live_background_uses_context_working_directory() {
     .expect("background pwd should finish");
     assert_eq!(snapshot.stdout.trim(), cwd.to_string_lossy());
     let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn shell_manages_its_background_processes() {
+    let started = ShellTool
+        .execute(json!({ "action": "run", "command": "sleep 30", "background": true }))
+        .await
+        .expect("background command should start");
+    let id = started
+        .strip_prefix("background process started: ")
+        .expect("result should contain a process id");
+
+    let listed = ShellTool
+        .execute(json!({ "action": "list" }))
+        .await
+        .expect("list should succeed");
+    assert!(listed.contains(id));
+
+    let status = ShellTool
+        .execute(json!({ "action": "status", "id": id }))
+        .await
+        .expect("status should succeed");
+    assert!(status.contains("running: true"));
+
+    let killed = ShellTool
+        .execute(json!({ "action": "kill", "id": id }))
+        .await
+        .expect("kill should succeed");
+    assert_eq!(killed, format!("stop requested for {id}"));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while processes::registry().get(id).unwrap().running {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("killed process should stop");
 }
 
 #[tokio::test]

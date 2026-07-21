@@ -75,6 +75,8 @@ async fn interactive_command_esc_does_not_freeze() {
             .unwrap()
             .as_nanos()
     ));
+    let old_bone = std::env::var_os("BONE_DIR");
+    unsafe { std::env::set_var("BONE_DIR", &config_dir) };
     let cmd_dir = config_dir.join("lua/commands");
     std::fs::create_dir_all(&cmd_dir).unwrap();
 
@@ -136,7 +138,8 @@ bone.command.register("picker", {
         publisher,
         commands_rx,
         provider,
-        extensions,
+        extensions.clone(),
+        bone_core::config::store::ConfigStore::new(extensions),
         session,
         bone_core::tools::ApprovalMode::Safe,
         None,
@@ -186,9 +189,55 @@ bone.command.register("picker", {
     })
     .await;
 
-    std::fs::remove_dir_all(&config_dir).ok();
     assert!(
         result.is_ok(),
         "interactive command did not complete after Esc — likely frozen"
     );
+
+    // The bundled config command must use the canonical daemon schema and still
+    // complete through the same remote interactive path.
+    cmd_tx
+        .send(RuntimeCommand::RunCommand {
+            name: "config".into(),
+            input: "".into(),
+        })
+        .unwrap();
+    reply_next_key(&mut events, &cmd_tx, "Down").await;
+    reply_next_key(&mut events, &cmd_tx, "Enter").await;
+    reply_next_key(&mut events, &cmd_tx, "Enter").await;
+    reply_next_key(&mut events, &cmd_tx, "Esc").await;
+    let (schema, snapshot) = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut config = None;
+        loop {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::ConfigSnapshot { schema, snapshot } => {
+                    config = Some((schema, snapshot))
+                }
+                RuntimeEvent::CommandComplete { .. } => break config,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("bundled config command did not complete")
+    .expect("bundled config command did not publish its canonical schema");
+    let namespaces = schema
+        .pages
+        .iter()
+        .map(|page| page.namespace.as_str())
+        .collect::<Vec<_>>();
+    assert!(namespaces.contains(&"general"));
+    assert!(namespaces.contains(&"providers"));
+    assert!(namespaces.contains(&"tools"));
+    assert!(namespaces.contains(&"commands"));
+    assert!(namespaces.contains(&"status"));
+    assert_eq!(snapshot.values["general"]["show_reasoning"], false);
+
+    std::fs::remove_dir_all(&config_dir).ok();
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }

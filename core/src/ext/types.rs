@@ -243,6 +243,10 @@ pub(crate) fn collect_subagents(
 }
 
 impl ExtensionManager {
+    pub(crate) fn same_runtime(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.lua, &other.lua)
+    }
+
     /// Wrap a pre-created `Arc<Mutex<Lua>>`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_arc(
@@ -280,8 +284,12 @@ impl ExtensionManager {
     /// it publicly just makes that same construction reachable from tests and
     /// (eventually) a headless/Driver path that does not own a Lua runtime.
     pub fn unloaded() -> Self {
+        let lua = Lua::new();
+        lua.set_app_data(super::ctx::ConfigSnapshot(Arc::new(Mutex::new(
+            crate::config::custom::CustomConfigs::default(),
+        ))));
         Self {
-            lua: Arc::new(Mutex::new(Lua::new())),
+            lua: Arc::new(Mutex::new(lua)),
             engine_ok: false,
             loaded: false,
             commands: Vec::new(),
@@ -349,6 +357,29 @@ impl ExtensionManager {
             .unwrap_or_default()
     }
 
+    /// Resolve extension-owned config pages without touching the Lua VM.
+    /// Config requests can arrive while an interactive Lua command is blocked
+    /// on `ctx.ui.key()`, so schema generation must remain VM-independent.
+    pub fn extension_settings_pages(&self) -> Vec<super::settings_registry::SettingsPage> {
+        let settings = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let registry = self
+            .settings_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut pages = registry.pages();
+        for page in &mut pages {
+            for field in &mut page.fields {
+                let path = format!("{}.{}", page.namespace, field.key);
+                field.value = registry.resolve(&settings, &path).ok();
+            }
+        }
+        pages
+    }
+
     /// Get the daemon-owned resolved settings, including dynamic UI highlights
     /// and renderer presets from the booted UI module.
     pub fn frontend_settings(&self) -> super::snapshots::ResolvedFrontendSettings {
@@ -373,26 +404,9 @@ impl ExtensionManager {
             .map(|lua| super::snapshots::collect_presets(&lua))
             .unwrap_or_default();
         super::snapshots::ResolvedFrontendSettings {
-            settings: settings.clone(),
+            settings,
             revision,
-            extension_pages: {
-                let registry = self
-                    .settings_registry
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                let store = Settings {
-                    inner: settings.clone(),
-                    revision,
-                };
-                let mut pages = registry.pages();
-                for page in &mut pages {
-                    for field in &mut page.fields {
-                        let path = format!("{}.{}", page.namespace, field.key);
-                        field.value = registry.resolve(&store, &path).ok();
-                    }
-                }
-                pages
-            },
+            extension_pages: self.extension_settings_pages(),
             spinner_styles,
             spinner_texts,
         }
@@ -422,11 +436,42 @@ impl ExtensionManager {
             .map_err(|e| e.to_string())
     }
 
-    /// Replace the daemon's resolved settings after a validated full-file reload.
-    pub fn replace_settings(&self, settings: BoneSettings) {
-        let mut store = self.settings.lock().unwrap_or_else(|e| e.into_inner());
-        store.inner = settings;
-        store.revision = store.revision.saturating_add(1);
+    pub fn validate_extension_setting(
+        &self,
+        path: &str,
+        value: &crate::config::settings::ExtensionValue,
+    ) -> Result<(), String> {
+        self.settings_registry
+            .read()
+            .map_err(|e| format!("settings registry lock poisoned: {e}"))?
+            .validate(path, value)
+    }
+
+    /// Replace the runtime mirror after the configuration store commits.
+    pub fn replace_settings(&self, settings: Settings) {
+        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
+    /// Install the daemon-loaded compatibility snapshot used by legacy Lua
+    /// config helpers. Callbacks read this in-memory snapshot instead of
+    /// independently reloading configuration files.
+    pub fn replace_config_snapshot(&self, config: crate::config::custom::CustomConfigs) {
+        self.lua
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .set_app_data(super::ctx::ConfigSnapshot(Arc::new(Mutex::new(config))));
+    }
+
+    pub fn config_snapshot(&self) -> crate::config::custom::CustomConfigs {
+        let lua = self.lua.lock().unwrap_or_else(|error| error.into_inner());
+        let snapshot = lua
+            .app_data_ref::<super::ctx::ConfigSnapshot>()
+            .expect("extension config snapshot must be installed during boot");
+        snapshot
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// The base banner lines from `bone.banner()` (no client-side update/catalog

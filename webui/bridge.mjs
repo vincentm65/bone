@@ -25,11 +25,12 @@
 import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname, resolve, relative } from "node:path";
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 
 // ── usage stats ─────────────────────────────────────────────────────────────
 //
@@ -323,7 +324,6 @@ function boneDir() {
   return home ? join(home, ".bone-rust") : "/tmp/.bone-rust";
 }
 const DB_PATH = join(boneDir(), "data", "conversations.db");
-const PROVIDERS_PATH = join(boneDir(), "config", "providers.yaml");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -452,11 +452,11 @@ function createDaemonLink(onLine, onStatus) {
   };
 }
 
-// ── local data (chats + providers) ──────────────────────────────────────────
+// ── local data (chats) ──────────────────────────────────────────────────────
 //
-// The runtime protocol has no "list conversations" / "list providers" command,
-// but the bridge is local: it reads bone's SQLite history and providers.yaml
-// directly so the UI can show a chat sidebar and a model picker as real widgets.
+// The runtime protocol has no "list conversations" command,
+// but the bridge is local: it reads bone's SQLite history directly so the UI
+// can show a chat sidebar as a real widget.
 
 function listConversations() {
   if (!existsSync(DB_PATH)) return [];
@@ -536,199 +536,56 @@ function handleConversationWrite(req, res, id) {
   });
 }
 
-// ── providers.yaml CRUD ─────────────────────────────────────────────────────
-//
-// Reads the CustomConfigPage-format providers.yaml (title + fields array).
-// Each provider field has a `value:` map with label/base_url/model/api_key/
-// endpoint/handler. We parse it into a flat list for the API, and support
-// full CRUD (read, update, add, delete) with proper YAML round-tripping.
-
-// Atomic write: the daemon re-reads providers.yaml on every turn (auto-compact
-// before_turn → CustomConfigs::load) and on each provider switch, so a plain
-// truncate+write can be caught mid-flight and parsed as empty. Write to a temp
-// file and rename() so readers only ever see a complete file.
-async function writeFileAtomic(path, data) {
-  const tmp = `${path}.tmp.${process.pid}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
-
-const PROVIDER_FIELDS = ["label", "base_url", "model", "api_key", "endpoint", "handler"];
-const DEFAULT_PROVIDER = {
-  label: "", base_url: "", model: "", api_key: "", endpoint: "/chat/completions", handler: "openai",
-};
-
-// Parse a field block (everything after the `- key:` delimiter) into
-// { key, label, type, default, value }. `value` is a nested map for provider
-// entries, or a scalar string for plain entries like `_last_provider`.
-function parseProviderField(block) {
-  const key = (block.match(/^\s*([^\n]+)/) || [])[1]?.trim();
-  if (!key) return null;
-  const labelRaw = (block.match(/\n\s*label:\s*([^\n]+)/) || [])[1]?.trim();
-  const label = labelRaw === undefined ? undefined : parseYamlValue(labelRaw);
-  const type = (block.match(/\n\s*type:\s*([^\n]+)/) || [])[1]?.trim();
-  const def = (block.match(/\n\s*default:\s*([^\n]+)/) || [])[1]?.trim();
-  // A scalar `value:` (e.g. `value: deepseek`) has content on the same line;
-  // preserve it verbatim so round-tripping doesn't clobber it into a map.
-  const scalar = block.match(/\n\s*value:[ \t]+(\S[^\n]*)$/m);
-  if (scalar) {
-    return { key, label: label ?? key, type, default: def, value: parseYamlValue(scalar[1]) };
+async function daemonConfigCommand(command) {
+  const requestId = typeof command === "object" ? randomUUID() : null;
+  if (requestId) {
+    const kind = Object.keys(command)[0];
+    command = { [kind]: { ...command[kind], request_id: requestId } };
   }
-  // Extract the nested value: map lines (between `value:` and the next field).
-  const valueLines = [];
-  let inValue = false;
-  for (const line of block.split("\n")) {
-    if (/^\s+value:\s*$/.test(line) || /^\s+value:\s*\{/.test(line)) { inValue = true; continue; }
-    if (inValue) valueLines.push(line);
-  }
-  const value = {};
-  for (const line of valueLines) {
-    const m = line.match(/^\s+(\w+):\s*(.*)$/);
-    if (m) value[m[1]] = parseYamlValue(m[2]);
-  }
-  return { key, label: label ?? key, type, default: def, value };
+  return new Promise((resolve, reject) => {
+    let sent = false;
+    let timer;
+    let link;
+    const finish = (callback, value) => {
+      clearTimeout(timer);
+      link.close();
+      callback(value);
+    };
+    link = createDaemonLink(
+      (line) => {
+        let event;
+        try { event = JSON.parse(line); } catch { return; }
+        if (!requestId && event.config_snapshot) finish(resolve, event.config_snapshot);
+        else if (!requestId && event.config_changed) finish(resolve, event.config_changed);
+        else if (event.config_changed?.request_id === requestId) finish(resolve, event.config_changed);
+        else if (event.config_mutation_rejected?.request_id === requestId)
+          finish(reject, new Error(event.config_mutation_rejected.error));
+      },
+      (status) => {
+        if (status === "connected" && !sent) {
+          sent = true;
+          if (!link.write(command)) finish(reject, new Error("daemon disconnected"));
+        }
+      },
+    );
+    timer = setTimeout(() => finish(reject, new Error("configuration request timed out")), 5000);
+  });
 }
 
-function parseYamlValue(raw) {
-  const v = raw.trim();
-  if (v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1).replace(/''/g, "'");
-  if (v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1);
-  return v;
+async function daemonConfigSnapshot() {
+  return (await daemonConfigCommand("get_config")).snapshot;
 }
 
-function serializeValueBlock(value) {
-  const lines = [];
-  for (const field of PROVIDER_FIELDS) {
-    if (value[field] !== undefined) {
-      lines.push(`    ${field}: ${serializeYamlValue(value[field])}`);
-    }
-  }
-  return `  value:\n${lines.join("\n")}`;
+async function readProvidersFromDaemon() {
+  return (await daemonConfigSnapshot()).providers.map((provider) => ({
+    key: provider.id,
+    ...provider,
+    api_key: "",
+  }));
 }
 
-function serializeYamlValue(v) {
-  const s = String(v);
-  // Quote only when YAML actually requires it: empty, a leading indicator char,
-  // a colon/hash that would start a comment or mapping, or edge whitespace.
-  // Plain URLs (`https://…`) and keys (`sk-…`) stay unquoted, matching serde.
-  const needsQuote =
-    s === "" ||
-    /^[\s>|*&!%@`"'\[\]{},#?:-]/.test(s) ||
-    /[:#]\s/.test(s) ||
-    /:$/.test(s) ||
-    /\s$/.test(s) ||
-    /["\n]/.test(s);
-  if (needsQuote) return `'${s.replace(/'/g, "''")}'`;
-  return s;
-}
-
-// Parse the full providers.yaml into a list of provider objects.
-async function readProviders() {
-  if (!existsSync(PROVIDERS_PATH)) return [];
-  const text = await readFile(PROVIDERS_PATH, "utf8");
-  const fields = parseProviderBlocks(text);
-  return fields
-    .filter(f => f.key && !f.key.startsWith("_"))
-    .map(f => ({ key: f.key, label: f.label, ...f.value }));
-}
-
-function parseProviderBlocks(text) {
-  const out = [];
-  // Each entry starts with a `- key:` line (column-0, as serde_yaml emits it,
-  // or indented). Split on that delimiter; block 0 is the header, so skip it.
-  const blocks = text.split(/\n[ \t]*-\s+key:/);
-  for (let i = 1; i < blocks.length; i++) {
-    const parsed = parseProviderField(blocks[i]);
-    if (parsed) out.push(parsed);
-  }
-  return out;
-}
-
-// Update a single field on an existing provider.
-async function updateProvider(key, updates) {
-  if (!existsSync(PROVIDERS_PATH)) throw new Error("providers.yaml missing");
-  const text = await readFile(PROVIDERS_PATH, "utf8");
-  const fields = parseProviderBlocks(text);
-  const idx = fields.findIndex(f => f.key === key);
-  if (idx < 0) throw new Error(`provider "${key}" not found`);
-
-  Object.assign(fields[idx].value, updates);
-
-  const header = extractHeader(text);
-  const yaml = rebuildProvidersYaml(header, fields);
-  await writeFileAtomic(PROVIDERS_PATH, yaml);
-}
-
-function rebuildProvidersYaml(header, fields) {
-  const lines = [header, "fields:"];
-  for (const f of fields) {
-    lines.push(`- key: ${f.key}`);
-    lines.push(`  label: ${serializeYamlValue(f.label)}`);
-    if (f.type) lines.push(`  type: ${f.type}`);
-    if (f.default !== undefined) lines.push(`  default: ${f.default}`);
-    // Scalar entries (e.g. `_last_provider`) keep their value inline; provider
-    // entries serialize their field map as a nested block.
-    if (f.value && typeof f.value === "object") {
-      lines.push(serializeValueBlock(f.value));
-    } else {
-      lines.push(`  value: ${serializeYamlValue(f.value ?? "")}`);
-    }
-  }
-  // Remove trailing blank lines
-  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  return lines.join("\n") + "\n";
-}
-
-// Add a new provider.
-async function addProvider(key, value) {
-  if (!existsSync(PROVIDERS_PATH)) throw new Error("providers.yaml missing");
-  const text = await readFile(PROVIDERS_PATH, "utf8");
-  const fields = parseProviderBlocks(text);
-  if (fields.find(f => f.key === key)) throw new Error(`provider "${key}" already exists`);
-
-  const header = extractHeader(text);
-  const newField = { key, label: value.label || key, type: "provider", value: { ...DEFAULT_PROVIDER, ...value } };
-  fields.push(newField);
-  const yaml = rebuildProvidersYaml(header, fields);
-  await writeFileAtomic(PROVIDERS_PATH, yaml);
-  return newField;
-}
-
-// Delete a provider.
-async function deleteProvider(key) {
-  if (!existsSync(PROVIDERS_PATH)) throw new Error("providers.yaml missing");
-  const text = await readFile(PROVIDERS_PATH, "utf8");
-  const fields = parseProviderBlocks(text);
-  const idx = fields.findIndex(f => f.key === key);
-  if (idx < 0) throw new Error(`provider "${key}" not found`);
-  fields.splice(idx, 1);
-  const header = extractHeader(text);
-  const yaml = rebuildProvidersYaml(header, fields);
-  await writeFileAtomic(PROVIDERS_PATH, yaml);
-}
-
-// Everything above the `fields:` list (i.e. the `title:` line). rebuild adds
-// its own `fields:` line, so stop before it.
-// Persist the last-used provider id into the scalar `_last_provider` entry so
-// the daemon resumes it on next boot (its `derive_providers_config` reads it).
-async function setLastProvider(id) {
-  if (!existsSync(PROVIDERS_PATH)) return;
-  const text = await readFile(PROVIDERS_PATH, "utf8");
-  const fields = parseProviderBlocks(text);
-  const f = fields.find((x) => x.key === "_last_provider");
-  if (f && f.value === id) return; // already current — skip the rewrite
-  if (f) f.value = id;
-  else fields.push({ key: "_last_provider", label: "", type: "string", default: "null", value: id });
-  await writeFileAtomic(PROVIDERS_PATH, rebuildProvidersYaml(extractHeader(text), fields));
-}
-
-function extractHeader(text) {
-  const lines = text.split("\n");
-  let headerEnd = lines.length;
-  for (let i = 0; i < lines.length; i++) {
-    if (/^\s*fields:\s*$/.test(lines[i]) || /^\s*-\s+key:/.test(lines[i])) { headerEnd = i; break; }
-  }
-  return lines.slice(0, headerEnd).join("\n").replace(/\n+$/, "");
+async function getConfigFromDaemon() {
+  return daemonConfigCommand("get_config");
 }
 
 async function sendJson(res, fn) {
@@ -742,93 +599,6 @@ async function sendJson(res, fn) {
   }
 }
 
-// ── config (general.yaml + tools.yaml) ───────────────────────────────────────
-//
-// bone stores config as regular serde-generated YAML "pages". We surface the
-// general page's fields (approval/thinking/compaction) and the tools deny-list
-// so the UI can toggle them. Writes update a single scalar in place and the
-// client follows with `reload_extensions` so the daemon re-reads from disk.
-
-const GENERAL_PATH = join(boneDir(), "config", "general.yaml");
-const TOOLS_PATH = join(boneDir(), "config", "tools.yaml");
-
-// Parse a config page's `- key:` field blocks into {key,label,type,options,value}.
-function parseConfigPage(text) {
-  const out = [];
-  const blocks = text.split(/\n-\s+key:/).slice(1);
-  for (const b of blocks) {
-    const key = (b.match(/^\s*([^\n]+)/) || [])[1]?.trim();
-    if (!key) continue;
-    const label = (b.match(/\n\s*label:\s*([^\n]+)/) || [])[1]?.trim() || key;
-    const type = (b.match(/\n\s*type:\s*([^\n]+)/) || [])[1]?.trim() || "string";
-    // value: falls back to default: ; strip wrapping quotes.
-    const raw = (b.match(/\n\s*value:\s*([^\n]+)/) || b.match(/\n\s*default:\s*([^\n]+)/) || [])[1];
-    const value = raw == null ? "" : raw.trim().replace(/^['"]|['"]$/g, "");
-    const opts = b.match(/\n\s*options:\s*\[([^\]]*)\]/);
-    const options = opts ? opts[1].split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-    out.push({ key, label, type, value, ...(options ? { options } : {}) });
-  }
-  return out;
-}
-
-async function readGeneral() {
-  if (!existsSync(GENERAL_PATH)) return [];
-  return parseConfigPage(await readFile(GENERAL_PATH, "utf8"));
-}
-
-async function readToolsDisabled() {
-  if (!existsSync(TOOLS_PATH)) return [];
-  const text = await readFile(TOOLS_PATH, "utf8");
-  const m = text.match(/disabled:\s*\n((?:\s*-\s*[^\n]+\n?)*)/);
-  if (!m) return [];
-  return [...m[1].matchAll(/-\s*([^\n]+)/g)].map((x) => x[1].trim());
-}
-
-async function getConfig() {
-  return { general: await readGeneral(), toolsDisabled: await readToolsDisabled() };
-}
-
-function yamlScalar(value, type) {
-  if (type === "bool") return value === true || value === "true" ? "true" : "false";
-  if (type === "number") return String(value);
-  // strings (incl. numeric strings like auto_compact_tokens) are single-quoted
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
-// Replace (or insert) the `value:` line inside the `- key: <key>` block.
-function setGeneralValue(text, key, value, type) {
-  const lines = text.split("\n");
-  const start = lines.findIndex((l) => new RegExp(`^-?\\s*key:\\s*${key}\\s*$`).test(l));
-  if (start < 0) return text;
-  let end = start + 1;
-  while (end < lines.length && !/^-\s/.test(lines[end])) end++;
-  const valLine = `  value: ${yamlScalar(value, type)}`;
-  let vi = -1;
-  for (let j = start; j < end; j++) if (/^\s+value:/.test(lines[j])) { vi = j; break; }
-  if (vi >= 0) lines[vi] = valLine;
-  else {
-    let di = start;
-    for (let j = start; j < end; j++) if (/^\s+default:/.test(lines[j])) di = j;
-    lines.splice(di + 1, 0, valLine);
-  }
-  return lines.join("\n");
-}
-
-async function writeGeneralValue(key, value, type) {
-  if (!existsSync(GENERAL_PATH)) throw new Error("general.yaml missing");
-  const text = await readFile(GENERAL_PATH, "utf8");
-  await writeFile(GENERAL_PATH, setGeneralValue(text, key, value, type));
-}
-
-async function writeToolDisabled(name, disabled) {
-  const current = await readToolsDisabled();
-  const next = disabled ? [...new Set([...current, name])] : current.filter((t) => t !== name);
-  const body =
-    "title: Tools\n" +
-    (next.length ? "disabled:\n" + next.map((t) => `- ${t}`).join("\n") + "\n" : "disabled: []\n");
-  await writeFile(TOOLS_PATH, body);
-}
-
 // ── http server ─────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -840,7 +610,7 @@ const server = http.createServer(async (req, res) => {
   const conversationMatch = url.pathname.match(/^\/api\/conversations\/(\d+)$/);
   if (conversationMatch && (req.method === "PATCH" || req.method === "DELETE"))
     return handleConversationWrite(req, res, Number(conversationMatch[1]));
-  if (url.pathname === "/api/providers" && req.method === "GET") return sendJson(res, readProviders);
+  if (url.pathname === "/api/providers" && req.method === "GET") return sendJson(res, readProvidersFromDaemon);
   const providerMatch = url.pathname.match(/^\/api\/providers\/([^/]+)$/);
   if (providerMatch && req.method === "PATCH") return handleProviderPatch(req, res, providerMatch[1]);
   if (providerMatch && req.method === "DELETE") return handleProviderDelete(req, res, providerMatch[1]);
@@ -855,7 +625,7 @@ const server = http.createServer(async (req, res) => {
     if (rel.startsWith("..") || rel === "") throw new Error("path must be a workspace file");
     return { path: rel, absolute_path: file, content: await readFile(file, "utf8") };
   });
-  if (url.pathname === "/api/config" && req.method === "GET") return sendJson(res, getConfig);
+  if (url.pathname === "/api/config" && req.method === "GET") return sendJson(res, getConfigFromDaemon);
   if (url.pathname === "/api/config" && req.method === "POST") return handleConfigWrite(req, res);
   if (url.pathname === "/api/restart-daemon" && req.method === "POST") {
     if (restartDaemon()) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
@@ -883,24 +653,47 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// POST /api/config — body { namespace: "general"|"tools", key, value, type }.
-// Writes the YAML; the client then sends `reload_extensions` to apply it.
+// POST /api/config — revision-checked daemon configuration mutation.
 function handleConfigWrite(req, res) {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", async () => {
     try {
-      const { namespace, key, value, type } = JSON.parse(body);
-      if (namespace === "tools") await writeToolDisabled(key, value === false || value === "false");
-      else await writeGeneralValue(key, value, type || "string");
-      res.writeHead(204).end();
+      const { path, value, tool, enabled, expected_revision } = JSON.parse(body);
+      let command;
+      if (tool) {
+        command = { set_tool_enabled: { name: tool, enabled, expected_revision } };
+      } else if (path) {
+        command = { set_config_value: { path, value, expected_revision } };
+      } else {
+        throw new Error("path or tool is required");
+      }
+      const event = await daemonConfigCommand(command);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(event));
     } catch (e) {
-      res.writeHead(400).end(String(e));
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end(String(e));
     }
   });
 }
 
 // ── provider endpoints ──────────────────────────────────────────────────────
+
+function providerUpdate(id, provider, fields = {}) {
+  const merged = { ...provider, ...fields };
+  return {
+    id,
+    label: merged.label || id,
+    base_url: merged.base_url ?? "",
+    model: merged.model ?? "",
+    endpoint: merged.endpoint ?? "",
+    handler: merged.handler ?? "",
+    context_window_tokens: merged.context_window_tokens ?? null,
+    reasoning_effort: merged.reasoning_effort ?? "",
+    ...(Object.hasOwn(fields, "api_key") ? { api_key: fields.api_key } : {}),
+  };
+}
 
 // PATCH /api/providers/:key — body { field, value } or { fields: { ... } }
 function handleProviderPatch(req, res, key) {
@@ -909,11 +702,14 @@ function handleProviderPatch(req, res, key) {
   req.on("end", async () => {
     try {
       const data = JSON.parse(body);
-      if (data.fields) {
-        await updateProvider(key, data.fields);
-      } else {
-        await updateProvider(key, { [data.field]: data.value });
-      }
+      const snapshot = await daemonConfigSnapshot();
+      const provider = snapshot.providers.find((entry) => entry.id === key);
+      if (!provider) throw new Error(`provider "${key}" not found`);
+      const fields = data.fields || { [data.field]: data.value };
+      await daemonConfigCommand({ upsert_provider: {
+        provider: providerUpdate(key, provider, fields),
+        expected_revision: snapshot.revision,
+      } });
       res.writeHead(204).end();
     } catch (e) {
       res.writeHead(400, { "content-type": "text/plain" });
@@ -923,10 +719,14 @@ function handleProviderPatch(req, res, key) {
 }
 
 // DELETE /api/providers/:key
-function handleProviderDelete(req, res, key) {
-  deleteProvider(key)
-    .then(() => res.writeHead(204).end())
-    .catch(e => res.writeHead(400, { "content-type": "text/plain" }).end(String(e)));
+async function handleProviderDelete(_req, res, key) {
+  try {
+    const snapshot = await daemonConfigSnapshot();
+    await daemonConfigCommand({ delete_provider: { id: key, expected_revision: snapshot.revision } });
+    res.writeHead(204).end();
+  } catch (e) {
+    res.writeHead(400, { "content-type": "text/plain" }).end(String(e));
+  }
 }
 
 // POST /api/providers — body { key, label, ...field values }
@@ -936,9 +736,11 @@ function handleProviderPost(req, res) {
   req.on("end", async () => {
     try {
       const data = JSON.parse(body);
-      const key = data.key;
-      const { label, base_url, model, api_key, endpoint, handler } = data;
-      await addProvider(key, { label, base_url, model, api_key, endpoint, handler });
+      const snapshot = await daemonConfigSnapshot();
+      await daemonConfigCommand({ upsert_provider: {
+        provider: providerUpdate(data.key, {}, data),
+        expected_revision: snapshot.revision,
+      } });
       res.writeHead(201).end();
     } catch (e) {
       res.writeHead(400, { "content-type": "text/plain" });
@@ -1067,11 +869,6 @@ function handleCommand(url, req, res) {
     }
     try {
       const cmd = JSON.parse(body);
-      // Remember the user's provider choice so the next daemon boot resumes it,
-      // mirroring the TUI which persists `_last_provider` on switch. The daemon
-      // itself only swaps its in-memory provider; nothing writes it to disk.
-      const pid = cmd?.switch_provider?.provider_id;
-      if (pid) setLastProvider(pid).catch((e) => log(`last_provider write failed: ${e.message}`));
       if (sess.link.write(cmd)) res.writeHead(204).end();
       else res.writeHead(409).end("daemon not connected");
     } catch (e) {
