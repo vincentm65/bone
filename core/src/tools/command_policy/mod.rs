@@ -354,10 +354,6 @@ fn resolve_command_policy(raw: RawCommandPolicy) -> CommandPolicy {
     }
 }
 
-pub(crate) fn default_command_policy() -> CommandPolicy {
-    resolve_command_policy(default_raw_command_policy())
-}
-
 fn default_raw_command_policy() -> RawCommandPolicy {
     serde_yaml::from_str(DEFAULT_COMMAND_POLICY)
         .expect("bundled default-command-policy.yaml must be valid")

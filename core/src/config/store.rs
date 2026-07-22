@@ -25,7 +25,6 @@ struct Inner {
     disabled_tools: Vec<String>,
     disabled_commands: Vec<String>,
     legacy: super::custom::CustomConfigs,
-    _command_policy: crate::tools::command_policy::CommandPolicy,
 }
 
 impl ConfigStore {
@@ -88,12 +87,6 @@ impl ConfigStore {
         runtime_settings.replace_domains(subagents.clone(), extension_values.clone());
         extensions.replace_settings(runtime_settings);
         let revision = core.revision();
-        let command_policy =
-            crate::tools::command_policy::load_command_policy().unwrap_or_else(|error| {
-                crate::ext::ctx::runtime_warn_once(format!("bone: warning: {error}"));
-                // The runtime loader applies the same bundled fallback.
-                crate::tools::command_policy::default_command_policy()
-            });
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 revision,
@@ -104,7 +97,6 @@ impl ConfigStore {
                 disabled_tools,
                 disabled_commands,
                 legacy,
-                _command_policy: command_policy,
             })),
             extensions: Arc::new(Mutex::new(vec![extensions])),
         }
@@ -212,6 +204,8 @@ impl ConfigStore {
                 ),
             ));
         }
+        super::providers_config::validate_reasoning_effort(&update.reasoning_effort)
+            .map_err(|error| (inner.revision, error))?;
         let mut config = inner.providers.clone();
         let api_key = update.api_key.clone().map(Into::into).unwrap_or_else(|| {
             config
@@ -258,17 +252,9 @@ impl ConfigStore {
             .ok_or_else(|| {
                 super::error::ConfigError::load(&path, "file does not exist").to_string()
             })?;
-        let subagents = super::domains::load_subagents()?
-            .unwrap_or_default()
-            .subagents;
-        let extension_values = super::domains::load_extensions()?
-            .unwrap_or_default()
-            .extensions;
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         inner.disabled_tools = loaded.resolved().tools.disabled.clone();
         inner.disabled_commands = loaded.resolved().commands.disabled.clone();
-        inner.subagents = subagents;
-        inner.extension_values = extension_values;
         inner.core = loaded;
         inner.revision = inner.revision.saturating_add(1);
         let settings = Self::runtime_settings(&inner);
@@ -730,6 +716,7 @@ impl ConfigStore {
         expected: u64,
     ) -> Result<(), (u64, String)> {
         self.mutate(expected, |inner| {
+            super::providers_config::validate_reasoning_effort(&update.reasoning_effort)?;
             let api_key = update.api_key.map(Into::into).unwrap_or_else(|| {
                 inner
                     .providers
@@ -903,6 +890,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_mutation_rejects_unsupported_reasoning_effort() {
+        let _guard = crate::util::test_env_lock();
+        let previous = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+        let before = store.snapshot();
+        let update = ProviderUpdate {
+            id: "test".into(),
+            label: "Test".into(),
+            base_url: "http://localhost".into(),
+            model: "test-model".into(),
+            endpoint: "/chat/completions".into(),
+            handler: "openai".into(),
+            context_window_tokens: None,
+            reasoning_effort: "extreme".into(),
+            api_key: None,
+        };
+
+        let error = store.upsert_provider(update, before.revision).unwrap_err();
+        assert!(error.1.contains("unsupported reasoning_effort"));
+        let after = store.snapshot();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.providers, before.providers);
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+
+    #[test]
     fn malformed_startup_configuration_returns_error_instead_of_panicking() {
         let _guard = crate::util::test_env_lock();
         let previous = std::env::var_os("BONE_DIR");
@@ -1015,6 +1037,129 @@ mod tests {
         assert_eq!(snapshot.values["general"]["show_reasoning"], true);
 
         std::fs::remove_dir_all(dir).ok();
+        unsafe {
+            match old_bone {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn reload_settings_adopts_config_yaml_and_advances_revision() {
+        let _guard = crate::util::test_env_lock();
+        let old_bone = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+        let extensions = crate::ext::ExtensionManager::unloaded();
+        let store = ConfigStore::new(extensions.clone()).unwrap();
+        let before = store.snapshot();
+        let mut persisted = Settings::load().unwrap().unwrap();
+        persisted
+            .set_value("general", "show_thinking", "true".into())
+            .unwrap();
+
+        store.reload_settings().unwrap();
+
+        let after = store.snapshot();
+        assert_eq!(after.revision, before.revision + 1);
+        assert_eq!(after.values["general"]["show_reasoning"], true);
+        assert_eq!(
+            extensions
+                .config_snapshot()
+                .get_value("general", "show_thinking"),
+            "true"
+        );
+
+        unsafe {
+            match old_bone {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn reload_settings_does_not_adopt_peer_documents() {
+        let _guard = crate::util::test_env_lock();
+        let old_bone = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+        let before = store.snapshot();
+
+        let mut subagents = super::super::domains::load_subagents()
+            .unwrap()
+            .unwrap_or_default()
+            .subagents;
+        subagents.insert(
+            "external-reviewer".into(),
+            SubagentSettings {
+                description: "External edit".into(),
+                ..Default::default()
+            },
+        );
+        super::super::domains::persist_subagents(&subagents).unwrap();
+
+        let mut extension_values = super::super::domains::load_extensions()
+            .unwrap()
+            .unwrap_or_default()
+            .extensions;
+        extension_values
+            .entry("external".into())
+            .or_default()
+            .insert("enabled".into(), ExtensionValue::Bool(true));
+        super::super::domains::persist_extensions(&extension_values).unwrap();
+
+        let mut providers = super::super::domains::load_providers()
+            .unwrap()
+            .unwrap_or_default();
+        providers.providers.insert(
+            "external".into(),
+            super::super::ProviderEntry {
+                label: "External".into(),
+                base_url: "http://localhost".into(),
+                model: "external-model".into(),
+                api_key: Default::default(),
+                endpoint: "/chat/completions".into(),
+                handler: "openai".into(),
+                context_window_tokens: None,
+                reasoning_effort: String::new(),
+            },
+        );
+        super::super::domains::persist_providers(&providers).unwrap();
+
+        store.reload_settings().unwrap();
+
+        let after = store.snapshot();
+        assert_eq!(after.revision, before.revision + 1);
+        assert_eq!(after.values["subagents"], before.values["subagents"]);
+        assert_eq!(after.values["extensions"], before.values["extensions"]);
+        assert_eq!(after.providers, before.providers);
+        assert!(
+            super::super::domains::load_subagents()
+                .unwrap()
+                .unwrap()
+                .subagents
+                .contains_key("external-reviewer")
+        );
+        assert!(
+            super::super::domains::load_extensions()
+                .unwrap()
+                .unwrap()
+                .extensions
+                .contains_key("external")
+        );
+        assert!(
+            super::super::domains::load_providers()
+                .unwrap()
+                .unwrap()
+                .providers
+                .contains_key("external")
+        );
+
         unsafe {
             match old_bone {
                 Some(value) => std::env::set_var("BONE_DIR", value),

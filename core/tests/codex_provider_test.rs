@@ -171,7 +171,8 @@ fn test_codex_request_serializes_prompt_cache_key() {
         stream: true,
         store: false,
         reasoning: Some(bone_core::llm::providers::codex::CodexReasoning {
-            effort: "high".to_string(),
+            effort: Some("high".to_string()),
+            summary: "auto",
         }),
         tools: None,
         tool_choice: None,
@@ -181,7 +182,22 @@ fn test_codex_request_serializes_prompt_cache_key() {
 
     let json = serde_json::to_value(request).unwrap();
     assert_eq!(json["prompt_cache_key"], "bone-codex-thread-42");
+    assert_eq!(json["reasoning"]["effort"], "high");
+    assert_eq!(json["reasoning"]["summary"], "auto");
     assert_eq!(json["input"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn test_codex_reasoning_serializes_summary_without_effort() {
+    let reasoning = bone_core::llm::providers::codex::CodexReasoning {
+        effort: None,
+        summary: "auto",
+    };
+
+    assert_eq!(
+        serde_json::to_value(reasoning).unwrap(),
+        serde_json::json!({"summary": "auto"})
+    );
 }
 
 #[test]

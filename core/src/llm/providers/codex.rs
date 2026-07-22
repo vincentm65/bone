@@ -85,7 +85,9 @@ pub struct CodexRequest {
 
 #[derive(Serialize, Clone)]
 pub struct CodexReasoning {
-    pub effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    pub summary: &'static str,
 }
 
 /// Typed input items for the Codex Responses API. Uses `#[serde(untagged)]`;
@@ -209,6 +211,15 @@ struct CodexOutputItem {
     arguments: Option<String>,
     #[serde(default)]
     encrypted_content: Option<String>,
+    #[serde(default)]
+    summary: Vec<CodexSummaryPart>,
+}
+
+#[derive(Deserialize)]
+struct CodexSummaryPart {
+    #[serde(rename = "type")]
+    part_type: String,
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -322,13 +333,13 @@ pub fn build_instructions(messages: &[ChatMessage]) -> String {
     }
 }
 
-/// Extract tool calls and usage from a completed response object.
-/// Text is NOT emitted here — it was already streamed via
-/// `response.output_text.delta` events, and re-emitting would
-/// duplicate content and confuse the LLM on subsequent rounds.
+/// Extract tool calls, generated reasoning summaries, encrypted reasoning, and
+/// usage from a completed response object. Assistant text is NOT emitted here
+/// because it was already streamed via `response.output_text.delta` events.
 #[allow(clippy::type_complexity)]
 fn extract_response_events(
     resp: &CodexResponse,
+    emitted_summary_parts: &BTreeSet<(usize, usize)>,
 ) -> (Vec<ChatEvent>, Option<(u32, u32, Option<u32>)>) {
     // Single pass over the output array so reasoning and function_call items
     // stay in the backend's original order. Splitting them into separate lists
@@ -336,7 +347,7 @@ fn extract_response_events(
     // [reasoning A, call A, reasoning B, call B] and break `store: false`
     // validation / prefix-cache alignment.
     let mut events: Vec<ChatEvent> = Vec::new();
-    for item in &resp.output {
+    for (output_index, item) in resp.output.iter().enumerate() {
         match item.item_type.as_str() {
             "function_call" => {
                 let (Some(id), Some(name)) = (item.call_id.clone(), item.name.clone()) else {
@@ -352,18 +363,28 @@ fn extract_response_events(
                 }));
             }
             "reasoning" => {
-                let (Some(id), Some(encrypted_content)) =
-                    (item.id.clone(), item.encrypted_content.clone())
-                else {
-                    continue;
-                };
-                if id.is_empty() || encrypted_content.is_empty() {
-                    continue;
+                for (summary_index, part) in item.summary.iter().enumerate() {
+                    if part.part_type == "summary_text"
+                        && !part.text.is_empty()
+                        && !emitted_summary_parts.contains(&(output_index, summary_index))
+                    {
+                        events.push(ChatEvent::ReasoningDelta {
+                            text: part.text.clone(),
+                            echo_field: None,
+                        });
+                    }
                 }
-                events.push(ChatEvent::EncryptedReasoning {
-                    id,
-                    encrypted_content,
-                });
+
+                if let (Some(id), Some(encrypted_content)) =
+                    (item.id.clone(), item.encrypted_content.clone())
+                    && !id.is_empty()
+                    && !encrypted_content.is_empty()
+                {
+                    events.push(ChatEvent::EncryptedReasoning {
+                        id,
+                        encrypted_content,
+                    });
+                }
             }
             _ => {}
         }
@@ -391,6 +412,48 @@ fn extract_response_events(
 
 fn output_index(raw: &Value) -> usize {
     raw.get("output_index").and_then(Value::as_u64).unwrap_or(0) as usize
+}
+
+fn process_summary_event(
+    event_type: &str,
+    raw: &Value,
+    emitted_summary_parts: &mut BTreeSet<(usize, usize)>,
+) -> Option<ChatEvent> {
+    let key = (
+        output_index(raw),
+        raw.get("summary_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+    );
+
+    match event_type {
+        "response.reasoning_summary_text.delta" => {
+            let text = raw.get("delta").and_then(Value::as_str)?;
+            if text.is_empty() {
+                return None;
+            }
+            emitted_summary_parts.insert(key);
+            Some(ChatEvent::ReasoningDelta {
+                text: text.to_string(),
+                echo_field: None,
+            })
+        }
+        "response.reasoning_summary_text.done" => {
+            let text = raw.get("text").and_then(Value::as_str)?;
+            if text.is_empty() {
+                return None;
+            }
+            let already_emitted = !emitted_summary_parts.insert(key);
+            (!already_emitted).then(|| ChatEvent::ReasoningDelta {
+                text: text.to_string(),
+                echo_field: None,
+            })
+        }
+        // Part-added announces the summary slot; text arrives in delta/done or
+        // the completed output item.
+        "response.reasoning_summary_part.added" => None,
+        _ => None,
+    }
 }
 
 /// Resolve the event type. First checks the JSON `type` field (Responses API
@@ -539,10 +602,10 @@ impl LlmProvider for CodexProvider {
             input: input_items,
             stream: true,
             store: false,
-            reasoning: self
-                .reasoning_effort
-                .clone()
-                .map(|effort| CodexReasoning { effort }),
+            reasoning: Some(CodexReasoning {
+                effort: self.reasoning_effort.clone(),
+                summary: "auto",
+            }),
             tools,
             tool_choice,
             prompt_cache_key,
@@ -604,6 +667,7 @@ impl LlmProvider for CodexProvider {
             let mut partial_tool_calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
             let mut emitted_tool_call_ids: BTreeSet<String> = BTreeSet::new();
             let mut emitted_reasoning_ids: BTreeSet<String> = BTreeSet::new();
+            let mut emitted_summary_parts: BTreeSet<(usize, usize)> = BTreeSet::new();
             let mut last_usage: Option<(u32, u32, Option<u32>)> = None;
 
             while let Some(event) = events.try_next().await.map_err(|err| {
@@ -638,6 +702,20 @@ impl LlmProvider for CodexProvider {
                     "response.output_text.delta" => {
                         if let Some(delta) = raw.get("delta").and_then(|d| d.as_str()) {
                             yield ChatEvent::TextDelta(delta.to_string());
+                        }
+                    }
+
+                    // Generated reasoning summaries are safe, API-authored
+                    // reasoning output; encrypted reasoning remains separate.
+                    "response.reasoning_summary_text.delta"
+                    | "response.reasoning_summary_text.done"
+                    | "response.reasoning_summary_part.added" => {
+                        if let Some(event) = process_summary_event(
+                            event_type,
+                            &raw,
+                            &mut emitted_summary_parts,
+                        ) {
+                            yield event;
                         }
                     }
 
@@ -692,18 +770,41 @@ impl LlmProvider for CodexProvider {
 
                     "response.output_item.done" => {
                         let output_index = output_index(&raw);
-                        // Encrypted reasoning items: emit for in-memory replay.
                         if let Some(item) = raw.get("item")
-                            && item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
-                            && let Some(id) = item.get("id").and_then(|v| v.as_str())
-                            && let Some(enc) = item.get("encrypted_content").and_then(|v| v.as_str())
-                            && !id.is_empty() && !enc.is_empty() {
+                            && item.get("type").and_then(Value::as_str) == Some("reasoning")
+                        {
+                            // Some compatible backends omit summary delta/done
+                            // events and expose only the completed summary parts.
+                            if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+                                for (summary_index, part) in summary.iter().enumerate() {
+                                    let key = (output_index, summary_index);
+                                    if !emitted_summary_parts.contains(&key)
+                                        && part.get("type").and_then(Value::as_str) == Some("summary_text")
+                                        && let Some(text) = part.get("text").and_then(Value::as_str)
+                                        && !text.is_empty()
+                                    {
+                                        emitted_summary_parts.insert(key);
+                                        yield ChatEvent::ReasoningDelta {
+                                            text: text.to_string(),
+                                            echo_field: None,
+                                        };
+                                    }
+                                }
+                            }
+
+                            // Encrypted reasoning items are retained for replay,
+                            // independently of their visible generated summary.
+                            if let Some(id) = item.get("id").and_then(Value::as_str)
+                                && let Some(enc) = item.get("encrypted_content").and_then(Value::as_str)
+                                && !id.is_empty() && !enc.is_empty()
+                            {
                                 emitted_reasoning_ids.insert(id.to_string());
                                 yield ChatEvent::EncryptedReasoning {
                                     id: id.to_string(),
                                     encrypted_content: enc.to_string(),
                                 };
                             }
+                        }
                         if let Some(partial) = partial_tool_calls.remove(&output_index)
                             && !partial.id.is_empty() && !partial.name.is_empty() {
                                 emitted_tool_call_ids.insert(partial.id.clone());
@@ -754,7 +855,8 @@ impl LlmProvider for CodexProvider {
                         }
                         if let Some(resp_val) = raw.get("response")
                             && let Ok(resp) = serde_json::from_value::<CodexResponse>(resp_val.clone()) {
-                                let (events, usage) = extract_response_events(&resp);
+                                let (events, usage) =
+                                    extract_response_events(&resp, &emitted_summary_parts);
                                 if let Some(u) = usage {
                                     last_usage = Some(u);
                                 }
@@ -804,10 +906,11 @@ impl LlmProvider for CodexProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodexResponse, extract_response_events, output_index};
+    use super::{CodexResponse, extract_response_events, output_index, process_summary_event};
     use crate::llm::provider::ChatEvent;
     use crate::tools::TRUNCATED_ARGS_KEY;
     use serde_json::json;
+    use std::collections::BTreeSet;
 
     #[test]
     fn completed_tool_calls_follow_argument_contract() {
@@ -819,12 +922,87 @@ mod tests {
             ]
         }))
         .unwrap();
-        let (events, _) = extract_response_events(&response);
+        let (events, _) = extract_response_events(&response, &Default::default());
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], ChatEvent::ToolCall(call) if call.arguments == json!({})));
         assert!(
             matches!(&events[1], ChatEvent::ToolCall(call) if call.arguments[TRUNCATED_ARGS_KEY] == "{\"x\":")
         );
+    }
+
+    #[test]
+    fn streamed_summary_done_does_not_duplicate_deltas() {
+        let mut emitted = BTreeSet::new();
+        let delta = json!({"output_index": 2, "summary_index": 1, "delta": "Checked "});
+        let done = json!({"output_index": 2, "summary_index": 1, "text": "Checked it."});
+
+        assert!(matches!(
+            process_summary_event(
+                "response.reasoning_summary_text.delta",
+                &delta,
+                &mut emitted
+            ),
+            Some(ChatEvent::ReasoningDelta { text, echo_field: None }) if text == "Checked "
+        ));
+        assert!(
+            process_summary_event("response.reasoning_summary_text.done", &done, &mut emitted)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn streamed_summary_done_is_fallback_without_deltas() {
+        let mut emitted = BTreeSet::new();
+        let done = json!({"output_index": 0, "summary_index": 0, "text": "Checked it."});
+
+        assert!(matches!(
+            process_summary_event(
+                "response.reasoning_summary_text.done",
+                &done,
+                &mut emitted
+            ),
+            Some(ChatEvent::ReasoningDelta { text, echo_field: None }) if text == "Checked it."
+        ));
+    }
+
+    #[test]
+    fn completed_reasoning_emits_summary_and_encrypted_replay() {
+        let response: CodexResponse = serde_json::from_value(json!({
+            "output": [{
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "Checked the implementation."}],
+                "encrypted_content": "encrypted"
+            }]
+        }))
+        .unwrap();
+
+        let (events, _) = extract_response_events(&response, &Default::default());
+        assert!(matches!(
+            &events[0],
+            ChatEvent::ReasoningDelta { text, echo_field: None }
+                if text == "Checked the implementation."
+        ));
+        assert!(matches!(
+            &events[1],
+            ChatEvent::EncryptedReasoning { id, encrypted_content }
+                if id == "rs_1" && encrypted_content == "encrypted"
+        ));
+    }
+
+    #[test]
+    fn completed_reasoning_skips_already_streamed_summary_part() {
+        let response: CodexResponse = serde_json::from_value(json!({
+            "output": [{
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "duplicate"}]
+            }]
+        }))
+        .unwrap();
+
+        let emitted = BTreeSet::from([(0, 0)]);
+        let (events, _) = extract_response_events(&response, &emitted);
+        assert!(events.is_empty());
     }
 
     #[test]

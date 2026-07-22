@@ -107,9 +107,9 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
         || (name == "subagent.lua" && !existing.contains("eager"))
-        // Config now consumes the daemon's typed aggregate schema and preserves
-        // native false values when toggling; refresh older seeded copies.
-        || (name == "config.lua" && !existing.contains("canonical-config-v4")))
+        // Config now exposes validated provider reasoning effort alongside the
+        // daemon's typed aggregate schema; refresh older seeded copies.
+        || (name == "config.lua" && !existing.contains("canonical-config-v5")))
 }
 
 /// Boot the Lua extension system.

@@ -13,30 +13,16 @@ const DEFAULT_INIT_LUA: &str = r#"-- Bone init.lua
 require("banner")
 "#;
 
-/// Appended to the banner template when the user opts into a populated
-/// `init.lua` during onboarding: a live, ready-to-dispatch sub-agent.
-const SUBAGENT_INIT_SNIPPET: &str = r#"
--- A ready-to-use sub-agent, live immediately. Dispatch it with the `subagent`
--- tool, e.g. "use the researcher subagent to investigate X". Add more with
--- additional bone.subagent.register { ... } calls, or delete this block.
-bone.subagent.register({
-    name = "researcher",
-    description = "Investigates a question across the codebase and reports concise findings.",
-    system_prompt = "You are a focused research agent. Investigate the assigned task "
-        .. "thoroughly using the available tools, then report concrete findings with "
-        .. "file:line references. Do not make edits.",
-})
-"#;
-
 /// Minimal `init.lua` written when the user opts out of auto-population.
 pub const BLANK_INIT_LUA: &str = "-- Bone init.lua
--- Empty by choice. Define bone.banner, register sub-agents, or add event hooks
--- here. See the docs for the full picture of what Lua can do.
+-- Empty by choice. Define bone.banner or add advanced startup hooks here.
+-- See the docs for the full picture of what Lua can do.
 ";
 
-/// Banner template + a live sub-agent — the \"auto-populated\" onboarding choice.
+/// Banner wiring — the \"auto-populated\" onboarding choice. Named sub-agents
+/// are persisted separately in `subagents.yaml`.
 pub fn populated_init_lua() -> String {
-    format!("{DEFAULT_INIT_LUA}{SUBAGENT_INIT_SNIPPET}")
+    DEFAULT_INIT_LUA.to_string()
 }
 
 /// Minimal `init.lua` — the \"blank\" onboarding choice.

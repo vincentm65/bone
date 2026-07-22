@@ -62,6 +62,7 @@ struct DenyListPage {
 }
 
 /// Tool names that are built-in (native Rust) and always appear on the tools page.
+#[cfg(test)]
 const NATIVE_TOOLS: &[&str] = &["shell", "read_file", "write_file", "edit_file"];
 
 /// All loaded custom pages, keyed by filename stem.
@@ -81,6 +82,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// Report a malformed config page once with the specific parse error.
+#[cfg(test)]
 fn warn_parse_failure(detail: &str) {
     crate::ext::ctx::runtime_warn_once(format!("bone: warning: {detail}"));
 }
@@ -144,7 +146,8 @@ pub fn seed_builtin_pages(allow: Option<&std::collections::HashSet<String>>, for
 
 impl CustomConfigs {
     /// Scan `~/.bone-rust/config/` for `*.yaml` files and load them.
-    pub fn load() -> Self {
+    #[cfg(test)]
+    pub(crate) fn load() -> Self {
         let dir = config_dir();
         let mut configs = CustomConfigs::default();
 
@@ -217,6 +220,7 @@ impl CustomConfigs {
     /// Load canonical settings from `config.yaml`, or migrate from pages if
     /// the file does not yet exist.  This is deliberately **not** recursive —
     /// it does not call `load()` again, so there is no infinite loop.
+    #[cfg(test)]
     fn load_or_migrate_settings(pages: &[(String, CustomConfigPage)]) -> Option<Settings> {
         match Settings::load() {
             Ok(Some(s)) => Some(s),
@@ -275,6 +279,7 @@ impl CustomConfigs {
     // ── Deny-list page helpers ──────────────────────────────────────────────
 
     /// Scan a Lua directory for .lua file stems.
+    #[cfg(test)]
     fn scan_lua_dir(dir: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         if !dir.is_dir() {
@@ -295,6 +300,7 @@ impl CustomConfigs {
     }
 
     /// Rebuild the tools and commands pages from the filesystem + deny-list.
+    #[cfg(test)]
     fn rebuild_denylist_pages(&mut self) {
         let lua_tools = Self::scan_lua_dir(&bone_dir().join("lua").join("tools"));
         let lua_commands = Self::scan_lua_dir(&bone_dir().join("lua").join("commands"));
@@ -478,11 +484,6 @@ impl CustomConfigs {
     /// Get all enabled tool names from the "tools" page.
     pub fn enabled_tool_names(&self) -> Vec<String> {
         self.enabled_names("tools")
-    }
-
-    /// Get all enabled command names from the "commands" page.
-    pub fn enabled_command_names(&self) -> Vec<String> {
-        self.enabled_names("commands")
     }
 
     /// Get the persisted deny-list for tools or commands.
@@ -674,7 +675,8 @@ impl CustomConfigs {
     }
 
     /// Insert or replace a provider and persist the providers page.
-    pub fn upsert_provider_entry(
+    #[cfg(test)]
+    pub(crate) fn upsert_provider_entry(
         &mut self,
         key: &str,
         entry: &crate::config::ProviderEntry,
@@ -705,25 +707,6 @@ impl CustomConfigs {
                 default: None,
                 value: Some(nested),
             });
-        }
-        if self.save_page("providers") {
-            Ok(())
-        } else {
-            self.page_mut("providers").unwrap().fields = backup;
-            Err("could not save providers.yaml".into())
-        }
-    }
-
-    /// Delete a provider and persist the providers page.
-    pub fn delete_provider_entry(&mut self, key: &str) -> Result<(), String> {
-        let page = self
-            .page_mut("providers")
-            .ok_or_else(|| "providers config page is missing".to_string())?;
-        let backup = page.fields.clone();
-        let before = page.fields.len();
-        page.fields.retain(|field| field.key != key);
-        if page.fields.len() == before {
-            return Err(format!("unknown provider: {key}"));
         }
         if self.save_page("providers") {
             Ok(())

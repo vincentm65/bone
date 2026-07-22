@@ -3,7 +3,8 @@
 //! A fullscreen, `/stats`-style takeover (see `crate::ui::stats`) that walks a
 //! new user through: picking a provider + API key (skippable), choosing optional
 //! tools/commands from the catalog (auto-downloaded), and whether `init.lua`
-//! is auto-populated or blank. The choices are persisted via
+//! is auto-populated or blank. The populated choice stores its starter agent in
+//! canonical `subagents.yaml`. Choices are persisted via
 //! `config::apply_onboarding`, which doubles as the "already onboarded" marker.
 
 use std::io;
@@ -83,7 +84,7 @@ impl State {
         let mut init_options = vec![
             (
                 "Auto-populated",
-                "Banner + a live researcher sub-agent you can dispatch right away.",
+                "Banner wiring plus a researcher in subagents.yaml, ready to dispatch.",
                 InitChoice::Populated,
             ),
             (
@@ -440,7 +441,7 @@ fn draw_welcome(frame: &mut ratatui::Frame, area: Rect) {
             "Catalog",
             "Optional tools & commands, downloaded on demand.",
         ),
-        bullet("init.lua", "Startup script — banner, sub-agents, hooks."),
+        bullet("init.lua", "Startup script — banner and advanced hooks."),
         Line::from(""),
         Line::from(Span::styled(
             "Everything is editable later — just ask bone, or run /setup again.",

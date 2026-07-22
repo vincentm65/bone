@@ -543,9 +543,9 @@ impl Settings {
         self.inner.extensions = extensions;
     }
 
-    /// Load from `~/.bone-rust/config.yaml`. Returns `Ok(None)` when the file
-    /// does not exist (caller should migrate), `Err(...)` when it exists but is
-    /// corrupt or has a bad version.
+    /// Load `config.yaml` from the resolved Bone configuration directory. Returns
+    /// `Ok(None)` when the file does not exist (caller should migrate), `Err(...)`
+    /// when it exists but is corrupt or has a bad version.
     pub fn load() -> Result<Option<Self>, SettingsError> {
         Self::load_path(&settings_path())
     }

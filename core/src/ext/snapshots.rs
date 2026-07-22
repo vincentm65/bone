@@ -1,7 +1,7 @@
 //! UI snapshot types — input styling, spinner/text presets.
 //!
-//! Rust snapshots these once at boot; the renderer and input handler consume
-//! only the Rust copies. Theme and keymap come from `BoneSettings` directly.
+//! The daemon republishes fresh resolved snapshots after configuration mutations
+//! and reloads; renderers and input handlers consume only those Rust copies.
 
 use crate::config::settings::BoneSettings;
 

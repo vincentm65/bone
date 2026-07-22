@@ -125,13 +125,13 @@ fn force_overwrites_existing_file() {
 
     let (first, content) = DEFAULT_LUA_COMMANDS[0];
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(first), "-- user edit with canonical-config-v4\n").unwrap();
+    std::fs::write(dir.join(first), "-- user edit with canonical-config-v5\n").unwrap();
 
     // Without force, an existing current-format file is left untouched.
     seed_default_lua_commands(&dir, None, false);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
-        "-- user edit with canonical-config-v4\n",
+        "-- user edit with canonical-config-v5\n",
         "without force, existing file should be preserved"
     );
 
@@ -198,6 +198,8 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
     std::fs::write(&config, "-- canonical-config-v3\n").unwrap();
     assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v4\n").unwrap();
+    assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    std::fs::write(&config, "-- canonical-config-v5\n").unwrap();
     assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);

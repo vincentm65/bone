@@ -70,8 +70,8 @@ pub fn command_policy_path() -> PathBuf {
     bone_dir().join("command-policy.yaml")
 }
 
-/// Runtime configuration populated from config/*.yaml pages.
-/// No longer persisted to a single file — all values come from CustomConfigs.
+/// Runtime configuration resolved from the daemon-owned [`store::ConfigStore`].
+/// Canonical values are persisted across `config.yaml` and its peer documents.
 #[derive(Debug, Clone)]
 pub struct UserConfig {
     pub approval_mode: ApprovalMode,
@@ -342,7 +342,7 @@ pub fn seed_all_with_persisted() {
 /// The user's `init.lua` choice in the onboarding wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitChoice {
-    /// Banner + a live sub-agent.
+    /// Banner wiring plus a starter sub-agent in `subagents.yaml`.
     Populated,
     /// Minimal placeholder.
     Blank,
@@ -350,9 +350,28 @@ pub enum InitChoice {
     Keep,
 }
 
+fn seed_starter_subagent() -> std::io::Result<()> {
+    let mut subagents = domains::load_subagents()
+        .map_err(std::io::Error::other)?
+        .unwrap_or_default()
+        .subagents;
+    subagents
+        .entry("researcher".into())
+        .or_insert_with(|| settings::SubagentSettings {
+            description: "Investigates a question across the codebase and reports concise findings."
+                .into(),
+            system_prompt: Some(
+                "You are a focused research agent. Investigate the assigned task thoroughly using the available tools, then report concrete findings with file:line references. Do not make edits."
+                    .into(),
+            ),
+            ..Default::default()
+        });
+    domains::persist_subagents(&subagents).map_err(std::io::Error::other)
+}
+
 /// Persist the wizard's results and materialize them on disk: the selection
-/// file (also the onboarding marker), the chosen `init.lua`, and the seeded
-/// tools/commands filtered to the selection.
+/// file (also the onboarding marker), the chosen `init.lua`, canonical starter
+/// sub-agent configuration, and seeded tools/commands filtered to the selection.
 pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io::Result<()> {
     // Materialize everything first; only write the selection file (the
     // "onboarding complete" marker) last, so a failure partway through leaves
@@ -368,6 +387,9 @@ pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io
             fs::create_dir_all(parent)?;
         }
         fs::write(&init_path, content)?;
+    }
+    if init == InitChoice::Populated {
+        seed_starter_subagent()?;
     }
 
     seed_base();
@@ -452,11 +474,13 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
 #[cfg(test)]
 mod tests {
     use super::{
-        migrate_memory_to_catalog, migrate_memory_to_catalog_with_hash, sync_bundled_file,
+        InitChoice, SetupSelection, apply_onboarding, domains, migrate_memory_to_catalog,
+        migrate_memory_to_catalog_with_hash, settings::SubagentSettings, sync_bundled_file,
     };
     use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn migration_test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -468,6 +492,120 @@ mod tests {
 
     fn sha256(content: &[u8]) -> String {
         format!("{:x}", Sha256::digest(content))
+    }
+
+    fn with_test_bone_dir(test: impl FnOnce(&Path)) {
+        let _guard = crate::util::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let old_bone_dir = std::env::var_os("BONE_DIR");
+        // SAFETY: held under test_env_lock; restored below.
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(dir.path())));
+
+        match old_bone_dir {
+            Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+            None => unsafe { std::env::remove_var("BONE_DIR") },
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    fn empty_selection() -> SetupSelection {
+        SetupSelection {
+            tools: Vec::new(),
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn populated_onboarding_writes_banner_and_canonical_researcher() {
+        with_test_bone_dir(|dir| {
+            apply_onboarding(&empty_selection(), InitChoice::Populated).unwrap();
+
+            assert_eq!(
+                fs::read_to_string(dir.join("init.lua")).unwrap(),
+                "-- Bone init.lua\nrequire(\"banner\")\n"
+            );
+            let config = domains::load_subagents().unwrap().unwrap();
+            assert_eq!(config.version, 1);
+            assert_eq!(config.subagents.len(), 1);
+            assert_eq!(
+                config.subagents.get("researcher"),
+                Some(&SubagentSettings {
+                    description:
+                        "Investigates a question across the codebase and reports concise findings."
+                            .into(),
+                    system_prompt: Some(
+                        "You are a focused research agent. Investigate the assigned task thoroughly using the available tools, then report concrete findings with file:line references. Do not make edits."
+                            .into(),
+                    ),
+                    ..Default::default()
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn populated_onboarding_preserves_existing_subagents() {
+        with_test_bone_dir(|_| {
+            let expected = BTreeMap::from([
+                (
+                    "reviewer".into(),
+                    SubagentSettings {
+                        description: "Reviews changes".into(),
+                        system_prompt: Some("Review only".into()),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "researcher".into(),
+                    SubagentSettings {
+                        description: "My custom researcher".into(),
+                        system_prompt: Some("Use my instructions".into()),
+                        provider: Some("custom-provider".into()),
+                        model: Some("custom-model".into()),
+                        approval: "danger".into(),
+                        timeout_ms: Some(42_000),
+                        max_concurrency: Some(3),
+                        enabled: false,
+                    },
+                ),
+            ]);
+            domains::persist_subagents(&expected).unwrap();
+
+            apply_onboarding(&empty_selection(), InitChoice::Populated).unwrap();
+
+            assert_eq!(
+                domains::load_subagents().unwrap().unwrap().subagents,
+                expected
+            );
+        });
+    }
+
+    #[test]
+    fn blank_and_keep_onboarding_do_not_modify_subagents() {
+        with_test_bone_dir(|dir| {
+            apply_onboarding(&empty_selection(), InitChoice::Blank).unwrap();
+            assert!(!dir.join("subagents.yaml").exists());
+
+            let subagents =
+                "version: 1\nsubagents:\n  existing:\n    description: Existing agent\n";
+            fs::write(dir.join("subagents.yaml"), subagents).unwrap();
+            fs::write(dir.join("init.lua"), "-- existing init\n").unwrap();
+
+            apply_onboarding(&empty_selection(), InitChoice::Keep).unwrap();
+
+            assert_eq!(
+                fs::read_to_string(dir.join("subagents.yaml")).unwrap(),
+                subagents
+            );
+            assert_eq!(
+                fs::read_to_string(dir.join("init.lua")).unwrap(),
+                "-- existing init\n"
+            );
+        });
     }
 
     #[test]

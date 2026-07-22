@@ -174,6 +174,25 @@ fn default_handler() -> String {
     "openai".to_string()
 }
 
+pub const REASONING_EFFORTS: &[&str] = &[
+    "default", "none", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+pub fn validate_reasoning_effort(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty()
+        || REASONING_EFFORTS
+            .iter()
+            .any(|effort| value.eq_ignore_ascii_case(effort))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported reasoning_effort {value:?}; expected default, none, minimal, low, medium, high, xhigh, or max"
+        ))
+    }
+}
+
 impl ProviderEntry {
     /// Non-empty reasoning effort for request builders. Empty/`default` → None.
     pub fn reasoning_effort_opt(&self) -> Option<String> {
@@ -240,6 +259,22 @@ impl Default for ProvidersConfig {
             last_provider: String::new(),
             providers: std::collections::HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_supported_reasoning_efforts() {
+        assert!(validate_reasoning_effort("").is_ok());
+        assert!(validate_reasoning_effort("default").is_ok());
+        for effort in REASONING_EFFORTS {
+            assert!(validate_reasoning_effort(effort).is_ok(), "{effort}");
+        }
+        assert!(validate_reasoning_effort("HIGH").is_ok());
+        assert!(validate_reasoning_effort("extreme").is_err());
     }
 }
 

@@ -1,4 +1,4 @@
-<!-- bone-agents-reference-version: 3 -->
+<!-- bone-agents-reference-version: 4 -->
 # Bone Agent Reference
 
 Bone refreshes this reference from the running build. It documents how to
@@ -114,6 +114,9 @@ bone.cwd            -- string: startup CWD
 bone.config_dir     -- string: config directory path
 bone.agent_depth    -- integer: 0 for the main agent, >0 inside a sub-agent
 bone.headless       -- boolean: true outside the interactive TUI
+bone.model          -- string: current model name
+bone.provider       -- string: current provider name
+bone.truncation_marker -- string: marker appended to truncated background-job results
 
 -- Logging (outputs to stderr)
 bone.log.info("message")
@@ -123,8 +126,9 @@ bone.log.error("message")
 -- Tool registration
 bone.tool.register({ ... })
 
--- Sub-agent registration
+-- Sub-agent registration and discovery
 bone.subagent.register({ name = "...", description = "...", system_prompt = "...", provider = "...", model = "...", approval = "..." })
+bone.subagent.list()  -- resolved config and Lua definitions
 
 -- Command registration
 bone.command.register("name", { description = "...", handler = function(args, ctx) ... end })
@@ -181,9 +185,12 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | `ctx.ui.pane(table)` | `true\|(false, string)` | Upsert/clear a live pane (tools only) — see [Live Panes](#live-panes) |
 | `ctx.ui.apply(diff)` | `true\|(false, string)` | Apply a protocol `ViewDiff` (`upsert`, `remove`, or `set_highlight`) declaratively |
 | `ctx.ui.key()` | `table` | Block for one key event: `{code, char, ctrl, alt, shift}` — see [Live Panes](#live-panes) |
+| `ctx.ui.width()` | `integer` | Current terminal width in columns (`0` when unknown or headless) |
 | **Live events** | | During `execute_output_live` only |
 | **`ctx.runtime.*`** | | Read-only runtime metadata |
 | `ctx.runtime.info()` | `table` | `{session_id, provider, model, agent_depth, approval_mode, execution={kind, depth}}` |
+| **`ctx.model.*`** | | Request-scoped model metadata |
+| `ctx.model.context_window_tokens` | `integer\|nil` | Provider context-window limit, when known |
 | **`ctx.usage.*`** | | Token usage |
 | `ctx.usage.snapshot()` | `table\|nil` | See [Usage Snapshot](#usage-snapshot) below |
 | **`ctx.state.*`** | | Session-scoped key-value store |
@@ -200,6 +207,14 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | `ctx.agent.followup(id, prompt, opts?)` | `table` | `{ok, id, error}` — continue a completed job from its saved transcript |
 | `ctx.agent.jobs()` | `array` | Snapshot of all jobs (`{id, agent, task, status, result, started_at}`) |
 | `ctx.agent.wait(ids?, opts?)` | `table` | `{ok, jobs, pending, timed_out, cancelled}` — block until jobs finish |
+| **`ctx.process.*`** | | Managed background processes |
+| `ctx.process.spawn(cmd, opts?)` | `table` | Start a managed process and return its id |
+| `ctx.process.status(id)` | `table` | Current state and captured output |
+| `ctx.process.output(id)` | `table` | Captured process output |
+| `ctx.process.list()` | `array` | Snapshot of managed processes |
+| `ctx.process.kill(id)` | `bool` | Terminate a managed process group |
+| **`ctx.settings.*`** | | Read-only extension settings |
+| `ctx.settings.get(path)` | `value\|nil` | Read a resolved extension value by dotted `namespace.key` path |
 | **`ctx.config.*`** | | Daemon-owned config snapshot access |
 | `ctx.config.dir` | `string` | Same as `ctx.config_dir` |
 | `ctx.config.get(section, key)` | `value\|nil` | Read a resolved value from the installed snapshot |
@@ -209,6 +224,9 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | `ctx.config.cycle_field(section, key, current)` | `string\|bool\|nil` | Next bool/enum value from the canonical schema |
 | `ctx.config.list_providers()` | `array` | Redacted provider rows with active and API-key-configured markers |
 | `ctx.config.set_provider_entry(id, entry)` | `true` | Persist a typed provider mutation; an omitted API key preserves the existing secret |
+| `ctx.config.upsert_subagent(entry)` | `true` | Persist a named subagent definition |
+| `ctx.config.delete_subagent(name)` | `true` | Delete a named subagent definition |
+| `ctx.config.set_subagent_enabled(name, enabled)` | `true` | Enable or disable a named subagent |
 | **`ctx.session.*`** | | Conversation history |
 | `ctx.session.current()` | `table\|nil` | `{id, provider, model}` for current session |
 | `ctx.session.list(opts?)` | `array` | Recent conversations (default limit 20, max 100) |
@@ -216,8 +234,11 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | **`ctx.conversation.*`** | | Active conversation transcript (not SQLite) |
 | `ctx.conversation.current()` | `table\|nil` | `{id, provider, model}` for the active conversation |
 | `ctx.conversation.history()` | `array` | In-memory transcript: `{role, content, tool_calls?, name?, tool_call_id?}` |
+| `ctx.conversation.context_tokens(messages)` | `integer` | Estimate provider-context tokens for a messages array |
 | `ctx.conversation.submit(text)` | `true` | Queue a later user turn through the daemon-owned inbox |
 | `ctx.conversation.load(id)` | `true\|(false, string)` | Ask the daemon to load a conversation (interactive command contexts) |
+| **`ctx.db.*`** | | Read-only session database access |
+| `ctx.db.query(sql, params?)` | `array` | Run a read-only `SELECT` (or CTE) with positional parameters and return row tables |
 
 #### Context Availability
 
@@ -232,14 +253,11 @@ Not all `ctx` fields are available in every handler type:
 | `shell` / `shell_streaming` | yes | yes | — |
 | `read_file` / `write_file` | yes | yes | — |
 | `ui.notify` | yes | yes | yes |
-| `ui.status` / `ui.pane` | yes | yes | — |
-| `usage` | yes | yes | — |
-| `state` | yes | yes | — |
-| `tools` | yes | yes | — |
-| `agent` | yes | yes | — |
-| `config` | yes | yes | `config.dir` only |
-| `session` | yes | yes | — |
-| `conversation` | yes | yes | — |
+| `ui.status` / `ui.notice` / `ui.pane` / `ui.apply` / `ui.key` / `ui.width` | yes | yes | — |
+| `runtime` / `model` / `usage` | yes | yes | — |
+| `state` / `tools` / `agent` / `process` | yes | yes | — |
+| `settings` / `config` | yes | yes | `config.dir` only |
+| `session` / `conversation` / `db` | yes | yes | — |
 | `call_id` | yes | — | — |
 
 Event handlers receive a minimal `ctx` with only `config_dir`, `ui.notify`, and `config.dir`. They cannot execute shell commands, read files, or call tools. This is intentional — event handlers run inline during the event loop and must not block.
@@ -261,7 +279,7 @@ local messages = ctx.conversation.history()
 -- The system prompt is NOT included.
 ```
 
-The transcript returned by `history()` is the live in-memory history used for the next provider request. Use `submit(text)` to queue a later user turn. Interactive commands can call `load(id)` to ask the daemon to switch conversations and emit the normal transcript/state updates.
+The transcript returned by `history()` is the live in-memory history used for the next provider request. `context_tokens(messages)` estimates the resulting provider context using the current system prompt and tool definitions. Use `submit(text)` to queue a later user turn. Interactive commands can call `load(id)` to ask the daemon to switch conversations and emit the normal transcript/state updates.
 
 #### Shell Options
 
@@ -321,7 +339,7 @@ bone.subagent.register({
 })
 ```
 
-Fields: `name` (required, unique), `description` (required), `system_prompt`, `provider`, `model`, `approval`, `timeout_ms`. Duplicates are skipped with a warning.
+Fields: `name` (required, unique), `description` (required), `system_prompt`, `provider`, `model`, `approval`, `timeout_ms`, `max_concurrency`. Duplicates are skipped with a warning. `bone.subagent.list()` returns the resolved config-backed and Lua-registered definitions.
 
 Sub-agents cannot spawn nested sub-agents. When `bone.agent_depth > 0`, the default `subagent` delegation tool is not registered, and Rust also rejects attempts to spawn another agent from inside a sub-agent.
 
@@ -341,7 +359,7 @@ if result.ok then
     ctx.log.info(result.content)
 end
 ```
-Opts: `{ approval, provider, model, system_prompt, timeout_ms, max_tokens }`. Default timeout: 300s, max 900s. Agent requests use an inactivity timeout: an active sub-agent is not stopped merely because a hard wall-clock duration elapsed while it is still streaming output or tool results. `max_tokens` caps the subagent's output tokens (sent as the provider's `max_tokens`); omit it to let the provider/server apply its own default. The cap is applied to the freshly-constructed provider, so it never affects the main turn. Use it to bound a model whose output could run away — e.g. compaction summaries.
+Opts: `{ approval, provider, model, system_prompt, timeout_ms, wall_timeout_ms, max_tokens, tools }`. `tools` is an allow-list of tool names exposed to the subagent. The inactivity timeout defaults to 300s and is capped at 900s; an active sub-agent is not stopped while it continues streaming output or tool results. `wall_timeout_ms` is an optional hard deadline that fires regardless of progress (max 3,600s). `max_tokens` caps the subagent's output tokens (sent as the provider's `max_tokens`); omit it to let the provider/server apply its own default. The cap is applied to the freshly-constructed provider, so it never affects the main turn. Use it to bound a model whose output could run away — e.g. compaction summaries.
 
 `run_stream` accepts additional callback opts: `on_started`, `on_status`, `on_tool_call`, `on_tool_result`, `on_token_usage`, `on_finished`, `on_failed`. Each callback receives a table with event-specific fields.
 
@@ -358,7 +376,7 @@ local result = ctx.agent.spawn("Research Rust async runtimes", {
 -- result: { ok = true, id = "job-1", error = nil }
 ```
 
-Opts: `{ agent, approval, provider, model, system_prompt, timeout_ms }`. Sub-agents (`agent_depth > 0`) cannot spawn or wait on background jobs.
+Opts for `spawn` and `followup`: `{ agent, title, approval, provider, model, system_prompt, timeout_ms, wall_timeout_ms, max_concurrency, tools }`. `title` is the human-readable job label, `max_concurrency` limits parallel jobs for that agent template, and `tools` is the subagent tool allow-list. Sub-agents (`agent_depth > 0`) cannot spawn, follow up, or wait on background jobs.
 
 Query all jobs:
 ```lua
@@ -1033,7 +1051,7 @@ may wire runtime behavior, but it must not define a competing settings table.
 `config.yaml` is created automatically on first boot. Its default shape is:
 
 ```yaml
-version: 1
+version: 2
 
 general:
   approval: safe                 # safe | danger

@@ -262,6 +262,63 @@ async fn resetting_approval_updates_live_mode() {
     }
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
+    let before_revision = config.snapshot().revision;
+    let mut persisted = crate::config::settings::Settings::load().unwrap().unwrap();
+    persisted
+        .set_value("general", "show_thinking", "true".into())
+        .unwrap();
+    let (hub, mut commands) = Hub::new();
+    let mut events = hub.subscribe();
+    let mut ctx = DaemonCtx {
+        hub: hub.publisher(),
+        llm: Arc::new(ConfigTestProvider),
+        extensions,
+        session: Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
+            crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+        ))),
+        mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
+        approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
+        key_registry: crate::runtime::KeyReplyRegistry::new(),
+        reload_inbox: None,
+        forward_view_diffs: false,
+        config,
+    };
+
+    let _ = ctx
+        .handle_idle_command(RuntimeCommand::ReloadSettings, &mut commands)
+        .await;
+
+    let event = events.recv().await.unwrap();
+    let RuntimeEvent::ConfigChanged {
+        changed_paths,
+        snapshot,
+        ..
+    } = event
+    else {
+        panic!("expected ConfigChanged");
+    };
+    assert_eq!(changed_paths, vec!["config.yaml"]);
+    assert_eq!(snapshot.revision, before_revision + 1);
+    assert_eq!(snapshot.values["general"]["show_reasoning"], true);
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn dropping_remote_client_closes_its_transport() {
     let (client_io, mut peer_io) = tokio::io::duplex(4096);
