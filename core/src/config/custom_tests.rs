@@ -75,6 +75,35 @@ fn set_value_tests_use_an_isolated_config_home() {
     });
 }
 
+#[test]
+fn enabled_tool_names_respect_explicit_overrides() {
+    let field = |key: &str, value: Option<bool>| ConfigField {
+        key: key.into(),
+        label: None,
+        field_type: ConfigFieldType::Bool,
+        options: Vec::new(),
+        default: Some(serde_yaml::Value::Bool(true)),
+        value: value.map(serde_yaml::Value::Bool),
+    };
+    let mut configs = CustomConfigs::default();
+    configs.pages.push((
+        "tools".into(),
+        CustomConfigPage {
+            title: "Tools".into(),
+            fields: vec![
+                field("default-on", None),
+                field("disabled", Some(false)),
+                field("enabled", Some(true)),
+            ],
+        },
+    ));
+
+    assert_eq!(
+        configs.enabled_tool_names(),
+        vec!["default-on".to_string(), "enabled".to_string()]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn provider_page_update_replaces_file_and_preserves_permissions() {

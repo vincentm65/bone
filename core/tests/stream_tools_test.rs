@@ -5,6 +5,7 @@ use bone_core::tools::registry::{ToolHandler, ToolRegistry};
 use bone_core::tools::types::{Tool, ToolCall, ToolDefinition, ToolOutput};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 struct MockTool {
@@ -31,6 +32,7 @@ struct SlowTool {
     name: String,
     delay_ms: u64,
     content: String,
+    completion_order: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -45,6 +47,10 @@ impl Tool for SlowTool {
 
     async fn execute(&self, _arguments: Value) -> Result<String, String> {
         tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        self.completion_order
+            .lock()
+            .unwrap()
+            .push(self.name.clone());
         Ok(self.content.clone())
     }
 }
@@ -91,29 +97,6 @@ fn make_call(name: &str, id: &str) -> ToolCall {
         name: name.to_string(),
         arguments: json!({}),
     }
-}
-
-#[tokio::test]
-async fn tool_handler_execute_all_returns_results_in_order() {
-    let registry = ToolRegistry::new()
-        .register(MockTool {
-            name: "tool_a".to_string(),
-            result: Ok("result_a".to_string()),
-        })
-        .register(MockTool {
-            name: "tool_b".to_string(),
-            result: Ok("result_b".to_string()),
-        });
-
-    let handler = ToolHandler::new(registry);
-    let calls = vec![make_call("tool_a", "c1"), make_call("tool_b", "c2")];
-
-    let results = handler.execute_all(calls, 0).await;
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].content, "result_a");
-    assert!(!results[0].is_error);
-    assert_eq!(results[1].content, "result_b");
-    assert!(!results[1].is_error);
 }
 
 #[tokio::test]
@@ -182,32 +165,32 @@ async fn tool_handler_execute_all_disabled_tool() {
 }
 
 #[tokio::test]
-async fn tool_handler_execute_all_runs_in_parallel() {
+async fn execute_all_is_concurrent_but_returns_request_order() {
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
     let registry = ToolRegistry::new()
         .register(SlowTool {
-            name: "slow_a".to_string(),
-            delay_ms: 100,
-            content: "a".to_string(),
+            name: "slow".to_string(),
+            delay_ms: 20,
+            content: "first".to_string(),
+            completion_order: completion_order.clone(),
         })
         .register(SlowTool {
-            name: "slow_b".to_string(),
-            delay_ms: 100,
-            content: "b".to_string(),
+            name: "fast".to_string(),
+            delay_ms: 0,
+            content: "second".to_string(),
+            completion_order: completion_order.clone(),
         });
-
     let handler = ToolHandler::new(registry);
-    let calls = vec![make_call("slow_a", "c1"), make_call("slow_b", "c2")];
 
-    let start = std::time::Instant::now();
-    let results = handler.execute_all(calls, 0).await;
-    let elapsed = start.elapsed();
+    let results = handler
+        .execute_all(vec![make_call("slow", "c1"), make_call("fast", "c2")], 0)
+        .await;
 
-    assert_eq!(results.len(), 2);
-    assert!(
-        elapsed < std::time::Duration::from_millis(300),
-        "execute_all should run tools concurrently, took {:?}",
-        elapsed
-    );
+    assert_eq!(*completion_order.lock().unwrap(), vec!["fast", "slow"]);
+    assert_eq!(results[0].call_id, "c1");
+    assert_eq!(results[0].content, "first");
+    assert_eq!(results[1].call_id, "c2");
+    assert_eq!(results[1].content, "second");
 }
 
 #[tokio::test]

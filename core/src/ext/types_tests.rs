@@ -1,9 +1,22 @@
 use super::*;
 
 #[test]
-fn unloaded_manager_has_a_compatibility_snapshot() {
+fn unloaded_manager_exposes_inert_defaults() {
     let manager = ExtensionManager::unloaded();
+
+    assert!(!manager.is_available());
     assert!(manager.config_snapshot().pages.is_empty());
+    assert!(manager.commands().is_empty());
+    assert!(matches!(
+        manager.dispatch_tool_call("write_file", "call_1", &serde_json::json!({}), "danger"),
+        EventDispatchResult::Continue
+    ));
+
+    let settings = manager.frontend_settings().settings;
+    assert_eq!(settings.general.approval, "safe");
+    assert!(settings.ui.status_show_model);
+    assert!(settings.theme.highlights.is_empty());
+    assert!(settings.keymaps.bindings.is_empty());
 }
 
 #[test]
