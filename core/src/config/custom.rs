@@ -4,7 +4,6 @@
 //! migration, setup compatibility, and external callers that still construct
 //! page-format values; legacy page files are not live runtime authorities.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -81,27 +80,20 @@ pub fn config_dir() -> PathBuf {
     bone_dir().join("config")
 }
 
+fn write_yaml_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let yaml = serde_yaml::to_string(value).map_err(|error| error.to_string())?;
+    let permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    crate::tools::write_atomic::write_atomic_sync(path, yaml.as_bytes(), permissions)
+}
+
 /// Report a malformed config page once with the specific parse error.
 #[cfg(test)]
 fn warn_parse_failure(detail: &str) {
     crate::ext::ctx::runtime_warn_once(format!("bone: warning: {detail}"));
-}
-
-fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(contents)?;
-    if let Ok(metadata) = std::fs::metadata(path) {
-        temporary
-            .as_file()
-            .set_permissions(metadata.permissions())?;
-    }
-    temporary.as_file_mut().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error)
-        .map(|_| ())
 }
 
 // ── Built-in seed pages ────────────────────────────────────────────────────
@@ -247,21 +239,9 @@ impl CustomConfigs {
 
     /// Save a single page back to its YAML file.
     fn save_page(&self, namespace: &str) -> bool {
-        if let Some(page) = self.page_ref(namespace) {
-            let path = config_dir().join(format!("{namespace}.yaml"));
-            let yaml = match serde_yaml::to_string(page) {
-                Ok(y) => y,
-                Err(_) => return false,
-            };
-            let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
-            return crate::tools::write_atomic::write_atomic_sync(
-                &path,
-                yaml.as_bytes(),
-                permissions,
-            )
-            .is_ok();
-        }
-        false
+        self.page_ref(namespace).is_some_and(|page| {
+            write_yaml_atomic(&config_dir().join(format!("{namespace}.yaml")), page).is_ok()
+        })
     }
 
     /// Persist the named page; if saving fails, revert the field to its prior value
@@ -413,9 +393,7 @@ impl CustomConfigs {
                     title: page.title.clone(),
                     disabled: disabled.clone(),
                 };
-                if let Ok(yaml) = serde_yaml::to_string(&new_page) {
-                    let _ = std::fs::write(&path, yaml);
-                }
+                let _ = write_yaml_atomic(&path, &new_page);
 
                 return (disabled, page.title);
             }
@@ -434,16 +412,11 @@ impl CustomConfigs {
     /// Save the deny-list for a tools/commands page.
     /// Returns true if the write succeeded.
     fn save_denylist(&self, namespace: &str, disabled: &[String], title: &str) -> bool {
-        let path = config_dir().join(format!("{namespace}.yaml"));
         let page = DenyListPage {
             title: title.to_string(),
             disabled: disabled.to_vec(),
         };
-        let yaml = match serde_yaml::to_string(&page) {
-            Ok(y) => y,
-            Err(_) => return false,
-        };
-        write_atomic(&path, yaml.as_bytes()).is_ok()
+        write_yaml_atomic(&config_dir().join(format!("{namespace}.yaml")), &page).is_ok()
     }
 
     fn page_ref(&self, namespace: &str) -> Option<&CustomConfigPage> {

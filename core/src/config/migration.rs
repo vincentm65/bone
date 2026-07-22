@@ -1198,6 +1198,18 @@ providers:
 
         let providers: ProvidersConfig = load_yaml(&root.path("providers.yaml")).unwrap();
         assert_eq!(providers.version, 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(root.path("providers.yaml"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         // last_provider must be empty — setup's provider step sets it.
         assert!(providers.last_provider.is_empty());
         // Must have the three seeded template providers.

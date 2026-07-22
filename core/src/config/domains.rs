@@ -1,7 +1,6 @@
 //! Canonical peer configuration documents outside `config.yaml`.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -160,32 +159,13 @@ pub(crate) fn write_document<T: Serialize>(
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let yaml = serde_yaml::to_string(value).map_err(|error| error.to_string())?;
     let permissions = std::fs::metadata(path)
-        .or_else(|_| {
-            permissions_from
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-                .and_then(std::fs::metadata)
-        })
         .ok()
+        .or_else(|| permissions_from.and_then(|path| std::fs::metadata(path).ok()))
         .map(|metadata| metadata.permissions());
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
-    temporary
-        .write_all(yaml.as_bytes())
-        .map_err(|error| error.to_string())?;
-    if let Some(permissions) = permissions {
-        temporary
-            .as_file()
-            .set_permissions(permissions)
-            .map_err(|error| error.to_string())?;
-    }
-    temporary
-        .as_file_mut()
-        .sync_all()
-        .map_err(|error| error.to_string())?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error.to_string())?;
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| error.to_string())
+    #[cfg(unix)]
+    let permissions = permissions.or_else(|| {
+        use std::os::unix::fs::PermissionsExt;
+        Some(std::fs::Permissions::from_mode(0o600))
+    });
+    crate::tools::write_atomic::write_atomic_sync(path, yaml.as_bytes(), permissions)
 }

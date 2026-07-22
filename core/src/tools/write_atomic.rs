@@ -22,10 +22,14 @@ pub fn write_atomic_sync(
 
     let temp_path = temp_path(path);
     let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(permissions) = permissions.as_ref() {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            options.mode(permissions.mode());
+        }
+        let mut file = options.open(&temp_path)?;
         file.write_all(content)?;
         file.flush()?;
         if let Some(permissions) = permissions {
@@ -34,7 +38,12 @@ pub fn write_atomic_sync(
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temp_path, path)?;
-        if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
             std::fs::File::open(parent)?.sync_all()?;
         }
         Ok(())

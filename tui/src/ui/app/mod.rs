@@ -8,7 +8,7 @@ pub mod stream;
 use paste::{apply_input_key_with_paste_burst, collect_paste_burst, is_paste_burst, plain_char};
 
 use crate::chat::Message;
-use crate::config::{self, UserConfig};
+use crate::config::UserConfig;
 use crate::llm::{ChatMessage, LlmProvider};
 
 use crate::tools::{ApprovalMode, CallOutcome, ToolCall, ToolResult};
@@ -454,7 +454,6 @@ pub struct App {
     pub should_quit: bool,
     pub renderer: Renderer,
     pub user_config: UserConfig,
-    pub custom_configs: config::custom::CustomConfigs,
     /// Latest daemon-owned typed schema/snapshot and correlated mutations.
     config_view: ConfigView,
     pending_config: BTreeMap<String, String>,
@@ -477,17 +476,12 @@ pub struct App {
     /// Live, running estimate of `received` (completion) tokens during a turn.
     /// `Some` while a turn streams — ticked up on each text/tool delta and
     /// rebaselined to the authoritative count on `TokenUsage`; `None` when idle
-    /// so the status bar shows `token_stats.received` directly.
+    /// so the status bar shows `view.received` directly.
     pub stream_estimated_received: Option<u64>,
     /// Frontend mirror of cumulative session state (token totals, conversation
     /// id/seq, active provider). Populated from `StateSnapshot` events after
     /// each turn / lifecycle change.
     pub view: crate::runtime::SessionSnapshot,
-    /// Active conversation id, synced from `StateSnapshot` events so
-    /// `app_ctx_state` can build Lua context without reading the session.
-    pub conversation_id: Option<i64>,
-    /// Accumulated token stats, synced from `StateSnapshot` events.
-    pub token_stats: crate::llm::TokenStats,
 
     /// Active pane pages displayed between input and status bar.
     pub pages: Vec<PanePage>,
@@ -562,7 +556,6 @@ impl App {
     pub fn with_runtime_client(
         provider: std::sync::Arc<dyn LlmProvider>,
         user_config: UserConfig,
-        custom_configs: config::custom::CustomConfigs,
         command_tx: tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeCommand>,
         events_rx: tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
         daemon_client: Option<crate::rpc::RemoteClient>,
@@ -609,7 +602,6 @@ impl App {
             should_quit: false,
             renderer,
             user_config,
-            custom_configs,
             config_view: ConfigView::default(),
             pending_config: BTreeMap::new(),
             next_config_request: 0,
@@ -624,8 +616,6 @@ impl App {
             last_ctrl_c: None,
             stream_estimated_received: None,
             view,
-            conversation_id: None,
-            token_stats: crate::llm::TokenStats::default(),
             pages: Vec::new(),
             active_page: 0,
             panes_visible: true,
@@ -662,7 +652,6 @@ impl App {
     pub fn with_daemon(
         llm: Box<dyn LlmProvider>,
         user_config: UserConfig,
-        custom_configs: config::custom::CustomConfigs,
         client: crate::rpc::RemoteClient,
     ) -> io::Result<Self> {
         let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(llm);
@@ -670,14 +659,7 @@ impl App {
         // `StateSnapshot` aren't missed.
         let command_tx = client.command_sender();
         let events_rx = client.subscribe();
-        Self::with_runtime_client(
-            provider,
-            user_config,
-            custom_configs,
-            command_tx,
-            events_rx,
-            Some(client),
-        )
+        Self::with_runtime_client(provider, user_config, command_tx, events_rx, Some(client))
     }
 
     /// Client-side banner hints (release + catalog update notices) appended below
@@ -1070,8 +1052,6 @@ impl App {
     /// Adopt a daemon `SessionSnapshot` as the local view-model: the single
     /// place the frontend mirrors authoritative state.
     pub(crate) fn apply_snapshot(&mut self, snapshot: crate::runtime::SessionSnapshot) {
-        self.conversation_id = snapshot.conversation_id;
-        self.token_stats = snapshot.to_token_stats();
         self.view = snapshot;
     }
 
@@ -1284,8 +1264,9 @@ impl App {
         // the queue, with more work intentionally queued after it.
         self.reset_transient_ui_state(false);
 
-        let summary = if self.token_stats.request_count > 0 {
-            format!("Session: {}. Chat cleared.", self.token_stats.one_liner())
+        let token_stats = self.view.to_token_stats();
+        let summary = if token_stats.request_count > 0 {
+            format!("Session: {}. Chat cleared.", token_stats.one_liner())
         } else {
             "Chat cleared.".to_string()
         };
