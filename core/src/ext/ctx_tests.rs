@@ -7,7 +7,8 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
     let temp = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("BONE_DIR", temp.path()) };
 
-    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded());
+    let store =
+        crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
     let lua = Lua::new();
     let mut cfg = CtxConfig::new(
         temp.path().to_string_lossy().into_owned(),
@@ -55,6 +56,31 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
     );
     assert_eq!(store.snapshot().values["ui"]["spinner_speed"], 125);
 
+    let upsert_subagent: mlua::Function = config.get("upsert_subagent").unwrap();
+    let agent = lua.create_table().unwrap();
+    agent.set("name", "reviewer").unwrap();
+    agent.set("description", "Reviews changes").unwrap();
+    assert!(upsert_subagent.call::<bool>(agent).unwrap());
+    assert_eq!(
+        store.snapshot().values["subagents"]["reviewer"]["enabled"],
+        true
+    );
+
+    let set_subagent_enabled: mlua::Function = config.get("set_subagent_enabled").unwrap();
+    assert!(
+        set_subagent_enabled
+            .call::<bool>(("reviewer", false))
+            .unwrap()
+    );
+    assert_eq!(
+        store.snapshot().values["subagents"]["reviewer"]["enabled"],
+        false
+    );
+
+    let delete_subagent: mlua::Function = config.get("delete_subagent").unwrap();
+    assert!(delete_subagent.call::<bool>("reviewer").unwrap());
+    assert!(store.snapshot().values["subagents"]["reviewer"].is_null());
+
     unsafe {
         match old_bone {
             Some(value) => std::env::set_var("BONE_DIR", value),
@@ -90,6 +116,41 @@ fn config_get_uses_installed_snapshot_instead_of_filesystem() {
     assert_eq!(
         get.call::<String>(("general", "approval_mode")).unwrap(),
         "safe"
+    );
+}
+
+#[test]
+fn config_get_table_exposes_canonical_enablement_from_snapshot() {
+    let lua = Lua::new();
+    let mut settings = crate::config::settings::Settings::defaults();
+    settings.inner.commands.disabled.push("compact".into());
+    settings.inner.tools.disabled.push("browser".into());
+    let custom = crate::config::custom::CustomConfigs {
+        pages: Vec::new(),
+        settings: Some(settings),
+    };
+    lua.set_app_data(ConfigSnapshot(Arc::new(Mutex::new(custom))));
+    let cfg = CtxConfig::new("/tmp".into(), new_shared_state());
+    let config = build_config_table(&lua, &cfg).unwrap();
+    let get_table: mlua::Function = config.get("get_table").unwrap();
+
+    let commands: mlua::Table = get_table.call("commands").unwrap();
+    let tools: mlua::Table = get_table.call("tools").unwrap();
+    assert_eq!(
+        commands
+            .get::<mlua::Table>("disabled")
+            .unwrap()
+            .get::<String>(1)
+            .unwrap(),
+        "compact"
+    );
+    assert_eq!(
+        tools
+            .get::<mlua::Table>("disabled")
+            .unwrap()
+            .get::<String>(1)
+            .unwrap(),
+        "browser"
     );
 }
 

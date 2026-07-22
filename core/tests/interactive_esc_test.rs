@@ -139,7 +139,7 @@ bone.command.register("picker", {
         commands_rx,
         provider,
         extensions.clone(),
-        bone_core::config::store::ConfigStore::new(extensions),
+        bone_core::config::store::ConfigStore::new(extensions).unwrap(),
         session,
         bone_core::tools::ApprovalMode::Safe,
         None,

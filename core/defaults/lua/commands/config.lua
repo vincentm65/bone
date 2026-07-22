@@ -1,5 +1,5 @@
 -- /config — interactive settings editor.
--- canonical-config-v3
+-- canonical-config-v4
 --
 -- Renders its own styled bottom pane (full span control) for the tabbed
 -- settings overview, and reuses `ui.menu` only for the isolated sub-prompts
@@ -377,7 +377,7 @@ local function run(ctx, start_ns)
 
    menu.clear(ctx)
    if restart_required then
-      return { action = "config.apply_restart_required", submit = false }
+      return { action = "config.reload_tools", submit = false }
    end
    if changed then return { action = "config.apply", submit = false } end
    return nil

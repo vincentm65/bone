@@ -467,6 +467,41 @@ fn acquire_settings_write_lock(
     Ok((mutex, file))
 }
 
+fn sparse_settings_value(settings: &BoneSettings) -> Result<serde_yaml::Value, SettingsError> {
+    let mut value =
+        serde_yaml::to_value(settings).map_err(|error| SettingsError::Parse(error.to_string()))?;
+    let defaults = serde_yaml::to_value(BoneSettings::default())
+        .map_err(|error| SettingsError::Parse(error.to_string()))?;
+    prune_defaults(&mut value, &defaults, true);
+    Ok(value)
+}
+
+fn prune_defaults(value: &mut serde_yaml::Value, defaults: &serde_yaml::Value, root: bool) {
+    let (serde_yaml::Value::Mapping(values), serde_yaml::Value::Mapping(default_values)) =
+        (value, defaults)
+    else {
+        return;
+    };
+
+    let keys: Vec<_> = values.keys().cloned().collect();
+    for key in keys {
+        if root && key.as_str() == Some("version") {
+            continue;
+        }
+        let Some(default) = default_values.get(&key) else {
+            continue;
+        };
+        let Some(current) = values.get_mut(&key) else {
+            continue;
+        };
+        prune_defaults(current, default, false);
+        let empty_mapping = matches!(current, serde_yaml::Value::Mapping(map) if map.is_empty());
+        if current == default || empty_mapping {
+            values.remove(&key);
+        }
+    }
+}
+
 // ── Settings wrapper ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -548,12 +583,16 @@ impl Settings {
         self.write_path(path)
     }
 
+    pub(crate) fn sparse_yaml(&self) -> Result<String, SettingsError> {
+        let sparse = sparse_settings_value(&self.inner)?;
+        serde_yaml::to_string(&sparse).map_err(|e| SettingsError::Parse(e.to_string()))
+    }
+
     fn write_path(&self, path: &std::path::Path) -> Result<(), SettingsError> {
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         fs::create_dir_all(parent)?;
 
-        let yaml =
-            serde_yaml::to_string(&self.inner).map_err(|e| SettingsError::Parse(e.to_string()))?;
+        let yaml = self.sparse_yaml()?;
         let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
         tmp.write_all(yaml.as_bytes())?;
         tmp.as_file_mut().sync_all()?;
@@ -1217,7 +1256,42 @@ mod tests {
         assert!(!raw.contains("subagents:"));
         assert!(!raw.contains("Report file and line references."));
         assert!(!raw.contains("label:"));
+        assert!(!raw.contains("null"));
+        assert!(!raw.contains("show_reasoning"));
+        assert!(!raw.contains("theme:"));
+        assert!(
+            raw.lines().count() < 10,
+            "config should stay sparse:\n{raw}"
+        );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn verbose_input_round_trips_to_sparse_output() {
+        let path = temp_path("verbose-roundtrip");
+        let mut original = Settings::defaults();
+        original.inner.general.approval = "danger".into();
+        original.inner.ui.input.prefix = Some("λ ".into());
+        original.inner.ui.status_show_timer = false;
+        let verbose = serde_yaml::to_string(original.resolved()).unwrap();
+        assert!(verbose.contains("show_reasoning: false"));
+        assert!(verbose.contains("theme:"));
+        fs::write(&path, verbose).unwrap();
+
+        let loaded = Settings::load_path(&path).unwrap().unwrap();
+        loaded.save_path(&path).unwrap();
+        let reloaded = Settings::load_path(&path).unwrap().unwrap();
+        assert_eq!(reloaded.inner.general.approval, "danger");
+        assert_eq!(reloaded.inner.ui.input.prefix.as_deref(), Some("λ "));
+        assert!(!reloaded.inner.ui.status_show_timer);
+        let sparse = fs::read_to_string(&path).unwrap();
+        assert!(!sparse.contains("show_reasoning"));
+        assert!(!sparse.contains("theme:"));
+        assert!(sparse.contains("approval: danger"));
+        assert!(sparse.contains("status_show_timer: false"));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]

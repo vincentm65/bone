@@ -29,21 +29,19 @@ struct Inner {
 }
 
 impl ConfigStore {
-    pub fn new(extensions: crate::ext::ExtensionManager) -> Self {
-        if let Err(error) = super::migration::migrate() {
-            panic!("configuration migration failed: {error}");
-        }
+    pub fn new(extensions: crate::ext::ExtensionManager) -> Result<Self, String> {
+        super::migration::migrate()?;
         let path = super::settings::settings_path();
         let core = super::settings::Settings::load()
-            .unwrap_or_else(|error| panic!("cannot load {}: {error}", path.display()))
-            .unwrap_or_else(|| panic!("configuration migration did not create {}", path.display()));
-        Self::from_legacy(
+            .map_err(|error| format!("cannot load {}: {error}", path.display()))?
+            .ok_or_else(|| format!("configuration migration did not create {}", path.display()))?;
+        Ok(Self::from_legacy(
             extensions,
             super::custom::CustomConfigs {
                 settings: Some(core),
                 ..Default::default()
             },
-        )
+        ))
     }
 
     pub(crate) fn from_legacy(
@@ -905,6 +903,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn malformed_startup_configuration_returns_error_instead_of_panicking() {
+        let _guard = crate::util::test_env_lock();
+        let previous = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+        std::fs::write(dir.path().join("config.yaml"), "version: 2\ngeneral: [\n").unwrap();
+
+        let error = ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+            .err()
+            .expect("malformed configuration should fail");
+        assert!(error.contains("cannot migrate"));
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+
+    #[test]
     fn successful_migration_makes_legacy_pages_inert() {
         let _guard = crate::util::test_env_lock();
         let old_bone = std::env::var_os("BONE_DIR");
@@ -917,7 +936,7 @@ mod tests {
         let legacy = "this is not a valid config page\n";
         std::fs::write(legacy_dir.join("general.yaml"), legacy).unwrap();
 
-        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded());
+        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
 
         assert_eq!(store.snapshot().values["general"]["approval"], "safe");
         assert!(store.legacy_snapshot().pages.is_empty());
@@ -947,7 +966,7 @@ mod tests {
         ));
         unsafe { std::env::set_var("BONE_DIR", &dir) };
 
-        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded());
+        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
         let blocked = super::super::settings::settings_path();
         std::fs::remove_file(&blocked).unwrap();
         std::fs::create_dir(&blocked).unwrap();
@@ -984,7 +1003,7 @@ mod tests {
         ));
         unsafe { std::env::set_var("BONE_DIR", &dir) };
 
-        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded());
+        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
         let other_actor_store = store.clone();
         let revision = store.snapshot().revision;
         other_actor_store
@@ -1019,7 +1038,7 @@ mod tests {
         unsafe { std::env::set_var("BONE_DIR", &dir) };
 
         let initial = crate::ext::ExtensionManager::unloaded();
-        let store = ConfigStore::new(initial.clone());
+        let store = ConfigStore::new(initial.clone()).unwrap();
         let attached = crate::ext::ExtensionManager::unloaded();
         store.attach_extensions(attached.clone());
         let revision = store.snapshot().revision;
@@ -1071,7 +1090,7 @@ mod tests {
         unsafe { std::env::set_var("BONE_DIR", &dir) };
 
         let extensions = crate::ext::ExtensionManager::unloaded();
-        let store = ConfigStore::new(extensions.clone());
+        let store = ConfigStore::new(extensions.clone()).unwrap();
         let initial_revision = store.snapshot().revision;
 
         store
@@ -1139,7 +1158,7 @@ mod tests {
         unsafe { std::env::set_var("BONE_DIR", &dir) };
 
         let extensions = crate::ext::ExtensionManager::unloaded();
-        let store = ConfigStore::new(extensions.clone());
+        let store = ConfigStore::new(extensions.clone()).unwrap();
         let blocked = super::super::domains::subagents_path();
         std::fs::remove_file(&blocked).unwrap();
         std::fs::create_dir(&blocked).unwrap();

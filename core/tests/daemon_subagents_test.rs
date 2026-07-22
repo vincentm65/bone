@@ -92,7 +92,7 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let (hub, commands) = Hub::new();
     let mut events = hub.subscribe();
-    let config = bone_core::config::store::ConfigStore::new(booted.manager.clone());
+    let config = bone_core::config::store::ConfigStore::new(booted.manager.clone()).unwrap();
     let initial_revision = config.snapshot().revision;
     let daemon = tokio::spawn(run_daemon(
         hub.publisher(),

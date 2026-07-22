@@ -194,6 +194,9 @@ async fn expand_lua_command(
         let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
 
         // Find the command handler.
+        if !booted.manager.command_enabled(&name_owned) {
+            return None;
+        }
         let handler = ext::ops_commands::find_handler(&lua, &name_owned)?;
 
         // Create ctx table.

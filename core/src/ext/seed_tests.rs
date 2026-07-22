@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn canonical_disabled_tools_are_excluded() {
+    let mut settings = crate::config::settings::Settings::defaults();
+    settings.inner.tools.disabled = vec!["browser".into(), "cron".into()];
+    let custom = crate::config::custom::CustomConfigs {
+        settings: Some(settings),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        configured_tool_names(
+            &custom,
+            vec!["shell".into(), "browser".into(), "cron".into()]
+        ),
+        vec!["shell"]
+    );
+}
+
+#[test]
 fn extract_description_prefers_field_then_comment() {
     assert_eq!(
         extract_description("-- header\nregister_tool({ description = \"does a thing\" })"),
@@ -107,13 +125,13 @@ fn force_overwrites_existing_file() {
 
     let (first, content) = DEFAULT_LUA_COMMANDS[0];
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(first), "-- user edit with canonical-config-v3\n").unwrap();
+    std::fs::write(dir.join(first), "-- user edit with canonical-config-v4\n").unwrap();
 
     // Without force, an existing current-format file is left untouched.
     seed_default_lua_commands(&dir, None, false);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
-        "-- user edit with canonical-config-v3\n",
+        "-- user edit with canonical-config-v4\n",
         "without force, existing file should be preserved"
     );
 
@@ -178,6 +196,8 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
     std::fs::write(&config, "-- canonical-config-v2\n").unwrap();
     assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v3\n").unwrap();
+    assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    std::fs::write(&config, "-- canonical-config-v4\n").unwrap();
     assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);

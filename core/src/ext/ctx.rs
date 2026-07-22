@@ -1570,7 +1570,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
         })?,
     )?;
 
-    let provider_store = store;
+    let provider_store = store.clone();
     table.set(
         "set_provider_entry",
         lua.create_function(move |_, (id, entry): (String, Table)| {
@@ -1598,6 +1598,57 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
             let revision = provider_store.snapshot().revision;
             provider_store
                 .upsert_provider(update, revision)
+                .map_err(|(_, error)| mlua::Error::external(error))?;
+            Ok(true)
+        })?,
+    )?;
+
+    let upsert_store = store.clone();
+    table.set(
+        "upsert_subagent",
+        lua.create_function(move |_, entry: Table| {
+            let agent = bone_protocol::SubagentDefinition {
+                name: entry.get::<Option<String>>("name")?.unwrap_or_default(),
+                description: entry
+                    .get::<Option<String>>("description")?
+                    .unwrap_or_default(),
+                system_prompt: entry.get("system_prompt")?,
+                provider: entry.get("provider")?,
+                model: entry.get("model")?,
+                approval: entry
+                    .get::<Option<String>>("approval")?
+                    .unwrap_or_else(|| "safe".into()),
+                timeout_ms: entry.get("timeout_ms")?,
+                max_concurrency: entry.get("max_concurrency")?,
+                enabled: entry.get::<Option<bool>>("enabled")?.unwrap_or(true),
+                source: "config".into(),
+            };
+            let revision = upsert_store.snapshot().revision;
+            upsert_store
+                .upsert_subagent(agent, revision)
+                .map_err(|(_, error)| mlua::Error::external(error))?;
+            Ok(true)
+        })?,
+    )?;
+
+    let delete_store = store.clone();
+    table.set(
+        "delete_subagent",
+        lua.create_function(move |_, name: String| {
+            let revision = delete_store.snapshot().revision;
+            delete_store
+                .delete_subagent(&name, revision)
+                .map_err(|(_, error)| mlua::Error::external(error))?;
+            Ok(true)
+        })?,
+    )?;
+
+    table.set(
+        "set_subagent_enabled",
+        lua.create_function(move |_, (name, enabled): (String, bool)| {
+            let revision = store.snapshot().revision;
+            store
+                .set_subagent_enabled(&name, enabled, revision)
                 .map_err(|(_, error)| mlua::Error::external(error))?;
             Ok(true)
         })?,
@@ -1641,15 +1692,16 @@ fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> 
         let snapshot = config_snapshot(lua)?;
         let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(settings) = custom.settings.as_ref() {
-            if section == "theme" {
-                let value = serde_yaml::to_value(&settings.resolved().theme)
-                    .map_err(mlua::Error::external)?;
-                return yaml_to_lua(lua, &value);
-            }
-            if section == "keymaps" {
-                let value = serde_yaml::to_value(&settings.resolved().keymaps)
-                    .map_err(mlua::Error::external)?;
-                return yaml_to_lua(lua, &value);
+            let resolved = settings.resolved();
+            let value = match section.as_str() {
+                "theme" => Some(serde_yaml::to_value(&resolved.theme)),
+                "tools" => Some(serde_yaml::to_value(&resolved.tools)),
+                "commands" => Some(serde_yaml::to_value(&resolved.commands)),
+                "keymaps" => Some(serde_yaml::to_value(&resolved.keymaps)),
+                _ => None,
+            };
+            if let Some(value) = value {
+                return yaml_to_lua(lua, &value.map_err(mlua::Error::external)?);
             }
         }
 

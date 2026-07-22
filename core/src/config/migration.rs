@@ -11,7 +11,7 @@ use serde::Deserialize;
 use super::custom::{ConfigFieldType, CustomConfigPage};
 use super::domains::{ExtensionsConfig, SubagentsConfig};
 use super::settings::{ExtensionValue, Settings};
-use super::{ProviderEntry, ProvidersConfig, bone_dir, load_yaml};
+use super::{ProviderCredential, ProviderEntry, ProvidersConfig, bone_dir, load_yaml};
 
 pub(crate) const MIGRATION_VERSION: u8 = 1;
 const MARKER: &str = ".config-layout-v1-migrated";
@@ -247,6 +247,54 @@ impl Candidate {
             Some(config) => (config, false),
             None => (legacy.providers.clone().unwrap_or_default(), true),
         };
+        // For a fresh install (no legacy providers and no existing providers.yaml),
+        // seed well-known provider templates so the onboarding wizard has entries
+        // to show and the app remains launchable after setup completes.
+        let providers = if write_providers && providers.providers.is_empty() {
+            let mut seeded = ProvidersConfig::default();
+            seeded.providers.insert(
+                "local".into(),
+                ProviderEntry {
+                    label: "llama.cpp".into(),
+                    base_url: "http://127.0.0.1:8080".into(),
+                    model: "local".into(),
+                    api_key: ProviderCredential::from(""),
+                    endpoint: "/v1/chat/completions".into(),
+                    handler: "openai".into(),
+                    context_window_tokens: None,
+                    reasoning_effort: String::new(),
+                },
+            );
+            seeded.providers.insert(
+                "openai".into(),
+                ProviderEntry {
+                    label: "OpenAI".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    model: "gpt-4o".into(),
+                    api_key: ProviderCredential::from(""),
+                    endpoint: "/chat/completions".into(),
+                    handler: "openai".into(),
+                    context_window_tokens: None,
+                    reasoning_effort: String::new(),
+                },
+            );
+            seeded.providers.insert(
+                "anthropic".into(),
+                ProviderEntry {
+                    label: "Anthropic".into(),
+                    base_url: "https://api.anthropic.com".into(),
+                    model: "claude-sonnet-4-20250514".into(),
+                    api_key: ProviderCredential::from(""),
+                    endpoint: "/messages".into(),
+                    handler: "anthropic".into(),
+                    context_window_tokens: None,
+                    reasoning_effort: String::new(),
+                },
+            );
+            seeded
+        } else {
+            providers
+        };
         let (subagents, write_subagents) = match super::domains::load_subagents()? {
             Some(config) => (config, false),
             None => (
@@ -344,15 +392,14 @@ impl Candidate {
         }
         // Write config.yaml after every extracted domain. If interrupted after
         // this point, a retry can safely use the already-written peer files.
-        super::domains::write_document(
-            &root.join("config.yaml"),
-            self.core.resolved(),
-            legacy
-                .root_settings
-                .as_ref()
-                .map(|_| root.join("config.yaml"))
-                .as_deref(),
-        )
+        let config_path = root.join("config.yaml");
+        let permissions = legacy
+            .root_settings
+            .as_ref()
+            .and_then(|_| std::fs::metadata(&config_path).ok())
+            .map(|metadata| metadata.permissions());
+        let yaml = self.core.sparse_yaml().map_err(|error| error.to_string())?;
+        write_bytes(&config_path, yaml.as_bytes(), permissions)
     }
 }
 
@@ -1137,5 +1184,79 @@ providers:
         );
         assert!(!root.path("config.yaml").exists());
         assert!(root.backups(MARKER).is_empty());
+    }
+
+    #[test]
+    fn fresh_install_seeds_provider_templates() {
+        let _guard = crate::util::test_env_lock();
+        let root = TestRoot::new();
+        // No legacy data at all — simulates a brand-new BONE_DIR.
+        migrate().unwrap();
+
+        let settings = std::fs::read_to_string(root.path("config.yaml")).unwrap();
+        assert_eq!(settings, "version: 2\n");
+
+        let providers: ProvidersConfig = load_yaml(&root.path("providers.yaml")).unwrap();
+        assert_eq!(providers.version, 1);
+        // last_provider must be empty — setup's provider step sets it.
+        assert!(providers.last_provider.is_empty());
+        // Must have the three seeded template providers.
+        for id in ["local", "openai", "anthropic"] {
+            let entry = providers
+                .providers
+                .get(id)
+                .unwrap_or_else(|| panic!("fresh install must seed provider template {id:?}"));
+            assert!(
+                entry.api_key.is_empty(),
+                "seeded provider {id:?} must have an empty api_key"
+            );
+            assert!(
+                !entry.base_url.is_empty(),
+                "seeded provider {id:?} must have a base_url"
+            );
+            assert!(
+                !entry.model.is_empty(),
+                "seeded provider {id:?} must have a model"
+            );
+        }
+        // The local provider must match the canonical llama.cpp preset.
+        let local = &providers.providers["local"];
+        assert_eq!(local.label, "llama.cpp");
+        assert_eq!(local.base_url, "http://127.0.0.1:8080");
+        assert_eq!(local.model, "local");
+        assert_eq!(local.endpoint, "/v1/chat/completions");
+        assert_eq!(local.handler, "openai");
+    }
+
+    #[test]
+    fn fresh_install_seeding_is_idempotent() {
+        let _guard = crate::util::test_env_lock();
+        let root = TestRoot::new();
+        migrate().unwrap();
+        let first: ProvidersConfig = load_yaml(&root.path("providers.yaml")).unwrap();
+        // Second migration must preserve the seeded providers unchanged.
+        migrate().unwrap();
+        let second: ProvidersConfig = load_yaml(&root.path("providers.yaml")).unwrap();
+        assert_eq!(first.providers.len(), second.providers.len());
+        for id in ["local", "openai", "anthropic"] {
+            assert_eq!(first.providers[id].base_url, second.providers[id].base_url);
+        }
+    }
+
+    #[test]
+    fn existing_peer_documents_suppress_seeding() {
+        let _guard = crate::util::test_env_lock();
+        let root = TestRoot::new();
+        // Write an explicit providers.yaml (simulating a non-fresh user).
+        root.write(
+            "providers.yaml",
+            "version: 1\nactive: custom\nproviders:\n  custom:\n    label: Custom\n    base_url: http://example.com\n    model: m\n    handler: openai\n",
+        );
+        migrate().unwrap();
+        let providers: ProvidersConfig = load_yaml(&root.path("providers.yaml")).unwrap();
+        // Must NOT contain seeded templates — the user's explicit config wins.
+        assert_eq!(providers.providers.len(), 1);
+        assert!(providers.providers.contains_key("custom"));
+        assert!(!providers.providers.contains_key("local"));
     }
 }

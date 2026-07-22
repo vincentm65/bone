@@ -6,6 +6,17 @@ fn unloaded_manager_has_a_compatibility_snapshot() {
     assert!(manager.config_snapshot().pages.is_empty());
 }
 
+#[test]
+fn command_enablement_uses_canonical_settings() {
+    let manager = ExtensionManager::unloaded();
+    let mut settings = crate::config::settings::Settings::defaults();
+    settings.inner.commands.disabled.push("history".into());
+    manager.replace_settings(settings);
+
+    assert!(!manager.command_enabled("history"));
+    assert!(manager.command_enabled("config"));
+}
+
 fn msg_table(lua: &Lua, role: &str, content: &str) -> mlua::Table {
     let t = lua.create_table().unwrap();
     t.set("role", role).unwrap();

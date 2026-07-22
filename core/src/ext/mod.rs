@@ -109,7 +109,7 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         || (name == "subagent.lua" && !existing.contains("eager"))
         // Config now consumes the daemon's typed aggregate schema and preserves
         // native false values when toggling; refresh older seeded copies.
-        || (name == "config.lua" && !existing.contains("canonical-config-v3")))
+        || (name == "config.lua" && !existing.contains("canonical-config-v4")))
 }
 
 /// Boot the Lua extension system.
@@ -177,6 +177,30 @@ pub fn boot_with_tools_shared(
     )
 }
 
+fn configured_tool_names(
+    custom: &super::config::custom::CustomConfigs,
+    all_tool_names: Vec<String>,
+) -> Vec<String> {
+    if let Some(settings) = custom
+        .settings
+        .as_ref()
+        .filter(|settings| settings.resolved().version >= 2)
+    {
+        let disabled = &settings.resolved().tools.disabled;
+        all_tool_names
+            .into_iter()
+            .filter(|name| !disabled.contains(name))
+            .collect()
+    } else {
+        let names = custom.enabled_tool_names();
+        if names.is_empty() {
+            all_tool_names
+        } else {
+            names
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn boot_with_tools_inner(
     config_dir: &Path,
@@ -211,12 +235,7 @@ fn boot_with_tools_inner(
         .collect();
 
     let mut enabled = if sync {
-        let names = custom.enabled_tool_names();
-        if names.is_empty() {
-            all_tool_names
-        } else {
-            names
-        }
+        configured_tool_names(custom, all_tool_names)
     } else {
         all_tool_names
     };

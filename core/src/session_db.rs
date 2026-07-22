@@ -2,19 +2,36 @@
 
 use crate::llm::{ChatMessage, ChatRole};
 use crate::runtime::UsageRecord;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Returns the path to the conversations database.
 /// Centralizes the path so all callers (TUI, headless, stats-popup) stay in sync.
 /// Uses [`crate::config::bone_dir`] so XDG/`HOME` isolation matches config/Lua.
-/// One-time: if the new path is missing but the pre-XDG legacy path exists,
-/// hard-link (or copy) it so existing history isn't orphaned.
+/// One-time: when using the default/XDG root, copy the pre-XDG legacy database
+/// with SQLite's backup API so existing history isn't orphaned.
 pub fn db_path() -> std::path::PathBuf {
+    db_path_with_legacy(legacy_db_path().as_deref())
+}
+
+fn db_path_with_legacy(legacy: Option<&Path>) -> PathBuf {
     let path = crate::config::bone_dir()
         .join("data")
         .join("conversations.db");
-    migrate_legacy_db_if_needed(&path);
+    let explicit_root = matches!(std::env::var("BONE_DIR"), Ok(dir) if !dir.is_empty());
+    if !explicit_root
+        && let Some(legacy) = legacy
+        && migrate_legacy_db_if_needed(legacy, &path).is_err()
+    {
+        // Keep using the legacy database when snapshotting fails. Returning the
+        // new path would let SessionDb::open create an empty database there and
+        // suppress every future migration attempt.
+        return legacy.to_path_buf();
+    }
     path
 }
 
@@ -24,43 +41,50 @@ fn legacy_db_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".bone-rust/data/conversations.db"))
 }
 
-fn migrate_legacy_db_if_needed(path: &Path) {
+fn migrate_legacy_db_if_needed(
+    legacy: &Path,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if path.exists() || !legacy.exists() || legacy == path {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "session database path has no parent",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+
+    // Serialize migration across Bone processes. The destination only appears
+    // after SQLite has produced and closed a complete snapshot, so no peer can
+    // open a partially copied database.
+    let lock_path = parent.join(".conversations.db.migrate.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    fs2::FileExt::lock_exclusive(&lock)?;
     if path.exists() {
-        return;
+        return Ok(());
     }
-    let Some(legacy) = legacy_db_path() else {
-        return;
-    };
-    if !legacy.exists() || legacy == path {
-        return;
+
+    let source = Connection::open_with_flags(legacy, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let temp = tempfile::NamedTempFile::new_in(parent)?;
+    let mut destination = Connection::open(temp.path())?;
+    let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+    backup.run_to_completion(100, Duration::from_millis(10), None)?;
+    drop(backup);
+    drop(destination);
+    drop(source);
+
+    std::fs::set_permissions(temp.path(), std::fs::metadata(legacy)?.permissions())?;
+    if path.exists() {
+        return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Fold any uncheckpointed WAL pages into the main file first so a plain
-    // hard-link/copy of `conversations.db` alone is self-contained. Without
-    // this, opening the new path would miss data still sitting only in
-    // `conversations.db-wal` next to the legacy file.
-    if let Ok(conn) = Connection::open(&legacy) {
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-        // Drop the connection before linking/copying so the checkpoint is
-        // durable and no writer holds the main file open.
-        drop(conn);
-    }
-    // Prefer a hard link so both paths share the same inode until the user
-    // deletes one; fall back to a full copy when link isn't possible (e.g.
-    // cross-filesystem). Also ferry any leftover -wal/-shm sidecars in the
-    // copy path so a partial checkpoint still can't orphan pages.
-    if std::fs::hard_link(&legacy, path).is_err() {
-        let _ = std::fs::copy(&legacy, path);
-        for suffix in ["-wal", "-shm"] {
-            let src = PathBuf::from(format!("{}{suffix}", legacy.display()));
-            let dst = PathBuf::from(format!("{}{suffix}", path.display()));
-            if src.exists() && !dst.exists() {
-                let _ = std::fs::copy(&src, &dst);
-            }
-        }
-    }
+    temp.persist(path)?;
+    Ok(())
 }
 
 /// A search hit from FTS5 query.

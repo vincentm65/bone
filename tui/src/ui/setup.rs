@@ -54,8 +54,8 @@ struct State {
 }
 
 impl State {
-    fn new(fresh: bool) -> Self {
-        let config = config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded());
+    fn new(fresh: bool) -> Result<Self, String> {
+        let config = config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())?;
         let mut providers: Vec<(String, String)> = config
             .providers_config()
             .providers
@@ -100,7 +100,7 @@ impl State {
             ));
         }
 
-        Self {
+        Ok(Self {
             step: Step::Welcome,
             config,
             providers,
@@ -114,7 +114,7 @@ impl State {
             init_cursor: 0,
             completed: false,
             fresh,
-        }
+        })
     }
 
     fn init_choice(&self) -> InitChoice {
@@ -198,7 +198,7 @@ pub fn run(fresh: bool) -> io::Result<bool> {
 }
 
 fn run_loop(term: &mut FullscreenTerminal, fresh: bool) -> io::Result<bool> {
-    let mut state = State::new(fresh);
+    let mut state = State::new(fresh).map_err(io::Error::other)?;
     term.draw(|frame| draw(frame, &state))?;
 
     loop {
@@ -277,10 +277,25 @@ fn set_all_catalog(state: &mut State, checked: bool) {
     }
 }
 
+fn activate_provider(config: &config::store::ConfigStore, id: &str) -> bool {
+    let revision = config.snapshot().revision;
+    config.set_active_provider(id, revision).is_ok()
+}
+
 fn advance(state: &mut State) {
     // Persist the provider choice as we leave the Provider step.
     if state.step == Step::Provider {
         state.save_provider();
+        // Even without an API key, set the selected provider as active so
+        // `last_provider` points to an existing entry and Bone can launch
+        // without falling back to the undefined "local" default.
+        if state.provider_saved.is_none() && !state.providers.is_empty() {
+            if let Some((id, _)) = state.providers.get(state.provider_cursor).cloned()
+                && activate_provider(&state.config, &id)
+            {
+                state.provider_saved = Some(id);
+            }
+        }
     }
     state.next_step();
 }
@@ -682,4 +697,42 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         Step::Confirm => &[("enter", "apply"), ("←", "back"), ("esc", cancel_label)],
     };
     picker::draw_footer(frame, area, keys);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeded_provider_can_be_activated_without_api_key() {
+        let _guard = crate::ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("BONE_DIR");
+        let root = std::env::temp_dir().join(format!(
+            "bone-setup-provider-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        unsafe { std::env::set_var("BONE_DIR", &root) };
+
+        let store = config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+            .expect("seed fresh configuration");
+        assert!(
+            store.providers_config().providers["local"]
+                .api_key
+                .is_empty()
+        );
+        assert!(activate_provider(&store, "local"));
+        assert_eq!(store.providers_config().last_provider, "local");
+
+        std::fs::remove_dir_all(root).ok();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
 }

@@ -147,7 +147,8 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let addr = parse_listen_addr(args);
     let shutdown_on_eof = has_flag(args, "--shutdown-on-stdin-eof");
     let (cli_provider, cli_model) = parse_provider_model(args);
-    let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded());
+    let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded())
+        .map_err(std::io::Error::other)?;
     let configured_provider = config.providers_config().last_provider;
     let provider_label = cli_provider.as_deref().unwrap_or_else(|| {
         if configured_provider.is_empty() {
@@ -536,7 +537,8 @@ async fn main() -> std::io::Result<()> {
     bone::update_check::check_in_background();
 
     // Normal TUI mode
-    let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded());
+    let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded())
+        .map_err(std::io::Error::other)?;
     let mut custom = config.legacy_snapshot();
     let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
     // Frontend settings arrive from the daemon-owned FrontendState snapshot.

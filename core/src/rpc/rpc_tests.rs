@@ -103,7 +103,7 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
     custom.try_set_last_provider("mock").unwrap();
 
     let extensions = crate::ext::ExtensionManager::unloaded();
-    let config = crate::config::store::ConfigStore::new(extensions.clone());
+    let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
     let revision = config.snapshot().revision;
     let (hub, commands_rx) = Hub::new();
     let mut events = hub.subscribe();
@@ -216,7 +216,7 @@ async fn resetting_approval_updates_live_mode() {
     unsafe { std::env::set_var("BONE_DIR", dir.path()) };
 
     let extensions = crate::ext::ExtensionManager::unloaded();
-    let config = crate::config::store::ConfigStore::new(extensions.clone());
+    let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
     config
         .set_value(
             "general.approval",

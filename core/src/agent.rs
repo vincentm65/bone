@@ -533,7 +533,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
             crate::ext::ExtensionManager::unloaded(),
             snapshot,
         ),
-        None => crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()),
+        None => crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())?,
     };
     let mut custom = config.legacy_snapshot();
     let mut providers_config = config.providers_config();

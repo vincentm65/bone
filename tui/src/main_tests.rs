@@ -78,7 +78,8 @@ fn actor_provider_config_reads_current_store_and_applies_cli_overrides() {
     ));
     unsafe { std::env::set_var("BONE_DIR", &dir) };
 
-    let store = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded());
+    let store =
+        bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded()).unwrap();
     let mut revision = store.snapshot().revision;
     store
         .upsert_provider(provider_update("first", "first-model"), revision)

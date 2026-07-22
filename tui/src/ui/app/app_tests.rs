@@ -1,7 +1,8 @@
 use super::{
-    ConfigView, WireTools, apply_queue_nav_key, background_pane_needs_refresh,
-    configured_input_style, edit_diff_message, job_snapshot_messages, lua_config_available,
-    parse_config_value, render_config_page, should_open_agent_log, take_pending_config,
+    App, ConfigView, WireTools, apply_queue_nav_key, background_pane_needs_refresh,
+    config_rejection_message, configured_input_style, edit_diff_message, idle_state_needs_redraw,
+    job_snapshot_messages, lua_config_available, parse_config_value, render_config_page,
+    should_open_agent_log, take_pending_config,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
@@ -342,6 +343,91 @@ fn config_page_lookup_and_render_are_recursive() {
     assert!(view.field("extensions.example.mode").is_some());
     let output = render_config_page(&view, Some("extensions.example")).unwrap();
     assert!(output.contains("extensions.example.mode = danger"));
+}
+
+#[test]
+fn config_rejection_message_includes_pending_path_when_known() {
+    assert_eq!(
+        config_rejection_message(Some("general.approval".into()), "permission denied"),
+        "Configuration change for general.approval rejected: permission denied"
+    );
+    assert_eq!(
+        config_rejection_message(None, "permission denied"),
+        "Configuration change rejected: permission denied"
+    );
+}
+
+#[test]
+fn idle_config_revision_change_requests_redraw_without_new_messages() {
+    assert!(idle_state_needs_redraw(false, 4, 4, 7, 8));
+    assert!(!idle_state_needs_redraw(false, 4, 4, 7, 7));
+}
+
+#[test]
+fn rejected_config_change_restores_approval_and_requests_snapshot() {
+    let _guard = crate::ENV_LOCK.lock().unwrap();
+    let previous = std::env::var_os("BONE_DIR");
+    let root = std::env::temp_dir().join(format!(
+        "bone-rejected-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    unsafe { std::env::set_var("BONE_DIR", &root) };
+
+    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+        .expect("seed configuration");
+    let provider =
+        crate::llm::providers::create_provider_with_config("local", &store.providers_config())
+            .unwrap();
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_, events_rx) = tokio::sync::broadcast::channel(8);
+    let mut app = App::with_runtime_client(
+        std::sync::Arc::from(provider),
+        crate::config::UserConfig::default(),
+        crate::config::custom::CustomConfigs::default(),
+        command_tx,
+        events_rx,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        crate::runtime::RuntimeCommand::GetConfig
+    ));
+    app.config_view = config_view();
+    app.config_view.snapshot.as_mut().unwrap().values =
+        serde_json::json!({ "general": { "approval": "safe" } });
+    app.approval_mode = crate::tools::ApprovalMode::Danger;
+    app.user_config.approval_mode = crate::tools::ApprovalMode::Danger;
+    app.pending_config
+        .insert("request-1".into(), "general.approval".into());
+
+    assert_eq!(
+        app.reject_config_change(7, Some("request-1".into()))
+            .as_deref(),
+        Some("general.approval")
+    );
+    assert_eq!(app.approval_mode, crate::tools::ApprovalMode::Safe);
+    assert_eq!(
+        app.user_config.approval_mode,
+        crate::tools::ApprovalMode::Safe
+    );
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        crate::runtime::RuntimeCommand::GetConfig
+    ));
+
+    drop(app);
+    std::fs::remove_dir_all(root).ok();
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }
 
 #[test]

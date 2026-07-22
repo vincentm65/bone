@@ -357,6 +357,23 @@ fn take_pending_config(
     request_id.and_then(|request_id| pending.remove(&request_id))
 }
 
+fn config_rejection_message(path: Option<String>, error: &str) -> String {
+    let context = path.map_or(String::new(), |path| format!(" for {path}"));
+    format!("Configuration change{context} rejected: {error}")
+}
+
+fn idle_state_needs_redraw(
+    replaced_scrollback: bool,
+    messages_before: usize,
+    messages_after: usize,
+    config_revision_before: u64,
+    config_revision_after: u64,
+) -> bool {
+    replaced_scrollback
+        || messages_after != messages_before
+        || config_revision_after != config_revision_before
+}
+
 fn render_config_page(view: &ConfigView, requested: Option<&str>) -> Result<String, String> {
     fn collect<'a>(
         pages: &'a [bone_protocol::ConfigPage],
@@ -741,10 +758,8 @@ impl App {
                 request_id,
             } => {
                 let path = self.reject_config_change(current_revision, request_id);
-                let context = path.map_or(String::new(), |path| format!(" for {path}"));
-                self.messages.push(Message::system(format!(
-                    "Configuration change{context} rejected: {error}"
-                )));
+                self.messages
+                    .push(Message::system(config_rejection_message(path, &error)));
             }
             // Pane/UI diff from the daemon (e.g. a command's pane between turns).
             // Both in-process and remote clients receive these via the event bus
@@ -795,10 +810,35 @@ impl App {
         if let Some(snapshot) = self.config_view.snapshot.as_mut() {
             snapshot.revision = current_revision;
         }
+        // The daemon rejected the mutation (e.g. config.yaml unwritable), so
+        // revert local approval mode to what the (pre-change) config snapshot
+        // still holds.  Without this, `cycle_approval_mode` / `persist_mode`
+        // updates `self.approval_mode` before the daemon acknowledges, and a
+        // rejection leaves the TUI permanently showing the wrong mode.
+        self.sync_approval_mode_from_config();
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::GetConfig);
         take_pending_config(&mut self.pending_config, request_id)
+    }
+
+    /// Re-read `approval_mode` from the current config-view snapshot so the TUI
+    /// reflects the daemon's authoritative persisted value after a rejection.
+    fn sync_approval_mode_from_config(&mut self) {
+        let Some(snapshot) = &self.config_view.snapshot else {
+            return;
+        };
+        let Some(mode_str) = snapshot
+            .values
+            .pointer("/general/approval")
+            .and_then(|v| v.as_str())
+        else {
+            return;
+        };
+        if let Ok(parsed) = crate::tools::ApprovalMode::parse(mode_str) {
+            self.approval_mode = parsed;
+            self.user_config.approval_mode = parsed;
+        }
     }
 
     fn begin_config_change(&mut self, path: impl Into<String>) -> String {
@@ -1371,6 +1411,7 @@ impl App {
             // Drain daemon events between turns (StateSnapshot, Status,
             // FrontendState, etc.).
             let before = self.messages.len();
+            let before_config_revision = self.config_view.revision();
             let mut replaced_scrollback = false;
             while let Ok(ev) = self.events_rx.try_recv() {
                 replaced_scrollback |=
@@ -1410,7 +1451,16 @@ impl App {
             }
             // Commit any scrollback an idle event added or replaced so it
             // renders promptly rather than waiting for the next keystroke.
-            if replaced_scrollback || self.messages.len() != before {
+            // Also redraw when the config_view changed (e.g. from a remote
+            // client's mutation) even if no message was appended, so the
+            // status bar and config page update without keyboard input.
+            if idle_state_needs_redraw(
+                replaced_scrollback,
+                before,
+                self.messages.len(),
+                before_config_revision,
+                self.config_view.revision(),
+            ) {
                 self.renderer
                     .flush_new_to_scrollback(&self.messages, &mut terminal)?;
                 self.redraw(&mut terminal)?;

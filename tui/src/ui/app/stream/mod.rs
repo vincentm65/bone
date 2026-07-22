@@ -16,7 +16,7 @@ use tokio::time::Duration;
 
 use super::{
     AgentsKeyResult, App, apply_agents_nav_key, apply_input_key_with_paste_burst,
-    apply_pane_nav_key, apply_queue_nav_key, finish_queue_edit,
+    apply_pane_nav_key, apply_queue_nav_key, config_rejection_message, finish_queue_edit,
 };
 
 /// One place that resolves a `KeyEvent` to a blocked `ctx.ui.key()` request.
@@ -866,9 +866,8 @@ impl App {
                 request_id,
             } => {
                 let path = self.reject_config_change(current_revision, request_id);
-                let context = path.map_or(String::new(), |path| format!(" for {path}"));
                 self.pump_notice(
-                    format!("Configuration change{context} rejected: {error}"),
+                    config_rejection_message(path, &error),
                     cur_idx,
                     term,
                 )?;

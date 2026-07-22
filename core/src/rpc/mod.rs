@@ -479,9 +479,9 @@ pub fn frontend_state(
         banner: extensions.frontend_banner(),
         settings: serde_json::to_value(extensions.frontend_settings()).unwrap_or_default(),
         commands: extensions
-            .commands()
-            .iter()
-            .map(|c| (c.name.clone(), c.description.clone()))
+            .enabled_commands()
+            .into_iter()
+            .map(|c| (c.name, c.description))
             .collect(),
         tool_defs: tools.definitions(),
         tool_display: serde_json::to_value(tools.display_map()).unwrap_or_default(),
@@ -763,13 +763,20 @@ impl DaemonCtx {
     }
 
     fn persist_mode(&self, mode_str: &str) {
-        if !self.set_mode(mode_str) {
-            return;
-        }
+        let mode = match crate::tools::ApprovalMode::parse(mode_str) {
+            Ok(mode) => mode,
+            Err(error) => {
+                self.hub.publish(RuntimeEvent::Status { message: error });
+                return;
+            }
+        };
         let revision = self.config.snapshot().revision;
         let result =
             self.config
                 .set_value("general.approval", serde_json::json!(mode_str), revision);
+        if result.is_ok() {
+            self.mode.set(mode);
+        }
         self.finish_config_mutation(vec!["general.approval".into()], result, false, None);
     }
 
@@ -894,6 +901,9 @@ impl DaemonCtx {
         Option<crate::ext::types::LuaCommandReturn>,
         Vec<crate::ext::ctx::ConversationOperation>,
     )> {
+        if !self.extensions.command_enabled(&name) {
+            return None;
+        }
         use std::sync::atomic::{AtomicBool, Ordering};
 
         // App-derived ctx snapshot, assembled from the session + provider the same
@@ -1369,10 +1379,17 @@ impl DaemonCtx {
                 let result = self
                     .config
                     .set_enabled("tools", &name, enabled, expected_revision);
+                if result.is_ok() {
+                    self.session
+                        .lock()
+                        .unwrap()
+                        .tools
+                        .set_enabled(&name, enabled);
+                }
                 self.finish_config_mutation(
                     vec![format!("tools.{name}")],
                     result,
-                    true,
+                    false,
                     request_id,
                 );
                 Flow::Continue
@@ -1389,7 +1406,7 @@ impl DaemonCtx {
                 self.finish_config_mutation(
                     vec![format!("commands.{name}")],
                     result,
-                    true,
+                    false,
                     request_id,
                 );
                 Flow::Continue

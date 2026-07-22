@@ -43,7 +43,7 @@ bone.subagent.register({ name = "lua-only", description = "Lua agent", max_concu
         "model",
         "provider",
     );
-    let _config = bone_core::config::store::ConfigStore::new(booted.manager.clone());
+    let _config = bone_core::config::store::ConfigStore::new(booted.manager.clone()).unwrap();
     let lua = booted.manager.lua_arc();
     let lua = lua.lock().unwrap();
 

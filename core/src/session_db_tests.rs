@@ -1,5 +1,9 @@
-use super::{SCHEMA_VERSION, SessionDb, civil_from_days, iso_from_unix_secs};
+use super::{
+    SCHEMA_VERSION, SessionDb, civil_from_days, db_path_with_legacy, iso_from_unix_secs,
+    migrate_legacy_db_if_needed,
+};
 use rusqlite::Connection;
+use std::path::PathBuf;
 
 /// The original v1 schema, before `is_estimated` and the created_at index.
 const V1_SCHEMA: &str = "
@@ -863,7 +867,7 @@ fn db_path_follows_bone_dir() {
     }
 
     let expected = xdg.join("bone-rust/data/conversations.db");
-    let got = super::db_path();
+    let got = db_path_with_legacy(None);
 
     match old_bone {
         Some(v) => unsafe { std::env::set_var("BONE_DIR", v) },
@@ -876,4 +880,156 @@ fn db_path_follows_bone_dir() {
     let _ = std::fs::remove_dir_all(&xdg);
 
     assert_eq!(got, expected);
+}
+
+#[test]
+fn explicit_bone_dir_does_not_import_legacy_database() {
+    let _guard = crate::util::test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("explicit");
+    let legacy = temp.path().join("legacy.db");
+    Connection::open(&legacy)
+        .unwrap()
+        .execute_batch("CREATE TABLE legacy_data (value TEXT);")
+        .unwrap();
+
+    let old_bone = std::env::var_os("BONE_DIR");
+    unsafe { std::env::set_var("BONE_DIR", &root) };
+    let path = db_path_with_legacy(Some(&legacy));
+    match old_bone {
+        Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
+
+    assert_eq!(path, root.join("data/conversations.db"));
+    assert!(!path.exists());
+}
+
+#[test]
+fn xdg_migration_uses_independent_sqlite_snapshot_with_wal_data() {
+    let _guard = crate::util::test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let xdg = temp.path().join("xdg");
+    let legacy = temp.path().join("legacy/conversations.db");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+
+    let source = Connection::open(&legacy).unwrap();
+    source
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE legacy_data (value TEXT NOT NULL);
+             PRAGMA wal_checkpoint(TRUNCATE);
+             INSERT INTO legacy_data VALUES ('wal-backed');",
+        )
+        .unwrap();
+    let wal = PathBuf::from(format!("{}-wal", legacy.display()));
+    assert!(std::fs::metadata(wal).unwrap().len() > 0);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let old_bone = std::env::var_os("BONE_DIR");
+    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    unsafe {
+        std::env::remove_var("BONE_DIR");
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+    }
+    let migrated = db_path_with_legacy(Some(&legacy));
+    match old_bone {
+        Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
+    match old_xdg {
+        Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+    }
+
+    assert_eq!(migrated, xdg.join("bone-rust/data/conversations.db"));
+    let destination = Connection::open(&migrated).unwrap();
+    let value: String = destination
+        .query_row("SELECT value FROM legacy_data", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "wal-backed");
+
+    destination
+        .execute("UPDATE legacy_data SET value = 'destination'", [])
+        .unwrap();
+    let source_value: String = source
+        .query_row("SELECT value FROM legacy_data", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(source_value, "wal-backed");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let source_meta = std::fs::metadata(&legacy).unwrap();
+        let destination_meta = std::fs::metadata(&migrated).unwrap();
+        assert_ne!(source_meta.ino(), destination_meta.ino());
+        assert_eq!(destination_meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    migrate_legacy_db_if_needed(&legacy, &migrated).unwrap();
+    let value: String = destination
+        .query_row("SELECT value FROM legacy_data", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "destination");
+}
+
+#[test]
+fn migration_preserves_an_existing_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let legacy = temp.path().join("legacy.db");
+    let destination = temp.path().join("new/conversations.db");
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+    for (path, value) in [(&legacy, "legacy"), (&destination, "destination")] {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("CREATE TABLE data (value TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO data VALUES (?1)", [value])
+            .unwrap();
+    }
+
+    migrate_legacy_db_if_needed(&legacy, &destination).unwrap();
+    let value: String = Connection::open(destination)
+        .unwrap()
+        .query_row("SELECT value FROM data", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "destination");
+}
+
+#[test]
+fn failed_xdg_migration_keeps_using_legacy_database() {
+    let _guard = crate::util::test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let xdg = temp.path().join("xdg");
+    let legacy = temp.path().join("legacy/conversations.db");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let original = b"not a sqlite database";
+    std::fs::write(&legacy, original).unwrap();
+
+    let old_bone = std::env::var_os("BONE_DIR");
+    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    unsafe {
+        std::env::remove_var("BONE_DIR");
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+    }
+    let selected = db_path_with_legacy(Some(&legacy));
+    match old_bone {
+        Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
+    match old_xdg {
+        Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+    }
+
+    let destination = xdg.join("bone-rust/data/conversations.db");
+    assert_eq!(selected, legacy);
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&selected).unwrap(), original);
 }

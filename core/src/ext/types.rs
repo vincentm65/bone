@@ -337,9 +337,32 @@ impl ExtensionManager {
         super::api_ui::drain_diffs(&self.ui)
     }
 
-    /// Get registered Lua commands.
+    /// Get every registered Lua command for configuration and enablement UI.
     pub fn commands(&self) -> &[super::ops_commands::RegisteredLuaCommand] {
         &self.commands
+    }
+
+    pub fn command_enabled(&self, name: &str) -> bool {
+        !self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resolved()
+            .commands
+            .disabled
+            .iter()
+            .any(|disabled| disabled == name)
+    }
+
+    /// Get only commands currently available for frontend discovery/dispatch.
+    pub fn enabled_commands(&self) -> Vec<super::ops_commands::RegisteredLuaCommand> {
+        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let disabled = &settings.resolved().commands.disabled;
+        self.commands
+            .iter()
+            .filter(|command| !disabled.contains(&command.name))
+            .cloned()
+            .collect()
     }
 
     /// Structured definitions for frontends. Lua registrations are promoted

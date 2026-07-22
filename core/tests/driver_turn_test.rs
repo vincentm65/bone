@@ -1293,6 +1293,79 @@ end)
     std::fs::remove_dir_all(&config_dir).ok();
 }
 
+#[tokio::test]
+async fn driver_before_turn_can_read_canonical_command_enablement() {
+    let config_dir = common::temp_dir("driver-before-turn-command-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"
+bone.on("before_turn", function(_event, ctx)
+    local commands = ctx.config.get_table("commands")
+    if type(commands) ~= "table" then return nil end
+    if type(commands.disabled) == "table" then
+        for _, name in ipairs(commands.disabled) do
+            if name == "compact" then return nil end
+        end
+    end
+    return {
+        action = "conversation.replace",
+        messages = { { role = "user", content = "auto-compacted" } },
+    }
+end)
+"#,
+    )
+    .unwrap();
+
+    let mut custom = bone_core::config::custom::CustomConfigs {
+        pages: Vec::new(),
+        settings: Some(bone_core::config::settings::Settings::defaults()),
+    };
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "mock-1",
+            vec![ChatEvent::TextDelta("done".into())],
+        )),
+        extensions: booted.manager,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, None),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert!(outcome.transcript_replaced);
+    assert_eq!(outcome.transcript[0].content, "auto-compacted");
+    assert_eq!(outcome.transcript.last().unwrap().content, "done");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
 /// Tool that returns a very large result, to prove compaction sees the *current*
 /// pending context mid-loop (including appended tool results), not a stale
 /// last-request size.

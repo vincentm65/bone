@@ -309,6 +309,14 @@ impl ToolHandler {
         self.enabled.contains(name)
     }
 
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) {
+        if enabled {
+            self.enabled.insert(name.to_string());
+        } else {
+            self.enabled.remove(name);
+        }
+    }
+
     pub fn enabled_names(&self) -> Vec<String> {
         let mut names: Vec<_> = self.enabled.iter().cloned().collect();
         names.sort();

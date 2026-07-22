@@ -250,7 +250,7 @@ fn settings_get_set_reset_persist_and_validate() {
     .unwrap();
 
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.contains("approval: safe"));
+    assert_eq!(raw, "version: 2\n");
     assert_eq!(settings.lock().unwrap().resolved().general.approval, "safe");
     let _ = std::fs::remove_file(path);
 }
