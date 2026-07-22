@@ -762,10 +762,6 @@ impl App {
                 self.view.sent = sent;
                 self.view.received = received;
                 self.view.context_length = context_length;
-                // Keep the accumulated token_stats in sync for app_ctx_state.
-                self.token_stats.sent = sent;
-                self.token_stats.received = received;
-                self.token_stats.context_length = context_length;
                 // Real count arrived for this request — rebaseline the live
                 // estimate so further deltas (next request in the tool loop)
                 // tick up from the authoritative total instead of the guess.

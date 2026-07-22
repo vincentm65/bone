@@ -570,7 +570,6 @@ fn rejected_config_change_restores_approval_and_requests_snapshot() {
     let mut app = App::with_runtime_client(
         std::sync::Arc::from(provider),
         crate::config::UserConfig::default(),
-        crate::config::custom::CustomConfigs::default(),
         command_tx,
         events_rx,
         None,

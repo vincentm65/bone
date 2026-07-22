@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 #[cfg(test)]
@@ -614,12 +613,15 @@ impl Settings {
         fs::create_dir_all(parent)?;
 
         let yaml = self.sparse_yaml()?;
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.write_all(yaml.as_bytes())?;
-        tmp.as_file_mut().sync_all()?;
-        tmp.persist(path)
-            .map_err(|error| SettingsError::Io(error.error))?;
-        Ok(())
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            Some(std::fs::Permissions::from_mode(0o600))
+        };
+        #[cfg(not(unix))]
+        let permissions = None;
+        crate::tools::write_atomic::write_atomic_sync(path, yaml.as_bytes(), permissions)
+            .map_err(|error| SettingsError::Io(std::io::Error::other(error)))
     }
 
     /// Reload the latest file and commit one validated mutation while all
@@ -1267,6 +1269,14 @@ mod tests {
         settings.save_path(&path).unwrap();
         settings.inner.general.approval = "safe".into();
         settings.save_path(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         let loaded = Settings::load_path(&path).unwrap().unwrap();
         assert_eq!(loaded.inner.general.approval, "safe");

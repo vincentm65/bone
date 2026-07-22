@@ -13,12 +13,10 @@ fn seeded_minimax_providers_use_supported_handler() {
         if matches!(
             field.field_type,
             crate::config::custom::ConfigFieldType::Provider
-        ) {
-            if let Some(value) = &field.value
-                && let Some(entry) = ProviderEntry::from_nested(value)
-            {
-                config.providers.insert(field.key.clone(), entry);
-            }
+        ) && let Some(value) = &field.value
+            && let Some(entry) = ProviderEntry::from_nested(value)
+        {
+            config.providers.insert(field.key.clone(), entry);
         }
     }
 

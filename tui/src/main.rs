@@ -582,7 +582,7 @@ async fn main() -> std::io::Result<()> {
         })?;
         let (read_half, write_half) = tokio::io::split(stream);
         let client = bone::rpc::RemoteClient::connect(read_half, write_half);
-        let mut app = App::with_daemon(provider, cfg, custom, client)?;
+        let mut app = App::with_daemon(provider, cfg, client)?;
         app.run().await?;
         return Ok(());
     }
@@ -615,14 +615,8 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    let mut app = App::with_runtime_client(
-        boot.provider.clone(),
-        cfg,
-        custom,
-        command_tx,
-        events_rx,
-        None,
-    )?;
+    let mut app =
+        App::with_runtime_client(boot.provider.clone(), cfg, command_tx, events_rx, None)?;
 
     // run_daemon is !Send (owns the Lua VM via session), so drive it and
     // the TUI together on a LocalSet.

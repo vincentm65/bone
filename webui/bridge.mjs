@@ -222,7 +222,6 @@ function usageByYear(db) {
 }
 
 function usageByHourSince(db, whereClause) {
-  const sql = `SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), ${SUM_COLS.replace('COUNT(*)', 'COUNT(*)').replace('COALESCE(SUM(cost),0.0)', 'COALESCE(SUM(cached_tokens),0)')} FROM usage_events${whereClause} GROUP BY 1 ORDER BY 1`;
   // Simplified: just get prompt/completion/cached without cost for hourly
   const sql2 = `SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0), COUNT(*) FROM usage_events${whereClause} GROUP BY 1 ORDER BY 1`;
   try {
