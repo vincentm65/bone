@@ -4,7 +4,7 @@
 use std::io;
 use std::path::Path;
 
-use super::super::render::{MIN_ROWS, Renderer};
+use super::super::render::Renderer;
 use super::App;
 
 impl App {
@@ -25,11 +25,13 @@ impl App {
         };
         std::fs::remove_file(&tmp).ok();
 
-        *term = Renderer::init_terminal(MIN_ROWS)?;
+        let physical_size = crossterm::terminal::size()?;
+        let initial_height = crate::ui::render::initial_viewport_height(physical_size.1);
+        *term = Renderer::init_terminal(initial_height)?;
         self.apply_terminal_background();
-        self.renderer.viewport_height = MIN_ROWS;
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.renderer.viewport_height = initial_height;
+        self.renderer.last_size = Some(physical_size);
+        self.flush_new_messages_to_scrollback(term)?;
 
         match editor_result {
             Ok(status) if status.success() => {}

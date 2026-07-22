@@ -16,6 +16,13 @@ use super::{ProviderCredential, ProviderEntry, ProvidersConfig, bone_dir, load_y
 pub(crate) const MIGRATION_VERSION: u8 = 1;
 const MARKER: &str = ".config-layout-v1-migrated";
 
+fn migration_lock_error(operation: &str, path: &Path, error: &std::io::Error) -> String {
+    format!(
+        "cannot {operation} config migration lock {}: {error}",
+        path.display()
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DenyListPage {
@@ -43,9 +50,9 @@ pub(crate) fn migrate() -> Result<(), String> {
         .read(true)
         .write(true)
         .open(&lock_path)
-        .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+        .map_err(|error| migration_lock_error("open", &lock_path, &error))?;
     lock.lock_exclusive()
-        .map_err(|error| format!("cannot lock {}: {error}", lock_path.display()))?;
+        .map_err(|error| migration_lock_error("acquire", &lock_path, &error))?;
 
     let marker = root.join(MARKER);
     if marker.exists() {
@@ -777,6 +784,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn migration_lock_errors_include_operation_path_and_os_error() {
+        let path = Path::new("exact/.config-migration.lock");
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert_eq!(
+            migration_lock_error("open", path, &error),
+            "cannot open config migration lock exact/.config-migration.lock: denied"
+        );
+        assert_eq!(
+            migration_lock_error("acquire", path, &error),
+            "cannot acquire config migration lock exact/.config-migration.lock: denied"
+        );
     }
 
     #[test]

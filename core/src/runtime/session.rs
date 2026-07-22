@@ -35,11 +35,46 @@ use crate::llm::provider::LlmProvider;
 use crate::llm::{ChatMessage, TokenStats};
 use crate::runtime::driver::{Driver, DriverOutcome};
 use crate::runtime::{KeyReplyRegistry, RuntimeEvent};
-use crate::session_db::SessionDb;
+use crate::session_db::{SessionDb, StartupDbError, StartupDbOperation};
 use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalGate, SharedApprovalMode};
 use bone_protocol::SessionSnapshot;
+
+/// Structured failure while attaching a runtime session to durable storage.
+#[derive(Debug)]
+pub enum SessionInitError {
+    Database(StartupDbError),
+    ConversationNotFound {
+        conversation_id: i64,
+        path: std::path::PathBuf,
+    },
+}
+
+impl std::fmt::Display for SessionInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Database(error) => error.fmt(f),
+            Self::ConversationNotFound {
+                conversation_id,
+                path,
+            } => write!(
+                f,
+                "session database load conversation failed for {}: conversation {} does not exist",
+                path.display(),
+                conversation_id
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionInitError {}
+
+impl From<StartupDbError> for SessionInitError {
+    fn from(error: StartupDbError) -> Self {
+        Self::Database(error)
+    }
+}
 
 /// Owns the agent turn-truth for one conversation.
 pub struct RuntimeSession {
@@ -90,7 +125,7 @@ impl RuntimeSession {
     }
 
     /// Open the session database and make a conversation active for `llm`'s
-    /// provider/model. Idempotent; returns a human-readable warning on failure.
+    /// provider/model. Idempotent and preserves structured startup failures.
     ///
     /// Boot resumes the **most recent** conversation in place rather than minting
     /// a fresh one every launch: a non-empty conversation has its transcript
@@ -99,63 +134,59 @@ impl RuntimeSession {
     /// recycled, and only a truly empty database mints a new row. This is what
     /// makes the conversation survive a runtime restart — the data was always
     /// persisted, it just wasn't being reattached.
-    pub fn init_db(&mut self, llm: &dyn LlmProvider) -> Option<String> {
+    pub fn init_db(&mut self, llm: &dyn LlmProvider) -> Result<(), SessionInitError> {
         if self.session_db.is_some() {
-            return None;
+            return Ok(());
         }
         let db_path = crate::session_db::db_path();
-        let db = match SessionDb::open(&db_path) {
-            Ok(db) => db,
-            Err(err) => return Some(format!("warning: failed to open session database: {err}")),
-        };
+        let db = SessionDb::open_for_startup(&db_path)?;
         match db.latest_conversation() {
             // Resume the last conversation in place.
             Ok(Some((conv_id, has_messages))) => {
                 if has_messages {
-                    match db.load_effective_transcript(conv_id) {
-                        Ok(messages) => self.transcript = messages,
-                        Err(err) => {
-                            return Some(format!("warning: failed to load conversation: {err}"));
-                        }
-                    }
+                    self.transcript = db.load_effective_transcript(conv_id).map_err(|error| {
+                        StartupDbError::from_sqlite(
+                            StartupDbOperation::LoadConversation,
+                            &db_path,
+                            error,
+                        )
+                    })?;
                 }
                 let _ = db.reopen_conversation(conv_id);
                 self.session_seq = db.max_message_seq(conv_id).unwrap_or(0);
                 self.conversation_id = Some(conv_id);
                 self.session_db = Some(db);
                 self.restore_usage_and_context();
-                None
+                Ok(())
             }
             // Empty database: mint the first conversation.
-            Ok(None) => match db.create_conversation(llm.id(), llm.model()) {
-                Ok(conv_id) => {
-                    self.conversation_id = Some(conv_id);
-                    self.session_db = Some(db);
-                    None
-                }
-                Err(err) => Some(format!("warning: failed to create conversation: {err}")),
-            },
-            Err(err) => Some(format!("warning: failed to read conversations: {err}")),
+            Ok(None) => {
+                let conv_id =
+                    db.create_conversation_for_startup(&db_path, llm.id(), llm.model())?;
+                self.conversation_id = Some(conv_id);
+                self.session_db = Some(db);
+                Ok(())
+            }
+            Err(error) => Err(StartupDbError::from_sqlite(
+                StartupDbOperation::ReadConversations,
+                &db_path,
+                error,
+            )
+            .into()),
         }
     }
 
     /// Open a fresh durable conversation for an independently managed runtime.
-    pub fn init_db_new(&mut self, llm: &dyn LlmProvider) -> Option<String> {
+    pub fn init_db_new(&mut self, llm: &dyn LlmProvider) -> Result<(), SessionInitError> {
         if self.session_db.is_some() {
-            return None;
+            return Ok(());
         }
-        let db = match SessionDb::open(&crate::session_db::db_path()) {
-            Ok(db) => db,
-            Err(err) => return Some(format!("warning: failed to open session database: {err}")),
-        };
-        match db.create_conversation(llm.id(), llm.model()) {
-            Ok(conv_id) => {
-                self.conversation_id = Some(conv_id);
-                self.session_db = Some(db);
-                None
-            }
-            Err(err) => Some(format!("warning: failed to create conversation: {err}")),
-        }
+        let db_path = crate::session_db::db_path();
+        let db = SessionDb::open_for_startup(&db_path)?;
+        let conv_id = db.create_conversation_for_startup(&db_path, llm.id(), llm.model())?;
+        self.conversation_id = Some(conv_id);
+        self.session_db = Some(db);
+        Ok(())
     }
 
     /// Open one existing durable conversation for an independently managed
@@ -165,37 +196,40 @@ impl RuntimeSession {
         &mut self,
         _llm: &dyn LlmProvider,
         conversation_id: i64,
-    ) -> Option<String> {
+    ) -> Result<(), SessionInitError> {
         if self.session_db.is_some() {
-            return None;
+            return Ok(());
         }
-        let db = match SessionDb::open(&crate::session_db::db_path()) {
-            Ok(db) => db,
-            Err(err) => return Some(format!("warning: failed to open session database: {err}")),
-        };
+        let db_path = crate::session_db::db_path();
+        let db = SessionDb::open_for_startup(&db_path)?;
         match db.conversation_exists(conversation_id) {
-            Ok(false) => return Some(format!("conversation {conversation_id} does not exist")),
-            Err(err) => {
-                return Some(format!(
-                    "failed to read conversation {conversation_id}: {err}"
-                ));
+            Ok(false) => {
+                return Err(SessionInitError::ConversationNotFound {
+                    conversation_id,
+                    path: db_path,
+                });
+            }
+            Err(error) => {
+                return Err(StartupDbError::from_sqlite(
+                    StartupDbOperation::ReadConversations,
+                    &db_path,
+                    error,
+                )
+                .into());
             }
             Ok(true) => {}
         }
-        match db.load_effective_transcript(conversation_id) {
-            Ok(messages) => self.transcript = messages,
-            Err(err) => {
-                return Some(format!(
-                    "failed to load conversation {conversation_id}: {err}"
-                ));
-            }
-        }
+        self.transcript = db
+            .load_effective_transcript(conversation_id)
+            .map_err(|error| {
+                StartupDbError::from_sqlite(StartupDbOperation::LoadConversation, &db_path, error)
+            })?;
         let _ = db.reopen_conversation(conversation_id);
         self.session_seq = db.max_message_seq(conversation_id).unwrap_or(0);
         self.conversation_id = Some(conversation_id);
         self.session_db = Some(db);
         self.restore_usage_and_context();
-        None
+        Ok(())
     }
 
     /// Restore cumulative persisted usage and recompute the current context

@@ -39,6 +39,17 @@ fn kill_process_group(pid: u32) {
     }
 }
 
+#[cfg(windows)]
+async fn kill_process_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+}
+
 pub struct ScriptRequest {
     pub command: String,
     pub env: Vec<(String, String)>,
@@ -202,6 +213,10 @@ where
         #[cfg(unix)]
         if let Some(pid) = child.id() {
             kill_process_group(pid);
+        }
+        #[cfg(windows)]
+        if let Some(pid) = child.id() {
+            kill_process_tree(pid).await;
         }
         let _ = child.start_kill();
         let _ = child.wait().await;

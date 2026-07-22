@@ -1,6 +1,6 @@
 use super::{
-    SCHEMA_VERSION, SessionDb, civil_from_days, db_path_with_legacy, iso_from_unix_secs,
-    migrate_legacy_db_if_needed,
+    SCHEMA_VERSION, SessionDb, StartupDbOperation, civil_from_days, db_path_with_legacy,
+    iso_from_unix_secs, migrate_legacy_db_if_needed, retry_startup_sqlite_with_deadline,
 };
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -1032,4 +1032,133 @@ fn failed_xdg_migration_keeps_using_legacy_database() {
     assert_eq!(selected, legacy);
     assert!(!destination.exists());
     assert_eq!(std::fs::read(&selected).unwrap(), original);
+}
+
+#[test]
+fn concurrent_fresh_startups_create_independent_conversations() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("conversations.db");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let db = SessionDb::open_for_startup(&path).unwrap();
+                db.create_conversation_for_startup(&path, "local", "local")
+                    .unwrap()
+            })
+        })
+        .collect();
+    let mut ids: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 4);
+
+    let db = SessionDb::open(&path).unwrap();
+    let count: i64 = db
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 4);
+}
+
+#[test]
+fn concurrent_upgrade_startups_reach_latest_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("conversations.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(V1_SCHEMA).unwrap();
+    conn.pragma_update(None, "user_version", 1u32).unwrap();
+    drop(conn);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                SessionDb::open_for_startup(&path).unwrap()
+            })
+        })
+        .collect();
+    for handle in handles {
+        drop(handle.join().unwrap());
+    }
+
+    let conn = Connection::open(path).unwrap();
+    let version: u32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+}
+
+#[test]
+fn startup_open_retries_short_write_contention() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("conversations.db");
+    drop(SessionDb::open(&path).unwrap());
+
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let worker_path = path.clone();
+    let worker = std::thread::spawn(move || SessionDb::open_for_startup(&worker_path));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    holder.execute_batch("ROLLBACK;").unwrap();
+
+    assert!(worker.join().unwrap().is_ok());
+}
+
+#[test]
+fn startup_contention_error_is_bounded_and_structured() {
+    let path = PathBuf::from("locked.db");
+    let started = std::time::Instant::now();
+    let error = retry_startup_sqlite_with_deadline(
+        StartupDbOperation::CreateConversation,
+        &path,
+        std::time::Duration::from_millis(80),
+        || {
+            Err::<(), _>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("database is locked".into()),
+            ))
+        },
+    )
+    .unwrap_err();
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(error.operation, StartupDbOperation::CreateConversation);
+    assert_eq!(error.path, path);
+    assert!(error.is_transient_contention());
+    assert!(error.elapsed >= std::time::Duration::from_millis(80));
+    let rendered = error.to_string();
+    assert!(rendered.contains("create conversation"));
+    assert!(rendered.contains("locked.db"));
+    assert!(rendered.contains("extended code 5"));
+}
+
+#[test]
+fn startup_retry_does_not_retry_non_contention_errors() {
+    let mut attempts = 0;
+    let error = retry_startup_sqlite_with_deadline(
+        StartupDbOperation::SchemaSetup,
+        std::path::Path::new("corrupt.db"),
+        std::time::Duration::from_secs(1),
+        || {
+            attempts += 1;
+            Err::<(), _>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                Some("database disk image is malformed".into()),
+            ))
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(attempts, 1);
+    assert!(!error.is_transient_contention());
 }

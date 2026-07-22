@@ -34,6 +34,7 @@ pub fn write_atomic_sync(
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temp_path, path)?;
+        #[cfg(not(windows))]
         if let Some(parent) = path.parent() {
             std::fs::File::open(parent)?.sync_all()?;
         }

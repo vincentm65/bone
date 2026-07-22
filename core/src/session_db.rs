@@ -7,7 +7,7 @@ use rusqlite::{
 };
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Returns the path to the conversations database.
 /// Centralizes the path so all callers (TUI, headless, stats-popup) stay in sync.
@@ -452,6 +452,177 @@ const BUCKET_PROJECTION: &str = "COALESCE(usage.prompt,0), COALESCE(usage.comple
 /// new migration step; tests assert against this instead of a bare literal.
 pub(crate) const SCHEMA_VERSION: u32 = 9;
 
+const STARTUP_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+const STARTUP_RETRY_DEADLINE: Duration = Duration::from_secs(3);
+const NORMAL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Database operation being performed when runtime startup failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupDbOperation {
+    Open,
+    SchemaSetup,
+    Prune,
+    ReadConversations,
+    CreateConversation,
+    LoadConversation,
+}
+
+impl std::fmt::Display for StartupDbOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Open => "open",
+            Self::SchemaSetup => "schema setup",
+            Self::Prune => "prune ended empty conversations",
+            Self::ReadConversations => "read conversations",
+            Self::CreateConversation => "create conversation",
+            Self::LoadConversation => "load conversation",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Structured session-database startup failure.
+#[derive(Debug)]
+pub struct StartupDbError {
+    pub operation: StartupDbOperation,
+    pub path: PathBuf,
+    pub elapsed: Duration,
+    source: StartupDbErrorSource,
+}
+
+#[derive(Debug)]
+enum StartupDbErrorSource {
+    Sqlite(rusqlite::Error),
+    Io(std::io::Error),
+}
+
+impl StartupDbError {
+    fn sqlite(
+        operation: StartupDbOperation,
+        path: &Path,
+        elapsed: Duration,
+        source: rusqlite::Error,
+    ) -> Self {
+        Self {
+            operation,
+            path: path.to_path_buf(),
+            elapsed,
+            source: StartupDbErrorSource::Sqlite(source),
+        }
+    }
+
+    fn io(operation: StartupDbOperation, path: &Path, source: std::io::Error) -> Self {
+        Self {
+            operation,
+            path: path.to_path_buf(),
+            elapsed: Duration::ZERO,
+            source: StartupDbErrorSource::Io(source),
+        }
+    }
+
+    pub(crate) fn from_sqlite(
+        operation: StartupDbOperation,
+        path: &Path,
+        source: rusqlite::Error,
+    ) -> Self {
+        Self::sqlite(operation, path, Duration::ZERO, source)
+    }
+
+    /// Primary and extended SQLite result codes, when the source is SQLite.
+    pub fn sqlite_codes(&self) -> Option<(rusqlite::ErrorCode, i32)> {
+        match &self.source {
+            StartupDbErrorSource::Sqlite(error) => error
+                .sqlite_error()
+                .map(|code| (code.code, code.extended_code)),
+            StartupDbErrorSource::Io(_) => None,
+        }
+    }
+
+    pub fn is_transient_contention(&self) -> bool {
+        self.sqlite_codes().is_some_and(|(code, _)| {
+            matches!(
+                code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+        })
+    }
+}
+
+impl std::fmt::Display for StartupDbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session database {} failed for {} after {:.3}s",
+            self.operation,
+            self.path.display(),
+            self.elapsed.as_secs_f64()
+        )?;
+        if let Some((code, extended)) = self.sqlite_codes() {
+            write!(
+                f,
+                ": SQLite {:?} (extended code {extended}): {}",
+                code, self.source
+            )
+        } else {
+            write!(f, ": {}", self.source)
+        }
+    }
+}
+
+impl std::fmt::Display for StartupDbErrorSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sqlite(error) => error.fmt(f),
+            Self::Io(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for StartupDbError {}
+
+fn is_transient_sqlite(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+fn retry_startup_sqlite<T>(
+    operation: StartupDbOperation,
+    path: &Path,
+    action: impl FnMut() -> rusqlite::Result<T>,
+) -> Result<T, StartupDbError> {
+    retry_startup_sqlite_with_deadline(operation, path, STARTUP_RETRY_DEADLINE, action)
+}
+
+fn retry_startup_sqlite_with_deadline<T>(
+    operation: StartupDbOperation,
+    path: &Path,
+    deadline: Duration,
+    mut action: impl FnMut() -> rusqlite::Result<T>,
+) -> Result<T, StartupDbError> {
+    let started = Instant::now();
+    let mut backoff = Duration::from_millis(20);
+    loop {
+        match action() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_transient_sqlite(&error) && started.elapsed() < deadline => {
+                let remaining = deadline.saturating_sub(started.elapsed());
+                std::thread::sleep(backoff.min(remaining));
+                backoff = (backoff * 2).min(Duration::from_millis(200));
+            }
+            Err(error) => {
+                return Err(StartupDbError::sqlite(
+                    operation,
+                    path,
+                    started.elapsed(),
+                    error,
+                ));
+            }
+        }
+    }
+}
+
 /// SQLite-backed conversation and usage storage.
 pub struct SessionDb {
     conn: Connection,
@@ -467,7 +638,7 @@ impl SessionDb {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(
@@ -476,6 +647,34 @@ impl SessionDb {
         let db = Self { conn };
         db.setup_schema()?;
         db.prune_ended_empty_conversations()?;
+        Ok(db)
+    }
+
+    /// Open the database while preserving startup operation and contention
+    /// details. Startup uses short SQLite waits plus a single bounded retry
+    /// deadline; normal runtime operations return to the five-second timeout.
+    pub fn open_for_startup(path: &Path) -> Result<Self, StartupDbError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| StartupDbError::io(StartupDbOperation::Open, path, error))?;
+        }
+        let conn = Connection::open(path).map_err(|error| {
+            StartupDbError::sqlite(StartupDbOperation::Open, path, Duration::ZERO, error)
+        })?;
+        conn.busy_timeout(STARTUP_BUSY_TIMEOUT).map_err(|error| {
+            StartupDbError::sqlite(StartupDbOperation::Open, path, Duration::ZERO, error)
+        })?;
+        retry_startup_sqlite(StartupDbOperation::Open, path, || {
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        })?;
+        let db = Self { conn };
+        retry_startup_sqlite(StartupDbOperation::SchemaSetup, path, || db.setup_schema())?;
+        retry_startup_sqlite(StartupDbOperation::Prune, path, || {
+            db.prune_ended_empty_conversations()
+        })?;
+        db.conn.busy_timeout(NORMAL_BUSY_TIMEOUT).map_err(|error| {
+            StartupDbError::sqlite(StartupDbOperation::Open, path, Duration::ZERO, error)
+        })?;
         Ok(db)
     }
 
@@ -490,12 +689,14 @@ impl SessionDb {
             .map(|count| count > 0)
         }
 
-        let current_version: u32 = self
-            .conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        // Acquire the migration write lock before reading user_version. Without
+        // this, two startups can both observe an old version and the loser can
+        // resume with stale migration state after the winner commits.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current_version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
         if current_version == SCHEMA_VERSION {
-            return Ok(());
+            return tx.commit();
         }
 
         // Data-preserving migration chain. A fresh database (user_version 0)
@@ -504,7 +705,6 @@ impl SessionDb {
         // (current_version > SCHEMA_VERSION) is left untouched rather than
         // destroyed. The whole chain runs in one transaction so a failure
         // never leaves a half-migrated database.
-        let tx = self.conn.unchecked_transaction()?;
         let mut version = current_version;
 
         if version == 0 {
@@ -733,6 +933,47 @@ impl SessionDb {
             params![now, provider, model],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Create the startup conversation with bounded retries for SQLite lock
+    /// contention only.
+    pub fn create_conversation_for_startup(
+        &self,
+        path: &Path,
+        provider: &str,
+        model: &str,
+    ) -> Result<i64, StartupDbError> {
+        self.conn
+            .busy_timeout(STARTUP_BUSY_TIMEOUT)
+            .map_err(|error| {
+                StartupDbError::sqlite(
+                    StartupDbOperation::CreateConversation,
+                    path,
+                    Duration::ZERO,
+                    error,
+                )
+            })?;
+        let result = retry_startup_sqlite(StartupDbOperation::CreateConversation, path, || {
+            self.create_conversation(provider, model)
+        });
+        let restore = self
+            .conn
+            .busy_timeout(NORMAL_BUSY_TIMEOUT)
+            .map_err(|error| {
+                StartupDbError::sqlite(
+                    StartupDbOperation::CreateConversation,
+                    path,
+                    Duration::ZERO,
+                    error,
+                )
+            });
+        match result {
+            Ok(id) => {
+                restore?;
+                Ok(id)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Insert a message row plus its FTS index entry. Shared by `append_message`

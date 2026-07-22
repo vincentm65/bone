@@ -20,6 +20,11 @@ use super::bone_dir;
 #[derive(Debug)]
 pub enum SettingsError {
     Io(std::io::Error),
+    Lock {
+        operation: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
     Parse(String),
     BadVersion(u8),
     Validation(String),
@@ -29,6 +34,15 @@ impl std::fmt::Display for SettingsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "settings I/O error: {e}"),
+            Self::Lock {
+                operation,
+                path,
+                source,
+            } => write!(
+                f,
+                "cannot {operation} settings lock {}: {source}",
+                path.display()
+            ),
             Self::Parse(s) => write!(f, "settings parse error: {s}"),
             Self::BadVersion(v) => write!(f, "unsupported settings version {v}; expected 1 or 2"),
             Self::Validation(s) => write!(f, "settings validation error: {s}"),
@@ -39,7 +53,7 @@ impl std::fmt::Display for SettingsError {
 impl std::error::Error for SettingsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(e) => Some(e),
+            Self::Io(e) | Self::Lock { source: e, .. } => Some(e),
             _ => None,
         }
     }
@@ -454,16 +468,23 @@ fn acquire_settings_write_lock(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let lock_path = lock_path_for(path);
+    let lock_error = |operation, source| SettingsError::Lock {
+        operation,
+        path: lock_path.clone(),
+        source,
+    };
     if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)
+            .map_err(|error| lock_error("create parent directory for", error))?;
     }
     let file = File::options()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(lock_path)?;
-    fs2::FileExt::lock_exclusive(&file)?;
+        .open(&lock_path)
+        .map_err(|error| lock_error("open", error))?;
+    fs2::FileExt::lock_exclusive(&file).map_err(|error| lock_error("acquire", error))?;
     Ok((mutex, file))
 }
 
@@ -1394,6 +1415,36 @@ mod tests {
         // Works with just a filename too.
         let bare = Path::new("config.yaml");
         assert_eq!(lock_path_for(bare), PathBuf::from("config.yaml.lock"));
+    }
+
+    #[test]
+    fn lock_errors_include_operation_path_and_os_error() {
+        let path = PathBuf::from("exact/config.yaml.lock");
+        for (operation, expected) in [
+            (
+                "create parent directory for",
+                "cannot create parent directory for settings lock exact/config.yaml.lock: denied",
+            ),
+            (
+                "open",
+                "cannot open settings lock exact/config.yaml.lock: denied",
+            ),
+            (
+                "acquire",
+                "cannot acquire settings lock exact/config.yaml.lock: denied",
+            ),
+        ] {
+            let error = SettingsError::Lock {
+                operation,
+                path: path.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+            };
+            assert_eq!(error.to_string(), expected);
+        }
+        assert_eq!(
+            SettingsError::Io(std::io::Error::other("plain")).to_string(),
+            "settings I/O error: plain"
+        );
     }
 
     #[test]

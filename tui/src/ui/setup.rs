@@ -706,7 +706,9 @@ mod tests {
 
     #[test]
     fn seeded_provider_can_be_activated_without_api_key() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
+        let _guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os("BONE_DIR");
         let root = std::env::temp_dir().join(format!(
             "bone-setup-provider-{}-{}",

@@ -255,23 +255,30 @@ fn lua_shell_primitives_use_tool_working_directory() {
     let tools_dir = config_dir.join("lua/tools");
     std::fs::create_dir_all(&working_dir).unwrap();
     std::fs::create_dir_all(&tools_dir).unwrap();
+    let cwd_command = if cfg!(windows) {
+        "pwd | Select-Object -ExpandProperty Path"
+    } else {
+        "pwd"
+    };
     std::fs::write(
         tools_dir.join("cwd_probe.lua"),
-        r#"
-bone.tool.register({
+        format!(
+            r#"
+bone.tool.register({{
   name = "cwd_probe",
   description = "checks shell working directories",
   safety = "read_only",
-  parameters = { type = "object", properties = {} },
+  parameters = {{ type = "object", properties = {{}} }},
   execute = function(_args, ctx)
-    local direct = ctx.shell("pwd").stdout:gsub("%s+$", "")
+    local direct = ctx.shell("{cwd_command}").stdout:gsub("%s+$", "")
     local streamed = ""
-    ctx.shell_streaming("pwd", function(line) streamed = line end)
-    local process = ctx.process.spawn("pwd")
+    ctx.shell_streaming("{cwd_command}", function(line) streamed = line end)
+    local process = ctx.process.spawn("{cwd_command}")
     return direct .. "|" .. streamed .. "|" .. process.id
   end,
-})
+}})
 "#,
+        ),
     )
     .unwrap();
 
@@ -320,10 +327,10 @@ bone.tool.register({
         .expect("background pwd should finish");
     rt.shutdown_timeout(Duration::from_secs(1));
 
-    let expected = working_dir.to_string_lossy();
-    assert_eq!(parts[0], expected);
-    assert_eq!(parts[1], expected);
-    assert_eq!(snapshot.stdout.trim(), expected);
+    let expected = std::fs::canonicalize(&working_dir).unwrap();
+    for actual in [parts[0], parts[1], snapshot.stdout.trim()] {
+        assert_eq!(std::fs::canonicalize(actual).unwrap(), expected);
+    }
 
     std::fs::remove_dir_all(&config_dir).ok();
 }

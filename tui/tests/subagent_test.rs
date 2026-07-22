@@ -44,12 +44,78 @@ bone.subagent.register({
 })
 "#;
 
+/// Self-contained fixture for the optional catalog `subagent` tool. The catalog
+/// is not part of this workspace, so tests must not depend on a sibling checkout
+/// or the user's installed tool selection.
+const SUBAGENT_TOOL: &str = r###"
+local agents = bone.subagent.list()
+if #agents == 0 then return end
+
+local by_name = {}
+local names = {}
+for _, agent in ipairs(agents) do
+    by_name[agent.name] = agent
+    table.insert(names, agent.name)
+end
+
+local function format_jobs(jobs)
+    local sections = {}
+    for _, job in ipairs(jobs or {}) do
+        table.insert(sections, "## " .. job.agent .. " (" .. job.id .. ")\n" .. (job.result or job.status))
+    end
+    return table.concat(sections, "\n\n")
+end
+
+bone.tool.register({
+    name = "subagent",
+    description = "Dispatch or wait for sub-agents: " .. table.concat(names, ", "),
+    safety = "read_only",
+    parameters = { type = "object", properties = {} },
+    execute = function(args, ctx)
+        if args.action == "wait" then
+            local waited = ctx.agent.wait(args.ids)
+            return format_jobs(waited.jobs)
+        end
+
+        local ids = {}
+        for _, task in ipairs(args.tasks or {}) do
+            local agent = by_name[task.agent]
+            local spawned = ctx.agent.spawn(task.task, {
+                agent = task.agent,
+                title = task.title,
+                system_prompt = agent and agent.system_prompt or nil,
+                timeout_ms = agent and agent.timeout_ms or nil,
+                max_concurrency = agent and agent.max_concurrency or 1,
+                tools = agent and agent.tools or nil,
+            })
+            if spawned.ok then table.insert(ids, spawned.id) end
+        end
+
+        local report = "Dispatched " .. #ids
+        if args.wait and #ids > 0 then
+            local waited = ctx.agent.wait(ids)
+            local results = format_jobs(waited.jobs)
+            if results ~= "" then report = report .. "\n\n" .. results end
+        end
+        return report
+    end,
+})
+"###;
+
+fn seed_subagent_tool(config_dir: &std::path::Path) {
+    let tools_dir = config_dir.join("lua/tools");
+    std::fs::create_dir_all(&tools_dir).unwrap();
+    std::fs::write(tools_dir.join("subagent.lua"), SUBAGENT_TOOL).unwrap();
+}
+
 #[test]
 fn two_agents_registered_and_listed_in_tool() {
     let config_dir = common::temp_dir("subagent-two-agents");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
+    seed_subagent_tool(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
@@ -90,6 +156,7 @@ fn two_agents_registered_and_listed_in_tool() {
 #[test]
 fn no_agents_registered_no_tool() {
     let config_dir = common::temp_dir("subagent-no-agents");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
@@ -119,6 +186,7 @@ fn no_agents_registered_no_tool() {
 #[test]
 fn tool_allowlist_narrows_exposed_tools() {
     let config_dir = common::temp_dir("subagent-tool-allowlist");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
@@ -154,9 +222,11 @@ fn tool_allowlist_narrows_exposed_tools() {
 #[test]
 fn spawn_lifecycle_no_provider() {
     let config_dir = common::temp_dir("subagent-lifecycle");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
+    seed_subagent_tool(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
@@ -264,6 +334,7 @@ fn spawn_lifecycle_no_provider() {
 #[test]
 fn dispatch_with_wait_returns_results_inline() {
     let config_dir = common::temp_dir("subagent-dispatch-wait");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     // Unique agent name: the busy-agent check is global by name, so avoid
@@ -278,6 +349,7 @@ fn dispatch_with_wait_returns_results_inline() {
         })"#,
     )
     .unwrap();
+    seed_subagent_tool(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
@@ -338,6 +410,7 @@ fn dispatch_with_wait_returns_results_inline() {
 #[test]
 fn wait_action_collects_dispatched_job() {
     let config_dir = common::temp_dir("subagent-wait-action");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
@@ -349,6 +422,7 @@ fn wait_action_collects_dispatched_job() {
         })"#,
     )
     .unwrap();
+    seed_subagent_tool(&config_dir);
 
     let mut custom = bone::config::custom::CustomConfigs::default();
     let booted = bone::ext::boot_with_tools(
@@ -434,6 +508,7 @@ bone.tool.register({
 #[test]
 fn depth_guard_rejects_spawn_at_depth_1() {
     let config_dir = common::temp_dir("subagent-depth-guard");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
     let tools_dir = config_dir.join("lua/tools");
     std::fs::create_dir_all(&tools_dir).unwrap();
@@ -611,6 +686,7 @@ fn lua_cancel_call(marker: &str, id: &str) -> ToolCall {
 #[test]
 fn cancel_running_job_via_lua_tool() {
     let config_dir = common::temp_dir("subagent-cancel-lua");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
     let tools_dir = config_dir.join("lua/tools");
     std::fs::create_dir_all(&tools_dir).unwrap();

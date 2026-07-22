@@ -137,6 +137,32 @@ cargo test --workspace
 cargo build --release
 ```
 
+### Windows development builds
+
+Windows does not allow Cargo to replace a running `.exe`. If
+`target\debug\bone.exe` is still running, a rebuild can fail with
+`Access is denied. (os error 5)` even after Cargo has acquired its package and
+artifact locks. This is a build-artifact limitation, not an application
+single-instance restriction.
+
+Build once and launch additional instances directly from separate terminals:
+
+```powershell
+cargo build -p bone
+.\target\debug\bone.exe
+```
+
+To rebuild while another development instance remains open, use a distinct
+target directory in each terminal:
+
+```powershell
+$env:CARGO_TARGET_DIR = 'target-instance-1'
+cargo run -p bone
+```
+
+Alternatively, copy a completed executable outside Cargo's target directory and
+run the staged copy while continuing development builds.
+
 The web client does not need an npm build step. Run it against a local build with:
 
 ```sh

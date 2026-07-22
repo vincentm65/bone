@@ -1,5 +1,39 @@
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[allow(dead_code)]
+pub struct BoneDirGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous: Option<OsString>,
+}
+
+impl Drop for BoneDirGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(previous) => std::env::set_var("BONE_DIR", previous),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn isolate_bone_dir(path: &Path) -> BoneDirGuard {
+    let lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os("BONE_DIR");
+    unsafe { std::env::set_var("BONE_DIR", path) };
+    BoneDirGuard {
+        _lock: lock,
+        previous,
+    }
+}
 
 #[allow(dead_code)]
 pub fn temp_dir(label: &str) -> PathBuf {

@@ -1,13 +1,194 @@
 use super::{
     App, ConfigView, WireTools, apply_queue_nav_key, background_pane_needs_refresh,
     config_rejection_message, configured_input_style, edit_diff_message, idle_state_needs_redraw,
-    job_snapshot_messages, lua_config_available, parse_config_value, render_config_page,
-    should_open_agent_log, take_pending_config,
+    job_snapshot_messages, lua_config_available, parse_config_value, prepare_streaming_replay,
+    render_config_page, run_insertion_lifecycle, should_open_agent_log, take_pending_config,
+    terminal_dimensions_changed,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::VecDeque;
+
+#[test]
+fn terminal_dimension_changes_require_a_prior_size() {
+    assert!(!terminal_dimensions_changed(None, (80, 24)));
+    assert!(!terminal_dimensions_changed(Some((80, 24)), (80, 24)));
+    assert!(terminal_dimensions_changed(Some((80, 24)), (100, 24)));
+    assert!(terminal_dimensions_changed(Some((80, 24)), (80, 30)));
+    assert!(terminal_dimensions_changed(Some((80, 24)), (100, 30)));
+}
+
+#[test]
+fn streaming_replay_resets_source_offset_and_accounts_for_message() {
+    let mut renderer = crate::ui::render::Renderer::new();
+    renderer.scrollback_cursor = 2;
+    renderer.streaming_source_flushed = 37;
+
+    prepare_streaming_replay(&mut renderer);
+
+    assert_eq!(renderer.scrollback_cursor, 3);
+    assert_eq!(renderer.streaming_source_flushed, 0);
+}
+
+#[test]
+fn insertion_lifecycle_restores_a_windows_cleared_viewport() {
+    const VIEWPORT_ROWS: [&str; 7] = [
+        "top separator",
+        "pane",
+        "autocomplete",
+        "input field",
+        "bottom separator",
+        "running shell",
+        "status row",
+    ];
+
+    #[derive(Default)]
+    struct Model {
+        events: Vec<&'static str>,
+        viewport: Vec<&'static str>,
+        scrollback: Vec<&'static str>,
+    }
+
+    let mut model = Model::default();
+    run_insertion_lifecycle(
+        &mut model,
+        |model| {
+            model.events.push("size/draw");
+            model.viewport.extend(VIEWPORT_ROWS);
+            Ok(())
+        },
+        |model| {
+            model.events.push("insert");
+            model.scrollback.push("message");
+            #[cfg(windows)]
+            model.viewport.clear();
+            Ok(())
+        },
+        |model| {
+            #[cfg(windows)]
+            {
+                model.events.push("Windows draw");
+                model.viewport.extend(VIEWPORT_ROWS);
+            }
+            #[cfg(not(windows))]
+            let _ = model;
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    #[cfg(windows)]
+    assert_eq!(model.events, ["size/draw", "insert", "Windows draw"]);
+    #[cfg(not(windows))]
+    assert_eq!(model.events, ["size/draw", "insert"]);
+    assert_eq!(model.viewport, VIEWPORT_ROWS);
+    assert_eq!(model.scrollback, ["message"]);
+}
+
+#[test]
+fn insertion_callers_preserve_reset_resize_insert_restore_order() {
+    for (name, resets_input) in [
+        ("multiline submit", true),
+        ("inline command", true),
+        ("daemon turn", false),
+        ("stream fragment", false),
+    ] {
+        let mut events = Vec::new();
+        if resets_input {
+            events.push("reset");
+        }
+        run_insertion_lifecycle(
+            &mut events,
+            |events| {
+                events.push("size/draw");
+                Ok(())
+            },
+            |events| {
+                events.push("insert");
+                Ok(())
+            },
+            |events| {
+                #[cfg(windows)]
+                events.push("Windows draw");
+                #[cfg(not(windows))]
+                let _ = events;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let mut expected = if resets_input {
+            vec!["reset", "size/draw", "insert"]
+        } else {
+            vec!["size/draw", "insert"]
+        };
+        #[cfg(windows)]
+        expected.push("Windows draw");
+        assert_eq!(events, expected, "{name}");
+    }
+}
+
+#[test]
+fn stale_resize_rebuild_precedes_width_sensitive_stream_insertion() {
+    #[derive(Default)]
+    struct Model {
+        events: Vec<&'static str>,
+        tracked_size: Option<(u16, u16)>,
+        insertion_width: u16,
+        streaming_offset: usize,
+        scrollback_cursor: usize,
+    }
+
+    let mut model = Model {
+        tracked_size: Some((80, 24)),
+        streaming_offset: 37,
+        scrollback_cursor: 2,
+        ..Model::default()
+    };
+    let current_size = (42, 18);
+    run_insertion_lifecycle(
+        &mut model,
+        |model| {
+            if terminal_dimensions_changed(model.tracked_size, current_size) {
+                model.events.push("rebuild");
+                let mut renderer = crate::ui::render::Renderer::new();
+                renderer.scrollback_cursor = model.scrollback_cursor;
+                renderer.streaming_source_flushed = model.streaming_offset;
+                prepare_streaming_replay(&mut renderer);
+                model.scrollback_cursor = renderer.scrollback_cursor;
+                model.streaming_offset = renderer.streaming_source_flushed;
+                model.tracked_size = Some(current_size);
+            }
+            model.events.push("size/draw");
+            model.insertion_width = model.tracked_size.unwrap().0;
+            Ok(())
+        },
+        |model| {
+            model.events.push("insert");
+            assert_eq!(model.insertion_width, current_size.0);
+            model.streaming_offset += 11;
+            Ok(())
+        },
+        |model| {
+            #[cfg(windows)]
+            model.events.push("Windows draw");
+            #[cfg(not(windows))]
+            let _ = model;
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let mut expected = vec!["rebuild", "size/draw", "insert"];
+    #[cfg(windows)]
+    expected.push("Windows draw");
+    assert_eq!(model.events, expected);
+    assert_eq!(model.tracked_size, Some(current_size));
+    assert_eq!(model.insertion_width, 42);
+    assert_eq!(model.scrollback_cursor, 3);
+    assert_eq!(model.streaming_offset, 11);
+}
 
 #[test]
 fn bundled_lua_config_is_available_for_interactive_dispatch() {
@@ -365,7 +546,9 @@ fn idle_config_revision_change_requests_redraw_without_new_messages() {
 
 #[test]
 fn rejected_config_change_restores_approval_and_requests_snapshot() {
-    let _guard = crate::ENV_LOCK.lock().unwrap();
+    let _guard = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = std::env::var_os("BONE_DIR");
     let root = std::env::temp_dir().join(format!(
         "bone-rejected-config-{}-{}",

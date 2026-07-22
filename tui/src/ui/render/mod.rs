@@ -29,17 +29,24 @@ pub(crate) const MIN_ROWS: u16 = 3;
 
 /// Largest inline-viewport height permitted for a given terminal height.
 ///
-/// We deliberately reserve at least one row above the viewport so the inline
-/// viewport never occupies the *entire* screen. A full-screen inline viewport
-/// forces ratatui's `insert_before` down a fragile "borrow the top viewport
-/// line and scroll it into scrollback" path (see
+/// We deliberately reserve at least one row above the viewport whenever the
+/// terminal has at least two rows, so the inline viewport never occupies the
+/// *entire* usable screen. Heights zero and one use one Ratatui row as a
+/// defensive fallback because no row can be reserved.
+///
+/// A full-screen inline viewport forces ratatui's `insert_before` down a fragile
+/// "borrow the top viewport line and scroll it into scrollback" path (see
 /// `insert_before_scrolling_regions`' `viewport_area.height ==
 /// last_known_area.height` branch), which intermittently strands bottom-pane
 /// rows (the input field, wrapped command preview, and `────` separators) in
-/// scrollback. Keeping one row free guarantees the robust partial-screen
-/// scroll path is always used.
+/// scrollback. Keeping one row free guarantees the robust partial-screen scroll
+/// path is used whenever possible.
 pub(crate) fn max_viewport_height(terminal_height: u16) -> u16 {
     terminal_height.saturating_sub(1).max(1)
+}
+
+pub(crate) fn initial_viewport_height(terminal_height: u16) -> u16 {
+    MIN_ROWS.min(max_viewport_height(terminal_height))
 }
 pub use bottom_pane::PaneDraw;
 pub(crate) use bottom_pane::approval_pane_lines;
@@ -193,7 +200,7 @@ impl Renderer {
 
     /// Create a new terminal in inline-viewport mode.
     ///
-    /// Starts at `MIN_ROWS` (4 lines). The viewport is resized dynamically
+    /// Starts at `MIN_ROWS` (3 lines). The viewport is resized dynamically
     /// via `resize_viewport()` as the input field grows or shrinks.
     pub fn init_terminal(height: u16) -> io::Result<BoneTerminal> {
         crossterm::terminal::enable_raw_mode()?;

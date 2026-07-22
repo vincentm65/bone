@@ -99,14 +99,12 @@ fn boot_runtime_host_for(
         )
     };
     let mut session = bone::runtime::RuntimeSession::new(booted.tools);
-    let warning = match target {
+    match target {
         bone::rpc::SessionTarget::Latest => session.init_db(&*provider),
         bone::rpc::SessionTarget::New => session.init_db_new(&*provider),
         bone::rpc::SessionTarget::Conversation(id) => session.init_db_conversation(&*provider, id),
-    };
-    if let Some(warning) = warning {
-        return Err(std::io::Error::other(warning));
     }
+    .map_err(|error| std::io::Error::other(format!("fatal: {error}")))?;
     Ok(RuntimeHostBoot {
         provider,
         manager: booted.manager,

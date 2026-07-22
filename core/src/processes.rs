@@ -116,6 +116,19 @@ impl ProcessRegistry {
         true
     }
 
+    /// Request cancellation for every running process owned by `scope`.
+    pub fn kill_all_scoped(&self, scope: &str) -> usize {
+        let processes = self.processes.lock().unwrap();
+        let mut killed = 0;
+        for process in processes.values() {
+            if process.snapshot.owner == scope && process.snapshot.running {
+                process.cancel.store(true, Ordering::Relaxed);
+                killed += 1;
+            }
+        }
+        killed
+    }
+
     pub fn kill(&self, id: &str) -> bool {
         let processes = self.processes.lock().unwrap();
         let Some(p) = processes.get(id) else {
@@ -195,5 +208,44 @@ pub(crate) fn execute_action(
             }
         }
         _ => Err("action must be run, list, status, or kill".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(owner: &str, running: bool) -> Process {
+        Process {
+            snapshot: ProcessSnapshot {
+                id: String::new(),
+                command: String::new(),
+                owner: owner.into(),
+                running,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                error: None,
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn kill_all_scoped_only_cancels_running_processes_in_scope() {
+        let registry = ProcessRegistry {
+            next: AtomicU64::new(1),
+            processes: Mutex::new(HashMap::from([
+                ("owned-running".into(), process("conversation:7", true)),
+                ("owned-finished".into(), process("conversation:7", false)),
+                ("other-running".into(), process("conversation:8", true)),
+            ])),
+        };
+
+        assert_eq!(registry.kill_all_scoped("conversation:7"), 1);
+        let processes = registry.processes.lock().unwrap();
+        assert!(processes["owned-running"].cancel.load(Ordering::Relaxed));
+        assert!(!processes["owned-finished"].cancel.load(Ordering::Relaxed));
+        assert!(!processes["other-running"].cancel.load(Ordering::Relaxed));
     }
 }

@@ -185,7 +185,21 @@ pub(crate) fn write_document<T: Serialize>(
     temporary
         .persist(path)
         .map_err(|error| error.error.to_string())?;
+    sync_parent_directory(parent)
+}
+
+#[cfg(not(windows))]
+fn sync_parent_directory(parent: &Path) -> Result<(), String> {
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(_parent: &Path) -> Result<(), String> {
+    // The file itself was flushed before the atomic rename above. Opening a
+    // directory with std::fs::File::open fails with ERROR_ACCESS_DENIED on
+    // Windows unless special directory-handle flags are used, so do not turn a
+    // successful persistence operation into a reported failure here.
+    Ok(())
 }

@@ -4,12 +4,8 @@ use crate::tools::builtin_tools;
 
 #[test]
 fn apply_outcome_persists_explicit_turn_messages_after_transcript_replacement() {
-    let path = std::env::temp_dir().join(format!(
-        "bone_compaction_persist_{}_{}.db",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
-    ));
-    let _ = std::fs::remove_file(&path);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
     let db = SessionDb::open(&path).unwrap();
     let conv = db.create_conversation("test", "model").unwrap();
     let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
@@ -48,17 +44,12 @@ fn apply_outcome_persists_explicit_turn_messages_after_transcript_replacement() 
     assert_eq!(stored[0].content, "current answer");
 
     drop(session);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn apply_outcome_surfaces_persistence_failure_after_adopting_state() {
-    let path = std::env::temp_dir().join(format!(
-        "bone_persistence_failure_{}_{}.db",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
-    ));
-    let _ = std::fs::remove_file(&path);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
     let db = SessionDb::open(&path).unwrap();
     let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
     session.session_db = Some(db);
@@ -86,5 +77,4 @@ fn apply_outcome_surfaces_persistence_failure_after_adopting_state() {
     assert!(persistence_error.is_some());
 
     drop(session);
-    let _ = std::fs::remove_file(path);
 }

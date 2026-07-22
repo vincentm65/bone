@@ -209,6 +209,111 @@ async fn busy_turn_services_config_commands() {
 }
 
 #[tokio::test]
+async fn cancel_stops_managed_shell_processes_while_idle_and_mid_turn() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(PendingProvider);
+    let (_addr, hub) = spawn_daemon(provider).await;
+    let mut events = hub.subscribe();
+    let commands = hub.command_sender();
+    let scope = bone_core::processes::conversation_scope(None);
+
+    async fn wait_until_stopped(id: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if !bone_core::processes::registry()
+                    .get(id)
+                    .expect("managed process disappeared")
+                    .running
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("managed process was not cancelled");
+    }
+
+    #[cfg(windows)]
+    let long_running_command = "Start-Sleep -Seconds 60";
+    #[cfg(not(windows))]
+    let long_running_command = "sleep 60";
+
+    let idle_process = bone_core::processes::registry().spawn(
+        long_running_command.into(),
+        scope.clone(),
+        60_000,
+        None,
+    );
+    commands.send(RuntimeCommand::Cancel).unwrap();
+    wait_until_stopped(&idle_process).await;
+
+    #[cfg(windows)]
+    let child_pid_file = std::env::temp_dir().join(format!(
+        "bone-cancel-child-{}-{}.pid",
+        std::process::id(),
+        idle_process
+    ));
+    #[cfg(windows)]
+    let turn_command = format!(
+        "$child = Start-Process powershell.exe -ArgumentList '-NoProfile -Command Start-Sleep -Seconds 60' -PassThru; Set-Content -LiteralPath '{}' -Value $child.Id; Start-Sleep -Seconds 60",
+        child_pid_file.display().to_string().replace('\'', "''")
+    );
+    #[cfg(not(windows))]
+    let turn_command = long_running_command.to_string();
+
+    let turn_process = bone_core::processes::registry().spawn(turn_command, scope, 60_000, None);
+    #[cfg(windows)]
+    let child_pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(&child_pid_file) {
+                break pid.trim().parse::<u32>().expect("invalid child pid");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("managed process did not spawn its child");
+
+    commands
+        .send(RuntimeCommand::SubmitPrompt {
+            text: "wait".into(),
+            images: vec![],
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(events.recv().await.unwrap(), RuntimeEvent::Started { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("turn did not start");
+
+    commands.send(RuntimeCommand::Cancel).unwrap();
+    wait_until_stopped(&turn_process).await;
+
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "if (Get-Process -Id {child_pid} -ErrorAction SilentlyContinue) {{ exit 1 }}"
+                ),
+            ])
+            .status()
+            .expect("failed to check child process");
+        assert!(
+            status.success(),
+            "managed child process {child_pid} survived"
+        );
+        std::fs::remove_file(child_pid_file).ok();
+    }
+}
+
+#[tokio::test]
 async fn client_submits_prompt_over_socket_and_receives_turn() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(vec![
         ChatEvent::TextDelta("daemon ".into()),

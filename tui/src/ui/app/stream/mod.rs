@@ -243,13 +243,11 @@ impl App {
 
         if let Some(cmd) = text.strip_prefix(':') {
             if cmd.trim() == "q" || cmd.trim() == "q!" {
+                self.input.reset();
                 if let Some(notice) = self.request_quit() {
                     self.messages.push(Message::system(notice));
-                    self.renderer
-                        .flush_new_to_scrollback(&self.messages, term)?;
-                    self.redraw(term)?;
+                    self.flush_new_messages_to_scrollback(term)?;
                 }
-                self.input.reset();
                 return Ok(());
             }
             return self.run_inline_command(cmd, term).await;
@@ -301,10 +299,7 @@ impl App {
         // appear whenever the input had grown past one line. Resetting first
         // means the viewport is already at its final height when we insert.
         self.input.reset();
-        self.redraw(term)?;
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
-        self.redraw(term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         self.begin_streaming();
 
         // Send the turn to the daemon (it handles message push, Driver, and persistence).
@@ -339,10 +334,8 @@ impl App {
     ) -> io::Result<()> {
         self.messages
             .push(Message::user(display.as_deref().unwrap_or(&task)));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         self.begin_streaming();
-        self.redraw(term)?;
         self.run_event_pump(term).await
     }
 
@@ -480,8 +473,7 @@ impl App {
         }
 
         if let Some(idx) = cur_idx {
-            self.renderer
-                .finalize_streaming_message(&self.messages[idx].content, term)?;
+            self.finalize_streaming_to_scrollback(idx, term)?;
         }
         // Defensive teardown: a tool-only or failed turn never emits TextDelta,
         // so clear the live thinking pane here too.
@@ -502,11 +494,10 @@ impl App {
         self.running_shells.clear();
         self.pending_shells.clear();
         self.clear_approval_pane();
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         // Single blank line between the last message and the input field. Deduped
         // against the next turn's leading blank, so spacing stays single.
-        self.renderer.flush_separator(term)?;
+        self.flush_scrollback_separator(term)?;
         // Safe now: the turn is over, no tool is running Lua lock-free.
         self.redraw(term)?;
         Ok(())
@@ -635,7 +626,7 @@ impl App {
                     | Ok(RuntimeEvent::Notice { message }) => {
                         // Surface daemon messages emitted while a command runs.
                         self.messages.push(Message::system(message));
-                        self.renderer.flush_new_to_scrollback(&self.messages, term).ok();
+                        self.flush_new_messages_to_scrollback(term).ok();
                     }
                     Ok(RuntimeEvent::CommandComplete { output, submit, display_role, action }) => {
                         completion = Some((output, submit, display_role, action));
@@ -709,12 +700,9 @@ impl App {
             self.messages.push(Message::user(display));
             // Reset input + shrink viewport before flushing (see the note in
             // `submit_user_turn`): flushing against a still-tall viewport lets
-            // the follow-up redraw's viewport recreation clobber the echo row.
+            // the follow-up viewport recreation clobber the echo row.
             self.input.reset();
-            self.redraw(term).ok();
-            self.renderer
-                .flush_new_to_scrollback(&self.messages, term)
-                .ok();
+            self.flush_new_messages_to_scrollback(term).ok();
             self.streaming = true;
             self.shown_tool_rows.clear();
             self.stream_estimated_received = Some(self.view.received);
@@ -753,13 +741,7 @@ impl App {
                 let idx = self.pump_ensure_assistant(cur_idx);
                 self.bump_estimated_received(text.len());
                 self.messages[idx].content.push_str(&text);
-                self.renderer
-                    .flush_streaming_message(&self.messages[idx].content, term)?;
-                // On Windows, `insert_before` uses the no-scrolling-regions path
-                // which clears the inline viewport; repaint it immediately so the
-                // status bar doesn't flicker between this flush and the next tick.
-                #[cfg(windows)]
-                self.pump_tick(term)?;
+                self.flush_streaming_to_scrollback(idx, term)?;
             }
             RuntimeEvent::ReasoningDelta { text } => {
                 // Reasoning is always retained in the Driver transcript for
@@ -946,11 +928,10 @@ impl App {
                     .retain(|(cid, _, _)| cid != &call_id);
                 self.pending_shells.retain(|(cid, _, _)| cid != &call_id);
                 if let Some(idx) = cur_idx.take() {
-                    self.renderer
-                        .finalize_streaming_message(&self.messages[idx].content, term)?;
+                    self.finalize_streaming_to_scrollback(idx, term)?;
                     // Streamed assistant text has no trailing blank; add one so
                     // the tool row below doesn't touch it (deduped → single).
-                    self.renderer.flush_separator(term)?;
+                    self.flush_scrollback_separator(term)?;
                 }
                 let result = crate::tools::ToolResult {
                     call_id: call_id.clone(),
@@ -967,8 +948,7 @@ impl App {
                 } else {
                     self.messages.push(Message::tool_row(name, is_error));
                 }
-                self.renderer
-                    .flush_new_to_scrollback(&self.messages, term)?;
+                self.flush_new_messages_to_scrollback(term)?;
             }
             RuntimeEvent::KeyRequest { id } => {
                 pending_key.set_daemon(id, self.command_tx.clone());
@@ -987,13 +967,11 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         if let Some(idx) = cur_idx.take() {
-            self.renderer
-                .finalize_streaming_message(&self.messages[idx].content, term)?;
-            self.renderer.flush_separator(term)?;
+            self.finalize_streaming_to_scrollback(idx, term)?;
+            self.flush_scrollback_separator(term)?;
         }
         self.messages.push(Message::system(message));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         Ok(())
     }
 
@@ -1107,9 +1085,8 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         if let Some(idx) = cur_idx.take() {
-            self.renderer
-                .finalize_streaming_message(&self.messages[idx].content, term)?;
-            self.renderer.flush_separator(term)?;
+            self.finalize_streaming_to_scrollback(idx, term)?;
+            self.flush_scrollback_separator(term)?;
         }
         let result = crate::tools::ToolResult {
             call_id: call.id.clone(),
@@ -1119,8 +1096,7 @@ impl App {
         let display = self.wire_tools.display_for_call(call);
         self.messages.push(build_tool_row(call, &result, display));
         self.shown_tool_rows.insert(call.id.clone());
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         Ok(())
     }
 
@@ -1135,8 +1111,7 @@ impl App {
     ) -> io::Result<()> {
         self.messages.push(Message::system(preview.to_string()));
         self.shown_tool_rows.insert(call_id.to_string());
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         Ok(())
     }
 
@@ -1223,8 +1198,7 @@ impl App {
             result.clone(),
             is_error,
         ));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
 
         // Fold the (truncated) output into the daemon's transcript so a later
         // model turn can answer questions about it. The daemon owns the

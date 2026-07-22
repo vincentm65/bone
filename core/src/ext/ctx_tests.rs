@@ -761,16 +761,22 @@ async fn extension_shell_primitives_honor_cancellation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shell_streaming_callback_error_reaps_process_tree() {
-    let cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg.approval_mode = crate::tools::ApprovalMode::Danger;
     let lua = Lua::new();
     let ctx = create_ctx_table(&lua, &cfg).unwrap();
     lua.globals().set("ctx", ctx).unwrap();
+    #[cfg(unix)]
+    let command = "echo first; sleep 30 & wait";
+    #[cfg(windows)]
+    let command = "Write-Output first; $p = Start-Process powershell -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -PassThru; $p.WaitForExit()";
+    lua.globals().set("shell_command", command).unwrap();
     let started = std::time::Instant::now();
     let (ok, error): (bool, String) = lua
         .load(
             r#"
             local ok, err = pcall(function()
-                ctx.shell_streaming("echo first; sleep 30 & wait", function()
+                ctx.shell_streaming(shell_command, function()
                     error("callback failed")
                 end)
             end)

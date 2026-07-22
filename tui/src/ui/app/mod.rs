@@ -24,7 +24,7 @@ use super::commands;
 use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
-use super::render::{BoneTerminal, MAX_PANE_ROWS, MIN_ROWS, PaneDraw, Renderer, StatusInfo};
+use super::render::{BoneTerminal, MAX_PANE_ROWS, PaneDraw, Renderer, StatusInfo};
 
 fn should_open_agent_log(input: &InputState) -> bool {
     input.buffer.trim().is_empty()
@@ -36,6 +36,26 @@ fn background_pane_needs_refresh(
     agent_jobs_tick_due: bool,
 ) -> bool {
     processes_running || processes_pane_visible || agent_jobs_tick_due
+}
+
+fn terminal_dimensions_changed(last: Option<(u16, u16)>, current: (u16, u16)) -> bool {
+    last.is_some_and(|last| last != current)
+}
+
+fn prepare_streaming_replay(renderer: &mut Renderer) {
+    renderer.scrollback_cursor += 1;
+    renderer.streaming_source_flushed = 0;
+}
+
+fn run_insertion_lifecycle<C>(
+    context: &mut C,
+    prepare: impl FnOnce(&mut C) -> io::Result<()>,
+    insert: impl FnOnce(&mut C) -> io::Result<()>,
+    restore: impl FnOnce(&mut C) -> io::Result<()>,
+) -> io::Result<()> {
+    prepare(context)?;
+    insert(context)?;
+    restore(context)
 }
 
 fn finish_queue_edit(
@@ -1154,9 +1174,7 @@ impl App {
                     });
                     Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
                     self.renderer.reset_scrollback_state();
-                    self.renderer
-                        .flush_new_to_scrollback(&self.messages, term)?;
-                    self.redraw(term)?;
+                    self.flush_new_messages_to_scrollback(term)?;
                     return Ok(());
                 }
                 Ok(crate::runtime::RuntimeEvent::ConversationLoadFailed {
@@ -1164,9 +1182,7 @@ impl App {
                     message,
                 }) if failed_id == id => {
                     self.messages.push(Message::system(message));
-                    self.renderer
-                        .flush_new_to_scrollback(&self.messages, term)?;
-                    self.redraw(term)?;
+                    self.flush_new_messages_to_scrollback(term)?;
                     return Ok(());
                 }
                 Ok(other) => self.apply_idle_event(other),
@@ -1302,8 +1318,7 @@ impl App {
         )));
         self.messages.push(Message::system(summary));
         self.renderer.scrollback_cursor = 0;
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         self.cancel_streaming = false;
         // Pages were cleared above; re-show the queue pane if items remain.
         self.refresh_queue_pane();
@@ -1344,12 +1359,15 @@ impl App {
             prev_hook(info);
         }));
 
-        let mut terminal = Renderer::init_terminal(MIN_ROWS)?;
+        let physical_size = crossterm::terminal::size()?;
+        let initial_height = crate::ui::render::initial_viewport_height(physical_size.1);
+        let mut terminal = Renderer::init_terminal(initial_height)?;
+        self.renderer.viewport_height = initial_height;
+        self.renderer.last_size = Some(physical_size);
 
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, &mut terminal)?;
         self.refresh_jobs_pane();
-        self.force_redraw(&mut terminal)?;
+        self.ensure_viewport_and_draw(&mut terminal)?;
+        self.flush_new_messages_to_scrollback(&mut terminal)?;
 
         while !self.should_quit {
             if event::poll(std::time::Duration::from_millis(50))? {
@@ -1461,8 +1479,7 @@ impl App {
                 before_config_revision,
                 self.config_view.revision(),
             ) {
-                self.renderer
-                    .flush_new_to_scrollback(&self.messages, &mut terminal)?;
+                self.flush_new_messages_to_scrollback(&mut terminal)?;
                 self.redraw(&mut terminal)?;
             }
 
@@ -1481,15 +1498,10 @@ impl App {
             {
                 msg.content.push_str("\n[cancelled]");
             }
-            self.renderer.finalize_streaming_message(
-                self.messages
-                    .last()
-                    .map(|m| m.content.as_str())
-                    .unwrap_or(""),
-                &mut terminal,
-            )?;
-            self.renderer
-                .flush_new_to_scrollback(&self.messages, &mut terminal)?;
+            if let Some(idx) = self.messages.len().checked_sub(1) {
+                self.finalize_streaming_to_scrollback(idx, &mut terminal)?;
+            }
+            self.flush_new_messages_to_scrollback(&mut terminal)?;
         }
 
         self.dispatch_session_end().await;
@@ -1500,8 +1512,8 @@ impl App {
         Ok(())
     }
 
-    /// Ensure the viewport is the right size, then draw.
-    fn ensure_viewport_and_draw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+    /// Ensure the viewport height matches the current input and pane state.
+    fn ensure_viewport_height(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
         // Apply any Lua-driven UI updates (floats from bone.api.ui, ctx.ui.pane,
         // or ctx.ui.pane) before measuring, so a newly opened float is
         // counted in the viewport height.
@@ -1540,9 +1552,99 @@ impl App {
             Renderer::resize_viewport(terminal, old_height, desired)?;
             self.renderer.viewport_height = desired;
         }
+        Ok(())
+    }
 
+    /// Draw the current application state without reconciling physical size.
+    fn draw_current_viewport(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
         terminal.draw(|frame| self.draw(frame))?;
         Ok(())
+    }
+
+    /// Ensure the viewport is the right size, then draw.
+    fn ensure_viewport_and_draw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        self.ensure_viewport_height(terminal)?;
+        self.draw_current_viewport(terminal)
+    }
+
+    /// Rebuild scrollback when the physical terminal dimensions changed.
+    fn reconcile_terminal_size(&mut self, terminal: &mut BoneTerminal) -> io::Result<(u16, u16)> {
+        let size = crossterm::terminal::size()?;
+        if terminal_dimensions_changed(self.renderer.last_size, size) {
+            self.rebuild_scrollback_after_resize(terminal)?;
+            self.renderer.last_size = Some(size);
+        }
+        Ok(size)
+    }
+
+    /// Reconcile dimensions and establish the final viewport before insertion.
+    fn prepare_viewport_for_insertion(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        let size = self.reconcile_terminal_size(terminal)?;
+        self.ensure_viewport_and_draw(terminal)?;
+        self.renderer.last_size = Some(size);
+        Ok(())
+    }
+
+    /// Restore the viewport cleared by Ratatui's Windows insertion fallback.
+    fn restore_viewport_after_insertion(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        #[cfg(windows)]
+        self.draw_current_viewport(terminal)?;
+        #[cfg(not(windows))]
+        let _ = terminal;
+        Ok(())
+    }
+
+    fn flush_new_messages_to_scrollback(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        run_insertion_lifecycle(
+            &mut (self, terminal),
+            |(app, terminal)| app.prepare_viewport_for_insertion(terminal),
+            |(app, terminal)| {
+                app.renderer
+                    .flush_new_to_scrollback(&app.messages, terminal)
+            },
+            |(app, terminal)| app.restore_viewport_after_insertion(terminal),
+        )
+    }
+
+    fn flush_streaming_to_scrollback(
+        &mut self,
+        message_idx: usize,
+        terminal: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        run_insertion_lifecycle(
+            &mut (self, terminal),
+            |(app, terminal)| app.prepare_viewport_for_insertion(terminal),
+            |(app, terminal)| {
+                app.renderer
+                    .flush_streaming_message(&app.messages[message_idx].content, terminal)
+            },
+            |(app, terminal)| app.restore_viewport_after_insertion(terminal),
+        )
+    }
+
+    fn finalize_streaming_to_scrollback(
+        &mut self,
+        message_idx: usize,
+        terminal: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        run_insertion_lifecycle(
+            &mut (self, terminal),
+            |(app, terminal)| app.prepare_viewport_for_insertion(terminal),
+            |(app, terminal)| {
+                app.renderer
+                    .finalize_streaming_message(&app.messages[message_idx].content, terminal)
+            },
+            |(app, terminal)| app.restore_viewport_after_insertion(terminal),
+        )
+    }
+
+    fn flush_scrollback_separator(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        run_insertion_lifecycle(
+            &mut (self, terminal),
+            |(app, terminal)| app.prepare_viewport_for_insertion(terminal),
+            |(app, terminal)| app.renderer.flush_separator(terminal),
+            |(app, terminal)| app.restore_viewport_after_insertion(terminal),
+        )
     }
 
     /// Redraw from scratch, updating the tracked terminal size.
@@ -1557,11 +1659,7 @@ impl App {
         // erase, so rebuild from scratch: wipe screen + scrollback and re-flush
         // all history at the new width — the same way scrollback is built from
         // empty on startup.
-        let size = crossterm::terminal::size()?;
-        if self.renderer.last_size.is_some_and(|last| last != size) {
-            self.rebuild_scrollback_after_resize(terminal)?;
-            self.renderer.last_size = Some(size);
-        }
+        let size = self.reconcile_terminal_size(terminal)?;
         self.ensure_viewport_and_draw(terminal)?;
         self.renderer.last_size = Some(size);
         Ok(())
@@ -1571,9 +1669,19 @@ impl App {
     /// into scrollback at the current terminal width. Used after a physical
     /// resize, where reflowed/duplicated viewport rows can't be erased in place.
     fn rebuild_scrollback_after_resize(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
-        Renderer::hard_reset_viewport(terminal, self.renderer.viewport_height)?;
+        let physical_height = crossterm::terminal::size()?.1;
+        let clamped_height = self
+            .renderer
+            .viewport_height
+            .min(crate::ui::render::max_viewport_height(physical_height));
+        Renderer::hard_reset_viewport(terminal, clamped_height)?;
+        self.renderer.viewport_height = clamped_height;
         self.apply_terminal_background();
         self.renderer.reset_scrollback_state();
+        // Establish the final viewport dimensions before replaying history. The
+        // replay deliberately uses renderer primitives directly so it cannot
+        // recursively trigger another resize rebuild.
+        self.ensure_viewport_height(terminal)?;
 
         // The in-progress streamed assistant message (if any) is flushed via the
         // streaming path rather than as a committed message, and `scrollback_cursor`
@@ -1589,8 +1697,7 @@ impl App {
             .flush_new_to_scrollback(&self.messages[..committed_end], terminal)?;
 
         if let Some(idx) = stream_idx {
-            self.renderer.scrollback_cursor += 1;
-            self.renderer.streaming_source_flushed = 0;
+            prepare_streaming_replay(&mut self.renderer);
             self.renderer
                 .flush_streaming_message(&self.messages[idx].content, terminal)?;
         }
@@ -2407,8 +2514,7 @@ impl App {
         if double_tap {
             if let Some(notice) = self.request_quit() {
                 self.messages.push(Message::system(notice));
-                self.renderer
-                    .flush_new_to_scrollback(&self.messages, term)?;
+                self.flush_new_messages_to_scrollback(term)?;
                 self.last_ctrl_c = Some(now);
                 return self.redraw(term);
             }
@@ -2936,8 +3042,7 @@ impl App {
             "quit" | "exit" => {
                 if let Some(notice) = self.request_quit() {
                     self.messages.push(Message::system(notice));
-                    self.renderer
-                        .flush_new_to_scrollback(&self.messages, term)?;
+                    self.flush_new_messages_to_scrollback(term)?;
                     self.redraw(term)?;
                 }
                 return Ok(());
@@ -2954,17 +3059,14 @@ impl App {
         }
 
         self.messages.push(Message::system(reply));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
+        self.flush_new_messages_to_scrollback(term)?;
         self.redraw(term)?;
         Ok(())
     }
 
     fn show_reply(&mut self, reply: impl Into<String>, term: &mut BoneTerminal) -> io::Result<()> {
         self.messages.push(Message::system(reply.into()));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
-        self.redraw(term)
+        self.flush_new_messages_to_scrollback(term)
     }
 
     fn show_assistant_reply(
@@ -2973,9 +3075,7 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         self.messages.push(Message::assistant(reply.into()));
-        self.renderer
-            .flush_new_to_scrollback(&self.messages, term)?;
-        self.redraw(term)
+        self.flush_new_messages_to_scrollback(term)
     }
 
     /// Launch `<bone-exe> <subcommand>` in a tmux `display-popup` sized

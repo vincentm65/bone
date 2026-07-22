@@ -66,7 +66,9 @@ fn approval_mode_uses_canonical_setting() {
 #[test]
 fn actor_provider_config_reads_current_store_and_applies_cli_overrides() {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let old_bone = std::env::var_os("BONE_DIR");
     let dir = std::env::temp_dir().join(format!(
         "bone-actor-provider-config-{}-{}",

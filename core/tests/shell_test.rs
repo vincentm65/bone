@@ -1,5 +1,6 @@
 mod common;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -10,6 +11,47 @@ use bone_core::processes;
 use bone_core::tools::builtin_tools;
 use bone_core::tools::shell::{ScriptRequest, ShellTool, run_script_lines, truncate_output};
 use bone_core::tools::types::{Tool, ToolExecutionContext};
+
+#[cfg(windows)]
+const PARTIAL_THEN_SLEEP: &str = "Write-Output 'partial compiler output'; Start-Sleep -Seconds 5";
+#[cfg(not(windows))]
+const PARTIAL_THEN_SLEEP: &str = "echo 'partial compiler output' && sleep 5";
+
+#[cfg(windows)]
+const PRINT_WORKING_DIR: &str = "(Get-Location).Path";
+#[cfg(not(windows))]
+const PRINT_WORKING_DIR: &str = "pwd";
+
+#[cfg(windows)]
+const LONG_SLEEP: &str = "Start-Sleep -Seconds 30";
+#[cfg(not(windows))]
+const LONG_SLEEP: &str = "sleep 30";
+
+#[cfg(windows)]
+const OUTPUT_THEN_LONG_SLEEP: &str = "Write-Output 'starting download'; Start-Sleep -Seconds 30";
+#[cfg(not(windows))]
+const OUTPUT_THEN_LONG_SLEEP: &str = "echo 'starting download' && sleep 30";
+
+#[cfg(windows)]
+const BUFFERED_OUTPUT_THEN_SLEEP: &str = "Write-Output 'first'; Start-Sleep -Milliseconds 50; Write-Output 'second'; Start-Sleep -Seconds 30";
+#[cfg(not(windows))]
+const BUFFERED_OUTPUT_THEN_SLEEP: &str =
+    "printf 'first\\n'; sleep 0.05; printf 'second\\n'; sleep 30";
+
+fn assert_output_contains_cwd(output: &str, cwd: &Path) {
+    let expected = cwd.canonicalize().unwrap();
+    assert!(
+        output.lines().any(|line| {
+            let candidate = line.trim();
+            !candidate.is_empty()
+                && Path::new(candidate)
+                    .canonicalize()
+                    .is_ok_and(|path| path == expected)
+        }),
+        "output did not contain working directory {}: {output:?}",
+        cwd.display()
+    );
+}
 
 #[test]
 fn process_lifecycle_is_exposed_only_through_shell() {
@@ -33,7 +75,7 @@ async fn timeout_returns_partial_stdout() {
 
     let result = tool
         .execute(json!({
-            "command": "echo 'partial compiler output' && sleep 5",
+            "command": PARTIAL_THEN_SLEEP,
             "timeout_ms": 1000
         }))
         .await;
@@ -63,13 +105,13 @@ async fn live_foreground_uses_context_working_directory() {
     tokio::fs::create_dir_all(&cwd).await.unwrap();
     let output = ShellTool
         .execute_output_live(
-            json!({ "command": "pwd" }),
+            json!({ "command": PRINT_WORKING_DIR }),
             None,
             ToolExecutionContext::default().with_working_dir(cwd.clone()),
         )
         .await
         .expect("pwd should succeed");
-    assert!(output.content.contains(&cwd.to_string_lossy().to_string()));
+    assert_output_contains_cwd(&output.content, &cwd);
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
@@ -79,7 +121,7 @@ async fn live_background_uses_context_working_directory() {
     tokio::fs::create_dir_all(&cwd).await.unwrap();
     let output = ShellTool
         .execute_output_live(
-            json!({ "command": "pwd", "background": true }),
+            json!({ "command": PRINT_WORKING_DIR, "background": true }),
             None,
             ToolExecutionContext::default().with_working_dir(cwd.clone()),
         )
@@ -100,14 +142,14 @@ async fn live_background_uses_context_working_directory() {
     })
     .await
     .expect("background pwd should finish");
-    assert_eq!(snapshot.stdout.trim(), cwd.to_string_lossy());
+    assert_output_contains_cwd(&snapshot.stdout, &cwd);
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
 #[tokio::test]
 async fn shell_manages_its_background_processes() {
     let started = ShellTool
-        .execute(json!({ "action": "run", "command": "sleep 30", "background": true }))
+        .execute(json!({ "action": "run", "command": LONG_SLEEP, "background": true }))
         .await
         .expect("background command should start");
     let id = started
@@ -227,7 +269,7 @@ async fn cancel_kills_promptly_and_returns_partial_output() {
     let cmd = tokio::spawn(async move {
         tool.execute_output_live(
             json!({
-                "command": "echo 'starting download' && sleep 30",
+                "command": OUTPUT_THEN_LONG_SLEEP,
                 "timeout_ms": 30_000
             }),
             None,
@@ -287,7 +329,7 @@ async fn cancellation_does_not_invoke_callbacks_for_buffered_output() {
 
     let result = run_script_lines(
         ScriptRequest {
-            command: "printf 'first\\n'; sleep 0.05; printf 'second\\n'; sleep 30".into(),
+            command: BUFFERED_OUTPUT_THEN_SLEEP.into(),
             env: Vec::new(),
             timeout_ms: 30_000,
             working_dir: None,

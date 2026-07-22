@@ -1,3 +1,5 @@
+#![cfg(not(windows))]
+
 use bone::ui::render::backend::BoneBackend;
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
