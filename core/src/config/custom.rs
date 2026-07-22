@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::domains::write_document;
 use super::settings::Settings;
 use super::{bone_dir, load_yaml, seed_file_forced, seed_file_if_missing};
 
@@ -81,13 +82,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 fn write_yaml_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let yaml = serde_yaml::to_string(value).map_err(|error| error.to_string())?;
-    let permissions = std::fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    crate::tools::write_atomic::write_atomic_sync(path, yaml.as_bytes(), permissions)
+    write_document(path, value, None)
 }
 
 /// Report a malformed config page once with the specific parse error.

@@ -654,10 +654,9 @@ impl LlmProvider for CodexProvider {
         if let (Some(turn_state), Some(value)) = (
             context.turn_state.as_ref(),
             response.headers().get("x-codex-turn-state"),
-        ) {
-            if let Ok(value) = value.to_str() {
-                let _ = turn_state.set(value.to_owned());
-            }
+        ) && let Ok(value) = value.to_str()
+        {
+            let _ = turn_state.set(value.to_owned());
         }
 
         let events = response.bytes_stream().eventsource();

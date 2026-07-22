@@ -588,7 +588,7 @@ pub fn registry() -> &'static JobRegistry {
 /// Apply finished-job state under the lock: update status/result/tokens.
 #[allow(clippy::too_many_arguments)]
 fn finish_job(
-    jobs: &mut Vec<Job>,
+    jobs: &mut [Job],
     id: &str,
     result: String,
     result_file: Option<String>,

@@ -2419,7 +2419,7 @@ fn launch_background_job(
                 };
                 match &event {
                     crate::runtime::RuntimeEvent::ToolCall { summary, .. } => {
-                        crate::ext::jobs::registry().note_activity(&event_job_id, &summary);
+                        crate::ext::jobs::registry().note_activity(&event_job_id, summary);
                     }
                     crate::runtime::RuntimeEvent::ToolResult { is_error, .. } => {
                         crate::ext::jobs::registry().note_activity_done(&event_job_id, *is_error);
