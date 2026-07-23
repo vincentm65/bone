@@ -904,12 +904,16 @@ impl Driver {
             }
 
             for result in &results {
-                emit_runtime(RuntimeEvent::ToolResult {
+                // Live frontends receive this from ToolHandler as each call
+                // completes. Keep the legacy/headless event sinks populated
+                // without sending a duplicate to `runtime_events`.
+                let event = RuntimeEvent::ToolResult {
                     name: result.name.clone(),
                     call_id: result.call_id.clone(),
                     is_error: result.is_error,
                     content: result.content.clone(),
-                });
+                };
+                emit_event(events, event_sender.as_ref(), &event);
                 session_seq += 1;
                 session.append_message(
                     "tool",
@@ -1071,6 +1075,16 @@ pub(crate) async fn execute_tool_calls(
     // Track original index to preserve call order in output.
     let mut out: Vec<(usize, ToolResult)> = Vec::with_capacity(calls.len());
     let mut approved: Vec<(usize, ToolCall)> = Vec::new();
+    let emit_result = |result: &ToolResult| {
+        if let Some(events) = &runtime_events {
+            let _ = events.send(RuntimeEvent::ToolResult {
+                name: result.name.clone(),
+                call_id: result.call_id.clone(),
+                is_error: result.is_error,
+                content: result.content.clone(),
+            });
+        }
+    };
 
     for (i, call) in calls.into_iter().enumerate() {
         let safety = tools.safety_for_call(&call);
@@ -1092,20 +1106,18 @@ pub(crate) async fn execute_tool_calls(
         match gate.decide(blocked, auto_allows, &call).await {
             CallOutcome::Approve => approved.push((i, call)),
             CallOutcome::Blocked(reason) => {
-                out.push((
-                    i,
-                    ToolResult::error(call.id.clone(), call.name.clone(), reason),
-                ));
+                let result = ToolResult::error(call.id.clone(), call.name.clone(), reason);
+                emit_result(&result);
+                out.push((i, result));
             }
             CallOutcome::Denied => {
-                out.push((
-                    i,
-                    ToolResult::error(
-                        call.id.clone(),
-                        call.name.clone(),
-                        crate::tools::denied_message(*mode, safety),
-                    ),
-                ));
+                let result = ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    crate::tools::denied_message(*mode, safety),
+                );
+                emit_result(&result);
+                out.push((i, result));
             }
         }
     }

@@ -12,6 +12,20 @@ use crate::tools::types::{
 };
 use futures_util::future::join_all;
 
+fn emit_tool_result(
+    events: &Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
+    result: &ToolResult,
+) {
+    if let Some(events) = events {
+        let _ = events.send(crate::runtime::RuntimeEvent::ToolResult {
+            name: result.name.clone(),
+            call_id: result.call_id.clone(),
+            is_error: result.is_error,
+            content: result.content.clone(),
+        });
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -381,10 +395,16 @@ impl ToolHandler {
             .as_ref()
             .is_some_and(|t| t.load(std::sync::atomic::Ordering::Relaxed))
         {
-            return calls
+            let results: Vec<_> = calls
                 .into_iter()
                 .map(|call| ToolResult::error(call.id, call.name, "cancelled by user"))
                 .collect();
+            if tool_call_depth == 0 {
+                for result in &results {
+                    emit_tool_result(&runtime_events, result);
+                }
+            }
+            return results;
         }
 
         if calls
@@ -403,17 +423,23 @@ impl ToolHandler {
             let session_state = self.session_state_for_call(&call);
             let owner = self.owner.clone();
             let runtime_events = runtime_events.clone();
+            let result_events = runtime_events.clone();
             async move {
-                self.execute_one_live(
-                    call,
-                    events,
-                    session_state,
-                    owner,
-                    agent_depth,
-                    tool_call_depth,
-                    runtime_events,
-                )
-                .await
+                let result = self
+                    .execute_one_live(
+                        call,
+                        events,
+                        session_state,
+                        owner,
+                        agent_depth,
+                        tool_call_depth,
+                        runtime_events,
+                    )
+                    .await;
+                if tool_call_depth == 0 {
+                    emit_tool_result(&result_events, &result);
+                }
+                result
             }
         }))
         .await
@@ -455,6 +481,9 @@ impl ToolHandler {
                 } else if let Some(state) = result.state.clone() {
                     state_overrides.insert(key.to_string(), Some(state));
                 }
+            }
+            if tool_call_depth == 0 {
+                emit_tool_result(&runtime_events, &result);
             }
             results.push(result);
         }
@@ -513,3 +542,7 @@ impl std::fmt::Debug for ToolHandler {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod tests;
