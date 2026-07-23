@@ -72,6 +72,56 @@ local function wrap_input(text, max)
     return segments
 end
 
+local function char_count(value)
+    return #utf8_chars(tostring(value or ""))
+end
+
+local function edit_text(value, cursor, key, code)
+    local chars = utf8_chars(value)
+    cursor = clamp(tonumber(cursor) or #chars, 0, #chars)
+    if is_text_key(key) then
+        table.insert(chars, cursor + 1, key.char)
+        return table.concat(chars), cursor + 1
+    elseif code == "Backspace" and cursor > 0 then
+        table.remove(chars, cursor)
+        return table.concat(chars), cursor - 1
+    elseif code == "Delete" and cursor < #chars then
+        table.remove(chars, cursor + 1)
+        return table.concat(chars), cursor
+    elseif code == "Left" then
+        return value, math.max(0, cursor - 1)
+    elseif code == "Right" then
+        return value, math.min(#chars, cursor + 1)
+    elseif code == "Home" then
+        return value, 0
+    elseif code == "End" then
+        return value, #chars
+    end
+    return nil, cursor
+end
+
+local function with_cursor(value, cursor)
+    local chars = utf8_chars(value)
+    cursor = clamp(tonumber(cursor) or #chars, 0, #chars)
+    table.insert(chars, cursor + 1, "█")
+    return table.concat(chars)
+end
+
+local function append_wrapped(lines, text, width, fg, modifiers)
+    for _, segment in ipairs(wrap_input(tostring(text or ""), math.max(1, width))) do
+        lines[#lines + 1] = line(span(segment, fg, modifiers))
+    end
+end
+
+local function render_heading(lines, state, width)
+    if state.progress then
+        lines[#lines + 1] = line(span(state.progress, "cyan", { "bold" }))
+    end
+    if state.question and state.question ~= "" then
+        append_wrapped(lines, state.question, width, "white", { "bold" })
+    end
+end
+
 local function one_line(value)
     return tostring(value or ""):gsub("%s+", " ")
 end
@@ -83,28 +133,35 @@ local function clip(value, max)
     return table.concat(chars, "", 1, max - 1) .. "…"
 end
 
-local function clip_spans(values, max)
-    local out = {}
-    local remaining = max
-    for _, value in ipairs(values or {}) do
-        if remaining <= 0 then break end
-        local chars = utf8_chars(one_line(value.text))
-        local clipped = #chars > remaining
-        local text
-        if not clipped then
-            text = table.concat(chars)
-        elseif remaining >= 2 then
-            text = table.concat(chars, "", 1, remaining - 1) .. "…"
-        else
-            text = ""
+local function wrap_description(opt, max)
+    max = math.max(1, max)
+    if not opt.description_spans then
+        local rows = {}
+        for _, text in ipairs(wrap_input(opt.description or "", max)) do
+            rows[#rows + 1] = { span(text, "gray") }
         end
-        if text ~= "" then
-            out[#out + 1] = span(text, value.fg or "gray", value.modifiers)
-        end
-        remaining = remaining - #utf8_chars(text)
-        if clipped then break end
+        return rows
     end
-    return out
+
+    local rows, current, used = {}, {}, 0
+    for _, value in ipairs(opt.description_spans) do
+        for _, ch in ipairs(utf8_chars(tostring(value.text or ""))) do
+            if used >= max then
+                rows[#rows + 1], current, used = current, {}, 0
+            end
+            local last = current[#current]
+            local modifiers = value.modifiers
+            if last and last.fg == (value.fg or "gray") and last.modifiers == modifiers then
+                last.text = last.text .. ch
+            else
+                current[#current + 1] = span(ch, value.fg or "gray", modifiers)
+            end
+            used = used + 1
+        end
+    end
+    if #current > 0 then rows[#rows + 1] = current end
+    if #rows == 0 then rows[1] = {} end
+    return rows
 end
 
 local function normalize_preview(value)
@@ -333,12 +390,10 @@ end
 
 local function render_preview_select(p, state)
     local lines = {}
-    render_tabs(lines, state.tabs, state.active_tab)
-    if state.question and state.question ~= "" then
-        lines[#lines + 1] = line(span(state.question, "white", { "bold" }))
-    end
-
     local width = pane_width(p.ctx) or 80
+    render_tabs(lines, state.tabs, state.active_tab)
+    render_heading(lines, state, width)
+
     local target_rows, body_rows, use_columns = preview_row_budget(state, width, #lines)
     local custom_rows = state.allow_custom and 1 or 0
     local option_rows = math.max(1, body_rows - custom_rows)
@@ -370,7 +425,7 @@ local function render_preview_select(p, state)
                 local marker = state.custom_focused and ">" or " "
                 left = line(
                     span(" " .. marker .. " Custom: ", state.custom_focused and "cyan" or "darkgray", { "bold" }),
-                    span(clip(state.input, left_width - 11), state.custom_focused and "white" or "darkgray")
+                    span(clip(state.custom_focused and with_cursor(state.input, state.input_cursor) or state.input, left_width - 11), state.custom_focused and "white" or "darkgray")
                 )
             else
                 left = ""
@@ -400,7 +455,7 @@ local function render_preview_select(p, state)
             local marker = state.custom_focused and ">" or " "
             lines[#lines + 1] = line(
                 span(" " .. marker .. " Custom: ", state.custom_focused and "cyan" or "darkgray", { "bold" }),
-                span(clip(state.input, width - 11), state.custom_focused and "white" or "darkgray")
+                span(clip(state.custom_focused and with_cursor(state.input, state.input_cursor) or state.input, width - 11), state.custom_focused and "white" or "darkgray")
             )
         end
         local preview_rows = math.max(1, body_rows - stacked_options - custom_rows - 1)
@@ -432,6 +487,8 @@ local function render_preview_select(p, state)
     end
     if state.multi then hints[#hints + 1] = "Space toggle" end
     hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
+    if state.allow_back then hints[#hints + 1] = "Alt+← back" end
+    if state.allow_forward then hints[#hints + 1] = "Alt+→ next" end
     hints[#hints + 1] = "Esc cancel"
     lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
     lines[#lines + 1] = ""
@@ -441,10 +498,9 @@ end
 local function render_select(p, state)
     if state.has_previews then return render_preview_select(p, state) end
     local lines = {}
+    local width = pane_width(p.ctx) or 80
     render_tabs(lines, state.tabs, state.active_tab)
-    if state.question and state.question ~= "" then
-        lines[#lines + 1] = line(span(state.question, "white", { "bold" }))
-    end
+    render_heading(lines, state, width)
     if state.searchable then
         local cursor = state.filter_focused and "█" or ""
         local count = string.format("  %d/%d", #state.options, #state.all_options)
@@ -461,7 +517,8 @@ local function render_select(p, state)
     local CUSTOM_LABEL_W = 11
     local custom_segments
     if state.allow_custom then
-        custom_segments = wrap_input(state.input, (pane_width(p.ctx) or math.huge) - CUSTOM_LABEL_W)
+        local displayed = state.custom_focused and with_cursor(state.input, state.input_cursor) or state.input
+        custom_segments = wrap_input(displayed, width - CUSTOM_LABEL_W)
     end
     local custom_rows = custom_segments and math.min(#custom_segments, 4) or 1
     -- Reserve rows for the trailing chrome we render after the options: the
@@ -487,7 +544,6 @@ local function render_select(p, state)
 
     local first = (state.scroll or 0) + 1
     local last = math.min(total, first + option_rows - 1)
-    local width = pane_width(p.ctx) or math.huge
     if first > 1 then
         lines[#lines + 1] = line(span(clip("    ↑ " .. tostring(first - 1) .. " more", width), "darkgray"))
     end
@@ -523,17 +579,15 @@ local function render_select(p, state)
         if selected then option_line.bg = SELECTED_BG end
         lines[#lines + 1] = option_line
         if opt.description and opt.description ~= "" then
-            local description_spans = { span("     ", "gray") }
-            if opt.description_spans then
-                for _, description_span in ipairs(clip_spans(opt.description_spans, width - 5)) do
+            for _, wrapped_spans in ipairs(wrap_description(opt, width - 5)) do
+                local description_spans = { span("     ", "gray") }
+                for _, description_span in ipairs(wrapped_spans) do
                     description_spans[#description_spans + 1] = description_span
                 end
-            else
-                description_spans[#description_spans + 1] = span(clip(opt.description, width - 5), "gray")
+                local description_line = { spans = description_spans }
+                if selected then description_line.bg = SELECTED_BG end
+                lines[#lines + 1] = description_line
             end
-            local description_line = { spans = description_spans }
-            if selected then description_line.bg = SELECTED_BG end
-            lines[#lines + 1] = description_line
         end
     end
     if total == 0 then
@@ -556,10 +610,9 @@ local function render_select(p, state)
             -- under the value. The cursor block sits on the last row.
             local prefix = i == 1 and (" " .. cursor .. " Custom: ")
                 or string.rep(" ", CUSTOM_LABEL_W)
-            local tail = (i == custom_rows and state.custom_focused) and "█" or ""
             lines[#lines + 1] = line(
                 span(prefix, cursor_fg, { "bold" }),
-                span(seg .. tail, fg, mods)
+                span(seg, fg, mods)
             )
         end
     end
@@ -573,6 +626,8 @@ local function render_select(p, state)
     hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
     if state.searchable then hints[#hints + 1] = "/ or type filter" end
     if state.allow_custom then hints[#hints + 1] = "Tab custom" end
+    if state.allow_back then hints[#hints + 1] = "Alt+← back" end
+    if state.allow_forward then hints[#hints + 1] = "Alt+→ next" end
     hints[#hints + 1] = "Esc cancel"
     lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
     lines[#lines + 1] = ""
@@ -590,6 +645,21 @@ local function handle_tab_nav(state, key)
     if key == "Left" and state.left_value then return state.left_value end
     if key == "Right" and state.right_value then return state.right_value end
     return nil
+end
+
+local function cycle_focus(state, reverse)
+    local focuses = { "options" }
+    if state.preview_focusable then focuses[#focuses + 1] = "preview" end
+    if state.allow_custom then focuses[#focuses + 1] = "custom" end
+    local current = state.preview_focused and "preview" or (state.custom_focused and "custom" or "options")
+    local index = 1
+    for i, value in ipairs(focuses) do
+        if value == current then index = i break end
+    end
+    index = ((index - 1 + (reverse and -1 or 1)) % #focuses) + 1
+    state.preview_focused = focuses[index] == "preview"
+    state.custom_focused = focuses[index] == "custom"
+    state.filter_focused = false
 end
 
 local function select_loop(ctx, spec, multi)
@@ -612,12 +682,16 @@ local function select_loop(ctx, spec, multi)
     local state = {
         title = spec.title,
         question = spec.question,
+        progress = spec.progress,
+        allow_back = spec.allow_back or false,
+        allow_forward = spec.allow_forward or false,
         options = all_options,
         all_options = all_options,
         selected = math.max(1, tonumber(spec.default or 1) or 1),
         checked = {},
         allow_custom = spec.allow_custom or false,
         input = tostring(spec.initial or ""),
+        input_cursor = char_count(spec.initial or ""),
         searchable = spec.searchable or false,
         filter = "",
         filter_focused = false,
@@ -632,9 +706,10 @@ local function select_loop(ctx, spec, multi)
         has_previews = has_previews,
         preview_layout = preview_layout,
         preview_min_width = preview_min_width,
-        preview_focusable = preview_interactive,
-        preview_scrollable = preview_interactive,
+        preview_focusable = has_previews and preview_interactive,
+        preview_scrollable = has_previews and preview_interactive,
         preview_focused = false,
+        custom_focused = spec.initial_custom or false,
         preview_scroll = 0,
     }
     if #state.options == 0 and not state.allow_custom then
@@ -659,7 +734,23 @@ local function select_loop(ctx, spec, multi)
         state.notice = nil -- clear any transient notice on the next keypress
         local code = key_name(key)
         local prev = state.selected
-        local nav = handle_tab_nav(state, code)
+        if state.allow_back and key.alt and code == "Left" then
+            local result = { back = true, selected = state.selected }
+            if multi then
+                result.values = {}
+                for _, opt in ipairs(state.all_options) do
+                    if state.checked[opt] then result.values[#result.values + 1] = opt.value end
+                end
+                if state.input ~= "" then result.custom = state.input end
+            elseif state.custom_focused then
+                result.value, result.custom = state.input, true
+            elseif state.options[state.selected] then
+                result.value = state.options[state.selected].value
+            end
+            return result
+        end
+        if state.allow_forward and key.alt and code == "Right" then code = "Enter" end
+        local nav = not state.custom_focused and handle_tab_nav(state, code) or nil
         if nav then return { value = nav, navigation = true } end
 
         local action = state.action_keys[code] or (code == "Char" and state.action_keys[key.char])
@@ -685,34 +776,17 @@ local function select_loop(ctx, spec, multi)
             apply_filter(state, selected_value)
         elseif state.searchable and state.filter_focused and code == "Backspace" then
             local selected_value = state.options[state.selected] and state.options[state.selected].value
-            state.filter = state.filter:sub(1, -2)
+            state.filter = select(1, edit_text(state.filter, char_count(state.filter), key, code)) or state.filter
             apply_filter(state, selected_value)
-        elseif state.custom_focused and is_text_key(key) then
-            state.input = state.input .. key.char
-        elseif state.custom_focused and code == "Backspace" then
-            state.input = state.input:sub(1, -2)
+        elseif state.custom_focused and (is_text_key(key) or code == "Backspace" or code == "Delete"
+            or code == "Left" or code == "Right" or code == "Home" or code == "End") then
+            local edited, cursor = edit_text(state.input, state.input_cursor, key, code)
+            if edited ~= nil then state.input = edited end
+            state.input_cursor = cursor
         elseif code == "Esc" then
             return { cancelled = true }
-        elseif state.has_previews and state.preview_focusable and code == "Tab" then
-            if key.shift then
-                if state.custom_focused then
-                    state.custom_focused = false
-                    state.preview_focused = true
-                elseif state.preview_focused then
-                    state.preview_focused = false
-                elseif state.allow_custom then
-                    state.custom_focused = true
-                else
-                    state.preview_focused = true
-                end
-            elseif state.custom_focused then
-                state.custom_focused = false
-            elseif state.preview_focused then
-                state.preview_focused = false
-                state.custom_focused = state.allow_custom
-            else
-                state.preview_focused = true
-            end
+        elseif code == "Tab" and (state.preview_focusable or state.allow_custom) then
+            cycle_focus(state, key.shift)
         elseif state.has_previews and state.preview_focused
             and (code == "Up" or (code == "Char" and key.char == "k")) then
             state.preview_scroll = clamp((state.preview_scroll or 0) - 1, 0, state.preview_max_scroll or 0)
@@ -767,8 +841,6 @@ local function select_loop(ctx, spec, multi)
         elseif code == "End" then
             state.selected = #state.options
             state.custom_focused = false
-        elseif code == "Tab" and state.allow_custom then
-            state.custom_focused = not state.custom_focused
         elseif code == "Char" and key.char == " " and multi and not state.custom_focused
             and state.options[state.selected] then
             local opt = state.options[state.selected]
@@ -818,33 +890,87 @@ function M.text_input(ctx, spec)
     spec = spec or {}
     local p = pane.new(ctx, { id = SOURCE, title = spec.title or "Input" })
     local input = tostring(spec.initial or "")
+    local cursor = char_count(input)
     while true do
-        local lines = { line(span(spec.question or "", "white", { "bold" })) }
-        -- Wrap the input under the "> " prefix (2 cols); continuation rows are
-        -- indented to align under the text. The cursor block sits at the end of
-        -- the last wrapped row.
-        local segments = wrap_input(input, (pane_width(ctx) or math.huge) - 2)
-        for i, seg in ipairs(segments) do
+        local width = pane_width(ctx) or 80
+        local lines = {}
+        render_heading(lines, spec, width)
+        local segments = wrap_input(with_cursor(input, cursor), width - 2)
+        for i, segment in ipairs(segments) do
             local prefix = i == 1 and "> " or "  "
-            local tail = i == #segments and "█" or ""
-            lines[#lines + 1] = line(span(prefix .. seg .. tail, "white", { "bold" }))
+            lines[#lines + 1] = line(span(prefix .. segment, "white", { "bold" }))
         end
-        lines[#lines + 1] = line(span("Enter submit · Esc cancel", "darkgray"))
+        local hints = { "←→ move", "Home/End", "Enter submit" }
+        if spec.allow_back then hints[#hints + 1] = "Alt+← back" end
+        if spec.allow_forward then hints[#hints + 1] = "Alt+→ next" end
+        hints[#hints + 1] = "Esc cancel"
+        lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
         lines[#lines + 1] = ""
-        p:set_lines(lines, #lines)
+        p:set_lines(lines, math.min(MAX_ROWS, #lines))
         local key = wait_key(ctx)
         if not key then return { cancelled = true } end
         local code = key_name(key)
-        if is_text_key(key) then
-            input = input .. key.char
-        elseif code == "Backspace" then
-            input = input:sub(1, -2)
+        if spec.allow_back and key.alt and code == "Left" then
+            return { back = true, value = input }
+        elseif spec.allow_forward and key.alt and code == "Right" then
+            return { value = input }
         elseif code == "Esc" then
             return { cancelled = true }
         elseif code == "Enter" then
             return { value = input }
+        else
+            local edited
+            edited, cursor = edit_text(input, cursor, key, code)
+            if edited ~= nil then input = edited end
         end
     end
+end
+
+local function copy_spec(value)
+    local out = {}
+    for key, item in pairs(value or {}) do out[key] = item end
+    return out
+end
+
+function M.questions(ctx, spec)
+    spec = spec or {}
+    local questions = spec.questions or spec
+    local answers = {}
+    local index = 1
+    while index <= #questions do
+        local question = copy_spec(questions[index])
+        local prior = answers[index]
+        question.progress = question.progress or string.format("Question %d of %d", index, #questions)
+        question.allow_back = index > 1
+        question.allow_forward = index < #questions
+        if prior then
+            question.default = prior.selected or question.default
+            question.initial = prior.custom or prior.value or question.initial
+            question.initial_custom = prior.custom ~= nil
+            question.initial_checked = prior.values or question.initial_checked
+        end
+
+        local kind = question.type
+        if not kind then kind = question.options and "single_select" or "text_input" end
+        local result
+        if kind == "multi_select" or kind == "multi" then
+            result = M.multi_select(ctx, question)
+        elseif kind == "text_input" or kind == "text" then
+            result = M.text_input(ctx, question)
+        else
+            result = M.select(ctx, question)
+        end
+
+        if result.cancelled then return result end
+        if result.back then
+            answers[index] = result
+            index = index - 1
+        else
+            answers[index] = result
+            index = index + 1
+        end
+    end
+    return { answers = answers }
 end
 
 function M.clear(ctx)

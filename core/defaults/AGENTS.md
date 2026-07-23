@@ -679,6 +679,22 @@ local result = menu.select(ctx, {
 -- cancelled     → { cancelled = true }
 ```
 
+Text and custom fields support UTF-8-safe Backspace/Delete plus Left, Right,
+Home, and End editing. Questions and option descriptions wrap to the current
+pane width. When both previews and custom input are present, Tab cycles in a
+stable order: options → preview → custom (Shift+Tab reverses it).
+
+For a sequence of prompts, `menu.questions` adds progress, preserves answers,
+and supports **Alt+Left** backtracking and **Alt+Right** submission/advancement:
+
+```lua
+local result = menu.questions(ctx, {
+    { question = "Environment?", options = { "dev", "prod" } },
+    { question = "Release note?", type = "text_input" },
+})
+-- result.answers[1].value, result.answers[2].value
+```
+
 An object option may include a generic rich preview. When any option has one,
 the menu shows a compact option rail beside the highlighted option's preview
 (and stacks them on narrow terminals). Preview lines use the same plain-string
