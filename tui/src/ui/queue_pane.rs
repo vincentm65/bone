@@ -49,7 +49,7 @@ pub fn render(queue: &VecDeque<String>, selected: usize) -> Option<PanePage> {
             .add_modifier(Modifier::DIM),
     )));
     lines.push(Line::from(Span::styled(
-        " Input: Enter = queue · Ctrl+Enter = steer",
+        " Input: Enter = queue · Ctrl/Alt+Enter = steer",
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM),
@@ -79,7 +79,7 @@ mod tests {
         assert_eq!(page.content.len(), 4);
         assert!(page.content[1].to_string().contains("second line"));
         assert!(page.content[2].to_string().contains("reorder"));
-        assert!(page.content[3].to_string().contains("Ctrl+Enter"));
+        assert!(page.content[3].to_string().contains("Ctrl/Alt+Enter"));
     }
 
     #[test]

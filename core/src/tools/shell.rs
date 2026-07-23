@@ -1,5 +1,6 @@
 //! The `shell` / `bash` tool: runs commands with streaming output and timeouts.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -13,8 +14,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::Duration;
 
-use crate::tools::truncate_line;
 use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
+use crate::tools::{MAX_TOOL_LINE_CHARS, truncate_line};
 
 // ── Script execution (formerly script_runner.rs) ────────────────────────────
 
@@ -135,6 +136,57 @@ fn spawn_script(
     Ok((child, stdout, stderr))
 }
 
+const CAPTURE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Keep command output memory bounded while preserving both useful ends.
+struct OutputCapture {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    omitted: usize,
+}
+
+impl OutputCapture {
+    fn new() -> Self {
+        Self {
+            head: Vec::with_capacity(CAPTURE_BYTES / 2),
+            tail: VecDeque::with_capacity(CAPTURE_BYTES / 2),
+            omitted: 0,
+        }
+    }
+
+    fn push(&mut self, mut bytes: &[u8]) {
+        let head_room = CAPTURE_BYTES / 2 - self.head.len();
+        let keep = head_room.min(bytes.len());
+        self.head.extend_from_slice(&bytes[..keep]);
+        bytes = &bytes[keep..];
+
+        let tail_limit = CAPTURE_BYTES / 2;
+        if bytes.len() >= tail_limit {
+            self.omitted += self.tail.len() + bytes.len() - tail_limit;
+            self.tail.clear();
+            bytes = &bytes[bytes.len() - tail_limit..];
+        } else {
+            let overflow = (self.tail.len() + bytes.len()).saturating_sub(tail_limit);
+            self.omitted += overflow;
+            self.tail.drain(..overflow);
+        }
+        self.tail.extend(bytes.iter().copied());
+    }
+
+    fn render(self, max_lines: usize) -> String {
+        let marker = format!("\n... {} bytes truncated ...\n", self.omitted);
+        let mut bytes = Vec::with_capacity(
+            self.head.len() + self.tail.len() + usize::from(self.omitted > 0) * marker.len(),
+        );
+        bytes.extend(self.head);
+        if self.omitted > 0 {
+            bytes.extend(marker.as_bytes());
+        }
+        bytes.extend(self.tail);
+        truncate_output(&String::from_utf8_lossy(&bytes), max_lines)
+    }
+}
+
 pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> {
     run_script_stream(request, |_, _| Ok(())).await
 }
@@ -148,7 +200,9 @@ where
     let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
     let cancel = request.cancel.clone();
     let (mut child, stdout, stderr) = spawn_script(request)?;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(bool, Vec<u8>)>();
+    // A small bounded queue lets slow consumers apply backpressure to both OS
+    // pipes instead of buffering arbitrary command output in the daemon.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(16);
     let tx_out = tx.clone();
     tokio::spawn(async move {
         let mut reader = stdout;
@@ -157,7 +211,7 @@ where
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if tx_out.send((false, buf[..n].to_vec())).is_err() {
+                    if tx_out.send((false, buf[..n].to_vec())).await.is_err() {
                         break;
                     }
                 }
@@ -172,7 +226,7 @@ where
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if tx_err.send((true, buf[..n].to_vec())).is_err() {
+                    if tx_err.send((true, buf[..n].to_vec())).await.is_err() {
                         break;
                     }
                 }
@@ -181,8 +235,8 @@ where
     });
     drop(tx);
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-    let mut out = Vec::new();
-    let mut err = Vec::new();
+    let mut out = OutputCapture::new();
+    let mut err = OutputCapture::new();
     let mut status = None;
     let mut timed_out = false;
     let mut cancelled = false;
@@ -196,7 +250,7 @@ where
             r = child.wait() => { status = Some(r.map_err(crate::util::errstr)?); break; }
             chunk = rx.recv(), if output_open => match chunk {
                 Some((is_err, bytes)) => {
-                    if is_err { err.extend(&bytes) } else { out.extend(&bytes) }
+                    if is_err { err.push(&bytes) } else { out.push(&bytes) }
                     if let Err(error) = emit(is_err, &bytes) {
                         emit_error = Some(error);
                         break;
@@ -223,9 +277,9 @@ where
     }
     while let Some((is_err, bytes)) = rx.recv().await {
         if is_err {
-            err.extend(&bytes)
+            err.push(&bytes)
         } else {
-            out.extend(&bytes)
+            out.push(&bytes)
         }
         if !timed_out
             && !cancelled
@@ -235,8 +289,8 @@ where
             emit_error = Some(error);
         }
     }
-    let stdout = truncate_output(&String::from_utf8_lossy(&out), 500);
-    let stderr = truncate_output(&String::from_utf8_lossy(&err), 100);
+    let stdout = out.render(500);
+    let stderr = err.render(100);
     if let Some(error) = emit_error {
         return Err(error);
     }
@@ -269,17 +323,42 @@ pub async fn run_script_live(
     output_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
     call_id: String,
 ) -> Result<ScriptOutput, String> {
+    let mut emitted = 0usize;
+    let mut truncation_sent = false;
     run_script_stream(request, |is_err, bytes| {
-        if let Some(events) = &output_events {
+        let Some(events) = &output_events else {
+            return Ok(());
+        };
+        let keep = (CAPTURE_BYTES - emitted).min(bytes.len());
+        if keep > 0 {
+            emitted += keep;
             let _ = events.send(crate::runtime::RuntimeEvent::ToolOutput {
                 call_id: call_id.clone(),
-                content: String::from_utf8_lossy(bytes).into_owned(),
+                content: String::from_utf8_lossy(&bytes[..keep]).into_owned(),
+                stderr: is_err,
+            });
+        }
+        if keep < bytes.len() && !truncation_sent {
+            truncation_sent = true;
+            let _ = events.send(crate::runtime::RuntimeEvent::ToolOutput {
+                call_id: call_id.clone(),
+                content: format!(
+                    "\n... live shell output truncated after {CAPTURE_BYTES} bytes ...\n"
+                ),
                 stderr: is_err,
             });
         }
         Ok(())
     })
     .await
+}
+
+fn render_stream_line(bytes: &[u8], was_truncated: bool) -> String {
+    let mut line = truncate_line(&String::from_utf8_lossy(bytes));
+    if was_truncated && !line.ends_with("…[truncated]") {
+        line.push_str("…[truncated]");
+    }
+    line
 }
 
 /// As [`run_script`], but invokes `callback` for each complete stdout line.
@@ -291,27 +370,40 @@ pub async fn run_script_lines<F>(
 where
     F: FnMut(String) -> Result<(), String>,
 {
+    const MAX_LINE_BYTES: usize = MAX_TOOL_LINE_CHARS * 4;
+
     let mut pending = Vec::new();
+    let mut pending_truncated = false;
     let result = run_script_stream(request, |is_err, bytes| {
         if is_err {
             return Ok(());
         }
-        pending.extend_from_slice(bytes);
-        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-            let mut line: Vec<_> = pending.drain(..=newline).collect();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
+        for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let complete = chunk.ends_with(b"\n");
+            let content = if complete {
+                &chunk[..chunk.len() - 1]
+            } else {
+                chunk
+            };
+            let keep = (MAX_LINE_BYTES - pending.len()).min(content.len());
+            pending.extend_from_slice(&content[..keep]);
+            pending_truncated |= keep < content.len();
+            if complete {
+                if pending.last() == Some(&b'\r') {
+                    pending.pop();
+                }
+                callback(render_stream_line(&pending, pending_truncated))?;
+                pending.clear();
+                pending_truncated = false;
             }
-            callback(String::from_utf8_lossy(&line).into_owned())?;
         }
         Ok(())
     })
     .await;
     match result {
         Ok(output) => {
-            if !pending.is_empty() {
-                callback(String::from_utf8_lossy(&pending).into_owned())?;
+            if !pending.is_empty() || pending_truncated {
+                callback(render_stream_line(&pending, pending_truncated))?;
             }
             Ok(output)
         }
@@ -587,5 +679,28 @@ impl Tool for ShellTool {
         )
         .await?;
         Ok(ToolOutput::text(format_output(&output)))
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn output_capture_keeps_both_ends_with_a_fixed_memory_limit() {
+        let mut capture = OutputCapture::new();
+        capture.push(&vec![b'a'; CAPTURE_BYTES]);
+        capture.push(&vec![b'z'; CAPTURE_BYTES]);
+
+        let output = capture.render(500);
+        assert!(output.starts_with('a'));
+        assert!(
+            output
+                .lines()
+                .last()
+                .is_some_and(|line| line.starts_with('z'))
+        );
+        assert!(output.contains("bytes truncated"));
+        assert!(output.len() < 10_000);
     }
 }

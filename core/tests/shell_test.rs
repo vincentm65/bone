@@ -8,9 +8,9 @@ use std::time::Instant;
 use serde_json::json;
 
 use bone_core::processes;
-use bone_core::tools::builtin_tools;
 use bone_core::tools::shell::{ScriptRequest, ShellTool, run_script_lines, truncate_output};
 use bone_core::tools::types::{Tool, ToolExecutionContext};
+use bone_core::tools::{MAX_TOOL_LINE_CHARS, builtin_tools};
 
 #[cfg(windows)]
 const PARTIAL_THEN_SLEEP: &str = "Write-Output 'partial compiler output'; Start-Sleep -Seconds 5";
@@ -201,6 +201,64 @@ fn truncates_single_huge_line() {
     let output = truncate_output(&"x".repeat(10 * 1024 * 1024), 500);
     assert!(output.contains("…[truncated]"));
     assert!(output.len() < 10_000, "output len was {}", output.len());
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn live_shell_caps_queued_output_and_marks_truncation() {
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut ctx = ToolExecutionContext::default();
+    ctx.call_id = "large-output".into();
+    ctx.runtime_events = Some(events_tx);
+
+    ShellTool
+        .execute_output_live(
+            json!({ "command": "head -c 3145728 /dev/zero | tr '\\0' x" }),
+            None,
+            ctx,
+        )
+        .await
+        .expect("command should succeed");
+
+    let mut bytes = 0;
+    let mut truncation_markers = 0;
+    while let Ok(event) = events_rx.try_recv() {
+        if let bone_core::runtime::RuntimeEvent::ToolOutput { content, .. } = event {
+            bytes += content.len();
+            truncation_markers += usize::from(content.contains("live shell output truncated"));
+        }
+    }
+    assert_eq!(truncation_markers, 1);
+    assert!(bytes <= 2 * 1024 * 1024 + 100, "queued {bytes} bytes");
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn line_stream_bounds_one_unterminated_line_and_delivers_it_once() {
+    let mut lines = Vec::new();
+    let output = run_script_lines(
+        ScriptRequest {
+            command: format!(
+                "head -c {} /dev/zero | tr '\\0' x",
+                MAX_TOOL_LINE_CHARS * 4 + 100
+            ),
+            env: Vec::new(),
+            timeout_ms: 5_000,
+            working_dir: None,
+            cancel: None,
+        },
+        |line| {
+            lines.push(line);
+            Ok(())
+        },
+    )
+    .await
+    .expect("command should succeed");
+
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].ends_with("…[truncated]"));
+    assert!(lines[0].chars().count() <= MAX_TOOL_LINE_CHARS + "…[truncated]".chars().count());
+    assert!(output.stdout.ends_with("…[truncated]"));
 }
 
 #[tokio::test]

@@ -24,7 +24,11 @@ pub struct ProcessSnapshot {
 struct Process {
     snapshot: ProcessSnapshot,
     cancel: Arc<AtomicBool>,
+    order: u64,
 }
+
+const MAX_COMPLETED_PROCESSES: usize = 64;
+
 pub struct ProcessRegistry {
     next: AtomicU64,
     processes: Mutex<HashMap<String, Process>>,
@@ -38,7 +42,8 @@ impl ProcessRegistry {
         timeout_ms: u64,
         working_dir: Option<std::path::PathBuf>,
     ) -> String {
-        let id = format!("process-{}", self.next.fetch_add(1, Ordering::Relaxed));
+        let order = self.next.fetch_add(1, Ordering::Relaxed);
+        let id = format!("process-{order}");
         let cancel = Arc::new(AtomicBool::new(false));
         self.processes.lock().unwrap().insert(
             id.clone(),
@@ -54,6 +59,7 @@ impl ProcessRegistry {
                     error: None,
                 },
                 cancel: cancel.clone(),
+                order,
             },
         );
         let registry = registry();
@@ -67,7 +73,8 @@ impl ProcessRegistry {
                 cancel: Some(cancel),
             })
             .await;
-            if let Some(process) = registry.processes.lock().unwrap().get_mut(&job_id) {
+            let mut processes = registry.processes.lock().unwrap();
+            if let Some(process) = processes.get_mut(&job_id) {
                 process.snapshot.running = false;
                 match result {
                     Ok(out) => {
@@ -78,9 +85,25 @@ impl ProcessRegistry {
                     Err(err) => process.snapshot.error = Some(err),
                 }
             }
+            Self::prune_completed(&mut processes);
         });
         id
     }
+
+    fn prune_completed(processes: &mut HashMap<String, Process>) {
+        while processes.values().filter(|p| !p.snapshot.running).count() > MAX_COMPLETED_PROCESSES {
+            let Some(id) = processes
+                .values()
+                .filter(|p| !p.snapshot.running)
+                .min_by_key(|p| p.order)
+                .map(|p| p.snapshot.id.clone())
+            else {
+                break;
+            };
+            processes.remove(&id);
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<ProcessSnapshot> {
         self.processes
             .lock()
@@ -228,7 +251,29 @@ mod tests {
                 error: None,
             },
             cancel: Arc::new(AtomicBool::new(false)),
+            order: 0,
         }
+    }
+
+    #[test]
+    fn completed_processes_are_bounded_without_evicting_running_processes() {
+        let mut processes = HashMap::new();
+        for order in 0..=MAX_COMPLETED_PROCESSES as u64 {
+            let id = format!("process-{order}");
+            let mut entry = process("conversation:7", false);
+            entry.snapshot.id = id.clone();
+            entry.order = order;
+            processes.insert(id, entry);
+        }
+        let mut running = process("conversation:7", true);
+        running.snapshot.id = "running".into();
+        processes.insert("running".into(), running);
+
+        ProcessRegistry::prune_completed(&mut processes);
+
+        assert_eq!(processes.len(), MAX_COMPLETED_PROCESSES + 1);
+        assert!(!processes.contains_key("process-0"));
+        assert!(processes.contains_key("running"));
     }
 
     #[test]

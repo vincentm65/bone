@@ -20,7 +20,7 @@ pub mod codec;
 
 use std::sync::{Arc, Mutex};
 
-use futures_util::future::{FutureExt, LocalBoxFuture};
+use futures_util::future::{AbortHandle, Abortable, FutureExt, LocalBoxFuture};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -32,25 +32,40 @@ use crate::runtime::{RuntimeCommand, RuntimeEvent};
 /// [`RuntimeCommand`]s into a single receiver the runtime consumes.
 #[derive(Clone)]
 pub struct Hub {
-    events_tx: broadcast::Sender<RuntimeEvent>,
+    events_tx: Arc<broadcast::Sender<RuntimeEvent>>,
     commands_tx: mpsc::UnboundedSender<RuntimeCommand>,
     group: Option<HubGroup>,
+    busy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Event fan-out shared by all conversation hubs in one daemon.
 #[derive(Clone, Default)]
-pub struct HubGroup(Arc<Mutex<Vec<broadcast::Sender<RuntimeEvent>>>>);
+pub struct HubGroup(Arc<Mutex<Vec<std::sync::Weak<broadcast::Sender<RuntimeEvent>>>>>);
 
 /// Runtime-side half of a [`Hub`]. It can publish events but deliberately does
 /// not retain a command sender, so dropping every client closes the command
 /// receiver and lets an in-process daemon terminate naturally.
 #[derive(Clone)]
 pub struct HubPublisher {
-    events_tx: broadcast::Sender<RuntimeEvent>,
+    events_tx: Arc<broadcast::Sender<RuntimeEvent>>,
     group: Option<HubGroup>,
+    busy: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct TurnGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl HubPublisher {
+    fn begin_turn(&self) -> TurnGuard {
+        self.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+        TurnGuard(self.busy.clone())
+    }
+
     /// Broadcast an event to every attached client.
     pub fn publish(&self, event: RuntimeEvent) {
         let _ = self.events_tx.send(event);
@@ -59,9 +74,16 @@ impl HubPublisher {
     /// Broadcast daemon-global state to clients attached to every conversation.
     pub fn publish_global(&self, event: RuntimeEvent) {
         if let Some(group) = &self.group {
-            for sender in group.0.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-                let _ = sender.send(event.clone());
-            }
+            group
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|sender| {
+                    sender.upgrade().is_some_and(|sender| {
+                        let _ = sender.send(event.clone());
+                        true
+                    })
+                });
         } else {
             self.publish(event);
         }
@@ -75,6 +97,7 @@ impl From<Hub> for HubPublisher {
         Self {
             events_tx: hub.events_tx,
             group: hub.group,
+            busy: hub.busy,
         }
     }
 }
@@ -91,12 +114,13 @@ impl Hub {
 
     fn new_inner(group: Option<HubGroup>) -> (Self, mpsc::UnboundedReceiver<RuntimeCommand>) {
         let (events_tx, _) = broadcast::channel(1024);
+        let events_tx = Arc::new(events_tx);
         if let Some(group) = &group {
             group
                 .0
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(events_tx.clone());
+                .push(Arc::downgrade(&events_tx));
         }
         let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         (
@@ -104,6 +128,7 @@ impl Hub {
                 events_tx,
                 commands_tx,
                 group,
+                busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             commands_rx,
         )
@@ -121,6 +146,7 @@ impl Hub {
         HubPublisher {
             events_tx: self.events_tx.clone(),
             group: self.group.clone(),
+            busy: self.busy.clone(),
         }
     }
 
@@ -137,6 +163,10 @@ impl Hub {
     /// Current attached-client count (event subscribers).
     pub fn client_count(&self) -> usize {
         self.events_tx.receiver_count()
+    }
+
+    fn is_busy(&self) -> bool {
+        self.busy.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -167,7 +197,12 @@ pub struct ManagedRuntime {
 struct ManagedEntry {
     hub: Hub,
     initial: Arc<dyn Fn() -> Vec<RuntimeEvent> + Send + Sync>,
+    abort: AbortHandle,
+    generation: u64,
+    last_used: u64,
 }
+
+const MAX_CACHED_ACTORS: usize = 16;
 
 struct SessionAttachment {
     commands: mpsc::UnboundedSender<RuntimeCommand>,
@@ -222,10 +257,12 @@ where
     F: FnMut(SessionTarget) -> Result<ManagedRuntime, String>,
 {
     let mut sessions = std::collections::HashMap::<i64, ManagedEntry>::new();
-    // Tag each actor future with its conversation id so we can evict the map
-    // entry when the actor exits (panic, command channel closed, etc.).
-    let mut actors = FuturesUnordered::<LocalBoxFuture<'static, (i64, ())>>::new();
+    // Generation tags prevent a retired actor from removing a replacement that
+    // was created for the same durable conversation before it finished exiting.
+    let mut actors = FuturesUnordered::<LocalBoxFuture<'static, (i64, u64)>>::new();
     let mut latest_id = None;
+    let mut generation = 0u64;
+    let mut clock = 0u64;
 
     loop {
         tokio::select! {
@@ -234,14 +271,16 @@ where
                     break;
                 };
 
+                clock = clock.wrapping_add(1);
                 let requested_id = match target {
                     SessionTarget::Conversation(id) => Some(id),
                     SessionTarget::Latest => latest_id,
                     SessionTarget::New => None,
                 };
                 if let Some(id) = requested_id
-                    && let Some(entry) = sessions.get(&id)
+                    && let Some(entry) = sessions.get_mut(&id)
                 {
+                    entry.last_used = clock;
                     let _ = reply.send(Ok(SessionAttachment {
                         commands: entry.hub.command_sender(),
                         events: entry.hub.subscribe(),
@@ -249,6 +288,24 @@ where
                     }));
                     latest_id = Some(id);
                     continue;
+                }
+
+                // Make room only when creating an actor. Attached actors are
+                // never evicted; the least recently attached idle actor goes.
+                while sessions.len() >= MAX_CACHED_ACTORS {
+                    let Some(id) = sessions
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.hub.client_count() == 0 && !entry.hub.is_busy()
+                        })
+                        .min_by_key(|(_, entry)| entry.last_used)
+                        .map(|(id, _)| *id)
+                    else {
+                        break;
+                    };
+                    if let Some(entry) = sessions.remove(&id) {
+                        entry.abort.abort();
+                    }
                 }
 
                 match factory(target) {
@@ -260,29 +317,39 @@ where
                         if let std::collections::hash_map::Entry::Vacant(entry) =
                             sessions.entry(id)
                         {
+                            generation = generation.wrapping_add(1);
+                            let actor_generation = generation;
+                            let (abort, registration) = AbortHandle::new_pair();
                             let publisher = runtime.hub.publisher();
                             let task = runtime.task;
                             actors.push(Box::pin(async move {
-                                if let Err(payload) = std::panic::AssertUnwindSafe(task)
-                                    .catch_unwind()
-                                    .await
-                                {
-                                    publisher.publish(RuntimeEvent::Status {
-                                        message: format!(
-                                            "conversation runtime panicked: {}",
-                                            crate::runtime::panic_message(payload.as_ref())
-                                        ),
-                                    });
-                                }
-                                (id, ())
+                                let run = async move {
+                                    if let Err(payload) = std::panic::AssertUnwindSafe(task)
+                                        .catch_unwind()
+                                        .await
+                                    {
+                                        publisher.publish(RuntimeEvent::Status {
+                                            message: format!(
+                                                "conversation runtime panicked: {}",
+                                                crate::runtime::panic_message(payload.as_ref())
+                                            ),
+                                        });
+                                    }
+                                };
+                                let _ = Abortable::new(run, registration).await;
+                                (id, actor_generation)
                             }));
                             entry.insert(ManagedEntry {
                                 hub: runtime.hub,
                                 initial: runtime.initial,
+                                abort,
+                                generation: actor_generation,
+                                last_used: clock,
                             });
                         }
                         latest_id = Some(id);
-                        let entry = sessions.get(&id).expect("managed session inserted");
+                        let entry = sessions.get_mut(&id).expect("managed session inserted");
+                        entry.last_used = clock;
                         let _ = reply.send(Ok(SessionAttachment {
                             commands: entry.hub.command_sender(),
                             events: entry.hub.subscribe(),
@@ -292,11 +359,12 @@ where
                     Err(err) => { let _ = reply.send(Err(err)); }
                 }
             }
-            Some((id, _)) = actors.next(), if !actors.is_empty() => {
-                // Actor exited (panic, channel closed, etc.). Evict the stale
-                // map entry so a future attach can create a fresh actor for
-                // this conversation instead of hitting a dead hub.
-                sessions.remove(&id);
+            Some((id, generation)) = actors.next(), if !actors.is_empty() => {
+                // Do not let a retired actor remove a replacement for the same
+                // durable conversation.
+                if sessions.get(&id).is_some_and(|entry| entry.generation == generation) {
+                    sessions.remove(&id);
+                }
             }
         }
     }
@@ -1911,10 +1979,19 @@ pub async fn run_daemon(
     // both the in-process TUI and remote clients.
     let mut inject_timer = tokio::time::interval(std::time::Duration::from_millis(200));
     loop {
+        let mut turn_guard = None;
         let flow = tokio::select! {
             biased;
             cmd = commands.recv() => match cmd {
-                Some(cmd) => ctx.handle_idle_command(cmd, &mut commands).await,
+                Some(cmd) => {
+                    if matches!(
+                        &cmd,
+                        RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
+                    ) {
+                        turn_guard = Some(ctx.hub.begin_turn());
+                    }
+                    ctx.handle_idle_command(cmd, &mut commands).await
+                }
                 None => break,
             },
             _ = inject_timer.tick() => {
@@ -1923,6 +2000,7 @@ pub async fn run_daemon(
                     // prompt (transcript push, DB persist, `message` hook), then
                     // attach the short display label for job-result injects.
                     Some((text, display)) => {
+                        turn_guard = Some(ctx.hub.begin_turn());
                         match ctx
                             .handle_idle_command(
                                 RuntimeCommand::SubmitPrompt { text, images: vec![] },
@@ -1941,6 +2019,7 @@ pub async fn run_daemon(
         if let Flow::StartTurn { text, display } = flow {
             ctx.run_turn(text, display, &mut commands).await;
         }
+        drop(turn_guard);
     }
 }
 

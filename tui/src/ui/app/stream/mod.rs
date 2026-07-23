@@ -1345,8 +1345,12 @@ impl App {
                             }
                         }
                     }
-                    // Ctrl+Enter during streaming: steer the agent mid-turn.
-                    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Alt+Enter is the fallback when Ctrl+Enter reports as plain Enter.
+                    if key.code == KeyCode::Enter
+                        && key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
                         let text = input.expanded().trim().to_string();
                         if !text.is_empty() {
                             let _ = command_tx.send(RuntimeCommand::Steer { text });

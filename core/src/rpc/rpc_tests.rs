@@ -40,6 +40,23 @@ async fn grouped_hubs_broadcast_global_events() {
     );
 }
 
+#[test]
+fn grouped_hubs_do_not_retain_dropped_actor_channels() {
+    let group = HubGroup::default();
+    let (dropped, _commands) = Hub::new_grouped(group.clone());
+    drop(dropped);
+    assert_eq!(group.0.lock().unwrap().len(), 1);
+
+    let (live, _commands) = Hub::new_grouped(group.clone());
+    live.publisher().publish_global(RuntimeEvent::Status {
+        message: "cleanup".into(),
+    });
+
+    let senders = group.0.lock().unwrap();
+    assert_eq!(senders.len(), 1);
+    assert!(senders[0].upgrade().is_some());
+}
+
 struct ConfigTestProvider;
 
 #[async_trait::async_trait]
@@ -768,6 +785,203 @@ async fn managed_event_channel_closure_writes_one_status_then_eof() {
             .expect("managed connection did not close after terminal status");
             assert!(eof.is_none());
             serve.await.unwrap().unwrap();
+
+            runner.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_sessions_never_evict_attached_actors() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (manager, receiver) = SessionManager::new();
+            let factory_created = created.clone();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                factory_created.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let SessionTarget::Conversation(id) = target else {
+                    return Err("explicit conversation required".into());
+                };
+                Ok(fake_managed_runtime(id, active.clone(), max_active.clone()))
+            }));
+
+            let mut attachments = Vec::new();
+            for id in 1..=MAX_CACHED_ACTORS as i64 + 1 {
+                attachments.push(
+                    manager
+                        .attach(SessionTarget::Conversation(id))
+                        .await
+                        .unwrap(),
+                );
+            }
+            drop(
+                manager
+                    .attach(SessionTarget::Conversation(1))
+                    .await
+                    .unwrap(),
+            );
+
+            assert_eq!(
+                created.load(std::sync::atomic::Ordering::SeqCst),
+                MAX_CACHED_ACTORS + 1
+            );
+            drop(attachments);
+            runner.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_sessions_evict_the_oldest_disconnected_actor() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (manager, receiver) = SessionManager::new();
+            let factory_created = created.clone();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                factory_created.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let SessionTarget::Conversation(id) = target else {
+                    return Err("explicit conversation required".into());
+                };
+                Ok(fake_managed_runtime(id, active.clone(), max_active.clone()))
+            }));
+
+            for id in 1..=MAX_CACHED_ACTORS as i64 + 1 {
+                drop(
+                    manager
+                        .attach(SessionTarget::Conversation(id))
+                        .await
+                        .unwrap(),
+                );
+            }
+            assert_eq!(
+                created.load(std::sync::atomic::Ordering::SeqCst),
+                MAX_CACHED_ACTORS + 1
+            );
+
+            // Actor 1 was the least recently attached idle entry and must be
+            // reconstructed rather than retained beyond the cache bound.
+            drop(
+                manager
+                    .attach(SessionTarget::Conversation(1))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(
+                created.load(std::sync::atomic::Ordering::SeqCst),
+                MAX_CACHED_ACTORS + 2
+            );
+
+            runner.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_sessions_do_not_evict_disconnected_running_actor() {
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let factory_created = created.clone();
+            let factory_dropped = dropped.clone();
+            let (manager, receiver) = SessionManager::new();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                factory_created.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let SessionTarget::Conversation(id) = target else {
+                    return Err("explicit conversation required".into());
+                };
+                let (hub, mut commands) = Hub::new();
+                if id != 1 {
+                    return Ok(ManagedRuntime {
+                        conversation_id: id,
+                        hub,
+                        initial: Arc::new(Vec::new),
+                        task: Box::pin(std::future::pending()),
+                    });
+                }
+
+                let publisher = hub.publisher();
+                let dropped = factory_dropped.clone();
+                Ok(ManagedRuntime {
+                    conversation_id: id,
+                    hub,
+                    initial: Arc::new(Vec::new),
+                    task: Box::pin(async move {
+                        if matches!(
+                            commands.recv().await,
+                            Some(RuntimeCommand::SubmitPrompt { .. })
+                        ) {
+                            let _turn = publisher.begin_turn();
+                            publisher.publish(RuntimeEvent::Started {
+                                approval: "safe".into(),
+                                task: String::new(),
+                                model: "test".into(),
+                                display: None,
+                            });
+                            let _drop_flag = DropFlag(dropped);
+                            std::future::pending::<()>().await;
+                        }
+                    }),
+                })
+            }));
+
+            let mut running = manager
+                .attach(SessionTarget::Conversation(1))
+                .await
+                .unwrap();
+            running
+                .commands
+                .send(RuntimeCommand::SubmitPrompt {
+                    text: "keep running".into(),
+                    images: vec![],
+                })
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !matches!(
+                    running.events.recv().await,
+                    Ok(RuntimeEvent::Started { .. })
+                ) {}
+            })
+            .await
+            .expect("actor did not start");
+            drop(running);
+
+            for id in 2..=MAX_CACHED_ACTORS as i64 + 1 {
+                drop(
+                    manager
+                        .attach(SessionTarget::Conversation(id))
+                        .await
+                        .unwrap(),
+                );
+            }
+            drop(
+                manager
+                    .attach(SessionTarget::Conversation(1))
+                    .await
+                    .unwrap(),
+            );
+
+            assert_eq!(
+                created.load(std::sync::atomic::Ordering::SeqCst),
+                MAX_CACHED_ACTORS + 1
+            );
+            assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
 
             runner.abort();
         })
