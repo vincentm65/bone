@@ -120,9 +120,10 @@ async fn write_file_inner(
         store
             .write()
             .unwrap_or_else(|error| error.into_inner())
-            .record(
+            .record_with_format(
                 &snapshot_path,
                 &normalized,
+                snapshot::TextFormat::detect(&args.content),
                 Some(&(1..=n).collect::<Vec<_>>()),
             );
     }

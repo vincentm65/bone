@@ -35,6 +35,7 @@ fn image_media_type(path: &str) -> Option<&'static str> {
 
 const MAX_TEXT_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_IMAGE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 /// Default window when the model omits `max_lines`. High enough that typical
 /// source files fit in one full read (safer first-try edits) while still
 /// hard-capped at the schema maximum of 1000.
@@ -59,6 +60,40 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+fn range_header(
+    path: &str,
+    first: usize,
+    end: usize,
+    total: usize,
+    stopped: Option<&str>,
+    truncated_count: usize,
+) -> String {
+    let mut header = format!("File: {path}\n");
+    if end < total {
+        header.push_str(&format!("Range: lines {first}-{end} of {total}.\n"));
+        if let Some(reason) = stopped {
+            header.push_str(&format!("Stopped: {reason}.\n"));
+        }
+        header.push_str(&format!(
+            "Continue: read_file(path={path:?}, start_line={}).\n",
+            end + 1
+        ));
+    } else if first > 1 {
+        header.push_str(&format!(
+            "Range: lines {first}-{end} of {total}; end of file.\n"
+        ));
+    } else {
+        header.push_str(&format!("Range: lines 1-{end} of {total}; entire file.\n"));
+    }
+    if truncated_count > 0 {
+        header.push_str(&format!(
+            "Inspect: {truncated_count} overlong line{} truncated and not editable; use shell.\n",
+            plural(truncated_count),
+        ));
+    }
+    header
+}
+
 #[derive(Deserialize)]
 struct Args {
     path: String,
@@ -72,7 +107,7 @@ impl Tool for ReadFileTool {
         ToolDefinition {
             name: "read_file".to_string(),
             description:
-                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. Reads a UTF-8 text file and returns the resolved path, range information, and numbered lines. To edit, copy an exact unique block of shown text into edit_file.old_text and provide its replacement as new_text. Optionally pass start_line and max_lines; defaults to the first 1000 lines. Image files (png, jpg, jpeg, gif, webp) are returned as an image you can view."
+                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. Reads a UTF-8 text file and returns the resolved path, range information, and numbered lines, stopping at 50 KiB of output. To edit, copy an exact unique block of shown text into edit_file.old_text and provide its replacement as new_text. Optionally pass start_line and max_lines; defaults to the first 1000 lines. Image files (png, jpg, jpeg, gif, webp) are returned as an image you can view."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -185,7 +220,7 @@ async fn read_text(
 
     if first > total {
         // Range starts past EOF: nothing to show, but still report totals.
-        record_snapshot(snapshots, &path, &normalized, &[])?;
+        record_snapshot(snapshots, &path, &raw, &normalized, &[])?;
         return Ok(if total > 0 {
             format!(
                 "File: {path}\nRange: no lines; file has {total} line{}",
@@ -196,53 +231,62 @@ async fn read_text(
         });
     }
 
-    // Collect the requested window, bounding per-line byte cost so a single
-    // minified multi-MB line can't consume the whole context window. Truncated
-    // lines are shown for orientation but excluded from the editable set so
-    // the model cannot invent a body from a partial view.
-    let end = (start + max).min(total);
+    // Collect the requested window, bounding both individual lines and the
+    // complete rendered tool output. Lines are never split by the output cap.
+    let requested_end = (start + max).min(total);
+    let mut end = start;
     let mut body = String::new();
-    let mut shown_nums: Vec<usize> = Vec::with_capacity(end - start);
+    let mut shown_nums: Vec<usize> = Vec::with_capacity(requested_end - start);
     let mut truncated_count = 0usize;
-    for n in first..=end {
+    let mut byte_limited = false;
+    for n in first..=requested_end {
         let content = lines[n - 1];
         let overlong = content.chars().count() > MAX_TOOL_LINE_CHARS;
-        if overlong {
-            truncated_count += 1;
-            body.push_str(&format!(
+        let rendered = if overlong {
+            format!(
                 "{n:>5} | {}  [not editable — line exceeds {MAX_TOOL_LINE_CHARS} chars]\n",
                 truncate_line(content)
-            ));
+            )
         } else {
-            body.push_str(&format!("{n:>5} | {content}\n"));
+            format!("{n:>5} | {content}\n")
+        };
+        let next_truncated = truncated_count + usize::from(overlong);
+        let header = range_header(
+            &path,
+            first,
+            n,
+            total,
+            Some("50 KiB output limit"),
+            next_truncated,
+        );
+        if !body.is_empty() && header.len() + body.len() + rendered.len() > MAX_OUTPUT_BYTES {
+            byte_limited = true;
+            break;
+        }
+        body.push_str(&rendered);
+        end = n;
+        truncated_count = next_truncated;
+        if !overlong {
             shown_nums.push(n);
         }
     }
 
     // Record the full normalized text + only the shown (editable) line numbers.
     // Elided and truncated lines are not editable (visible-line guard).
-    record_snapshot(snapshots, &path, &normalized, &shown_nums)?;
+    record_snapshot(snapshots, &path, &raw, &normalized, &shown_nums)?;
 
-    // Header + footer around the numbered lines.
-    let mut header = format!("File: {path}\n");
-    if end < total {
-        header.push_str(&format!(
-            "Range: lines {first}-{end} of {total}. To continue, call read_file with start_line={next}.\n",
-            next = end + 1,
-        ));
-    } else if first > 1 {
-        header.push_str(&format!(
-            "Range: lines {first}-{end} of {total}; end of file.\n"
-        ));
+    let stopped = if byte_limited {
+        Some("50 KiB output limit")
+    } else if end < total {
+        Some(if args.max_lines.is_some() {
+            "requested line limit"
+        } else {
+            "1,000-line limit"
+        })
     } else {
-        header.push_str(&format!("Range: lines 1-{end} of {total}; entire file.\n"));
-    }
-    if truncated_count > 0 {
-        header.push_str(&format!(
-            "Note: {truncated_count} overlong line{} truncated and not editable; use shell to inspect it.\n",
-            plural(truncated_count),
-        ));
-    }
+        None
+    };
+    let header = range_header(&path, first, end, total, stopped, truncated_count);
 
     // `body` ends with a trailing newline; remove only that delimiter so
     // significant trailing spaces or tabs on the final displayed line survive.
@@ -256,6 +300,7 @@ async fn read_text(
 fn record_snapshot(
     snapshots: Option<&Snapshots>,
     path: &str,
+    raw: &str,
     normalized: &str,
     seen: &[usize],
 ) -> Result<(), String> {
@@ -263,7 +308,12 @@ fn record_snapshot(
         let mut guard = store
             .write()
             .map_err(|_| "snapshot store lock is poisoned".to_string())?;
-        guard.record(path, normalized, Some(seen));
+        guard.record_with_format(
+            path,
+            normalized,
+            snapshot::TextFormat::detect(raw),
+            Some(seen),
+        );
     }
     Ok(())
 }

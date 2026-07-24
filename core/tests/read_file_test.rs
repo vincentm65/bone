@@ -69,6 +69,22 @@ async fn long_lines_are_bounded_and_marked_uneditable() {
 }
 
 #[tokio::test]
+async fn output_is_bounded_between_complete_lines() {
+    let path = temp_path("bounded.txt");
+    let content = (1..=1000)
+        .map(|n| format!("{n:04} {}", "x".repeat(100)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&path, content).await.unwrap();
+    let result = ReadFileTool.execute(json!({ "path": path })).await.unwrap();
+    assert!(result.len() <= 50 * 1024, "{} bytes", result.len());
+    assert!(result.contains("Stopped: 50 KiB output limit."));
+    assert!(result.contains("Continue: read_file(path="));
+    assert!(!result.ends_with("…[truncated]"));
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
 async fn image_files_still_return_attachments() {
     let dir = common::temp_dir("simple-read-image");
     fs::create_dir_all(&dir).await.unwrap();

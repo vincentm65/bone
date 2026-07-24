@@ -59,6 +59,40 @@ async fn replaces_exact_unique_text_after_read() {
 }
 
 #[tokio::test]
+async fn preserves_crlf_and_bom() {
+    let path = temp_path("crlf-bom.txt");
+    fs::write(&path, "\u{feff}alpha\r\nbeta\r\ngamma\r\n")
+        .await
+        .unwrap();
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    edit_live(&path, "beta", "BETA", &context).await.unwrap();
+    assert_eq!(
+        fs::read(&path).await.unwrap(),
+        "\u{feff}alpha\r\nBETA\r\ngamma\r\n".as_bytes()
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn preserves_mixed_line_endings_outside_the_edit() {
+    let path = temp_path("mixed-endings.txt");
+    fs::write(&path, "alpha\r\nbeta\ngamma\rdelta")
+        .await
+        .unwrap();
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    edit_live(&path, "beta", "BETA", &context).await.unwrap();
+    assert_eq!(
+        fs::read(&path).await.unwrap(),
+        b"alpha\r\nBETA\ngamma\rdelta"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
 async fn deletion_and_contextual_insertion_use_the_same_contract() {
     let path = setup("delete-insert.txt", "one\ntwo\nthree\n").await;
     let context = ToolExecutionContext::default();

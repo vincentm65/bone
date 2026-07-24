@@ -20,6 +20,50 @@ use tokio::fs;
 
 pub type Snapshots = Arc<RwLock<SnapshotStore>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEnding {
+    Lf,
+    CrLf,
+    Cr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextFormat {
+    pub line_ending: LineEnding,
+    pub has_bom: bool,
+}
+
+impl TextFormat {
+    pub fn detect(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        let line_ending = bytes
+            .iter()
+            .position(|byte| *byte == b'\r' || *byte == b'\n')
+            .map_or(LineEnding::Lf, |index| {
+                if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                    LineEnding::CrLf
+                } else if bytes[index] == b'\r' {
+                    LineEnding::Cr
+                } else {
+                    LineEnding::Lf
+                }
+            });
+        Self {
+            line_ending,
+            has_bom: text.starts_with('\u{feff}'),
+        }
+    }
+
+    pub fn restore_newlines(self, normalized: &str) -> String {
+        let newline = match self.line_ending {
+            LineEnding::Lf => "\n",
+            LineEnding::CrLf => "\r\n",
+            LineEnding::Cr => "\r",
+        };
+        normalized.replace('\n', newline)
+    }
+}
+
 /// Anchor a path to the session working directory. Absolute paths are unchanged.
 pub fn resolve_path(path: &str, working_dir: Option<&Path>) -> Result<PathBuf, String> {
     if path.trim().is_empty() {
@@ -50,6 +94,8 @@ pub async fn resolve_existing_path(
 pub struct Snapshot {
     /// Normalized full file text (LF line endings, BOM stripped).
     pub text: String,
+    /// Original BOM and line-ending convention.
+    pub format: TextFormat,
     /// 4-hex content tag (uppercase), derived from `text` via [`compute_tag`].
     pub tag: String,
     /// Lines (1-indexed) the model actually saw in the read output. Edits may
@@ -72,9 +118,20 @@ impl SnapshotStore {
     /// Record a normalized snapshot for `path`, returning its tag. A repeated
     /// read of identical content merges the lines visible to the model.
     pub fn record(&mut self, path: &str, text: &str, seen_lines: Option<&[usize]>) -> String {
+        self.record_with_format(path, text, TextFormat::detect(text), seen_lines)
+    }
+
+    pub fn record_with_format(
+        &mut self,
+        path: &str,
+        text: &str,
+        format: TextFormat,
+        seen_lines: Option<&[usize]>,
+    ) -> String {
         let tag = compute_tag(text);
         if let Some(snapshot) = self.paths.get_mut(path)
             && snapshot.text == text
+            && snapshot.format == format
         {
             if let Some(lines) = seen_lines {
                 snapshot.seen_lines.extend(lines.iter().copied());
@@ -90,6 +147,7 @@ impl SnapshotStore {
             path.to_string(),
             Snapshot {
                 text: text.to_string(),
+                format,
                 tag: tag.clone(),
                 seen_lines: seen,
             },

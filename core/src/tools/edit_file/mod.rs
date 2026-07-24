@@ -111,18 +111,19 @@ async fn run_edit(
     let old_text = snapshot::normalize_text(&args.old_text);
     let new_text = snapshot::normalize_text(&args.new_text);
 
-    let (base, seen_lines) = if let Some(store) = snapshots {
+    let live_format = snapshot::TextFormat::detect(&live_raw);
+    let (base, seen_lines, format) = if let Some(store) = snapshots {
         let guard = store.read().map_err(|e| e.to_string())?;
         let snap = guard
             .head(&path)
             .ok_or_else(|| format!("read `{path}` with read_file before editing it"))?;
         ensure_visible(&snap.text, &old_text, &snap.seen_lines, &path)?;
-        (snap.text.clone(), snap.seen_lines.clone())
+        (snap.text.clone(), snap.seen_lines.clone(), snap.format)
     } else {
-        (live.clone(), BTreeSet::new())
+        (live.clone(), BTreeSet::new(), live_format)
     };
 
-    if base != live {
+    if base != live || format != live_format {
         return Err(format!(
             "`{path}` changed after it was read; re-read it and retry"
         ));
@@ -139,7 +140,9 @@ async fn run_edit(
         .await
         .map_err(|e| format!("could not re-check `{path}` before writing: {e}"))?
         .permissions();
-    write_atomic_if_unchanged(&resolved, &edited, Some(permissions), live_raw.as_bytes()).await?;
+    let rendered = replace_raw(&live_raw, live_offset, old_text.len(), &new_text, format);
+    write_atomic_if_unchanged(&resolved, &rendered, Some(permissions), live_raw.as_bytes()).await?;
+    let edited_format = snapshot::TextFormat::detect(&rendered);
 
     if let Some(store) = snapshots {
         let seen = remap_seen_lines(
@@ -151,7 +154,7 @@ async fn run_edit(
             &seen_lines,
         );
         let mut guard = store.write().map_err(|e| e.to_string())?;
-        guard.record(&path, &edited, Some(&seen));
+        guard.record_with_format(&path, &edited, edited_format, Some(&seen));
     }
 
     let rendered = truncate_output(&diff::build_unified_diff(
@@ -207,6 +210,46 @@ fn replace_unique(text: &str, old: &str, new: &str, path: &str) -> Result<String
     result.push_str(new);
     result.push_str(&text[offset + old.len()..]);
     Ok(result)
+}
+
+fn raw_offset(raw: &str, normalized_offset: usize) -> usize {
+    let mut raw_offset = usize::from(raw.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();
+    let mut normalized = 0usize;
+    while normalized < normalized_offset {
+        let remaining = &raw[raw_offset..];
+        let ch = remaining
+            .chars()
+            .next()
+            .expect("normalized offset within raw text");
+        raw_offset += ch.len_utf8();
+        if ch == '\r' {
+            if raw[raw_offset..].starts_with('\n') {
+                raw_offset += 1;
+            }
+            normalized += 1;
+        } else {
+            normalized += ch.len_utf8();
+        }
+    }
+    debug_assert_eq!(normalized, normalized_offset);
+    raw_offset
+}
+
+fn replace_raw(
+    raw: &str,
+    normalized_offset: usize,
+    old_len: usize,
+    new: &str,
+    format: snapshot::TextFormat,
+) -> String {
+    let start = raw_offset(raw, normalized_offset);
+    let end = raw_offset(raw, normalized_offset + old_len);
+    let replacement = format.restore_newlines(new);
+    let mut result = String::with_capacity(raw.len() - (end - start) + replacement.len());
+    result.push_str(&raw[..start]);
+    result.push_str(&replacement);
+    result.push_str(&raw[end..]);
+    result
 }
 
 fn ensure_visible(
