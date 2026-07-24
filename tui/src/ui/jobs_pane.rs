@@ -16,9 +16,6 @@ use super::pane_page::PanePage;
 /// Pane source identifier (stable key for upsert/remove).
 pub const PANE_SOURCE: &str = "jobs";
 
-// Match the selected-row background used by the shared Lua menu (/history).
-const SELECTED_BG: Color = Color::Rgb(0x3A, 0x3F, 0x4B);
-
 /// Render the jobs pane from the registry snapshot, grouping by `agent` label.
 /// Only shows agents with at least one running job (a completed job stays
 /// visible while a sibling in the same group is still running).
@@ -146,60 +143,40 @@ pub fn render_selected(jobs: &[Job], selected_id: Option<&str>) -> Option<PanePa
     }
 
     let now = current_unix_seconds();
-    let mut lines = Vec::with_capacity(active.len());
-    for job in &active {
-        let selected = Some(job.id.as_str()) == selected_id;
-        let (icon, status) = job_status(job, now);
-        let mut line = Line::from(vec![
-            Span::styled(
-                if selected { " › " } else { "   " },
-                Style::default().fg(if selected {
-                    Color::White
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-            Span::styled(
-                format!("{icon} "),
-                Style::default()
-                    .fg(icon_fg(job))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(job.agent.clone(), Style::default().fg(name_fg(job))),
-            Span::styled(" ", Style::default().fg(Color::DarkGray)),
-            Span::styled(status, Style::default().fg(Color::Gray)),
-        ]);
-        if selected {
-            line = line.style(Style::default().bg(SELECTED_BG));
-        }
-        lines.push(line);
-    }
-
-    let selected_index = active
+    let rows = active
         .iter()
-        .position(|job| Some(job.id.as_str()) == selected_id)
-        .unwrap_or(0);
-    let visible_rows: usize = 8;
-    let scroll = selected_index.saturating_sub(visible_rows.saturating_sub(1));
+        .map(|job| {
+            let selected = Some(job.id.as_str()) == selected_id;
+            let (icon, status) = job_status(job, now);
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{icon} "),
+                    Style::default()
+                        .fg(icon_fg(job))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(job.agent.clone(), Style::default().fg(name_fg(job))),
+                Span::styled(" ", Style::default().fg(Color::DarkGray)),
+                Span::styled(status, Style::default().fg(Color::Gray)),
+            ]);
+            (selected, line)
+        })
+        .collect();
+    let agent_count = active
+        .iter()
+        .fold(Vec::<&str>::new(), |mut names, job| {
+            if !names.contains(&job.agent.as_str()) {
+                names.push(job.agent.as_str());
+            }
+            names
+        })
+        .len();
 
-    Some(PanePage {
-        source: PANE_SOURCE.to_string(),
-        title: format!(
-            "Agents ({})",
-            active
-                .iter()
-                .fold(Vec::<&str>::new(), |mut names, job| {
-                    if !names.contains(&job.agent.as_str()) {
-                        names.push(job.agent.as_str());
-                    }
-                    names
-                })
-                .len()
-        ),
-        content: lines,
-        visible_rows,
-        scroll,
-    })
+    Some(super::selectable_pane::render(
+        PANE_SOURCE,
+        format!("Agents ({agent_count})"),
+        rows,
+    ))
 }
 
 /// Unique, first-seen-ordered `agent` labels present in the job snapshot.

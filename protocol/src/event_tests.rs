@@ -78,6 +78,20 @@ fn every_runtime_event_variant_round_trips() {
             message: "boom".into(),
         },
         RuntimeEvent::WorkElapsed { elapsed_ms: 1234 },
+        RuntimeEvent::ProcessesSnapshot {
+            version: 4,
+            processes: vec![ProcessSnapshot {
+                id: "process-1".into(),
+                command: "cargo test".into(),
+                owner: "conversation:7".into(),
+                running: true,
+                stdout: "running".into(),
+                stderr: String::new(),
+                exit_code: None,
+                signal: None,
+                error: None,
+            }],
+        },
         RuntimeEvent::StateSnapshot {
             snapshot: SessionSnapshot {
                 sent: 100,
@@ -194,6 +208,10 @@ fn every_runtime_command_variant_round_trips() {
         },
         RuntimeCommand::Cancel,
         RuntimeCommand::CancelJob { id: "job-1".into() },
+        RuntimeCommand::GetProcesses,
+        RuntimeCommand::CancelProcess {
+            id: "process-1".into(),
+        },
         RuntimeCommand::RunCommand {
             name: "usage".into(),
             input: "".into(),

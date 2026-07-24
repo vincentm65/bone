@@ -7,6 +7,7 @@ use crate::tools::{ApprovalMode, Tool, ToolCall};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
+use crate::ui::selectable_pane::{SelectablePaneAction, apply_nav_key};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
@@ -15,8 +16,8 @@ use std::time::Instant;
 use tokio::time::Duration;
 
 use super::{
-    AgentsKeyResult, App, apply_agents_nav_key, apply_input_key_with_paste_burst,
-    apply_pane_nav_key, apply_queue_nav_key, config_rejection_message, finish_queue_edit,
+    App, active_job_ids, active_process_ids, apply_input_key_with_paste_burst, apply_pane_nav_key,
+    apply_queue_nav_key, config_rejection_message, finish_queue_edit, should_open_agent_log,
 };
 
 /// One place that resolves a `KeyEvent` to a blocked `ctx.ui.key()` request.
@@ -40,8 +41,10 @@ pub(crate) struct KeySink {
 struct DrainKeysResult {
     mode_changed: bool,
     open_transcript: bool,
-    open_job: bool,
+    open_job: Option<String>,
+    open_process: Option<String>,
     jobs_changed: bool,
+    processes_changed: bool,
 }
 
 /// A pending `ctx.ui.key()` request from the daemon, delivered via
@@ -385,6 +388,8 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut self.selected_job_id,
+                    &mut self.selected_process_id,
+                    &self.processes,
                     &mut self.queue_selected,
                     &mut self.queue_editing,
                     &mut pending_key,
@@ -397,11 +402,14 @@ impl App {
                 if drained.open_transcript {
                     self.open_transcript_view(term)?;
                 }
-                if drained.jobs_changed {
+                if drained.jobs_changed || drained.processes_changed {
                     self.refresh_jobs_pane();
                 }
-                if drained.open_job {
-                    self.open_selected_job(term)?;
+                if let Some(id) = drained.open_job {
+                    self.open_job(&id, term)?;
+                }
+                if let Some(id) = drained.open_process {
+                    self.open_process(&id, term)?;
                 }
             }
             if self.cancel_streaming {
@@ -441,13 +449,10 @@ impl App {
                         self.pump_apply_event(ev, &mut cur_idx, &mut pending, &mut pending_key, term)?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_n)) => {
-                        // Fell behind the broadcast ring: the oldest events were
-                        // dropped. Do NOT `resubscribe()` — that discards the
-                        // events still buffered, including `TurnComplete` (the
-                        // newest event, otherwise still retained), which would
-                        // hang this loop forever. Continuing recv() drains the
-                        // retained backlog; only the dropped oldest deltas are
-                        // lost, a cosmetic gap the next StateSnapshot reconciles.
+                        // Keep draining the retained backlog so TurnComplete is
+                        // not lost. Process state needs an explicit refresh because
+                        // StateSnapshot does not contain background processes.
+                        self.recover_from_event_lag();
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
@@ -574,6 +579,8 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut self.selected_job_id,
+                    &mut self.selected_process_id,
+                    &self.processes,
                     &mut self.queue_selected,
                     &mut self.queue_editing,
                     &mut pending_key,
@@ -586,11 +593,14 @@ impl App {
                 if drained.open_transcript {
                     self.open_transcript_view(term).ok();
                 }
-                if drained.jobs_changed {
+                if drained.jobs_changed || drained.processes_changed {
                     self.refresh_jobs_pane();
                 }
-                if drained.open_job {
-                    self.open_selected_job(term).ok();
+                if let Some(id) = drained.open_job {
+                    self.open_job(&id, term).ok();
+                }
+                if let Some(id) = drained.open_process {
+                    self.open_process(&id, term).ok();
                 }
             }
             if self.cancel_streaming {
@@ -644,11 +654,14 @@ impl App {
                     Ok(RuntimeEvent::StateSnapshot { snapshot }) => {
                         self.apply_snapshot(snapshot);
                     }
+                    Ok(RuntimeEvent::ProcessesSnapshot { version, processes }) => {
+                        self.apply_processes_snapshot(version, processes);
+                    }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Don't resubscribe: that would drop the retained
-                        // backlog, including `CommandComplete` (the newest
-                        // event), and hang this loop. Keep draining instead.
+                        // Keep draining retained events so CommandComplete is not
+                        // lost, and explicitly repair the process snapshot cache.
+                        self.recover_from_event_lag();
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'command,
                 },
@@ -864,6 +877,12 @@ impl App {
             // the view in sync); post-turn / on attach it's the primary source.
             RuntimeEvent::StateSnapshot { snapshot } => {
                 self.apply_snapshot(snapshot);
+            }
+            RuntimeEvent::ProcessesSnapshot {
+                version,
+                processes,
+            } => {
+                self.apply_processes_snapshot(version, processes);
             }
             RuntimeEvent::ToolCall {
                 id,
@@ -1227,6 +1246,8 @@ impl App {
         pages: &mut Vec<PanePage>,
         active_page: &mut usize,
         selected_job_id: &mut Option<String>,
+        selected_process_id: &mut Option<String>,
+        processes: &[bone_protocol::ProcessSnapshot],
         queue_selected: &mut usize,
         queue_editing: &mut Option<(usize, String)>,
         pending_key: &mut KeySink,
@@ -1326,25 +1347,60 @@ impl App {
                         );
                         continue;
                     }
+                    let processes_active = *panes_visible
+                        && pages
+                            .get(*active_page)
+                            .is_some_and(|p| p.source == crate::ui::processes_pane::PANE_SOURCE);
+                    if processes_active {
+                        let active_ids = active_process_ids(processes);
+                        match apply_nav_key(
+                            key.code,
+                            key.modifiers,
+                            &active_ids,
+                            selected_process_id,
+                            should_open_agent_log(input),
+                        ) {
+                            SelectablePaneAction::Unhandled => {}
+                            SelectablePaneAction::SelectionChanged => {
+                                result.processes_changed = true;
+                                continue;
+                            }
+                            SelectablePaneAction::Cancel(id) => {
+                                let _ = command_tx.send(RuntimeCommand::CancelProcess { id });
+                                result.processes_changed = true;
+                                continue;
+                            }
+                            SelectablePaneAction::Open(id) => {
+                                result.open_process = Some(id);
+                                continue;
+                            }
+                        }
+                    }
                     let agents_active = *panes_visible
                         && pages
                             .get(*active_page)
                             .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE);
                     if agents_active {
-                        match apply_agents_nav_key(key.code, key.modifiers, selected_job_id, input)
-                        {
-                            AgentsKeyResult::Unhandled => {}
-                            AgentsKeyResult::SelectionChanged => {
+                        let active_ids = active_job_ids();
+                        match apply_nav_key(
+                            key.code,
+                            key.modifiers,
+                            &active_ids,
+                            selected_job_id,
+                            should_open_agent_log(input),
+                        ) {
+                            SelectablePaneAction::Unhandled => {}
+                            SelectablePaneAction::SelectionChanged => {
                                 result.jobs_changed = true;
                                 continue;
                             }
-                            AgentsKeyResult::Cancelled(id) => {
+                            SelectablePaneAction::Cancel(id) => {
                                 let _ = command_tx.send(RuntimeCommand::CancelJob { id });
                                 result.jobs_changed = true;
                                 continue;
                             }
-                            AgentsKeyResult::OpenJob => {
-                                result.open_job = true;
+                            SelectablePaneAction::Open(id) => {
+                                result.open_job = Some(id);
                                 continue;
                             }
                         }

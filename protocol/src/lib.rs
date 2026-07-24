@@ -17,7 +17,8 @@ pub use config::{
     ConfigPage, ConfigSchema, ConfigSnapshot, ProviderConfig, ProviderUpdate, SettingDefinition,
 };
 pub use event::{
-    CommandAction, ConfigAction, ConversationLoad, KeymapDispatchKind, RuntimeCommand, RuntimeEvent,
+    CommandAction, ConfigAction, ConversationLoad, KeymapDispatchKind, ProcessSnapshot,
+    RuntimeCommand, RuntimeEvent,
 };
 pub use input::KeyEvent;
 pub use message::{

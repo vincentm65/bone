@@ -25,17 +25,26 @@ use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
 use super::render::{BoneTerminal, MAX_PANE_ROWS, PaneDraw, Renderer, StatusInfo};
+use super::selectable_pane::{SelectablePaneAction, apply_nav_key};
 
 fn should_open_agent_log(input: &InputState) -> bool {
     input.buffer.trim().is_empty()
 }
 
-fn background_pane_needs_refresh(
-    processes_running: bool,
-    processes_pane_visible: bool,
-    agent_jobs_tick_due: bool,
-) -> bool {
-    processes_running || processes_pane_visible || agent_jobs_tick_due
+pub(crate) fn active_job_ids() -> Vec<String> {
+    crate::ext::jobs::registry().running_ids()
+}
+
+pub(crate) fn active_process_ids(processes: &[bone_protocol::ProcessSnapshot]) -> Vec<String> {
+    processes
+        .iter()
+        .filter(|process| process.running)
+        .map(|process| process.id.clone())
+        .collect()
+}
+
+fn background_pane_needs_refresh(processes_changed: bool, agent_jobs_tick_due: bool) -> bool {
+    processes_changed || agent_jobs_tick_due
 }
 
 fn terminal_dimensions_changed(last: Option<(u16, u16)>, current: (u16, u16)) -> bool {
@@ -78,14 +87,6 @@ fn finish_queue_edit(
     *queue_selected = index.min(queue.len() - 1);
     input.clear_buffer();
     true
-}
-
-/// Result of an agents-pane key handled by [`apply_agents_nav_key`].
-pub(crate) enum AgentsKeyResult {
-    Unhandled,
-    SelectionChanged,
-    OpenJob,
-    Cancelled(String),
 }
 
 /// Shared queue-pane navigation for idle `handle_key` and streaming `drain_keys`.
@@ -142,38 +143,6 @@ pub(crate) fn apply_queue_nav_key(
             true
         }
         _ => false,
-    }
-}
-
-/// Shared agents/jobs-pane navigation for idle `handle_key` and streaming `drain_keys`.
-pub(crate) fn apply_agents_nav_key(
-    code: KeyCode,
-    modifiers: KeyModifiers,
-    selected_job_id: &mut Option<String>,
-    input: &InputState,
-) -> AgentsKeyResult {
-    if !modifiers.is_empty() {
-        return AgentsKeyResult::Unhandled;
-    }
-    let jobs = crate::ext::jobs::registry().running_jobs();
-    let current = selected_job_id
-        .as_deref()
-        .and_then(|id| jobs.iter().position(|j| j.id == id))
-        .unwrap_or(0);
-    match code {
-        KeyCode::Up if !jobs.is_empty() => {
-            *selected_job_id = Some(jobs[current.saturating_sub(1)].id.clone());
-            AgentsKeyResult::SelectionChanged
-        }
-        KeyCode::Down if !jobs.is_empty() => {
-            *selected_job_id = Some(jobs[(current + 1).min(jobs.len() - 1)].id.clone());
-            AgentsKeyResult::SelectionChanged
-        }
-        KeyCode::Enter if should_open_agent_log(input) => AgentsKeyResult::OpenJob,
-        KeyCode::Char('k') => selected_job_id
-            .clone()
-            .map_or(AgentsKeyResult::Unhandled, AgentsKeyResult::Cancelled),
-        _ => AgentsKeyResult::Unhandled,
     }
 }
 
@@ -555,10 +524,18 @@ pub struct App {
     pending_shells: Vec<(String, String, std::time::Instant)>,
     /// Last-seen job-registry version (forces first-tick render).
     jobs_seen_version: u64,
-    /// Last wall-clock jobs-pane refresh (drives the ~1s live ticker).
+    /// Latest daemon-owned process snapshots for the attached conversation.
+    processes: Vec<bone_protocol::ProcessSnapshot>,
+    /// Version attached to `processes`.
+    processes_version: u64,
+    /// Last-seen managed-process snapshot version.
+    processes_seen_version: u64,
+    /// Last wall-clock jobs-pane refresh (drives the ~1s agent ticker).
     jobs_last_refresh: std::time::Instant,
     /// Job selected in the native Agents pane.
     selected_job_id: Option<String>,
+    /// Process selected in the native Processes pane.
+    selected_process_id: Option<String>,
     /// Set after the user was warned that quitting kills running sub-agent
     /// jobs; the next quit request goes through.
     quit_despite_jobs: bool,
@@ -610,6 +587,7 @@ impl App {
         };
 
         let _ = command_tx.send(crate::runtime::RuntimeCommand::GetConfig);
+        let _ = command_tx.send(crate::runtime::RuntimeCommand::GetProcesses);
         Ok(Self {
             messages,
             command_tx,
@@ -657,8 +635,12 @@ impl App {
             running_shells: Vec::new(),
             pending_shells: Vec::new(),
             jobs_seen_version: u64::MAX,
+            processes: Vec::new(),
+            processes_version: 0,
+            processes_seen_version: u64::MAX,
             jobs_last_refresh: std::time::Instant::now(),
             selected_job_id: None,
+            selected_process_id: None,
             quit_despite_jobs: false,
             terminal_bg_set: false,
         })
@@ -707,10 +689,16 @@ impl App {
             RuntimeEvent::StateSnapshot { snapshot } => {
                 self.apply_snapshot(snapshot);
             }
+            RuntimeEvent::ProcessesSnapshot { version, processes } => {
+                self.apply_processes_snapshot(version, processes)
+            }
             RuntimeEvent::ConversationLoaded { messages, snapshot } => {
                 self.reset_transient_ui_state(true);
                 self.cancel_streaming = false;
                 self.apply_snapshot(snapshot);
+                let _ = self
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::GetProcesses);
                 self.messages.clear();
                 let rows = self.rebuild_scrollback_from_transcript(&messages);
                 self.messages.extend(rows);
@@ -1094,7 +1082,10 @@ impl App {
                     break;
                 }
                 Ok(other) => self.apply_idle_event(other),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.recover_from_event_lag();
+                    continue;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -1117,8 +1108,19 @@ impl App {
         while let Ok(ev) = self.events_rx.try_recv() {
             self.apply_idle_event(ev);
         }
+        let refresh_processes = matches!(
+            &cmd,
+            crate::runtime::RuntimeCommand::NewConversation
+                | crate::runtime::RuntimeCommand::ClearConversation
+                | crate::runtime::RuntimeCommand::LoadConversation { .. }
+        );
         let _ = self.command_tx.send(cmd);
         self.await_state_snapshot().await;
+        if refresh_processes {
+            let _ = self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::GetProcesses);
+        }
     }
 
     /// Load a past conversation as one atomic frontend operation. Waiting here
@@ -1166,7 +1168,10 @@ impl App {
                     return Ok(());
                 }
                 Ok(other) => self.apply_idle_event(other),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.recover_from_event_lag();
+                    continue;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     return Err(io::Error::new(
                         io::ErrorKind::BrokenPipe,
@@ -1251,6 +1256,11 @@ impl App {
         self.pages.clear();
         self.active_page = 0;
         self.jobs_seen_version = u64::MAX;
+        self.processes.clear();
+        self.processes_version = 0;
+        self.processes_seen_version = u64::MAX;
+        self.selected_job_id = None;
+        self.selected_process_id = None;
         if clear_queue {
             self.queue.clear();
             self.queue_selected = 0;
@@ -1803,39 +1813,44 @@ impl App {
         Ok(())
     }
 
-    /// Refresh the jobs pane when the registry version changed or, while
-    /// jobs are running, at least once per second so elapsed time and token
-    /// counters stay live. Returns `true` when the pane was refreshed.
+    fn apply_processes_snapshot(
+        &mut self,
+        version: u64,
+        processes: Vec<bone_protocol::ProcessSnapshot>,
+    ) {
+        self.processes_version = version;
+        self.processes = processes;
+        self.refresh_jobs_pane();
+        self.processes_seen_version = version;
+    }
+
+    fn recover_from_event_lag(&self) {
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::GetProcesses);
+    }
+
+    /// Refresh background panes when either registry version changes or, while
+    /// agent jobs are running, at least once per second so elapsed time and token
+    /// counters stay live. Returns `true` when the panes were refreshed.
     pub(crate) fn maybe_refresh_jobs_pane(&mut self) -> bool {
-        let registry = crate::ext::jobs::registry();
-        let version = registry.version();
-        let processes_running = crate::processes::registry()
-            .list(None)
-            .iter()
-            .any(|p| p.running);
-        let processes_pane_visible = self
-            .pages
-            .iter()
-            .any(|page| page.source == crate::ui::processes_pane::PANE_SOURCE);
-        // Keep refreshing for one final tick after the last process exits so
-        // refresh_jobs_pane can remove the now-empty processes pane.
+        let jobs = crate::ext::jobs::registry();
+        let jobs_version = jobs.version();
+        let processes_changed = self.processes_version != self.processes_seen_version;
         let agent_jobs_tick_due = self.jobs_last_refresh.elapsed()
             >= std::time::Duration::from_secs(1)
-            && !registry.running_ids().is_empty();
-        let periodic = background_pane_needs_refresh(
-            processes_running,
-            processes_pane_visible,
-            agent_jobs_tick_due,
-        );
-        if version == self.jobs_seen_version && !periodic {
+            && !jobs.running_ids().is_empty();
+        let refresh = background_pane_needs_refresh(processes_changed, agent_jobs_tick_due);
+        if jobs_version == self.jobs_seen_version && !refresh {
             return false;
         }
-        // Unhide the pane when a new job starts while hidden.
-        if version != self.jobs_seen_version && !registry.running_ids().is_empty() {
+        // Unhide the pane when a new agent job starts while hidden.
+        if jobs_version != self.jobs_seen_version && !jobs.running_ids().is_empty() {
             self.panes_visible = true;
         }
         self.refresh_jobs_pane();
-        self.jobs_seen_version = version;
+        self.jobs_seen_version = jobs_version;
+        self.processes_seen_version = self.processes_version;
         self.jobs_last_refresh = std::time::Instant::now();
         true
     }
@@ -1904,14 +1919,13 @@ impl App {
         let has_running = jobs
             .iter()
             .any(|j| j.status == crate::ext::jobs::JobStatus::Running);
+        let active_ids: Vec<_> = jobs
+            .iter()
+            .filter(|job| !job.is_finished())
+            .map(|job| job.id.clone())
+            .collect();
+        crate::ui::selectable_pane::reconcile_selection(&mut self.selected_job_id, &active_ids);
         if has_running {
-            let active: Vec<_> = jobs.iter().filter(|j| !j.is_finished()).collect();
-            if !active
-                .iter()
-                .any(|j| Some(j.id.as_str()) == self.selected_job_id.as_deref())
-            {
-                self.selected_job_id = active.first().map(|j| j.id.clone());
-            }
             if let Some(page) =
                 crate::ui::jobs_pane::render_selected(&jobs, self.selected_job_id.as_deref())
             {
@@ -1927,8 +1941,16 @@ impl App {
                 self.active_page,
             );
         }
-        let processes = crate::processes::registry().list(None);
-        if let Some(page) = crate::ui::processes_pane::render(&processes) {
+        let active_ids: Vec<_> = self
+            .processes
+            .iter()
+            .filter(|process| process.running)
+            .map(|process| process.id.clone())
+            .collect();
+        crate::ui::selectable_pane::reconcile_selection(&mut self.selected_process_id, &active_ids);
+        if let Some(page) =
+            crate::ui::processes_pane::render(&self.processes, self.selected_process_id.as_deref())
+        {
             let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
             self.active_page = new_active;
             self.panes_visible = true;
@@ -2236,14 +2258,37 @@ impl App {
                 .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE)
     }
 
-    fn open_selected_job(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let Some(id) = self.selected_job_id.as_deref() else {
+    fn processes_pane_active(&self) -> bool {
+        self.panes_visible
+            && self
+                .pages
+                .get(self.active_page)
+                .is_some_and(|p| p.source == crate::ui::processes_pane::PANE_SOURCE)
+    }
+
+    fn open_process(&mut self, id: &str, term: &mut BoneTerminal) -> io::Result<()> {
+        let Some(process) = self
+            .processes
+            .iter()
+            .find(|process| process.id == id)
+            .cloned()
+        else {
             return Ok(());
         };
+        let result = crate::ui::process_view::run(
+            process,
+            self.command_tx.clone(),
+            self.events_rx.resubscribe(),
+        );
+        self.force_redraw(term)?;
+        result
+    }
+
+    fn open_job(&mut self, id: &str, term: &mut BoneTerminal) -> io::Result<()> {
         let Some(job) = crate::ext::jobs::registry()
             .all_jobs()
             .into_iter()
-            .find(|j| j.id == id)
+            .find(|job| job.id == id)
         else {
             return Ok(());
         };
@@ -2302,23 +2347,52 @@ impl App {
             return self.redraw(term);
         }
 
-        if self.agents_pane_active() {
-            match apply_agents_nav_key(code, modifiers, &mut self.selected_job_id, &self.input) {
-                AgentsKeyResult::Unhandled => {}
-                AgentsKeyResult::SelectionChanged => {
+        if self.processes_pane_active() {
+            let active_ids = active_process_ids(&self.processes);
+            match apply_nav_key(
+                code,
+                modifiers,
+                &active_ids,
+                &mut self.selected_process_id,
+                should_open_agent_log(&self.input),
+            ) {
+                SelectablePaneAction::Unhandled => {}
+                SelectablePaneAction::SelectionChanged => {
                     self.refresh_jobs_pane();
                     return self.redraw(term);
                 }
-                AgentsKeyResult::Cancelled(id) => {
+                SelectablePaneAction::Cancel(id) => {
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::CancelProcess { id });
+                    return self.redraw(term);
+                }
+                SelectablePaneAction::Open(id) => return self.open_process(&id, term),
+            }
+        }
+
+        if self.agents_pane_active() {
+            let active_ids = active_job_ids();
+            match apply_nav_key(
+                code,
+                modifiers,
+                &active_ids,
+                &mut self.selected_job_id,
+                should_open_agent_log(&self.input),
+            ) {
+                SelectablePaneAction::Unhandled => {}
+                SelectablePaneAction::SelectionChanged => {
+                    self.refresh_jobs_pane();
+                    return self.redraw(term);
+                }
+                SelectablePaneAction::Cancel(id) => {
                     let _ = self
                         .command_tx
                         .send(crate::runtime::RuntimeCommand::CancelJob { id });
                     self.refresh_jobs_pane();
                     return self.redraw(term);
                 }
-                AgentsKeyResult::OpenJob => {
-                    return self.open_selected_job(term);
-                }
+                SelectablePaneAction::Open(id) => return self.open_job(&id, term),
             }
         }
 

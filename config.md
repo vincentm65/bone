@@ -272,6 +272,9 @@ bone.settings.define("compact", {
 Rules:
 
 - Extension paths are always namespaced.
+- A settings page is associated with the command matching its namespace by default,
+  so disabling that command hides the page without deleting persisted values.
+- Set `command = "other_name"` only when the namespace and command name differ.
 - Extensions cannot redefine built-in paths.
 - Schema registration does not write defaults into YAML.
 - Defaults are resolved in memory.

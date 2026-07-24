@@ -1053,6 +1053,10 @@ bone.settings.define("my_extension", {
 })
 ```
 
+A settings page is associated with the command matching its namespace by default,
+so disabling `/my_extension` hides the page without deleting its values. Set
+`command = "other_name"` only when the page namespace and command name differ.
+
 Extension values are stored under the matching namespace in `extensions.yaml`.
 Registration does not write defaults, and values remain preserved while an
 extension is unavailable. Provider credentials may be plaintext or an exact

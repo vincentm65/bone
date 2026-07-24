@@ -305,6 +305,7 @@ fn extension_settings_define_resolve_and_validate() {
     let pages = registry.read().unwrap().pages();
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0].owner, "init.lua");
+    assert_eq!(pages[0].command.as_deref(), Some("example"));
     assert_eq!(
         settings.lock().unwrap().extension_value("example.limit"),
         None

@@ -20,6 +20,8 @@ pub struct SettingsPage {
     pub title: String,
     #[serde(default)]
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     pub fields: Vec<SettingsField>,
 }
 
@@ -59,6 +61,9 @@ impl SettingsRegistry {
 
     pub fn register(&mut self, mut page: SettingsPage) -> Result<(), String> {
         validate_name("namespace", &page.namespace)?;
+        if page.command.is_none() {
+            page.command = Some(page.namespace.clone());
+        }
         if matches!(
             page.namespace.as_str(),
             "general" | "ui" | "theme" | "keymaps"
@@ -234,6 +239,7 @@ mod tests {
             namespace: namespace.into(),
             title: namespace.into(),
             owner: "test.lua".into(),
+            command: None,
             fields,
         }
     }

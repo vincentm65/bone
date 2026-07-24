@@ -7,6 +7,7 @@ use super::{
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
+use crate::ui::selectable_pane::{SelectablePaneAction, apply_nav_key};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::VecDeque;
 
@@ -233,9 +234,9 @@ fn config_preset_override_preserves_explicit_lua_input_customization() {
 }
 
 #[test]
-fn finished_process_refreshes_visible_pane_for_removal() {
-    assert!(background_pane_needs_refresh(false, true, false));
-    assert!(!background_pane_needs_refresh(false, false, false));
+fn process_registry_changes_refresh_background_panes() {
+    assert!(background_pane_needs_refresh(true, false));
+    assert!(!background_pane_needs_refresh(false, false));
 }
 
 #[test]
@@ -249,6 +250,67 @@ fn agent_log_enter_submits_nonempty_input() {
     input.buffer = "queue this message".into();
 
     assert!(!should_open_agent_log(&input));
+}
+
+#[test]
+fn shared_background_navigation_selects_opens_and_cancels_by_id() {
+    for active_ids in [
+        vec!["agent-newest".into(), "agent-older".into()],
+        vec!["process-newest".into(), "process-older".into()],
+    ] {
+        let mut selected = active_ids.first().cloned();
+
+        assert_eq!(
+            apply_nav_key(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+                &active_ids,
+                &mut selected,
+                true,
+            ),
+            SelectablePaneAction::SelectionChanged
+        );
+        assert_eq!(selected.as_deref(), active_ids.get(1).map(String::as_str));
+        assert_eq!(
+            apply_nav_key(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                &active_ids,
+                &mut selected,
+                true,
+            ),
+            SelectablePaneAction::Open(active_ids[1].clone())
+        );
+        assert_eq!(
+            apply_nav_key(
+                KeyCode::Char('k'),
+                KeyModifiers::NONE,
+                &active_ids,
+                &mut selected,
+                true,
+            ),
+            SelectablePaneAction::Cancel(active_ids[1].clone())
+        );
+    }
+}
+
+#[test]
+fn background_enter_with_input_falls_through_to_submission() {
+    let active_ids = vec!["activity-1".into()];
+    let mut selected = Some("activity-1".into());
+    let mut input = InputState::default();
+    input.buffer = "typed message".into();
+
+    assert_eq!(
+        apply_nav_key(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            &active_ids,
+            &mut selected,
+            should_open_agent_log(&input),
+        ),
+        SelectablePaneAction::Unhandled
+    );
 }
 
 #[test]
@@ -545,7 +607,7 @@ fn idle_config_revision_change_requests_redraw_without_new_messages() {
 }
 
 #[test]
-fn rejected_config_change_restores_approval_and_requests_snapshot() {
+fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
     let _guard = crate::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -579,6 +641,39 @@ fn rejected_config_change_restores_approval_and_requests_snapshot() {
         command_rx.try_recv().unwrap(),
         crate::runtime::RuntimeCommand::GetConfig
     ));
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        crate::runtime::RuntimeCommand::GetProcesses
+    ));
+    app.recover_from_event_lag();
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        crate::runtime::RuntimeCommand::GetProcesses
+    ));
+    app.apply_idle_event(crate::runtime::RuntimeEvent::ProcessesSnapshot {
+        version: 9,
+        processes: vec![bone_protocol::ProcessSnapshot {
+            id: "process-remote".into(),
+            command: "remote build".into(),
+            owner: "conversation:7".into(),
+            running: true,
+            stdout: "building".into(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            error: None,
+        }],
+    });
+    assert_eq!(app.processes_version, 9);
+    assert_eq!(app.processes_seen_version, 9);
+    assert_eq!(app.processes[0].id, "process-remote");
+    assert_eq!(app.selected_process_id.as_deref(), Some("process-remote"));
+    assert!(
+        app.pages
+            .iter()
+            .any(|page| page.source == crate::ui::processes_pane::PANE_SOURCE)
+    );
+
     app.config_view = config_view();
     app.config_view.snapshot.as_mut().unwrap().values =
         serde_json::json!({ "general": { "approval": "safe" } });

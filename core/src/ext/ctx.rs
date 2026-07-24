@@ -545,6 +545,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         t.set("stdout", p.stdout)?;
         t.set("stderr", p.stderr)?;
         t.set("exit_code", p.exit_code.map(i64::from))?;
+        t.set("signal", p.signal.map(i64::from))?;
         t.set("error", p.error)?;
         Ok(Value::Table(t))
     })?;
@@ -2870,6 +2871,7 @@ fn dispatch_event(
         | RuntimeEvent::KeyRequest { .. }
         | RuntimeEvent::ApprovalRequest { .. }
         | RuntimeEvent::StateSnapshot { .. }
+        | RuntimeEvent::ProcessesSnapshot { .. }
         | RuntimeEvent::FrontendState { .. }
         | RuntimeEvent::ConfigSnapshot { .. }
         | RuntimeEvent::ConfigChanged { .. }

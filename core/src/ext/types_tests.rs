@@ -20,14 +20,62 @@ fn unloaded_manager_exposes_inert_defaults() {
 }
 
 #[test]
-fn command_enablement_uses_canonical_settings() {
-    let manager = ExtensionManager::unloaded();
-    let mut settings = crate::config::settings::Settings::defaults();
-    settings.inner.commands.disabled.push("history".into());
-    manager.replace_settings(settings);
+fn extension_settings_pages_follow_command_enablement() {
+    use super::super::settings_registry::{SettingsField, SettingsFieldType, SettingsPage};
+    use crate::config::settings::ExtensionValue;
 
-    assert!(!manager.command_enabled("history"));
-    assert!(manager.command_enabled("config"));
+    let manager = ExtensionManager::unloaded();
+    let page = |namespace: &str, command: Option<&str>| SettingsPage {
+        namespace: namespace.into(),
+        title: namespace.into(),
+        owner: "test.lua".into(),
+        command: command.map(str::to_string),
+        fields: vec![SettingsField {
+            key: "value".into(),
+            label: "Value".into(),
+            field_type: SettingsFieldType::String,
+            options: Vec::new(),
+            default: ExtensionValue::String("default".into()),
+            value: None,
+            integer: None,
+            min: None,
+            max: None,
+        }],
+    };
+    let registry = manager.settings_registry.clone();
+    let mut registry = registry.write().unwrap();
+    registry.register(page("example", None)).unwrap();
+    registry.register(page("renamed", Some("example"))).unwrap();
+    registry.register(page("standalone", None)).unwrap();
+    drop(registry);
+
+    let mut settings = crate::config::settings::Settings::defaults();
+    settings.inner.commands.disabled.push("example".into());
+    settings
+        .inner
+        .extensions
+        .entry("example".into())
+        .or_default()
+        .insert("value".into(), ExtensionValue::String("persisted".into()));
+    manager.replace_settings(settings.clone());
+
+    let namespaces = |pages: &[SettingsPage]| {
+        pages
+            .iter()
+            .map(|page| page.namespace.clone())
+            .collect::<Vec<_>>()
+    };
+    let pages = manager.extension_settings_pages();
+    assert_eq!(namespaces(&pages), ["standalone"]);
+
+    settings.inner.commands.disabled.clear();
+    manager.replace_settings(settings);
+    let pages = manager.extension_settings_pages();
+    assert_eq!(namespaces(&pages), ["example", "renamed", "standalone"]);
+    assert_eq!(
+        pages[0].fields[0].value,
+        Some(ExtensionValue::String("persisted".into()))
+    );
 }
 
 fn msg_table(lua: &Lua, role: &str, content: &str) -> mlua::Table {

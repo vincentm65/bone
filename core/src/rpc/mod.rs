@@ -677,6 +677,8 @@ struct DaemonCtx {
     forward_view_diffs: bool,
     /// Sole live configuration authority for this daemon runtime.
     config: crate::config::store::ConfigStore,
+    /// Last process registry version published for the attached conversation.
+    processes_seen: Option<(String, u64)>,
 }
 
 impl DaemonCtx {
@@ -766,6 +768,41 @@ impl DaemonCtx {
                 s.snapshot(self.llm.id(), self.llm.model())
             },
         });
+    }
+
+    fn publish_processes(&mut self, force: bool) {
+        let scope =
+            crate::processes::conversation_scope(self.session.lock().unwrap().conversation_id);
+        let registry = crate::processes::registry();
+        let version = registry.version();
+        if !force && self.processes_seen.as_ref() == Some(&(scope.clone(), version)) {
+            return;
+        }
+        let processes = registry
+            .list(Some(&scope))
+            .into_iter()
+            .map(|process| bone_protocol::ProcessSnapshot {
+                id: process.id,
+                command: process.command,
+                owner: process.owner,
+                running: process.running,
+                stdout: process.stdout,
+                stderr: process.stderr,
+                exit_code: process.exit_code,
+                signal: process.signal,
+                error: process.error,
+            })
+            .collect();
+        self.processes_seen = Some((scope, version));
+        self.hub
+            .publish(RuntimeEvent::ProcessesSnapshot { version, processes });
+    }
+
+    fn cancel_process(&mut self, id: &str) {
+        let scope =
+            crate::processes::conversation_scope(self.session.lock().unwrap().conversation_id);
+        crate::processes::registry().kill_scoped(&scope, id);
+        self.publish_processes(true);
     }
 
     /// Forward any pane/UI diffs the Lua VM has queued to remote frontends.
@@ -1071,12 +1108,17 @@ impl DaemonCtx {
                     let id = self.key_registry.register(req);
                     self.hub.publish(RuntimeEvent::KeyRequest { id });
                 }
-                _ = diff_timer.tick() => self.drain_diffs(),
+                _ = diff_timer.tick() => {
+                    self.publish_processes(false);
+                    self.drain_diffs();
+                }
                 cmd = commands.recv() => match cmd {
                     Some(RuntimeCommand::KeyReply { id, key }) => { self.key_registry.resolve(id, key); }
                     Some(cmd) if is_config_command(&cmd) => {
                         let _ = Box::pin(self.handle_idle_command(cmd, commands)).await;
                     }
+                    Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
+                    Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
                     Some(RuntimeCommand::Cancel) => {
                         // Ctrl+C cancels all work owned by this conversation,
                         // including background sub-agents and shell processes.
@@ -1755,6 +1797,14 @@ impl DaemonCtx {
                 self.cancel_job(&id);
                 Flow::Continue
             }
+            RuntimeCommand::GetProcesses => {
+                self.publish_processes(true);
+                Flow::Continue
+            }
+            RuntimeCommand::CancelProcess { id } => {
+                self.cancel_process(&id);
+                Flow::Continue
+            }
             // A cancel while idle has no turn to stop, but background work may
             // still be running — terminate it.
             RuntimeCommand::Cancel => {
@@ -1841,7 +1891,12 @@ impl DaemonCtx {
                     }
                     None => break, // turn drained
                 },
-                _ = diff_timer.tick(), if self.forward_view_diffs => self.drain_diffs(),
+                _ = diff_timer.tick() => {
+                    self.publish_processes(false);
+                    if self.forward_view_diffs {
+                        self.drain_diffs();
+                    }
+                },
                 cmd = commands.recv() => match cmd {
                     // A turn cancel also terminates the session's background
                     // sub-agents and managed shell processes: they were spawned
@@ -1854,6 +1909,8 @@ impl DaemonCtx {
                     Some(cmd @ (RuntimeCommand::ApprovalReply { .. }
                     | RuntimeCommand::KeyReply { .. })) => conn.send(cmd),
                     Some(RuntimeCommand::CancelJob { id }) => self.cancel_job(&id),
+                    Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
+                    Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
                     // Mid-turn Safe/Danger toggle: applies to the rest of the turn
                     // (the gate reads the shared atomic per call).
                     Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.persist_mode(&mode_str),
@@ -1970,6 +2027,7 @@ pub async fn run_daemon(
         reload_inbox,
         forward_view_diffs,
         config,
+        processes_seen: None,
     };
     ctx.publish_config();
 
@@ -2001,6 +2059,7 @@ pub async fn run_daemon(
                     None => break,
                 },
                 _ = inject_timer.tick() => {
+                    ctx.publish_processes(false);
                     match ctx.next_background_prompt() {
                         // Route through the same `SubmitPrompt` handling as a typed
                         // prompt (transcript push, DB persist, `message` hook), then

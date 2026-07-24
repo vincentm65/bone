@@ -38,6 +38,12 @@ const BUFFERED_OUTPUT_THEN_SLEEP: &str = "Write-Output 'first'; Start-Sleep -Mil
 const BUFFERED_OUTPUT_THEN_SLEEP: &str =
     "printf 'first\\n'; sleep 0.05; printf 'second\\n'; sleep 30";
 
+#[cfg(windows)]
+const LIVE_BACKGROUND_OUTPUT: &str =
+    "Write-Output 'live background output'; Start-Sleep -Seconds 2";
+#[cfg(not(windows))]
+const LIVE_BACKGROUND_OUTPUT: &str = "printf 'live background output\\n'; sleep 2";
+
 fn assert_output_contains_cwd(output: &str, cwd: &Path) {
     let expected = cwd.canonicalize().unwrap();
     assert!(
@@ -181,6 +187,85 @@ async fn shell_manages_its_background_processes() {
     })
     .await
     .expect("killed process should stop");
+}
+
+#[tokio::test]
+async fn background_output_is_visible_before_completion() {
+    let started = ShellTool
+        .execute(json!({ "command": LIVE_BACKGROUND_OUTPUT, "background": true }))
+        .await
+        .expect("background command should start");
+    let id = started
+        .strip_prefix("background process started: ")
+        .expect("result should contain a process id");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let snapshot = processes::registry().get(id).unwrap();
+            if snapshot.stdout.contains("live background output") {
+                assert!(snapshot.running, "output should arrive before completion");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("live output should become visible");
+
+    assert!(processes::registry().kill(id));
+}
+
+#[tokio::test]
+async fn finished_background_status_reports_exit_code() {
+    let started = ShellTool
+        .execute(json!({ "command": "exit 7", "background": true }))
+        .await
+        .expect("background command should start");
+    let id = started
+        .strip_prefix("background process started: ")
+        .expect("result should contain a process id");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while processes::registry().get(id).unwrap().running {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background command should finish");
+
+    let status = ShellTool
+        .execute(json!({ "action": "status", "id": id }))
+        .await
+        .expect("status should succeed");
+
+    assert!(status.contains("exit code: 7"), "{status}");
+    assert!(status.contains("signal: none"), "{status}");
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn signalled_background_status_reports_signal() {
+    let started = ShellTool
+        .execute(json!({ "command": "kill -TERM $$", "background": true }))
+        .await
+        .expect("background command should start");
+    let id = started
+        .strip_prefix("background process started: ")
+        .expect("result should contain a process id");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while processes::registry().get(id).unwrap().running {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background command should finish");
+
+    let status = ShellTool
+        .execute(json!({ "action": "status", "id": id }))
+        .await
+        .expect("status should succeed");
+
+    assert!(status.contains("exit code: none"), "{status}");
+    assert!(status.contains("signal: 15"), "{status}");
 }
 
 #[tokio::test]

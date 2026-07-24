@@ -351,6 +351,7 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::KeyRequest { .. }
         | crate::runtime::RuntimeEvent::ApprovalRequest { .. }
         | crate::runtime::RuntimeEvent::StateSnapshot { .. }
+        | crate::runtime::RuntimeEvent::ProcessesSnapshot { .. }
         | crate::runtime::RuntimeEvent::FrontendState { .. }
         | crate::runtime::RuntimeEvent::ConfigSnapshot { .. }
         | crate::runtime::RuntimeEvent::ConfigChanged { .. }

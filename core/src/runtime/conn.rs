@@ -152,6 +152,8 @@ impl RuntimeConn for LocalConn {
             // Daemon-level commands are not part of a single in-process turn.
             RuntimeCommand::RunCommand { .. }
             | RuntimeCommand::CancelJob { .. }
+            | RuntimeCommand::GetProcesses
+            | RuntimeCommand::CancelProcess { .. }
             | RuntimeCommand::NewConversation
             | RuntimeCommand::LoadConversation { .. }
             | RuntimeCommand::ClearConversation

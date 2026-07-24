@@ -257,6 +257,7 @@ async fn resetting_approval_updates_live_mode() {
         reload_inbox: None,
         forward_view_diffs: false,
         config,
+        processes_seen: None,
     };
 
     let _ = ctx
@@ -309,6 +310,7 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         reload_inbox: None,
         forward_view_diffs: false,
         config,
+        processes_seen: None,
     };
 
     let _ = ctx
@@ -986,4 +988,85 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
             runner.abort();
         })
         .await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn process_commands_are_conversation_scoped() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let conversation_id = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % i64::MAX as u128) as i64;
+    let scope = crate::processes::conversation_scope(Some(conversation_id));
+    let foreign_scope = crate::processes::conversation_scope(Some(conversation_id + 1));
+    let registry = crate::processes::registry();
+    let own_id = registry.spawn("sleep 30".into(), scope.clone(), 60_000, None);
+    let foreign_id = registry.spawn("sleep 30".into(), foreign_scope.clone(), 60_000, None);
+
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
+    let (hub, mut commands) = Hub::new();
+    let mut events = hub.subscribe();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.conversation_id = Some(conversation_id);
+    let mut ctx = DaemonCtx {
+        hub: hub.publisher(),
+        llm: Arc::new(ConfigTestProvider),
+        extensions,
+        session: Arc::new(Mutex::new(session)),
+        mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
+        approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
+        key_registry: crate::runtime::KeyReplyRegistry::new(),
+        reload_inbox: None,
+        forward_view_diffs: false,
+        config,
+        processes_seen: None,
+    };
+
+    ctx.handle_idle_command(RuntimeCommand::GetProcesses, &mut commands)
+        .await;
+    let RuntimeEvent::ProcessesSnapshot { processes, .. } = events.recv().await.unwrap() else {
+        panic!("expected process snapshot");
+    };
+    assert_eq!(processes.len(), 1);
+    assert_eq!(processes[0].id, own_id);
+    assert_eq!(processes[0].owner, scope);
+
+    ctx.handle_idle_command(
+        RuntimeCommand::CancelProcess {
+            id: foreign_id.clone(),
+        },
+        &mut commands,
+    )
+    .await;
+    assert!(registry.get(&foreign_id).unwrap().running);
+
+    ctx.handle_idle_command(
+        RuntimeCommand::CancelProcess { id: own_id.clone() },
+        &mut commands,
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while registry.get(&own_id).is_some_and(|process| process.running) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("scoped process was not cancelled");
+
+    registry.kill_scoped(&foreign_scope, &foreign_id);
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }

@@ -193,7 +193,10 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
 
 /// Run a script while observing each stdout/stderr chunk. The shared executor
 /// owns timeout, cancellation, process-tree cleanup, reaping, and final output.
-async fn run_script_stream<F>(request: ScriptRequest, mut emit: F) -> Result<ScriptOutput, String>
+pub(crate) async fn run_script_stream<F>(
+    request: ScriptRequest,
+    mut emit: F,
+) -> Result<ScriptOutput, String>
 where
     F: FnMut(bool, &[u8]) -> Result<(), String>,
 {

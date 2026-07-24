@@ -394,6 +394,12 @@ impl ExtensionManager {
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let mut pages = registry.pages();
+        let disabled = &settings.resolved().commands.disabled;
+        pages.retain(|page| {
+            page.command
+                .as_ref()
+                .is_none_or(|command| !disabled.contains(command))
+        });
         for page in &mut pages {
             for field in &mut page.fields {
                 let path = format!("{}.{}", page.namespace, field.key);

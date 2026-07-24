@@ -92,6 +92,11 @@ pub enum RuntimeEvent {
     StateSnapshot {
         snapshot: SessionSnapshot,
     },
+    /// Conversation-scoped snapshots of daemon-owned background processes.
+    ProcessesSnapshot {
+        version: u64,
+        processes: Vec<ProcessSnapshot>,
+    },
     /// Boot-time resolved display state (settings, renderer presets, banner, and
     /// command list) owned by the daemon, so a frontend can render the user's
     /// customizations without running Lua itself. Sent on connect and re-sent
@@ -165,6 +170,20 @@ pub enum RuntimeEvent {
     KeymapDispatched {
         kind: KeymapDispatchKind,
     },
+}
+
+/// Serializable daemon-owned background process state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessSnapshot {
+    pub id: String,
+    pub command: String,
+    pub owner: String,
+    pub running: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub error: Option<String>,
 }
 
 /// A frontend-coupled action an interactive command's Lua handler asked for.
@@ -253,6 +272,12 @@ pub enum RuntimeCommand {
     Cancel,
     /// Cancel one background sub-agent owned by this conversation.
     CancelJob {
+        id: String,
+    },
+    /// Request the current conversation's daemon-owned process snapshots.
+    GetProcesses,
+    /// Cancel one daemon-owned process in the current conversation.
+    CancelProcess {
         id: String,
     },
     RunCommand {
