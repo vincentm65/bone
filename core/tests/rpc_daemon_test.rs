@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bone_core::ext::{BootedTools, ExtensionManager};
 use bone_core::llm::provider::LlmProvider;
-use bone_core::llm::{ChatEvent, ChatMessage, LlmError, ResponseStream};
+use bone_core::llm::{ChatEvent, ChatMessage, ChatRole, LlmError, ResponseStream};
 use bone_core::rpc::codec::{MessageReader, write_message};
 use bone_core::rpc::{Hub, run_daemon, serve_connection};
 use bone_core::runtime::{RuntimeCommand, RuntimeEvent, RuntimeSession};
@@ -204,6 +204,73 @@ async fn busy_turn_services_config_commands() {
     })
     .await
     .expect("busy turn consumed GetConfig");
+
+    commands.send(RuntimeCommand::Cancel).unwrap();
+}
+
+#[tokio::test]
+async fn prompt_received_during_turn_is_queued_and_appended_after_completion() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(PendingProvider);
+    let (hub, commands_rx) = Hub::new();
+    let mut events = hub.subscribe();
+    let commands = hub.command_sender();
+    let session = Arc::new(Mutex::new(RuntimeSession::new(ToolHandler::new(
+        builtin_tools(),
+    ))));
+    tokio::spawn(run_daemon(
+        hub.publisher(),
+        commands_rx,
+        provider,
+        ExtensionManager::unloaded(),
+        bone_core::config::store::ConfigStore::new(ExtensionManager::unloaded()).unwrap(),
+        session.clone(),
+        ApprovalMode::Safe,
+        None,
+        false,
+    ));
+
+    commands
+        .send(RuntimeCommand::SubmitPrompt {
+            text: "first".into(),
+            images: vec![],
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(events.recv().await.unwrap(), RuntimeEvent::Started { .. }) {}
+    })
+    .await
+    .expect("first turn did not start");
+
+    commands
+        .send(RuntimeCommand::SubmitPrompt {
+            text: "second".into(),
+            images: vec![],
+        })
+        .unwrap();
+    commands.send(RuntimeCommand::Cancel).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut first_completed = false;
+        loop {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::TurnComplete => first_completed = true,
+                RuntimeEvent::Started { .. } if first_completed => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("queued prompt did not start after the first turn");
+
+    let user_messages = session
+        .lock()
+        .unwrap()
+        .transcript
+        .iter()
+        .filter(|message| message.role == ChatRole::User)
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, ["first", "second"]);
 
     commands.send(RuntimeCommand::Cancel).unwrap();
 }

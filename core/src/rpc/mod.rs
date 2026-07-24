@@ -1782,6 +1782,7 @@ impl DaemonCtx {
         text: String,
         mut display: Option<String>,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
+        pending_prompts: &mut std::collections::VecDeque<RuntimeCommand>,
     ) {
         use crate::runtime::{ChannelApprovalGate, LocalConn, RuntimeConn};
         use std::sync::atomic::AtomicBool;
@@ -1865,13 +1866,13 @@ impl DaemonCtx {
                     }) => {
                         self.set_extension_setting(&path, value, expected_revision, request_id)
                     }
-                    // A second submit mid-turn is dropped (the runtime is busy
-                    // running one turn at a time). Tell the client so it isn't
-                    // left waiting on a prompt that will never run, mirroring the
-                    // idle-path acknowledgement.
-                    Some(RuntimeCommand::SubmitPrompt { .. }) => self.hub.publish(RuntimeEvent::Status {
-                        message: "busy: a turn is in progress; prompt ignored".into(),
-                    }),
+                    // Preserve prompts received while a turn is active. They are
+                    // handled through the normal idle path after this turn, so
+                    // transcript insertion, persistence, hooks, and turn ordering
+                    // remain identical to an idle submission.
+                    Some(cmd @ RuntimeCommand::SubmitPrompt { .. }) => {
+                        pending_prompts.push_back(cmd)
+                    }
                     // Width updates and ordinary hooks are safe mid-turn. Ending
                     // the conversation must wait until no turn can still persist.
                     Some(RuntimeCommand::SetTerminalWidth { width }) => self.set_width(width),
@@ -1978,46 +1979,53 @@ pub async fn run_daemon(
     // Lua-submitted prompts (`bone.submit`) so injection is daemon-owned for
     // both the in-process TUI and remote clients.
     let mut inject_timer = tokio::time::interval(std::time::Duration::from_millis(200));
+    let mut pending_prompts = std::collections::VecDeque::new();
     loop {
         let mut turn_guard = None;
-        let flow = tokio::select! {
-            biased;
-            cmd = commands.recv() => match cmd {
-                Some(cmd) => {
-                    if matches!(
-                        &cmd,
-                        RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
-                    ) {
-                        turn_guard = Some(ctx.hub.begin_turn());
-                    }
-                    ctx.handle_idle_command(cmd, &mut commands).await
-                }
-                None => break,
-            },
-            _ = inject_timer.tick() => {
-                match ctx.next_background_prompt() {
-                    // Route through the same `SubmitPrompt` handling as a typed
-                    // prompt (transcript push, DB persist, `message` hook), then
-                    // attach the short display label for job-result injects.
-                    Some((text, display)) => {
-                        turn_guard = Some(ctx.hub.begin_turn());
-                        match ctx
-                            .handle_idle_command(
-                                RuntimeCommand::SubmitPrompt { text, images: vec![] },
-                                &mut commands,
-                            )
-                            .await
-                        {
-                            Flow::StartTurn { text, .. } => Flow::StartTurn { text, display },
-                            other => other,
+        let flow = if let Some(cmd) = pending_prompts.pop_front() {
+            turn_guard = Some(ctx.hub.begin_turn());
+            ctx.handle_idle_command(cmd, &mut commands).await
+        } else {
+            tokio::select! {
+                biased;
+                cmd = commands.recv() => match cmd {
+                    Some(cmd) => {
+                        if matches!(
+                            &cmd,
+                            RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
+                        ) {
+                            turn_guard = Some(ctx.hub.begin_turn());
                         }
+                        ctx.handle_idle_command(cmd, &mut commands).await
                     }
-                    None => Flow::Continue,
+                    None => break,
+                },
+                _ = inject_timer.tick() => {
+                    match ctx.next_background_prompt() {
+                        // Route through the same `SubmitPrompt` handling as a typed
+                        // prompt (transcript push, DB persist, `message` hook), then
+                        // attach the short display label for job-result injects.
+                        Some((text, display)) => {
+                            turn_guard = Some(ctx.hub.begin_turn());
+                            match ctx
+                                .handle_idle_command(
+                                    RuntimeCommand::SubmitPrompt { text, images: vec![] },
+                                    &mut commands,
+                                )
+                                .await
+                            {
+                                Flow::StartTurn { text, .. } => Flow::StartTurn { text, display },
+                                other => other,
+                            }
+                        }
+                        None => Flow::Continue,
+                    }
                 }
             }
         };
         if let Flow::StartTurn { text, display } = flow {
-            ctx.run_turn(text, display, &mut commands).await;
+            ctx.run_turn(text, display, &mut commands, &mut pending_prompts)
+                .await;
         }
         drop(turn_guard);
     }

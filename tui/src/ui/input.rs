@@ -152,11 +152,11 @@ impl InputState {
         !self.images.is_empty()
     }
 
-    pub fn take_images(&mut self) -> Vec<ImageData> {
-        std::mem::take(&mut self.images)
-            .into_iter()
+    pub fn images(&self) -> Vec<ImageData> {
+        self.images
+            .iter()
             .filter(|pending| self.buffer.contains(&pending.token))
-            .map(|pending| pending.image)
+            .map(|pending| pending.image.clone())
             .collect()
     }
 

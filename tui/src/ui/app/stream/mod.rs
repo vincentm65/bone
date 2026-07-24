@@ -262,7 +262,7 @@ impl App {
         // Keep the short placeholder in scrollback while sending full content.
         let display_text = (self.input.has_pastes() || self.input.has_images())
             .then(|| self.input.buffer.trim().to_string());
-        let images = self.input.take_images();
+        let images = self.input.images();
         self.submit_user_turn(text, display_text, images, term)
             .await
     }
@@ -282,8 +282,21 @@ impl App {
         images: Vec<crate::llm::ImageData>,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        // User message metadata only — daemon handles transcript/DB/dispatch.
+        // Refuse to clear the draft or show an optimistic local row if the
+        // daemon command channel is already closed. Keeping the input intact
+        // makes the failure recoverable instead of leaving a displayed but
+        // unsubmitted message and waiting forever for turn events.
         let image_count = images.len();
+        self.command_tx
+            .send(crate::runtime::RuntimeCommand::SubmitPrompt {
+                text: text.clone(),
+                images,
+            })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "runtime command channel closed")
+            })?;
+
+        // User message metadata only — daemon handles transcript/DB/dispatch.
         self.messages.push(Message::user_with_images(
             display_text.as_deref().unwrap_or(&text),
             image_count,
@@ -301,15 +314,6 @@ impl App {
         self.input.reset();
         self.flush_new_messages_to_scrollback(term)?;
         self.begin_streaming();
-
-        // Send the turn to the daemon (it handles message push, Driver, and persistence).
-        let _ = self
-            .command_tx
-            .send(crate::runtime::RuntimeCommand::SubmitPrompt {
-                text: text.clone(),
-                images,
-            });
-
         self.run_event_pump(term).await
     }
 
