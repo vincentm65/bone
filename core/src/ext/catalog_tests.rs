@@ -11,7 +11,9 @@ fn parses_index_with_defaults_and_metadata() {
           "repo_url": "https://example.com/repo", "docs_url": "https://example.com/docs",
           "min_bone_version": ">=2.4", "dependencies": ["helper.lua"],
           "permissions": ["network"], "long_description": "More detail.", "sha256": "abc" },
-        { "name": "goal.lua", "kind": "command" }
+        { "name": "goal.lua", "kind": "command", "files": [
+          { "path": "themes/nord.lua", "sha256": "def" }
+        ] }
     ]"#;
     let entries = parse_index(json).expect("valid index");
     assert_eq!(entries.len(), 2);
@@ -32,6 +34,7 @@ fn parses_index_with_defaults_and_metadata() {
     assert_eq!(entries[0].dependencies, ["helper.lua"]);
     assert_eq!(entries[0].permissions, ["network"]);
     assert_eq!(entries[0].long_description.as_deref(), Some("More detail."));
+    assert!(entries[0].files.is_empty());
     assert_eq!(entries[0].dir_segment(), "tools");
     // Missing optional metadata and sha256 use empty defaults.
     assert!(entries[1].sha256.is_empty());
@@ -39,6 +42,9 @@ fn parses_index_with_defaults_and_metadata() {
     assert!(entries[1].dependencies.is_empty());
     assert_eq!(entries[1].dir_segment(), "commands");
     assert!(entries[1].is_command());
+    assert_eq!(entries[1].files.len(), 1);
+    assert_eq!(entries[1].files[0].path, "themes/nord.lua");
+    assert_eq!(entries[1].files[0].sha256, "def");
 }
 
 #[test]
@@ -74,6 +80,45 @@ fn malformed_entries_are_filtered_from_the_index() {
     let entries = parse_index(json).expect("valid JSON index");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "good.lua");
+}
+
+#[test]
+fn bundled_paths_are_validated_and_unique() {
+    let valid = CatalogEntry {
+        name: "themes.lua".into(),
+        kind: "command".into(),
+        files: vec![
+            CatalogFile {
+                path: "themes/nord.lua".into(),
+                sha256: "abc".into(),
+            },
+            CatalogFile {
+                path: "tools/helper.lua".into(),
+                sha256: String::new(),
+            },
+        ],
+        ..CatalogEntry::default()
+    };
+    assert!(valid.validate().is_ok());
+
+    for paths in [
+        vec!["nord.lua"],
+        vec!["unknown/nord.lua"],
+        vec!["themes/../nord.lua"],
+        vec!["themes/nord.txt"],
+        vec!["commands/themes.lua"],
+        vec!["themes/nord.lua", "themes/nord.lua"],
+    ] {
+        let mut entry = valid.clone();
+        entry.files = paths
+            .into_iter()
+            .map(|path| CatalogFile {
+                path: path.into(),
+                sha256: String::new(),
+            })
+            .collect();
+        assert!(entry.validate().is_err(), "accepted {:?}", entry.files);
+    }
 }
 
 #[test]

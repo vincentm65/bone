@@ -2,9 +2,9 @@
 //!
 //! Optional tools and commands live in a separate `bone-catalog` repo served as
 //! raw content (not embedded in the binary). This module fetches the catalog
-//! index and downloads individual items on demand. Installed items are written
-//! into `~/.bone-rust/lua/{tools,commands}/` — once on disk the normal loader
-//! runs them like any user file. Updates are detected by comparing the on-disk
+//! index and downloads individual items on demand. Installed items and their
+//! bundled files are written beneath `~/.bone-rust/lua/` — once on disk the
+//! normal loader runs them like any user file. Updates are detected by comparing
 //! file's sha256 against the catalog's, and surfaced to the user (`/catalog`
 //! tag + startup hint); they're applied only when the user asks. Index entries
 //! may also publish optional version, authorship, links, compatibility,
@@ -24,6 +24,16 @@ const DEFAULT_URL: &str = "https://raw.githubusercontent.com/vincentm65/bone-cat
 
 /// How often the background refresh actually hits the network.
 const REFRESH_THROTTLE: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// One additional file installed and removed with its parent catalog item.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CatalogFile {
+    /// Path relative to both the catalog root and `~/.bone-rust/lua/`, e.g.
+    /// `"themes/nord.lua"`.
+    pub path: String,
+    #[serde(default)]
+    pub sha256: String,
+}
 
 /// One catalog entry, as listed in `catalog.json`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -58,6 +68,9 @@ pub struct CatalogEntry {
     pub min_bone_version: Option<String>,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Additional files installed and removed with this visible catalog item.
+    #[serde(default)]
+    pub files: Vec<CatalogFile>,
     #[serde(default)]
     pub permissions: Vec<String>,
     #[serde(default)]
@@ -86,6 +99,24 @@ impl CatalogEntry {
         }
         if !matches!(self.kind.as_str(), "tool" | "command") {
             return Err(format!("invalid catalog kind '{}'", self.kind));
+        }
+        let primary_path = format!("{}/{}", self.dir_segment(), self.name);
+        let mut paths = std::collections::HashSet::new();
+        for file in &self.files {
+            let Some((dir, name)) = file.path.split_once('/') else {
+                return Err(format!(
+                    "invalid bundled catalog path '{}': expected <kind>/<name>.lua",
+                    file.path
+                ));
+            };
+            if !matches!(dir, "tools" | "commands" | "themes")
+                || !super::is_safe_leaf_name(name)
+                || !name.ends_with(".lua")
+                || file.path == primary_path
+                || !paths.insert(file.path.as_str())
+            {
+                return Err(format!("invalid bundled catalog path '{}'", file.path));
+            }
         }
         Ok(())
     }
@@ -208,9 +239,15 @@ fn cached_index() -> Vec<CatalogEntry> {
 
 // ---- install state & update detection -----------------------------------
 
-/// True if the item's file is present on disk.
+fn bundled_path(file: &CatalogFile) -> PathBuf {
+    crate::config::bone_dir().join("lua").join(&file.path)
+}
+
+/// True if the item's primary file and all bundled files are present on disk.
 pub fn is_installed(entry: &CatalogEntry) -> bool {
-    entry.validate().is_ok() && lua_dir(entry).join(&entry.name).exists()
+    entry.validate().is_ok()
+        && lua_dir(entry).join(&entry.name).exists()
+        && entry.files.iter().all(|file| bundled_path(file).exists())
 }
 
 /// Installed catalog commands that are not bundled defaults.
@@ -239,26 +276,34 @@ fn bundled_sha256(entry: &CatalogEntry) -> Option<String> {
         .map(|(_, content)| sha256_hex(content.as_bytes()))
 }
 
-/// True if the on-disk copy differs from the catalog's current content.
-///
-/// Detection is purely content-based: the catalog publishes the sha256 of each
-/// file, and we hash whatever is installed. An empty `sha256` (no hash
-/// published) disables detection and returns `false`, so the feature stays dark
-/// until the catalog ships hashes — never a false positive.
-pub fn needs_update(entry: &CatalogEntry) -> bool {
-    if entry.validate().is_err() || entry.sha256.is_empty() {
+fn file_needs_update(path: &Path, expected: &str, bundled: Option<&str>) -> bool {
+    if expected.is_empty() {
         return false;
     }
-    let path = lua_dir(entry).join(&entry.name);
-    match std::fs::read(&path) {
+    match std::fs::read(path) {
         Ok(bytes) => {
             let installed = sha256_hex(&bytes);
-            !installed.eq_ignore_ascii_case(&entry.sha256)
-                && bundled_sha256(entry)
-                    .is_none_or(|bundled| !installed.eq_ignore_ascii_case(&bundled))
+            !installed.eq_ignore_ascii_case(expected)
+                && bundled.is_none_or(|hash| !installed.eq_ignore_ascii_case(hash))
         }
         Err(_) => false,
     }
+}
+
+/// True if any installed file differs from the catalog's current content.
+pub fn needs_update(entry: &CatalogEntry) -> bool {
+    if entry.validate().is_err() {
+        return false;
+    }
+    let bundled = bundled_sha256(entry);
+    file_needs_update(
+        &lua_dir(entry).join(&entry.name),
+        &entry.sha256,
+        bundled.as_deref(),
+    ) || entry
+        .files
+        .iter()
+        .any(|file| file_needs_update(&bundled_path(file), &file.sha256, None))
 }
 
 /// Number of installed items with a newer version available, read from the
@@ -282,42 +327,64 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Download and install a catalog item into `~/.bone-rust/lua/{tools,commands}/`.
-/// Verifies the sha256 when the entry declares one. Returns an error string on
-/// failure (caller decides whether to surface it).
+/// Download and install a catalog item and any files bundled with it beneath
+/// `~/.bone-rust/lua/`.
+/// Verifies declared sha256 values before writing anything.
 pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
-    let rel = format!("{}/{}", entry.dir_segment(), entry.name);
-    let bytes = fetch(&base_url(), &rel)
-        .ok_or_else(|| format!("could not download {} from catalog", entry.name))?;
+    let primary_rel = format!("{}/{}", entry.dir_segment(), entry.name);
+    let mut downloads = Vec::with_capacity(entry.files.len() + 1);
+    downloads.push((
+        primary_rel.clone(),
+        lua_dir(entry).join(&entry.name),
+        entry.sha256.as_str(),
+    ));
+    downloads.extend(
+        entry
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), bundled_path(file), file.sha256.as_str())),
+    );
 
-    if !entry.sha256.is_empty() {
-        let got = sha256_hex(&bytes);
-        if !got.eq_ignore_ascii_case(&entry.sha256) {
-            return Err(format!(
-                "checksum mismatch for {} (expected {}, got {got})",
-                entry.name, entry.sha256
-            ));
+    let downloads = downloads
+        .into_iter()
+        .map(|(rel, path, expected)| {
+            let bytes = fetch(&base_url(), &rel)
+                .ok_or_else(|| format!("could not download {rel} from catalog"))?;
+            if !expected.is_empty() {
+                let got = sha256_hex(&bytes);
+                if !got.eq_ignore_ascii_case(expected) {
+                    return Err(format!(
+                        "checksum mismatch for {rel} (expected {expected}, got {got})"
+                    ));
+                }
+            }
+            Ok((path, bytes))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for (path, bytes) in downloads {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         }
+        let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
+        crate::tools::write_atomic::write_atomic_sync(&path, &bytes, permissions)
+            .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     }
-
-    let dir = lua_dir(entry);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let path = dir.join(&entry.name);
-    let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
-    crate::tools::write_atomic::write_atomic_sync(&path, &bytes, permissions)
-        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     Ok(())
 }
 
-/// Remove an installed catalog item (delete the file, forget its version).
+/// Remove an installed catalog item and every file bundled with it.
 pub fn remove(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
-    let path = lua_dir(entry).join(&entry.name);
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
+    let mut paths = vec![lua_dir(entry).join(&entry.name)];
+    paths.extend(entry.files.iter().map(bundled_path));
+    for path in paths {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
+        }
     }
     Ok(())
 }

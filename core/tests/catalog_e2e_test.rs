@@ -25,14 +25,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Write the fixture's `demo.lua` plus an index whose sha256 matches it, and
-/// return the matching `CatalogEntry`.
-fn publish(fixture: &Path, body: &str) -> CatalogEntry {
-    fs::write(fixture.join("tools").join("demo.lua"), body).unwrap();
+/// Write the fixture's primary and bundled files plus a matching index.
+fn publish(fixture: &Path, body: &str, theme_body: &str) -> CatalogEntry {
+    fs::write(fixture.join("tools/demo.lua"), body).unwrap();
+    fs::write(fixture.join("themes/nord.lua"), theme_body).unwrap();
     let sha = sha256_hex(body.as_bytes());
+    let theme_sha = sha256_hex(theme_body.as_bytes());
     let json = format!(
         r#"[{{ "name": "demo.lua", "kind": "tool", "description": "demo",
-              "sha256": "{sha}" }}]"#
+              "sha256": "{sha}", "files": [
+                {{ "path": "themes/nord.lua", "sha256": "{theme_sha}" }}
+              ] }}]"#
     );
     fs::write(fixture.join("catalog.json"), json).unwrap();
     catalog::fetch_index().into_iter().next().unwrap()
@@ -43,6 +46,7 @@ fn catalog_fetch_install_update_remove() {
     let fixture = common::temp_dir("catalog-fixture");
     let cfg = common::temp_dir("catalog-cfg");
     fs::create_dir_all(fixture.join("tools")).unwrap();
+    fs::create_dir_all(fixture.join("themes")).unwrap();
 
     // SAFETY: single-test file; no other threads read these vars concurrently.
     unsafe {
@@ -50,19 +54,37 @@ fn catalog_fetch_install_update_remove() {
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
     }
     let installed_path = cfg.join("bone-rust").join("lua/tools/demo.lua");
+    let installed_theme_path = cfg.join("bone-rust").join("lua/themes/nord.lua");
 
-    // Publish v1 and install it.
-    let entry = publish(&fixture, "-- demo v1\n");
+    // Publish v1 and install the primary and bundled theme.
+    let entry = publish(
+        &fixture,
+        "-- demo v1\n",
+        "return { palette = { bg = '#000000' } }\n",
+    );
     assert!(!catalog::is_installed(&entry));
     catalog::install(&entry).unwrap();
     assert_eq!(fs::read_to_string(&installed_path).unwrap(), "-- demo v1\n");
+    assert_eq!(
+        fs::read_to_string(&installed_theme_path).unwrap(),
+        "return { palette = { bg = '#000000' } }\n"
+    );
     assert!(catalog::is_installed(&entry));
-    // Fresh install matches the published content: no update pending.
     assert!(!catalog::needs_update(&entry));
     assert_eq!(catalog::updates_available(), 0);
 
-    // Publish new content (a "git" change). The on-disk copy now differs.
-    let entry = publish(&fixture, "-- demo v2\n");
+    // Every bundled file is required for the item to count as installed.
+    fs::remove_file(&installed_theme_path).unwrap();
+    assert!(!catalog::is_installed(&entry));
+    catalog::install(&entry).unwrap();
+    assert!(catalog::is_installed(&entry));
+
+    // Publishing changed bundled content flags the parent item for update.
+    let entry = publish(
+        &fixture,
+        "-- demo v1\n",
+        "return { palette = { bg = '#111111' } }\n",
+    );
     assert!(
         catalog::needs_update(&entry),
         "changed content flags update"
@@ -76,11 +98,20 @@ fn catalog_fetch_install_update_remove() {
         "-- demo v1\n",
         "refresh must not pull updates without user action"
     );
+    assert_eq!(
+        fs::read_to_string(&installed_theme_path).unwrap(),
+        "return { palette = { bg = '#000000' } }\n",
+        "refresh must not pull bundled updates without user action"
+    );
     assert_eq!(catalog::updates_available(), 1);
 
     // The user applies the update via install(); the flag clears.
     catalog::install(&entry).unwrap();
-    assert_eq!(fs::read_to_string(&installed_path).unwrap(), "-- demo v2\n");
+    assert_eq!(fs::read_to_string(&installed_path).unwrap(), "-- demo v1\n");
+    assert_eq!(
+        fs::read_to_string(&installed_theme_path).unwrap(),
+        "return { palette = { bg = '#111111' } }\n"
+    );
     assert!(!catalog::needs_update(&entry));
     assert_eq!(catalog::updates_available(), 0);
 
@@ -102,9 +133,10 @@ fn catalog_fetch_install_update_remove() {
     };
     assert!(catalog::install(&bad).is_err(), "bad sha256 should fail");
 
-    // Remove it.
+    // Remove the item and its bundle.
     catalog::remove(&entry).unwrap();
     assert!(!installed_path.exists());
+    assert!(!installed_theme_path.exists());
 
     fs::remove_dir_all(&fixture).ok();
     fs::remove_dir_all(&cfg).ok();
