@@ -7,6 +7,7 @@ mod migration;
 pub mod providers_config;
 pub mod settings;
 pub mod store;
+pub mod theme;
 
 use std::fs;
 use std::path::{Path, PathBuf};

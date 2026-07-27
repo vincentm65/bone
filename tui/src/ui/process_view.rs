@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -16,9 +16,10 @@ pub fn run(
     process: bone_protocol::ProcessSnapshot,
     command_tx: tokio::sync::mpsc::UnboundedSender<bone_protocol::RuntimeCommand>,
     events_rx: tokio::sync::broadcast::Receiver<bone_protocol::RuntimeEvent>,
+    theme: &crate::ui::theme::Theme,
 ) -> io::Result<()> {
     let _ = command_tx.send(bone_protocol::RuntimeCommand::GetProcesses);
-    fullscreen::run(|term| run_loop(term, process, &command_tx, events_rx))
+    fullscreen::run(|term| run_loop(term, process, &command_tx, events_rx, theme))
 }
 
 fn run_loop(
@@ -26,6 +27,7 @@ fn run_loop(
     mut process: bone_protocol::ProcessSnapshot,
     command_tx: &tokio::sync::mpsc::UnboundedSender<bone_protocol::RuntimeCommand>,
     mut events_rx: tokio::sync::broadcast::Receiver<bone_protocol::RuntimeEvent>,
+    theme: &crate::ui::theme::Theme,
 ) -> io::Result<()> {
     let mut scroll = 0;
     let mut follow = true;
@@ -51,7 +53,7 @@ fn run_loop(
             }
         }
         let size = term.size()?;
-        let lines = process_lines(&process, size.width as usize);
+        let lines = process_lines(&process, size.width as usize, theme);
         let height = size.height.saturating_sub(1) as usize;
         let max_scroll = lines.len().saturating_sub(height);
         if follow {
@@ -59,7 +61,7 @@ fn run_loop(
         } else {
             scroll = scroll.min(max_scroll);
         }
-        draw(term, &lines, scroll, process.running, follow)?;
+        draw(term, &lines, scroll, process.running, follow, theme)?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -106,20 +108,24 @@ fn run_loop(
     Ok(())
 }
 
-fn process_lines(process: &bone_protocol::ProcessSnapshot, width: usize) -> Vec<Line<'static>> {
+fn process_lines(
+    process: &bone_protocol::ProcessSnapshot,
+    width: usize,
+    theme: &crate::ui::theme::Theme,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
-        Span::styled("$ ", Style::default().fg(Color::DarkGray)),
+        Span::styled("$ ", Style::default().fg(theme.shell_separator)),
         Span::styled(
             process.command.clone(),
             Style::default()
-                .fg(Color::White)
+                .fg(theme.shell_program)
                 .add_modifier(Modifier::BOLD),
         ),
     ])];
-    append_output(&mut lines, &process.stdout, width, Color::Gray);
-    append_output(&mut lines, &process.stderr, width, Color::Red);
+    append_output(&mut lines, &process.stdout, width, theme.palette.fg);
+    append_output(&mut lines, &process.stderr, width, theme.tool_error);
     if let Some(error) = &process.error {
-        append_output(&mut lines, error, width, Color::Red);
+        append_output(&mut lines, error, width, theme.tool_error);
     }
     if !process.running {
         if let Some(code) = process.exit_code {
@@ -127,7 +133,7 @@ fn process_lines(process: &bone_protocol::ProcessSnapshot, width: usize) -> Vec<
                 &mut lines,
                 &format!("exit code: {code}"),
                 width,
-                Color::DarkGray,
+                theme.palette.muted,
             );
         }
         if let Some(signal) = process.signal {
@@ -135,17 +141,22 @@ fn process_lines(process: &bone_protocol::ProcessSnapshot, width: usize) -> Vec<
                 &mut lines,
                 &format!("signal: {signal}"),
                 width,
-                Color::DarkGray,
+                theme.palette.muted,
             );
         }
         if process.exit_code.is_none() && process.signal.is_none() && process.error.is_none() {
-            append_output(&mut lines, "finished", width, Color::DarkGray);
+            append_output(&mut lines, "finished", width, theme.palette.muted);
         }
     }
     lines
 }
 
-fn append_output(lines: &mut Vec<Line<'static>>, output: &str, width: usize, color: Color) {
+fn append_output(
+    lines: &mut Vec<Line<'static>>,
+    output: &str,
+    width: usize,
+    color: ratatui::style::Color,
+) {
     for logical in output.lines() {
         for visual in wrap_text(logical, width) {
             lines.push(Line::from(Span::styled(visual, Style::default().fg(color))));
@@ -159,8 +170,17 @@ fn draw(
     scroll: usize,
     running: bool,
     follow: bool,
+    theme: &crate::ui::theme::Theme,
 ) -> io::Result<()> {
     term.draw(|frame| {
+        let mut surface = Style::default().fg(theme.palette.fg);
+        if let Some(bg) = theme.palette.bg {
+            surface = surface.bg(bg);
+        }
+        frame.render_widget(
+            ratatui::widgets::Block::default().style(surface),
+            frame.area(),
+        );
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -179,7 +199,7 @@ fn draw(
                 format!(
                     "{state}{follow} · ↑/↓ PgUp/PgDn Home/End scroll · Ctrl+C cancel · q/Esc/Ctrl+O close"
                 ),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.palette.muted),
             ))),
             chunks[1],
         );
@@ -204,11 +224,14 @@ mod tests {
             signal: None,
             error: None,
         };
-        let lines = process_lines(&process, 80);
+        let mut theme = crate::ui::theme::Theme::default();
+        theme.palette.fg = ratatui::style::Color::Rgb(1, 2, 3);
+        theme.tool_error = ratatui::style::Color::Rgb(4, 5, 6);
+        let lines = process_lines(&process, 80, &theme);
 
         assert_eq!(lines[1].style.fg, None);
-        assert_eq!(lines[1].spans[0].style.fg, Some(Color::Gray));
-        assert_eq!(lines[2].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.palette.fg));
+        assert_eq!(lines[2].spans[0].style.fg, Some(theme.tool_error));
     }
 
     #[test]
@@ -224,10 +247,11 @@ mod tests {
             signal: Some(15),
             error: None,
         };
-        let lines = process_lines(&process, 80);
+        let theme = crate::ui::theme::Theme::default();
+        let lines = process_lines(&process, 80, &theme);
 
         assert_eq!(lines[1].to_string(), "exit code: 143");
         assert_eq!(lines[2].to_string(), "signal: 15");
-        assert_eq!(lines[1].spans[0].style.fg, Some(Color::DarkGray));
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.palette.muted));
     }
 }

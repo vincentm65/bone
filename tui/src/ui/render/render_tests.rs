@@ -4,6 +4,25 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 #[test]
+fn terminal_background_writes_exact_osc_sequences() {
+    let mut output = Vec::new();
+    assert!(write_terminal_background(&mut output, Some(Color::Rgb(1, 2, 3))).unwrap());
+    assert_eq!(output, b"\x1b]11;rgb:01/02/03\x1b\\");
+
+    output.clear();
+    assert!(write_terminal_background(&mut output, Some(Color::Blue)).unwrap());
+    assert_eq!(output, b"\x1b]11;rgb:24/72/c8\x1b\\");
+
+    output.clear();
+    assert!(!write_terminal_background(&mut output, None).unwrap());
+    assert!(!write_terminal_background(&mut output, Some(Color::Indexed(1))).unwrap());
+    assert!(output.is_empty());
+
+    write_terminal_background_reset(&mut output).unwrap();
+    assert_eq!(output, b"\x1b]111\x1b\\");
+}
+
+#[test]
 fn max_viewport_height_reserves_a_row_when_possible() {
     assert_eq!(max_viewport_height(0), 1);
     assert_eq!(max_viewport_height(1), 1);
@@ -72,14 +91,6 @@ fn consecutive_scrollback_separators_are_deduplicated() {
     let content = [Line::raw("next")];
     assert_eq!(renderer.dedup_scrollback_blanks(&content).len(), 1);
     assert_eq!(renderer.dedup_scrollback_blanks(&blank).len(), 1);
-}
-
-#[test]
-fn terminal_color_rgb_maps_truecolor_and_named_colors() {
-    assert_eq!(terminal_color_rgb(Color::Rgb(1, 2, 3)), (1, 2, 3));
-    assert_eq!(terminal_color_rgb(Color::Black), (0, 0, 0));
-    assert_eq!(terminal_color_rgb(Color::White), (255, 255, 255));
-    assert_eq!(terminal_color_rgb(Color::LightBlue), (0x3B, 0x8E, 0xEA));
 }
 
 /// Reproduces the panic shape from counting wrap height at a wider width than

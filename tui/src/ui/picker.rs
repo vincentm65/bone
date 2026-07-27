@@ -8,14 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-pub const BG: Color = Color::Indexed(16);
-pub const TEXT: Color = Color::Indexed(252);
-pub const MUTED: Color = Color::Indexed(244);
-pub const DIM: Color = Color::Indexed(239);
-pub const BORDER: Color = Color::Indexed(238);
-pub const ACCENT: Color = Color::Cyan;
-pub const GOOD: Color = Color::Indexed(71);
-pub const BAD: Color = Color::Indexed(167);
+use crate::ui::theme::Theme;
 
 /// One toggleable row in a checklist.
 pub struct Item {
@@ -30,8 +23,8 @@ pub struct Item {
     /// Optional status tag shown at the end of the row (e.g. "update"). Rendered
     /// in `tag_color`; `None` to hide.
     pub tag: Option<String>,
-    /// Color for `tag`. Defaults to the accent color.
-    pub tag_color: Color,
+    /// Explicit color for `tag`; `None` uses the active theme accent.
+    pub tag_color: Option<Color>,
     /// Optional section heading rendered immediately before this row.
     pub section: Option<String>,
     /// Label/value metadata rendered in the detail pane.
@@ -49,7 +42,7 @@ impl Item {
             user_touched: false,
             category: "",
             tag: None,
-            tag_color: ACCENT,
+            tag_color: None,
             section: None,
             details: Vec::new(),
             long_desc: None,
@@ -85,46 +78,44 @@ pub fn draw_list(
     hint: &str,
     items: &[Item],
     cursor: usize,
+    theme: &Theme,
 ) {
+    let p = &theme.palette;
     let area = pad(area);
-
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // title
-            Constraint::Length(1), // hint
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),    // columns
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
         ])
         .split(area);
-
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            title.to_string(),
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            title,
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         ))),
         rows[0],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hint.to_string(),
-            Style::default().fg(DIM),
+            hint,
+            Style::default().fg(p.subtle),
         ))),
         rows[1],
     );
-
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
         .split(rows[3]);
-
     let mut all_lines = Vec::with_capacity(items.len() * 2);
     let mut selected_row = 0;
     for (i, item) in items.iter().enumerate() {
         if let Some(section) = &item.section {
             all_lines.push(Line::from(Span::styled(
                 section.clone(),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
             )));
         }
         if i == cursor {
@@ -133,20 +124,19 @@ pub fn draw_list(
         let selected = i == cursor;
         let cursor_span = Span::styled(
             if selected { " ▸ " } else { "   " },
-            Style::default().fg(if selected { ACCENT } else { DIM }),
+            Style::default().fg(if selected { p.accent } else { p.subtle }),
         );
-        let check = if item.checked { "[x] " } else { "[ ] " };
         let check_span = Span::styled(
-            check,
-            Style::default().fg(if item.checked { GOOD } else { DIM }),
+            if item.checked { "[x] " } else { "[ ] " },
+            Style::default().fg(if item.checked { p.good } else { p.subtle }),
         );
         let name = item.name.strip_suffix(".lua").unwrap_or(&item.name);
         let name_style = if selected {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
         } else if item.checked {
-            Style::default().fg(TEXT)
+            Style::default().fg(p.fg)
         } else {
-            Style::default().fg(MUTED)
+            Style::default().fg(p.muted)
         };
         let mut spans = vec![
             cursor_span,
@@ -156,14 +146,14 @@ pub fn draw_list(
         if !item.category.is_empty() {
             spans.push(Span::styled(
                 format!("  ·{}", item.category),
-                Style::default().fg(DIM),
+                Style::default().fg(p.subtle),
             ));
         }
         if let Some(tag) = &item.tag {
             spans.push(Span::styled(
                 format!("  {tag}"),
                 Style::default()
-                    .fg(item.tag_color)
+                    .fg(item.tag_color.unwrap_or(p.accent))
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -179,26 +169,24 @@ pub fn draw_list(
     };
     let end = (start + height).min(all_lines.len());
     frame.render_widget(Paragraph::new(all_lines[start..end].to_vec()), cols[0]);
-
-    let detail = cols[1];
     let detail_lines = if let Some(item) = items.get(cursor) {
         let name = item.name.strip_suffix(".lua").unwrap_or(&item.name);
         let mut lines = vec![
             Line::from(Span::styled(
                 name.to_string(),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
         ];
         if item.desc.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No description.",
-                Style::default().fg(DIM),
+                Style::default().fg(p.subtle),
             )));
         } else {
             lines.push(Line::from(Span::styled(
                 item.desc.clone(),
-                Style::default().fg(MUTED),
+                Style::default().fg(p.muted),
             )));
         }
         if !item.details.is_empty() {
@@ -207,9 +195,9 @@ pub fn draw_list(
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("{label}: "),
-                        Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+                        Style::default().fg(p.subtle).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(value.clone(), Style::default().fg(TEXT)),
+                    Span::styled(value.clone(), Style::default().fg(p.fg)),
                 ]));
             }
         }
@@ -217,7 +205,7 @@ pub fn draw_list(
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 long_desc.clone(),
-                Style::default().fg(MUTED),
+                Style::default().fg(p.muted),
             )));
         }
         lines
@@ -230,29 +218,30 @@ pub fn draw_list(
             .block(
                 Block::default()
                     .borders(Borders::LEFT)
-                    .border_style(Style::default().fg(BORDER))
+                    .border_style(Style::default().fg(p.border))
                     .padding(ratatui::widgets::Padding::horizontal(2)),
             ),
-        detail,
+        cols[1],
     );
 }
 
 /// Render a one-line key-bindings footer under a top border. Each `(key, label)`
 /// pair is shown as a highlighted key token followed by its label. Shared by the
 /// onboarding wizard and `/catalog` so both screens share an identical footer.
-pub fn draw_footer(frame: &mut ratatui::Frame, area: Rect, keys: &[(&str, &str)]) {
+pub fn draw_footer(frame: &mut ratatui::Frame, area: Rect, keys: &[(&str, &str)], theme: &Theme) {
+    let p = &theme.palette;
     let mut spans: Vec<Span> = Vec::new();
     for (k, label) in keys {
         spans.push(Span::styled(
             format!(" {k} "),
             Style::default()
-                .fg(BG)
-                .bg(MUTED)
+                .fg(p.bg.unwrap_or(p.fg))
+                .bg(p.muted)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!(" {label}   "),
-            Style::default().fg(DIM),
+            Style::default().fg(p.subtle),
         ));
     }
     frame.render_widget(
@@ -261,8 +250,67 @@ pub fn draw_footer(frame: &mut ratatui::Frame, area: Rect, keys: &[(&str, &str)]
             .block(
                 Block::default()
                     .borders(Borders::TOP)
-                    .border_style(Style::default().fg(BORDER)),
+                    .border_style(Style::default().fg(p.border)),
             ),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_renderer_uses_semantic_roles_and_preserves_explicit_tag_color() {
+        let mut theme = Theme::default();
+        theme.palette.fg = Color::Rgb(1, 2, 3);
+        theme.palette.muted = Color::Rgb(4, 5, 6);
+        theme.palette.subtle = Color::Rgb(7, 8, 9);
+        theme.palette.accent = Color::Rgb(10, 11, 12);
+        theme.palette.good = Color::Rgb(13, 14, 15);
+        theme.palette.border = Color::Rgb(16, 17, 18);
+        let tag_color = Color::Rgb(19, 20, 21);
+
+        let mut selected = Item::new("selected.lua".into(), "Summary".into(), true);
+        selected.category = "tool";
+        selected.tag = Some("custom".into());
+        selected.tag_color = Some(tag_color);
+        selected.section = Some("Section".into());
+        selected.details.push(("Version".into(), "1.0".into()));
+        selected.long_desc = Some("Long description".into());
+        let inactive = Item::new("inactive.lua".into(), String::new(), false);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_list(
+                    frame,
+                    frame.area(),
+                    "Picker title",
+                    "Picker hint",
+                    &[selected, inactive],
+                    0,
+                    &theme,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer.cell((2, 1)).unwrap().fg, theme.palette.fg);
+        assert_eq!(buffer.cell((2, 2)).unwrap().fg, theme.palette.subtle);
+        assert_eq!(buffer.cell((2, 4)).unwrap().fg, theme.palette.fg);
+        assert_eq!(buffer.cell((3, 5)).unwrap().fg, theme.palette.accent);
+        assert_eq!(buffer.cell((5, 5)).unwrap().fg, theme.palette.good);
+        assert_eq!(buffer.cell((9, 5)).unwrap().fg, theme.palette.accent);
+        assert_eq!(buffer.cell((26, 5)).unwrap().fg, tag_color);
+        assert_eq!(buffer.cell((5, 6)).unwrap().fg, theme.palette.subtle);
+        assert_eq!(buffer.cell((9, 6)).unwrap().fg, theme.palette.muted);
+        assert_eq!(buffer.cell((31, 4)).unwrap().fg, theme.palette.border);
+        assert_eq!(buffer.cell((34, 4)).unwrap().fg, theme.palette.fg);
+        assert_eq!(buffer.cell((34, 6)).unwrap().fg, theme.palette.muted);
+        assert_eq!(buffer.cell((34, 8)).unwrap().fg, theme.palette.subtle);
+        assert_eq!(buffer.cell((43, 8)).unwrap().fg, theme.palette.fg);
+        assert_eq!(buffer.cell((34, 10)).unwrap().fg, theme.palette.muted);
+    }
 }

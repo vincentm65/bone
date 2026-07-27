@@ -4,6 +4,7 @@
 //! and reloads; renderers and input handlers consume only those Rust copies.
 
 use crate::config::settings::BoneSettings;
+use std::collections::HashMap;
 
 /// Complete daemon-owned settings payload sent to frontends. Persisted settings
 /// stay canonical in `config.yaml`; renderer preset definitions are resolved
@@ -22,6 +23,10 @@ pub struct ResolvedFrontendSettings {
     pub spinner_styles: Vec<SpinnerPreset>,
     #[serde(default)]
     pub spinner_texts: Vec<TextPreset>,
+    /// Temporary daemon-owned highlight overrides. Kept separate from the
+    /// configured theme so clearing an override reveals configured state.
+    #[serde(default)]
+    pub runtime_highlights: HashMap<String, String>,
 }
 
 // ── Spinner / text presets ──────────────────────────────────────────────────

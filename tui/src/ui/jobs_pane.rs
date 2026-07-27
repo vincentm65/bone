@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::ext::jobs::{Job, JobStatus, current_unix_seconds};
+use crate::ui::theme::Theme;
 
 use super::pane_page::PanePage;
 
@@ -20,7 +21,7 @@ pub const PANE_SOURCE: &str = "jobs";
 /// Only shows agents with at least one running job (a completed job stays
 /// visible while a sibling in the same group is still running).
 /// Returns `None` when no jobs are active.
-pub fn render(jobs: &[Job]) -> Option<PanePage> {
+pub fn render(theme: &Theme, jobs: &[Job]) -> Option<PanePage> {
     let agents = pane_agents(jobs);
     if agents.is_empty() {
         return None;
@@ -59,7 +60,7 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                     visible_jobs.iter().filter(|j| j.is_finished()).count()
                 ),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(theme.palette.fg)
                     .add_modifier(Modifier::BOLD),
             )));
             for job in &visible_jobs {
@@ -77,9 +78,9 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 let mut parts = vec![
                     Span::styled(
                         format!("   {} ", job_status_icon(job)),
-                        Style::default().fg(icon_fg(job)),
+                        Style::default().fg(icon_fg(theme, job)),
                     ),
-                    Span::styled(task, Style::default().fg(Color::Gray)),
+                    Span::styled(task, Style::default().fg(theme.palette.muted)),
                 ];
                 let elapsed = match job.status {
                     JobStatus::Running => Some(now.saturating_sub(job.started_at)),
@@ -88,12 +89,12 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 if let Some(elapsed) = elapsed {
                     parts.push(Span::styled(
                         format!(" ({}s) {} total", elapsed, format_tokens(total)),
-                        Style::default().fg(Color::Gray),
+                        Style::default().fg(theme.palette.muted),
                     ));
                 } else {
                     parts.push(Span::styled(
                         format!(" {} total", format_tokens(total)),
-                        Style::default().fg(icon_fg(job)),
+                        Style::default().fg(icon_fg(theme, job)),
                     ));
                 }
                 lines.push(Line::from(parts));
@@ -105,12 +106,12 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
                 Span::styled(
                     format!(" {icon} "),
                     Style::default()
-                        .fg(icon_fg(job))
+                        .fg(icon_fg(theme, job))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(agent.clone(), Style::default().fg(name_fg(job))),
-                Span::styled(" ", Style::default().fg(Color::DarkGray)),
-                Span::styled(status, Style::default().fg(Color::Gray)),
+                Span::styled(agent.clone(), Style::default().fg(name_fg(theme, job))),
+                Span::styled(" ", Style::default().fg(theme.palette.muted)),
+                Span::styled(status, Style::default().fg(theme.palette.muted)),
             ]));
         }
     }
@@ -136,7 +137,7 @@ pub fn render(jobs: &[Job]) -> Option<PanePage> {
 /// but does not give the keyboard selection code a one-row-per-job target.
 /// Keep this view flat so the selected job can be highlighted and scrolled
 /// into view reliably.
-pub fn render_selected(jobs: &[Job], selected_id: Option<&str>) -> Option<PanePage> {
+pub fn render_selected(theme: &Theme, jobs: &[Job], selected_id: Option<&str>) -> Option<PanePage> {
     let active: Vec<&Job> = jobs.iter().filter(|job| !job.is_finished()).collect();
     if active.is_empty() {
         return None;
@@ -152,12 +153,12 @@ pub fn render_selected(jobs: &[Job], selected_id: Option<&str>) -> Option<PanePa
                 Span::styled(
                     format!("{icon} "),
                     Style::default()
-                        .fg(icon_fg(job))
+                        .fg(icon_fg(theme, job))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(job.agent.clone(), Style::default().fg(name_fg(job))),
-                Span::styled(" ", Style::default().fg(Color::DarkGray)),
-                Span::styled(status, Style::default().fg(Color::Gray)),
+                Span::styled(job.agent.clone(), Style::default().fg(name_fg(theme, job))),
+                Span::styled(" ", Style::default().fg(theme.palette.muted)),
+                Span::styled(status, Style::default().fg(theme.palette.muted)),
             ]);
             (selected, line)
         })
@@ -173,6 +174,7 @@ pub fn render_selected(jobs: &[Job], selected_id: Option<&str>) -> Option<PanePa
         .len();
 
     Some(super::selectable_pane::render(
+        theme,
         PANE_SOURCE,
         format!("Agents ({agent_count})"),
         rows,
@@ -200,20 +202,20 @@ fn job_label(job: &Job) -> &str {
     }
 }
 
-fn icon_fg(job: &Job) -> Color {
+fn icon_fg(theme: &Theme, job: &Job) -> Color {
     match job.status {
-        JobStatus::Running => Color::White,
-        JobStatus::Queued => Color::Yellow,
-        JobStatus::Done => Color::DarkGray,
-        JobStatus::Error => Color::Red,
+        JobStatus::Running => theme.palette.accent,
+        JobStatus::Queued => theme.palette.warn,
+        JobStatus::Done => theme.palette.good,
+        JobStatus::Error => theme.palette.error,
     }
 }
 
-fn name_fg(job: &Job) -> Color {
+fn name_fg(theme: &Theme, job: &Job) -> Color {
     if !job.is_finished() {
-        Color::White
+        theme.palette.fg
     } else {
-        Color::DarkGray
+        theme.palette.muted
     }
 }
 

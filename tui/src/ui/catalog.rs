@@ -1,6 +1,6 @@
 //! `/catalog` — a fullscreen popup for browsing, installing, and removing the
-//! optional tools and commands hosted in the catalog. Rows are grouped into
-//! Updates, Installed, and Available sections. Installed items are checked and
+//! optional tools, commands, and themes hosted in the catalog. Rows are grouped
+//! into Updates, Installed, and Available sections. Installed items are checked
 //! labeled; applying only acts on items the user explicitly toggled, so
 //! already-installed items are preserved unless the user unchecks them.
 //!
@@ -18,7 +18,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::ext::catalog::{self, CatalogEntry};
 use crate::ui::fullscreen::{self, FullscreenTerminal};
-use crate::ui::picker::{self, ACCENT, BAD, BG, BORDER, DIM, GOOD, Item, MUTED, TEXT};
+use crate::ui::picker::{self, Item};
+use crate::ui::theme::Theme;
 
 /// Result of running the popup.
 pub struct Outcome {
@@ -34,18 +35,23 @@ pub struct Outcome {
 ///
 /// Items whose on-disk content differs from the catalog are tagged "update" and
 /// pre-checked (so a plain Enter pulls every pending update at once).
-pub fn build_items(entries: &[CatalogEntry]) -> Vec<Item> {
+pub fn build_items(entries: &[CatalogEntry], theme: &Theme) -> Vec<Item> {
     entries
         .iter()
         .map(|entry| {
             let installed = catalog::is_installed(entry);
-            build_item(entry, installed, installed && catalog::needs_update(entry))
+            build_item(
+                entry,
+                installed,
+                installed && catalog::needs_update(entry),
+                theme,
+            )
         })
         .collect()
 }
 
-fn grouped_catalog(entries: Vec<CatalogEntry>) -> (Vec<CatalogEntry>, Vec<Item>) {
-    let items = build_items(&entries);
+fn grouped_catalog(entries: Vec<CatalogEntry>, theme: &Theme) -> (Vec<CatalogEntry>, Vec<Item>) {
+    let items = build_items(&entries, theme);
     group_rows(entries, items)
 }
 
@@ -94,12 +100,13 @@ fn status_rank(item: &Item) -> usize {
     }
 }
 
-fn build_item(entry: &CatalogEntry, installed: bool, update: bool) -> Item {
+fn build_item(entry: &CatalogEntry, installed: bool, update: bool, theme: &Theme) -> Item {
+    let p = &theme.palette;
     let mut item = Item::new(entry.name.clone(), entry.description.clone(), installed);
-    item.category = if entry.kind == "command" {
-        "command"
-    } else {
-        "tool"
+    item.category = match entry.kind.as_str() {
+        "command" => "command",
+        "theme" => "theme",
+        _ => "tool",
     };
     add_detail(&mut item, "Version", entry.version.as_deref());
     add_detail(&mut item, "Updated", entry.updated_at.as_deref());
@@ -125,10 +132,11 @@ fn build_item(entry: &CatalogEntry, installed: bool, update: bool) -> Item {
         .filter(|value| !value.is_empty());
     if update {
         item.tag = Some("update".to_string());
+        item.tag_color = Some(p.accent);
         item.user_touched = true;
     } else if installed {
         item.tag = Some("installed".to_string());
-        item.tag_color = GOOD;
+        item.tag_color = Some(p.good);
     }
     item
 }
@@ -227,9 +235,9 @@ struct State {
 }
 
 impl State {
-    fn new() -> Self {
+    fn new(theme: &Theme) -> Self {
         let entries = catalog::sync_quiet();
-        let (entries, items) = grouped_catalog(entries);
+        let (entries, items) = grouped_catalog(entries, theme);
         Self {
             entries,
             items,
@@ -245,13 +253,13 @@ impl State {
 
 /// Run the catalog popup fullscreen. Returns the outcome (whether anything
 /// changed + a summary message).
-pub fn run() -> io::Result<Outcome> {
-    fullscreen::run(run_loop)
+pub fn run(theme: &Theme) -> io::Result<Outcome> {
+    fullscreen::run(|term| run_loop(term, theme))
 }
 
-fn run_loop(term: &mut FullscreenTerminal) -> io::Result<Outcome> {
-    let mut state = State::new();
-    term.draw(|frame| draw(frame, &state))?;
+fn run_loop(term: &mut FullscreenTerminal, theme: &Theme) -> io::Result<Outcome> {
+    let mut state = State::new(theme);
+    term.draw(|frame| draw(frame, &state, theme))?;
 
     loop {
         match event::read()? {
@@ -273,13 +281,13 @@ fn run_loop(term: &mut FullscreenTerminal) -> io::Result<Outcome> {
                 KeyCode::Char('a') => set_all(&mut state, true),
                 KeyCode::Char('n') => set_all(&mut state, false),
                 // Apply, then stay open showing the result until the user closes.
-                KeyCode::Enter => apply_state(&mut state),
+                KeyCode::Enter => apply_state(&mut state, theme),
                 _ => {}
             },
             Event::Resize(_, _) => {}
             _ => {}
         }
-        term.draw(|frame| draw(frame, &state))?;
+        term.draw(|frame| draw(frame, &state, theme))?;
     }
 }
 
@@ -305,7 +313,7 @@ fn set_all(state: &mut State, checked: bool) {
     }
 }
 
-fn apply_state(state: &mut State) {
+fn apply_state(state: &mut State, theme: &Theme) {
     let results = apply_results(&state.entries, &state.items, true);
     let mut installed = 0;
     let mut removed = 0;
@@ -362,8 +370,8 @@ fn apply_state(state: &mut State) {
         .map(|e| e.name.clone())
         .zip(results)
         .collect();
-    let (entries, mut items) = grouped_catalog(std::mem::take(&mut state.entries));
-    overlay_results(&mut items, &name_results);
+    let (entries, mut items) = grouped_catalog(std::mem::take(&mut state.entries), theme);
+    overlay_results(&mut items, &name_results, theme);
     state.entries = entries;
     state.items = items;
     state.cursor = state.cursor.min(state.items.len().saturating_sub(1));
@@ -371,7 +379,8 @@ fn apply_state(state: &mut State) {
 }
 
 /// Overlay per-item status tags onto freshly rebuilt rows, matched by name.
-fn overlay_results(items: &mut [Item], name_results: &[(String, ItemResult)]) {
+fn overlay_results(items: &mut [Item], name_results: &[(String, ItemResult)], theme: &Theme) {
+    let p = &theme.palette;
     for item in items.iter_mut() {
         let Some((_, result)) = name_results.iter().find(|(name, _)| *name == item.name) else {
             continue;
@@ -379,15 +388,15 @@ fn overlay_results(items: &mut [Item], name_results: &[(String, ItemResult)]) {
         match result {
             ItemResult::Installed => {
                 item.tag = Some("installed".to_string());
-                item.tag_color = GOOD;
+                item.tag_color = Some(p.good);
             }
             ItemResult::Removed => {
                 item.tag = Some("removed".to_string());
-                item.tag_color = GOOD;
+                item.tag_color = Some(p.good);
             }
             ItemResult::Failed(err) => {
                 item.tag = Some("✗ failed".to_string());
-                item.tag_color = BAD;
+                item.tag_color = Some(p.error);
                 item.desc = format!("Failed: {err}");
             }
             ItemResult::Unchanged => {}
@@ -397,9 +406,16 @@ fn overlay_results(items: &mut [Item], name_results: &[(String, ItemResult)]) {
 
 // ---- rendering ----------------------------------------------------------
 
-fn draw(frame: &mut ratatui::Frame, state: &State) {
+fn draw(frame: &mut ratatui::Frame, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     let screen = frame.area();
-    frame.render_widget(Block::default().style(Style::default().bg(BG)), screen);
+    frame.render_widget(
+        Block::default().style(match p.bg {
+            Some(bg) => Style::default().bg(bg),
+            None => Style::default(),
+        }),
+        screen,
+    );
 
     let area = screen;
 
@@ -412,48 +428,50 @@ fn draw(frame: &mut ratatui::Frame, state: &State) {
         ])
         .split(area);
 
-    draw_header(frame, chunks[0]);
-    draw_body(frame, chunks[1], state);
-    draw_footer(frame, chunks[2], state.result.is_some());
+    draw_header(frame, chunks[0], theme);
+    draw_body(frame, chunks[1], state, theme);
+    draw_footer(frame, chunks[2], state.result.is_some(), theme);
 }
 
-fn draw_header(frame: &mut ratatui::Frame, area: Rect) {
+fn draw_header(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
+    let p = &theme.palette;
     let lines = vec![
         Line::from(vec![
             Span::styled(
                 "bone ",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("catalog", Style::default().fg(MUTED)),
+            Span::styled("catalog", Style::default().fg(p.muted)),
         ]),
         Line::from(Span::styled(
-            "Optional tools & commands — download on demand",
-            Style::default().fg(DIM),
+            "Optional tools, commands & themes — download on demand",
+            Style::default().fg(p.subtle),
         )),
     ];
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(BORDER))
+                .border_style(Style::default().fg(p.border))
                 .padding(ratatui::widgets::Padding::new(2, 0, 1, 0)),
         ),
         area,
     );
 }
 
-fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
+fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     if state.items.is_empty() {
         let lines = vec![
             Line::from(Span::styled(
                 "No catalog items available.",
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "bone couldn't reach the catalog (you may be offline). Anything \
                  already installed still works; try again later.",
-                Style::default().fg(MUTED),
+                Style::default().fg(p.muted),
             )),
         ];
         frame.render_widget(
@@ -479,7 +497,7 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
             Paragraph::new(Line::from(Span::styled(
                 banner.clone(),
                 Style::default()
-                    .fg(if failed { BAD } else { GOOD })
+                    .fg(if failed { p.error } else { p.good })
                     .add_modifier(Modifier::BOLD),
             )))
             .block(Block::default().padding(ratatui::widgets::Padding::new(2, 0, 1, 0))),
@@ -498,10 +516,18 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
             "Check to install, uncheck to remove. Toggle with Space; Enter applies.",
         )
     };
-    picker::draw_list(frame, list_area, title, hint, &state.items, state.cursor);
+    picker::draw_list(
+        frame,
+        list_area,
+        title,
+        hint,
+        &state.items,
+        state.cursor,
+        theme,
+    );
 }
 
-fn draw_footer(frame: &mut ratatui::Frame, area: Rect, applied: bool) {
+fn draw_footer(frame: &mut ratatui::Frame, area: Rect, applied: bool, theme: &Theme) {
     let keys: &[(&str, &str)] = if applied {
         &[("↑↓", "move"), ("enter/esc", "close")]
     } else {
@@ -513,7 +539,7 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, applied: bool) {
             ("esc", "close"),
         ]
     };
-    picker::draw_footer(frame, area, keys);
+    picker::draw_footer(frame, area, keys, theme);
 }
 
 #[cfg(test)]
@@ -529,9 +555,79 @@ mod tests {
         }
     }
 
+    fn make_theme() -> Theme {
+        Theme::default()
+    }
+
+    fn result_state(banner: &str) -> State {
+        State {
+            entries: Vec::new(),
+            items: vec![Item::new("demo.lua".into(), "Demo".into(), false)],
+            cursor: 0,
+            outcome: Outcome {
+                changed: false,
+                message: String::new(),
+            },
+            result: Some(banner.to_string()),
+        }
+    }
+
+    #[test]
+    fn result_overlays_use_good_and_error_roles() {
+        let mut theme = make_theme();
+        theme.palette.good = ratatui::style::Color::Rgb(1, 2, 3);
+        theme.palette.error = ratatui::style::Color::Rgb(4, 5, 6);
+        let mut items = vec![
+            Item::new("installed".into(), String::new(), false),
+            Item::new("removed".into(), String::new(), false),
+            Item::new("failed".into(), String::new(), false),
+            Item::new("unchanged".into(), String::new(), false),
+        ];
+        items[3].tag = Some("keep".into());
+        let results = vec![
+            ("installed".into(), ItemResult::Installed),
+            ("removed".into(), ItemResult::Removed),
+            ("failed".into(), ItemResult::Failed("network".into())),
+            ("unchanged".into(), ItemResult::Unchanged),
+        ];
+
+        overlay_results(&mut items, &results, &theme);
+
+        assert_eq!(items[0].tag_color, Some(theme.palette.good));
+        assert_eq!(items[1].tag_color, Some(theme.palette.good));
+        assert_eq!(items[2].tag_color, Some(theme.palette.error));
+        assert_eq!(items[2].desc, "Failed: network");
+        assert_eq!(items[3].tag.as_deref(), Some("keep"));
+        assert_eq!(items[3].tag_color, None);
+    }
+
+    #[test]
+    fn result_banners_render_with_success_and_error_roles() {
+        let mut theme = make_theme();
+        theme.palette.good = ratatui::style::Color::Rgb(7, 8, 9);
+        theme.palette.error = ratatui::style::Color::Rgb(10, 11, 12);
+
+        for (banner, expected) in [
+            ("✓ installed 1", theme.palette.good),
+            ("✗ 1 failed", theme.palette.error),
+        ] {
+            let state = result_state(banner);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 14)).unwrap();
+            terminal
+                .draw(|frame| draw_body(frame, frame.area(), &state, &theme))
+                .unwrap();
+            assert_eq!(
+                terminal.backend().buffer().cell((2, 1)).unwrap().fg,
+                expected
+            );
+        }
+    }
+
     #[test]
     fn available_item_is_unchecked_without_status() {
-        let item = build_item(&entry("tool"), false, false);
+        let theme = make_theme();
+        let item = build_item(&entry("tool"), false, false, &theme);
 
         assert!(!item.checked);
         assert!(!item.user_touched);
@@ -541,22 +637,33 @@ mod tests {
 
     #[test]
     fn installed_item_is_checked_and_labeled() {
-        let item = build_item(&entry("command"), true, false);
+        let theme = make_theme();
+        let item = build_item(&entry("command"), true, false, &theme);
 
         assert!(item.checked);
         assert!(!item.user_touched);
         assert_eq!(item.tag.as_deref(), Some("installed"));
-        assert_eq!(item.tag_color, GOOD);
+        assert_eq!(item.tag_color, Some(theme.palette.good));
         assert_eq!(item.category, "command");
     }
 
     #[test]
+    fn theme_item_has_distinct_category() {
+        let theme = make_theme();
+        let item = build_item(&entry("theme"), false, false, &theme);
+
+        assert_eq!(item.category, "theme");
+    }
+
+    #[test]
     fn pending_update_takes_precedence_and_is_applied_by_default() {
-        let item = build_item(&entry("tool"), true, true);
+        let theme = make_theme();
+        let item = build_item(&entry("tool"), true, true, &theme);
 
         assert!(item.checked);
         assert!(item.user_touched);
         assert_eq!(item.tag.as_deref(), Some("update"));
+        assert_eq!(item.tag_color, Some(theme.palette.accent));
     }
 
     #[test]
@@ -572,7 +679,8 @@ mod tests {
         entry.permissions = vec!["network".to_string(), "filesystem".to_string()];
         entry.long_description = Some("A longer explanation.".to_string());
 
-        let item = build_item(&entry, false, false);
+        let theme = make_theme();
+        let item = build_item(&entry, false, false, &theme);
 
         assert_eq!(item.details.len(), 8);
         assert_eq!(
@@ -585,6 +693,7 @@ mod tests {
 
     #[test]
     fn rows_are_grouped_as_updates_installed_and_available() {
+        let theme = make_theme();
         let entries = vec![
             CatalogEntry {
                 name: "available.lua".to_string(),
@@ -600,9 +709,9 @@ mod tests {
             },
         ];
         let items = vec![
-            build_item(&entries[0], false, false),
-            build_item(&entries[1], true, true),
-            build_item(&entries[2], true, false),
+            build_item(&entries[0], false, false, &theme),
+            build_item(&entries[1], true, true, &theme),
+            build_item(&entries[2], true, false, &theme),
         ];
 
         let (entries, items) = group_rows(entries, items);
@@ -631,6 +740,7 @@ mod tests {
                     "Grouped extensions",
                     &items,
                     0,
+                    &theme,
                 );
             })
             .unwrap();
@@ -652,5 +762,13 @@ mod tests {
         assert!(screen.contains("Updates (1)"), "{screen}");
         assert!(screen.contains("Installed (1)"), "{screen}");
         assert!(screen.contains("Available (1)"), "{screen}");
+    }
+
+    #[test]
+    fn theme_render_assertion() {
+        let theme = Theme::default();
+        let item = build_item(&entry("tool"), true, false, &theme);
+        assert_eq!(item.tag.as_deref(), Some("installed"));
+        assert_eq!(item.tag_color, Some(theme.palette.good));
     }
 }

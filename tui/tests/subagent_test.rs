@@ -625,7 +625,7 @@ fn rust_jobs_pane_returns_valid_panepage() {
         },
     ];
 
-    let pane = bone::ui::jobs_pane::render(&jobs);
+    let pane = bone::ui::jobs_pane::render(&bone::ui::theme::Theme::default(), &jobs);
     assert!(
         pane.is_some(),
         "jobs pane renderer should return Some for running jobs; got None",

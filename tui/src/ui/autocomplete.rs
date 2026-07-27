@@ -94,7 +94,7 @@ impl AutocompleteState {
 
     /// Number of visible rows this autocomplete needs.
     pub fn visible_rows(&self) -> u16 {
-        MAX_VISIBLE as u16
+        (MAX_VISIBLE + usize::from(self.more_count() > 0)) as u16
     }
 
     /// Number of additional items below the visible window.

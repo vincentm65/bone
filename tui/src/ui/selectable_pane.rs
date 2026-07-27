@@ -1,13 +1,13 @@
 //! Shared selection, navigation, and layout mechanics for native list panes.
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::pane_page::PanePage;
+use crate::ui::theme::Theme;
 
 pub(crate) const VISIBLE_ROWS: usize = 8;
-const SELECTED_BG: Color = Color::Rgb(0x3A, 0x3F, 0x4B);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SelectablePaneAction {
@@ -59,7 +59,12 @@ pub(crate) fn reconcile_selection(selected_id: &mut Option<String>, active_ids: 
     }
 }
 
-pub(crate) fn render(source: &str, title: String, rows: Vec<(bool, Line<'static>)>) -> PanePage {
+pub(crate) fn render(
+    theme: &Theme,
+    source: &str,
+    title: String,
+    rows: Vec<(bool, Line<'static>)>,
+) -> PanePage {
     let selected_index = rows.iter().position(|(selected, _)| *selected).unwrap_or(0);
     let content = rows
         .into_iter()
@@ -69,14 +74,14 @@ pub(crate) fn render(source: &str, title: String, rows: Vec<(bool, Line<'static>
                 Span::styled(
                     if selected { " › " } else { "   " },
                     Style::default().fg(if selected {
-                        Color::White
+                        theme.palette.accent
                     } else {
-                        Color::DarkGray
+                        theme.palette.muted
                     }),
                 ),
             );
             if selected {
-                line = line.style(Style::default().bg(SELECTED_BG));
+                line = line.style(Style::default().bg(theme.palette.selection));
             }
             line
         })
@@ -202,11 +207,13 @@ mod tests {
         let rows = (0..10)
             .map(|index| (index == 9, Line::raw(format!("row {index}"))))
             .collect();
-        let page = render("test", "Test".into(), rows);
+        let mut theme = Theme::default();
+        theme.palette.selection = ratatui::style::Color::Blue;
+        let page = render(&theme, "test", "Test".into(), rows);
 
         assert_eq!(page.visible_rows, 8);
         assert_eq!(page.scroll, 2);
         assert!(page.content[9].to_string().contains('›'));
-        assert_eq!(page.content[9].style.bg, Some(SELECTED_BG));
+        assert_eq!(page.content[9].style.bg, Some(theme.palette.selection));
     }
 }

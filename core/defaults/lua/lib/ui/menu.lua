@@ -19,8 +19,8 @@ local MAX_ROWS = 24
 local SELECTED_BG = "#3A3F4B"
 
 -- Current pane width in columns, or nil when the host can't report it (older
--- binary lacking `ctx.ui.width`, or not yet drawn). Callers that get nil skip
--- wrapping and fall back to the single-line behaviour.
+-- binary lacking `ctx.ui.width`, or not yet drawn). Renderers use 80 columns
+-- as the compatibility fallback.
 local function pane_width(ctx)
     if not ctx or not ctx.ui or type(ctx.ui.width) ~= "function" then
         return nil
@@ -115,7 +115,7 @@ end
 
 local function render_heading(lines, state, width)
     if state.progress then
-        lines[#lines + 1] = line(span(state.progress, "cyan", { "bold" }))
+        append_wrapped(lines, state.progress, width, "cyan", { "bold" })
     end
     if state.question and state.question ~= "" then
         append_wrapped(lines, state.question, width, "white", { "bold" })
@@ -124,13 +124,6 @@ end
 
 local function one_line(value)
     return tostring(value or ""):gsub("%s+", " ")
-end
-
-local function clip(value, max)
-    local chars = utf8_chars(one_line(value))
-    if not max or #chars <= max then return table.concat(chars) end
-    if max < 2 then return "" end
-    return table.concat(chars, "", 1, max - 1) .. "…"
 end
 
 local function wrap_description(opt, max)
@@ -226,7 +219,41 @@ local function apply_filter(state, selected_value)
     state.scroll = 0
 end
 
-local function render_tabs(lines, tabs, active)
+local function append_span(rows, value, text)
+    if text == "" then return end
+    local last = rows[#rows]
+    if last and last.fg == value.fg and last.modifiers == value.modifiers then
+        last.text = last.text .. text
+    else
+        rows[#rows + 1] = span(text, value.fg, value.modifiers)
+    end
+end
+
+local function wrap_line_spans(value, width)
+    width = math.max(1, width)
+    local source = type(value) == "string" and { span(value, "gray") } or (value and value.spans or {})
+    local rows, current, used = {}, {}, 0
+    for _, source_span in ipairs(source) do
+        for _, ch in ipairs(utf8_chars(tostring(source_span.text or ""))) do
+            if used == width then
+                rows[#rows + 1] = { spans = current, bg = type(value) == "table" and value.bg or nil }
+                current, used = {}, 0
+            end
+            append_span(current, source_span, ch)
+            used = used + 1
+        end
+    end
+    if #current > 0 or #rows == 0 then
+        rows[#rows + 1] = { spans = current, bg = type(value) == "table" and value.bg or nil }
+    end
+    return rows
+end
+
+local function append_line_wrapped(lines, value, width)
+    for _, wrapped in ipairs(wrap_line_spans(value, width)) do lines[#lines + 1] = wrapped end
+end
+
+local function render_tabs(lines, tabs, active, width)
     if not tabs or #tabs == 0 then return end
     local spans = {}
     for i, tab in ipairs(tabs) do
@@ -238,7 +265,7 @@ local function render_tabs(lines, tabs, active)
             spans[#spans + 1] = span(label, "darkgray")
         end
     end
-    lines[#lines + 1] = { spans = spans }
+    append_line_wrapped(lines, { spans = spans }, width)
 end
 
 local function rows_for(state)
@@ -264,33 +291,9 @@ local function split_leading_circle(label)
     return nil, label
 end
 
-local function clip_line_spans(values, max)
-    local out = {}
-    local remaining = max
-    for _, value in ipairs(values or {}) do
-        if remaining <= 0 then break end
-        local chars = utf8_chars(tostring(value.text or ""))
-        local clipped = #chars > remaining
-        local text
-        if not clipped then
-            text = table.concat(chars)
-        elseif remaining >= 2 then
-            text = table.concat(chars, "", 1, remaining - 1) .. "…"
-        else
-            text = ""
-        end
-        if text ~= "" then
-            out[#out + 1] = span(text, value.fg or "gray", value.modifiers)
-        end
-        remaining = remaining - #utf8_chars(text)
-        if clipped then break end
-    end
-    return out
-end
-
-local function line_spans(value, width)
-    if type(value) == "string" then return { span(clip(value, width), "gray") } end
-    return clip_line_spans(value and value.spans or {}, width)
+local function line_spans(value)
+    if type(value) == "string" then return { span(value, "gray") } end
+    return value and value.spans or {}
 end
 
 local function spans_width(values)
@@ -299,15 +302,38 @@ local function spans_width(values)
     return width
 end
 
-local function compact_option_line(state, opt, selected, width)
+local function compact_option_lines(state, opt, selected, width)
     local checked = state.checked and state.checked[opt]
     local check = state.multi and (checked and "[x] " or "[ ] ") or ""
-    local marker = selected and ">" or " "
-    return line(
-        span(" " .. marker .. " ", selected and "cyan" or "darkgray", selected and { "bold" } or {}),
-        span(check, checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
-        span(clip(opt.label, width - 3 - #check), "white", opt.label_modifiers or (selected and { "bold" } or {}))
-    )
+    local prefix_width = 3 + #check
+    local labels = wrap_input(opt.label, math.max(1, width - prefix_width))
+    local rows = {}
+    for i, label in ipairs(labels) do
+        local marker = i == 1 and (selected and ">" or " ") or " "
+        local row = line(
+            span(" " .. marker .. " ", selected and "cyan" or "darkgray", selected and { "bold" } or {}),
+            span(i == 1 and check or string.rep(" ", #check), checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
+            span(label, "white", opt.label_modifiers or (selected and { "bold" } or {}))
+        )
+        if selected then row.bg = SELECTED_BG end
+        rows[#rows + 1] = row
+    end
+    return rows
+end
+
+local function compact_custom_lines(state, width)
+    local focused = state.custom_focused
+    local value = focused and with_cursor(state.input, state.input_cursor) or state.input
+    local segments = wrap_input(value, math.max(1, width - 11))
+    local rows = {}
+    for i, segment in ipairs(segments) do
+        local prefix = i == 1 and (" " .. (focused and ">" or " ") .. " Custom: ") or string.rep(" ", 11)
+        rows[#rows + 1] = line(
+            span(prefix, focused and "cyan" or "darkgray", { "bold" }),
+            span(segment, focused and "white" or "darkgray")
+        )
+    end
+    return rows
 end
 
 local function join_columns(left, right, left_width, right_width, focused)
@@ -317,7 +343,7 @@ local function join_columns(left, right, left_width, right_width, focused)
     out[#out + 1] = span(string.rep(" ", math.max(0, left_width - spans_width(left_spans))), "darkgray")
     out[#out + 1] = span(" ┃ ", focused and "cyan" or "darkgray", focused and { "bold" } or {})
     for _, value in ipairs(line_spans(right, right_width)) do out[#out + 1] = value end
-    return { spans = out }
+    return { spans = out, bg = type(left) == "table" and left.bg or nil }
 end
 
 local function selected_preview(state)
@@ -326,31 +352,90 @@ local function selected_preview(state)
     return opt and opt.preview or nil, opt
 end
 
-local function tallest_preview_rows(state)
+local function preview_values(preview, width)
+    local values = {}
+    for _, value in ipairs(preview and preview.lines or {}) do
+        for _, wrapped in ipairs(wrap_line_spans(value, width)) do values[#values + 1] = wrapped end
+    end
+    return values
+end
+
+local function tallest_preview_rows(state, width)
     local rows = 1
     for _, opt in ipairs(state.all_options) do
-        if opt.preview and opt.preview.lines then
-            rows = math.max(rows, #opt.preview.lines)
-        end
+        rows = math.max(rows, #preview_values(opt.preview, width))
     end
     return rows
 end
 
-local function preview_row_budget(state, width, header_rows)
+local function compact_option_row_count(state, opt, width)
+    return #compact_option_lines(state, opt, false, width)
+end
+
+local function compact_custom_row_count(state, width)
+    return state.allow_custom and #compact_custom_lines(state, width) or 0
+end
+
+local function max_stacked_option_rows(state, width)
+    local max_rows = 0
+    for first = 1, #state.options do
+        local rows = 0
+        for i = first, math.min(#state.options, first + 3) do
+            rows = rows + compact_option_row_count(state, state.options[i], width)
+        end
+        max_rows = math.max(max_rows, rows)
+    end
+    return max_rows
+end
+
+local function preview_title_rows(state, opt, width, stacked)
+    local title = opt and opt.preview and opt.preview.title or (opt and opt.label or "Preview")
+    local title_line = stacked
+        and line(span("Preview ─ ", state.preview_focused and "cyan" or "darkgray"), span(title, "white", { "bold" }))
+        or line(span(title, state.preview_focused and "cyan" or "white", { "bold" }))
+    return #wrap_line_spans(title_line, width)
+end
+
+local function stacked_option_row_budget(state, opt, width, body_rows, custom_rows)
+    local available_rows = math.max(1, body_rows - custom_rows)
+    local budget = math.max(1, available_rows - preview_title_rows(state, opt, width, true) - 1)
+    if opt then
+        budget = math.min(available_rows, math.max(budget, compact_option_row_count(state, opt, width)))
+    end
+    return budget
+end
+
+local function preview_row_budget(state, width, header_rows, left_width, right_width)
     local use_columns = preview_uses_columns(state, width)
-    local custom_rows = state.allow_custom and 1 or 0
-    local preview_rows = tallest_preview_rows(state)
-    local raw_body
-    local raw_overflow
+    local custom_rows
+    local preview_rows
+    local option_rows
     if use_columns then
-        raw_body = math.max(4, preview_rows + 1, #state.options + custom_rows)
-        raw_overflow = false
+        custom_rows = compact_custom_row_count(state, left_width)
+        preview_rows = tallest_preview_rows(state, right_width)
+        option_rows = 0
+        for _, opt in ipairs(state.options) do
+            option_rows = option_rows + compact_option_row_count(state, opt, left_width)
+        end
     else
-        local shown_options = math.min(4, #state.options)
-        raw_body = math.max(4, shown_options + custom_rows + 1 + preview_rows)
-        raw_overflow = #state.options > shown_options
+        custom_rows = compact_custom_row_count(state, width)
+        preview_rows = tallest_preview_rows(state, width)
+        option_rows = max_stacked_option_rows(state, width)
     end
 
+    local max_title_rows = 1
+    for _, opt in ipairs(state.all_options) do
+        max_title_rows = math.max(max_title_rows, preview_title_rows(
+            state,
+            opt,
+            use_columns and right_width or width,
+            not use_columns
+        ))
+    end
+    local raw_body = use_columns
+        and math.max(4, preview_rows + max_title_rows, option_rows + custom_rows)
+        or math.max(4, option_rows + custom_rows + max_title_rows + preview_rows)
+    local raw_overflow = not use_columns and #state.options > math.min(4, #state.options)
     local notice_rows = state.notice and state.notice ~= "" and 1 or 0
     local target_rows
     if state.visible_rows then
@@ -358,20 +443,51 @@ local function preview_row_budget(state, width, header_rows)
     else
         target_rows = clamp(header_rows + raw_body + notice_rows + (raw_overflow and 1 or 0) + 2, 3, MAX_ROWS)
     end
-
-    local body_rows = math.max(4, target_rows - header_rows - notice_rows - 2)
-    -- The overflow indicator consumes a row only after the option viewport is
-    -- known. Reserve it from the body after calculating whether it is needed.
-    local option_rows = use_columns
-        and math.max(1, body_rows - custom_rows)
-        or math.min(4, math.max(1, body_rows - custom_rows))
-    if #state.options > option_rows and body_rows > 4 then body_rows = body_rows - 1 end
-    return target_rows, body_rows, use_columns
+    return target_rows, use_columns
 end
 
-local function preview_window(state, rows)
+local function option_window(state, width, row_budget, max_items)
+    local total = #state.options
+    if total == 0 then return 1, 0, {}, 0, 0 end
+    row_budget = math.max(1, row_budget)
+    max_items = max_items or total
+    local first = clamp((state.scroll or 0) + 1, 1, total)
+    if state.selected < first then first = state.selected end
+    local function through_selected(start)
+        local rows = 0
+        for i = start, state.selected do
+            rows = rows + compact_option_row_count(state, state.options[i], width)
+        end
+        return rows
+    end
+    while first < state.selected
+        and (state.selected - first + 1 > max_items or through_selected(first) > row_budget) do
+        first = first + 1
+    end
+
+    local rows, used, last = {}, 0, first - 1
+    for i = first, total do
+        if i - first + 1 > max_items then break end
+        local option_lines = compact_option_lines(
+            state,
+            state.options[i],
+            i == state.selected and not state.custom_focused,
+            width
+        )
+        if used > 0 and used + #option_lines > row_budget then break end
+        local remaining = row_budget - used
+        for row = 1, math.min(#option_lines, remaining) do rows[#rows + 1] = option_lines[row] end
+        used = used + math.min(#option_lines, remaining)
+        last = i
+        if used >= row_budget then break end
+    end
+    state.scroll = first - 1
+    return first, last, rows, first - 1, math.max(0, total - last)
+end
+
+local function preview_window(state, width, rows)
     local preview, opt = selected_preview(state)
-    local values = preview and preview.lines or {}
+    local values = preview_values(preview, width)
     local max_scroll = state.preview_scrollable and math.max(0, #values - rows) or 0
     state.preview_scroll = clamp(state.preview_scroll or 0, 0, max_scroll)
     state.preview_page_rows = rows
@@ -384,101 +500,13 @@ local function preview_window(state, rows)
     for i = state.preview_scroll + 1, math.min(#values, state.preview_scroll + rows) do
         visible[#visible + 1] = values[i]
     end
-    if #visible == 0 then visible[1] = line(span("No preview", "darkgray")) end
+    if #visible == 0 then
+        visible = wrap_line_spans(line(span("No preview", "darkgray")), width)
+    end
     return title, visible
 end
 
-local function render_preview_select(p, state)
-    local lines = {}
-    local width = pane_width(p.ctx) or 80
-    render_tabs(lines, state.tabs, state.active_tab)
-    render_heading(lines, state, width)
-
-    local target_rows, body_rows, use_columns = preview_row_budget(state, width, #lines)
-    local custom_rows = state.allow_custom and 1 or 0
-    local option_rows = math.max(1, body_rows - custom_rows)
-    if not use_columns then option_rows = math.min(option_rows, 4) end
-    local total = #state.options
-    state.scroll = clamp(state.scroll or 0, 0, math.max(0, total - option_rows))
-    if state.selected <= state.scroll then state.scroll = state.selected - 1 end
-    if state.selected > state.scroll + option_rows then state.scroll = state.selected - option_rows end
-    local body_start = #lines
-
-    if use_columns then
-        local left_width = clamp(math.floor(width * 0.32), 20, 34)
-        local right_width = math.max(1, width - left_width - 3)
-        local title, preview_lines = preview_window(state, body_rows - 1)
-        local right_lines = { line(span(title, state.preview_focused and "cyan" or "white", { "bold" })) }
-        for _, value in ipairs(preview_lines) do right_lines[#right_lines + 1] = value end
-
-        for row = 1, body_rows do
-            local option_index = state.scroll + row
-            local left
-            if row <= option_rows and option_index <= total then
-                left = compact_option_line(
-                    state,
-                    state.options[option_index],
-                    option_index == state.selected and not state.custom_focused,
-                    left_width
-                )
-            elseif state.allow_custom and row == body_rows then
-                local marker = state.custom_focused and ">" or " "
-                left = line(
-                    span(" " .. marker .. " Custom: ", state.custom_focused and "cyan" or "darkgray", { "bold" }),
-                    span(clip(state.custom_focused and with_cursor(state.input, state.input_cursor) or state.input, left_width - 11), state.custom_focused and "white" or "darkgray")
-                )
-            else
-                left = ""
-            end
-            lines[#lines + 1] = join_columns(
-                left,
-                right_lines[row] or "",
-                left_width,
-                right_width,
-                state.preview_focused
-            )
-        end
-    else
-        local stacked_options = math.min(option_rows, 4, total)
-        for row = 1, stacked_options do
-            local option_index = state.scroll + row
-            if option_index <= total then
-                lines[#lines + 1] = compact_option_line(
-                    state,
-                    state.options[option_index],
-                    option_index == state.selected and not state.custom_focused,
-                    width
-                )
-            end
-        end
-        if state.allow_custom then
-            local marker = state.custom_focused and ">" or " "
-            lines[#lines + 1] = line(
-                span(" " .. marker .. " Custom: ", state.custom_focused and "cyan" or "darkgray", { "bold" }),
-                span(clip(state.custom_focused and with_cursor(state.input, state.input_cursor) or state.input, width - 11), state.custom_focused and "white" or "darkgray")
-            )
-        end
-        local preview_rows = math.max(1, body_rows - stacked_options - custom_rows - 1)
-        local title, preview_lines = preview_window(state, preview_rows)
-        lines[#lines + 1] = line(
-            span("Preview ─ ", state.preview_focused and "cyan" or "darkgray"),
-            span(title, "white", { "bold" })
-        )
-        for _, value in ipairs(preview_lines) do lines[#lines + 1] = value end
-        while #lines - body_start < body_rows do lines[#lines + 1] = "" end
-    end
-
-    local above = state.scroll or 0
-    local below = math.max(0, total - above - option_rows)
-    if above > 0 or below > 0 then
-        lines[#lines + 1] = line(span(
-            string.format("    ↑ %d more · ↓ %d more", above, below),
-            "darkgray"
-        ))
-    end
-    if state.notice and state.notice ~= "" then
-        lines[#lines + 1] = line(span(state.notice, "#E5C07B"))
-    end
+local function preview_hints(state)
     local hints = { "↑↓/j/k " .. (state.preview_focused and "scroll" or "move") }
     if state.preview_focusable then
         hints[#hints + 1] = "Tab switch pane"
@@ -490,25 +518,183 @@ local function render_preview_select(p, state)
     if state.allow_back then hints[#hints + 1] = "Alt+← back" end
     if state.allow_forward then hints[#hints + 1] = "Alt+→ next" end
     hints[#hints + 1] = "Esc cancel"
-    lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
+    return table.concat(hints, " · ")
+end
+
+local function render_preview_select(p, state)
+    local lines = {}
+    local width = pane_width(p.ctx) or 80
+    render_tabs(lines, state.tabs, state.active_tab, width)
+    render_heading(lines, state, width)
+
+    local use_columns = preview_uses_columns(state, width)
+    local left_width = use_columns
+        and math.min(clamp(math.floor(width * 0.32), 20, 34), math.max(1, width - 4))
+        or width
+    local right_width = use_columns and math.max(1, width - left_width - 3) or width
+    local target_rows = preview_row_budget(state, width, #lines, left_width, right_width)
+    local notice_lines = {}
+    if state.notice and state.notice ~= "" then append_wrapped(notice_lines, state.notice, width, "#E5C07B") end
+    local hint_lines = {}
+    append_wrapped(hint_lines, preview_hints(state), width, "darkgray")
+    local body_rows = target_rows - #lines - #notice_lines - #hint_lines - 1
+    if body_rows < 1 then
+        target_rows = math.min(MAX_ROWS, target_rows + 1 - body_rows)
+        body_rows = math.max(1, target_rows - #lines - #notice_lines - #hint_lines - 1)
+    end
+
+    local custom_lines = state.allow_custom and compact_custom_lines(state, left_width) or {}
+    local option_budget
+    if use_columns then
+        option_budget = math.max(1, body_rows - #custom_lines)
+    else
+        local _, opt = selected_preview(state)
+        option_budget = stacked_option_row_budget(state, opt, width, body_rows, #custom_lines)
+    end
+    local first, last, option_lines, above, below = option_window(
+        state,
+        left_width,
+        option_budget,
+        use_columns and nil or 4
+    )
+    local overflow_lines = {}
+    if above > 0 or below > 0 then
+        append_wrapped(
+            overflow_lines,
+            string.format("    ↑ %d more · ↓ %d more", above, below),
+            width,
+            "darkgray"
+        )
+        body_rows = math.max(1, body_rows - #overflow_lines)
+        if use_columns then
+            option_budget = math.max(1, body_rows - #custom_lines)
+        else
+            local _, opt = selected_preview(state)
+            option_budget = stacked_option_row_budget(state, opt, width, body_rows, #custom_lines)
+        end
+        first, last, option_lines, above, below = option_window(
+            state,
+            left_width,
+            option_budget,
+            use_columns and nil or 4
+        )
+        overflow_lines = {}
+        append_wrapped(
+            overflow_lines,
+            string.format("    ↑ %d more · ↓ %d more", above, below),
+            width,
+            "darkgray"
+        )
+    end
+
+    if use_columns then
+        local preview, opt = selected_preview(state)
+        local base_title = preview and preview.title or (opt and opt.label or "Preview")
+        local title_rows = wrap_line_spans(
+            line(span(base_title, state.preview_focused and "cyan" or "white", { "bold" })),
+            right_width
+        )
+        local preview_rows = math.max(1, body_rows - #title_rows)
+        local title, preview_lines = preview_window(state, right_width, preview_rows)
+        title_rows = wrap_line_spans(
+            line(span(title, state.preview_focused and "cyan" or "white", { "bold" })),
+            right_width
+        )
+        preview_rows = math.max(1, body_rows - #title_rows)
+        title, preview_lines = preview_window(state, right_width, preview_rows)
+        title_rows = wrap_line_spans(
+            line(span(title, state.preview_focused and "cyan" or "white", { "bold" })),
+            right_width
+        )
+        local right_lines = {}
+        for _, value in ipairs(title_rows) do right_lines[#right_lines + 1] = value end
+        for _, value in ipairs(preview_lines) do right_lines[#right_lines + 1] = value end
+        local left_lines = option_lines
+        for _, value in ipairs(custom_lines) do left_lines[#left_lines + 1] = value end
+        for row = 1, body_rows do
+            lines[#lines + 1] = join_columns(
+                left_lines[row] or "",
+                right_lines[row] or "",
+                left_width,
+                right_width,
+                state.preview_focused
+            )
+        end
+    else
+        local body_start = #lines
+        for _, value in ipairs(option_lines) do lines[#lines + 1] = value end
+        for _, value in ipairs(custom_lines) do lines[#lines + 1] = value end
+        local preview, opt = selected_preview(state)
+        local base_title = preview and preview.title or (opt and opt.label or "Preview")
+        local title_rows = wrap_line_spans(line(
+            span("Preview ─ ", state.preview_focused and "cyan" or "darkgray"),
+            span(base_title, "white", { "bold" })
+        ), width)
+        local preview_rows = math.max(1, body_rows - (#lines - body_start) - #title_rows)
+        local title, preview_lines = preview_window(state, width, preview_rows)
+        title_rows = wrap_line_spans(line(
+            span("Preview ─ ", state.preview_focused and "cyan" or "darkgray"),
+            span(title, "white", { "bold" })
+        ), width)
+        preview_rows = math.max(1, body_rows - (#lines - body_start) - #title_rows)
+        title, preview_lines = preview_window(state, width, preview_rows)
+        title_rows = wrap_line_spans(line(
+            span("Preview ─ ", state.preview_focused and "cyan" or "darkgray"),
+            span(title, "white", { "bold" })
+        ), width)
+        local available_title_rows = math.max(0, body_rows - (#lines - body_start) - 1)
+        for row = 1, math.min(#title_rows, available_title_rows) do lines[#lines + 1] = title_rows[row] end
+        local available_preview_rows = math.max(0, body_rows - (#lines - body_start))
+        for row = 1, math.min(#preview_lines, available_preview_rows) do
+            lines[#lines + 1] = preview_lines[row]
+        end
+        while #lines - body_start < body_rows do lines[#lines + 1] = "" end
+    end
+
+    for _, value in ipairs(overflow_lines) do lines[#lines + 1] = value end
+    for _, value in ipairs(notice_lines) do lines[#lines + 1] = value end
+    for _, value in ipairs(hint_lines) do lines[#lines + 1] = value end
     lines[#lines + 1] = ""
     p:set_lines(lines, target_rows)
+end
+
+local function option_row_count(state, opt, width)
+    local existing_marker, label = split_leading_circle(opt.label)
+    local marker_width = existing_marker and not state.multi and 2 or 0
+    local check_width = state.multi and 4 or 0
+    local rows = #wrap_input(label, math.max(1, width - 3 - check_width - marker_width))
+    if opt.description and opt.description ~= "" then
+        rows = rows + #wrap_description(opt, width - 5)
+    end
+    return rows
+end
+
+local function select_hints(state)
+    local hints = { "↑↓/j/k move" }
+    if state.multi then hints[#hints + 1] = "Space toggle" end
+    hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
+    if state.searchable then hints[#hints + 1] = "/ or type filter" end
+    if state.allow_custom then hints[#hints + 1] = "Tab custom" end
+    if state.allow_back then hints[#hints + 1] = "Alt+← back" end
+    if state.allow_forward then hints[#hints + 1] = "Alt+→ next" end
+    hints[#hints + 1] = "Esc cancel"
+    return table.concat(hints, " · ")
 end
 
 local function render_select(p, state)
     if state.has_previews then return render_preview_select(p, state) end
     local lines = {}
     local width = pane_width(p.ctx) or 80
-    render_tabs(lines, state.tabs, state.active_tab)
+    render_tabs(lines, state.tabs, state.active_tab, width)
     render_heading(lines, state, width)
     if state.searchable then
         local cursor = state.filter_focused and "█" or ""
         local count = string.format("  %d/%d", #state.options, #state.all_options)
-        lines[#lines + 1] = line(
+        append_line_wrapped(lines, line(
             span("Filter: ", "darkgray"),
             span(state.filter .. cursor, "white", state.filter_focused and { "bold" } or {}),
             span(count, "darkgray")
-        )
+        ), width)
     end
 
     local total = #state.options
@@ -518,34 +704,57 @@ local function render_select(p, state)
     local custom_segments
     if state.allow_custom then
         local displayed = state.custom_focused and with_cursor(state.input, state.input_cursor) or state.input
-        custom_segments = wrap_input(displayed, width - CUSTOM_LABEL_W)
+        custom_segments = wrap_input(displayed, math.max(1, width - CUSTOM_LABEL_W))
     end
-    local custom_rows = custom_segments and math.min(#custom_segments, 4) or 1
-    -- Reserve rows for the trailing chrome we render after the options: the
-    -- hints legend (1) + trailing blank (1) + the custom-input rows (when
-    -- enabled, possibly wrapped to several rows).
-    local reserved = 2 + (state.allow_custom and custom_rows or 0)
-    local available_rows = math.max(1, rows_for(state) - #lines - reserved)
-    local has_descriptions = false
-    for _, opt in ipairs(state.options) do
-        if opt.description and opt.description ~= "" then
-            has_descriptions = true
-            break
+    local custom_rows = custom_segments and #custom_segments or 1
+    local notice_rows = state.notice and state.notice ~= ""
+        and #wrap_input(state.notice, width) or 0
+    local hint_text = select_hints(state)
+    local hint_rows = #wrap_input(hint_text, width)
+    local reserved = 1 + notice_rows + hint_rows + (state.allow_custom and custom_rows or 0)
+    local base_available_rows = math.max(1, rows_for(state) - #lines - reserved)
+
+    local function calculate_window(available_rows)
+        local first = clamp((state.scroll or 0) + 1, 1, math.max(1, total))
+        if state.selected < first then first = state.selected end
+        local function rows_through_selected(start)
+            local rows = 0
+            for i = start, math.min(state.selected, total) do
+                rows = rows + option_row_count(state, state.options[i], width)
+            end
+            return rows
         end
-    end
-    local option_rows = math.max(1, math.floor(available_rows / (has_descriptions and 2 or 1)))
-    if total > option_rows then
-        state.scroll = clamp(state.scroll or 0, 0, math.max(0, total - option_rows))
-        if state.selected <= state.scroll then state.scroll = state.selected - 1 end
-        if state.selected > state.scroll + option_rows then state.scroll = state.selected - option_rows end
-    else
-        state.scroll = 0
+        while first < state.selected and rows_through_selected(first) > available_rows do
+            first = first + 1
+        end
+        local used_rows, last = 0, first - 1
+        for i = first, total do
+            local rows = option_row_count(state, state.options[i], width)
+            if used_rows > 0 and used_rows + rows > available_rows then break end
+            used_rows = used_rows + rows
+            last = i
+            if used_rows >= available_rows then break end
+        end
+        return first, last
     end
 
-    local first = (state.scroll or 0) + 1
-    local last = math.min(total, first + option_rows - 1)
+    local first, last = calculate_window(base_available_rows)
+    local function indicator_rows(window_first, window_last)
+        local rows = 0
+        if window_first > 1 then rows = rows + #wrap_input("    ↑ " .. tostring(window_first - 1) .. " more", width) end
+        if window_last < total then rows = rows + #wrap_input("    ↓ " .. tostring(total - window_last) .. " more", width) end
+        return rows
+    end
+    local indicators = indicator_rows(first, last)
+    if indicators > 0 then
+        first, last = calculate_window(math.max(1, base_available_rows - indicators))
+        indicators = indicator_rows(first, last)
+        first, last = calculate_window(math.max(1, base_available_rows - indicators))
+    end
+    state.scroll = first - 1
+
     if first > 1 then
-        lines[#lines + 1] = line(span(clip("    ↑ " .. tostring(first - 1) .. " more", width), "darkgray"))
+        append_wrapped(lines, "    ↑ " .. tostring(first - 1) .. " more", width, "darkgray")
     end
     for i = first, last do
         local opt = state.options[i]
@@ -559,25 +768,28 @@ local function render_select(p, state)
         local fg = "white"
         local label_mods = opt.label_modifiers or (selected and { "bold" } or {})
         local existing_marker, label = split_leading_circle(opt.label)
-        label = clip(label, width - 3 - #check - (existing_marker and 2 or 0))
-        local option_line
-        if existing_marker and not state.multi then
-            local dot = existing_marker
-            local dot_fg = existing_marker == "●" and "#78B373" or "darkgray"
-            option_line = line(
-                span(" " .. cursor .. " ", cursor_fg, cursor_mods),
-                span(dot .. " ", dot_fg),
-                span(label, fg, label_mods)
-            )
-        else
-            option_line = line(
-                span(" " .. cursor .. " ", cursor_fg, cursor_mods),
-                span(check, checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
-                span(label, fg, label_mods)
-            )
+        local marker_width = existing_marker and not state.multi and 2 or 0
+        local label_rows = wrap_input(label, math.max(1, width - 3 - #check - marker_width))
+        for row_index, label_row in ipairs(label_rows) do
+            local option_line
+            local row_cursor = row_index == 1 and cursor or " "
+            if existing_marker and not state.multi then
+                local dot_fg = existing_marker == "●" and "#78B373" or "darkgray"
+                option_line = line(
+                    span(" " .. row_cursor .. " ", cursor_fg, cursor_mods),
+                    span(row_index == 1 and (existing_marker .. " ") or "  ", dot_fg),
+                    span(label_row, fg, label_mods)
+                )
+            else
+                option_line = line(
+                    span(" " .. row_cursor .. " ", cursor_fg, cursor_mods),
+                    span(row_index == 1 and check or string.rep(" ", #check), checked and "#78B373" or "darkgray", checked and { "bold" } or {}),
+                    span(label_row, fg, label_mods)
+                )
+            end
+            if selected then option_line.bg = SELECTED_BG end
+            lines[#lines + 1] = option_line
         end
-        if selected then option_line.bg = SELECTED_BG end
-        lines[#lines + 1] = option_line
         if opt.description and opt.description ~= "" then
             for _, wrapped_spans in ipairs(wrap_description(opt, width - 5)) do
                 local description_spans = { span("     ", "gray") }
@@ -591,10 +803,10 @@ local function render_select(p, state)
         end
     end
     if total == 0 then
-        lines[#lines + 1] = line(span("   No matches", "darkgray"))
+        append_wrapped(lines, "   No matches", width, "darkgray")
     end
     if last < total then
-        lines[#lines + 1] = line(span(clip("    ↓ " .. tostring(total - last) .. " more", width), "darkgray"))
+        append_wrapped(lines, "    ↓ " .. tostring(total - last) .. " more", width, "darkgray")
     end
     if state.allow_custom then
         local cursor = state.custom_focused and ">" or " "
@@ -603,9 +815,6 @@ local function render_select(p, state)
         local mods = state.custom_focused and { "bold" } or {}
         for i = 1, custom_rows do
             local seg = custom_segments[i] or ""
-            if i == custom_rows and #custom_segments > custom_rows then
-                seg = seg .. "…"
-            end
             -- First row carries the label; continuation rows indent to align
             -- under the value. The cursor block sits on the last row.
             local prefix = i == 1 and (" " .. cursor .. " Custom: ")
@@ -618,18 +827,10 @@ local function render_select(p, state)
     end
     -- Transient warning (e.g. an empty multi-select submit was blocked).
     if state.notice and state.notice ~= "" then
-        lines[#lines + 1] = line(span(state.notice, "#E5C07B"))
+        append_wrapped(lines, state.notice, width, "#E5C07B")
     end
-    -- One-line control legend so the keys aren't a guessing game.
-    local hints = { "↑↓/j/k move" }
-    if state.multi then hints[#hints + 1] = "Space toggle" end
-    hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
-    if state.searchable then hints[#hints + 1] = "/ or type filter" end
-    if state.allow_custom then hints[#hints + 1] = "Tab custom" end
-    if state.allow_back then hints[#hints + 1] = "Alt+← back" end
-    if state.allow_forward then hints[#hints + 1] = "Alt+→ next" end
-    hints[#hints + 1] = "Esc cancel"
-    lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
+    -- Control legend so the keys aren't a guessing game.
+    append_wrapped(lines, hint_text, width, "darkgray")
     lines[#lines + 1] = ""
     p:set_lines(lines, math.min(24, math.max(3, #lines)))
 end
@@ -895,7 +1096,7 @@ function M.text_input(ctx, spec)
         local width = pane_width(ctx) or 80
         local lines = {}
         render_heading(lines, spec, width)
-        local segments = wrap_input(with_cursor(input, cursor), width - 2)
+        local segments = wrap_input(with_cursor(input, cursor), math.max(1, width - 2))
         for i, segment in ipairs(segments) do
             local prefix = i == 1 and "> " or "  "
             lines[#lines + 1] = line(span(prefix .. segment, "white", { "bold" }))
@@ -904,7 +1105,7 @@ function M.text_input(ctx, spec)
         if spec.allow_back then hints[#hints + 1] = "Alt+← back" end
         if spec.allow_forward then hints[#hints + 1] = "Alt+→ next" end
         hints[#hints + 1] = "Esc cancel"
-        lines[#lines + 1] = line(span(table.concat(hints, " · "), "darkgray"))
+        append_wrapped(lines, table.concat(hints, " · "), width, "darkgray")
         lines[#lines + 1] = ""
         p:set_lines(lines, math.min(MAX_ROWS, #lines))
         local key = wait_key(ctx)

@@ -828,8 +828,7 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
             let json: serde_json::Value = lua.from_value(value)?;
             let diff: LuaViewDiff = serde_json::from_value(json)
                 .map_err(|e| mlua::Error::external(format!("ui diff: {e}")))?;
-            super::api_ui::lock_shared(&ui_state).apply(diff.into());
-            Ok(true)
+            Ok(super::api_ui::lock_shared(&ui_state).apply(diff.into()))
         })?;
         ui_table.set("apply", apply_fn)?;
     } else {

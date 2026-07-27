@@ -26,9 +26,20 @@ impl ViewModel {
         Self::default()
     }
 
-    /// Fold one diff into the model. Upserts preserve component order (an
-    /// existing id is replaced in place; a new id is appended).
-    pub fn apply(&mut self, diff: &ViewDiff) {
+    /// Fold one valid diff into the model. Upserts preserve component order (an
+    /// existing id is replaced in place; a new id is appended). Invalid runtime
+    /// highlight updates are rejected without mutation.
+    pub fn apply(&mut self, diff: &ViewDiff) -> bool {
+        if let ViewDiff::SetHighlight { name, fg } = diff {
+            let valid_role = crate::config::theme::role(name).is_some_and(|role| role.runtime);
+            let valid_color = fg
+                .as_deref()
+                .is_none_or(|value| crate::config::theme::parse_color(value).is_ok());
+            if !valid_role || !valid_color {
+                return false;
+            }
+        }
+
         match diff {
             ViewDiff::Upsert { component } => {
                 if let Some(slot) = self
@@ -52,7 +63,11 @@ impl ViewModel {
                     self.highlights.remove(name);
                 }
             },
+            // Theme previews are transient renderer state. Persisted settings
+            // remain the authoritative snapshot for newly attached clients.
+            ViewDiff::SetTheme { .. } => {}
         }
+        true
     }
 
     /// Find a component by id.

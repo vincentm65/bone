@@ -265,17 +265,17 @@ fn prompt_option_line(
 ) -> Line<'static> {
     let marker_style = if selected {
         Style::default()
-            .fg(theme.thinking)
+            .fg(theme.palette.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(ratatui::style::Color::DarkGray)
+        Style::default().fg(theme.palette.muted)
     };
     let text_style = if selected {
         Style::default()
-            .fg(ratatui::style::Color::White)
+            .fg(theme.palette.fg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(ratatui::style::Color::DarkGray)
+        Style::default().fg(theme.palette.muted)
     };
     let muted_style = Style::default().fg(theme.status_text);
     let good_style = Style::default().fg(theme.approval_safe);
@@ -826,7 +826,13 @@ impl super::Renderer {
                     let option = &prompt.options[i];
                     let selected = i == prompt.selected;
                     frame.render_widget(
-                        Paragraph::new(prompt_option_line(&self.theme, option, selected)),
+                        Paragraph::new(prompt_option_line(&self.theme, option, selected)).style(
+                            if selected {
+                                Style::default().bg(self.theme.palette.selection)
+                            } else {
+                                Style::default()
+                            },
+                        ),
                         Rect {
                             y,
                             height: 1,
@@ -861,7 +867,13 @@ impl super::Renderer {
                     let option = &prompt.options[i];
                     let selected = i == prompt.selected;
                     frame.render_widget(
-                        Paragraph::new(prompt_option_line(&self.theme, option, selected)),
+                        Paragraph::new(prompt_option_line(&self.theme, option, selected)).style(
+                            if selected {
+                                Style::default().bg(self.theme.palette.selection)
+                            } else {
+                                Style::default()
+                            },
+                        ),
                         Rect {
                             y,
                             height: 1,
@@ -922,14 +934,19 @@ impl super::Renderer {
                 let selected = i == ac.selected;
                 let style = if selected {
                     Style::default()
-                        .fg(ratatui::style::Color::White)
+                        .fg(self.theme.palette.fg)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(self.theme.status_text)
                 };
+                let row_style = if selected {
+                    Style::default().bg(self.theme.palette.selection)
+                } else {
+                    Style::default()
+                };
                 let label = format!("  /{name:<name_width$} — {desc}");
                 frame.render_widget(
-                    Paragraph::new(Span::styled(label, style)),
+                    Paragraph::new(Span::styled(label, style)).style(row_style),
                     self.input_style.content_rect(area, y, 1),
                 );
                 y += 1;

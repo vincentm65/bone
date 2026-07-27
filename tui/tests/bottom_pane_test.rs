@@ -8,6 +8,7 @@ use bone::ui::prompt::Prompt;
 use bone::ui::render::{InputStyle, PaneDraw, Renderer, StatusInfo};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::{Color, Modifier};
 
 fn status_info() -> StatusInfo {
     let mut status_show = std::collections::HashMap::new();
@@ -278,6 +279,187 @@ fn composer_height_uses_the_same_word_wrapping_as_rendering() {
         Renderer::new().desired_height(&input, None, 10, &[], 0, None, 0),
         6
     );
+}
+
+#[test]
+fn prompt_options_use_semantic_theme_roles_and_full_row_selection() {
+    let mut renderer = Renderer::new();
+    renderer.theme.palette.accent = Color::Rgb(1, 2, 3);
+    renderer.theme.palette.selection = Color::Rgb(4, 5, 6);
+    renderer.theme.palette.fg = Color::Rgb(7, 8, 9);
+    renderer.theme.palette.muted = Color::Rgb(10, 11, 12);
+    renderer.theme.status_text = Color::Rgb(13, 14, 15);
+    renderer.theme.approval_safe = Color::Rgb(16, 17, 18);
+    let prompt = Prompt::new(
+        "Options",
+        vec!["● Enabled · active", "○ Disabled · inactive"],
+    );
+    let input = InputState::default();
+    let status = status_info();
+    let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status, &[], 0, None),
+                Some(&prompt),
+            )
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let selected = 2;
+    assert_eq!(
+        buffer.cell((2, selected)).unwrap().fg,
+        renderer.theme.palette.accent
+    );
+    assert!(
+        buffer
+            .cell((2, selected))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(
+        buffer.cell((4, selected)).unwrap().fg,
+        renderer.theme.approval_safe
+    );
+    assert_eq!(
+        buffer.cell((6, selected)).unwrap().fg,
+        renderer.theme.palette.fg
+    );
+    assert!(
+        buffer
+            .cell((6, selected))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(
+        buffer.cell((16, selected)).unwrap().fg,
+        renderer.theme.status_text
+    );
+    assert_eq!(
+        buffer.cell((0, selected)).unwrap().bg,
+        renderer.theme.palette.selection
+    );
+    assert_eq!(
+        buffer.cell((39, selected)).unwrap().bg,
+        renderer.theme.palette.selection
+    );
+
+    let unselected = 3;
+    assert_eq!(
+        buffer.cell((2, unselected)).unwrap().fg,
+        renderer.theme.palette.muted
+    );
+    assert_eq!(
+        buffer.cell((4, unselected)).unwrap().fg,
+        renderer.theme.status_text
+    );
+    assert_eq!(
+        buffer.cell((6, unselected)).unwrap().fg,
+        renderer.theme.palette.muted
+    );
+    assert_eq!(
+        buffer.cell((17, unselected)).unwrap().fg,
+        renderer.theme.status_text
+    );
+}
+
+#[test]
+fn autocomplete_uses_semantic_selection_and_secondary_colors() {
+    let mut renderer = Renderer::new();
+    renderer.theme.palette.fg = Color::Rgb(20, 21, 22);
+    renderer.theme.palette.selection = Color::Rgb(23, 24, 25);
+    renderer.theme.status_text = Color::Rgb(26, 27, 28);
+    let input = InputState::default();
+    let autocomplete = AutocompleteState::new(
+        (0..6)
+            .map(|i| (format!("command{i}"), format!("description {i}")))
+            .collect(),
+    );
+    let status = status_info();
+    let height = renderer.desired_height(&input, None, 40, &[], 0, Some(&autocomplete), 0);
+    let mut terminal = Terminal::new(TestBackend::new(40, height)).unwrap();
+
+    terminal
+        .draw(|frame| {
+            renderer.draw_bottom_pane(
+                frame,
+                &pane_args(&input, &status, &[], 0, Some(&autocomplete)),
+                None,
+            )
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer.cell((2, 2)).unwrap().fg, renderer.theme.palette.fg);
+    assert!(
+        buffer
+            .cell((2, 2))
+            .unwrap()
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(
+        buffer.cell((0, 2)).unwrap().bg,
+        renderer.theme.palette.selection
+    );
+    assert_eq!(
+        buffer.cell((38, 2)).unwrap().bg,
+        renderer.theme.palette.selection
+    );
+    assert_eq!(buffer.cell((2, 3)).unwrap().fg, renderer.theme.status_text);
+    assert!(row_text(&terminal, 7, 40).contains("[+1 more]"));
+    assert_eq!(buffer.cell((2, 7)).unwrap().fg, renderer.theme.status_text);
+}
+
+#[test]
+fn composer_uses_input_border_prefix_cursor_and_fill_roles() {
+    let input = InputState::default();
+    let status = status_info();
+
+    let mut boxed = Renderer::new();
+    boxed.input_style = input_style("box");
+    boxed.theme.input_border = Color::Rgb(30, 31, 32);
+    boxed.theme.input_prefix = Color::Rgb(33, 34, 35);
+    boxed.theme.input_cursor = Color::Rgb(36, 37, 38);
+    let height = boxed.desired_height(&input, None, 20, &[], 0, None, 0);
+    let mut terminal = Terminal::new(TestBackend::new(20, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            boxed.draw_bottom_pane(frame, &pane_args(&input, &status, &[], 0, None), None)
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer.cell((0, 0)).unwrap().fg, boxed.theme.input_border);
+    assert_eq!(buffer.cell((2, 1)).unwrap().fg, boxed.theme.input_prefix);
+    assert_eq!(buffer.cell((4, 1)).unwrap().fg, boxed.theme.input_cursor);
+    assert!(
+        buffer
+            .cell((4, 1))
+            .unwrap()
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+
+    let mut filled = Renderer::new();
+    filled.input_style = input_style("filled");
+    filled.theme.input_bg = Color::Rgb(39, 40, 41);
+    let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+    terminal
+        .draw(|frame| {
+            filled.draw_bottom_pane(frame, &pane_args(&input, &status, &[], 0, None), None)
+        })
+        .unwrap();
+    for y in 0..=2 {
+        assert_eq!(
+            terminal.backend().buffer().cell((0, y)).unwrap().bg,
+            filled.theme.input_bg
+        );
+    }
 }
 
 #[test]

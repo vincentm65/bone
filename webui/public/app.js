@@ -2507,6 +2507,16 @@ const THEMES = [
   { id: "green", name: "Terminal", dot: "#4ec98c" },
   { id: "slate", name: "Slate", dot: "#5b9dff" },
   { id: "purple", name: "Purple", dot: "#8b7bff" },
+  { id: "nord", name: "Nord", dot: "#88c0d0" },
+  { id: "dracula", name: "Dracula", dot: "#bd93f9" },
+  { id: "gruvbox", name: "Gruvbox", dot: "#fabd2f" },
+  { id: "solarized", name: "Solarized", dot: "#268bd2" },
+  { id: "tokyo-night", name: "Tokyo Night", dot: "#7aa2f7" },
+  { id: "catppuccin", name: "Catppuccin", dot: "#cba6f7" },
+  { id: "rose-pine", name: "Rosé Pine", dot: "#c4a7e7" },
+  { id: "one-dark", name: "One Dark", dot: "#61afef" },
+  { id: "ayu", name: "Ayu", dot: "#ffb454" },
+  { id: "everforest", name: "Everforest", dot: "#a7c080" },
   { id: "auto", name: "Auto", dot: "linear-gradient(135deg, #8b7bff, #2dd4bf)" },
 ];
 function themePicker() {

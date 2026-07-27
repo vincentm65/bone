@@ -74,7 +74,7 @@ fn close_removes_and_statusline_and_highlight_apply() {
             bone.api.ui.set_statusline("status", {
                 { text = "ready", fg = "green", align = "right" },
             })
-            bone.api.ui.set_highlight("error", "#ff0000")
+            assert(bone.api.ui.set_highlight("tool_error", "#ff0000"))
             bone.api.ui.close("f")
         "##,
     )
@@ -85,7 +85,41 @@ fn close_removes_and_statusline_and_highlight_apply() {
     assert!(vm.get("f").is_none(), "closed float removed");
     assert!(vm.get("status").is_some(), "statusline present");
     assert_eq!(
-        vm.highlights.get("error").map(String::as_str),
+        vm.highlights.get("tool_error").map(String::as_str),
         Some("#ff0000")
     );
+}
+
+#[test]
+fn invalid_highlights_do_not_mutate_or_emit_diffs_and_clear_is_valid() {
+    let (lua, ui) = lua_with_api();
+    lua.load(
+        r##"
+            assert(bone.api.ui.set_highlight("thinking", "#123456"))
+            assert(not bone.api.ui.set_highlight("unknown", "blue"))
+            assert(not bone.api.ui.set_highlight("accent", "blue"))
+            assert(not bone.api.ui.set_highlight("thinking", "indexed(1)"))
+        "##,
+    )
+    .exec()
+    .unwrap();
+
+    let vm = snapshot(&ui);
+    assert_eq!(vm.highlights.len(), 1);
+    assert_eq!(
+        vm.highlights.get("thinking").map(String::as_str),
+        Some("#123456")
+    );
+    assert_eq!(drain_diffs(&ui).len(), 1);
+
+    let cleared: bool = lua
+        .load(r#"return bone.api.ui.set_highlight("thinking", nil)"#)
+        .eval()
+        .unwrap();
+    assert!(cleared);
+    assert!(snapshot(&ui).highlights.is_empty());
+    assert!(matches!(
+        drain_diffs(&ui).as_slice(),
+        [ViewDiff::SetHighlight { name, fg }] if name == "thinking" && fg.is_none()
+    ));
 }

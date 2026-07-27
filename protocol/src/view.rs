@@ -193,9 +193,21 @@ impl Component {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewDiff {
-    Upsert { component: Component },
-    Remove { id: String },
-    SetHighlight { name: String, fg: Option<String> },
+    Upsert {
+        component: Component,
+    },
+    Remove {
+        id: String,
+    },
+    SetHighlight {
+        name: String,
+        fg: Option<String>,
+    },
+    /// Complete resolved theme settings for immediate interactive preview.
+    /// Opaque JSON keeps this crate independent of the core config types.
+    SetTheme {
+        theme: serde_json::Value,
+    },
 }
 
 pub fn view_diff_from_pane_content(pc: PaneContent) -> ViewDiff {

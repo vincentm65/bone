@@ -4,43 +4,69 @@
 
 use ratatui::style::Color;
 
-/// Parse a color string into a ratatui Color.
-///
-/// Supports:
-/// - Named colors (case-insensitive): black, red, green, yellow, blue, magenta,
-///   cyan, gray/grey, dark_gray/dark_grey, white, lightred, lightgreen,
-///   lightyellow, lightblue, lightmagenta, lightcyan.
-/// - Hex colors: `#RRGGBB` or `RRGGBB`.
+/// Parse a color string into a ratatui Color using the canonical backend-neutral
+/// theme parser. Conversion to ratatui is deliberately kept at this boundary.
 pub fn parse_color(s: &str) -> Option<Color> {
-    let s = s.trim();
-    let s = s.strip_prefix('#').unwrap_or(s);
-    let s = s.to_ascii_uppercase();
-    match s.as_str() {
-        "WHITE" => Some(Color::White),
-        "BLACK" => Some(Color::Black),
-        "RED" => Some(Color::Red),
-        "GREEN" => Some(Color::Green),
-        "YELLOW" => Some(Color::Yellow),
-        "BLUE" => Some(Color::Blue),
-        "MAGENTA" => Some(Color::Magenta),
-        "CYAN" => Some(Color::Cyan),
-        "GRAY" | "GREY" => Some(Color::Gray),
-        "DARKGRAY" | "DARK_GRAY" | "DARKGREY" | "DARK_GREY" => Some(Color::DarkGray),
-        "LIGHTRED" => Some(Color::LightRed),
-        "LIGHTGREEN" => Some(Color::LightGreen),
-        "LIGHTYELLOW" => Some(Color::LightYellow),
-        "LIGHTBLUE" => Some(Color::LightBlue),
-        "LIGHTMAGENTA" => Some(Color::LightMagenta),
-        "LIGHTCYAN" => Some(Color::LightCyan),
-        _ => {
-            if s.len() == 6 {
-                let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-                Some(Color::Rgb(r, g, b))
-            } else {
-                None
-            }
-        }
+    use bone_core::config::theme::{ColorValue, NamedColor};
+
+    match bone_core::config::theme::parse_color(s).ok()? {
+        ColorValue::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
+        ColorValue::Named(color) => Some(match color {
+            NamedColor::Black => Color::Black,
+            NamedColor::Red => Color::Red,
+            NamedColor::Green => Color::Green,
+            NamedColor::Yellow => Color::Yellow,
+            NamedColor::Blue => Color::Blue,
+            NamedColor::Magenta => Color::Magenta,
+            NamedColor::Cyan => Color::Cyan,
+            NamedColor::Gray => Color::Gray,
+            NamedColor::DarkGray => Color::DarkGray,
+            NamedColor::White => Color::White,
+            NamedColor::LightRed => Color::LightRed,
+            NamedColor::LightGreen => Color::LightGreen,
+            NamedColor::LightYellow => Color::LightYellow,
+            NamedColor::LightBlue => Color::LightBlue,
+            NamedColor::LightMagenta => Color::LightMagenta,
+            NamedColor::LightCyan => Color::LightCyan,
+        }),
+    }
+}
+
+/// Convert terminal-independent RGB and named ANSI colors to concrete RGB.
+/// Indexed colors and `Reset` depend on terminal state, so callers must handle
+/// them explicitly instead of silently inventing a replacement color.
+pub fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    Some(match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0x00, 0x00, 0x00),
+        Color::Red => (0xCD, 0x31, 0x31),
+        Color::Green => (0x0D, 0xBC, 0x79),
+        Color::Yellow => (0xE5, 0xE5, 0x10),
+        Color::Blue => (0x24, 0x72, 0xC8),
+        Color::Magenta => (0xBC, 0x3F, 0xBC),
+        Color::Cyan => (0x11, 0xA8, 0xCD),
+        Color::Gray => (0xC0, 0xC0, 0xC0),
+        Color::DarkGray => (0x80, 0x80, 0x80),
+        Color::LightRed => (0xF1, 0x4C, 0x4C),
+        Color::LightGreen => (0x23, 0xD1, 0x8B),
+        Color::LightYellow => (0xF5, 0xF5, 0x43),
+        Color::LightBlue => (0x3B, 0x8E, 0xEA),
+        Color::LightMagenta => (0xD6, 0x70, 0xD6),
+        Color::LightCyan => (0x29, 0xB8, 0xDB),
+        Color::White => (0xFF, 0xFF, 0xFF),
+        Color::Indexed(_) | Color::Reset => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgb_conversion_rejects_terminal_dependent_colors() {
+        assert_eq!(color_to_rgb(Color::Rgb(1, 2, 3)), Some((1, 2, 3)));
+        assert_eq!(color_to_rgb(Color::Cyan), Some((0x11, 0xA8, 0xCD)));
+        assert_eq!(color_to_rgb(Color::Indexed(42)), None);
+        assert_eq!(color_to_rgb(Color::Reset), None);
     }
 }

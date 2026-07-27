@@ -772,7 +772,7 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
     {
         let ui = extensions.ui_handle();
         bone_core::ext::api_ui::lock_shared(&ui).apply(ViewDiff::SetHighlight {
-            name: "marker".into(),
+            name: "thinking".into(),
             fg: Some("#abcdef".into()),
         });
     }
@@ -819,7 +819,7 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
     .expect("daemon did not forward a view diff");
     match diff {
         ViewDiff::SetHighlight { name, fg } => {
-            assert_eq!(name, "marker");
+            assert_eq!(name, "thinking");
             assert_eq!(fg.as_deref(), Some("#abcdef"));
         }
         other => panic!("unexpected diff: {other:?}"),
@@ -842,7 +842,14 @@ async fn daemon_runs_registered_command_over_socket() {
             .as_nanos()
     ));
     let cmd_dir = config_dir.join("lua/commands");
+    let themes_dir = config_dir.join("lua/themes");
     std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::create_dir_all(&themes_dir).unwrap();
+    std::fs::write(
+        themes_dir.join("ocean.lua"),
+        r##"return { palette = { accent = "#112233" } }"##,
+    )
+    .unwrap();
     std::fs::write(
         cmd_dir.join("echo.lua"),
         r#"
@@ -856,6 +863,13 @@ bone.command.register("restart", {
   description = "request restart feedback",
   handler = function(_input, _ctx)
     return { action = "config.apply_restart_required", submit = false }
+  end,
+})
+bone.command.register("preview", {
+  description = "preview a theme",
+  handler = function(_input, _ctx)
+    bone.theme.preview("ocean")
+    return { submit = false }
   end,
 })
 "#,
@@ -922,6 +936,32 @@ bone.command.register("restart", {
 
     assert_eq!(result.0, "echo: hi", "daemon ran the command in its VM");
     assert!(!result.1, "echo is a display command, not a submit");
+
+    client
+        .command_sender()
+        .send(RuntimeCommand::RunCommand {
+            name: "preview".into(),
+            input: String::new(),
+        })
+        .unwrap();
+    let preview = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut diff = None;
+        loop {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::ViewDiff { diff: event } => diff = Some(event),
+                RuntimeEvent::CommandComplete { .. } => break diff,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("preview command did not complete")
+    .expect("preview diff must arrive before CommandComplete");
+    let bone_core::runtime::view::ViewDiff::SetTheme { theme } = preview else {
+        panic!("unexpected preview diff: {preview:?}");
+    };
+    assert_eq!(theme["name"], "ocean");
+    assert_eq!(theme["palette"]["accent"], "#112233");
 
     client
         .command_sender()
@@ -1126,10 +1166,22 @@ bone.command.register("ping", {
     );
     let resolved: bone_core::ext::snapshots::ResolvedFrontendSettings =
         serde_json::from_value(settings).expect("resolved settings JSON deserializes");
-    assert!(matches!(
-        resolved.settings.theme.highlights.get("tool_call"),
-        Some(bone_core::config::settings::ThemeStyleSpec::Color(color)) if color == "#FF0000"
-    ));
+    assert!(
+        !resolved.settings.theme.highlights.contains_key("tool_call"),
+        "runtime highlight must not enter persisted theme settings"
+    );
+    assert_eq!(
+        resolved
+            .runtime_highlights
+            .get("tool_call")
+            .map(String::as_str),
+        Some("#FF0000")
+    );
+    let persisted = serde_json::to_value(&resolved.settings).unwrap();
+    assert!(
+        !persisted.to_string().contains("#FF0000"),
+        "runtime highlight must be absent from serialized configured settings"
+    );
     assert!(
         resolved
             .spinner_styles

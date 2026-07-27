@@ -1,12 +1,13 @@
 //! Markdown rendering for the transcript via pulldown-cmark and syntect.
 
+use crate::ui::theme::Theme;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::borrow::Cow;
 use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SyColor, FontStyle, Theme};
+use syntect::highlighting::{Color as SyColor, FontStyle};
 use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -14,13 +15,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// caller (`crate::ui::theme::Theme::code`), so `syntax_*` color changes
 /// propagate without touching this module.
 static PS: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-
-const MUTED: Color = Color::DarkGray;
-const INLINE_CODE: Color = Color::Gray;
-const CODE_FALLBACK: Color = Color::Gray;
-const RULE: Color = Color::DarkGray;
-const TABLE_BORDER: Color = Color::DarkGray;
-const TABLE_HEADER_FG: Color = Color::Rgb(140, 220, 220);
 
 #[derive(Clone, Copy, Debug, Default)]
 struct InlineStyle {
@@ -94,14 +88,18 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn push_prefix(&mut self, prefix: impl Into<String>) {
-        self.current
-            .push(Span::styled(prefix.into(), Style::default().fg(MUTED)));
+        self.current.push(Span::styled(
+            prefix.into(),
+            Style::default().fg(self.theme.markdown_marker),
+        ));
     }
 
     fn current_style(&self) -> Style {
         let mut style = Style::default();
         if let Some(level) = self.style.heading {
-            style = style.fg(Color::White).add_modifier(Modifier::BOLD);
+            style = style
+                .fg(self.theme.markdown_heading)
+                .add_modifier(Modifier::BOLD);
             if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) {
                 style = style.add_modifier(Modifier::UNDERLINED);
             }
@@ -113,13 +111,13 @@ impl<'a> MarkdownRenderer<'a> {
             style = style.add_modifier(Modifier::ITALIC);
         }
         if self.style.code {
-            style = style.fg(INLINE_CODE);
+            style = style.fg(self.theme.markdown_inline_code);
         }
         if self.style.strikethrough {
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
         if self.style.link {
-            style = style.fg(Color::Gray);
+            style = style.fg(self.theme.markdown_link);
         }
         style
     }
@@ -137,6 +135,7 @@ impl<'a> MarkdownRenderer<'a> {
             self.lines.extend(wrap_prefixed_line(
                 std::mem::take(&mut self.current),
                 self.width,
+                self.theme,
             ));
         }
     }
@@ -145,8 +144,10 @@ impl<'a> MarkdownRenderer<'a> {
         if self.lines.last().is_some_and(|line| !line.spans.is_empty()) {
             if self.quote_depth > 0 {
                 let prefix = "> ".repeat(self.quote_depth);
-                self.lines
-                    .push(Line::styled(prefix, Style::default().fg(MUTED)));
+                self.lines.push(Line::styled(
+                    prefix,
+                    Style::default().fg(self.theme.markdown_marker),
+                ));
             } else {
                 self.lines.push(Line::raw(""));
             }
@@ -224,22 +225,25 @@ impl<'a> MarkdownRenderer<'a> {
         let boxed = table_total_width(&col_widths) <= self.width;
 
         if has_header && boxed {
-            self.lines.push(table_border(&col_widths, '┌', '┬', '┐'));
+            self.lines
+                .push(table_border(&col_widths, '┌', '┬', '┐', self.theme));
         }
 
         for (row_idx, row) in rows.iter().enumerate() {
             self.lines.push(if boxed {
-                table_row(row, &col_widths, &alignments)
+                table_row(row, &col_widths, &alignments, self.theme)
             } else {
-                table_pipe_row(row, self.width)
+                table_pipe_row(row, self.width, self.theme)
             });
             if boxed && row.is_header && row_idx == 0 {
-                self.lines.push(table_border(&col_widths, '├', '┼', '┤'));
+                self.lines
+                    .push(table_border(&col_widths, '├', '┼', '┤', self.theme));
             }
         }
 
         if boxed {
-            self.lines.push(table_border(&col_widths, '└', '┴', '┘'));
+            self.lines
+                .push(table_border(&col_widths, '└', '┴', '┘', self.theme));
         }
         self.blank_line();
     }
@@ -267,9 +271,9 @@ impl<'a> MarkdownRenderer<'a> {
             .or_else(|| PS.find_syntax_by_extension(&self.code_lang))
             .unwrap_or_else(|| PS.find_syntax_plain_text());
         let code_lines = std::mem::take(&mut self.code_lines);
-        let mut highlighter = HighlightLines::new(syntax, self.theme);
+        let mut highlighter = HighlightLines::new(syntax, self.theme.code());
         for line in code_lines {
-            let highlighted = highlight_line(&line, &mut highlighter);
+            let highlighted = highlight_line(&line, &mut highlighter, self.theme);
             let mut spans = vec![Span::raw("  ")];
             spans.extend(highlighted.spans);
             self.lines.push(Line::from(spans));
@@ -299,8 +303,14 @@ fn markdown_options() -> Options {
         | Options::ENABLE_TASKLISTS
 }
 
-fn table_border(col_widths: &[usize], left: char, mid: char, right: char) -> Line<'static> {
-    let style = Style::default().fg(TABLE_BORDER);
+fn table_border(
+    col_widths: &[usize],
+    left: char,
+    mid: char,
+    right: char,
+    theme: &Theme,
+) -> Line<'static> {
+    let style = Style::default().fg(theme.markdown_table_border);
     let mut out = format!("{left}─");
     for (i, &w) in col_widths.iter().enumerate() {
         if i > 0 {
@@ -366,11 +376,16 @@ fn truncate_spans(spans: &[Span<'static>], width: usize) -> Vec<Span<'static>> {
     truncated
 }
 
-fn table_row(row: &TableRow, col_widths: &[usize], alignments: &[Alignment]) -> Line<'static> {
-    let border_style = Style::default().fg(TABLE_BORDER);
+fn table_row(
+    row: &TableRow,
+    col_widths: &[usize],
+    alignments: &[Alignment],
+    theme: &Theme,
+) -> Line<'static> {
+    let border_style = Style::default().fg(theme.markdown_table_border);
     let text_style = if row.is_header {
         Style::default()
-            .fg(TABLE_HEADER_FG)
+            .fg(theme.markdown_table_header)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -392,18 +407,24 @@ fn table_row(row: &TableRow, col_widths: &[usize], alignments: &[Alignment]) -> 
     Line::from(spans)
 }
 
-fn table_pipe_row(row: &TableRow, width: usize) -> Line<'static> {
+fn table_pipe_row(row: &TableRow, width: usize, theme: &Theme) -> Line<'static> {
     let style = if row.is_header {
         Style::default()
-            .fg(TABLE_HEADER_FG)
+            .fg(theme.markdown_table_header)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
-    let mut spans = vec![Span::styled("| ", Style::default().fg(TABLE_BORDER))];
+    let mut spans = vec![Span::styled(
+        "| ",
+        Style::default().fg(theme.markdown_table_border),
+    )];
     for (idx, cell) in row.cells.iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled(" | ", Style::default().fg(TABLE_BORDER)));
+            spans.push(Span::styled(
+                " | ",
+                Style::default().fg(theme.markdown_table_border),
+            ));
         }
         spans.extend(
             cell.spans
@@ -412,7 +433,10 @@ fn table_pipe_row(row: &TableRow, width: usize) -> Line<'static> {
                 .map(|span| Span::styled(span.content.into_owned(), span.style.patch(style))),
         );
     }
-    spans.push(Span::styled(" |", Style::default().fg(TABLE_BORDER)));
+    spans.push(Span::styled(
+        " |",
+        Style::default().fg(theme.markdown_table_border),
+    ));
     Line::from(truncate_spans(&spans, width))
 }
 
@@ -440,9 +464,12 @@ fn aligned_cell(
     spans
 }
 
-fn wrap_prefixed_line(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
-    let prefix_len = muted_prefix_len(&spans);
-    let prefix_width = line_width(&spans[..prefix_len]);
+fn wrap_prefixed_line(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let (prefix_len, prefix_width) = structural_prefix_len(&spans);
     if prefix_width == 0 || line_width(&spans) <= width {
         return vec![Line::from(spans)];
     }
@@ -451,14 +478,37 @@ fn wrap_prefixed_line(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'stat
         spans[..prefix_len].to_vec(),
         words_from_spans(&spans[prefix_len..]),
         width,
+        theme,
     )
 }
 
-fn muted_prefix_len(spans: &[Span<'static>]) -> usize {
-    spans
-        .iter()
-        .take_while(|span| span.style.fg == Some(MUTED))
-        .count()
+/// Identify complete leading marker spans. Prefixes are emitted separately by
+/// `push_prefix`, so this deliberately counts spans rather than characters or
+/// bytes and does not depend on their configured color.
+fn structural_prefix_len(spans: &[Span<'static>]) -> (usize, usize) {
+    let mut count = 0;
+    let mut width = 0;
+    for span in spans {
+        if !is_structural_prefix(span.content.as_ref()) {
+            break;
+        }
+        count += 1;
+        width += UnicodeWidthStr::width(span.content.as_ref());
+    }
+    (count, width)
+}
+
+fn is_structural_prefix(text: &str) -> bool {
+    if text == "> " || text.starts_with("[^") && text.ends_with("]: ") {
+        return true;
+    }
+    let marker = text.trim_start();
+    marker == "- "
+        || marker == "* "
+        || marker == "+ "
+        || marker.strip_suffix(". ").is_some_and(|number| {
+            !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+        })
 }
 
 fn line_width(spans: &[Span<'static>]) -> usize {
@@ -493,6 +543,7 @@ fn wrap_words(
     prefix: Vec<Span<'static>>,
     words: Vec<Vec<Span<'static>>>,
     width: usize,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     // Block-quote prefixes should repeat on continuation lines.
     // List/other prefixes should use blank spaces to preserve alignment.
@@ -502,7 +553,7 @@ fn wrap_words(
     } else {
         vec![Span::styled(
             " ".repeat(line_width(&prefix)),
-            Style::default().fg(MUTED),
+            Style::default().fg(theme.markdown_marker),
         )]
     };
     let mut lines = Vec::new();
@@ -534,9 +585,9 @@ fn wrap_words(
     lines
 }
 
-fn syntect_style(sy_style: syntect::highlighting::Style) -> Style {
+fn syntect_style(sy_style: syntect::highlighting::Style, theme: &Theme) -> Style {
     let fg = if sy_style.foreground.a == 0 {
-        CODE_FALLBACK
+        theme.syntax_text
     } else {
         sy_fg(sy_style.foreground)
     };
@@ -560,7 +611,11 @@ fn syntect_style(sy_style: syntect::highlighting::Style) -> Style {
 /// set, whose grammars only close line-scoped contexts (e.g. `# comments`) on
 /// an actual `\n` — parsing without it leaks those scopes into every following
 /// line. So highlight with the newline appended and strip it from the output.
-fn highlight_line(line: &str, highlighter: &mut HighlightLines<'_>) -> Line<'static> {
+fn highlight_line(
+    line: &str,
+    highlighter: &mut HighlightLines<'_>,
+    theme: &Theme,
+) -> Line<'static> {
     let with_newline = format!("{line}\n");
     let ranges = highlighter
         .highlight_line(&with_newline, &PS)
@@ -574,7 +629,8 @@ fn highlight_line(line: &str, highlighter: &mut HighlightLines<'_>) -> Line<'sta
             .into_iter()
             .filter_map(|(style, text)| {
                 let text = text.strip_suffix('\n').unwrap_or(text);
-                (!text.is_empty()).then(|| Span::styled(text.to_string(), syntect_style(style)))
+                (!text.is_empty())
+                    .then(|| Span::styled(text.to_string(), syntect_style(style, theme)))
             })
             .collect::<Vec<_>>(),
     )
@@ -672,8 +728,8 @@ fn contains_markdown_table(content: &str) -> bool {
     })
 }
 
-/// Render markdown content into ratatui lines. `theme` is the syntect theme
-/// for code-block highlighting (see `crate::ui::theme::Theme::code`).
+/// Render markdown content into ratatui lines. `theme` is the application
+/// theme; `Theme::code()` is used for fenced code highlighting.
 pub fn render_markdown(content: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let normalized = unwrap_markdown_table_fences(content);
     let parser = Parser::new_ext(&normalized, markdown_options());
@@ -803,9 +859,10 @@ pub fn render_markdown(content: &str, width: u16, theme: &Theme) -> Vec<Line<'st
                 renderer.blank_line();
                 renderer.finish_line();
                 let w = width.max(1) as usize;
-                renderer
-                    .lines
-                    .push(Line::styled("─".repeat(w), Style::default().fg(RULE)));
+                renderer.lines.push(Line::styled(
+                    "─".repeat(w),
+                    Style::default().fg(renderer.theme.markdown_rule),
+                ));
                 renderer.blank_line();
             }
             Event::TaskListMarker(checked) => {

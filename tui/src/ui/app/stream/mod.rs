@@ -17,7 +17,8 @@ use tokio::time::Duration;
 
 use super::{
     App, active_job_ids, active_process_ids, apply_input_key_with_paste_burst, apply_pane_nav_key,
-    apply_queue_nav_key, config_rejection_message, finish_queue_edit, should_open_agent_log,
+    apply_queue_nav_key, config_rejection_message, finish_queue_edit, orphaned_tool_result_row,
+    should_open_agent_log,
 };
 
 /// One place that resolves a `KeyEvent` to a blocked `ctx.ui.key()` request.
@@ -143,7 +144,7 @@ impl PaneOwnership {
     }
 
     /// Record the component id from a `ViewDiff::Upsert` or clear it on
-    /// `ViewDiff::Remove`. `SetHighlight` carries no pane ownership.
+    /// `ViewDiff::Remove`. Highlight and theme diffs carry no pane ownership.
     pub fn track(&mut self, diff: &crate::runtime::view::ViewDiff) {
         use crate::runtime::view::ViewDiff;
         match diff {
@@ -153,7 +154,7 @@ impl PaneOwnership {
             ViewDiff::Remove { id } => {
                 self.sources.remove(id);
             }
-            ViewDiff::SetHighlight { .. } => {}
+            ViewDiff::SetHighlight { .. } | ViewDiff::SetTheme { .. } => {}
         }
     }
 
@@ -220,13 +221,14 @@ fn refresh_queue_page(
     pages: &mut Vec<PanePage>,
     active_page: &mut usize,
     panes_visible: &mut bool,
+    theme: &crate::ui::theme::Theme,
 ) {
     if queue.is_empty() {
         *selected = 0;
         *active_page = PanePage::remove(pages, crate::ui::queue_pane::PANE_SOURCE, *active_page);
     } else {
         *selected = (*selected).min(queue.len() - 1);
-        if let Some(page) = crate::ui::queue_pane::render(queue, *selected) {
+        if let Some(page) = crate::ui::queue_pane::render(queue, *selected, theme) {
             let (_, active) = PanePage::upsert(pages, *active_page, page);
             *active_page = active;
             *panes_visible = true;
@@ -394,6 +396,7 @@ impl App {
                     &mut self.queue_editing,
                     &mut pending_key,
                     &self.command_tx,
+                    &self.renderer.theme,
                 );
                 if drained.mode_changed {
                     self.user_config.approval_mode = self.approval_mode;
@@ -585,6 +588,7 @@ impl App {
                     &mut self.queue_editing,
                     &mut pending_key,
                     &self.command_tx,
+                    &self.renderer.theme,
                 );
                 if drained.mode_changed {
                     self.user_config.approval_mode = self.approval_mode;
@@ -964,8 +968,8 @@ impl App {
                 } else if let Some(call) = pending.remove(&call_id) {
                     let display = self.wire_tools.display_for_call(&call);
                     self.messages.push(build_tool_row(&call, &result, display));
-                } else {
-                    self.messages.push(Message::tool_row(name, is_error));
+                } else if let Some(row) = orphaned_tool_result_row(name, is_error) {
+                    self.messages.push(row);
                 }
                 self.flush_new_messages_to_scrollback(term)?;
             }
@@ -1023,9 +1027,12 @@ impl App {
         self.thinking_clear_at = None;
         self.thinking_first_shown.get_or_insert_with(Instant::now);
 
-        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::style::{Modifier, Style};
         use ratatui::text::Line;
-        let grey = Style::default().fg(Color::Gray);
+        let header_style = Style::default()
+            .fg(self.renderer.theme.thinking)
+            .add_modifier(Modifier::BOLD);
+        let body_style = Style::default().fg(self.renderer.theme.palette.muted);
         // Header + the last reasoning lines that fit; the header stays pinned.
         let mut tail: Vec<&str> = self
             .thinking_tail
@@ -1033,11 +1040,11 @@ impl App {
             .take(Self::THINKING_MAX_ROWS - 1)
             .collect();
         tail.reverse();
-        let mut content = vec![Line::styled(
-            "✻ Thinking",
-            grey.add_modifier(Modifier::BOLD),
-        )];
-        content.extend(tail.iter().map(|l| Line::styled((*l).to_string(), grey)));
+        let mut content = vec![Line::styled("✻ Thinking", header_style)];
+        content.extend(
+            tail.iter()
+                .map(|line| Line::styled((*line).to_string(), body_style)),
+        );
         let visible_rows = content.len();
         let page = PanePage {
             source: "thinking".to_string(),
@@ -1252,6 +1259,7 @@ impl App {
         queue_editing: &mut Option<(usize, String)>,
         pending_key: &mut KeySink,
         command_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCommand>,
+        theme: &crate::ui::theme::Theme,
     ) -> DrainKeysResult {
         let mut result = DrainKeysResult::default();
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
@@ -1319,6 +1327,7 @@ impl App {
                             pages,
                             active_page,
                             panes_visible,
+                            theme,
                         );
                         continue;
                     }
@@ -1344,6 +1353,7 @@ impl App {
                             pages,
                             active_page,
                             panes_visible,
+                            theme,
                         );
                         continue;
                     }
@@ -1455,6 +1465,7 @@ impl App {
                                                 pages,
                                                 active_page,
                                                 panes_visible,
+                                                theme,
                                             );
                                         }
                                     }
@@ -1467,6 +1478,7 @@ impl App {
                                             pages,
                                             active_page,
                                             panes_visible,
+                                            theme,
                                         );
                                     }
                                     InputAction::CycleMode => {

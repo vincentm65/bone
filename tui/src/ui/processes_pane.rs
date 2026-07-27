@@ -1,12 +1,18 @@
 //! Native live pane for host-managed background processes.
 use super::pane_page::PanePage;
 use bone_protocol::ProcessSnapshot;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+use crate::ui::theme::Theme;
 
 pub const PANE_SOURCE: &str = "processes";
 
-pub fn render(processes: &[ProcessSnapshot], selected_id: Option<&str>) -> Option<PanePage> {
+pub fn render(
+    theme: &Theme,
+    processes: &[ProcessSnapshot],
+    selected_id: Option<&str>,
+) -> Option<PanePage> {
     let active: Vec<_> = processes.iter().filter(|process| process.running).collect();
     if active.is_empty() {
         return None;
@@ -30,17 +36,21 @@ pub fn render(processes: &[ProcessSnapshot], selected_id: Option<&str>) -> Optio
                 Span::styled(
                     "◑ ",
                     Style::default()
-                        .fg(Color::White)
+                        .fg(theme.palette.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(label, Style::default().fg(Color::White)),
-                Span::styled(format!(" — {tail}"), Style::default().fg(Color::Gray)),
+                Span::styled(label, Style::default().fg(theme.palette.fg)),
+                Span::styled(
+                    format!(" — {tail}"),
+                    Style::default().fg(theme.palette.muted),
+                ),
             ]);
             (selected, line)
         })
         .collect();
 
     Some(super::selectable_pane::render(
+        theme,
         PANE_SOURCE,
         format!("Processes ({})", active.len()),
         rows,
@@ -67,12 +77,14 @@ mod tests {
 
     #[test]
     fn running_process_renders_selected_row_with_latest_output() {
-        let page = render(&[process("process-1")], Some("process-1"))
+        let mut theme = Theme::default();
+        theme.palette.selection = ratatui::style::Color::Blue;
+        let page = render(&theme, &[process("process-1")], Some("process-1"))
             .expect("running process should render");
 
         assert!(page.content[0].to_string().contains("latest"));
         assert!(page.content[0].to_string().contains('›'));
-        assert_eq!(page.content[0].style.bg, Some(Color::Rgb(0x3A, 0x3F, 0x4B)));
+        assert_eq!(page.content[0].style.bg, Some(theme.palette.selection));
     }
 
     #[test]
@@ -80,7 +92,7 @@ mod tests {
         let processes: Vec<_> = (0..10)
             .map(|index| process(&format!("process-{index}")))
             .collect();
-        let page = render(&processes, Some("process-9")).unwrap();
+        let page = render(&Theme::default(), &processes, Some("process-9")).unwrap();
 
         assert_eq!(page.scroll, 2);
         assert!(page.scroll <= page.max_scroll());

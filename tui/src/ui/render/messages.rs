@@ -6,7 +6,7 @@ use crate::chat::{Message, ToolDisplay};
 use crate::llm::ChatRole;
 use crate::ui::render::{markdown, wrap};
 use crate::ui::theme::Theme;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -18,7 +18,7 @@ pub(crate) fn wrapped_line_count(line: &Line<'static>, width: u16) -> u16 {
 }
 
 pub fn assistant_markdown_to_lines(content: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    markdown::render_markdown(content, width, theme.code())
+    markdown::render_markdown(content, width, theme)
 }
 
 pub fn render_tool(
@@ -86,7 +86,10 @@ pub(crate) fn render_tool_with_hint(
                     if is_first_logical {
                         spans.insert(
                             0,
-                            Span::styled("shell".to_string(), Style::default().fg(Color::White)),
+                            Span::styled(
+                                "shell".to_string(),
+                                Style::default().fg(theme.palette.fg),
+                            ),
                         );
                     }
                     wrap_tool_label_spans(spans, &visuals)
@@ -148,8 +151,8 @@ pub(crate) fn render_tool_with_hint(
     }
 }
 
-fn tool_name_style(_tool: &ToolDisplay, _theme: &Theme) -> Style {
-    Style::default().fg(Color::White)
+fn tool_name_style(_tool: &ToolDisplay, theme: &Theme) -> Style {
+    Style::default().fg(theme.palette.fg)
 }
 
 fn tool_rest_style(_tool: &ToolDisplay, theme: &Theme) -> Style {
@@ -834,7 +837,7 @@ fn header_spans_for_line(line: &str, theme: &Theme) -> Option<Vec<Span<'static>>
     }
 
     let path = &rest[..paren_start];
-    let name_style = Style::default().fg(Color::White);
+    let name_style = Style::default().fg(theme.palette.fg);
     let detail_style = Style::default().fg(theme.tool_call);
 
     Some(vec![
@@ -942,7 +945,7 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
             }
         }
         ChatRole::Assistant => {
-            let rendered = markdown::render_markdown(&msg.content, width, theme.code());
+            let rendered = markdown::render_markdown(&msg.content, width, theme);
             lines.extend(rendered);
         }
         ChatRole::System | ChatRole::Tool => {

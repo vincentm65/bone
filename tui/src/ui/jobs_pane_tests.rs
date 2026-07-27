@@ -24,15 +24,19 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
     }
 }
 
+fn theme() -> Theme {
+    Theme::default()
+}
+
 #[test]
 fn render_returns_none_without_agents() {
-    assert!(render(&[]).is_none());
+    assert!(render(&theme(), &[]).is_none());
 }
 
 #[test]
 fn render_includes_ad_hoc_job_agents() {
     let jobs = vec![job("job-1", "shotgun codex/gpt-5 #1", JobStatus::Running)];
-    let pane = render(&jobs).unwrap();
+    let pane = render(&theme(), &jobs).unwrap();
     let first: String = pane.content[0]
         .spans
         .iter()
@@ -48,7 +52,7 @@ fn render_lists_all_agents() {
         job("job-1", "researcher", JobStatus::Running),
         job("job-2", "coder", JobStatus::Running),
     ];
-    let pane = render(&jobs).unwrap();
+    let pane = render(&theme(), &jobs).unwrap();
     assert_eq!(pane.source, PANE_SOURCE);
     assert_eq!(pane.title, "Agents (2)");
     assert_eq!(pane.content.len(), 3); // 2 agents + separator line
@@ -66,13 +70,13 @@ fn render_lists_all_agents() {
 #[test]
 fn render_returns_none_when_jobs_done() {
     let jobs = vec![job("job-10", "researcher", JobStatus::Done)];
-    assert!(render(&jobs).is_none());
+    assert!(render(&theme(), &jobs).is_none());
 }
 
 #[test]
 fn render_shows_running_status() {
     let jobs = vec![job("job-1", "researcher", JobStatus::Running)];
-    let pane = render(&jobs).unwrap();
+    let pane = render(&theme(), &jobs).unwrap();
     let line: String = pane.content[0]
         .spans
         .iter()
@@ -86,14 +90,16 @@ fn render_shows_running_status() {
 #[test]
 fn selected_job_is_marked() {
     let jobs = vec![job("job-1", "researcher", JobStatus::Running)];
-    let pane = render_selected(&jobs, Some("job-1")).unwrap();
+    let mut theme = theme();
+    theme.palette.selection = Color::Blue;
+    let pane = render_selected(&theme, &jobs, Some("job-1")).unwrap();
     let line: String = pane.content[0]
         .spans
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
     assert!(line.contains('›'));
-    assert_eq!(pane.content[0].style.bg, Some(Color::Rgb(0x3A, 0x3F, 0x4B)));
+    assert_eq!(pane.content[0].style.bg, Some(theme.palette.selection));
 }
 
 #[test]
@@ -107,7 +113,7 @@ fn selected_job_scrolls_into_view() {
             )
         })
         .collect();
-    let pane = render_selected(&jobs, Some("job-9")).unwrap();
+    let pane = render_selected(&theme(), &jobs, Some("job-9")).unwrap();
 
     assert_eq!(pane.scroll, 2);
     assert!(pane.scroll <= pane.max_scroll());
@@ -116,10 +122,11 @@ fn selected_job_scrolls_into_view() {
 #[test]
 fn running_agent_is_not_greyed() {
     let jobs = vec![job("job-1", "researcher", JobStatus::Running)];
-    let pane = render(&jobs).unwrap();
+    let theme = theme();
+    let pane = render(&theme, &jobs).unwrap();
     let spans = &pane.content[0].spans;
-    assert_eq!(spans[0].style.fg, Some(Color::White));
-    assert_eq!(spans[1].style.fg, Some(Color::White));
+    assert_eq!(spans[0].style.fg, Some(theme.palette.accent));
+    assert_eq!(spans[1].style.fg, Some(theme.palette.fg));
 }
 
 #[test]
@@ -128,7 +135,7 @@ fn multi_job_shows_header() {
         job("job-1", "researcher", JobStatus::Running),
         job("job-2", "researcher", JobStatus::Running),
     ];
-    let pane = render(&jobs).unwrap();
+    let pane = render(&theme(), &jobs).unwrap();
     let header: String = pane.content[0]
         .spans
         .iter()

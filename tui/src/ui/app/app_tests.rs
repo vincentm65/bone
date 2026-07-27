@@ -1,9 +1,10 @@
 use super::{
-    App, ConfigView, WireTools, apply_queue_nav_key, background_pane_needs_refresh,
-    config_rejection_message, configured_input_style, edit_diff_message, idle_state_needs_redraw,
-    job_snapshot_messages, lua_config_available, parse_config_value, prepare_streaming_replay,
-    render_config_page, run_insertion_lifecycle, should_open_agent_log, take_pending_config,
-    terminal_dimensions_changed,
+    App, ConfigView, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
+    background_pane_needs_refresh, config_rejection_message, configured_input_style,
+    edit_diff_message, idle_state_needs_redraw, job_snapshot_messages, lua_config_available,
+    orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, render_config_page,
+    run_insertion_lifecycle, should_open_agent_log, take_pending_config,
+    terminal_background_transition, terminal_dimensions_changed,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
@@ -18,6 +19,32 @@ fn terminal_dimension_changes_require_a_prior_size() {
     assert!(terminal_dimensions_changed(Some((80, 24)), (100, 24)));
     assert!(terminal_dimensions_changed(Some((80, 24)), (80, 30)));
     assert!(terminal_dimensions_changed(Some((80, 24)), (100, 30)));
+}
+
+#[test]
+fn terminal_background_tracks_configured_and_absent_transitions() {
+    use ratatui::style::Color;
+
+    assert_eq!(
+        terminal_background_transition(false, Some(Color::Rgb(1, 2, 3))),
+        TerminalBackgroundTransition::Set
+    );
+    assert_eq!(
+        terminal_background_transition(true, Some(Color::Blue)),
+        TerminalBackgroundTransition::Set
+    );
+    assert_eq!(
+        terminal_background_transition(true, None),
+        TerminalBackgroundTransition::Reset
+    );
+    assert_eq!(
+        terminal_background_transition(false, None),
+        TerminalBackgroundTransition::None
+    );
+    assert_eq!(
+        terminal_background_transition(true, Some(Color::Indexed(1))),
+        TerminalBackgroundTransition::None
+    );
 }
 
 #[test]
@@ -119,13 +146,17 @@ fn insertion_callers_preserve_reset_resize_insert_restore_order() {
         )
         .unwrap();
 
-        let mut expected = if resets_input {
+        let expected = if resets_input {
             vec!["reset", "size/draw", "insert"]
         } else {
             vec!["size/draw", "insert"]
         };
         #[cfg(windows)]
-        expected.push("Windows draw");
+        let expected = {
+            let mut expected = expected;
+            expected.push("Windows draw");
+            expected
+        };
         assert_eq!(events, expected, "{name}");
     }
 }
@@ -181,9 +212,13 @@ fn stale_resize_rebuild_precedes_width_sensitive_stream_insertion() {
     )
     .unwrap();
 
-    let mut expected = vec!["rebuild", "size/draw", "insert"];
+    let expected = vec!["rebuild", "size/draw", "insert"];
     #[cfg(windows)]
-    expected.push("Windows draw");
+    let expected = {
+        let mut expected = expected;
+        expected.push("Windows draw");
+        expected
+    };
     assert_eq!(model.events, expected);
     assert_eq!(model.tracked_size, Some(current_size));
     assert_eq!(model.insertion_width, 42);
@@ -373,6 +408,16 @@ fn job_with_events(events: Vec<crate::ext::jobs::JobEvent>) -> crate::ext::jobs:
         scope: None,
         cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
+}
+
+#[test]
+fn orphaned_successful_tool_results_are_hidden_but_errors_remain_visible() {
+    assert!(orphaned_tool_result_row("subagent".into(), false).is_none());
+
+    let error = orphaned_tool_result_row("subagent".into(), true).unwrap();
+    let tool = error.tool.unwrap();
+    assert_eq!(tool.label, "subagent");
+    assert!(tool.is_error);
 }
 
 #[test]
@@ -696,6 +741,29 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         command_rx.try_recv().unwrap(),
         crate::runtime::RuntimeCommand::GetConfig
     ));
+
+    assert!(
+        app.renderer
+            .theme
+            .set_highlight("thinking", Some("#010203"))
+    );
+    let mut preview = crate::config::settings::ThemeSettings::default();
+    preview.palette.accent = Some("#112233".into());
+    preview.thinking = Some("accent".into());
+    assert!(
+        app.apply_view_diff(crate::runtime::view::ViewDiff::SetTheme {
+            theme: serde_json::to_value(preview).unwrap(),
+        })
+    );
+    assert_eq!(
+        app.renderer.theme.palette.accent,
+        ratatui::style::Color::Rgb(0x11, 0x22, 0x33)
+    );
+    assert_eq!(
+        app.renderer.theme.thinking,
+        ratatui::style::Color::Rgb(0x01, 0x02, 0x03),
+        "complete previews must preserve runtime overrides"
+    );
 
     drop(app);
     std::fs::remove_dir_all(root).ok();

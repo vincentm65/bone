@@ -51,6 +51,26 @@ fn terminal_dimensions_changed(last: Option<(u16, u16)>, current: (u16, u16)) ->
     last.is_some_and(|last| last != current)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalBackgroundTransition {
+    Set,
+    Reset,
+    None,
+}
+
+fn terminal_background_transition(
+    terminal_bg_set: bool,
+    bg: Option<ratatui::style::Color>,
+) -> TerminalBackgroundTransition {
+    if bg.and_then(crate::ui::color::color_to_rgb).is_some() {
+        TerminalBackgroundTransition::Set
+    } else if bg.is_none() && terminal_bg_set {
+        TerminalBackgroundTransition::Reset
+    } else {
+        TerminalBackgroundTransition::None
+    }
+}
+
 fn prepare_streaming_replay(renderer: &mut Renderer) {
     renderer.scrollback_cursor += 1;
     renderer.streaming_source_flushed = 0;
@@ -927,7 +947,9 @@ impl App {
             serde_json::from_value::<crate::ext::snapshots::ResolvedFrontendSettings>(settings)
         {
             let settings = resolved.settings;
-            self.renderer.theme.apply_snapshot(&settings.theme);
+            self.renderer
+                .theme
+                .apply_resolved_snapshot(&settings.theme, &resolved.runtime_highlights);
             theme_changed = true;
             self.lua_input_style = input_style_snapshot(&settings.ui.input);
             apply_settings_to_user_config(&mut self.user_config, &settings);
@@ -951,12 +973,14 @@ impl App {
     }
 
     fn apply_terminal_background(&mut self) {
-        if self.renderer.theme.palette.bg.is_some() {
-            if Renderer::apply_terminal_background(self.renderer.theme.palette.bg).is_ok() {
-                self.terminal_bg_set = true;
+        match terminal_background_transition(self.terminal_bg_set, self.renderer.theme.palette.bg) {
+            TerminalBackgroundTransition::Set => {
+                if Renderer::apply_terminal_background(self.renderer.theme.palette.bg).is_ok() {
+                    self.terminal_bg_set = true;
+                }
             }
-        } else {
-            self.reset_terminal_background();
+            TerminalBackgroundTransition::Reset => self.reset_terminal_background(),
+            TerminalBackgroundTransition::None => {}
         }
     }
 
@@ -1230,7 +1254,10 @@ impl App {
                         ),
                         None => {
                             let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
-                            let mut row = Message::tool_row(label, msg.is_error);
+                            let Some(mut row) = orphaned_tool_result_row(label, msg.is_error)
+                            else {
+                                continue;
+                            };
                             row.image_count = msg.images.len();
                             row
                         }
@@ -1904,6 +1931,25 @@ impl App {
                 }
                 changed
             }
+            ViewDiff::SetTheme { theme } => {
+                let Ok(theme) =
+                    serde_json::from_value::<crate::config::settings::ThemeSettings>(theme)
+                else {
+                    return false;
+                };
+                let overrides = self
+                    .renderer
+                    .theme
+                    .runtime_overrides()
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
+                self.renderer
+                    .theme
+                    .apply_resolved_snapshot(&theme, &overrides);
+                self.apply_terminal_background();
+                true
+            }
         }
     }
 
@@ -1926,9 +1972,11 @@ impl App {
             .collect();
         crate::ui::selectable_pane::reconcile_selection(&mut self.selected_job_id, &active_ids);
         if has_running {
-            if let Some(page) =
-                crate::ui::jobs_pane::render_selected(&jobs, self.selected_job_id.as_deref())
-            {
+            if let Some(page) = crate::ui::jobs_pane::render_selected(
+                &self.renderer.theme,
+                &jobs,
+                self.selected_job_id.as_deref(),
+            ) {
                 let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
                 self.active_page = new_active;
                 self.panes_visible = true;
@@ -1948,9 +1996,11 @@ impl App {
             .map(|process| process.id.clone())
             .collect();
         crate::ui::selectable_pane::reconcile_selection(&mut self.selected_process_id, &active_ids);
-        if let Some(page) =
-            crate::ui::processes_pane::render(&self.processes, self.selected_process_id.as_deref())
-        {
+        if let Some(page) = crate::ui::processes_pane::render(
+            &self.renderer.theme,
+            &self.processes,
+            self.selected_process_id.as_deref(),
+        ) {
             let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
             self.active_page = new_active;
             self.panes_visible = true;
@@ -1970,6 +2020,12 @@ fn edit_diff_message(name: &str, is_error: bool, content: &str) -> Option<Messag
     }
     let newline = content.find('\n')?;
     Some(Message::system(content[newline..].to_string()))
+}
+
+/// An unmatched successful result has no useful label or content to render.
+/// Keep unmatched errors visible, but do not leak bare tool names into the UI.
+fn orphaned_tool_result_row(name: String, is_error: bool) -> Option<Message> {
+    is_error.then(|| Message::tool_row(name, true))
 }
 
 /// Render a point-in-time view of a running job from its bounded runtime-event log.
@@ -2031,7 +2087,12 @@ fn job_snapshot_messages(job: &crate::ext::jobs::Job, wire_tools: &WireTools) ->
                 };
                 let row = match calls.get(call_id) {
                     Some(call) => build_tool_row(call, &result, wire_tools.display_for_call(call)),
-                    None => Message::tool_row(name.clone(), *is_error),
+                    None => {
+                        let Some(row) = orphaned_tool_result_row(name.clone(), *is_error) else {
+                            continue;
+                        };
+                        row
+                    }
                 };
                 rows.push(row);
             }
@@ -2231,7 +2292,9 @@ impl App {
             return;
         }
         self.queue_selected = self.queue_selected.min(self.queue.len() - 1);
-        if let Some(page) = crate::ui::queue_pane::render(&self.queue, self.queue_selected) {
+        if let Some(page) =
+            crate::ui::queue_pane::render(&self.queue, self.queue_selected, &self.renderer.theme)
+        {
             let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
             self.active_page = active;
             self.panes_visible = true;
@@ -2279,6 +2342,7 @@ impl App {
             process,
             self.command_tx.clone(),
             self.events_rx.resubscribe(),
+            &self.renderer.theme,
         );
         self.force_redraw(term)?;
         result
@@ -3180,7 +3244,7 @@ impl App {
         }
         let result = {
             let db = self.session_db.as_ref().unwrap();
-            crate::ui::stats::run(|range| match range {
+            crate::ui::stats::run(&self.renderer.theme, |range| match range {
                 None => db
                     .usage_stats_snapshot()
                     .map_err(|err| io::Error::other(err.to_string())),
@@ -3226,7 +3290,7 @@ impl App {
             }
         }
 
-        let result = crate::ui::catalog::run();
+        let result = crate::ui::catalog::run(&self.renderer.theme);
         self.restore_after_takeover(term)?;
         match result {
             Ok(outcome) => {
@@ -3275,7 +3339,7 @@ impl App {
         }
 
         if !ran {
-            let result = crate::ui::setup::run(false);
+            let result = crate::ui::setup::run(&self.renderer.theme, false);
             self.restore_after_takeover(term)?;
             match result {
                 Ok(true) => {}

@@ -1162,10 +1162,87 @@ theme:
     tool_error: error
 ```
 
-Colors may be hex (`#RRGGBB`) or named (`white`, `black`, `red`, `green`,
-`yellow`, `blue`, `magenta`, `cyan`, `gray`, `darkgray`, `lightred`,
-`lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`). Missing
-keys use native defaults.
+Colors may be hex (`#RRGGBB` or `RRGGBB`) or named (`white`, `black`, `red`,
+`green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`, `darkgray`, `lightred`,
+`lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`). Palette
+names may be used as references in role values. Resolution precedence is native
+defaults → palette → derived roles → structured shell/syntax fields → legacy
+flat fields → `highlights`. Runtime overrides apply last and are not persisted.
+Passing `nil` to `set_highlight` removes that temporary override and reveals the
+configured value; it does not restore the built-in default.
+
+Foreground highlights accept a scalar or `{ fg: ... }`; `user_msg_bg` and
+`input_bg` accept a scalar or `{ bg: ... }`. `user_msg` alone accepts both
+channels. `input_bg`, `input_prefix`, and `input_cursor` are configured only
+under `theme.highlights`. Palette roles belong under `theme.palette`; only `bg`
+is runtime mutable.
+
+<!-- BEGIN GENERATED THEME ROLES -->
+| Role | Channel | Runtime |
+|---|---|:---:|
+| `bg` | bg | yes |
+| `fg` | fg | no |
+| `muted` | fg | no |
+| `subtle` | fg | no |
+| `border` | fg | no |
+| `accent` | fg | no |
+| `good` | fg | no |
+| `warn` | fg | no |
+| `error` | fg | no |
+| `selection` | fg | no |
+| `user_msg` | fg + bg | yes |
+| `user_msg_bg` | bg | yes |
+| `status_text` | fg | yes |
+| `input_border` | fg | yes |
+| `input_bg` | bg | yes |
+| `input_prefix` | fg | yes |
+| `input_cursor` | fg | yes |
+| `system_msg` | fg | yes |
+| `approval_safe` | fg | yes |
+| `approval_danger` | fg | yes |
+| `tool_call` | fg | yes |
+| `tool_error` | fg | yes |
+| `diff_removed` | fg | yes |
+| `diff_added` | fg | yes |
+| `thinking` | fg | yes |
+| `shell_program` | fg | yes |
+| `shell_separator` | fg | yes |
+| `shell_redirect` | fg | yes |
+| `shell_flag` | fg | yes |
+| `shell_string` | fg | yes |
+| `shell_variable` | fg | yes |
+| `shell_comment` | fg | yes |
+| `shell_path` | fg | yes |
+| `syntax_text` | fg | yes |
+| `syntax_comment` | fg | yes |
+| `syntax_string` | fg | yes |
+| `syntax_number` | fg | yes |
+| `syntax_constant` | fg | yes |
+| `syntax_escape` | fg | yes |
+| `syntax_regex` | fg | yes |
+| `syntax_keyword` | fg | yes |
+| `syntax_keyword_control` | fg | yes |
+| `syntax_type` | fg | yes |
+| `syntax_function` | fg | yes |
+| `syntax_variable` | fg | yes |
+| `syntax_tag` | fg | yes |
+| `syntax_attribute` | fg | yes |
+| `syntax_punctuation` | fg | yes |
+| `syntax_subtle` | fg | yes |
+| `syntax_markup` | fg | yes |
+| `syntax_invalid` | fg | yes |
+| `markdown_marker` | fg | yes |
+| `markdown_heading` | fg | yes |
+| `markdown_link` | fg | yes |
+| `markdown_inline_code` | fg | yes |
+| `markdown_rule` | fg | yes |
+| `markdown_table_border` | fg | yes |
+| `markdown_table_header` | fg | yes |
+| `chart` | fg | yes |
+| `chart_empty` | fg | yes |
+| `heat_low` | fg | yes |
+| `heat_high` | fg | yes |
+<!-- END GENERATED THEME ROLES -->
 
 ### Keymaps
 

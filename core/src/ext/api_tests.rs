@@ -8,7 +8,15 @@ fn lua_with_api() -> Lua {
     let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
     let path = std::env::temp_dir().join("test-settings.yaml");
     let registry = Arc::new(std::sync::RwLock::new(Default::default()));
-    setup_api(&lua, &bone, settings, registry, path).unwrap();
+    setup_api(
+        &lua,
+        &bone,
+        settings,
+        registry,
+        path,
+        super::super::api_ui::new_shared(),
+    )
+    .unwrap();
     lua.globals().set("bone", bone).unwrap();
     lua
 }
@@ -48,6 +56,7 @@ fn top_level_keymap_accepts_strings_and_callbacks() {
         Arc::clone(&settings),
         Arc::new(std::sync::RwLock::new(Default::default())),
         std::env::temp_dir().join("unused-keymap-settings.yaml"),
+        super::super::api_ui::new_shared(),
     )
     .unwrap();
     lua.globals().set("bone", bone).unwrap();
@@ -116,6 +125,7 @@ fn canonical_namespaces_have_no_legacy_config_or_keymap_aliases() {
             assert(type(bone.keymap.set) == "function")
             assert(type(bone.settings.get) == "function")
             assert(type(bone.theme.load) == "function")
+            assert(type(bone.theme.preview) == "function")
             assert(bone.config == nil)
             assert(bone.api.submit == nil)
             assert(bone.api.config == nil)
@@ -150,12 +160,14 @@ fn theme_list_load_and_reload_selected_theme() {
     let lua = Lua::new();
     let bone = lua.create_table().unwrap();
     super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    let shared_ui = super::super::api_ui::new_shared();
     setup_api(
         &lua,
         &bone,
         Arc::clone(&settings),
         Arc::new(std::sync::RwLock::new(Default::default())),
         settings_path.clone(),
+        shared_ui.clone(),
     )
     .unwrap();
     lua.globals().set("bone", bone).unwrap();
@@ -163,11 +175,63 @@ fn theme_list_load_and_reload_selected_theme() {
         r#"
             local themes = bone.theme.list()
             assert(#themes == 1 and themes[1] == "ocean")
-            bone.theme.load("ocean")
+            bone.theme.preview("ocean")
         "#,
     )
     .exec()
     .unwrap();
+    assert_eq!(settings.lock().unwrap().resolved().theme.name, None);
+    assert!(!settings_path.exists(), "preview must not persist settings");
+    let diffs = super::super::api_ui::lock_shared(&shared_ui).drain_diffs();
+    assert_eq!(diffs.len(), 1);
+    let crate::runtime::view::ViewDiff::SetTheme { theme } = &diffs[0] else {
+        panic!("preview emitted unexpected diff: {:?}", diffs[0]);
+    };
+    let preview: crate::config::settings::ThemeSettings =
+        serde_json::from_value(theme.clone()).unwrap();
+    assert_eq!(preview.name.as_deref(), Some("ocean"));
+    assert_eq!(preview.palette.accent.as_deref(), Some("#112233"));
+
+    lua.load("bone.theme.preview(nil)").exec().unwrap();
+    let diffs = super::super::api_ui::lock_shared(&shared_ui).drain_diffs();
+    let crate::runtime::view::ViewDiff::SetTheme { theme } = &diffs[0] else {
+        panic!("restore emitted unexpected diff: {:?}", diffs[0]);
+    };
+    let restored: crate::config::settings::ThemeSettings =
+        serde_json::from_value(theme.clone()).unwrap();
+    assert_eq!(restored.name, None);
+    assert_eq!(settings.lock().unwrap().resolved().theme.name, None);
+    assert!(!settings_path.exists(), "restore must not persist settings");
+
+    std::fs::write(
+        &theme_path,
+        r#"return { palette = { accent = "not-a-color" } }"#,
+    )
+    .unwrap();
+    let error = lua
+        .load("bone.theme.preview('ocean')")
+        .exec()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("theme.palette.accent: invalid color \"not-a-color\""));
+    assert!(
+        super::super::api_ui::lock_shared(&shared_ui)
+            .drain_diffs()
+            .is_empty(),
+        "invalid preview must not emit a theme diff"
+    );
+    std::fs::write(
+        &theme_path,
+        r##"return { palette = { accent = "#112233" }, thinking = "accent" }"##,
+    )
+    .unwrap();
+
+    lua.load("bone.theme.load('ocean')").exec().unwrap();
+    let diffs = super::super::api_ui::lock_shared(&shared_ui).drain_diffs();
+    assert!(matches!(
+        diffs.as_slice(),
+        [crate::runtime::view::ViewDiff::SetTheme { .. }]
+    ));
     {
         let store = settings.lock().unwrap();
         assert_eq!(store.resolved().theme.name.as_deref(), Some("ocean"));
@@ -196,6 +260,7 @@ fn theme_list_load_and_reload_selected_theme() {
         Arc::clone(&settings),
         Arc::new(std::sync::RwLock::new(Default::default())),
         settings_path,
+        super::super::api_ui::new_shared(),
     )
     .unwrap();
     assert_eq!(
@@ -232,6 +297,7 @@ fn settings_get_set_reset_persist_and_validate() {
         Arc::clone(&settings),
         Arc::new(std::sync::RwLock::new(Default::default())),
         path.clone(),
+        super::super::api_ui::new_shared(),
     )
     .unwrap();
     lua.globals().set("bone", bone).unwrap();
@@ -276,6 +342,7 @@ fn extension_settings_define_resolve_and_validate() {
         Arc::clone(&settings),
         Arc::clone(&registry),
         path.clone(),
+        super::super::api_ui::new_shared(),
     )
     .unwrap();
     lua.globals().set("bone", bone).unwrap();

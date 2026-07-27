@@ -1,7 +1,11 @@
-use super::actor_provider_config;
 use super::cli::{approval_mode, has_flag, parse_provider_model};
+use super::{actor_provider_config, configured_theme, resolve_configured_theme};
+use bone::config::settings::SettingsError;
 use bone::tools::ApprovalMode;
 use bone_protocol::ProviderUpdate;
+use ratatui::style::Color;
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
@@ -64,8 +68,61 @@ fn approval_mode_uses_canonical_setting() {
 }
 
 #[test]
+fn pre_app_theme_reads_configured_colors() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = std::env::temp_dir().join(format!(
+        "bone-pre-app-theme-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.yaml"),
+        "version: 2\ntheme:\n  palette:\n    fg: '#123456'\n    selection: '#654321'\n  highlights:\n    input_prefix: '#abcdef'\n",
+    )
+    .unwrap();
+    unsafe { std::env::set_var("BONE_DIR", &dir) };
+
+    let theme = configured_theme();
+
+    assert_eq!(theme.palette.fg, Color::Rgb(0x12, 0x34, 0x56));
+    assert_eq!(theme.palette.selection, Color::Rgb(0x65, 0x43, 0x21));
+    assert_eq!(theme.input_prefix, Color::Rgb(0xab, 0xcd, 0xef));
+
+    std::fs::remove_dir_all(dir).ok();
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn failed_pre_app_theme_load_warns_and_uses_complete_default() {
+    let mut warning = None;
+    let theme = resolve_configured_theme(
+        Err(SettingsError::Parse("broken theme".into())),
+        |message| warning = Some(message.to_owned()),
+    );
+
+    assert_eq!(theme, bone::ui::theme::Theme::default());
+    assert_eq!(
+        warning.as_deref(),
+        Some(
+            "bone: warning: failed to load configured theme: settings parse error: broken theme; using defaults"
+        )
+    );
+}
+
+#[test]
 fn actor_provider_config_reads_current_store_and_applies_cli_overrides() {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

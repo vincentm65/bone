@@ -306,6 +306,7 @@ fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
         )),
         std::sync::Arc::clone(&registry),
         dir.join("config.yaml"),
+        super::api_ui::new_shared(),
     )
     .unwrap();
     lua.globals().set("bone", bone).unwrap();

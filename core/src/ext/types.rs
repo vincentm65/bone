@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt};
 
-use crate::config::settings::{BoneSettings, Settings, ThemeStyleSpec};
+use crate::config::settings::{BoneSettings, Settings};
 use crate::tools::ToolCall;
 use bone_protocol::KeymapDispatchKind;
 
@@ -412,21 +412,11 @@ impl ExtensionManager {
     /// Get the daemon-owned resolved settings, including dynamic UI highlights
     /// and renderer presets from the booted UI module.
     pub fn frontend_settings(&self) -> super::snapshots::ResolvedFrontendSettings {
-        let (mut settings, revision) = {
+        let (settings, revision) = {
             let store = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             (store.resolved().clone(), store.revision())
         };
         let view = super::api_ui::snapshot(&self.ui);
-        for (name, color) in view.highlights {
-            if name == "bg" {
-                settings.theme.palette.bg = Some(color);
-            } else {
-                settings
-                    .theme
-                    .highlights
-                    .insert(name, ThemeStyleSpec::Color(color));
-            }
-        }
         let (spinner_styles, spinner_texts) = self
             .lua
             .lock()
@@ -438,6 +428,7 @@ impl ExtensionManager {
             extension_pages: self.extension_settings_pages(),
             spinner_styles,
             spinner_texts,
+            runtime_highlights: view.highlights,
         }
     }
 

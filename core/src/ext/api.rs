@@ -30,6 +30,7 @@ pub fn setup_api(
     settings: Arc<Mutex<Settings>>,
     registry: super::settings_registry::SharedSettingsRegistry,
     settings_path: PathBuf,
+    shared_ui: super::api_ui::SharedUi,
 ) -> Result<(), String> {
     let api = api_table(lua, bone).map_err(crate::util::errstr)?;
 
@@ -130,7 +131,7 @@ pub fn setup_api(
     keymap.set("set", set).map_err(crate::util::errstr)?;
     bone.set("keymap", keymap).map_err(crate::util::errstr)?;
 
-    setup_theme_api(lua, bone, Arc::clone(&settings), &settings_path)?;
+    setup_theme_api(lua, bone, Arc::clone(&settings), &settings_path, shared_ui)?;
 
     // bone.settings.{define,get,set,reset} — canonical settings plus
     // declarative extension-owned schemas. `register` remains as a compatibility
@@ -338,6 +339,7 @@ fn setup_theme_api(
     bone: &Table,
     settings: Arc<Mutex<Settings>>,
     settings_path: &Path,
+    shared_ui: super::api_ui::SharedUi,
 ) -> Result<(), String> {
     let themes_dir = settings_path
         .parent()
@@ -368,13 +370,35 @@ fn setup_theme_api(
     let load_dir = themes_dir.clone();
     let load_store = Arc::clone(&settings);
     let load_path = settings_path.to_path_buf();
+    let load_ui = shared_ui.clone();
     let load = lua
         .create_function(move |lua, name: String| {
-            load_theme(lua, &load_dir, &load_store, &load_path, &name)
-                .map_err(mlua::Error::external)
+            let resolved = load_theme(lua, &load_dir, &load_store, &load_path, &name)
+                .map_err(mlua::Error::external)?;
+            publish_theme(&load_ui, &resolved).map_err(mlua::Error::external)
         })
         .map_err(crate::util::errstr)?;
     theme.set("load", load).map_err(crate::util::errstr)?;
+
+    let preview_dir = themes_dir.clone();
+    let preview_store = Arc::clone(&settings);
+    let preview = lua
+        .create_function(move |lua, name: Option<String>| {
+            let resolved = match name {
+                Some(name) => {
+                    resolve_theme(lua, &preview_dir, &name).map_err(mlua::Error::external)?
+                }
+                None => preview_store
+                    .lock()
+                    .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
+                    .resolved()
+                    .theme
+                    .clone(),
+            };
+            publish_theme(&shared_ui, &resolved).map_err(mlua::Error::external)
+        })
+        .map_err(crate::util::errstr)?;
+    theme.set("preview", preview).map_err(crate::util::errstr)?;
     bone.set("theme", theme).map_err(crate::util::errstr)?;
 
     let selected = settings
@@ -394,13 +418,11 @@ fn setup_theme_api(
     Ok(())
 }
 
-fn load_theme(
+fn resolve_theme(
     lua: &Lua,
     themes_dir: &Path,
-    settings: &Arc<Mutex<Settings>>,
-    settings_path: &Path,
     name: &str,
-) -> Result<(), String> {
+) -> Result<crate::config::settings::ThemeSettings, String> {
     if name.is_empty()
         || !name
             .chars()
@@ -420,11 +442,33 @@ fn load_theme(
         .from_value(value)
         .map_err(|error| format!("invalid theme '{name}': {error}"))?;
     resolved.name = Some(name.to_string());
+    crate::config::settings::validate_theme(&resolved).map_err(|error| error.to_string())?;
+    Ok(resolved)
+}
+
+fn load_theme(
+    lua: &Lua,
+    themes_dir: &Path,
+    settings: &Arc<Mutex<Settings>>,
+    settings_path: &Path,
+    name: &str,
+) -> Result<crate::config::settings::ThemeSettings, String> {
+    let resolved = resolve_theme(lua, themes_dir, name)?;
     settings
         .lock()
         .map_err(|e| format!("settings lock poisoned: {e}"))?
-        .replace_theme_at(resolved, settings_path)
-        .map_err(|error| error.to_string())
+        .replace_theme_at(resolved.clone(), settings_path)
+        .map_err(|error| error.to_string())?;
+    Ok(resolved)
+}
+
+fn publish_theme(
+    shared_ui: &super::api_ui::SharedUi,
+    theme: &crate::config::settings::ThemeSettings,
+) -> Result<(), String> {
+    let theme = serde_json::to_value(theme).map_err(|error| error.to_string())?;
+    super::api_ui::lock_shared(shared_ui).apply(crate::runtime::view::ViewDiff::SetTheme { theme });
+    Ok(())
 }
 
 #[cfg(test)]

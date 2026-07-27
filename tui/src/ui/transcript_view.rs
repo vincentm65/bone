@@ -7,7 +7,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -73,7 +73,7 @@ fn run_loop(
     );
     let mut scroll = initial_scroll(&lines, term.size()?.height);
 
-    draw(term, &lines, scroll)?;
+    draw(term, &lines, scroll, theme)?;
     loop {
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -114,12 +114,17 @@ fn run_loop(
             }
             _ => continue,
         }
-        draw(term, &lines, scroll)?;
+        draw(term, &lines, scroll, theme)?;
     }
     Ok(())
 }
 
-fn draw(term: &mut FullscreenTerminal, lines: &[Line<'static>], scroll: usize) -> io::Result<()> {
+fn draw(
+    term: &mut FullscreenTerminal,
+    lines: &[Line<'static>],
+    scroll: usize,
+    theme: &Theme,
+) -> io::Result<()> {
     term.draw(|frame| {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -136,7 +141,7 @@ fn draw(term: &mut FullscreenTerminal, lines: &[Line<'static>], scroll: usize) -
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 "↑/↓ PgUp/PgDn Home/End scroll · q/Esc/Ctrl+O close",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.status_text),
             )])),
             chunks[1],
         );

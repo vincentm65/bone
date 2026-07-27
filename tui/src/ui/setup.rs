@@ -19,7 +19,8 @@ use crate::config::{self, InitChoice, SetupSelection};
 use crate::ext::catalog::{self, CatalogEntry};
 use crate::ui::catalog as catalog_ui;
 use crate::ui::fullscreen::{self, FullscreenTerminal};
-use crate::ui::picker::{self, ACCENT, BG, BORDER, DIM, GOOD, Item, MUTED, TEXT};
+use crate::ui::picker::{self, Item};
+use crate::ui::theme::Theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -55,7 +56,7 @@ struct State {
 }
 
 impl State {
-    fn new(fresh: bool) -> Result<Self, String> {
+    fn new(fresh: bool, theme: &Theme) -> Result<Self, String> {
         let config = config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())?;
         let mut providers: Vec<(String, String)> = config
             .providers_config()
@@ -75,7 +76,7 @@ impl State {
         // Fetch the catalog index (blocking, cached fallback) so the picker is
         // populated; offline simply yields an empty list.
         let cat_entries = catalog::sync_quiet();
-        let cat_items = catalog_ui::build_items(&cat_entries);
+        let cat_items = catalog_ui::build_items(&cat_entries, theme);
 
         let init_exists = config::setup_selection_path()
             .parent()
@@ -194,13 +195,13 @@ impl State {
 
 /// Run the onboarding wizard fullscreen. Returns `Ok(true)` if the user
 /// completed it (choices applied), `Ok(false)` if they cancelled.
-pub fn run(fresh: bool) -> io::Result<bool> {
-    fullscreen::run(|term| run_loop(term, fresh))
+pub fn run(theme: &Theme, fresh: bool) -> io::Result<bool> {
+    fullscreen::run(|term| run_loop(term, fresh, theme))
 }
 
-fn run_loop(term: &mut FullscreenTerminal, fresh: bool) -> io::Result<bool> {
-    let mut state = State::new(fresh).map_err(io::Error::other)?;
-    term.draw(|frame| draw(frame, &state))?;
+fn run_loop(term: &mut FullscreenTerminal, fresh: bool, theme: &Theme) -> io::Result<bool> {
+    let mut state = State::new(fresh, theme).map_err(io::Error::other)?;
+    term.draw(|frame| draw(frame, &state, theme))?;
 
     loop {
         match event::read()? {
@@ -226,7 +227,7 @@ fn run_loop(term: &mut FullscreenTerminal, fresh: bool) -> io::Result<bool> {
             Event::Resize(_, _) => {}
             _ => {}
         }
-        term.draw(|frame| draw(frame, &state))?;
+        term.draw(|frame| draw(frame, &state, theme))?;
     }
 }
 
@@ -311,9 +312,12 @@ fn apply(state: &mut State) -> io::Result<()> {
 
 // ---- rendering ----------------------------------------------------------
 
-fn draw(frame: &mut ratatui::Frame, state: &State) {
+fn draw(frame: &mut ratatui::Frame, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     let screen = frame.area();
-    frame.render_widget(Block::default().style(Style::default().bg(BG)), screen);
+    if let Some(bg) = p.bg {
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), screen);
+    }
 
     let width = screen.width.min(90);
     let area = Rect {
@@ -332,12 +336,13 @@ fn draw(frame: &mut ratatui::Frame, state: &State) {
         ])
         .split(area);
 
-    draw_header(frame, chunks[0], state);
-    draw_body(frame, chunks[1], state);
-    draw_footer(frame, chunks[2], state);
+    draw_header(frame, chunks[0], state, theme);
+    draw_body(frame, chunks[1], state, theme);
+    draw_footer(frame, chunks[2], state, theme);
 }
 
-fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &State) {
+fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     let step_n = match state.step {
         Step::Welcome => 1,
         Step::Provider => 2,
@@ -347,44 +352,45 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     };
     let lines = vec![
         Line::from(vec![
-            Span::styled("Welcome to ", Style::default().fg(MUTED)),
+            Span::styled("Welcome to ", Style::default().fg(p.muted)),
             Span::styled(
                 "bone",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(Span::styled(
             format!("Setup · step {step_n} of {STEP_COUNT}"),
-            Style::default().fg(DIM),
+            Style::default().fg(p.subtle),
         )),
     ];
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(BORDER))
+                .border_style(Style::default().fg(p.border))
                 .padding(ratatui::widgets::Padding::new(2, 0, 1, 0)),
         ),
         area,
     );
 }
 
-fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
+fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     match state.step {
-        Step::Welcome => draw_welcome(frame, area),
-        Step::Provider => draw_provider(frame, area, state),
+        Step::Welcome => draw_welcome(frame, area, theme),
+        Step::Provider => draw_provider(frame, area, state, theme),
         Step::Catalog => {
             if state.cat_items.is_empty() {
                 let lines = vec![
                     Line::from(Span::styled(
                         "Catalog unavailable.",
-                        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                        Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
                         "bone couldn't reach the catalog (you may be offline). \
                          Skip for now and add tools later with /catalog.",
-                        Style::default().fg(MUTED),
+                        Style::default().fg(p.muted),
                     )),
                 ];
                 frame.render_widget(
@@ -399,11 +405,12 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State) {
                     "They download once selected. Toggle with Space; → to continue.",
                     &state.cat_items,
                     state.cat_cursor,
+                    theme,
                 );
             }
         }
-        Step::Init => draw_init(frame, area, state),
-        Step::Confirm => draw_confirm(frame, area, state),
+        Step::Init => draw_init(frame, area, state, theme),
+        Step::Confirm => draw_confirm(frame, area, state, theme),
     }
 }
 
@@ -413,19 +420,20 @@ const LOGO: [&str; 3] = [
     "┗━┛┗━┛╹ ╹┗━╸   ╹ ╹┗━┛┗━╸╹ ╹ ╹ ",
 ];
 
-fn draw_welcome(frame: &mut ratatui::Frame, area: Rect) {
+fn draw_welcome(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
+    let p = &theme.palette;
     let mut lines = vec![];
     for row in LOGO {
         lines.push(Line::from(Span::styled(
             row,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
         )));
     }
     lines.push(Line::from(""));
     lines.extend(vec![
         Line::from(Span::styled(
             "bone is yours to shape.",
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -433,19 +441,28 @@ fn draw_welcome(frame: &mut ratatui::Frame, area: Rect) {
                 "This quick setup seeds your {} config. You'll set:",
                 config::bone_dir().display()
             ),
-            Style::default().fg(MUTED),
+            Style::default().fg(p.muted),
         )),
         Line::from(""),
-        bullet("Provider", "Pick one and drop in an API key (optional)."),
+        bullet(
+            "Provider",
+            "Pick one and drop in an API key (optional).",
+            theme,
+        ),
         bullet(
             "Catalog",
             "Optional tools & commands, downloaded on demand.",
+            theme,
         ),
-        bullet("init.lua", "Startup script — banner and advanced hooks."),
+        bullet(
+            "init.lua",
+            "Startup script — banner and advanced hooks.",
+            theme,
+        ),
         Line::from(""),
         Line::from(Span::styled(
             "Everything is editable later — just ask bone, or run /setup again.",
-            Style::default().fg(DIM),
+            Style::default().fg(p.subtle),
         )),
     ]);
     frame.render_widget(
@@ -454,7 +471,8 @@ fn draw_welcome(frame: &mut ratatui::Frame, area: Rect) {
     );
 }
 
-fn draw_provider(frame: &mut ratatui::Frame, area: Rect, state: &State) {
+fn draw_provider(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     let area = picker::pad(area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -470,14 +488,14 @@ fn draw_provider(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "Pick a provider and add a key to get started",
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         ))),
         rows[0],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "↑/↓ choose · type your API key · → to continue (or skip).",
-            Style::default().fg(DIM),
+            Style::default().fg(p.subtle),
         ))),
         rows[1],
     );
@@ -486,7 +504,7 @@ fn draw_provider(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "No providers configured. Add one with /config later.",
-                Style::default().fg(MUTED),
+                Style::default().fg(p.muted),
             )))
             .wrap(Wrap { trim: false }),
             rows[3],
@@ -502,53 +520,67 @@ fn draw_provider(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     let mut list_lines = Vec::with_capacity(end - start);
     for (i, (id, label)) in state.providers.iter().enumerate().take(end).skip(start) {
         let selected = i == state.provider_cursor;
-        let marker = if selected { " ● " } else { " ○ " };
-        list_lines.push(Line::from(vec![
-            Span::styled(
-                marker,
-                Style::default().fg(if selected { GOOD } else { DIM }),
-            ),
-            Span::styled(
-                label.clone(),
-                if selected {
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(TEXT)
-                },
-            ),
-            Span::styled(format!("  ({id})"), Style::default().fg(DIM)),
-        ]));
+        let mut line = radio_option(label.clone(), selected, theme);
+        line.spans.push(Span::styled(
+            format!("  ({id})"),
+            Style::default().fg(p.subtle),
+        ));
+        list_lines.push(line);
     }
     frame.render_widget(Paragraph::new(list_lines), rows[3]);
 
     // Masked key field.
     let masked = "•".repeat(state.api_key.chars().count());
     let key_line = Line::from(vec![
-        Span::styled("API key  ", Style::default().fg(MUTED)),
+        Span::styled("API key  ", Style::default().fg(p.muted)),
         Span::styled(
             if masked.is_empty() {
                 "(leave blank to skip)".to_string()
             } else {
                 masked
             },
-            Style::default().fg(if state.api_key.is_empty() { DIM } else { TEXT }),
+            Style::default().fg(if state.api_key.is_empty() {
+                p.subtle
+            } else {
+                p.fg
+            }),
         ),
     ]);
     frame.render_widget(Paragraph::new(key_line), rows[4]);
 }
 
-fn bullet(head: &str, rest: &str) -> Line<'static> {
+fn bullet(head: &str, rest: &str, theme: &Theme) -> Line<'static> {
+    let p = &theme.palette;
     Line::from(vec![
-        Span::styled("  • ", Style::default().fg(ACCENT)),
+        Span::styled("  • ", Style::default().fg(p.accent)),
         Span::styled(
             format!("{head}  "),
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(rest.to_string(), Style::default().fg(MUTED)),
+        Span::styled(rest.to_string(), Style::default().fg(p.muted)),
     ])
 }
 
-fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State) {
+fn radio_option(label: String, selected: bool, theme: &Theme) -> Line<'static> {
+    let p = &theme.palette;
+    Line::from(vec![
+        Span::styled(
+            if selected { " ● " } else { " ○ " },
+            Style::default().fg(if selected { p.good } else { p.subtle }),
+        ),
+        Span::styled(
+            label,
+            if selected {
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(p.fg)
+            },
+        ),
+    ])
+}
+
+fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     let area = picker::pad(area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -563,14 +595,14 @@ fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "How should your init.lua start?",
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         ))),
         rows[0],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "init.lua runs once at launch. Pick with ↑/↓, confirm with →.",
-            Style::default().fg(DIM),
+            Style::default().fg(p.subtle),
         ))),
         rows[1],
     );
@@ -583,21 +615,7 @@ fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     let mut list_lines = Vec::with_capacity(state.init_options.len());
     for (i, (label, _, _)) in state.init_options.iter().enumerate() {
         let selected = i == state.init_cursor;
-        let marker = if selected { " ● " } else { " ○ " };
-        list_lines.push(Line::from(vec![
-            Span::styled(
-                marker,
-                Style::default().fg(if selected { GOOD } else { DIM }),
-            ),
-            Span::styled(
-                label.to_string(),
-                if selected {
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(TEXT)
-                },
-            ),
-        ]));
+        list_lines.push(radio_option(label.to_string(), selected, theme));
     }
     frame.render_widget(Paragraph::new(list_lines), cols[0]);
 
@@ -605,10 +623,10 @@ fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         vec![
             Line::from(Span::styled(
                 label.to_string(),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from(Span::styled(desc.to_string(), Style::default().fg(MUTED))),
+            Line::from(Span::styled(desc.to_string(), Style::default().fg(p.muted))),
         ]
     } else {
         Vec::new()
@@ -619,14 +637,15 @@ fn draw_init(frame: &mut ratatui::Frame, area: Rect, state: &State) {
             .block(
                 Block::default()
                     .borders(Borders::LEFT)
-                    .border_style(Style::default().fg(BORDER))
+                    .border_style(Style::default().fg(p.border))
                     .padding(ratatui::widgets::Padding::horizontal(2)),
             ),
         cols[1],
     );
 }
 
-fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State) {
+fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let p = &theme.palette;
     let n_cat = state.cat_items.iter().filter(|i| i.checked).count();
     let init_label = state.init_options[state.init_cursor].0;
     let provider = state
@@ -637,19 +656,19 @@ fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     let lines = vec![
         Line::from(Span::styled(
             "Ready to set up bone.",
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        summary("Provider", provider),
-        summary("Catalog", format!("{n_cat} selected")),
-        summary("init.lua", init_label.to_string()),
+        summary("Provider", provider, theme),
+        summary("Catalog", format!("{n_cat} selected"), theme),
+        summary("init.lua", init_label.to_string(), theme),
         Line::from(""),
         Line::from(Span::styled(
             format!(
                 "Press Enter to write these into {}.",
                 config::bone_dir().display()
             ),
-            Style::default().fg(GOOD),
+            Style::default().fg(p.good),
         )),
         Line::from(Span::styled(
             if state.fresh {
@@ -657,7 +676,7 @@ fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State) {
             } else {
                 "← to go back, Esc to cancel (leaves config unchanged)."
             },
-            Style::default().fg(DIM),
+            Style::default().fg(p.subtle),
         )),
     ];
     frame.render_widget(
@@ -666,17 +685,18 @@ fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State) {
     );
 }
 
-fn summary(head: &str, value: String) -> Line<'static> {
+fn summary(head: &str, value: String, theme: &Theme) -> Line<'static> {
+    let p = &theme.palette;
     Line::from(vec![
-        Span::styled(format!("  {head:<10} "), Style::default().fg(MUTED)),
+        Span::styled(format!("  {head:<10} "), Style::default().fg(p.muted)),
         Span::styled(
             value,
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         ),
     ])
 }
 
-fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State) {
+fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
     let cancel_label = if state.fresh { "skip" } else { "cancel" };
     let keys: &[(&str, &str)] = match state.step {
         Step::Welcome => &[("→/enter", "start"), ("esc", cancel_label)],
@@ -697,12 +717,42 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State) {
         Step::Init => &[("↑↓", "choose"), ("→", "next"), ("←", "back")],
         Step::Confirm => &[("enter", "apply"), ("←", "back"), ("esc", cancel_label)],
     };
-    picker::draw_footer(frame, area, keys);
+    picker::draw_footer(frame, area, keys, theme);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn setup_options_and_summary_use_semantic_palette_roles() {
+        let mut theme = Theme::default();
+        theme.palette.good = Color::Rgb(1, 2, 3);
+        theme.palette.subtle = Color::Rgb(4, 5, 6);
+        theme.palette.accent = Color::Rgb(7, 8, 9);
+        theme.palette.fg = Color::Rgb(10, 11, 12);
+        theme.palette.muted = Color::Rgb(13, 14, 15);
+
+        let lines = vec![
+            radio_option("Selected".into(), true, &theme),
+            radio_option("Inactive".into(), false, &theme),
+            summary("Provider", "configured".into(), &theme),
+        ];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 3)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer.cell((1, 0)).unwrap().fg, theme.palette.good);
+        assert_eq!(buffer.cell((3, 0)).unwrap().fg, theme.palette.accent);
+        assert_eq!(buffer.cell((1, 1)).unwrap().fg, theme.palette.subtle);
+        assert_eq!(buffer.cell((3, 1)).unwrap().fg, theme.palette.fg);
+        assert_eq!(buffer.cell((2, 2)).unwrap().fg, theme.palette.muted);
+        assert_eq!(buffer.cell((13, 2)).unwrap().fg, theme.palette.fg);
+    }
 
     #[test]
     fn seeded_provider_can_be_activated_without_api_key() {

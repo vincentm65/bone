@@ -365,6 +365,10 @@ pub struct ThemeSyntaxSettings {
     pub invalid: Option<String>,
 }
 
+/// A highlight is either a scalar color/reference or an explicit channel object.
+/// Objects accept only `fg` for foreground roles, only `bg` for background roles,
+/// and both channels for the composite `user_msg` role. Typography modifiers are
+/// intentionally not part of the persisted theme schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ThemeStyleSpec {
@@ -372,9 +376,6 @@ pub enum ThemeStyleSpec {
     Style {
         fg: Option<String>,
         bg: Option<String>,
-        bold: Option<bool>,
-        italic: Option<bool>,
-        underline: Option<bool>,
     },
 }
 
@@ -413,7 +414,17 @@ pub struct ThemeSettings {
     pub diff_removed: Option<String>,
     pub diff_added: Option<String>,
     pub thinking: Option<String>,
-    pub tab_active: Option<String>,
+    pub markdown_marker: Option<String>,
+    pub markdown_heading: Option<String>,
+    pub markdown_link: Option<String>,
+    pub markdown_inline_code: Option<String>,
+    pub markdown_rule: Option<String>,
+    pub markdown_table_border: Option<String>,
+    pub markdown_table_header: Option<String>,
+    pub chart: Option<String>,
+    pub chart_empty: Option<String>,
+    pub heat_low: Option<String>,
+    pub heat_high: Option<String>,
     pub syntax_text: Option<String>,
     pub syntax_comment: Option<String>,
     pub syntax_string: Option<String>,
@@ -1117,7 +1128,7 @@ pub(crate) fn validate_subagents(
     Ok(())
 }
 
-fn validate_theme(theme: &ThemeSettings) -> Result<(), SettingsError> {
+pub(crate) fn validate_theme(theme: &ThemeSettings) -> Result<(), SettingsError> {
     if let Some(name) = &theme.name
         && (name.is_empty()
             || !name
@@ -1126,6 +1137,73 @@ fn validate_theme(theme: &ThemeSettings) -> Result<(), SettingsError> {
     {
         return Err(SettingsError::Validation(format!(
             "theme.name must contain only ASCII letters, digits, '-' or '_', got {name:?}"
+        )));
+    }
+    let value =
+        serde_json::to_value(theme).map_err(|e| SettingsError::Validation(e.to_string()))?;
+    validate_theme_values(&value, "theme")?;
+    for (name, spec) in &theme.highlights {
+        let role = crate::config::theme::role(name).ok_or_else(|| {
+            SettingsError::Validation(format!("theme.highlights.{name}: unknown role"))
+        })?;
+        if crate::config::theme::palette_name(name) {
+            return Err(SettingsError::Validation(format!(
+                "theme.highlights.{name}: palette roles belong under theme.palette"
+            )));
+        }
+        match spec {
+            ThemeStyleSpec::Color(value) => {
+                validate_theme_color(value, &format!("theme.highlights.{name}"))?
+            }
+            ThemeStyleSpec::Style { fg, bg } => {
+                if fg.is_none() && bg.is_none() {
+                    return Err(SettingsError::Validation(format!(
+                        "theme.highlights.{name}: style must specify fg or bg"
+                    )));
+                }
+                if fg.is_some() && role.kind == crate::config::theme::RoleKind::Background {
+                    return Err(SettingsError::Validation(format!(
+                        "theme.highlights.{name}.fg is not valid for a background role"
+                    )));
+                }
+                if bg.is_some() && role.kind == crate::config::theme::RoleKind::Foreground {
+                    return Err(SettingsError::Validation(format!(
+                        "theme.highlights.{name}.bg is not valid for a foreground role"
+                    )));
+                }
+                if let Some(value) = fg {
+                    validate_theme_color(value, &format!("theme.highlights.{name}.fg"))?;
+                }
+                if let Some(value) = bg {
+                    validate_theme_color(value, &format!("theme.highlights.{name}.bg"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_theme_values(value: &serde_json::Value, path: &str) -> Result<(), SettingsError> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if key != "name" && key != "highlights" {
+                    validate_theme_values(value, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+        serde_json::Value::String(value) => validate_theme_color(value, path)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_theme_color(value: &str, path: &str) -> Result<(), SettingsError> {
+    if crate::config::theme::parse_color(value).is_err()
+        && !crate::config::theme::palette_name(value)
+    {
+        return Err(SettingsError::Validation(format!(
+            "{path}: invalid color {value:?}"
         )));
     }
     Ok(())

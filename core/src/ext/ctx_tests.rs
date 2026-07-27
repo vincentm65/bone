@@ -734,6 +734,7 @@ async fn extension_shell_primitives_honor_cancellation() {
     ] {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+        cfg.approval_mode = crate::tools::ApprovalMode::Danger;
         cfg.cancelled = Some(cancelled.clone());
         let lua = Lua::new();
         let ctx = create_ctx_table(&lua, &cfg).unwrap();
@@ -793,6 +794,7 @@ async fn shell_streaming_callback_error_reaps_process_tree() {
 #[tokio::test(flavor = "multi_thread")]
 async fn extension_processes_are_conversation_scoped() {
     let mut cfg_a = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    cfg_a.approval_mode = crate::tools::ApprovalMode::Danger;
     cfg_a.session_id = Some(101);
     let lua_a = Lua::new();
     let ctx_a = create_ctx_table(&lua_a, &cfg_a).unwrap();
@@ -894,7 +896,7 @@ fn ui_apply_accepts_protocol_view_diffs() {
     lua.globals().set("ctx", ctx).unwrap();
 
     lua.load(
-        r##"assert(ctx.ui.apply({ kind = "set_highlight", name = "accent", fg = "#abcdef" }))"##,
+        r##"assert(ctx.ui.apply({ kind = "set_highlight", name = "thinking", fg = "#abcdef" }))"##,
     )
     .exec()
     .unwrap();
@@ -902,13 +904,13 @@ fn ui_apply_accepts_protocol_view_diffs() {
     assert_eq!(
         crate::ext::api_ui::snapshot(&ui)
             .highlights
-            .get("accent")
+            .get("thinking")
             .map(String::as_str),
         Some("#abcdef")
     );
     assert!(matches!(
         crate::ext::api_ui::drain_diffs(&ui).as_slice(),
-        [crate::runtime::view::ViewDiff::SetHighlight { name, .. }] if name == "accent"
+        [crate::runtime::view::ViewDiff::SetHighlight { name, .. }] if name == "thinking"
     ));
 }
 

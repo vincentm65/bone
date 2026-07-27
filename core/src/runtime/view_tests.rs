@@ -53,21 +53,41 @@ fn remove_drops_component() {
 }
 
 #[test]
-fn set_highlight_sets_and_clears() {
+fn set_highlight_sets_and_clears_and_rejects_invalid_updates() {
     let mut vm = ViewModel::new();
-    vm.apply(&ViewDiff::SetHighlight {
-        name: "error".into(),
+    assert!(vm.apply(&ViewDiff::SetHighlight {
+        name: "tool_error".into(),
         fg: Some("#ff0000".into()),
-    });
+    }));
     assert_eq!(
-        vm.highlights.get("error").map(String::as_str),
+        vm.highlights.get("tool_error").map(String::as_str),
         Some("#ff0000")
     );
-    vm.apply(&ViewDiff::SetHighlight {
-        name: "error".into(),
+
+    let unchanged = vm.highlights.clone();
+    for diff in [
+        ViewDiff::SetHighlight {
+            name: "unknown".into(),
+            fg: Some("blue".into()),
+        },
+        ViewDiff::SetHighlight {
+            name: "accent".into(),
+            fg: Some("blue".into()),
+        },
+        ViewDiff::SetHighlight {
+            name: "tool_error".into(),
+            fg: Some("indexed(1)".into()),
+        },
+    ] {
+        assert!(!vm.apply(&diff));
+        assert_eq!(vm.highlights, unchanged);
+    }
+
+    assert!(vm.apply(&ViewDiff::SetHighlight {
+        name: "tool_error".into(),
         fg: None,
-    });
-    assert!(!vm.highlights.contains_key("error"));
+    }));
+    assert!(!vm.highlights.contains_key("tool_error"));
 }
 
 #[test]

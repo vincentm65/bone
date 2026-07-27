@@ -5,7 +5,7 @@ use syntect::highlighting::{
     Color as SyColor, FontStyle, StyleModifier, Theme as SyntectTheme, ThemeItem,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
     pub bg: Option<Color>,
     pub fg: Color,
@@ -36,7 +36,7 @@ impl Default for Palette {
     }
 }
 
-/// App-wide color theme.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     pub palette: Palette,
     pub user_msg: Color,
@@ -62,7 +62,17 @@ pub struct Theme {
     pub diff_removed: Color,
     pub diff_added: Color,
     pub thinking: Color,
-    pub tab_active: Color,
+    pub markdown_marker: Color,
+    pub markdown_heading: Color,
+    pub markdown_link: Color,
+    pub markdown_inline_code: Color,
+    pub markdown_rule: Color,
+    pub markdown_table_border: Color,
+    pub markdown_table_header: Color,
+    pub chart: Color,
+    pub chart_empty: Color,
+    pub heat_low: Color,
+    pub heat_high: Color,
     // Code-block syntax highlighting (chat transcript). Defaults replicate the
     // VS Code Dark+ palette previously embedded as a .tmTheme file.
     pub syntax_text: Color,
@@ -87,6 +97,12 @@ pub struct Theme {
     /// only drift from those fields through `rebuild_code`, which every
     /// mutation path (`apply_snapshot`, `set_highlight`) calls.
     code: SyntectTheme,
+    #[cfg(test)]
+    code_rebuilds: usize,
+    /// Configured base and sparse temporary overrides are kept separately;
+    /// public fields above are the effective theme consumed by renderers.
+    configured: Option<Box<Theme>>,
+    runtime_overrides: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Theme {
@@ -117,7 +133,17 @@ impl Default for Theme {
             diff_removed: Color::Rgb(135, 1, 1),
             diff_added: Color::Rgb(0, 95, 0),
             thinking: palette.accent,
-            tab_active: palette.accent,
+            markdown_marker: palette.muted,
+            markdown_heading: palette.fg,
+            markdown_link: palette.muted,
+            markdown_inline_code: palette.muted,
+            markdown_rule: palette.subtle,
+            markdown_table_border: palette.border,
+            markdown_table_header: palette.accent,
+            chart: palette.accent,
+            chart_empty: palette.subtle,
+            heat_low: palette.subtle,
+            heat_high: palette.good,
             syntax_text: Color::Rgb(0xD4, 0xD4, 0xD4),
             syntax_comment: Color::Rgb(0x6A, 0x99, 0x55),
             syntax_string: Color::Rgb(0xCE, 0x91, 0x78),
@@ -137,37 +163,20 @@ impl Default for Theme {
             syntax_markup: Color::Rgb(0x56, 0x9C, 0xD6),
             syntax_invalid: Color::Rgb(0xF4, 0x47, 0x47),
             code: SyntectTheme::default(),
+            #[cfg(test)]
+            code_rebuilds: 0,
+            configured: None,
+            runtime_overrides: std::collections::BTreeMap::new(),
         };
         theme.rebuild_code();
         theme
     }
 }
 
-/// Approximate a ratatui palette color as RGB for syntect. Named ANSI colors
-/// use the VS Code terminal defaults; `parse_color` produces `Rgb` for hex
-/// input, so these only matter for named-color theme values.
-fn to_syntect(c: Color) -> SyColor {
-    let (r, g, b) = match c {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Black => (0x00, 0x00, 0x00),
-        Color::Red => (0xCD, 0x31, 0x31),
-        Color::Green => (0x0D, 0xBC, 0x79),
-        Color::Yellow => (0xE5, 0xE5, 0x10),
-        Color::Blue => (0x24, 0x72, 0xC8),
-        Color::Magenta => (0xBC, 0x3F, 0xBC),
-        Color::Cyan => (0x11, 0xA8, 0xCD),
-        Color::Gray => (0xC0, 0xC0, 0xC0),
-        Color::DarkGray => (0x80, 0x80, 0x80),
-        Color::LightRed => (0xF1, 0x4C, 0x4C),
-        Color::LightGreen => (0x23, 0xD1, 0x8B),
-        Color::LightYellow => (0xF5, 0xF5, 0x43),
-        Color::LightBlue => (0x3B, 0x8E, 0xEA),
-        Color::LightMagenta => (0xD6, 0x70, 0xD6),
-        Color::LightCyan => (0x29, 0xB8, 0xDB),
-        Color::White => (0xFF, 0xFF, 0xFF),
-        Color::Indexed(_) | Color::Reset => (0xD4, 0xD4, 0xD4),
-    };
-    SyColor { r, g, b, a: 0xFF }
+/// Convert a ratatui palette color for syntect. Terminal-dependent indexed and
+/// reset colors have no stable RGB representation and are omitted.
+fn to_syntect(color: Color) -> Option<SyColor> {
+    crate::ui::color::color_to_rgb(color).map(|(r, g, b)| SyColor { r, g, b, a: 0xFF })
 }
 
 fn scope_item(scopes: &str, fg: Option<SyColor>, font_style: Option<FontStyle>) -> ThemeItem {
@@ -182,6 +191,23 @@ fn scope_item(scopes: &str, fg: Option<SyColor>, font_style: Option<FontStyle>) 
 }
 
 impl Theme {
+    /// Load the configured application theme directly from canonical settings.
+    /// A missing settings file has no configured overrides and uses defaults;
+    /// malformed settings remain an error so entry points can warn explicitly.
+    pub fn load_configured() -> Result<Self, crate::config::settings::SettingsError> {
+        let Some(settings) = crate::config::settings::Settings::load()? else {
+            return Ok(Self::default());
+        };
+        Ok(Self::from_snapshot(&settings.resolved().theme))
+    }
+
+    /// Build the configured application theme from a resolved settings snapshot.
+    pub fn from_snapshot(snap: &crate::config::settings::ThemeSettings) -> Self {
+        let mut theme = Self::default();
+        theme.apply_snapshot(snap);
+        theme
+    }
+
     /// The syntect theme for code-block highlighting, derived from the
     /// `syntax_*` fields.
     pub fn code(&self) -> &SyntectTheme {
@@ -193,63 +219,106 @@ impl Theme {
     /// goes through syntect's global scope repo and `render_markdown` runs per
     /// message per frame.
     fn rebuild_code(&mut self) {
-        let fg = |c: Color| Some(to_syntect(c));
         let mut code = SyntectTheme::default();
-        code.settings.foreground = Some(to_syntect(self.syntax_text));
+        code.settings.foreground = to_syntect(self.syntax_text);
         code.scopes = vec![
-            scope_item("comment", fg(self.syntax_comment), None),
-            scope_item("string", fg(self.syntax_string), None),
-            scope_item("constant.numeric", fg(self.syntax_number), None),
+            scope_item("comment", to_syntect(self.syntax_comment), None),
+            scope_item("string", to_syntect(self.syntax_string), None),
+            scope_item("constant.numeric", to_syntect(self.syntax_number), None),
             scope_item(
                 "constant.language, variable.language",
-                fg(self.syntax_constant),
+                to_syntect(self.syntax_constant),
                 None,
             ),
-            scope_item("constant.character.escape", fg(self.syntax_escape), None),
-            scope_item("constant.regexp", fg(self.syntax_regex), None),
+            scope_item(
+                "constant.character.escape",
+                to_syntect(self.syntax_escape),
+                None,
+            ),
+            scope_item("constant.regexp", to_syntect(self.syntax_regex), None),
             scope_item(
                 "keyword, storage, meta.preprocessor",
-                fg(self.syntax_keyword),
+                to_syntect(self.syntax_keyword),
                 None,
             ),
-            scope_item("keyword.control", fg(self.syntax_keyword_control), None),
+            scope_item(
+                "keyword.control",
+                to_syntect(self.syntax_keyword_control),
+                None,
+            ),
             scope_item(
                 "entity.name.type, support.class, support.type",
-                fg(self.syntax_type),
+                to_syntect(self.syntax_type),
                 None,
             ),
             scope_item(
                 "entity.name.function, support.function, meta.decorator, storage.type.annotation",
-                fg(self.syntax_function),
+                to_syntect(self.syntax_function),
                 None,
             ),
             scope_item(
                 "variable, support.variable, entity.name.variable",
-                fg(self.syntax_variable),
+                to_syntect(self.syntax_variable),
                 None,
             ),
-            scope_item("entity.name.tag", fg(self.syntax_tag), None),
+            scope_item("entity.name.tag", to_syntect(self.syntax_tag), None),
             scope_item(
                 "entity.other.attribute-name",
-                fg(self.syntax_attribute),
+                to_syntect(self.syntax_attribute),
                 None,
             ),
             scope_item(
                 "punctuation, keyword.operator",
-                fg(self.syntax_punctuation),
+                to_syntect(self.syntax_punctuation),
                 None,
             ),
-            scope_item("punctuation.definition.tag", fg(self.syntax_subtle), None),
+            scope_item(
+                "punctuation.definition.tag",
+                to_syntect(self.syntax_subtle),
+                None,
+            ),
             scope_item(
                 "markup.heading",
-                fg(self.syntax_markup),
+                to_syntect(self.syntax_markup),
                 Some(FontStyle::BOLD),
             ),
             scope_item("markup.bold", None, Some(FontStyle::BOLD)),
             scope_item("markup.italic", None, Some(FontStyle::ITALIC)),
-            scope_item("invalid", fg(self.syntax_invalid), None),
+            scope_item("invalid", to_syntect(self.syntax_invalid), None),
         ];
         self.code = code;
+        #[cfg(test)]
+        {
+            self.code_rebuilds += 1;
+        }
+    }
+
+    fn syntax_colors(&self) -> [Color; 18] {
+        [
+            self.syntax_text,
+            self.syntax_comment,
+            self.syntax_string,
+            self.syntax_number,
+            self.syntax_constant,
+            self.syntax_escape,
+            self.syntax_regex,
+            self.syntax_keyword,
+            self.syntax_keyword_control,
+            self.syntax_type,
+            self.syntax_function,
+            self.syntax_variable,
+            self.syntax_tag,
+            self.syntax_attribute,
+            self.syntax_punctuation,
+            self.syntax_subtle,
+            self.syntax_markup,
+            self.syntax_invalid,
+        ]
+    }
+
+    #[cfg(test)]
+    fn code_rebuilds(&self) -> usize {
+        self.code_rebuilds
     }
 
     fn resolve_color_ref(&self, value: &str) -> Option<Color> {
@@ -282,7 +351,17 @@ impl Theme {
         self.tool_call = self.palette.muted;
         self.tool_error = self.palette.error;
         self.thinking = self.palette.accent;
-        self.tab_active = self.palette.accent;
+        self.markdown_marker = self.palette.muted;
+        self.markdown_heading = self.palette.fg;
+        self.markdown_link = self.palette.muted;
+        self.markdown_inline_code = self.palette.muted;
+        self.markdown_rule = self.palette.subtle;
+        self.markdown_table_border = self.palette.border;
+        self.markdown_table_header = self.palette.accent;
+        self.chart = self.palette.accent;
+        self.chart_empty = self.palette.subtle;
+        self.heat_low = self.palette.subtle;
+        self.heat_high = self.palette.good;
     }
 
     fn set_named_color(&mut self, name: &str, color: Color) -> bool {
@@ -310,7 +389,17 @@ impl Theme {
             "diff_removed" => self.diff_removed = color,
             "diff_added" => self.diff_added = color,
             "thinking" => self.thinking = color,
-            "tab_active" => self.tab_active = color,
+            "markdown_marker" => self.markdown_marker = color,
+            "markdown_heading" => self.markdown_heading = color,
+            "markdown_link" => self.markdown_link = color,
+            "markdown_inline_code" => self.markdown_inline_code = color,
+            "markdown_rule" => self.markdown_rule = color,
+            "markdown_table_border" => self.markdown_table_border = color,
+            "markdown_table_header" => self.markdown_table_header = color,
+            "chart" => self.chart = color,
+            "chart_empty" => self.chart_empty = color,
+            "heat_low" => self.heat_low = color,
+            "heat_high" => self.heat_high = color,
             "syntax_text" => self.syntax_text = color,
             "syntax_comment" => self.syntax_comment = color,
             "syntax_string" => self.syntax_string = color,
@@ -393,7 +482,16 @@ impl Theme {
 
     /// Apply resolved theme settings, overriding defaults with set values.
     pub fn apply_snapshot(&mut self, snap: &crate::config::settings::ThemeSettings) {
+        let prior_syntax = self.syntax_colors();
+        let prior_code = self.code.clone();
+        #[cfg(test)]
+        let prior_rebuilds = self.code_rebuilds;
         let mut theme = Theme::default();
+        let default_syntax = theme.syntax_colors();
+        #[cfg(test)]
+        {
+            theme.code_rebuilds = prior_rebuilds;
+        }
         macro_rules! apply_palette {
             ($field:ident) => {
                 if let Some(ref s) = snap.palette.$field {
@@ -490,7 +588,17 @@ impl Theme {
         apply_ref!(diff_removed, snap.diff_removed);
         apply_ref!(diff_added, snap.diff_added);
         apply_ref!(thinking, snap.thinking);
-        apply_ref!(tab_active, snap.tab_active);
+        apply_ref!(markdown_marker, snap.markdown_marker);
+        apply_ref!(markdown_heading, snap.markdown_heading);
+        apply_ref!(markdown_link, snap.markdown_link);
+        apply_ref!(markdown_inline_code, snap.markdown_inline_code);
+        apply_ref!(markdown_rule, snap.markdown_rule);
+        apply_ref!(markdown_table_border, snap.markdown_table_border);
+        apply_ref!(markdown_table_header, snap.markdown_table_header);
+        apply_ref!(chart, snap.chart);
+        apply_ref!(chart_empty, snap.chart_empty);
+        apply_ref!(heat_low, snap.heat_low);
+        apply_ref!(heat_high, snap.heat_high);
         apply_ref!(syntax_text, snap.syntax_text);
         apply_ref!(syntax_comment, snap.syntax_comment);
         apply_ref!(syntax_string, snap.syntax_string);
@@ -513,118 +621,130 @@ impl Theme {
         for (name, spec) in &snap.highlights {
             theme.apply_highlight_spec(name, spec);
         }
-        theme.rebuild_code();
+        if theme.syntax_colors() != default_syntax {
+            theme.rebuild_code();
+        }
+        let overrides = self.runtime_overrides.clone();
+        theme.configured = Some(Box::new(theme.clone()));
+        theme.runtime_overrides = overrides;
         *self = theme;
+        self.reapply_runtime_overrides(false, prior_syntax, prior_code);
     }
 
-    /// Set a single named highlight group at runtime (`bone.api.ui.set_highlight`).
-    ///
-    /// The group `name` is one of the [`Theme`] field names (`user_msg`,
-    /// `input_border`, `status_text`, …). `color` is a hex/named string, or
-    /// `None` to reset that group to its built-in default. Unknown names and
-    /// unparseable colors warn and are ignored. Returns `true` when a field
-    /// changed, so the caller knows to redraw.
-    pub fn set_highlight(&mut self, name: &str, color: Option<&str>) -> bool {
-        let default = Theme::default();
-        macro_rules! set {
-            ($field:ident) => {{
-                match color {
-                    None => {
-                        self.$field = default.$field;
-                        true
-                    }
-                    Some(s) => match crate::ui::color::parse_color(s) {
-                        Some(c) => {
-                            self.$field = c;
-                            true
-                        }
-                        None => {
-                            bone_core::ext::ctx::runtime_warn_once(format!(
-                                "bone-lua warn: invalid highlight color for {name}: {s}"
-                            ));
-                            false
-                        }
-                    },
+    /// Apply a resolved frontend snapshot: configured settings first, then the
+    /// daemon's sparse temporary layer. Runtime values never enter settings.
+    pub fn apply_resolved_snapshot(
+        &mut self,
+        snap: &crate::config::settings::ThemeSettings,
+        overrides: &std::collections::HashMap<String, String>,
+    ) {
+        let validated: std::collections::BTreeMap<_, _> = overrides
+            .iter()
+            .filter(|(name, value)| {
+                let valid_name = Self::is_runtime_name(name);
+                let valid_color = crate::ui::color::parse_color(value).is_some();
+                if !valid_name || !valid_color {
+                    bone_core::ext::ctx::runtime_warn_once(format!(
+                        "bone-lua warn: invalid runtime highlight update: {name}"
+                    ));
                 }
-            }};
+                valid_name && valid_color
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        if validated.len() != overrides.len() {
+            return;
         }
-        macro_rules! set_optional {
-            ($field:ident) => {{
-                match color {
-                    None => {
-                        self.palette.$field = default.palette.$field;
-                        true
-                    }
-                    Some(s) => match crate::ui::color::parse_color(s) {
-                        Some(c) => {
-                            self.palette.$field = Some(c);
-                            true
-                        }
-                        None => {
-                            bone_core::ext::ctx::runtime_warn_once(format!(
-                                "bone-lua warn: invalid highlight color for {name}: {s}"
-                            ));
-                            false
-                        }
-                    },
+        self.runtime_overrides = validated;
+        self.apply_snapshot(snap);
+    }
+
+    /// The configured base, excluding temporary runtime overrides.
+    pub fn configured_theme(&self) -> &Theme {
+        self.configured.as_deref().unwrap_or(self)
+    }
+
+    /// Current sparse runtime layer.
+    pub fn runtime_overrides(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.runtime_overrides
+    }
+
+    fn reapply_runtime_overrides(
+        &mut self,
+        force_syntax_rebuild: bool,
+        prior_syntax: [Color; 18],
+        prior_code: SyntectTheme,
+    ) {
+        #[cfg(test)]
+        let prior_rebuilds = self.code_rebuilds;
+        let configured = self.configured.take();
+        let mut effective = configured
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(Theme::default);
+        effective.configured = None;
+        effective.runtime_overrides = self.runtime_overrides.clone();
+        let overrides = effective.runtime_overrides.clone();
+        for (name, value) in &overrides {
+            if let Some(color) = crate::ui::color::parse_color(value) {
+                if name == "bg" {
+                    effective.palette.bg = Some(color);
+                } else {
+                    effective.set_named_color(name, color);
                 }
-            }};
-        }
-        let changed = match name {
-            "bg" => set_optional!(bg),
-            "user_msg" => set!(user_msg),
-            "user_msg_bg" => set!(user_msg_bg),
-            "status_text" => set!(status_text),
-            "input_border" => set!(input_border),
-            "input_bg" => set!(input_bg),
-            "input_prefix" => set!(input_prefix),
-            "input_cursor" => set!(input_cursor),
-            "system_msg" => set!(system_msg),
-            "approval_safe" => set!(approval_safe),
-            "approval_danger" => set!(approval_danger),
-            "tool_call" => set!(tool_call),
-            "tool_error" => set!(tool_error),
-            "shell_program" => set!(shell_program),
-            "shell_separator" => set!(shell_separator),
-            "shell_redirect" => set!(shell_redirect),
-            "shell_flag" => set!(shell_flag),
-            "shell_string" => set!(shell_string),
-            "shell_variable" => set!(shell_variable),
-            "shell_comment" => set!(shell_comment),
-            "shell_path" => set!(shell_path),
-            "diff_removed" => set!(diff_removed),
-            "diff_added" => set!(diff_added),
-            "thinking" => set!(thinking),
-            "tab_active" => set!(tab_active),
-            "syntax_text" => set!(syntax_text),
-            "syntax_comment" => set!(syntax_comment),
-            "syntax_string" => set!(syntax_string),
-            "syntax_number" => set!(syntax_number),
-            "syntax_constant" => set!(syntax_constant),
-            "syntax_escape" => set!(syntax_escape),
-            "syntax_regex" => set!(syntax_regex),
-            "syntax_keyword" => set!(syntax_keyword),
-            "syntax_keyword_control" => set!(syntax_keyword_control),
-            "syntax_type" => set!(syntax_type),
-            "syntax_function" => set!(syntax_function),
-            "syntax_variable" => set!(syntax_variable),
-            "syntax_tag" => set!(syntax_tag),
-            "syntax_attribute" => set!(syntax_attribute),
-            "syntax_punctuation" => set!(syntax_punctuation),
-            "syntax_subtle" => set!(syntax_subtle),
-            "syntax_markup" => set!(syntax_markup),
-            "syntax_invalid" => set!(syntax_invalid),
-            other => {
-                bone_core::ext::ctx::runtime_warn_once(format!(
-                    "bone-lua warn: unknown highlight group: {other}"
-                ));
-                false
             }
-        };
-        if changed && name.starts_with("syntax_") {
-            self.rebuild_code();
         }
-        changed
+        #[cfg(test)]
+        {
+            effective.code_rebuilds = prior_rebuilds;
+        }
+        let effective_syntax = effective.syntax_colors();
+        let configured_syntax = configured.as_deref().map(Theme::syntax_colors);
+        if force_syntax_rebuild {
+            effective.rebuild_code();
+        } else if effective_syntax == prior_syntax && configured_syntax != Some(effective_syntax) {
+            effective.code = prior_code;
+        } else if configured_syntax != Some(effective_syntax) {
+            effective.rebuild_code();
+        }
+        effective.configured = Some(Box::new(
+            configured
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(Theme::default),
+        ));
+        *self = effective;
+    }
+
+    /// Set a single named highlight group at runtime. `None` removes the
+    /// temporary override and reveals the configured value beneath it.
+    pub fn set_highlight(&mut self, name: &str, color: Option<&str>) -> bool {
+        let Some(role) = bone_core::config::theme::role(name).filter(|role| role.runtime) else {
+            bone_core::ext::ctx::runtime_warn_once(format!(
+                "bone-lua warn: unknown highlight group: {name}"
+            ));
+            return false;
+        };
+        let prior_syntax = self.syntax_colors();
+        let prior_code = self.code.clone();
+        if let Some(value) = color {
+            if crate::ui::color::parse_color(value).is_none() {
+                bone_core::ext::ctx::runtime_warn_once(format!(
+                    "bone-lua warn: invalid highlight color for {name}: {value}"
+                ));
+                return false;
+            }
+            self.runtime_overrides
+                .insert(name.to_string(), value.to_string());
+        } else {
+            self.runtime_overrides.remove(name);
+        }
+        self.reapply_runtime_overrides(role.syntax, prior_syntax, prior_code);
+        true
+    }
+
+    fn is_runtime_name(name: &str) -> bool {
+        bone_core::config::theme::role(name).is_some_and(|role| role.runtime)
     }
 }
 

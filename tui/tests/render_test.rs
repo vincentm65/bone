@@ -3,10 +3,22 @@ use bone::ui::theme::Theme;
 
 fn render_markdown(content: &str, width: u16) -> Vec<ratatui::text::Line<'static>> {
     let theme = Theme::default();
-    render_markdown_themed(content, width, theme.code())
+    render_markdown_themed(content, width, &theme)
 }
 use bone::ui::render::safe_markdown_prefix_end;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
+
+fn unusual_theme() -> Theme {
+    let mut theme = Theme::default();
+    theme.markdown_marker = Color::Red;
+    theme.markdown_heading = Color::Green;
+    theme.markdown_link = Color::Yellow;
+    theme.markdown_inline_code = Color::Blue;
+    theme.markdown_rule = Color::Magenta;
+    theme.markdown_table_border = Color::Cyan;
+    theme.markdown_table_header = Color::LightRed;
+    theme
+}
 
 // ---------------------------------------------------------------------------
 // Tests for safe_markdown_prefix_end
@@ -155,6 +167,92 @@ fn line_comment_scope_does_not_leak_into_next_code_line() {
 }
 
 #[test]
+fn structural_markdown_roles_use_application_theme() {
+    let theme = unusual_theme();
+    let markdown = "# Heading\n\n> marker\n\n[link](https://example.com) and `code`\n\n---\n\n| Head |\n|---|\n| Cell |";
+    let lines = render_markdown_themed(markdown, 80, &theme);
+    let spans: Vec<_> = lines.iter().flat_map(|line| line.spans.iter()).collect();
+
+    for (content, color) in [
+        ("Heading", theme.markdown_heading),
+        ("> ", theme.markdown_marker),
+        ("link", theme.markdown_link),
+        ("code", theme.markdown_inline_code),
+        ("Head", theme.markdown_table_header),
+    ] {
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.content == content && span.style.fg == Some(color)),
+            "missing themed span {content:?} with {color:?}: {lines:?}"
+        );
+    }
+    let rule = render_markdown_themed("---", 20, &theme);
+    assert_eq!(rule[0].style.fg, Some(theme.markdown_rule));
+    assert!(spans.iter().any(|span| {
+        span.content.contains('│') && span.style.fg == Some(theme.markdown_table_border)
+    }));
+}
+
+#[test]
+fn fenced_syntax_colors_are_independent_of_markdown_roles() {
+    let theme = unusual_theme();
+    let lines = render_markdown_themed("```rust\nfn main() {}\n```", 80, &theme);
+    let function = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("main"))
+        .expect("highlighted function span");
+    assert!(function.style.fg.is_some());
+    assert!(
+        ![
+            theme.markdown_marker,
+            theme.markdown_heading,
+            theme.markdown_link,
+            theme.markdown_inline_code,
+            theme.markdown_rule,
+            theme.markdown_table_border,
+            theme.markdown_table_header,
+        ]
+        .contains(&function.style.fg.unwrap())
+    );
+}
+
+#[test]
+fn wrapped_prefixes_keep_marker_theme_without_character_indexing() {
+    let theme = unusual_theme();
+    for markdown in [
+        "> alpha beta gamma delta",
+        "- alpha beta gamma delta",
+        "12. alpha beta gamma delta",
+    ] {
+        let lines = render_markdown_themed(markdown, 12, &theme);
+        assert!(lines.len() > 1, "expected wrapping: {lines:?}");
+        assert!(lines.iter().all(|line| {
+            line.spans
+                .first()
+                .is_some_and(|span| span.style.fg == Some(theme.markdown_marker))
+        }));
+    }
+}
+
+#[test]
+fn narrow_table_preserves_inline_span_style() {
+    let theme = unusual_theme();
+    let lines = render_markdown_themed(
+        "| Value | Other |\n|---|---|\n| `code` | text |",
+        12,
+        &theme,
+    );
+    let code = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.style.fg == Some(theme.markdown_inline_code))
+        .expect("inline code style survives narrow table truncation");
+    assert_eq!(code.style.fg, Some(theme.markdown_inline_code));
+}
+
+#[test]
 fn heading_text_stays_on_heading_line() {
     // pulldown_cmark strips the # syntax — it emits Text("Heading"), not "# Heading".
     assert_eq!(rendered_text("# Heading", 80), vec!["Heading"]);
@@ -293,7 +391,7 @@ fn table_preserves_inline_code_style() {
         .flat_map(|line| line.spans.iter())
         .find(|span| span.content == "code")
         .expect("code cell should be present");
-    assert_eq!(code.style.fg, Some(ratatui::style::Color::Gray));
+    assert_eq!(code.style.fg, Some(Theme::default().markdown_inline_code));
 }
 
 #[test]

@@ -38,10 +38,14 @@ pub struct UiState {
 }
 
 impl UiState {
-    /// Fold a diff into the canonical view and record it for frontends.
-    pub fn apply(&mut self, diff: ViewDiff) {
-        self.view.apply(&diff);
+    /// Fold a valid diff into the canonical view and record it for frontends.
+    /// Invalid runtime highlight updates are rejected before either state changes.
+    pub fn apply(&mut self, diff: ViewDiff) -> bool {
+        if !self.view.apply(&diff) {
+            return false;
+        }
         self.diffs.push(diff);
+        true
     }
 
     /// Take and clear the pending diffs (a frontend renders these and acks).
@@ -220,8 +224,7 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
     let ui_state = shared_ui.clone();
     let set_highlight = lua
         .create_function(move |_, (name, fg): (String, Option<String>)| {
-            lock(&ui_state).apply(ViewDiff::SetHighlight { name, fg });
-            Ok(())
+            Ok(lock(&ui_state).apply(ViewDiff::SetHighlight { name, fg }))
         })
         .map_err(crate::util::errstr)?;
     ui.set("set_highlight", set_highlight)

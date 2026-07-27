@@ -49,6 +49,27 @@ async fn wait_stdin_eof() {
     }
 }
 
+fn resolve_configured_theme(
+    loaded: Result<bone::ui::theme::Theme, bone::config::settings::SettingsError>,
+    warn: impl FnOnce(&str),
+) -> bone::ui::theme::Theme {
+    match loaded {
+        Ok(theme) => theme,
+        Err(err) => {
+            let message =
+                format!("bone: warning: failed to load configured theme: {err}; using defaults");
+            warn(&message);
+            bone::ui::theme::Theme::default()
+        }
+    }
+}
+
+fn configured_theme() -> bone::ui::theme::Theme {
+    resolve_configured_theme(bone::ui::theme::Theme::load_configured(), |message| {
+        eprintln!("{message}");
+    })
+}
+
 /// Fully booted runtime host: provider, Lua extension manager, and session.
 struct RuntimeHostBoot {
     provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
@@ -438,9 +459,10 @@ async fn main() -> std::io::Result<()> {
     // `bone setup` — explicit (re)run of the onboarding wizard.
     if args.first().map(String::as_str) == Some("setup") {
         bone::config::seed_base();
+        let theme = configured_theme();
         // Exit 2 on cancel so a parent (e.g. the tmux `/setup` popup) can tell
         // a cancelled wizard from an applied one.
-        let applied = bone::ui::setup::run(false)?;
+        let applied = bone::ui::setup::run(&theme, false)?;
         std::process::exit(if applied { 0 } else { 2 });
     }
 
@@ -448,7 +470,8 @@ async fn main() -> std::io::Result<()> {
     // both directly and by the `/catalog` tmux popup.
     if matches!(args.first().map(String::as_str), Some("catalog")) {
         bone::config::seed_base();
-        let outcome = bone::ui::catalog::run()?;
+        let theme = configured_theme();
+        let outcome = bone::ui::catalog::run(&theme)?;
         std::process::exit(if outcome.changed { 0 } else { 2 });
     }
 
@@ -480,7 +503,8 @@ async fn main() -> std::io::Result<()> {
         // Fresh install: seed the always-safe base so the wizard can `require`
         // its libs, then run onboarding (writes the selection + init.lua).
         bone::config::seed_base();
-        bone::ui::setup::run(true)?;
+        let theme = configured_theme();
+        bone::ui::setup::run(&theme, true)?;
     }
     // Seed tools (and base) filtered by whatever selection is now persisted;
     // None ⇒ seed everything (default / upgrade behavior).
@@ -506,7 +530,8 @@ async fn main() -> std::io::Result<()> {
     if args.first().map(String::as_str) == Some("stats-popup") {
         let db = bone::session_db::SessionDb::open(&bone::session_db::db_path())
             .map_err(std::io::Error::other)?;
-        bone::ui::stats::run(|range| match range {
+        let theme = configured_theme();
+        bone::ui::stats::run(&theme, |range| match range {
             None => db
                 .usage_stats_snapshot()
                 .map_err(|err| std::io::Error::other(err.to_string())),
