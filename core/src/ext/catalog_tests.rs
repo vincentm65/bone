@@ -96,6 +96,10 @@ fn bundled_paths_are_validated_and_unique() {
                 path: "tools/helper.lua".into(),
                 sha256: String::new(),
             },
+            CatalogFile {
+                path: "firefox/bridge/src/main.rs".into(),
+                sha256: String::new(),
+            },
         ],
         ..CatalogEntry::default()
     };
@@ -103,9 +107,10 @@ fn bundled_paths_are_validated_and_unique() {
 
     for paths in [
         vec!["nord.lua"],
-        vec!["unknown/nord.lua"],
+        vec!["/themes/nord.lua"],
         vec!["themes/../nord.lua"],
-        vec!["themes/nord.txt"],
+        vec!["themes/./nord.lua"],
+        vec!["themes\\nord.lua"],
         vec!["commands/themes.lua"],
         vec!["themes/nord.lua", "themes/nord.lua"],
     ] {

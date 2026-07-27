@@ -643,6 +643,10 @@ impl Settings {
     {
         let _guard = acquire_settings_write_lock(path)?;
         let mut candidate = Self::load_path(path)?.unwrap_or_else(|| self.clone());
+        // Runtime snapshots merge separately persisted domains that are skipped
+        // when config.yaml is serialized. Preserve them across core setting writes.
+        candidate.inner.subagents = self.inner.subagents.clone();
+        candidate.inner.extensions = self.inner.extensions.clone();
         mutate(&mut candidate)?;
         validate_settings(&candidate.inner)?;
         candidate.revision = self.revision.saturating_add(1);

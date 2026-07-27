@@ -152,6 +152,53 @@ fn two_agents_registered_and_listed_in_tool() {
     std::fs::remove_dir_all(&config_dir).ok();
 }
 
+#[test]
+fn separate_subagents_config_registers_tool_before_runtime_sync() {
+    let config_dir = common::temp_dir("subagent-config-domain");
+    let _bone_dir = common::isolate_bone_dir(&config_dir);
+    std::fs::create_dir_all(config_dir.join("lua/themes")).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        "version: 2\ntheme:\n  name: regression\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("lua/themes/regression.lua"),
+        "return { palette = { accent = '#112233' } }",
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("subagents.yaml"),
+        "version: 1\nsubagents:\n  reviewer:\n    description: Reviews changes\n",
+    )
+    .unwrap();
+    seed_subagent_tool(&config_dir);
+
+    let config =
+        bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded()).unwrap();
+    let settings = std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot()));
+    let mut custom = config.legacy_snapshot();
+    let booted = bone::ext::boot_with_tools_shared(
+        &config_dir,
+        &config_dir,
+        &mut custom,
+        false,
+        bone::ext::BootOptions::default(),
+        "test-model",
+        "TestProvider",
+        settings,
+    );
+
+    let defs = booted.tools.definitions();
+    let subagent = defs
+        .iter()
+        .find(|definition| definition.name == "subagent")
+        .expect("subagent tool should register from separate subagents.yaml");
+    assert!(subagent.description.contains("reviewer"));
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
 /// No init.lua → no sub-agents → no subagent tool.
 #[test]
 fn no_agents_registered_no_tool() {

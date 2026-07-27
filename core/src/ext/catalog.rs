@@ -103,18 +103,17 @@ impl CatalogEntry {
         let primary_path = format!("{}/{}", self.dir_segment(), self.name);
         let mut paths = std::collections::HashSet::new();
         for file in &self.files {
-            let Some((dir, name)) = file.path.split_once('/') else {
-                return Err(format!(
-                    "invalid bundled catalog path '{}': expected <kind>/<name>.lua",
-                    file.path
-                ));
-            };
-            if !matches!(dir, "tools" | "commands" | "themes")
-                || !super::is_safe_leaf_name(name)
-                || !name.ends_with(".lua")
-                || file.path == primary_path
-                || !paths.insert(file.path.as_str())
-            {
+            let path = Path::new(&file.path);
+            let is_safe_relative = !file.path.contains('\\')
+                && file.path.split('/').count() >= 2
+                && file
+                    .path
+                    .split('/')
+                    .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)));
+            if !is_safe_relative || file.path == primary_path || !paths.insert(file.path.as_str()) {
                 return Err(format!("invalid bundled catalog path '{}'", file.path));
             }
         }
@@ -248,6 +247,13 @@ pub fn is_installed(entry: &CatalogEntry) -> bool {
     entry.validate().is_ok()
         && lua_dir(entry).join(&entry.name).exists()
         && entry.files.iter().all(|file| bundled_path(file).exists())
+}
+
+/// True if any file managed by the item is present on disk.
+pub fn has_installed_files(entry: &CatalogEntry) -> bool {
+    entry.validate().is_ok()
+        && (lua_dir(entry).join(&entry.name).exists()
+            || entry.files.iter().any(|file| bundled_path(file).exists()))
 }
 
 /// Installed catalog commands that are not bundled defaults.

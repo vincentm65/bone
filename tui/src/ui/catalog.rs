@@ -224,6 +224,63 @@ pub fn apply(
     (installed, removed, errors)
 }
 
+/// Install or remove one catalog item by its display name (`firefox`) or file
+/// name (`firefox.lua`).
+pub fn apply_named(action: &str, name: &str) -> Outcome {
+    let entries = catalog::sync_quiet();
+    let requested = name.strip_suffix(".lua").unwrap_or(name);
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.name.strip_suffix(".lua") == Some(requested))
+    else {
+        return Outcome {
+            changed: false,
+            message: format!("Catalog item not found: {name}"),
+        };
+    };
+
+    let result = match action {
+        "install" if catalog::is_installed(entry) && !catalog::needs_update(entry) => {
+            return Outcome {
+                changed: false,
+                message: format!("Catalog item already installed: {requested}"),
+            };
+        }
+        "install" => catalog::install(entry),
+        "remove" if !catalog::has_installed_files(entry) => {
+            return Outcome {
+                changed: false,
+                message: format!("Catalog item is not installed: {requested}"),
+            };
+        }
+        "remove" => catalog::remove(entry),
+        _ => {
+            return Outcome {
+                changed: false,
+                message: "Usage: /catalog install|remove NAME".to_string(),
+            };
+        }
+    };
+
+    match result {
+        Ok(()) => Outcome {
+            changed: true,
+            message: format!(
+                "Catalog item {}: {requested}",
+                if action == "install" {
+                    "installed"
+                } else {
+                    "removed"
+                }
+            ),
+        },
+        Err(err) => Outcome {
+            changed: false,
+            message: format!("Catalog {action} failed for {requested}: {err}"),
+        },
+    }
+}
+
 struct State {
     entries: Vec<CatalogEntry>,
     items: Vec<Item>,

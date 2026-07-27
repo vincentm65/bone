@@ -85,40 +85,24 @@ fn boot_runtime_host_for(
     provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
     custom: &mut CustomConfigs,
     target: bone::rpc::SessionTarget,
-    shared_settings: Option<std::sync::Arc<std::sync::Mutex<bone::config::settings::Settings>>>,
+    settings: std::sync::Arc<std::sync::Mutex<bone::config::settings::Settings>>,
 ) -> std::io::Result<RuntimeHostBoot> {
     let model = provider.model().to_string();
     let provider_label = format!("{} ({})", provider.name(), provider.id());
-    let booted = if let Some(settings) = shared_settings {
-        bone::ext::boot_with_tools_shared(
-            &bone::config::bone_dir(),
-            &std::env::current_dir()?,
-            custom,
-            true,
-            bone::ext::BootOptions {
-                agent_depth: 0,
-                headless: false,
-                tool_allowlist: None,
-            },
-            &model,
-            &provider_label,
-            settings,
-        )
-    } else {
-        bone::ext::boot_with_tools(
-            &bone::config::bone_dir(),
-            &std::env::current_dir()?,
-            custom,
-            true,
-            bone::ext::BootOptions {
-                agent_depth: 0,
-                headless: false,
-                tool_allowlist: None,
-            },
-            &model,
-            &provider_label,
-        )
-    };
+    let booted = bone::ext::boot_with_tools_shared(
+        &bone::config::bone_dir(),
+        &std::env::current_dir()?,
+        custom,
+        true,
+        bone::ext::BootOptions {
+            agent_depth: 0,
+            headless: false,
+            tool_allowlist: None,
+        },
+        &model,
+        &provider_label,
+        settings,
+    );
     let mut session = bone::runtime::RuntimeSession::new(booted.tools);
     match target {
         bone::rpc::SessionTarget::Latest => session.init_db(&*provider),
@@ -207,7 +191,10 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             .map_err(|error| error.to_string())?;
         let provider = std::sync::Arc::from(provider);
         let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
-        let mut boot = boot_runtime_host_for(provider, &mut custom, target, None)
+        let settings = std::sync::Arc::new(std::sync::Mutex::new(
+            factory_config.runtime_settings_snapshot(),
+        ));
+        let mut boot = boot_runtime_host_for(provider, &mut custom, target, settings)
             .map_err(|err| err.to_string())?;
         let conversation_id = boot
             .session
@@ -470,6 +457,15 @@ async fn main() -> std::io::Result<()> {
     // both directly and by the `/catalog` tmux popup.
     if matches!(args.first().map(String::as_str), Some("catalog")) {
         bone::config::seed_base();
+        if args.len() > 1 {
+            let [action, name] = &args[1..] else {
+                eprintln!("Usage: bone catalog install|remove NAME");
+                std::process::exit(1);
+            };
+            let outcome = bone::ui::catalog::apply_named(action, name);
+            println!("{}", outcome.message);
+            std::process::exit(if outcome.changed { 0 } else { 2 });
+        }
         let theme = configured_theme();
         let outcome = bone::ui::catalog::run(&theme)?;
         std::process::exit(if outcome.changed { 0 } else { 2 });
@@ -623,7 +619,13 @@ async fn main() -> std::io::Result<()> {
     // The interactive TUI starts a fresh conversation each launch (clean slate);
     // past chats remain in the DB and are reachable via /history. Only the
     // multi-chat `bone serve` / web UI resumes the latest conversation on attach.
-    let boot = boot_runtime_host_for(provider, &mut custom, bone::rpc::SessionTarget::New, None)?;
+    let settings = std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot()));
+    let boot = boot_runtime_host_for(
+        provider,
+        &mut custom,
+        bone::rpc::SessionTarget::New,
+        settings,
+    )?;
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
     let command_tx = hub.command_sender();

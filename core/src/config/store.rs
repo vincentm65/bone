@@ -135,11 +135,7 @@ impl ConfigStore {
     }
 
     fn sync_extension(&self, extensions: &crate::ext::ExtensionManager) {
-        let settings = {
-            let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-            Self::runtime_settings(&inner)
-        };
-        extensions.replace_settings(settings);
+        extensions.replace_settings(self.runtime_settings_snapshot());
         extensions.replace_config_snapshot(self.legacy_snapshot());
     }
 
@@ -154,6 +150,12 @@ impl ConfigStore {
         let mut settings = inner.core.clone();
         settings.replace_domains(inner.subagents.clone(), inner.extension_values.clone());
         settings
+    }
+
+    /// Settings snapshot with separately persisted configuration domains merged in.
+    pub fn runtime_settings_snapshot(&self) -> Settings {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        Self::runtime_settings(&inner)
     }
 
     fn extension_manager(&self) -> crate::ext::ExtensionManager {

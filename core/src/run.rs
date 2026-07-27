@@ -177,10 +177,16 @@ async fn expand_lua_command(
     // Run blocking Lua execution on a separate thread to avoid blocking the tokio worker.
     tokio::task::spawn_blocking(move || {
         // Boot extensions for command lookup only — no config sync/persist.
-        let booted = ext::boot_with_tools(
+        let config =
+            crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+                .ok()?;
+        let mut custom = config.legacy_snapshot();
+        let settings =
+            std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot()));
+        let booted = ext::boot_with_tools_shared(
             &config_dir_owned,
             &std::env::current_dir().unwrap_or_default(),
-            &mut crate::config::custom::CustomConfigs::default(),
+            &mut custom,
             false,
             ext::BootOptions {
                 agent_depth: 0,
@@ -189,6 +195,7 @@ async fn expand_lua_command(
             },
             &model.clone().unwrap_or_default(),
             &provider.clone().unwrap_or_default(),
+            settings,
         );
         let lua = booted.manager.lua_handle();
         let lua = lua.lock().unwrap_or_else(|e| e.into_inner());

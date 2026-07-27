@@ -29,12 +29,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn publish(fixture: &Path, body: &str, theme_body: &str) -> CatalogEntry {
     fs::write(fixture.join("tools/demo.lua"), body).unwrap();
     fs::write(fixture.join("themes/nord.lua"), theme_body).unwrap();
+    fs::write(fixture.join("assets/demo/README.md"), "demo asset\n").unwrap();
     let sha = sha256_hex(body.as_bytes());
     let theme_sha = sha256_hex(theme_body.as_bytes());
+    let asset_sha = sha256_hex(b"demo asset\n");
     let json = format!(
         r#"[{{ "name": "demo.lua", "kind": "tool", "description": "demo",
               "sha256": "{sha}", "files": [
-                {{ "path": "themes/nord.lua", "sha256": "{theme_sha}" }}
+                {{ "path": "themes/nord.lua", "sha256": "{theme_sha}" }},
+                {{ "path": "assets/demo/README.md", "sha256": "{asset_sha}" }}
               ] }}]"#
     );
     fs::write(fixture.join("catalog.json"), json).unwrap();
@@ -47,6 +50,7 @@ fn catalog_fetch_install_update_remove() {
     let cfg = common::temp_dir("catalog-cfg");
     fs::create_dir_all(fixture.join("tools")).unwrap();
     fs::create_dir_all(fixture.join("themes")).unwrap();
+    fs::create_dir_all(fixture.join("assets/demo")).unwrap();
 
     // SAFETY: single-test file; no other threads read these vars concurrently.
     unsafe {
@@ -55,6 +59,7 @@ fn catalog_fetch_install_update_remove() {
     }
     let installed_path = cfg.join("bone-rust").join("lua/tools/demo.lua");
     let installed_theme_path = cfg.join("bone-rust").join("lua/themes/nord.lua");
+    let installed_asset_path = cfg.join("bone-rust").join("lua/assets/demo/README.md");
 
     // Publish v1 and install the primary and bundled theme.
     let entry = publish(
@@ -68,6 +73,10 @@ fn catalog_fetch_install_update_remove() {
     assert_eq!(
         fs::read_to_string(&installed_theme_path).unwrap(),
         "return { palette = { bg = '#000000' } }\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&installed_asset_path).unwrap(),
+        "demo asset\n"
     );
     assert!(catalog::is_installed(&entry));
     assert!(!catalog::needs_update(&entry));
@@ -137,6 +146,7 @@ fn catalog_fetch_install_update_remove() {
     catalog::remove(&entry).unwrap();
     assert!(!installed_path.exists());
     assert!(!installed_theme_path.exists());
+    assert!(!installed_asset_path.exists());
 
     fs::remove_dir_all(&fixture).ok();
     fs::remove_dir_all(&cfg).ok();

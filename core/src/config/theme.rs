@@ -83,131 +83,126 @@ pub struct RoleSpec {
     pub syntax: bool,
 }
 
-const PALETTE: &[&str] = &[
-    "bg",
-    "fg",
-    "muted",
-    "subtle",
-    "border",
-    "accent",
-    "good",
-    "warn",
-    "error",
-    "selection",
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoleGroup {
+    Palette,
+    Ui,
+    Shell,
+    Syntax,
+    Markdown,
+    Stats,
+}
+
+#[derive(Clone, Copy)]
+struct RoleEntry {
+    name: &'static str,
+    group: RoleGroup,
+    kind: RoleKind,
+}
+
+impl RoleEntry {
+    fn spec(self) -> RoleSpec {
+        RoleSpec {
+            name: self.name,
+            description: match self.group {
+                RoleGroup::Palette => "palette color",
+                RoleGroup::Ui => "UI role",
+                RoleGroup::Shell => "shell role",
+                RoleGroup::Syntax => "syntax role",
+                RoleGroup::Markdown => "Markdown role",
+                RoleGroup::Stats => "statistics role",
+            },
+            kind: self.kind,
+            runtime: !matches!(self.group, RoleGroup::Palette) || self.name == "bg",
+            syntax: matches!(self.group, RoleGroup::Syntax),
+        }
+    }
+}
+
+const fn entry(name: &'static str, group: RoleGroup, kind: RoleKind) -> RoleEntry {
+    RoleEntry { name, group, kind }
+}
+
+use RoleGroup::{Markdown, Palette, Shell, Stats, Syntax, Ui};
+const FG: RoleKind = RoleKind::Foreground;
+const BG: RoleKind = RoleKind::Background;
+const COMPOSITE: RoleKind = RoleKind::Composite;
+
+/// Single source of truth for role lookup, validation, iteration, and docs.
+const ROLES: &[RoleEntry] = &[
+    entry("bg", Palette, BG),
+    entry("fg", Palette, FG),
+    entry("muted", Palette, FG),
+    entry("subtle", Palette, FG),
+    entry("border", Palette, FG),
+    entry("accent", Palette, FG),
+    entry("good", Palette, FG),
+    entry("warn", Palette, FG),
+    entry("error", Palette, FG),
+    entry("selection", Palette, FG),
+    entry("user_msg", Ui, COMPOSITE),
+    entry("user_msg_bg", Ui, BG),
+    entry("status_text", Ui, FG),
+    entry("input_border", Ui, FG),
+    entry("input_bg", Ui, BG),
+    entry("input_prefix", Ui, FG),
+    entry("input_cursor", Ui, FG),
+    entry("system_msg", Ui, FG),
+    entry("approval_safe", Ui, FG),
+    entry("approval_danger", Ui, FG),
+    entry("tool_call", Ui, FG),
+    entry("tool_error", Ui, FG),
+    entry("diff_removed", Ui, FG),
+    entry("diff_added", Ui, FG),
+    entry("thinking", Ui, FG),
+    entry("shell_program", Shell, FG),
+    entry("shell_separator", Shell, FG),
+    entry("shell_redirect", Shell, FG),
+    entry("shell_flag", Shell, FG),
+    entry("shell_string", Shell, FG),
+    entry("shell_variable", Shell, FG),
+    entry("shell_comment", Shell, FG),
+    entry("shell_path", Shell, FG),
+    entry("syntax_text", Syntax, FG),
+    entry("syntax_comment", Syntax, FG),
+    entry("syntax_string", Syntax, FG),
+    entry("syntax_number", Syntax, FG),
+    entry("syntax_constant", Syntax, FG),
+    entry("syntax_escape", Syntax, FG),
+    entry("syntax_regex", Syntax, FG),
+    entry("syntax_keyword", Syntax, FG),
+    entry("syntax_keyword_control", Syntax, FG),
+    entry("syntax_type", Syntax, FG),
+    entry("syntax_function", Syntax, FG),
+    entry("syntax_variable", Syntax, FG),
+    entry("syntax_tag", Syntax, FG),
+    entry("syntax_attribute", Syntax, FG),
+    entry("syntax_punctuation", Syntax, FG),
+    entry("syntax_subtle", Syntax, FG),
+    entry("syntax_markup", Syntax, FG),
+    entry("syntax_invalid", Syntax, FG),
+    entry("markdown_marker", Markdown, FG),
+    entry("markdown_heading", Markdown, FG),
+    entry("markdown_link", Markdown, FG),
+    entry("markdown_inline_code", Markdown, FG),
+    entry("markdown_rule", Markdown, FG),
+    entry("markdown_table_border", Markdown, FG),
+    entry("markdown_table_header", Markdown, FG),
+    entry("chart", Stats, FG),
+    entry("chart_empty", Stats, FG),
+    entry("heat_low", Stats, FG),
+    entry("heat_high", Stats, FG),
 ];
-const UI: &[&str] = &[
-    "user_msg",
-    "user_msg_bg",
-    "status_text",
-    "input_border",
-    "input_bg",
-    "input_prefix",
-    "input_cursor",
-    "system_msg",
-    "approval_safe",
-    "approval_danger",
-    "tool_call",
-    "tool_error",
-    "diff_removed",
-    "diff_added",
-    "thinking",
-];
-const SHELL: &[&str] = &[
-    "shell_program",
-    "shell_separator",
-    "shell_redirect",
-    "shell_flag",
-    "shell_string",
-    "shell_variable",
-    "shell_comment",
-    "shell_path",
-];
-const SYNTAX: &[&str] = &[
-    "syntax_text",
-    "syntax_comment",
-    "syntax_string",
-    "syntax_number",
-    "syntax_constant",
-    "syntax_escape",
-    "syntax_regex",
-    "syntax_keyword",
-    "syntax_keyword_control",
-    "syntax_type",
-    "syntax_function",
-    "syntax_variable",
-    "syntax_tag",
-    "syntax_attribute",
-    "syntax_punctuation",
-    "syntax_subtle",
-    "syntax_markup",
-    "syntax_invalid",
-];
-const MARKDOWN: &[&str] = &[
-    "markdown_marker",
-    "markdown_heading",
-    "markdown_link",
-    "markdown_inline_code",
-    "markdown_rule",
-    "markdown_table_border",
-    "markdown_table_header",
-];
-const STATS: &[&str] = &["chart", "chart_empty", "heat_low", "heat_high"];
 
 pub fn role(name: &str) -> Option<RoleSpec> {
-    let (group, kind, runtime, description) = if PALETTE.contains(&name) {
-        (
-            PALETTE,
-            if name == "bg" {
-                RoleKind::Background
-            } else {
-                RoleKind::Foreground
-            },
-            name == "bg",
-            "palette color",
-        )
-    } else if UI.contains(&name) {
-        (
-            UI,
-            if name == "user_msg" {
-                RoleKind::Composite
-            } else if name.ends_with("_bg") {
-                RoleKind::Background
-            } else {
-                RoleKind::Foreground
-            },
-            true,
-            "UI role",
-        )
-    } else if SHELL.contains(&name) {
-        (SHELL, RoleKind::Foreground, true, "shell role")
-    } else if SYNTAX.contains(&name) {
-        (SYNTAX, RoleKind::Foreground, true, "syntax role")
-    } else if MARKDOWN.contains(&name) {
-        (MARKDOWN, RoleKind::Foreground, true, "Markdown role")
-    } else if STATS.contains(&name) {
-        (STATS, RoleKind::Foreground, true, "statistics role")
-    } else {
-        return None;
-    };
-    let canonical_name = group.iter().copied().find(|candidate| *candidate == name)?;
-    Some(RoleSpec {
-        name: canonical_name,
-        description,
-        kind,
-        runtime,
-        syntax: std::ptr::eq(group, SYNTAX),
-    })
+    ROLES
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.spec())
 }
 
 pub fn role_names() -> impl Iterator<Item = &'static str> {
-    PALETTE
-        .iter()
-        .chain(UI)
-        .chain(SHELL)
-        .chain(SYNTAX)
-        .chain(MARKDOWN)
-        .chain(STATS)
-        .copied()
+    ROLES.iter().map(|entry| entry.name)
 }
 
 /// Generate the exhaustive public role table embedded in the default AGENTS.md.
@@ -231,7 +226,9 @@ pub fn role_docs_markdown() -> String {
 }
 
 pub fn palette_name(name: &str) -> bool {
-    PALETTE.contains(&name)
+    ROLES
+        .iter()
+        .any(|entry| entry.group == Palette && entry.name == name)
 }
 
 #[cfg(test)]

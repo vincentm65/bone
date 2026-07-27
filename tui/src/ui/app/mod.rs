@@ -3035,7 +3035,10 @@ impl App {
             return self.open_setup_wizard(term);
         }
         if cmd == "catalog" {
-            return self.open_catalog(term);
+            if arg.is_empty() {
+                return self.open_catalog(term);
+            }
+            return self.apply_catalog_action(&arg, term);
         }
         if cmd == "update" {
             return self.open_update(term);
@@ -3271,6 +3274,27 @@ impl App {
             .command_tx
             .send(crate::runtime::RuntimeCommand::ReloadExtensions);
         "Reloading tools and Lua extensions…".to_string()
+    }
+
+    fn apply_catalog_action(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
+        let mut parts = arg.split_whitespace();
+        let Some(action) = parts.next() else {
+            return self.open_catalog(term);
+        };
+        let Some(name) = parts.next() else {
+            return self.show_reply("Usage: /catalog install|remove NAME".to_string(), term);
+        };
+        if parts.next().is_some() || !matches!(action, "install" | "remove") {
+            return self.show_reply("Usage: /catalog install|remove NAME".to_string(), term);
+        }
+
+        let outcome = crate::ui::catalog::apply_named(action, name);
+        let message = if outcome.changed {
+            format!("{} {}", outcome.message, self.reload_extensions())
+        } else {
+            outcome.message
+        };
+        self.show_reply(message, term)
     }
 
     fn open_catalog(&mut self, term: &mut BoneTerminal) -> io::Result<()> {

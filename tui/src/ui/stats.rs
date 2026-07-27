@@ -219,39 +219,6 @@ fn handle_picker_key(code: KeyCode, pick: &mut DatePick) -> Option<PickerAction>
     }
 }
 
-/// Theme-derived palette for the stats view.
-struct Palette {
-    bg: Option<Color>,
-    fg: Color,
-    muted: Color,
-    subtle: Color,
-    border: Color,
-    accent: Color,
-    chart: Color,
-    chart_empty: Color,
-    error: Color,
-    heat_low: Color,
-    heat_high: Color,
-}
-
-impl Palette {
-    fn from_theme(t: &Theme) -> Self {
-        Self {
-            bg: t.palette.bg,
-            fg: t.palette.fg,
-            muted: t.palette.muted,
-            subtle: t.palette.subtle,
-            border: t.palette.border,
-            accent: t.palette.accent,
-            chart: t.chart,
-            chart_empty: t.chart_empty,
-            error: t.palette.error,
-            heat_low: t.heat_low,
-            heat_high: t.heat_high,
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn draw(
     frame: &mut ratatui::Frame,
@@ -264,9 +231,9 @@ fn draw(
     scroll: usize,
     refreshed: Instant,
 ) {
-    let pal = Palette::from_theme(theme);
+    let pal = theme;
     let screen = frame.area();
-    let root = Block::default().style(match pal.bg {
+    let root = Block::default().style(match pal.palette.bg {
         Some(bg) => Style::default().bg(bg),
         None => Style::default(),
     });
@@ -283,8 +250,8 @@ fn draw(
         ])
         .split(area);
 
-    draw_header(frame, vertical[0], data, refreshed, mode, custom, &pal);
-    draw_cards(frame, vertical[1], data, mode, custom, &pal);
+    draw_header(frame, vertical[0], data, refreshed, mode, custom, pal);
+    draw_cards(frame, vertical[1], data, mode, custom, pal);
 
     if vertical[2].width < 110 {
         let sections = Layout::default()
@@ -296,44 +263,44 @@ fn draw(
                 Constraint::Min(10),
             ])
             .split(vertical[2]);
-        draw_chart(frame, sections[0], data, mode, scroll, &pal);
-        draw_hourly_chart(frame, sections[1], data, mode, &pal);
-        draw_models(frame, sections[2], data, mode, custom, &pal);
-        draw_daily_activity(frame, sections[3], data, &pal);
+        draw_chart(frame, sections[0], data, mode, scroll, pal);
+        draw_hourly_chart(frame, sections[1], data, mode, pal);
+        draw_models(frame, sections[2], data, mode, custom, pal);
+        draw_daily_activity(frame, sections[3], data, pal);
     } else {
         let lower = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(53), Constraint::Percentage(47)])
             .split(vertical[2]);
-        draw_chart(frame, lower[0], data, mode, scroll, &pal);
+        draw_chart(frame, lower[0], data, mode, scroll, pal);
 
         let bottom = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
             .split(lower[1]);
-        draw_models(frame, bottom[0], data, mode, custom, &pal);
-        draw_heat_and_conversations(frame, bottom[1], data, mode, &pal);
+        draw_models(frame, bottom[0], data, mode, custom, pal);
+        draw_heat_and_conversations(frame, bottom[1], data, mode, pal);
     }
 
     let footer = Line::from(vec![
-        Span::styled(" q/Esc ", key_style(&pal)),
-        Span::styled("quit  ", dim(&pal)),
-        Span::styled(" 1-5 d/w/m/y/a ←→ ", key_style(&pal)),
-        Span::styled("view  ", dim(&pal)),
-        Span::styled(" t ", key_style(&pal)),
-        Span::styled("dates  ", dim(&pal)),
-        Span::styled(" r ", key_style(&pal)),
-        Span::styled("refresh  ", dim(&pal)),
-        Span::styled(" ↑↓ PgUp/PgDn ", key_style(&pal)),
-        Span::styled("scroll", dim(&pal)),
+        Span::styled(" q/Esc ", key_style(pal)),
+        Span::styled("quit  ", dim(pal)),
+        Span::styled(" 1-5 d/w/m/y/a ←→ ", key_style(pal)),
+        Span::styled("view  ", dim(pal)),
+        Span::styled(" t ", key_style(pal)),
+        Span::styled("dates  ", dim(pal)),
+        Span::styled(" r ", key_style(pal)),
+        Span::styled("refresh  ", dim(pal)),
+        Span::styled(" ↑↓ PgUp/PgDn ", key_style(pal)),
+        Span::styled("scroll", dim(pal)),
     ]);
     frame.render_widget(Paragraph::new(footer), vertical[3]);
 
     if let Some(pick) = picker {
-        draw_date_picker(frame, area, pick, &pal);
+        draw_date_picker(frame, area, pick, pal);
     }
     if let Some(msg) = error {
-        draw_error_overlay(frame, area, msg, &pal);
+        draw_error_overlay(frame, area, msg, pal);
     }
 }
 
@@ -344,7 +311,7 @@ fn draw_header(
     refreshed: Instant,
     mode: ViewMode,
     custom: Option<&DateRange>,
-    pal: &Palette,
+    pal: &Theme,
 ) {
     let range = match custom {
         Some(r) => {
@@ -360,10 +327,12 @@ fn draw_header(
         Line::from(vec![
             Span::styled(
                 " Token stats ",
-                Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal.palette.fg)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(range, Style::default().fg(pal.muted)),
+            Span::styled(range, Style::default().fg(pal.palette.muted)),
         ]),
         Line::from(vec![
             tabs(mode, custom.is_some(), pal),
@@ -374,7 +343,7 @@ fn draw_header(
         ]),
     ];
     frame.render_widget(
-        Paragraph::new(lines).block(panel("Overview", pal.border, pal.fg)),
+        Paragraph::new(lines).block(panel("Overview", pal.palette.border, pal.palette.fg)),
         area,
     );
 }
@@ -385,7 +354,7 @@ fn draw_cards(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
     custom: Option<&DateRange>,
-    pal: &Palette,
+    pal: &Theme,
 ) {
     let total = match custom {
         Some(_) => data.total.clone(),
@@ -401,25 +370,25 @@ fn draw_cards(
         (
             "Requests",
             compact_number(total.request_count as u64),
-            pal.accent,
+            pal.palette.accent,
         ),
         (
             "Prompt",
             compact_number(total.prompt_tokens as u64),
-            pal.accent,
+            pal.palette.accent,
         ),
         (
             "Completion",
             compact_number(total.completion_tokens as u64),
-            pal.accent,
+            pal.palette.accent,
         ),
         (
             "Cached",
             compact_number(total.cached_tokens as u64),
-            pal.accent,
+            pal.palette.accent,
         ),
-        ("Total", compact_number(tokens as u64), pal.accent),
-        ("Cache", format!("{cache_pct}%"), pal.accent),
+        ("Total", compact_number(tokens as u64), pal.palette.accent),
+        ("Cache", format!("{cache_pct}%"), pal.palette.accent),
     ];
     let constraints = (0..cards.len())
         .map(|_| Constraint::Percentage(100 / cards.len() as u16))
@@ -431,17 +400,19 @@ fn draw_cards(
     for (idx, (label, value, _color)) in cards.iter().enumerate() {
         let line = Line::from(Span::styled(
             value.clone(),
-            Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal.palette.fg)
+                .add_modifier(Modifier::BOLD),
         ));
         frame.render_widget(
-            Paragraph::new(line).block(panel(label, pal.border, pal.fg)),
+            Paragraph::new(line).block(panel(label, pal.palette.border, pal.palette.fg)),
             cols[idx],
         );
     }
 }
 
 /// Centered modal for entering a custom start/end date range.
-fn draw_date_picker(frame: &mut ratatui::Frame, area: Rect, pick: &DatePick, pal: &Palette) {
+fn draw_date_picker(frame: &mut ratatui::Frame, area: Rect, pick: &DatePick, pal: &Theme) {
     let w = 44u16;
     let h = 9u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -454,7 +425,9 @@ fn draw_date_picker(frame: &mut ratatui::Frame, area: Rect, pick: &DatePick, pal
         .border_style(Style::default().fg(pal.chart))
         .title(Span::styled(
             " Custom date range (YYYY-MM-DD) ",
-            Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal.palette.fg)
+                .add_modifier(Modifier::BOLD),
         ));
     frame.render_widget(block, popup);
 
@@ -463,7 +436,7 @@ fn draw_date_picker(frame: &mut ratatui::Frame, area: Rect, pick: &DatePick, pal
         let style = if on {
             Style::default().fg(pal.chart).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(pal.fg)
+            Style::default().fg(pal.palette.fg)
         };
         Line::from(vec![
             Span::styled(format!("{:<6}", label), dim(pal)),
@@ -491,7 +464,7 @@ fn draw_date_picker(frame: &mut ratatui::Frame, area: Rect, pick: &DatePick, pal
 }
 
 /// Small error toast shown at the bottom center.
-fn draw_error_overlay(frame: &mut ratatui::Frame, area: Rect, msg: &str, pal: &Palette) {
+fn draw_error_overlay(frame: &mut ratatui::Frame, area: Rect, msg: &str, pal: &Theme) {
     let text = format!(" error: {msg} ");
     let w = (text.chars().count() as u16 + 4).min(area.width);
     let h = 3u16;
@@ -505,14 +478,16 @@ fn draw_error_overlay(frame: &mut ratatui::Frame, area: Rect, msg: &str, pal: &P
             Line::from(""),
             Line::from(Span::styled(
                 text,
-                Style::default().fg(pal.error).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal.palette.error)
+                    .add_modifier(Modifier::BOLD),
             )),
         ])
         .alignment(Alignment::Center)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(pal.error)),
+                .border_style(Style::default().fg(pal.palette.error)),
         ),
         popup,
     );
@@ -524,7 +499,7 @@ fn draw_chart(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
     scroll: usize,
-    pal: &Palette,
+    pal: &Theme,
 ) {
     let buckets: Vec<&UsageBucket> = data.buckets(mode).iter().rev().collect();
     let max_rows = area.height.saturating_sub(2) as usize;
@@ -548,8 +523,8 @@ fn draw_chart(
     frame.render_widget(
         Paragraph::new(lines).block(panel(
             &format!("{} usage", mode.title()),
-            pal.border,
-            pal.fg,
+            pal.palette.border,
+            pal.palette.fg,
         )),
         area,
     );
@@ -559,14 +534,14 @@ fn usage_chart_line(
     bucket: &UsageBucket,
     max_tokens: i64,
     bar_width: usize,
-    pal: &Palette,
+    pal: &Theme,
 ) -> Line<'static> {
     let tokens = bucket_tokens(bucket);
     let filled = ((tokens as f64 / max_tokens as f64) * bar_width as f64).round() as usize;
     Line::from(vec![
         Span::styled(
             format!("{:>12} ", bucket.label),
-            Style::default().fg(pal.muted),
+            Style::default().fg(pal.palette.muted),
         ),
         Span::styled(
             "█".repeat(filled),
@@ -578,7 +553,9 @@ fn usage_chart_line(
         ),
         Span::styled(
             format!(" {:>8}", compact_number(tokens as u64)),
-            Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal.palette.fg)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" {:>5}r", compact_number(bucket.request_count as u64)),
@@ -593,7 +570,7 @@ fn draw_models(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
     custom: Option<&DateRange>,
-    pal: &Palette,
+    pal: &Theme,
 ) {
     let models = match custom {
         Some(_) => &data.by_model_today,
@@ -630,21 +607,30 @@ fn draw_models(
         lines.push(Line::from(vec![
             Span::styled(
                 trunc(&format!("{} / {}", m.provider, m.model), name_w),
-                Style::default().fg(pal.fg),
+                Style::default().fg(pal.palette.fg),
             ),
             Span::styled(
                 format!("{:>5} ", m.request_count),
-                Style::default().fg(pal.accent),
+                Style::default().fg(pal.palette.accent),
             ),
             Span::styled(
                 format!("{:>tw$} ", compact_number(tokens as u64), tw = tok_w),
-                Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal.palette.fg)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("{:>4}%", cache), Style::default().fg(pal.accent)),
+            Span::styled(
+                format!("{:>4}%", cache),
+                Style::default().fg(pal.palette.accent),
+            ),
         ]));
     }
     frame.render_widget(
-        Paragraph::new(lines).block(panel("Provider / model", pal.border, pal.fg)),
+        Paragraph::new(lines).block(panel(
+            "Provider / model",
+            pal.palette.border,
+            pal.palette.fg,
+        )),
         area,
     );
 }
@@ -654,11 +640,11 @@ fn draw_hourly_chart(
     area: Rect,
     data: &UsageStatsSnapshot,
     mode: ViewMode,
-    pal: &Palette,
+    pal: &Theme,
 ) {
     let (heat, title) = hourly_chart_lines(data, mode, pal);
     frame.render_widget(
-        Paragraph::new(heat).block(panel(&title, pal.border, pal.fg)),
+        Paragraph::new(heat).block(panel(&title, pal.palette.border, pal.palette.fg)),
         area,
     );
 }
@@ -668,7 +654,7 @@ fn draw_heat_and_conversations(
     area: Rect,
     data: &UsageStatsSnapshot,
     mode: ViewMode,
-    pal: &Palette,
+    pal: &Theme,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -677,7 +663,7 @@ fn draw_heat_and_conversations(
 
     let (heat, title) = hourly_chart_lines(data, mode, pal);
     frame.render_widget(
-        Paragraph::new(heat).block(panel(&title, pal.border, pal.fg)),
+        Paragraph::new(heat).block(panel(&title, pal.palette.border, pal.palette.fg)),
         chunks[0],
     );
 
@@ -687,7 +673,7 @@ fn draw_heat_and_conversations(
 fn hourly_chart_lines(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
-    pal: &Palette,
+    pal: &Theme,
 ) -> (Vec<Line<'static>>, String) {
     let hourly_data: &[HourUsage] = data.hourly(mode);
     let mut by_hour = [0i64; 24];
@@ -730,7 +716,7 @@ fn hourly_chart_lines(
             } else {
                 "no activity".to_string()
             },
-            Style::default().fg(pal.fg),
+            Style::default().fg(pal.palette.fg),
         ),
         Span::styled(
             format!("   total {}", compact_number(total_hourly as u64)),
@@ -745,13 +731,17 @@ fn draw_daily_activity(
     frame: &mut ratatui::Frame,
     area: Rect,
     data: &UsageStatsSnapshot,
-    pal: &Palette,
+    pal: &Theme,
 ) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
     if inner_width == 0 || inner_height < 3 {
         frame.render_widget(
-            Paragraph::new(Vec::<Line>::new()).block(panel("Daily activity", pal.border, pal.fg)),
+            Paragraph::new(Vec::<Line>::new()).block(panel(
+                "Daily activity",
+                pal.palette.border,
+                pal.palette.fg,
+            )),
             area,
         );
         return;
@@ -833,19 +823,25 @@ fn draw_daily_activity(
                     most_active
                         .map(|b| b.label.clone())
                         .unwrap_or_else(|| "none".to_string()),
-                    Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(pal.palette.fg)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 2 => spans.push(Span::styled(
                     most_active
                         .map(|b| compact_number(bucket_tokens(b) as u64))
                         .unwrap_or_else(|| "0".to_string()),
-                    Style::default().fg(pal.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(pal.palette.accent)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 4 => spans.push(Span::styled(format!("{} days", activity.len()), dim(pal))),
                 5 => spans.push(Span::styled("total", dim(pal))),
                 6 => spans.push(Span::styled(
                     compact_number(total_tokens as u64),
-                    Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(pal.palette.fg)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 _ => {}
             }
@@ -854,7 +850,7 @@ fn draw_daily_activity(
     }
 
     frame.render_widget(
-        Paragraph::new(lines).block(panel("Daily activity", pal.border, pal.fg)),
+        Paragraph::new(lines).block(panel("Daily activity", pal.palette.border, pal.palette.fg)),
         area,
     );
 }
@@ -865,7 +861,7 @@ fn activity_header(
     days: usize,
     max_tokens: i64,
     width: usize,
-    pal: &Palette,
+    pal: &Theme,
 ) -> Line<'static> {
     let full_range = format!("{first_day} → {last_day}");
     let compact_range = format!("{days} days → {last_day}");
@@ -880,11 +876,11 @@ fn activity_header(
     if range.len() + legend_width > width {
         return Line::from(Span::styled(
             trunc(&range, width),
-            Style::default().fg(pal.fg),
+            Style::default().fg(pal.palette.fg),
         ));
     }
     Line::from(vec![
-        Span::styled(range, Style::default().fg(pal.fg)),
+        Span::styled(range, Style::default().fg(pal.palette.fg)),
         Span::styled("   less ", dim(pal)),
         Span::styled("■ ", activity_style(0, max_tokens, pal)),
         Span::styled("■ ", activity_style(max_tokens / 2, max_tokens, pal)),
@@ -923,9 +919,9 @@ fn short_month_day(date: &str) -> Option<String> {
     ))
 }
 
-fn activity_style(tokens: i64, max: i64, pal: &Palette) -> Style {
+fn activity_style(tokens: i64, max: i64, pal: &Theme) -> Style {
     if tokens <= 0 {
-        return Style::default().fg(pal.subtle);
+        return Style::default().fg(pal.palette.subtle);
     }
     heat_style(tokens, max, pal)
 }
@@ -972,7 +968,7 @@ fn compact_number(count: u64) -> String {
     }
 }
 
-fn tabs(active: ViewMode, custom: bool, pal: &Palette) -> Span<'static> {
+fn tabs(active: ViewMode, custom: bool, pal: &Theme) -> Span<'static> {
     let modes = [
         ViewMode::Today,
         ViewMode::SevenDays,
@@ -996,7 +992,11 @@ fn tabs(active: ViewMode, custom: bool, pal: &Palette) -> Span<'static> {
     }
     Span::styled(
         text,
-        Style::default().fg(if custom { pal.muted } else { pal.fg }),
+        Style::default().fg(if custom {
+            pal.palette.muted
+        } else {
+            pal.palette.fg
+        }),
     )
 }
 
@@ -1016,7 +1016,7 @@ fn interpolate_rgb(low: (u8, u8, u8), high: (u8, u8, u8), steps: usize) -> Vec<(
 /// Build a heat gradient from `theme.heat_low` to `theme.heat_high` using
 /// `color_to_rgb`. Valid themes always provide RGB-convertible endpoints; the
 /// repeated semantic endpoint is only a defensive fallback for direct callers.
-fn build_heat_gradient(pal: &Palette) -> Vec<Color> {
+fn build_heat_gradient(pal: &Theme) -> Vec<Color> {
     let Some(low_rgb) = color_to_rgb(pal.heat_low) else {
         return vec![pal.heat_low; 15];
     };
@@ -1032,9 +1032,9 @@ fn build_heat_gradient(pal: &Palette) -> Vec<Color> {
         .collect()
 }
 
-fn heat_style(value: i64, max: i64, pal: &Palette) -> Style {
+fn heat_style(value: i64, max: i64, pal: &Theme) -> Style {
     if value <= 0 {
-        return Style::default().fg(pal.subtle);
+        return Style::default().fg(pal.palette.subtle);
     }
     let greens = build_heat_gradient(pal);
     let ratio = value as f64 / max as f64;
@@ -1058,8 +1058,10 @@ fn range_label(data: &UsageStatsSnapshot, mode: ViewMode) -> String {
     }
 }
 
-fn key_style(pal: &Palette) -> Style {
-    Style::default().fg(pal.fg).add_modifier(Modifier::BOLD)
+fn key_style(pal: &Theme) -> Style {
+    Style::default()
+        .fg(pal.palette.fg)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn bucket_tokens(b: &UsageBucket) -> i64 {
@@ -1076,8 +1078,8 @@ fn panel(title: &str, border: Color, title_fg: Color) -> Block<'static> {
         ))
 }
 
-fn dim(pal: &Palette) -> Style {
-    Style::default().fg(pal.muted)
+fn dim(pal: &Theme) -> Style {
+    Style::default().fg(pal.palette.muted)
 }
 
 fn trunc(s: &str, width: usize) -> String {
@@ -1096,54 +1098,17 @@ mod tests {
     use crate::ui::theme::Theme;
 
     #[test]
-    fn theme_palette_maps_semantic_roles() {
-        let theme = Theme::default();
-        let pal = Palette::from_theme(&theme);
-        assert_eq!(pal.fg, theme.palette.fg);
-        assert_eq!(pal.muted, theme.palette.muted);
-        assert_eq!(pal.subtle, theme.palette.subtle);
-        assert_eq!(pal.border, theme.palette.border);
-        assert_eq!(pal.accent, theme.palette.accent);
-        assert_eq!(pal.chart, theme.chart);
-        assert_eq!(pal.chart_empty, theme.chart_empty);
-        assert_eq!(pal.error, theme.palette.error);
-        assert_eq!(pal.heat_low, theme.heat_low);
-        assert_eq!(pal.heat_high, theme.heat_high);
-    }
-
-    #[test]
-    fn distinct_theme_produces_different_chart_color() {
-        // Build a theme with a non-default chart color
-        let mut custom = Theme::default();
-        custom.chart = Color::Rgb(255, 100, 50); // orange-red instead of default accent
-        let pal = Palette::from_theme(&custom);
-        assert_eq!(pal.chart, Color::Rgb(255, 100, 50));
-
-        // The default theme uses the accent color for chart
-        let default_pal = Palette::from_theme(&Theme::default());
-        assert_ne!(pal.chart, default_pal.chart);
-    }
-
-    #[test]
     fn distinct_theme_produces_different_heat_gradient() {
-        // Theme with blue-ish heat range
-        let mut blue_theme = Theme::default();
-        blue_theme.heat_low = Color::Rgb(0, 0, 50);
-        blue_theme.heat_high = Color::Rgb(0, 100, 255);
-        let blue_pal = Palette::from_theme(&blue_theme);
-        let blue_grad = build_heat_gradient(&blue_pal);
-        assert_eq!(blue_grad.len(), 15);
-        // First color should be close to heat_low
-        assert_eq!(blue_grad[0], Color::Rgb(0, 0, 50));
-        // Last color should be close to heat_high
-        assert_eq!(blue_grad[14], Color::Rgb(0, 100, 255));
+        let mut theme = Theme::default();
+        theme.heat_low = Color::Rgb(0, 0, 50);
+        theme.heat_high = Color::Rgb(0, 100, 255);
 
-        let default_pal = Palette::from_theme(&Theme::default());
-        let default_grad = build_heat_gradient(&default_pal);
-        assert_eq!(default_grad.len(), 15);
-        let (r, g, b) =
-            color_to_rgb(default_pal.heat_low).expect("default heat_low is RGB-convertible");
-        assert_eq!(default_grad[0], Color::Rgb(r, g, b));
+        let gradient = build_heat_gradient(&theme);
+
+        assert_eq!(gradient.len(), 15);
+        assert_eq!(gradient[0], theme.heat_low);
+        assert_eq!(gradient[14], theme.heat_high);
+        assert_ne!(gradient, build_heat_gradient(&Theme::default()));
     }
 
     #[test]
@@ -1151,7 +1116,6 @@ mod tests {
         let mut theme = Theme::default();
         theme.chart = Color::Rgb(1, 2, 3);
         theme.chart_empty = Color::Rgb(4, 5, 6);
-        let pal = Palette::from_theme(&theme);
         let bucket = UsageBucket {
             label: "today".into(),
             prompt_tokens: 25,
@@ -1161,7 +1125,7 @@ mod tests {
             request_count: 1,
         };
 
-        let line = usage_chart_line(&bucket, 100, 10, &pal);
+        let line = usage_chart_line(&bucket, 100, 10, &theme);
 
         assert_eq!(line.spans[1].style.fg, Some(theme.chart));
         assert_eq!(line.spans[2].style.fg, Some(theme.chart_empty));
@@ -1173,41 +1137,22 @@ mod tests {
     fn non_rgb_heat_endpoints_repeat_the_semantic_fallback() {
         let mut theme = Theme::default();
         theme.heat_low = Color::Indexed(7);
-        let pal = Palette::from_theme(&theme);
-        assert_eq!(build_heat_gradient(&pal), vec![Color::Indexed(7); 15]);
+        assert_eq!(build_heat_gradient(&theme), vec![Color::Indexed(7); 15]);
 
         theme.heat_low = Color::Rgb(1, 2, 3);
         theme.heat_high = Color::Reset;
-        let pal = Palette::from_theme(&theme);
-        assert_eq!(build_heat_gradient(&pal), vec![Color::Reset; 15]);
+        assert_eq!(build_heat_gradient(&theme), vec![Color::Reset; 15]);
     }
 
     #[test]
-    fn heat_style_low_positive_value_uses_low_color() {
-        let mut theme = Theme::default();
-        theme.heat_low = Color::Rgb(7, 8, 9);
-        theme.heat_high = Color::Rgb(10, 11, 12);
-        let pal = Palette::from_theme(&theme);
-        assert_eq!(heat_style(1, 100, &pal).fg, Some(theme.heat_low));
-    }
-
-    #[test]
-    fn heat_style_zero_value_uses_subtle() {
+    fn heat_style_uses_low_subtle_and_high_colors() {
         let mut theme = Theme::default();
         theme.palette.subtle = Color::Rgb(13, 14, 15);
-        let pal = Palette::from_theme(&theme);
-        let style = heat_style(0, 100, &pal);
-        assert_eq!(style.fg, Some(theme.palette.subtle));
-    }
+        theme.heat_low = Color::Rgb(7, 8, 9);
+        theme.heat_high = Color::Rgb(10, 11, 12);
 
-    #[test]
-    fn heat_style_full_value_uses_high_color() {
-        let mut theme = Theme::default();
-        theme.heat_low = Color::Rgb(0, 0, 0);
-        theme.heat_high = Color::Rgb(0, 200, 0);
-        let pal = Palette::from_theme(&theme);
-        let style = heat_style(100, 100, &pal);
-        // Full value should map to the last gradient entry (heat_high)
-        assert_eq!(style.fg, Some(Color::Rgb(0, 200, 0)));
+        assert_eq!(heat_style(0, 100, &theme).fg, Some(theme.palette.subtle));
+        assert_eq!(heat_style(1, 100, &theme).fg, Some(theme.heat_low));
+        assert_eq!(heat_style(100, 100, &theme).fg, Some(theme.heat_high));
     }
 }

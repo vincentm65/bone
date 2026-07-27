@@ -13,6 +13,7 @@ pub fn build_tool_row(
     let show_label = display.and_then(|d| d.show).unwrap_or(true);
     let is_shell = call.name == "shell";
     let show_result = display.and_then(|d| d.show_result).unwrap_or(false);
+    let firefox_failed = firefox_failure_message(call, result).is_some();
     let label = if show_label {
         tool_label(call, result, display)
     } else {
@@ -30,7 +31,7 @@ pub fn build_tool_row(
         content,
         tool: Some(crate::chat::ToolDisplay {
             label,
-            is_error: result.is_error,
+            is_error: result.is_error || firefox_failed,
             is_shell,
         }),
         image_count: result.images.len(),
@@ -59,6 +60,10 @@ pub fn tool_label(
         return format_shell_call_label(&call.arguments);
     }
 
+    if let Some(label) = format_firefox_label(call, result) {
+        return label;
+    }
+
     if let Some(display_label) = display.and_then(|display| format_display_label(call, display)) {
         return display_label;
     }
@@ -80,6 +85,184 @@ pub fn tool_label(
     }
 
     label
+}
+
+fn format_firefox_label(call: &ToolCall, result: &ToolResult) -> Option<String> {
+    let action = firefox_action(call)?;
+    let tool = call.name.strip_suffix("_observe").unwrap_or(&call.name);
+    let prefix = format!("{tool} {action}");
+
+    if let Some(error) = firefox_failure_message(call, result) {
+        return Some(if error.is_empty() {
+            format!("{prefix} — failed")
+        } else {
+            format!("{prefix} — failed: {error}")
+        });
+    }
+
+    let response = serde_json::from_str::<Value>(result.content.trim()).ok();
+    let response = response.as_ref();
+    let description = match action {
+        "observe" => firefox_page_description(response)
+            .map(|page| format!("observed {page}"))
+            .unwrap_or_else(|| "observed page".to_string()),
+        "navigate" => firefox_string(response, &[&["url"], &["current_url"], &["tab", "url"]])
+            .or_else(|| argument_string(&call.arguments, &["url"]))
+            .map(|url| format!("opened {}", concise_url(&url)))
+            .unwrap_or_else(|| "navigation completed".to_string()),
+        "click" => {
+            if let Some(name) = firefox_element_name(response, &call.arguments) {
+                format!("clicked “{}”", clean_label_text(&name, 80))
+            } else if let Some(reference) = firefox_string(response, &[&["clicked"]])
+                .or_else(|| argument_string(&call.arguments, &["ref"]))
+            {
+                format!("clicked ref {}", clean_label_text(&reference, 80))
+            } else {
+                "click completed".to_string()
+            }
+        }
+        "type" => {
+            if let Some(name) = firefox_element_name(response, &call.arguments) {
+                format!("typed into “{}”", clean_label_text(&name, 80))
+            } else if let Some(reference) = firefox_string(response, &[&["typed"]])
+                .or_else(|| argument_string(&call.arguments, &["ref"]))
+            {
+                format!("typed into ref {}", clean_label_text(&reference, 80))
+            } else {
+                "typing completed".to_string()
+            }
+        }
+        "press" => firefox_string(response, &[&["pressed"]])
+            .or_else(|| argument_string(&call.arguments, &["key"]))
+            .map(|key| format!("pressed {}", clean_label_text(&key, 80)))
+            .unwrap_or_else(|| "key press completed".to_string()),
+        "scroll" => {
+            let x = response
+                .and_then(|value| value.get("x"))
+                .and_then(Value::as_i64);
+            let y = response
+                .and_then(|value| value.get("y"))
+                .and_then(Value::as_i64);
+            match (x, y) {
+                (Some(x), Some(y)) => format!("scrolled to {x}, {y}"),
+                _ => "scroll completed".to_string(),
+            }
+        }
+        _ => "completed".to_string(),
+    };
+
+    Some(format!("{prefix} — {}", truncate_label(&description, 120)))
+}
+
+fn firefox_action(call: &ToolCall) -> Option<&str> {
+    match call.name.as_str() {
+        "firefox" | "browser_bridge" => call.arguments.get("action").and_then(Value::as_str),
+        "firefox_observe" | "browser_bridge_observe" => Some("observe"),
+        _ => None,
+    }
+}
+
+fn firefox_failure_message(call: &ToolCall, result: &ToolResult) -> Option<String> {
+    firefox_action(call)?;
+    let response = serde_json::from_str::<Value>(result.content.trim()).ok();
+    let structured_error = response
+        .as_ref()
+        .filter(|value| value.get("ok").and_then(Value::as_bool) == Some(false));
+
+    if !result.is_error && structured_error.is_none() {
+        return None;
+    }
+
+    let error = response
+        .as_ref()
+        .and_then(|value| {
+            firefox_string(
+                Some(value),
+                &[&["message"], &["error"], &["stderr"], &["content"]],
+            )
+        })
+        .unwrap_or_else(|| result.content.clone());
+    Some(clean_label_text(&error, 120))
+}
+
+fn firefox_page_description(response: Option<&Value>) -> Option<String> {
+    firefox_string(
+        response,
+        &[
+            &["title"],
+            &["tab", "title"],
+            &["page", "title"],
+            &["url"],
+            &["current_url"],
+            &["tab", "url"],
+        ],
+    )
+    .map(|value| {
+        if value.contains("://") {
+            concise_url(&value)
+        } else {
+            clean_label_text(&value, 100)
+        }
+    })
+}
+
+fn firefox_element_name(response: Option<&Value>, arguments: &Value) -> Option<String> {
+    firefox_string(
+        response,
+        &[
+            &["label"],
+            &["name"],
+            &["text"],
+            &["accessible_name"],
+            &["element", "label"],
+            &["element", "name"],
+            &["element", "text"],
+        ],
+    )
+    .or_else(|| argument_string(arguments, &["label", "name", "text", "accessible_name"]))
+}
+
+fn firefox_string(value: Option<&Value>, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        let value = path.iter().try_fold(value?, |value, key| value.get(*key))?;
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn argument_string(arguments: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        arguments
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn concise_url(url: &str) -> String {
+    let cleaned = clean_label_text(url, 100);
+    let without_scheme = cleaned
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&cleaned);
+    let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host).trim_end_matches('.');
+    if host.is_empty() {
+        cleaned
+    } else {
+        host.to_string()
+    }
+}
+
+fn clean_label_text(text: &str, max: usize) -> String {
+    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_label(&cleaned, max)
 }
 
 /// Truncate to `max` chars on a char boundary, appending an ellipsis.
@@ -457,4 +640,169 @@ fn flush_code_line(lines: &mut Vec<String>, current: &mut String, indent: usize)
         lines.push(format!("{}{}", "  ".repeat(indent), trimmed));
     }
     current.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_tool_row, tool_label};
+    use crate::tools::types::{ToolCall, ToolResult};
+    use serde_json::json;
+
+    fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "call-1".into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    fn result(content: &str) -> ToolResult {
+        ToolResult {
+            call_id: "call-1".into(),
+            name: "firefox".into(),
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn summarizes_firefox_observation_from_returned_title() {
+        let call = call("firefox", json!({"action":"observe"}));
+        let result = result(r#"{"title":"Amazon product page","url":"https://amazon.com/item"}"#);
+
+        assert_eq!(
+            tool_label(&call, &result, None),
+            "firefox observe — observed Amazon product page"
+        );
+    }
+
+    #[test]
+    fn browser_bridge_labels_include_the_action() {
+        let click = call("browser_bridge", json!({"action":"click"}));
+        assert_eq!(
+            tool_label(&click, &result("{}"), None),
+            "browser_bridge click — click completed"
+        );
+
+        let observe = call("browser_bridge_observe", json!({}));
+        assert_eq!(
+            tool_label(&observe, &result("{}"), None),
+            "browser_bridge observe — observed page"
+        );
+    }
+
+    #[test]
+    fn every_firefox_label_includes_its_action() {
+        for action in [
+            "observe",
+            "click",
+            "type",
+            "press",
+            "scroll",
+            "navigate",
+            "tabs",
+            "select_tab",
+        ] {
+            let call = call("firefox", json!({"action": action}));
+            assert!(
+                tool_label(&call, &result("{}"), None).starts_with(&format!("firefox {action} —")),
+                "missing action in {action} label"
+            );
+        }
+    }
+
+    #[test]
+    fn summarizes_firefox_navigation_from_returned_url_then_arguments() {
+        let call = call(
+            "firefox",
+            json!({"action":"navigate","url":"https://example.com/fallback"}),
+        );
+        assert_eq!(
+            tool_label(
+                &call,
+                &result(r#"{"url":"https://amazon.com/product/1"}"#),
+                None
+            ),
+            "firefox navigate — opened amazon.com"
+        );
+        assert_eq!(
+            tool_label(&call, &result("not json"), None),
+            "firefox navigate — opened example.com"
+        );
+    }
+
+    #[test]
+    fn summarizes_firefox_actions_from_results_with_argument_fallbacks() {
+        let click = call("firefox", json!({"action":"click","ref":"button-4"}));
+        assert_eq!(
+            tool_label(&click, &result(r#"{"label":"Add to Cart"}"#), None),
+            "firefox click — clicked “Add to Cart”"
+        );
+        assert_eq!(
+            tool_label(&click, &result(r#"{"clicked":"button-4"}"#), None),
+            "firefox click — clicked ref button-4"
+        );
+
+        let typed = call("firefox", json!({"action":"type","ref":"search"}));
+        assert_eq!(
+            tool_label(
+                &typed,
+                &result(r#"{"typed":"search","value":"shoes"}"#),
+                None
+            ),
+            "firefox type — typed into ref search"
+        );
+
+        let press = call("firefox", json!({"action":"press","key":"Enter"}));
+        assert_eq!(
+            tool_label(&press, &result(r#"{"pressed":"Enter"}"#), None),
+            "firefox press — pressed Enter"
+        );
+
+        let scroll = call("firefox", json!({"action":"scroll"}));
+        assert_eq!(
+            tool_label(&scroll, &result(r#"{"x":0,"y":640}"#), None),
+            "firefox scroll — scrolled to 0, 640"
+        );
+    }
+
+    #[test]
+    fn structured_firefox_failure_sets_error_state_and_label() {
+        let call = call("firefox", json!({"action":"click","ref":"old-ref"}));
+        let result = result(r#"{"ok":false,"error":"stale_ref","message":"element ref expired"}"#);
+        let row = build_tool_row(&call, &result, None);
+
+        assert_eq!(
+            row.tool.as_ref().unwrap().label,
+            "firefox click — failed: element ref expired"
+        );
+        assert!(row.tool.unwrap().is_error);
+    }
+
+    #[test]
+    fn firefox_error_result_uses_plain_content_and_cleans_newlines() {
+        let call = call("firefox", json!({"action":"navigate"}));
+        let mut result = result("Firefox did not respond\nwithin 30 seconds");
+        result.is_error = true;
+
+        assert_eq!(
+            tool_label(&call, &result, None),
+            "firefox navigate — failed: Firefox did not respond within 30 seconds"
+        );
+    }
+
+    #[test]
+    fn firefox_empty_and_malformed_successes_use_factual_fallbacks() {
+        let observe = call("firefox", json!({"action":"observe"}));
+        assert_eq!(
+            tool_label(&observe, &result(""), None),
+            "firefox observe — observed page"
+        );
+
+        let click = call("firefox", json!({"action":"click"}));
+        assert_eq!(
+            tool_label(&click, &result("not json"), None),
+            "firefox click — click completed"
+        );
+    }
 }

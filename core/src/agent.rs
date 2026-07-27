@@ -544,7 +544,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     // Boot Lua extension system and build tool handler.
     let provider = format!("{} ({})", llm.name(), llm.id());
     let model = llm.model().to_string();
-    let booted = crate::ext::boot_with_tools(
+    let booted = crate::ext::boot_with_tools_shared(
         &crate::config::bone_dir(),
         &std::env::current_dir().unwrap_or_default(),
         &mut custom,
@@ -556,6 +556,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         },
         &model,
         &provider,
+        std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot())),
     );
     config.attach_extensions(booted.manager.clone());
     let extensions = booted.manager;
