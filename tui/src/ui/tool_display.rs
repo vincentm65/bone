@@ -56,12 +56,7 @@ pub fn tool_label(
     display: Option<&ToolDisplayConfig>,
 ) -> String {
     if call.name == "shell" {
-        return call
-            .arguments
-            .get("command")
-            .and_then(|value| value.as_str())
-            .map(format_shell_label)
-            .unwrap_or_else(|| call.name.clone());
+        return format_shell_call_label(&call.arguments);
     }
 
     if let Some(display_label) = display.and_then(|display| format_display_label(call, display)) {
@@ -257,6 +252,25 @@ pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {
     let start_line = call.arguments["start_line"].as_u64().unwrap_or(1) as usize;
     let end_line = start_line + lines_read - 1;
     format!(" (lines {start_line}-{end_line}, {lines_read} read)")
+}
+
+pub fn format_shell_call_label(arguments: &Value) -> String {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("run");
+    if action == "run" {
+        return arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .map(format_shell_label)
+            .unwrap_or_else(|| "shell".to_string());
+    }
+
+    match arguments.get("id").and_then(Value::as_str) {
+        Some(id) => format!("shell {action} {id}"),
+        None => format!("shell {action}"),
+    }
 }
 
 pub fn format_shell_label(command: &str) -> String {

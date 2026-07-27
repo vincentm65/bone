@@ -8,7 +8,7 @@ use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
 use crate::ui::selectable_pane::{SelectablePaneAction, apply_nav_key};
-use crate::ui::tool_display::build_tool_row;
+use crate::ui::tool_display::{build_tool_row, format_shell_call_label};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::VecDeque;
 use std::io;
@@ -923,12 +923,7 @@ impl App {
                     self.pump_show_eager_row(&call, cur_idx, term)?;
                 }
                 if call.name == "shell" {
-                    let label = call
-                        .arguments
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .map(crate::ui::tool_display::format_shell_label)
-                        .unwrap_or_else(|| "shell".to_string());
+                    let label = format_shell_call_label(&call.arguments);
                     self.pending_shells.push((id.clone(), label, Instant::now()));
                 }
                 pending.insert(id, call);

@@ -1,5 +1,7 @@
 use bone::tools::types::{ToolCall, ToolDisplayConfig, ToolResult};
-use bone::ui::tool_display::{build_tool_row, format_shell_label, shell_row, tool_label};
+use bone::ui::tool_display::{
+    build_tool_row, format_shell_call_label, format_shell_label, shell_row, tool_label,
+};
 use serde_json::json;
 
 #[test]
@@ -47,6 +49,22 @@ fn shell_label_reflows_basic_code_payload() {
     assert_eq!(
         format_shell_label("cat << EOF// hello fn main(){let x = 1;}EOF"),
         "shell cat << EOF\n  // hello fn main()\n  {\n    let x = 1;\n  }\n EOF"
+    );
+}
+
+#[test]
+fn shell_management_labels_include_action_and_process_id() {
+    assert_eq!(
+        format_shell_call_label(&json!({ "action": "status", "id": "process-20" })),
+        "shell status process-20"
+    );
+    assert_eq!(
+        format_shell_call_label(&json!({ "action": "kill", "id": "process-20" })),
+        "shell kill process-20"
+    );
+    assert_eq!(
+        format_shell_call_label(&json!({ "action": "list" })),
+        "shell list"
     );
 }
 
