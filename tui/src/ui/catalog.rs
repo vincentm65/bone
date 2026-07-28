@@ -224,8 +224,8 @@ pub fn apply(
     (installed, removed, errors)
 }
 
-/// Install or remove one catalog item by its display name (`firefox`) or file
-/// name (`firefox.lua`).
+/// Install or remove one catalog item by its display name (`weather`) or file
+/// name (`weather.lua`).
 pub fn apply_named(action: &str, name: &str) -> Outcome {
     let entries = catalog::sync_quiet();
     let requested = name.strip_suffix(".lua").unwrap_or(name);

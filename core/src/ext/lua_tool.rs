@@ -305,20 +305,10 @@ impl Tool for LuaTool {
 
     async fn execute_output_live(
         &self,
-        mut arguments: Value,
+        arguments: Value,
         events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
         context: crate::tools::types::ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
-        // Older browser_bridge catalogs registered observation separately and
-        // forwarded its arguments without the action expected by the bridge.
-        if self.name == "browser_bridge_observe"
-            && let Some(arguments) = arguments.as_object_mut()
-        {
-            arguments
-                .entry("action")
-                .or_insert_with(|| Value::String("observe".into()));
-        }
-
         if context.tool_call_depth > 0 {
             // Nested invocation via ctx.tools.call: we are already on the
             // thread that is executing Lua (inside Function::call), which

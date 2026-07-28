@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn parses_index_with_defaults_and_metadata() {
     let json = br#"[
-        { "name": "browser.lua", "kind": "tool", "description": "drive a browser",
+        { "name": "weather.lua", "kind": "tool", "description": "show the weather",
           "version": 3, "updated_date": "2026-03-10", "author": "Bone Team",
           "repo_url": "https://example.com/repo", "docs_url": "https://example.com/docs",
           "min_bone_version": ">=2.4", "dependencies": ["helper.lua"],
@@ -17,7 +17,7 @@ fn parses_index_with_defaults_and_metadata() {
     ]"#;
     let entries = parse_index(json).expect("valid index");
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].name, "browser.lua");
+    assert_eq!(entries[0].name, "weather.lua");
     assert_eq!(entries[0].sha256, "abc");
     assert_eq!(entries[0].version.as_deref(), Some("3"));
     assert_eq!(entries[0].updated_at.as_deref(), Some("2026-03-10"));
@@ -97,7 +97,7 @@ fn bundled_paths_are_validated_and_unique() {
                 sha256: String::new(),
             },
             CatalogFile {
-                path: "firefox/bridge/src/main.rs".into(),
+                path: "packages/helper/src/main.rs".into(),
                 sha256: String::new(),
             },
         ],

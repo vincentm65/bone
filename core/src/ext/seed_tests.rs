@@ -3,17 +3,14 @@ use super::*;
 #[test]
 fn canonical_disabled_tools_are_excluded() {
     let mut settings = crate::config::settings::Settings::defaults();
-    settings.inner.tools.disabled = vec!["browser".into(), "cron".into()];
+    settings.inner.tools.disabled = vec!["cron".into()];
     let custom = crate::config::custom::CustomConfigs {
         settings: Some(settings),
         ..Default::default()
     };
 
     assert_eq!(
-        configured_tool_names(
-            &custom,
-            vec!["shell".into(), "browser".into(), "cron".into()]
-        ),
+        configured_tool_names(&custom, vec!["shell".into(), "cron".into()]),
         vec!["shell"]
     );
 }

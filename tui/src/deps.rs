@@ -14,7 +14,7 @@ const DEPS: &[Dep] = &[
     Dep {
         bin: "uv",
         pkg: None,
-        label: "uv (needed by web_search, task_list, cron, browser/browser-use)",
+        label: "uv (needed by web_search, task_list, cron)",
     },
     Dep {
         bin: "git",

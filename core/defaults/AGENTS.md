@@ -471,7 +471,6 @@ Available catalog tools include:
 - **ask_user** — Ask the user a question with selectable options
 - **task_list** — Maintain a visible checklist with TUI pane rendering
 - **cron** — Manage scheduled bone jobs via crontab
-- **browser** — Drive a persistent browser through observe/target actions
 
 To browse and install catalog tools interactively, run `/catalog` in the TUI. To override the catalog source URL, set the `BONE_CATALOG_URL` environment variable to an `http(s)://` base or a local filesystem path.
 

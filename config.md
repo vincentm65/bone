@@ -146,7 +146,7 @@ theme:
   overrides: {}
 
 tools:
-  disabled: [browser, cron]
+  disabled: [cron]
 
 commands:
   disabled: []

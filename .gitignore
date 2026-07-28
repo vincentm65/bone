@@ -7,7 +7,7 @@
 
 # Temp/scratch
 .temp/
-# Runtime tool data (browser profile, screenshots, daemon state)
+# Runtime tool data
 /data/
 
 # OS

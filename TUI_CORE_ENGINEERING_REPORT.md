@@ -499,8 +499,8 @@ branch can likely remove 200-300 lines without removing prompt behavior.
 
 ### 12. Move tool presentation to a typed protocol shape
 
-`tui/src/ui/tool_display.rs` is 808 lines of tool-specific parsing for shell,
-file, browser, Firefox, sub-agent, and generic results. Shell presentation adds
+`tui/src/ui/tool_display.rs` contains tool-specific parsing for shell, file,
+sub-agent, and generic results. Shell presentation adds
 another lexer in `tui/src/ui/render/messages.rs:481-734`. Inline shell failure
 is inferred from display strings at `tui/src/ui/app/stream/mod.rs:1215`.
 

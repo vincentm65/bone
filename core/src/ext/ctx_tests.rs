@@ -124,7 +124,7 @@ fn config_get_table_exposes_canonical_enablement_from_snapshot() {
     let lua = Lua::new();
     let mut settings = crate::config::settings::Settings::defaults();
     settings.inner.commands.disabled.push("compact".into());
-    settings.inner.tools.disabled.push("browser".into());
+    settings.inner.tools.disabled.push("cron".into());
     let custom = crate::config::custom::CustomConfigs {
         pages: Vec::new(),
         settings: Some(settings),
@@ -150,7 +150,7 @@ fn config_get_table_exposes_canonical_enablement_from_snapshot() {
             .unwrap()
             .get::<String>(1)
             .unwrap(),
-        "browser"
+        "cron"
     );
 }
 

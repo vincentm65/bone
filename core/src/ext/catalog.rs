@@ -38,7 +38,7 @@ pub struct CatalogFile {
 /// One catalog entry, as listed in `catalog.json`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CatalogEntry {
-    /// File name, e.g. `"browser.lua"`.
+    /// File name, e.g. `"weather.lua"`.
     pub name: String,
     /// `"tool"` or `"command"`.
     pub kind: String,
@@ -143,7 +143,7 @@ fn is_remote(base: &str) -> bool {
     base.starts_with("http://") || base.starts_with("https://")
 }
 
-/// Fetch `rel` (e.g. `"catalog.json"`, `"tools/browser.lua"`) from the catalog
+/// Fetch `rel` (e.g. `"catalog.json"`, `"tools/weather.lua"`) from the catalog
 /// base. Returns the raw bytes, or `None` on any failure.
 fn fetch(base: &str, rel: &str) -> Option<Vec<u8>> {
     if is_remote(base) {
