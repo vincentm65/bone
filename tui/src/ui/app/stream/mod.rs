@@ -229,6 +229,10 @@ fn format_elapsed_ms(ms: u64) -> String {
     format!("{mins}:{secs:02}")
 }
 
+pub(super) fn is_retry_status(message: &str) -> bool {
+    message.starts_with("retry") || message.starts_with("stream error, will retry:")
+}
+
 fn refresh_queue_page(
     queue: &VecDeque<String>,
     selected: &mut usize,
@@ -974,7 +978,7 @@ impl App {
                 // invisible: retries / stream errors. Lua that wants a message
                 // kept in the transcript emits `RuntimeEvent::Notice` instead
                 // (see below) rather than relying on the host to guess.
-                if message.starts_with("retry") || message.contains("stream error") {
+                if is_retry_status(&message) {
                     self.pump_notice(format!("⚠ {message}"), cur_idx, term)?;
                 }
             }

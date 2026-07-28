@@ -3,14 +3,26 @@ use super::{
     approval_already_pending, background_pane_needs_refresh, config_rejection_message,
     configured_input_style, edit_diff_message, idle_state_needs_redraw, job_snapshot_messages,
     lua_config_available, orphaned_tool_result_row, parse_config_value, prepare_streaming_replay,
-    render_config_page, run_insertion_lifecycle, should_open_agent_log, take_pending_config,
-    take_terminal_width_change, terminal_background_transition, terminal_dimensions_changed,
+    render_config_page, run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
+    take_pending_config, take_terminal_width_change, terminal_background_transition,
+    terminal_dimensions_changed,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
 use crate::ui::selectable_pane::{SelectablePaneAction, apply_nav_key};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::VecDeque;
+
+#[test]
+fn only_actual_retry_statuses_are_persisted() {
+    assert!(is_retry_status("retry 1/3: request failed"));
+    assert!(is_retry_status(
+        "stream error, will retry: connection reset"
+    ));
+    assert!(!is_retry_status(
+        "running shell: grep -R 'stream error, will retry' core/src"
+    ));
+}
 
 #[test]
 fn redelivered_pending_approval_is_not_prompted_twice() {
