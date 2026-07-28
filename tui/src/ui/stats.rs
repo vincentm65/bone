@@ -26,6 +26,7 @@ where
     F: FnMut(&Option<DateRange>) -> io::Result<UsageStatsSnapshot>,
 {
     let mut snapshot = load(&None)?;
+    let heat_scale = HeatScale::new(theme);
     let mut mode = ViewMode::SevenDays;
     let mut custom: Option<DateRange> = None;
     let mut picker: Option<DatePick> = None;
@@ -45,6 +46,7 @@ where
             &error,
             scroll,
             refreshed,
+            &heat_scale,
         )
     })?;
     loop {
@@ -136,6 +138,7 @@ where
                 &error,
                 scroll,
                 refreshed,
+                &heat_scale,
             )
         })?;
     }
@@ -230,6 +233,7 @@ fn draw(
     error: &Option<String>,
     scroll: usize,
     refreshed: Instant,
+    heat_scale: &HeatScale,
 ) {
     let pal = theme;
     let screen = frame.area();
@@ -264,9 +268,9 @@ fn draw(
             ])
             .split(vertical[2]);
         draw_chart(frame, sections[0], data, mode, scroll, pal);
-        draw_hourly_chart(frame, sections[1], data, mode, pal);
+        draw_hourly_chart(frame, sections[1], data, mode, pal, heat_scale);
         draw_models(frame, sections[2], data, mode, custom, pal);
-        draw_daily_activity(frame, sections[3], data, pal);
+        draw_daily_activity(frame, sections[3], data, pal, heat_scale);
     } else {
         let lower = Layout::default()
             .direction(Direction::Vertical)
@@ -279,7 +283,7 @@ fn draw(
             .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
             .split(lower[1]);
         draw_models(frame, bottom[0], data, mode, custom, pal);
-        draw_heat_and_conversations(frame, bottom[1], data, mode, pal);
+        draw_heat_and_conversations(frame, bottom[1], data, mode, pal, heat_scale);
     }
 
     let footer = Line::from(vec![
@@ -641,8 +645,9 @@ fn draw_hourly_chart(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
     pal: &Theme,
+    heat_scale: &HeatScale,
 ) {
-    let (heat, title) = hourly_chart_lines(data, mode, pal);
+    let (heat, title) = hourly_chart_lines(data, mode, pal, heat_scale);
     frame.render_widget(
         Paragraph::new(heat).block(panel(&title, pal.palette.border, pal.palette.fg)),
         area,
@@ -655,25 +660,27 @@ fn draw_heat_and_conversations(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
     pal: &Theme,
+    heat_scale: &HeatScale,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(6), Constraint::Min(6)])
         .split(area);
 
-    let (heat, title) = hourly_chart_lines(data, mode, pal);
+    let (heat, title) = hourly_chart_lines(data, mode, pal, heat_scale);
     frame.render_widget(
         Paragraph::new(heat).block(panel(&title, pal.palette.border, pal.palette.fg)),
         chunks[0],
     );
 
-    draw_daily_activity(frame, chunks[1], data, pal);
+    draw_daily_activity(frame, chunks[1], data, pal, heat_scale);
 }
 
 fn hourly_chart_lines(
     data: &UsageStatsSnapshot,
     mode: ViewMode,
     pal: &Theme,
+    heat_scale: &HeatScale,
 ) -> (Vec<Line<'static>>, String) {
     let hourly_data: &[HourUsage] = data.hourly(mode);
     let mut by_hour = [0i64; 24];
@@ -694,7 +701,7 @@ fn hourly_chart_lines(
     let mut spans = vec![Span::raw("  ")];
     for v in by_hour {
         let block = if v > 0 { "█  " } else { "·  " };
-        spans.push(Span::styled(block, heat_style(v, max_hour, pal)));
+        spans.push(Span::styled(block, heat_scale.style(v, max_hour)));
     }
     heat.push(Line::from(spans));
     let total_hourly: i64 = by_hour.iter().sum();
@@ -732,6 +739,7 @@ fn draw_daily_activity(
     area: Rect,
     data: &UsageStatsSnapshot,
     pal: &Theme,
+    heat_scale: &HeatScale,
 ) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -799,6 +807,7 @@ fn draw_daily_activity(
             max_tokens,
             inner_width,
             pal,
+            heat_scale,
         ));
     }
 
@@ -813,7 +822,10 @@ fn draw_daily_activity(
         let mut spans = vec![Span::styled(weekday_label(row), dim(pal))];
         for tokens in row_cells {
             let tokens = tokens.unwrap_or(0);
-            spans.push(Span::styled("■ ", activity_style(tokens, max_tokens, pal)));
+            spans.push(Span::styled(
+                "■ ",
+                activity_style(tokens, max_tokens, heat_scale),
+            ));
         }
         if stats_width > 0 {
             spans.push(Span::raw(" "));
@@ -862,6 +874,7 @@ fn activity_header(
     max_tokens: i64,
     width: usize,
     pal: &Theme,
+    heat_scale: &HeatScale,
 ) -> Line<'static> {
     let full_range = format!("{first_day} → {last_day}");
     let compact_range = format!("{days} days → {last_day}");
@@ -882,9 +895,9 @@ fn activity_header(
     Line::from(vec![
         Span::styled(range, Style::default().fg(pal.palette.fg)),
         Span::styled("   less ", dim(pal)),
-        Span::styled("■ ", activity_style(0, max_tokens, pal)),
-        Span::styled("■ ", activity_style(max_tokens / 2, max_tokens, pal)),
-        Span::styled("■", activity_style(max_tokens, max_tokens, pal)),
+        Span::styled("■ ", activity_style(0, max_tokens, heat_scale)),
+        Span::styled("■ ", activity_style(max_tokens / 2, max_tokens, heat_scale)),
+        Span::styled("■", activity_style(max_tokens, max_tokens, heat_scale)),
         Span::styled(" more", dim(pal)),
     ])
 }
@@ -919,11 +932,8 @@ fn short_month_day(date: &str) -> Option<String> {
     ))
 }
 
-fn activity_style(tokens: i64, max: i64, pal: &Theme) -> Style {
-    if tokens <= 0 {
-        return Style::default().fg(pal.palette.subtle);
-    }
-    heat_style(tokens, max, pal)
+fn activity_style(tokens: i64, max: i64, heat_scale: &HeatScale) -> Style {
+    heat_scale.style(tokens, max)
 }
 
 fn weekday_label(row: usize) -> &'static str {
@@ -1000,48 +1010,56 @@ fn tabs(active: ViewMode, custom: bool, pal: &Theme) -> Span<'static> {
     )
 }
 
-/// Interpolate between two RGB colors across `steps` levels.
-fn interpolate_rgb(low: (u8, u8, u8), high: (u8, u8, u8), steps: usize) -> Vec<(u8, u8, u8)> {
-    let mut colors = Vec::with_capacity(steps);
-    for i in 0..steps {
-        let t = i as f64 / (steps - 1) as f64;
-        let r = low.0 as f64 + (high.0 as f64 - low.0 as f64) * t;
-        let g = low.1 as f64 + (high.1 as f64 - low.1 as f64) * t;
-        let b = low.2 as f64 + (high.2 as f64 - low.2 as f64) * t;
-        colors.push((r.round() as u8, g.round() as u8, b.round() as u8));
-    }
-    colors
-}
+const HEAT_LEVELS: usize = 15;
 
 /// Build a heat gradient from `theme.heat_low` to `theme.heat_high` using
 /// `color_to_rgb`. Valid themes always provide RGB-convertible endpoints; the
 /// repeated semantic endpoint is only a defensive fallback for direct callers.
-fn build_heat_gradient(pal: &Theme) -> Vec<Color> {
+fn build_heat_gradient(pal: &Theme) -> [Color; HEAT_LEVELS] {
     let Some(low_rgb) = color_to_rgb(pal.heat_low) else {
-        return vec![pal.heat_low; 15];
+        return [pal.heat_low; HEAT_LEVELS];
     };
     let Some(high_rgb) = color_to_rgb(pal.heat_high) else {
-        return vec![pal.heat_high; 15];
+        return [pal.heat_high; HEAT_LEVELS];
     };
 
-    let steps = 15;
-    let colors = interpolate_rgb(low_rgb, high_rgb, steps);
-    colors
-        .into_iter()
-        .map(|(r, g, b)| Color::Rgb(r, g, b))
-        .collect()
+    std::array::from_fn(|index| {
+        let t = index as f64 / (HEAT_LEVELS - 1) as f64;
+        let channel =
+            |low: u8, high: u8| (low as f64 + (high as f64 - low as f64) * t).round() as u8;
+        Color::Rgb(
+            channel(low_rgb.0, high_rgb.0),
+            channel(low_rgb.1, high_rgb.1),
+            channel(low_rgb.2, high_rgb.2),
+        )
+    })
 }
 
-fn heat_style(value: i64, max: i64, pal: &Theme) -> Style {
-    if value <= 0 {
-        return Style::default().fg(pal.palette.subtle);
+/// Cached for the lifetime of the stats screen; heat cells only select a
+/// precomputed color.
+struct HeatScale {
+    colors: [Color; HEAT_LEVELS],
+    empty: Color,
+}
+
+impl HeatScale {
+    fn new(pal: &Theme) -> Self {
+        Self {
+            colors: build_heat_gradient(pal),
+            empty: pal.palette.subtle,
+        }
     }
-    let greens = build_heat_gradient(pal);
-    let ratio = value as f64 / max as f64;
-    let idx = ((ratio * greens.len() as f64).ceil() as usize).saturating_sub(1);
-    Style::default()
-        .fg(greens[idx.min(greens.len() - 1)])
-        .add_modifier(Modifier::BOLD)
+
+    fn style(&self, value: i64, max: i64) -> Style {
+        if value <= 0 {
+            return Style::default().fg(self.empty);
+        }
+        let ratio = value as f64 / max.max(1) as f64;
+        let idx = ((ratio * self.colors.len() as f64).ceil() as usize).saturating_sub(1);
+        Style::default()
+            .fg(self.colors[idx.min(self.colors.len() - 1)])
+            .add_modifier(Modifier::BOLD)
+    }
 }
 
 fn range_label(data: &UsageStatsSnapshot, mode: ViewMode) -> String {
@@ -1137,11 +1155,14 @@ mod tests {
     fn non_rgb_heat_endpoints_repeat_the_semantic_fallback() {
         let mut theme = Theme::default();
         theme.heat_low = Color::Indexed(7);
-        assert_eq!(build_heat_gradient(&theme), vec![Color::Indexed(7); 15]);
+        assert_eq!(
+            build_heat_gradient(&theme),
+            [Color::Indexed(7); HEAT_LEVELS]
+        );
 
         theme.heat_low = Color::Rgb(1, 2, 3);
         theme.heat_high = Color::Reset;
-        assert_eq!(build_heat_gradient(&theme), vec![Color::Reset; 15]);
+        assert_eq!(build_heat_gradient(&theme), [Color::Reset; HEAT_LEVELS]);
     }
 
     #[test]
@@ -1150,9 +1171,10 @@ mod tests {
         theme.palette.subtle = Color::Rgb(13, 14, 15);
         theme.heat_low = Color::Rgb(7, 8, 9);
         theme.heat_high = Color::Rgb(10, 11, 12);
+        let heat_scale = HeatScale::new(&theme);
 
-        assert_eq!(heat_style(0, 100, &theme).fg, Some(theme.palette.subtle));
-        assert_eq!(heat_style(1, 100, &theme).fg, Some(theme.heat_low));
-        assert_eq!(heat_style(100, 100, &theme).fg, Some(theme.heat_high));
+        assert_eq!(heat_scale.style(0, 100).fg, Some(theme.palette.subtle));
+        assert_eq!(heat_scale.style(1, 100).fg, Some(theme.heat_low));
+        assert_eq!(heat_scale.style(100, 100).fg, Some(theme.heat_high));
     }
 }

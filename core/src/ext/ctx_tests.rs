@@ -865,7 +865,6 @@ fn runtime_info_exposes_read_only_execution_metadata() {
 
 #[test]
 fn conversation_submit_and_load_queue_generic_operations() {
-    crate::ext::inbox::drain();
     let (tx, rx) = std::sync::mpsc::channel();
     let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
     cfg.conversation_operations = Some(tx);
@@ -882,7 +881,10 @@ fn conversation_submit_and_load_queue_generic_operations() {
     .exec()
     .unwrap();
 
-    assert_eq!(crate::ext::inbox::drain(), vec!["continue this"]);
+    assert_eq!(
+        crate::ext::inbox::for_lua(&lua).drain(),
+        vec!["continue this"]
+    );
     assert_eq!(rx.try_recv().unwrap(), ConversationOperation::Load(17));
 }
 

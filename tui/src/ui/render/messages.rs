@@ -36,21 +36,28 @@ pub fn render_tool(
         image_count,
         theme,
         lines,
-        width,
-        expanded,
-        true,
+        ToolRenderOptions {
+            width,
+            expanded,
+            show_expand_hint: true,
+        },
     );
 }
 
-pub(crate) fn render_tool_with_hint(
+#[derive(Clone, Copy)]
+struct ToolRenderOptions {
+    width: usize,
+    expanded: bool,
+    show_expand_hint: bool,
+}
+
+fn render_tool_with_hint(
     tool: &ToolDisplay,
     content: &str,
     image_count: usize,
     theme: &Theme,
     lines: &mut Vec<Line<'static>>,
-    width: usize,
-    expanded: bool,
-    show_expand_hint: bool,
+    options: ToolRenderOptions,
 ) {
     let marker = if tool.is_error { "✕ " } else { "  " };
     let name_style = tool_name_style(tool, theme);
@@ -58,7 +65,7 @@ pub(crate) fn render_tool_with_hint(
     let marker_style = Style::default().fg(theme.tool_error);
     let indent = "    ";
     let prefix_width = 4;
-    let label_width = width.saturating_sub(prefix_width).max(1);
+    let label_width = options.width.saturating_sub(prefix_width).max(1);
 
     if !tool.label.is_empty() {
         let wrapped = wrap_tool_label(&tool.label, label_width);
@@ -66,7 +73,7 @@ pub(crate) fn render_tool_with_hint(
         let mut visual_idx = 0usize;
         let mut heredoc_delim: Option<String> = None;
 
-        for (_line_idx, raw_line) in logical.iter().enumerate() {
+        for raw_line in &logical {
             let in_heredoc_body = heredoc_delim.is_some();
             let visuals = wrap_label_line(raw_line, label_width);
             let is_first_logical = visual_idx == 0;
@@ -127,14 +134,14 @@ pub(crate) fn render_tool_with_hint(
         render_shell_output(
             content,
             tool.is_error,
-            expanded,
-            show_expand_hint,
+            options.expanded,
+            options.show_expand_hint,
             theme,
             lines,
-            width,
+            options.width,
         );
     } else if !content.is_empty() {
-        render_tool_content(content, theme, lines, width);
+        render_tool_content(content, theme, lines, options.width);
     }
     if image_count > 0 {
         for idx in 1..=image_count {
@@ -454,25 +461,25 @@ fn render_shell_output(
 
 fn shell_output_lines(content: &str) -> Vec<String> {
     let mut lines = content.lines();
-    if matches!(lines.next(), Some(line) if line.starts_with("exit code: ")) {
-        if matches!(lines.next(), Some("stdout:")) {
-            let rest = lines.collect::<Vec<_>>();
-            let (stdout, stderr) = match rest.iter().position(|line| *line == "stderr:") {
-                Some(pos) => (&rest[..pos], &rest[pos + 1..]),
-                None => (&rest[..], &[][..]),
-            };
-            // Empty stdout still occupies a line in the wire format; drop it so
-            // stderr-only output doesn't render a leading blank gutter line.
-            let mut out = stdout.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-            while out.last().is_some_and(|line| line.is_empty()) {
-                out.pop();
-            }
-            out.extend(stderr.iter().map(|s| s.to_string()));
-            while out.last().is_some_and(|line| line.is_empty()) {
-                out.pop();
-            }
-            return out;
+    if matches!(lines.next(), Some(line) if line.starts_with("exit code: "))
+        && matches!(lines.next(), Some("stdout:"))
+    {
+        let rest = lines.collect::<Vec<_>>();
+        let (stdout, stderr) = match rest.iter().position(|line| *line == "stderr:") {
+            Some(pos) => (&rest[..pos], &rest[pos + 1..]),
+            None => (&rest[..], &[][..]),
+        };
+        // Empty stdout still occupies a line in the wire format; drop it so
+        // stderr-only output doesn't render a leading blank gutter line.
+        let mut out = stdout.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        while out.last().is_some_and(|line| line.is_empty()) {
+            out.pop();
         }
+        out.extend(stderr.iter().map(|s| s.to_string()));
+        while out.last().is_some_and(|line| line.is_empty()) {
+            out.pop();
+        }
+        return out;
     }
 
     content.lines().map(str::to_string).collect()
@@ -1014,9 +1021,11 @@ pub(crate) fn msg_to_lines_with_shell_hint(
                 msg.image_count,
                 theme,
                 &mut lines,
-                width as usize,
-                expanded,
-                show_expand_hint,
+                ToolRenderOptions {
+                    width: width as usize,
+                    expanded,
+                    show_expand_hint,
+                },
             );
         } else {
             render_content(msg, theme, &mut lines, width);

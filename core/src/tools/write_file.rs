@@ -88,10 +88,11 @@ async fn write_file_inner(
     // is acceptable for this tool's local convenience threat model.
     match fs::symlink_metadata(&path).await {
         Ok(_) => {
-            return Err(format!(
+            return Err(
                 "file already exists — write_file only creates new files. Do NOT retry write_file for this path. \
-                 To change it, read the file and call edit_file with path, old_text, and new_text.",
-            ));
+                 To change it, read the file and call edit_file with path, old_text, and new_text."
+                    .to_string(),
+            );
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(crate::util::errstr(e)),

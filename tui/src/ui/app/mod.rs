@@ -14,7 +14,7 @@ use crate::llm::{ChatMessage, LlmProvider};
 use crate::tools::{ApprovalMode, CallOutcome, ToolCall, ToolResult};
 use crate::ui::tool_display::build_tool_row;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io;
 use std::time::Instant;
 use tokio::time::Duration;
@@ -24,7 +24,7 @@ use super::commands;
 use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
-use super::render::{BoneTerminal, MAX_PANE_ROWS, PaneDraw, Renderer, StatusInfo};
+use super::render::{BoneTerminal, MAX_PANE_ROWS, PaneDraw, PaneSizing, Renderer, StatusInfo};
 use super::selectable_pane::{SelectablePaneAction, apply_nav_key};
 
 fn should_open_agent_log(input: &InputState) -> bool {
@@ -49,6 +49,87 @@ fn background_pane_needs_refresh(processes_changed: bool, agent_jobs_tick_due: b
 
 fn terminal_dimensions_changed(last: Option<(u16, u16)>, current: (u16, u16)) -> bool {
     last.is_some_and(|last| last != current)
+}
+
+fn take_terminal_width_change(last: &mut Option<u16>, current: u16) -> bool {
+    if *last == Some(current) {
+        return false;
+    }
+    *last = Some(current);
+    true
+}
+
+fn request_id_seed() -> u64 {
+    static CLIENT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let client = CLIENT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64);
+    time ^ (u64::from(std::process::id()) << 32) ^ client.rotate_left(17)
+}
+
+/// Owns an initialized inline terminal until all process-global terminal state
+/// has been restored. Explicit completion reports cleanup errors; unwinding
+/// still gets best-effort restoration through `Drop`.
+struct TerminalSession {
+    terminal: BoneTerminal,
+    active: bool,
+}
+
+impl TerminalSession {
+    fn new(terminal: BoneTerminal) -> Self {
+        Self {
+            terminal,
+            active: true,
+        }
+    }
+
+    fn restore(&mut self, prepare_viewport: bool) -> io::Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+
+        // Attempt every cleanup step even if an earlier one fails.
+        let background = Renderer::reset_terminal_background();
+        let viewport = if prepare_viewport {
+            Renderer::prepare_exit(&mut self.terminal)
+        } else {
+            Ok(())
+        };
+        let terminal = Renderer::shutdown_terminal();
+        background.and(viewport).and(terminal)
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.restore(true)
+    }
+}
+
+impl std::ops::Deref for TerminalSession {
+    type Target = BoneTerminal;
+
+    fn deref(&self) -> &Self::Target {
+        &self.terminal
+    }
+}
+
+impl std::ops::DerefMut for TerminalSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.terminal
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        // The panic hook has already printed the error before unwinding. Do not
+        // clear the viewport afterward and risk erasing that diagnostic.
+        if let Err(err) = self.restore(!std::thread::panicking()) {
+            bone_core::ext::ctx::runtime_warn(format!(
+                "bone: warning: failed to restore terminal: {err}"
+            ));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +297,17 @@ pub struct PendingApproval {
     id: u64,
     /// `true` once the user picked "Advise" and is typing free-form advice.
     advising: bool,
+}
+
+fn approval_already_pending(pending: Option<&PendingApproval>, id: u64) -> bool {
+    pending.is_some_and(|pending| pending.id == id)
+}
+
+pub(crate) struct ApprovalRequestDetails {
+    id: u64,
+    call: ToolCall,
+    auto_allows: bool,
+    preview: Option<String>,
 }
 
 /// Tool metadata the frontend needs to render — display configs (for tool rows)
@@ -466,7 +558,11 @@ pub struct App {
     /// Latest daemon-owned typed schema/snapshot and correlated mutations.
     config_view: ConfigView,
     pending_config: BTreeMap<String, String>,
-    next_config_request: u64,
+    next_request_id: u64,
+    pending_synchronizations: HashSet<u64>,
+    /// Learned lazily so a new frontend can still operate against a daemon
+    /// predating correlated state synchronization.
+    synchronization_supported: Option<bool>,
     pub queue: VecDeque<String>,
     /// Selected row in the native input-queue pane.
     pub queue_selected: usize,
@@ -478,6 +574,9 @@ pub struct App {
     /// Tool-call approval awaiting a decision, resolved inside the main stream
     /// loop. `Some` only while `active_prompt` shows an approval prompt.
     pub pending_approval: Option<PendingApproval>,
+    /// Approval gates already answered by this frontend. A synchronization can
+    /// replay an event before its reply is observed daemon-side.
+    answered_approvals: HashSet<u64>,
     /// Set to `true` to abort the current streaming response.
     pub cancel_streaming: bool,
     /// Timestamp of the last Ctrl+C press (for double-tap quit).
@@ -561,6 +660,8 @@ pub struct App {
     quit_despite_jobs: bool,
     /// True after OSC 11 changed the emulator background; reset on TUI handoff/exit.
     terminal_bg_set: bool,
+    /// Last width published to the daemon for Lua pane wrapping.
+    published_terminal_width: Option<u16>,
 }
 
 impl App {
@@ -608,6 +709,20 @@ impl App {
 
         let _ = command_tx.send(crate::runtime::RuntimeCommand::GetConfig);
         let _ = command_tx.send(crate::runtime::RuntimeCommand::GetProcesses);
+        // Probe protocol capabilities before any user request. FIFO command
+        // ordering guarantees a current daemon answers this before processing a
+        // later prompt/command; an older daemon simply ignores the new variant.
+        let request_seed = request_id_seed();
+        let mut pending_synchronizations = HashSet::new();
+        if command_tx
+            .send(crate::runtime::RuntimeCommand::Synchronize {
+                request_id: request_seed,
+                include_messages: false,
+            })
+            .is_ok()
+        {
+            pending_synchronizations.insert(request_seed);
+        }
         Ok(Self {
             messages,
             command_tx,
@@ -622,7 +737,9 @@ impl App {
             user_config,
             config_view: ConfigView::default(),
             pending_config: BTreeMap::new(),
-            next_config_request: 0,
+            next_request_id: request_seed.wrapping_add(1),
+            pending_synchronizations,
+            synchronization_supported: None,
             queue: VecDeque::new(),
             queue_selected: 0,
             queue_editing: None,
@@ -630,6 +747,7 @@ impl App {
             approval_mode,
             active_prompt: None,
             pending_approval: None,
+            answered_approvals: HashSet::new(),
             cancel_streaming: false,
             last_ctrl_c: None,
             stream_estimated_received: None,
@@ -663,6 +781,7 @@ impl App {
             selected_process_id: None,
             quit_despite_jobs: false,
             terminal_bg_set: false,
+            published_terminal_width: None,
         })
     }
 
@@ -709,6 +828,21 @@ impl App {
             RuntimeEvent::StateSnapshot { snapshot } => {
                 self.apply_snapshot(snapshot);
             }
+            RuntimeEvent::StateSynchronized {
+                request_id,
+                busy,
+                snapshot,
+                messages,
+            } if self.pending_synchronizations.remove(&request_id) => {
+                self.synchronization_supported = Some(true);
+                self.apply_snapshot(snapshot);
+                if !busy && let Some(messages) = messages {
+                    self.replace_transcript(messages);
+                }
+            }
+            RuntimeEvent::StreamLagged { .. } => {
+                self.recover_from_event_lag();
+            }
             RuntimeEvent::ProcessesSnapshot { version, processes } => {
                 self.apply_processes_snapshot(version, processes)
             }
@@ -719,10 +853,7 @@ impl App {
                 let _ = self
                     .command_tx
                     .send(crate::runtime::RuntimeCommand::GetProcesses);
-                self.messages.clear();
-                let rows = self.rebuild_scrollback_from_transcript(&messages);
-                self.messages.extend(rows);
-                self.renderer.scrollback_cursor = 0;
+                self.replace_transcript(messages);
             }
             RuntimeEvent::Status { message }
             | RuntimeEvent::ConversationLoadFailed { message, .. } => {
@@ -851,9 +982,14 @@ impl App {
         }
     }
 
+    fn next_request(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        request_id
+    }
+
     fn begin_config_change(&mut self, path: impl Into<String>) -> String {
-        self.next_config_request = self.next_config_request.saturating_add(1);
-        let request_id = format!("tui-{}-{}", std::process::id(), self.next_config_request);
+        let request_id = format!("tui-{:016x}", self.next_request());
         self.pending_config.insert(request_id.clone(), path.into());
         request_id
     }
@@ -1001,7 +1137,7 @@ impl App {
         // A user hook must not leave the terminal in raw mode forever on exit.
         let _ = tokio::time::timeout(
             Duration::from_secs(1),
-            self.send_and_await_snapshot(command),
+            self.send_and_await_snapshot(command, None),
         )
         .await;
     }
@@ -1027,21 +1163,28 @@ impl App {
         }
 
         if let Some(config_action) = action.config_action {
-            action_reply = Some(self.apply_config_action(config_action).await);
+            action_reply = Some(self.apply_config_action(config_action, term).await);
         }
         Ok(action_reply)
     }
 
-    async fn apply_config_action(&mut self, action: crate::ext::types::ConfigAction) -> String {
+    async fn apply_config_action(
+        &mut self,
+        action: crate::ext::types::ConfigAction,
+        term: &mut BoneTerminal,
+    ) -> String {
         match action {
             crate::ext::types::ConfigAction::Apply => {
                 let _ = self
                     .command_tx
                     .send(crate::runtime::RuntimeCommand::ReloadSettings);
                 let active_id = self.view.provider_id.clone();
-                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
-                    provider_id: active_id,
-                })
+                self.send_and_await_snapshot(
+                    crate::runtime::RuntimeCommand::SwitchProvider {
+                        provider_id: active_id,
+                    },
+                    Some(term),
+                )
                 .await;
                 "Configuration applied.".to_string()
             }
@@ -1050,9 +1193,12 @@ impl App {
                     .command_tx
                     .send(crate::runtime::RuntimeCommand::ReloadSettings);
                 let active_id = self.view.provider_id.clone();
-                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SwitchProvider {
-                    provider_id: active_id,
-                })
+                self.send_and_await_snapshot(
+                    crate::runtime::RuntimeCommand::SwitchProvider {
+                        provider_id: active_id,
+                    },
+                    Some(term),
+                )
                 .await;
                 "Configuration saved. Restart required for tool/command changes.".to_string()
             }
@@ -1060,11 +1206,14 @@ impl App {
             crate::ext::types::ConfigAction::SwitchProvider { id } => {
                 let prev = self.view.provider_id.clone();
                 let request_id = self.begin_config_change(format!("providers.active ({id})"));
-                self.send_and_await_snapshot(crate::runtime::RuntimeCommand::SetActiveProvider {
-                    id,
-                    expected_revision: self.config_view.revision(),
-                    request_id: Some(request_id),
-                })
+                self.send_and_await_snapshot(
+                    crate::runtime::RuntimeCommand::SetActiveProvider {
+                        id,
+                        expected_revision: self.config_view.revision(),
+                        request_id: Some(request_id),
+                    },
+                    Some(term),
+                )
                 .await;
                 if self.view.provider_id == prev {
                     format!(
@@ -1087,51 +1236,185 @@ impl App {
         self.view = snapshot;
     }
 
-    /// Block until the daemon publishes a `StateSnapshot`, then adopt it.
+    fn request_synchronization(&mut self, request_id: u64, include_messages: bool) {
+        self.pending_synchronizations.insert(request_id);
+        if self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::Synchronize {
+                request_id,
+                include_messages,
+            })
+            .is_err()
+        {
+            self.pending_synchronizations.remove(&request_id);
+        }
+    }
+
+    fn mark_legacy_runtime(&mut self) {
+        self.synchronization_supported = Some(false);
+        self.pending_synchronizations.clear();
+    }
+
+    /// Block until the daemon publishes the correlated state response, then
+    /// adopt it. Unrelated snapshots and replies remain ordinary idle events.
     ///
     /// Other events seen while waiting (notably an error `Status` the daemon
-    /// emits *before* the snapshot — e.g. "failed to switch provider: …") are
+    /// emits before the response — e.g. "failed to switch provider: …") are
     /// applied via [`apply_idle_event`], not discarded: a swallowed `Status`
-    /// makes a failed switch look like a successful one and the post-failure
-    /// snapshot (which keeps the *old* provider) the only thing the caller sees.
-    /// A `Lagged` receiver is retried rather than treated as terminal.
-    async fn await_state_snapshot(&mut self) {
+    /// makes a failed switch look like a successful one. If the event receiver
+    /// lags, repeating `Synchronize` is safe and repairs a lost response.
+    async fn await_state_synchronization(
+        &mut self,
+        request_id: u64,
+        mut term: Option<&mut BoneTerminal>,
+    ) {
+        let mut include_messages = false;
+        let mut legacy_snapshot_seen = false;
         loop {
             // Bind first so the recv future temporary is dropped before
             // `apply_snapshot` / `apply_idle_event` borrows `self` again.
-            let ev = self.events_rx.recv().await;
+            let ev = match tokio::time::timeout(Duration::from_millis(750), self.events_rx.recv())
+                .await
+            {
+                Ok(event) => event,
+                Err(_) if self.synchronization_supported.is_none() && legacy_snapshot_seen => {
+                    self.mark_legacy_runtime();
+                    break;
+                }
+                Err(_) if self.synchronization_supported == Some(true) => {
+                    self.request_synchronization(request_id, include_messages);
+                    continue;
+                }
+                Err(_) => {
+                    self.pending_synchronizations.remove(&request_id);
+                    self.messages.push(Message::system(
+                        "runtime did not acknowledge the requested state change",
+                    ));
+                    break;
+                }
+            };
             match ev {
+                Ok(crate::runtime::RuntimeEvent::StateSynchronized {
+                    request_id: response_id,
+                    busy,
+                    snapshot,
+                    messages,
+                }) if response_id == request_id => {
+                    self.synchronization_supported = Some(true);
+                    self.pending_synchronizations.remove(&response_id);
+                    self.apply_snapshot(snapshot);
+                    if busy {
+                        include_messages = true;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        self.request_synchronization(request_id, include_messages);
+                    } else {
+                        if let Some(messages) = messages {
+                            self.replace_transcript(messages);
+                        }
+                        break;
+                    }
+                }
+                Ok(crate::runtime::RuntimeEvent::Started {
+                    request_id: turn_request_id,
+                    task,
+                    display,
+                    ..
+                }) => {
+                    if let Some(term) = term.as_deref_mut()
+                        && let Err(error) = self
+                            .adopt_daemon_turn(turn_request_id, task, display, term)
+                            .await
+                    {
+                        self.messages.push(Message::system(format!(
+                            "failed to adopt concurrent turn: {error}"
+                        )));
+                    }
+                    // The response sent before/during that turn may have been
+                    // consumed by its event pump. Ask again after it releases
+                    // the daemon so this waiter observes the requested change.
+                    self.request_synchronization(request_id, include_messages);
+                }
+                Ok(crate::runtime::RuntimeEvent::StreamLagged { .. }) => {
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::GetProcesses);
+                    include_messages = true;
+                    self.request_synchronization(request_id, include_messages);
+                }
                 Ok(crate::runtime::RuntimeEvent::StateSnapshot { snapshot }) => {
                     self.apply_snapshot(snapshot);
-                    break;
+                    legacy_snapshot_seen = true;
                 }
                 Ok(other) => self.apply_idle_event(other),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    self.recover_from_event_lag();
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::GetProcesses);
+                    include_messages = true;
+                    self.request_synchronization(request_id, include_messages);
                     continue;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    self.messages
+                        .push(Message::system("runtime disconnected while synchronizing"));
+                    break;
+                }
             }
         }
     }
 
-    /// Drain buffered events, send a state-mutating command, then block for the
-    /// daemon's authoritative `StateSnapshot` reply.
-    ///
-    /// Draining *before* the send is what fixes the "one switch behind" bug:
-    /// every command (and turn) ends with a published snapshot, and one can
-    /// still be sitting in the broadcast buffer (not yet drained by the idle
-    /// loop) when the next `/provider` / `/model` / `/new` runs. Without the
-    /// pre-drain, `await_state_snapshot` would adopt that *previous* snapshot
-    /// and return before the daemon ever processed this command — so the view
-    /// always trailed by one. The daemon publishes nothing until it receives
-    /// `cmd`, so after draining + sending, the only snapshot that can arrive is
-    /// this command's. There is no await point between the drain and the send,
-    /// so the daemon cannot slip a publish in between.
-    async fn send_and_await_snapshot(&mut self, cmd: crate::runtime::RuntimeCommand) {
-        while let Ok(ev) = self.events_rx.try_recv() {
-            self.apply_idle_event(ev);
+    /// Wait for the uncorrelated acknowledgement emitted by older daemons.
+    /// This path is used only after one synchronization probe timed out while a
+    /// legacy `StateSnapshot` arrived, so current daemons retain strict IDs.
+    async fn await_legacy_state_snapshot(&mut self, mut term: Option<&mut BoneTerminal>) {
+        loop {
+            let event =
+                match tokio::time::timeout(Duration::from_secs(2), self.events_rx.recv()).await {
+                    Ok(event) => event,
+                    Err(_) => {
+                        self.messages.push(Message::system(
+                            "legacy runtime did not acknowledge the requested state change",
+                        ));
+                        break;
+                    }
+                };
+            match event {
+                Ok(crate::runtime::RuntimeEvent::StateSnapshot { snapshot }) => {
+                    self.apply_snapshot(snapshot);
+                    break;
+                }
+                Ok(crate::runtime::RuntimeEvent::Started {
+                    request_id,
+                    task,
+                    display,
+                    ..
+                }) => {
+                    if let Some(term) = term.as_deref_mut() {
+                        let _ = self
+                            .adopt_daemon_turn(request_id, task, display, term)
+                            .await;
+                    }
+                }
+                Ok(other) => self.apply_idle_event(other),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    self.messages
+                        .push(Message::system("runtime disconnected while synchronizing"));
+                    break;
+                }
+            }
         }
+    }
+
+    /// Send a mutation followed by a correlated synchronization request. Both
+    /// use the same FIFO command sender, so the reply necessarily describes
+    /// state at or after this mutation; another client's stale `StateSnapshot`
+    /// can no longer satisfy the waiter.
+    async fn send_and_await_snapshot(
+        &mut self,
+        cmd: crate::runtime::RuntimeCommand,
+        term: Option<&mut BoneTerminal>,
+    ) {
         let refresh_processes = matches!(
             &cmd,
             crate::runtime::RuntimeCommand::NewConversation
@@ -1139,7 +1422,13 @@ impl App {
                 | crate::runtime::RuntimeCommand::LoadConversation { .. }
         );
         let _ = self.command_tx.send(cmd);
-        self.await_state_snapshot().await;
+        if self.synchronization_supported == Some(false) {
+            self.await_legacy_state_snapshot(term).await;
+        } else {
+            let request_id = self.next_request();
+            self.request_synchronization(request_id, false);
+            self.await_state_synchronization(request_id, term).await;
+        }
         if refresh_processes {
             let _ = self
                 .command_tx
@@ -1159,16 +1448,13 @@ impl App {
             return Ok(());
         };
 
-        // A response from an earlier command must not satisfy this request.
-        while let Ok(ev) = self.events_rx.try_recv() {
-            self.apply_idle_event(ev);
-        }
         self.command_tx
             .send(crate::runtime::RuntimeCommand::LoadConversation { id })
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "runtime command channel closed")
             })?;
 
+        let mut recovery_request = None;
         loop {
             match self.events_rx.recv().await {
                 Ok(crate::runtime::RuntimeEvent::ConversationLoaded { messages, snapshot })
@@ -1183,6 +1469,41 @@ impl App {
                     self.flush_new_messages_to_scrollback(term)?;
                     return Ok(());
                 }
+                Ok(crate::runtime::RuntimeEvent::StateSynchronized {
+                    request_id,
+                    busy,
+                    messages,
+                    snapshot,
+                }) if recovery_request == Some(request_id) => {
+                    self.synchronization_supported = Some(true);
+                    self.pending_synchronizations.remove(&request_id);
+                    if busy {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        recovery_request = Some(self.request_full_synchronization());
+                    } else if snapshot.conversation_id == Some(id) {
+                        let Some(messages) = messages else {
+                            self.messages.push(Message::system(format!(
+                                "failed to recover conversation {id}: daemon omitted its transcript"
+                            )));
+                            self.flush_new_messages_to_scrollback(term)?;
+                            return Ok(());
+                        };
+                        self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
+                            messages,
+                            snapshot,
+                        });
+                        Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
+                        self.renderer.reset_scrollback_state();
+                        self.flush_new_messages_to_scrollback(term)?;
+                        return Ok(());
+                    } else {
+                        self.messages.push(Message::system(format!(
+                            "failed to load conversation {id}; the active conversation was unchanged"
+                        )));
+                        self.flush_new_messages_to_scrollback(term)?;
+                        return Ok(());
+                    }
+                }
                 Ok(crate::runtime::RuntimeEvent::ConversationLoadFailed {
                     id: failed_id,
                     message,
@@ -1191,9 +1512,24 @@ impl App {
                     self.flush_new_messages_to_scrollback(term)?;
                     return Ok(());
                 }
+                Ok(crate::runtime::RuntimeEvent::Started {
+                    request_id,
+                    task,
+                    display,
+                    ..
+                }) => {
+                    self.adopt_daemon_turn(request_id, task, display, term)
+                        .await?;
+                    if recovery_request.is_some() {
+                        recovery_request = Some(self.request_full_synchronization());
+                    }
+                }
+                Ok(crate::runtime::RuntimeEvent::StreamLagged { .. }) => {
+                    recovery_request = Some(self.recover_from_event_lag());
+                }
                 Ok(other) => self.apply_idle_event(other),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    self.recover_from_event_lag();
+                    recovery_request = Some(self.recover_from_event_lag());
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -1270,6 +1606,11 @@ impl App {
         rows
     }
 
+    fn replace_transcript(&mut self, transcript: Vec<ChatMessage>) {
+        self.messages = self.rebuild_scrollback_from_transcript(&transcript);
+        self.renderer.scrollback_cursor = 0;
+    }
+
     /// Reset transient per-turn UI state before switching conversations:
     /// abort any in-flight stream, drop panes, and any pending tool-approval
     /// prompt. Shared by `/clear` and conversation load.
@@ -1305,8 +1646,8 @@ impl App {
         self.pending_approval = None;
     }
 
-    async fn start_new_conversation(&mut self) {
-        self.send_and_await_snapshot(crate::runtime::RuntimeCommand::NewConversation)
+    async fn start_new_conversation(&mut self, term: &mut BoneTerminal) {
+        self.send_and_await_snapshot(crate::runtime::RuntimeCommand::NewConversation, Some(term))
             .await;
     }
 
@@ -1326,7 +1667,7 @@ impl App {
 
         // Tell the daemon to start a new conversation. It publishes a
         // StateSnapshot with the new conversation_id and reset stats.
-        self.send_and_await_snapshot(crate::runtime::RuntimeCommand::NewConversation)
+        self.send_and_await_snapshot(crate::runtime::RuntimeCommand::NewConversation, Some(term))
             .await;
 
         self.messages.clear();
@@ -1373,13 +1714,14 @@ impl App {
         // only touches process-global stdout, so it is safe from a hook.
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            let _ = Renderer::reset_terminal_background();
             let _ = Renderer::shutdown_terminal();
             prev_hook(info);
         }));
 
         let physical_size = crossterm::terminal::size()?;
         let initial_height = crate::ui::render::initial_viewport_height(physical_size.1);
-        let mut terminal = Renderer::init_terminal(initial_height)?;
+        let mut terminal = TerminalSession::new(Renderer::init_terminal(initial_height)?);
         self.renderer.viewport_height = initial_height;
         self.renderer.last_size = Some(physical_size);
 
@@ -1449,12 +1791,35 @@ impl App {
             let before = self.messages.len();
             let before_config_revision = self.config_view.revision();
             let mut replaced_scrollback = false;
-            while let Ok(ev) = self.events_rx.try_recv() {
-                replaced_scrollback |=
-                    matches!(&ev, crate::runtime::RuntimeEvent::ConversationLoaded { .. });
+            loop {
+                let ev = match self.events_rx.try_recv() {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                        self.recover_from_event_lag();
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                };
+                replaced_scrollback |= match &ev {
+                    crate::runtime::RuntimeEvent::ConversationLoaded { .. } => true,
+                    crate::runtime::RuntimeEvent::StateSynchronized {
+                        request_id,
+                        busy: false,
+                        messages: Some(_),
+                        ..
+                    } => self.pending_synchronizations.contains(request_id),
+                    _ => false,
+                };
                 match ev {
-                    crate::runtime::RuntimeEvent::Started { task, display, .. } => {
-                        self.adopt_daemon_turn(task, display, &mut terminal).await?;
+                    crate::runtime::RuntimeEvent::Started {
+                        request_id,
+                        task,
+                        display,
+                        ..
+                    } => {
+                        self.adopt_daemon_turn(request_id, task, display, &mut terminal)
+                            .await?;
                     }
                     crate::runtime::RuntimeEvent::ApprovalRequest {
                         id,
@@ -1466,12 +1831,16 @@ impl App {
                         ..
                     } => {
                         self.handle_approval_request(
-                            id,
-                            call_id,
-                            name,
-                            arguments,
-                            auto_allows,
-                            preview.as_deref(),
+                            ApprovalRequestDetails {
+                                id,
+                                call: ToolCall {
+                                    id: call_id,
+                                    name,
+                                    arguments,
+                                },
+                                auto_allows,
+                                preview,
+                            },
                             &mut terminal,
                         )?;
                     }
@@ -1524,10 +1893,9 @@ impl App {
 
         self.dispatch_session_end().await;
 
-        self.reset_terminal_background();
-        Renderer::prepare_exit(&mut terminal)?;
-        Renderer::shutdown_terminal()?;
-        Ok(())
+        // The session restores the actual terminal background on every exit.
+        self.terminal_bg_set = false;
+        terminal.finish()
     }
 
     /// Ensure the viewport height matches the current input and pane state.
@@ -1536,24 +1904,27 @@ impl App {
         // or ctx.ui.pane) before measuring, so a newly opened float is
         // counted in the viewport height.
         let size = terminal.size()?;
-        // Publish the live terminal width to the daemon so its Lua panes
-        // (`ctx.ui.width`) wrap text to the current width. Re-read each frame so
-        // it tracks resizes.
-        let _ = self
-            .command_tx
-            .send(crate::runtime::RuntimeCommand::SetTerminalWidth { width: size.width });
+        // Publish width changes so Lua panes (`ctx.ui.width`) wrap correctly
+        // without enqueueing the same command on every draw.
+        if take_terminal_width_change(&mut self.published_terminal_width, size.width) {
+            let _ = self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::SetTerminalWidth { width: size.width });
+        }
         let desired = self
             .renderer
             .desired_height(
-                &self.input,
-                // Approval prompt is a pane now (counted via `visible_pages`), so the
-                // input slot is sized normally — pass no prompt.
-                None,
+                &PaneSizing {
+                    input: &self.input,
+                    // Approval prompt is a pane now (counted via `visible_pages`), so the
+                    // input slot is sized normally.
+                    prompt: None,
+                    pages: self.visible_pages(),
+                    active_page: self.active_page,
+                    autocomplete: self.autocomplete.as_ref(),
+                    running: self.running_shells.len(),
+                },
                 size.width,
-                self.visible_pages(),
-                self.active_page,
-                self.autocomplete.as_ref(),
-                self.running_shells.len(),
             )
             // The inline viewport can never be taller than the terminal — crossterm
             // can't reserve more rows than exist, and an oversized inline viewport
@@ -1851,10 +2222,17 @@ impl App {
         self.processes_seen_version = version;
     }
 
-    fn recover_from_event_lag(&self) {
+    fn request_full_synchronization(&mut self) -> u64 {
+        let request_id = self.next_request();
+        self.request_synchronization(request_id, true);
+        request_id
+    }
+
+    fn recover_from_event_lag(&mut self) -> u64 {
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::GetProcesses);
+        self.request_full_synchronization()
     }
 
     /// Refresh background panes when either registry version changes or, while
@@ -2037,10 +2415,8 @@ fn job_snapshot_messages(job: &crate::ext::jobs::Job, wire_tools: &WireTools) ->
     for job_event in &job.events {
         match &job_event.event {
             crate::runtime::RuntimeEvent::TextDelta { text } => answer.push_str(text),
-            crate::runtime::RuntimeEvent::ReasoningDelta { text } => {
-                if !text.is_empty() {
-                    rows.push(Message::system(format!("thinking: {text}")));
-                }
+            crate::runtime::RuntimeEvent::ReasoningDelta { text } if !text.is_empty() => {
+                rows.push(Message::system(format!("thinking: {text}")));
             }
             crate::runtime::RuntimeEvent::ToolCall {
                 id,
@@ -2700,38 +3076,34 @@ impl App {
     /// otherwise raises the interactive prompt.
     pub(crate) fn handle_approval_request(
         &mut self,
-        id: u64,
-        call_id: String,
-        name: String,
-        arguments: serde_json::Value,
-        auto_allows: bool,
-        preview: Option<&str>,
+        request: ApprovalRequestDetails,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        let call = ToolCall {
-            id: call_id,
-            name,
-            arguments,
-        };
-        if let Some(preview) = preview {
-            self.pump_show_edit_preview(&call.id, preview, term)?;
+        if self.answered_approvals.contains(&request.id)
+            || approval_already_pending(self.pending_approval.as_ref(), request.id)
+        {
+            return Ok(());
+        }
+        if let Some(preview) = request.preview.as_deref() {
+            self.pump_show_edit_preview(&request.call.id, preview, term)?;
         }
         // Danger UI means every tool is allowed. Even if the daemon still sent
         // a prompt (mode desync), auto-accept and reassert Danger so the gate
         // catches up for subsequent calls.
-        if auto_allows || matches!(self.approval_mode, ApprovalMode::Danger) {
-            if !auto_allows {
+        if request.auto_allows || matches!(self.approval_mode, ApprovalMode::Danger) {
+            if !request.auto_allows {
                 self.user_config.approval_mode = ApprovalMode::Danger;
                 self.persist_runtime_config();
             }
             let _ = self
                 .command_tx
                 .send(crate::runtime::RuntimeCommand::ApprovalReply {
-                    id,
+                    id: request.id,
                     outcome: CallOutcome::Approve,
                 });
+            self.answered_approvals.insert(request.id);
         } else {
-            self.begin_approval(&call, id, term)?;
+            self.begin_approval(&request.call, request.id, term)?;
         }
         Ok(())
     }
@@ -2953,6 +3325,7 @@ impl App {
                     id: pending.id,
                     outcome: resolved,
                 });
+            self.answered_approvals.insert(pending.id);
         }
         self.active_prompt = None;
         self.clear_approval_pane();
@@ -3086,6 +3459,7 @@ impl App {
                                 expected_revision: self.config_view.revision(),
                                 request_id: Some(request_id),
                             },
+                            Some(term),
                         )
                         .await;
                     }
@@ -3143,6 +3517,7 @@ impl App {
                             expected_revision: self.config_view.revision(),
                             request_id: Some(request_id),
                         },
+                        Some(term),
                     )
                     .await;
                     // If the provider id didn't change, the switch failed (e.g.
@@ -3177,7 +3552,7 @@ impl App {
 
         // If provider or model identity changed, start a new conversation.
         if self.view.provider_id != prev_provider || self.view.provider_model != prev_model {
-            self.start_new_conversation().await;
+            self.start_new_conversation(term).await;
         }
 
         self.messages.push(Message::system(reply));

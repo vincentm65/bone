@@ -15,6 +15,7 @@ fn json_of(ev: &RuntimeEvent) -> serde_json::Value {
 fn every_runtime_event_variant_round_trips() {
     let variants = vec![
         RuntimeEvent::Started {
+            request_id: Some(11),
             approval: "safe".into(),
             task: "do it".into(),
             model: "m".into(),
@@ -107,6 +108,13 @@ fn every_runtime_event_variant_round_trips() {
                 provider_model: "gpt-4o".into(),
             },
         },
+        RuntimeEvent::StateSynchronized {
+            request_id: 17,
+            busy: true,
+            snapshot: SessionSnapshot::default(),
+            messages: Some(vec![ChatMessage::new(ChatRole::User, "repair")]),
+        },
+        RuntimeEvent::StreamLagged { skipped: 23 },
         RuntimeEvent::FrontendState {
             banner: "bone".into(),
             settings: json!({
@@ -130,6 +138,7 @@ fn every_runtime_event_variant_round_trips() {
             message: "missing".into(),
         },
         RuntimeEvent::TurnComplete,
+        RuntimeEvent::TurnCompleted { request_id: 11 },
         RuntimeEvent::ViewDiff {
             diff: ViewDiff::SetHighlight {
                 name: "accent".into(),
@@ -137,12 +146,14 @@ fn every_runtime_event_variant_round_trips() {
             },
         },
         RuntimeEvent::CommandComplete {
+            request_id: Some(12),
             output: "done".into(),
             submit: false,
             display_role: Some("assistant".into()),
             action: None,
         },
         RuntimeEvent::CommandComplete {
+            request_id: None,
             output: "restart".into(),
             submit: false,
             display_role: None,
@@ -153,6 +164,7 @@ fn every_runtime_event_variant_round_trips() {
             }),
         },
         RuntimeEvent::CommandComplete {
+            request_id: None,
             output: "switched".into(),
             submit: false,
             display_role: None,
@@ -168,9 +180,11 @@ fn every_runtime_event_variant_round_trips() {
             }),
         },
         RuntimeEvent::KeymapDispatched {
+            request_id: None,
             kind: KeymapDispatchKind::Noop,
         },
         RuntimeEvent::KeymapDispatched {
+            request_id: Some(13),
             kind: KeymapDispatchKind::Prompt {
                 text: "summarize this".into(),
             },
@@ -189,6 +203,7 @@ fn every_runtime_event_variant_round_trips() {
 fn every_runtime_command_variant_round_trips() {
     let cmds = vec![
         RuntimeCommand::SubmitPrompt {
+            request_id: Some(11),
             text: "hi".into(),
             images: vec![],
         },
@@ -209,10 +224,15 @@ fn every_runtime_command_variant_round_trips() {
         RuntimeCommand::Cancel,
         RuntimeCommand::CancelJob { id: "job-1".into() },
         RuntimeCommand::GetProcesses,
+        RuntimeCommand::Synchronize {
+            request_id: 17,
+            include_messages: true,
+        },
         RuntimeCommand::CancelProcess {
             id: "process-1".into(),
         },
         RuntimeCommand::RunCommand {
+            request_id: Some(12),
             name: "usage".into(),
             input: "".into(),
         },
@@ -270,6 +290,7 @@ fn every_runtime_command_variant_round_trips() {
             text: "go left instead".into(),
         },
         RuntimeCommand::KeymapDispatch {
+            request_id: Some(13),
             action: "toggle_panes".into(),
         },
     ];
@@ -282,4 +303,122 @@ fn every_runtime_command_variant_round_trips() {
             "round-trip {cmd:?}"
         );
     }
+}
+
+#[test]
+fn synchronize_defaults_to_snapshot_only() {
+    let command: RuntimeCommand =
+        serde_json::from_value(json!({ "synchronize": { "request_id": 9 } })).unwrap();
+    assert!(matches!(
+        command,
+        RuntimeCommand::Synchronize {
+            request_id: 9,
+            include_messages: false
+        }
+    ));
+
+    let event: RuntimeEvent = serde_json::from_value(json!({
+        "state_synchronized": {
+            "request_id": 9,
+            "busy": false,
+            "snapshot": SessionSnapshot::default()
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        event,
+        RuntimeEvent::StateSynchronized {
+            request_id: 9,
+            busy: false,
+            messages: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn request_ids_are_optional_for_legacy_wire_messages() {
+    let started: RuntimeEvent = serde_json::from_value(json!({
+        "started": {
+            "approval": "safe",
+            "task": "hi",
+            "model": "m",
+            "display": null
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        started,
+        RuntimeEvent::Started {
+            request_id: None,
+            ..
+        }
+    ));
+
+    let submit: RuntimeCommand =
+        serde_json::from_value(json!({ "submit_prompt": { "text": "hi", "images": [] } })).unwrap();
+    assert!(matches!(
+        submit,
+        RuntimeCommand::SubmitPrompt {
+            request_id: None,
+            ..
+        }
+    ));
+
+    let command: RuntimeCommand =
+        serde_json::from_value(json!({ "run_command": { "name": "help", "input": "" } })).unwrap();
+    assert!(matches!(
+        command,
+        RuntimeCommand::RunCommand {
+            request_id: None,
+            ..
+        }
+    ));
+
+    let keymap: RuntimeCommand =
+        serde_json::from_value(json!({ "keymap_dispatch": { "action": "noop" } })).unwrap();
+    assert!(matches!(
+        keymap,
+        RuntimeCommand::KeymapDispatch {
+            request_id: None,
+            ..
+        }
+    ));
+
+    let complete: RuntimeEvent = serde_json::from_value(json!({
+        "command_complete": {
+            "output": "",
+            "submit": false,
+            "display_role": null,
+            "action": null
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        complete,
+        RuntimeEvent::CommandComplete {
+            request_id: None,
+            ..
+        }
+    ));
+
+    let dispatched: RuntimeEvent =
+        serde_json::from_value(json!({ "keymap_dispatched": { "kind": "noop" } })).unwrap();
+    assert!(matches!(
+        dispatched,
+        RuntimeEvent::KeymapDispatched {
+            request_id: None,
+            ..
+        }
+    ));
+
+    let legacy_submit = RuntimeCommand::SubmitPrompt {
+        request_id: None,
+        text: "hi".into(),
+        images: vec![],
+    };
+    assert_eq!(
+        serde_json::to_value(legacy_submit).unwrap(),
+        json!({ "submit_prompt": { "text": "hi", "images": [] } })
+    );
 }

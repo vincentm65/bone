@@ -24,7 +24,7 @@ impl ChatRole {
 }
 
 /// A single image attachment carried by a message, ready for the wire.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageData {
     pub media_type: String,
     pub data: String,
@@ -35,7 +35,7 @@ fn is_false(b: &bool) -> bool {
 }
 
 /// A tool call produced by the model or replayed in a message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -90,7 +90,7 @@ impl ToolResult {
 }
 
 /// Provider-neutral reasoning/thinking content captured during a turn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reasoning {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,14 +98,19 @@ pub struct Reasoning {
 }
 
 /// An encrypted reasoning output item (OpenAI Responses API / Codex).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningItem {
     pub id: String,
     pub encrypted_content: String,
 }
 
 /// One item of an assistant turn's output, in emission order.
-#[derive(Debug, Clone)]
+///
+/// `ChatMessage` deliberately keeps this field off the frontend wire, but the
+/// persistence layer serializes it separately so provider replay can retain
+/// the exact interleaving of text, reasoning, and tool calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum OutputItem {
     Text(String),
     Reasoning(ReasoningItem),
@@ -113,7 +118,7 @@ pub enum OutputItem {
 }
 
 /// Provider-neutral chat message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,

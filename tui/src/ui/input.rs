@@ -1,5 +1,7 @@
 //! Chat input-field state: editing, history, and paste-placeholder handling.
 
+use std::collections::VecDeque;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::llm::ImageData;
@@ -29,6 +31,42 @@ pub struct PasteBlob {
 pub struct PendingImage {
     token: String,
     pub image: ImageData,
+}
+
+/// Bounded prompt history with its byte accounting kept inside the collection.
+///
+/// It dereferences to `VecDeque` for read-only callers while mutations stay
+/// centralized, so the entry and memory limits cannot drift apart.
+#[derive(Debug, Default)]
+pub struct InputHistory {
+    entries: VecDeque<String>,
+    bytes: usize,
+}
+
+impl InputHistory {
+    fn record(&mut self, value: String) {
+        if let Some(pos) = self.entries.iter().rposition(|entry| entry == &value)
+            && let Some(removed) = self.entries.remove(pos)
+        {
+            self.bytes -= removed.len();
+        }
+        self.bytes += value.len();
+        self.entries.push_back(value);
+        while self.entries.len() > MAX_INPUT_HISTORY_ENTRIES || self.bytes > MAX_INPUT_HISTORY_BYTES
+        {
+            if let Some(removed) = self.entries.pop_front() {
+                self.bytes -= removed.len();
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for InputHistory {
+    type Target = VecDeque<String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
 }
 
 /// Result of applying a key to the input state.
@@ -62,7 +100,7 @@ pub struct InputState {
     pub buffer: String,
     pub cursor_pos: usize,
     /// History of sent messages (up/down arrow to navigate)
-    pub history: Vec<String>,
+    pub history: InputHistory,
     pub history_index: Option<usize>,
     /// Set by the event loop when more key events are buffered behind the
     /// current one (a paste flood on terminals without bracketed-paste
@@ -339,16 +377,7 @@ impl InputState {
 
     pub fn reset(&mut self) {
         if !self.buffer.is_empty() {
-            // Deduplicate: remove previous occurrence if it exists
-            if let Some(pos) = self.history.iter().rposition(|s| s == &self.buffer) {
-                self.history.remove(pos);
-            }
-            self.history.push(self.buffer.clone());
-            while self.history.len() > MAX_INPUT_HISTORY_ENTRIES
-                || self.history.iter().map(String::len).sum::<usize>() > MAX_INPUT_HISTORY_BYTES
-            {
-                self.history.remove(0);
-            }
+            self.history.record(self.buffer.clone());
         }
         self.buffer.clear();
         self.cursor_pos = 0;

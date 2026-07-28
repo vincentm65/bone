@@ -97,6 +97,11 @@ fn cancel_sets_flag_and_completes() {
     // Cancel the job.
     assert!(reg.cancel(&id));
     assert!(cancel_flag.load(Ordering::Relaxed));
+    reg.complete(&id, Err("cancelled".into()));
+    assert!(
+        reg.peek_finished_unconsumed().is_empty(),
+        "an explicitly cancelled result must not auto-inject"
+    );
 
     // Cancelling a non-existent job returns false.
     assert!(!reg.cancel("nonexistent"));
@@ -143,17 +148,31 @@ fn scoped_cancel_and_peek_isolate_conversations() {
         ..new_job("b", "conv-2 work")
     });
 
-    // Cancelling conversation 1 leaves conversation 2's job untouched.
-    assert_eq!(reg.cancel_all_scoped(Some(1)), 1);
+    // A mismatched scope cannot cancel another conversation's job.
+    assert!(!reg.cancel_scoped(&a, Some(2)));
+    assert!(!flag_a.load(Ordering::Relaxed));
+
+    // Cancelling conversation 1 leaves conversation 2's job untouched and
+    // consumes the cancelled result so it cannot auto-inject later.
+    assert!(reg.cancel_scoped(&a, Some(1)));
     assert!(flag_a.load(Ordering::Relaxed));
     assert!(!flag_b.load(Ordering::Relaxed));
 
+    let flag_c = Arc::new(AtomicBool::new(false));
+    let c = reg.create(NewJob {
+        scope: Some(1),
+        cancel_flag: flag_c.clone(),
+        ..new_job("c", "conv-1 bulk-cancel work")
+    });
+    assert_eq!(reg.cancel_all_scoped(Some(1)), 2);
+    assert!(flag_c.load(Ordering::Relaxed));
+
     // Finished results are only visible to their own scope.
     reg.complete(&a, Ok("a done".into()));
+    reg.complete(&c, Err("c cancelled".into()));
     reg.complete(&b, Ok("b done".into()));
     let for_1 = reg.peek_finished_unconsumed_scoped(Some(1));
-    assert_eq!(for_1.len(), 1);
-    assert_eq!(for_1[0].id, a);
+    assert!(for_1.is_empty());
     let for_2 = reg.peek_finished_unconsumed_scoped(Some(2));
     assert_eq!(for_2.len(), 1);
     assert_eq!(for_2[0].id, b);

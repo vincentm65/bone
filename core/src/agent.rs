@@ -45,18 +45,7 @@ impl SessionWriter {
         self.conv_id
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn append_message(
-        &self,
-        role: &str,
-        content: &str,
-        tool_name: Option<&str>,
-        tool_call_id: Option<&str>,
-        tool_calls: Option<&str>,
-        images: Option<&str>,
-        is_error: bool,
-        seq: i64,
-    ) {
+    fn append_chat_message(&self, message: &ChatMessage, seq: i64) {
         let Some(conv_id) = self.conv_id else {
             return;
         };
@@ -64,17 +53,7 @@ impl SessionWriter {
         let Some(db) = guard.as_ref() else {
             return;
         };
-        if let Err(e) = db.append_message(
-            conv_id,
-            role,
-            content,
-            tool_name,
-            tool_call_id,
-            tool_calls,
-            images,
-            is_error,
-            seq,
-        ) {
+        if let Err(e) = db.append_chat_message(conv_id, message, seq) {
             self.note_failure("append_message", &e);
         }
     }
@@ -137,7 +116,6 @@ impl SessionSink for SessionWriter {
         SessionWriter::conv_id(self)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
         role: &str,
@@ -149,8 +127,15 @@ impl SessionSink for SessionWriter {
         is_error: bool,
         seq: i64,
     ) {
-        SessionWriter::append_message(
-            self,
+        let Some(conv_id) = self.conv_id else {
+            return;
+        };
+        let guard = self.db.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(db) = guard.as_ref() else {
+            return;
+        };
+        if let Err(error) = db.append_message(
+            conv_id,
             role,
             content,
             tool_name,
@@ -159,7 +144,13 @@ impl SessionSink for SessionWriter {
             images,
             is_error,
             seq,
-        )
+        ) {
+            self.note_failure("append_message", &error);
+        }
+    }
+
+    fn append_chat_message(&self, message: &ChatMessage, seq: i64) {
+        SessionWriter::append_chat_message(self, message, seq)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -351,6 +342,8 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::KeyRequest { .. }
         | crate::runtime::RuntimeEvent::ApprovalRequest { .. }
         | crate::runtime::RuntimeEvent::StateSnapshot { .. }
+        | crate::runtime::RuntimeEvent::StateSynchronized { .. }
+        | crate::runtime::RuntimeEvent::StreamLagged { .. }
         | crate::runtime::RuntimeEvent::ProcessesSnapshot { .. }
         | crate::runtime::RuntimeEvent::FrontendState { .. }
         | crate::runtime::RuntimeEvent::ConfigSnapshot { .. }
@@ -361,7 +354,8 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::ViewDiff { .. }
         | crate::runtime::RuntimeEvent::CommandComplete { .. }
         | crate::runtime::RuntimeEvent::KeymapDispatched { .. }
-        | crate::runtime::RuntimeEvent::TurnComplete => return,
+        | crate::runtime::RuntimeEvent::TurnComplete
+        | crate::runtime::RuntimeEvent::TurnCompleted { .. } => return,
     };
     println!("{json}");
 }

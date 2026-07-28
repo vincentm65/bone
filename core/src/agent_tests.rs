@@ -83,16 +83,11 @@ fn session_writer_persists_tool_error_state() {
         failures: std::sync::atomic::AtomicU64::new(0),
     };
 
-    writer.append_message(
-        "tool",
-        "failed",
-        Some("shell"),
-        Some("call-1"),
-        None,
-        None,
-        true,
-        1,
-    );
+    let mut message = crate::llm::ChatMessage::new(crate::llm::ChatRole::Tool, "failed");
+    message.name = Some("shell".to_string());
+    message.tool_call_id = Some("call-1".to_string());
+    message.is_error = true;
+    writer.append_chat_message(&message, 1);
     drop(writer);
 
     let messages = SessionDb::open(&path)

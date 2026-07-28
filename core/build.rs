@@ -1,106 +1,83 @@
 use std::{env, fs, path::PathBuf};
 
-/// Collect sorted `.lua` paths from a flat directory. `defaults/lua/tools` no
-/// longer exists — optional tools live in the catalog. A missing directory is
-/// tolerated (yields no entries).
-fn collect_lua_flat(dir: &std::path::Path) -> Vec<PathBuf> {
-    if !dir.exists() {
-        return Vec::new();
-    }
-    let mut entries = fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("failed to read default lua dir {}: {e}", dir.display()))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", dir.display()))
-                .path()
-        })
-        .filter(|path| path.extension().is_some_and(|ext| ext == "lua"))
-        .collect::<Vec<_>>();
-    entries.sort();
-    entries
-}
-
-fn generate_default_lua_tools(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
-    let dir = manifest_dir.join("defaults/lua/tools");
-    println!("cargo:rerun-if-changed={}", dir.display());
-
-    let entries = collect_lua_flat(&dir);
-
-    let mut generated = String::from("pub const DEFAULT_LUA_TOOLS: &[(&str, &str)] = &[\n");
-    for path in entries {
-        let file_name = path.file_name().unwrap().to_string_lossy();
-        generated.push_str(&format!(
-            "    ({file_name:?}, include_str!({path:?})),\n",
-            file_name = file_name.as_ref(),
-            path = path.display().to_string(),
-        ));
-    }
-    generated.push_str("];\n");
-    fs::write(out_dir.join("default_lua_tools.rs"), generated).unwrap();
-}
-
-fn generate_default_lua_commands(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
-    let dir = manifest_dir.join("defaults/lua/commands");
-    println!("cargo:rerun-if-changed={}", dir.display());
-
-    let entries = collect_lua_flat(&dir);
-
-    let mut generated = String::from("pub const DEFAULT_LUA_COMMANDS: &[(&str, &str)] = &[\n");
-    for path in entries {
-        let file_name = path.file_name().unwrap().to_string_lossy();
-        generated.push_str(&format!(
-            "    ({file_name:?}, include_str!({path:?})),\n",
-            file_name = file_name.as_ref(),
-            path = path.display().to_string(),
-        ));
-    }
-    generated.push_str("];\n");
-    fs::write(out_dir.join("default_lua_commands.rs"), generated).unwrap();
-}
-
-fn generate_default_lua_libs(manifest_dir: &std::path::Path, out_dir: &std::path::Path) {
-    let dir = manifest_dir.join("defaults/lua/lib");
-    println!("cargo:rerun-if-changed={}", dir.display());
-
-    let mut stack = vec![dir.clone()];
-    let mut entries = Vec::new();
-    while let Some(cur) = stack.pop() {
-        if !cur.exists() {
+/// Collect sorted `.lua` files. Missing directories are valid: optional
+/// built-ins can move to the catalog without making source builds fail.
+fn collect_lua(dir: &std::path::Path, recursive: bool) -> Vec<PathBuf> {
+    let mut pending = vec![dir.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(current) = pending.pop() {
+        if !current.exists() {
             continue;
         }
-        for entry in fs::read_dir(&cur)
-            .unwrap_or_else(|e| panic!("failed to read default lua lib dir {}: {e}", cur.display()))
+        for entry in fs::read_dir(&current)
+            .unwrap_or_else(|e| panic!("failed to read default lua dir {}: {e}", current.display()))
         {
             let path = entry
-                .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", cur.display()))
+                .unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", current.display()))
                 .path();
-            if path.is_dir() {
-                stack.push(path);
+            if recursive && path.is_dir() {
+                pending.push(path);
             } else if path.extension().is_some_and(|ext| ext == "lua") {
-                entries.push(path);
+                files.push(path);
             }
         }
     }
-    entries.sort();
+    files.sort();
+    files
+}
 
-    let mut generated = String::from("pub const DEFAULT_LUA_LIBS: &[(&str, &str)] = &[\n");
-    for path in entries {
-        let rel = path.strip_prefix(&dir).unwrap().to_string_lossy();
+fn generate_lua_table(
+    manifest_dir: &std::path::Path,
+    out_dir: &std::path::Path,
+    source: &str,
+    output: &str,
+    constant: &str,
+    recursive: bool,
+) {
+    let dir = manifest_dir.join(source);
+    println!("cargo:rerun-if-changed={}", dir.display());
+
+    let mut generated = format!("pub const {constant}: &[(&str, &str)] = &[\n");
+    for path in collect_lua(&dir, recursive) {
+        let name = path
+            .strip_prefix(&dir)
+            .expect("collected Lua path stays under its source directory")
+            .to_string_lossy();
         generated.push_str(&format!(
-            "    ({rel:?}, include_str!({path:?})),\n",
-            rel = rel.as_ref(),
+            "    ({name:?}, include_str!({path:?})),\n",
+            name = name.as_ref(),
             path = path.display().to_string(),
         ));
     }
     generated.push_str("];\n");
-    fs::write(out_dir.join("default_lua_libs.rs"), generated).unwrap();
+    fs::write(out_dir.join(output), generated)
+        .unwrap_or_else(|e| panic!("failed to write generated Lua table {output}: {e}"));
 }
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    generate_default_lua_tools(&manifest_dir, &out_dir);
-    generate_default_lua_commands(&manifest_dir, &out_dir);
-    generate_default_lua_libs(&manifest_dir, &out_dir);
+    for (source, output, constant, recursive) in [
+        (
+            "defaults/lua/tools",
+            "default_lua_tools.rs",
+            "DEFAULT_LUA_TOOLS",
+            false,
+        ),
+        (
+            "defaults/lua/commands",
+            "default_lua_commands.rs",
+            "DEFAULT_LUA_COMMANDS",
+            false,
+        ),
+        (
+            "defaults/lua/lib",
+            "default_lua_libs.rs",
+            "DEFAULT_LUA_LIBS",
+            true,
+        ),
+    ] {
+        generate_lua_table(&manifest_dir, &out_dir, source, output, constant, recursive);
+    }
 }

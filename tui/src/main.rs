@@ -358,10 +358,10 @@ async fn run_web(_args: &[String]) -> std::io::Result<()> {
 
     let mut command = tokio::process::Command::new("node");
     command.arg(&bridge_path);
-    if std::env::var_os("BONE_BIN").is_none() {
-        if let Ok(exe) = std::env::current_exe() {
-            command.env("BONE_BIN", exe);
-        }
+    if std::env::var_os("BONE_BIN").is_none()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        command.env("BONE_BIN", exe);
     }
 
     let mut child = command
@@ -407,7 +407,11 @@ async fn run_connect(args: &[String]) -> std::io::Result<()> {
             },
             line = lines.next_line() => match line? {
                 Some(line) if !line.trim().is_empty() => {
-                    let _ = commands.send(RuntimeCommand::SubmitPrompt { text: line, images: vec![] });
+                    let _ = commands.send(RuntimeCommand::SubmitPrompt {
+                        request_id: None,
+                        text: line,
+                        images: vec![],
+                    });
                 }
                 Some(_) => {}
                 None => break, // stdin closed

@@ -948,9 +948,9 @@ fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::E
         conversation_table.set("history", nil_fn)?;
     }
 
-    let submit_fn = lua.create_function(|_, text: String| {
+    let submit_fn = lua.create_function(|lua, text: String| {
         if !text.trim().is_empty() {
-            crate::ext::inbox::push(text);
+            crate::ext::inbox::for_lua(lua).push(text);
         }
         Ok(true)
     })?;
@@ -2303,13 +2303,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     agent_table.set("wait", wait_fn)?;
 
     // --- ctx.agent.cancel(id) ---
-    // Cancel a running job by setting its cancel flag.
+    // Cancel and consume a running job owned by this conversation.
     let agent_depth_c = cfg.agent_depth;
+    let cancel_scope = cfg.session_id;
     let cancel_fn = lua.create_function(move |lua, id: String| {
         if agent_depth_c > 0 {
             return agent_err(lua, "sub-agents cannot cancel jobs");
         }
-        let ok = crate::ext::jobs::registry().cancel(&id);
+        let ok = crate::ext::jobs::registry().cancel_scoped(&id, cancel_scope);
         let result = lua.create_table()?;
         result.set("ok", ok)?;
         Ok(Value::Table(result))
@@ -2870,6 +2871,8 @@ fn dispatch_event(
         | RuntimeEvent::KeyRequest { .. }
         | RuntimeEvent::ApprovalRequest { .. }
         | RuntimeEvent::StateSnapshot { .. }
+        | RuntimeEvent::StateSynchronized { .. }
+        | RuntimeEvent::StreamLagged { .. }
         | RuntimeEvent::ProcessesSnapshot { .. }
         | RuntimeEvent::FrontendState { .. }
         | RuntimeEvent::ConfigSnapshot { .. }
@@ -2880,7 +2883,8 @@ fn dispatch_event(
         | RuntimeEvent::ViewDiff { .. }
         | RuntimeEvent::CommandComplete { .. }
         | RuntimeEvent::KeymapDispatched { .. }
-        | RuntimeEvent::TurnComplete => {}
+        | RuntimeEvent::TurnComplete
+        | RuntimeEvent::TurnCompleted { .. } => {}
     }
     Ok(())
 }

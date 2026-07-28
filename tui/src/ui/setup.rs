@@ -291,12 +291,12 @@ fn advance(state: &mut State) {
         // Even without an API key, set the selected provider as active so
         // `last_provider` points to an existing entry and Bone can launch
         // without falling back to the undefined "local" default.
-        if state.provider_saved.is_none() && !state.providers.is_empty() {
-            if let Some((id, _)) = state.providers.get(state.provider_cursor).cloned()
-                && activate_provider(&state.config, &id)
-            {
-                state.provider_saved = Some(id);
-            }
+        if state.provider_saved.is_none()
+            && !state.providers.is_empty()
+            && let Some((id, _)) = state.providers.get(state.provider_cursor).cloned()
+            && activate_provider(&state.config, &id)
+        {
+            state.provider_saved = Some(id);
         }
     }
     state.next_step();

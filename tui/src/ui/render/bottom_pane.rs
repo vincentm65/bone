@@ -7,11 +7,13 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::StatusInfo;
 use super::wrap;
-use super::{InputState, Prompt, StatusInfo};
 use crate::tools::ApprovalMode;
 use crate::ui::autocomplete::{AutocompleteState, MAX_VISIBLE};
+use crate::ui::input::InputState;
 use crate::ui::pane_page::PanePage;
+use crate::ui::prompt::Prompt;
 use crate::ui::tool_display;
 
 /// Arguments shared by pane-drawing methods.
@@ -25,6 +27,17 @@ pub struct PaneDraw<'a> {
     /// a transient strip above the input while running.
     pub running: &'a [(String, String, std::time::Instant)],
 }
+
+/// State that affects the inline pane's required height.
+pub struct PaneSizing<'a> {
+    pub input: &'a InputState,
+    pub prompt: Option<&'a Prompt>,
+    pub pages: &'a [PanePage],
+    pub active_page: usize,
+    pub autocomplete: Option<&'a AutocompleteState>,
+    pub running: usize,
+}
+
 fn push_metric(parts: &mut Vec<Span<'static>>, style: Style, label: &str) {
     if !parts.is_empty() {
         parts.push(Span::styled(" / ", style));
@@ -529,18 +542,9 @@ impl super::Renderer {
     }
 
     /// Compute the desired viewport height for the current state.
-    pub fn desired_height(
-        &self,
-        input: &InputState,
-        prompt: Option<&Prompt>,
-        terminal_width: u16,
-        pages: &[PanePage],
-        active_page: usize,
-        autocomplete: Option<&AutocompleteState>,
-        running: usize,
-    ) -> u16 {
-        let running_rows = running as u16;
-        if let Some(p) = prompt {
+    pub fn desired_height(&self, sizing: &PaneSizing<'_>, terminal_width: u16) -> u16 {
+        let running_rows = sizing.running as u16;
+        if let Some(p) = sizing.prompt {
             let options = p.options.len().min(p.visible_rows) as u16;
             let hint = u16::from(p.hint.is_some());
             let prompt_rows = if let Some(ref cmd) = p.full_command {
@@ -561,10 +565,15 @@ impl super::Renderer {
                 1u16 + hint + options
             };
             // top sep + running + prompt region + status + page region
-            return 1 + running_rows + prompt_rows + 1 + page_extra_height(pages, active_page);
+            return 1
+                + running_rows
+                + prompt_rows
+                + 1
+                + page_extra_height(sizing.pages, sizing.active_page);
         }
-        let input_rows = rendered_input_rows(input, terminal_width, &self.input_style, &self.theme);
-        let ac_rows = autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
+        let input_rows =
+            rendered_input_rows(sizing.input, terminal_width, &self.input_style, &self.theme);
+        let ac_rows = sizing.autocomplete.map(|ac| ac.visible_rows()).unwrap_or(0);
         let top = u16::from(self.input_style.top_border());
         let bottom = u16::from(self.input_style.bottom_border());
         let padding = self.input_style.vertical_padding.saturating_mul(2);
@@ -575,7 +584,7 @@ impl super::Renderer {
             + ac_rows
             + bottom
             + 1
-            + page_extra_height(pages, active_page)
+            + page_extra_height(sizing.pages, sizing.active_page)
     }
 
     pub fn draw_bottom_pane_with_tick(

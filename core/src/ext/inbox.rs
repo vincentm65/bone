@@ -1,51 +1,66 @@
-//! Process-global submit inbox: Lua → the running frontend.
+//! Runtime-scoped submit inbox: Lua → the owning frontend.
 //!
-//! `bone.submit(text)` queues a prompt here from any Lua context (a tool, a
-//! command, an autocmd handler). The interactive frontend drains it on its event
-//! loop and submits it like typed input — between turns, or queued behind the
-//! active turn. This is the steering primitive behind plugins like `/btw`: Lua
-//! can drive the agent without holding a frontend handle.
+//! Each Lua VM owns one [`SubmitInbox`]. `bone.submit(text)` and
+//! `ctx.conversation.submit(text)` enqueue into that VM's inbox, and only the
+//! corresponding daemon consumes it. This keeps steering prompts isolated when
+//! several conversation actors share a process.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-fn inbox() -> &'static Mutex<VecDeque<String>> {
-    static INBOX: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-    INBOX.get_or_init(|| Mutex::new(VecDeque::new()))
+/// Maximum prompts held by one runtime before the oldest is dropped.
+const MAX_INBOX: usize = 256;
+
+/// Bounded FIFO of prompts submitted by one Lua runtime.
+#[derive(Clone, Debug, Default)]
+pub struct SubmitInbox {
+    queue: Arc<Mutex<VecDeque<String>>>,
 }
 
-/// Lock the inbox mutex, panicking on poison (same as `unwrap_or_else`).
-fn lock_inbox() -> std::sync::MutexGuard<'static, VecDeque<String>> {
-    inbox().lock().unwrap_or_else(|e| e.into_inner())
-}
+impl SubmitInbox {
+    /// Queue a prompt for the owning frontend to submit on its next idle tick.
+    pub fn push(&self, text: String) {
+        let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
+        queue.push_back(text);
+        while queue.len() > MAX_INBOX {
+            queue.pop_front();
+        }
+    }
 
-/// Queue a prompt for the frontend to submit on its next tick.
-///
-/// Bounded: beyond [`MAX_INBOX`] the oldest entry is dropped, so a runaway Lua
-/// loop can't grow the queue without bound. The only drain is the UI event
-/// loop, so this also bounds memory in non-interactive/headless runs.
-pub fn push(text: String) {
-    let mut q = lock_inbox();
-    q.push_back(text);
-    while q.len() > MAX_INBOX {
-        q.pop_front();
+    /// Take all queued prompts in FIFO order.
+    pub fn drain(&self) -> Vec<String> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain(..)
+            .collect()
+    }
+
+    /// Take the single oldest queued prompt, or `None` when empty.
+    pub fn pop(&self) -> Option<String> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+    }
+
+    pub(crate) fn same_queue(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.queue, &other.queue)
     }
 }
 
-/// Maximum prompts held in the inbox before the oldest is dropped.
-const MAX_INBOX: usize = 256;
+/// Return the inbox attached to `lua`, creating one for bare test/tool VMs.
+///
+/// Keeping the handle in Lua app-data lets every API surface created from that
+/// VM resolve the same queue without threading it through each call context.
+pub(crate) fn for_lua(lua: &mlua::Lua) -> SubmitInbox {
+    if let Some(inbox) = lua.app_data_ref::<SubmitInbox>() {
+        return inbox.clone();
+    }
 
-/// Take all queued prompts in FIFO order (empty when nothing is pending).
-pub fn drain() -> Vec<String> {
-    lock_inbox().drain(..).collect()
-}
-
-/// Take the single oldest queued prompt, or `None` when empty. Used by the
-/// daemon's background-injection tick, which runs one turn at a time and so
-/// consumes the queue one prompt per idle tick (rather than draining all at
-/// once like an interactive frontend that queues the rest locally).
-pub fn pop() -> Option<String> {
-    lock_inbox().pop_front()
+    let inbox = SubmitInbox::default();
+    lua.set_app_data(inbox.clone());
+    inbox
 }
 
 #[cfg(test)]

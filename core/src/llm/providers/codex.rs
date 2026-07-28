@@ -903,6 +903,28 @@ impl LlmProvider for CodexProvider {
     }
 }
 
+fn read_codex_token() -> String {
+    let path = std::path::Path::new(&dirs::home_dir().unwrap_or_default()).join(".codex/auth.json");
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    let Ok(doc): Result<Value, _> = serde_json::from_str(&data) else {
+        return String::new();
+    };
+    doc["tokens"]["access_token"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn resolve_codex_api_key(config_key: &str) -> String {
+    let token = read_codex_token();
+    if !token.is_empty() {
+        return token;
+    }
+    config_key.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CodexResponse, extract_response_events, output_index, process_summary_event};
@@ -1009,26 +1031,4 @@ mod tests {
         assert_eq!(output_index(&json!({})), 0);
         assert_eq!(output_index(&json!({"output_index": 3})), 3);
     }
-}
-
-fn read_codex_token() -> String {
-    let path = std::path::Path::new(&dirs::home_dir().unwrap_or_default()).join(".codex/auth.json");
-    let Ok(data) = std::fs::read_to_string(&path) else {
-        return String::new();
-    };
-    let Ok(doc): Result<Value, _> = serde_json::from_str(&data) else {
-        return String::new();
-    };
-    doc["tokens"]["access_token"]
-        .as_str()
-        .unwrap_or("")
-        .to_string()
-}
-
-fn resolve_codex_api_key(config_key: &str) -> String {
-    let token = read_codex_token();
-    if !token.is_empty() {
-        return token;
-    }
-    config_key.to_string()
 }

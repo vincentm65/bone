@@ -17,6 +17,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::llm::ChatMessage;
 use crate::session_db::{SessionDb, db_path};
 
 /// Sink for persisting agent conversation turns and token usage.
@@ -28,8 +29,9 @@ pub trait SessionSink: Send + Sync {
     /// Database conversation id, if a session is open.
     fn conv_id(&self) -> Option<i64>;
 
-    /// Append a message (user/assistant/tool) to the session transcript.
-    /// `is_error` indicates a tool-result that failed; ignored for non-tool roles.
+    /// Append a normalized message to the session transcript.
+    ///
+    /// Retained as the stable implementation surface for third-party sinks.
     #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
@@ -42,6 +44,29 @@ pub trait SessionSink: Send + Sync {
         is_error: bool,
         seq: i64,
     );
+
+    /// Append one complete model-facing message.
+    ///
+    /// Built-in durable sinks override this losslessly. Existing external
+    /// implementations keep compiling and receive the normalized projection.
+    fn append_chat_message(&self, message: &ChatMessage, seq: i64) {
+        let tool_calls = (!message.tool_calls.is_empty())
+            .then(|| serde_json::to_string(&message.tool_calls).ok())
+            .flatten();
+        let images = (!message.images.is_empty())
+            .then(|| serde_json::to_string(&message.images).ok())
+            .flatten();
+        self.append_message(
+            message.role.as_str(),
+            &message.content,
+            message.name.as_deref(),
+            message.tool_call_id.as_deref(),
+            tool_calls.as_deref(),
+            images.as_deref(),
+            message.is_error,
+            seq,
+        );
+    }
 
     /// Record token usage for a provider/model turn.
     #[allow(clippy::too_many_arguments)]
@@ -82,7 +107,6 @@ impl SessionSink for NullSessionSink {
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
         _role: &str,
@@ -172,7 +196,6 @@ impl SessionSink for UsageOnlySessionSink {
         Some(self.conv_id)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn append_message(
         &self,
         _role: &str,

@@ -130,10 +130,41 @@ fn canonical_namespaces_have_no_legacy_config_or_keymap_aliases() {
             assert(bone.api.submit == nil)
             assert(bone.api.config == nil)
             assert(bone.api.keymap == nil)
+            bone.submit("first")
+            bone.submit("   ")
+            bone.submit("second")
         "#,
     )
     .exec()
     .unwrap();
+    assert_eq!(
+        crate::ext::inbox::for_lua(&lua).drain(),
+        vec!["first", "second"]
+    );
+}
+
+#[test]
+fn submit_is_isolated_per_lua_runtime() {
+    let first = lua_with_api();
+    let second = lua_with_api();
+
+    first
+        .load(r#"bone.submit("first-a"); bone.submit("first-b")"#)
+        .exec()
+        .unwrap();
+    second
+        .load(r#"bone.submit("second-a"); bone.submit("second-b")"#)
+        .exec()
+        .unwrap();
+
+    assert_eq!(
+        crate::ext::inbox::for_lua(&second).drain(),
+        vec!["second-a", "second-b"]
+    );
+    assert_eq!(
+        crate::ext::inbox::for_lua(&first).drain(),
+        vec!["first-a", "first-b"]
+    );
 }
 
 #[test]

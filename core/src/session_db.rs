@@ -1,10 +1,11 @@
 //! SQLite persistence for conversations and per-provider usage records.
 
-use crate::llm::{ChatMessage, ChatRole};
+use crate::llm::{ChatMessage, ChatRole, OutputItem};
 use crate::runtime::UsageRecord;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
+use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -64,6 +65,7 @@ fn migrate_legacy_db_if_needed(
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(lock_path)?;
     fs2::FileExt::lock_exclusive(&lock)?;
     if path.exists() {
@@ -111,13 +113,102 @@ pub(crate) struct StoredMessage {
     pub images: Option<String>,
     /// True if this is a tool result that errored.
     pub is_error: bool,
+    /// Complete model-facing message payload for rows written by schema v10+.
+    payload_json: Option<String>,
+}
+
+const PERSISTED_MESSAGE_VERSION: u8 = 2;
+
+/// Versioned, lossless representation used only for durable replay.
+///
+/// `ChatMessage::output_sequence` is intentionally omitted from the general
+/// frontend wire format, so persistence carries it alongside the message.
+#[derive(Deserialize)]
+struct PersistedMessageV2 {
+    version: u8,
+    message: ChatMessage,
+    #[serde(default)]
+    output_sequence: Vec<OutputItem>,
+}
+
+/// Borrowed write shape avoids cloning message text, images, or output items.
+#[derive(Serialize)]
+struct PersistedMessageV2Ref<'a> {
+    version: u8,
+    message: &'a ChatMessage,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    output_sequence: &'a [OutputItem],
+}
+
+fn slice_is_empty<T>(items: &&[T]) -> bool {
+    items.is_empty()
+}
+
+impl<'a> From<&'a ChatMessage> for PersistedMessageV2Ref<'a> {
+    fn from(message: &'a ChatMessage) -> Self {
+        Self {
+            version: PERSISTED_MESSAGE_VERSION,
+            message,
+            output_sequence: &message.output_sequence,
+        }
+    }
+}
+
+impl PersistedMessageV2 {
+    fn into_chat_message(mut self) -> Option<ChatMessage> {
+        if self.version != PERSISTED_MESSAGE_VERSION {
+            return None;
+        }
+        self.message.output_sequence = std::mem::take(&mut self.output_sequence);
+        Some(self.message)
+    }
+}
+
+/// Normalized row projection retained for history, search, and compatibility.
+struct MessageRow<'a> {
+    role: &'a str,
+    content: &'a str,
+    tool_name: Option<&'a str>,
+    tool_call_id: Option<&'a str>,
+    tool_calls: Option<&'a str>,
+    images: Option<&'a str>,
+    is_error: bool,
+    payload_json: Option<&'a str>,
+}
+
+fn serialize_message(message: &ChatMessage) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&PersistedMessageV2Ref::from(message))
+}
+
+fn deserialize_message(json: &str) -> Option<ChatMessage> {
+    serde_json::from_str::<PersistedMessageV2>(json)
+        .ok()?
+        .into_chat_message()
+}
+
+fn serialize_messages(messages: &[ChatMessage]) -> Result<String, serde_json::Error> {
+    let messages: Vec<_> = messages.iter().map(PersistedMessageV2Ref::from).collect();
+    serde_json::to_string(&messages)
+}
+
+fn deserialize_messages(json: &str) -> Option<Vec<ChatMessage>> {
+    let messages = serde_json::from_str::<Vec<PersistedMessageV2>>(json).ok()?;
+    messages
+        .into_iter()
+        .map(PersistedMessageV2::into_chat_message)
+        .collect()
 }
 
 /// Convert a stored DB row into a provider-neutral [`ChatMessage`], parsing
-/// tool-calls and images from their JSON columns. Used by the daemon's
-/// `LoadConversation` handler to rebuild a transcript from the session DB.
+/// the complete payload when available and falling back to the legacy
+/// normalized columns. Used by the daemon's `LoadConversation` handler to
+/// rebuild a transcript from the session DB.
 pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMessage {
     use crate::llm::{ChatMessage, ChatRole};
+
+    if let Some(message) = msg.payload_json.as_deref().and_then(deserialize_message) {
+        return message;
+    }
 
     let role = match msg.role.as_str() {
         "assistant" => ChatRole::Assistant,
@@ -350,6 +441,7 @@ const FULL_SCHEMA: &str = "
         tool_calls      TEXT,
         images          TEXT,
         is_error        INTEGER NOT NULL DEFAULT 0,
+        payload_json    TEXT,
         seq             INTEGER NOT NULL,
         created_at      TEXT NOT NULL
     );
@@ -450,7 +542,7 @@ const BUCKET_PROJECTION: &str = "COALESCE(usage.prompt,0), COALESCE(usage.comple
 
 /// Latest conversations.db schema version. Bumped when `setup_schema` gains a
 /// new migration step; tests assert against this instead of a bare literal.
-pub(crate) const SCHEMA_VERSION: u32 = 9;
+pub(crate) const SCHEMA_VERSION: u32 = 10;
 
 const STARTUP_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const STARTUP_RETRY_DEADLINE: Duration = Duration::from_secs(3);
@@ -862,6 +954,16 @@ impl SessionDb {
             version = 9;
         }
 
+        if version == 9 {
+            // Preserve a complete, versioned model-facing message alongside
+            // the normalized columns used by history and FTS. Existing rows
+            // remain NULL and continue through the legacy column mapper.
+            if !column_exists(&tx, "messages", "payload_json")? {
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN payload_json TEXT;")?;
+            }
+            version = 10;
+        }
+
         if version != current_version {
             tx.pragma_update(None, "user_version", version)?;
         }
@@ -976,42 +1078,110 @@ impl SessionDb {
         }
     }
 
-    /// Insert a message row plus its FTS index entry. Shared by `append_message`
-    /// (top-level autocommit) and `append_turn` (batched transaction); `conn` is
-    /// a bare `&Connection`, and a `&Transaction` coerces to it.
-    #[allow(clippy::too_many_arguments)]
+    /// Insert one normalized message row plus its FTS projection.
     fn insert_message_row(
         conn: &Connection,
         conversation_id: i64,
-        role: &str,
-        content: &str,
-        tool_name: Option<&str>,
-        tool_call_id: Option<&str>,
-        tool_calls: Option<&str>,
-        images: Option<&str>,
-        is_error: bool,
+        row: &MessageRow<'_>,
         seq: i64,
         created_at: &str,
     ) -> rusqlite::Result<i64> {
         conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, is_error, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![conversation_id, role, content, tool_name, tool_call_id, tool_calls, images, is_error, seq, created_at],
+            "INSERT INTO messages
+             (conversation_id, role, content, tool_name, tool_call_id,
+              tool_calls, images, is_error, payload_json, seq, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                conversation_id,
+                row.role,
+                row.content,
+                row.tool_name,
+                row.tool_call_id,
+                row.tool_calls,
+                row.images,
+                row.is_error,
+                row.payload_json,
+                seq,
+                created_at
+            ],
         )?;
         let msg_id = conn.last_insert_rowid();
         // Include tool-call info in the FTS index so it stays searchable.
-        let searchable = if let Some(tc) = tool_calls {
-            format!("{content} TOOL_CALL {tc}")
+        let searchable = if let Some(tool_calls) = row.tool_calls {
+            format!("{} TOOL_CALL {tool_calls}", row.content)
         } else {
-            content.to_string()
+            row.content.to_string()
         };
         conn.execute(
             "INSERT INTO messages_fts (rowid, content, role, conversation_id) VALUES (?1, ?2, ?3, ?4)",
-            params![msg_id, searchable, role, conversation_id],
+            params![msg_id, searchable, row.role, conversation_id],
         )?;
         Ok(msg_id)
     }
 
+    /// Insert a complete chat message while retaining the legacy normalized
+    /// columns consumed by history/search callers.
+    fn insert_chat_message_row(
+        conn: &Connection,
+        conversation_id: i64,
+        message: &ChatMessage,
+        seq: i64,
+        created_at: &str,
+    ) -> rusqlite::Result<i64> {
+        let tool_calls_json = (message.role == ChatRole::Assistant
+            && !message.tool_calls.is_empty())
+        .then(|| serde_json::to_string(&message.tool_calls))
+        .transpose()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let images_json = (message.role == ChatRole::User && !message.images.is_empty())
+            .then(|| serde_json::to_string(&message.images))
+            .transpose()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let payload_json = serialize_message(message)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+
+        let row = MessageRow {
+            role: message.role.as_str(),
+            content: &message.content,
+            tool_name: (message.role == ChatRole::Tool)
+                .then(|| message.name.as_deref().unwrap_or("tool")),
+            tool_call_id: (message.role == ChatRole::Tool)
+                .then(|| message.tool_call_id.as_deref().unwrap_or("")),
+            tool_calls: tool_calls_json.as_deref(),
+            images: images_json.as_deref(),
+            is_error: message.role == ChatRole::Tool && message.is_error,
+            payload_json: Some(&payload_json),
+        };
+        Self::insert_message_row(conn, conversation_id, &row, seq, created_at)
+    }
+
+    /// Append a complete model-facing message to a conversation.
+    pub fn append_chat_message(
+        &self,
+        conversation_id: i64,
+        message: &ChatMessage,
+        seq: i64,
+    ) -> rusqlite::Result<i64> {
+        // Allocate the sequence while holding the write lock. More than one
+        // process can open a conversation, so a cached in-memory sequence is
+        // only a hint and must not create duplicate ordering.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let db_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
+            params![conversation_id],
+            |row| row.get(0),
+        )?;
+        let allocated_seq = seq.max(db_seq.saturating_add(1));
+        Self::insert_chat_message_row(&tx, conversation_id, message, allocated_seq, &now_iso())?;
+        tx.commit()?;
+        Ok(allocated_seq)
+    }
+
     /// Append a message to a conversation (inserts into both messages and messages_fts).
+    ///
+    /// This normalized-column adapter remains for compatibility. Runtime
+    /// persistence should use [`Self::append_chat_message`] so no message
+    /// fields are discarded.
     #[allow(clippy::too_many_arguments)]
     pub fn append_message(
         &self,
@@ -1025,9 +1195,6 @@ impl SessionDb {
         is_error: bool,
         seq: i64,
     ) -> rusqlite::Result<i64> {
-        // Allocate the sequence while holding the write lock. More than one
-        // process can open a conversation, so a cached in-memory sequence is
-        // only a hint and must not be allowed to create duplicate ordering.
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let db_seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
@@ -1035,9 +1202,29 @@ impl SessionDb {
             |row| row.get(0),
         )?;
         let allocated_seq = seq.max(db_seq.saturating_add(1));
-        Self::insert_message_row(
-            &tx,
-            conversation_id,
+        let chat_role = match role {
+            "assistant" => ChatRole::Assistant,
+            "tool" => ChatRole::Tool,
+            "system" => ChatRole::System,
+            _ => ChatRole::User,
+        };
+        let parsed_tool_calls: Result<Option<Vec<crate::tools::ToolCall>>, _> =
+            tool_calls.map(serde_json::from_str).transpose();
+        let parsed_images: Result<Option<Vec<crate::llm::ImageData>>, _> =
+            images.map(serde_json::from_str).transpose();
+        let payload_json = match (parsed_tool_calls, parsed_images) {
+            (Ok(tool_calls), Ok(images)) => {
+                let mut message = ChatMessage::new(chat_role, content);
+                message.name = tool_name.map(str::to_owned);
+                message.tool_call_id = tool_call_id.map(str::to_owned);
+                message.tool_calls = tool_calls.unwrap_or_default();
+                message.images = images.unwrap_or_default();
+                message.is_error = is_error;
+                serialize_message(&message).ok()
+            }
+            _ => None,
+        };
+        let row = MessageRow {
             role,
             content,
             tool_name,
@@ -1045,9 +1232,9 @@ impl SessionDb {
             tool_calls,
             images,
             is_error,
-            allocated_seq,
-            &now_iso(),
-        )?;
+            payload_json: payload_json.as_deref(),
+        };
+        Self::insert_message_row(&tx, conversation_id, &row, allocated_seq, &now_iso())?;
         tx.commit()?;
         Ok(allocated_seq)
     }
@@ -1086,56 +1273,9 @@ impl SessionDb {
         let checkpoint_source_is_current = seq == db_seq;
         seq = seq.max(db_seq);
         let now = now_iso();
-        for msg in messages {
-            let (role, tool_name, tool_call_id, tool_calls_json, images_json) = match msg.role {
-                ChatRole::Assistant => (
-                    "assistant",
-                    None,
-                    None,
-                    if msg.tool_calls.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&msg.tool_calls).ok()
-                    },
-                    None,
-                ),
-                // Default `tool_name`/`tool_call_id` to "tool"/"" when absent
-                // to preserve the pre-rewrite row shape (consumers that read
-                // these back expect non-null values).
-                ChatRole::Tool => (
-                    "tool",
-                    Some(msg.name.as_deref().unwrap_or("tool")),
-                    Some(msg.tool_call_id.as_deref().unwrap_or("")),
-                    None,
-                    None,
-                ),
-                ChatRole::User => (
-                    "user",
-                    None,
-                    None,
-                    None,
-                    (!msg.images.is_empty())
-                        .then(|| serde_json::to_string(&msg.images).ok())
-                        .flatten(),
-                ),
-                ChatRole::System => ("system", None, None, None, None),
-            };
-            // Only tool results carry an error flag; other roles persist `false`.
-            let is_error = msg.role == ChatRole::Tool && msg.is_error;
+        for message in messages {
             seq += 1;
-            Self::insert_message_row(
-                &tx,
-                conversation_id,
-                role,
-                &msg.content,
-                tool_name,
-                tool_call_id,
-                tool_calls_json.as_deref(),
-                images_json.as_deref(),
-                is_error,
-                seq,
-                &now,
-            )?;
+            Self::insert_chat_message_row(&tx, conversation_id, message, seq, &now)?;
         }
         for u in usage {
             tx.execute(
@@ -1157,7 +1297,7 @@ impl SessionDb {
         // written by another actor. In that case retain the full transcript
         // fallback; a later compaction can establish a fresh checkpoint.
         if checkpoint_source_is_current && let Some(checkpoint) = context_checkpoint {
-            let messages_json = serde_json::to_string(checkpoint)
+            let messages_json = serialize_messages(checkpoint)
                 .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
             tx.execute(
                 "INSERT INTO conversation_context_checkpoints
@@ -1187,7 +1327,7 @@ impl SessionDb {
         if db_seq != through_seq {
             return Ok(false);
         }
-        let messages_json = serde_json::to_string(messages)
+        let messages_json = serialize_messages(messages)
             .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
         tx.execute(
             "INSERT INTO conversation_context_checkpoints
@@ -1725,7 +1865,10 @@ impl SessionDb {
         // valid one. Checkpoints are a derived projection, never the only copy.
         for checkpoint in checkpoints {
             let (through_seq, json) = checkpoint?;
-            let Ok(mut transcript) = serde_json::from_str::<Vec<ChatMessage>>(&json) else {
+            let Some(mut transcript) = deserialize_messages(&json).or_else(|| {
+                // Schema v9 and older stored the wire representation directly.
+                serde_json::from_str::<Vec<ChatMessage>>(&json).ok()
+            }) else {
                 continue;
             };
             let mut tail = self.query_messages_after(conversation_id, through_seq)?;
@@ -1737,8 +1880,7 @@ impl SessionDb {
             .map(|rows| rows.into_iter().map(stored_to_chat_message).collect())
     }
 
-    /// Map a rusqlite row (seq, role, content, tool_name, tool_call_id,
-    /// tool_calls, images, is_error) into a [`StoredMessage`].
+    /// Map a rusqlite message projection into a [`StoredMessage`].
     fn stored_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<StoredMessage> {
         Ok(StoredMessage {
             seq: row.get(0)?,
@@ -1749,6 +1891,7 @@ impl SessionDb {
             tool_calls: row.get(5)?,
             images: row.get(6)?,
             is_error: row.get::<_, i64>(7)? != 0,
+            payload_json: row.get(8)?,
         })
     }
 
@@ -1758,7 +1901,8 @@ impl SessionDb {
         after_seq: i64,
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
-            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls, images, is_error
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls,
+                    images, is_error, payload_json
              FROM messages WHERE conversation_id = ?1 AND seq > ?2
              ORDER BY seq ASC, id ASC",
         )?;
@@ -1775,7 +1919,8 @@ impl SessionDb {
         limit: Option<usize>,
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
-            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls, images, is_error \
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls,
+                    images, is_error, payload_json \
              FROM messages WHERE conversation_id = ?1 \
              ORDER BY seq ASC, id ASC LIMIT ?2",
         )?;

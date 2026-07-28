@@ -154,10 +154,10 @@ fn reject_degenerate_arguments(tool: &dyn Tool, arguments: &serde_json::Value) -
         ));
     }
     let required = required_fields(tool);
-    if let Some(fields) = arguments.as_object() {
-        if !fields.is_empty() || required.is_empty() {
-            return None;
-        }
+    if let Some(fields) = arguments.as_object()
+        && (!fields.is_empty() || required.is_empty())
+    {
+        return None;
     }
     let got = match arguments {
         serde_json::Value::Null => "no arguments".to_string(),
@@ -421,7 +421,6 @@ impl ToolHandler {
         join_all(calls.into_iter().map(|call| {
             let events = events.clone();
             let session_state = self.session_state_for_call(&call);
-            let owner = self.owner.clone();
             let runtime_events = runtime_events.clone();
             let result_events = runtime_events.clone();
             async move {
@@ -430,7 +429,6 @@ impl ToolHandler {
                         call,
                         events,
                         session_state,
-                        owner,
                         agent_depth,
                         tool_call_depth,
                         runtime_events,
@@ -469,7 +467,6 @@ impl ToolHandler {
                     call,
                     events.clone(),
                     session_state,
-                    self.owner.clone(),
                     agent_depth,
                     tool_call_depth,
                     runtime_events.clone(),
@@ -496,7 +493,6 @@ impl ToolHandler {
         call: ToolCall,
         events: Option<tokio::sync::mpsc::UnboundedSender<KeyRequest>>,
         session_state: Option<String>,
-        owner: String,
         agent_depth: usize,
         tool_call_depth: usize,
         runtime_events: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
@@ -513,7 +509,7 @@ impl ToolHandler {
                     call,
                     events,
                     session_state,
-                    owner,
+                    self.owner.clone(),
                     self.cancel_token.clone(),
                     agent_depth,
                     tool_call_depth,

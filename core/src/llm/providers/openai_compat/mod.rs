@@ -15,6 +15,8 @@ use crate::llm::provider::{
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
+type ConversationHeader = (String, fn(i64) -> String);
+
 /// Generic OpenAI-compatible provider for any server with a `/chat/completions`
 /// streaming endpoint: llama.cpp, OpenRouter, GLM, Gemini, Kimi, DeepSeek, etc.
 /// Set `endpoint` in config to control the path (default: `/chat/completions`).
@@ -37,7 +39,7 @@ pub struct OpenAiCompatProvider {
     /// that speak the same Chat Completions wire format.
     api_key_override: Option<String>,
     extra_headers: Vec<(String, String)>,
-    conversation_header: Option<(String, fn(i64) -> String)>,
+    conversation_header: Option<ConversationHeader>,
 }
 
 impl OpenAiCompatProvider {
@@ -72,7 +74,7 @@ impl OpenAiCompatProvider {
         entry: &ProviderEntry,
         api_key: String,
         extra_headers: Vec<(String, String)>,
-        conversation_header: Option<(String, fn(i64) -> String)>,
+        conversation_header: Option<ConversationHeader>,
     ) -> Self {
         let mut provider = Self::from_entry(id, entry);
         provider.api_key_override = Some(api_key);
@@ -569,7 +571,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tools: Vec<ToolDefinition>,
         context: crate::llm::provider::ProviderRequestContext,
     ) -> Result<ResponseStream, LlmError> {
-        let stream_options = stream_usage_enabled(&self.base_url).then(|| StreamOptions {
+        let stream_options = stream_usage_enabled(&self.base_url).then_some(StreamOptions {
             include_usage: true,
         });
 

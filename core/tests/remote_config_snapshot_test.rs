@@ -33,17 +33,14 @@ async fn reply_next_key(
     code: &str,
 ) {
     loop {
-        match events.recv().await.unwrap() {
-            RuntimeEvent::KeyRequest { id } => {
-                cmd_tx
-                    .send(RuntimeCommand::KeyReply {
-                        id,
-                        key: key_event(code),
-                    })
-                    .unwrap();
-                return;
-            }
-            _ => {}
+        if let RuntimeEvent::KeyRequest { id } = events.recv().await.unwrap() {
+            cmd_tx
+                .send(RuntimeCommand::KeyReply {
+                    id,
+                    key: key_event(code),
+                })
+                .unwrap();
+            return;
         }
     }
 }
@@ -150,6 +147,7 @@ bone.command.register("cfgapply", {
     // ── Mirror `run_remote_command`: consume events until CommandComplete. ──
     cmd_tx
         .send(RuntimeCommand::RunCommand {
+            request_id: None,
             name: "cfgapply".into(),
             input: "".into(),
         })

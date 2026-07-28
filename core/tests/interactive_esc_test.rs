@@ -50,17 +50,14 @@ async fn reply_next_key(
     code: &str,
 ) {
     loop {
-        match events.recv().await.unwrap() {
-            RuntimeEvent::KeyRequest { id } => {
-                cmd_tx
-                    .send(RuntimeCommand::KeyReply {
-                        id,
-                        key: key_event(code),
-                    })
-                    .unwrap();
-                return;
-            }
-            _ => {}
+        if let RuntimeEvent::KeyRequest { id } = events.recv().await.unwrap() {
+            cmd_tx
+                .send(RuntimeCommand::KeyReply {
+                    id,
+                    key: key_event(code),
+                })
+                .unwrap();
+            return;
         }
     }
 }
@@ -163,6 +160,7 @@ bone.command.register("picker", {
     // Start the interactive command.
     cmd_tx
         .send(RuntimeCommand::RunCommand {
+            request_id: None,
             name: "picker".into(),
             input: "".into(),
         })
@@ -181,9 +179,8 @@ bone.command.register("picker", {
     // 4. The command should complete (nil return → CommandComplete).
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            match events.recv().await.unwrap() {
-                RuntimeEvent::CommandComplete { .. } => break,
-                _ => {}
+            if let RuntimeEvent::CommandComplete { .. } = events.recv().await.unwrap() {
+                break;
             }
         }
     })
@@ -198,6 +195,7 @@ bone.command.register("picker", {
     // complete through the same remote interactive path.
     cmd_tx
         .send(RuntimeCommand::RunCommand {
+            request_id: None,
             name: "config".into(),
             input: "".into(),
         })

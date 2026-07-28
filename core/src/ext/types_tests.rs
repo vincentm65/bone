@@ -20,6 +20,25 @@ fn unloaded_manager_exposes_inert_defaults() {
 }
 
 #[test]
+fn rebinding_runtime_inbox_preserves_queued_prompts() {
+    let durable = super::super::inbox::SubmitInbox::default();
+    durable.push("before reload".into());
+
+    let mut reloaded = ExtensionManager::unloaded();
+    reloaded.submit_inbox().push("during reload".into());
+    reloaded.use_submit_inbox(durable.clone());
+
+    assert_eq!(durable.drain(), vec!["before reload", "during reload"]);
+
+    let lua = reloaded.lua_handle();
+    super::super::inbox::for_lua(&lua.lock().unwrap()).push("after reload".into());
+    assert_eq!(
+        reloaded.submit_inbox().pop().as_deref(),
+        Some("after reload")
+    );
+}
+
+#[test]
 fn extension_settings_pages_follow_command_enablement() {
     use super::super::settings_registry::{SettingsField, SettingsFieldType, SettingsPage};
     use crate::config::settings::ExtensionValue;

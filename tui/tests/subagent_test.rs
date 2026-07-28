@@ -790,6 +790,14 @@ fn cancel_running_job_via_lua_tool() {
         cancel_flag.load(std::sync::atomic::Ordering::Relaxed),
         "ctx.agent.cancel must set the job's cancel flag",
     );
+    registry.complete(&job_id, Err("cancelled".into()));
+    assert!(
+        !registry
+            .peek_finished_unconsumed()
+            .iter()
+            .any(|job| job.id == job_id),
+        "an explicitly cancelled job must not auto-inject later",
+    );
 
     // 2. Cancelling a non-existent id is a no-op (ok=false).
     let miss = rt
@@ -810,7 +818,6 @@ fn cancel_running_job_via_lua_tool() {
     );
 
     // 3. Cancelling a finished job is a no-op (ok=false).
-    registry.complete(&job_id, Ok("done".into()));
     let after = rt
         .block_on(async {
             tokio::time::timeout(

@@ -297,11 +297,18 @@ impl Driver {
             .is_some_and(|m| m.role == crate::llm::ChatRole::User && m.content == prompt);
         if !prompt_already_last {
             let message = ChatMessage::new(crate::llm::ChatRole::User, prompt);
+            session.append_chat_message(&message, session_seq);
             history.push(message.clone());
             transcript.push(message.clone());
             persist_messages.push(message);
+        } else {
+            session.append_chat_message(
+                transcript
+                    .last()
+                    .expect("prompt_already_last requires a final message"),
+                session_seq,
+            );
         }
-        session.append_message("user", prompt, None, None, None, None, false, session_seq);
 
         // Rich frontend event stream (best-effort; ignored if no consumer).
         let remit = |event: RuntimeEvent| {
@@ -334,6 +341,7 @@ impl Driver {
         };
 
         emit_runtime(RuntimeEvent::Started {
+            request_id: None,
             approval: approval_label.to_string(),
             task: prompt.to_string(),
             model: llm.model().to_string(),
@@ -796,19 +804,10 @@ impl Driver {
                     assistant.reasoning_items = std::mem::take(&mut reasoning_items);
                 }
                 assistant.output_sequence = std::mem::take(&mut output_sequence);
+                session_seq += 1;
+                session.append_chat_message(&assistant, session_seq);
                 transcript.push(assistant.clone());
                 persist_messages.push(assistant);
-                session_seq += 1;
-                session.append_message(
-                    "assistant",
-                    &assistant_text,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    session_seq,
-                );
                 break Ok(assistant_text);
             }
 
@@ -827,22 +826,12 @@ impl Driver {
                 assistant.reasoning_items = std::mem::take(&mut reasoning_items);
             }
             assistant.output_sequence = std::mem::take(&mut output_sequence);
+            session_seq += 1;
+            session.append_chat_message(&assistant, session_seq);
             history.push(assistant.clone());
             request_history.push(assistant.clone());
             transcript.push(assistant.clone());
             persist_messages.push(assistant);
-            session_seq += 1;
-            let tool_calls_json = serde_json::to_string(&tool_calls).ok();
-            session.append_message(
-                "assistant",
-                &assistant_text,
-                None,
-                None,
-                tool_calls_json.as_deref(),
-                None,
-                false,
-                session_seq,
-            );
 
             // Execute tool calls.
             for call in &tool_calls {
@@ -915,17 +904,8 @@ impl Driver {
                 };
                 emit_event(events, event_sender.as_ref(), &event);
                 session_seq += 1;
-                session.append_message(
-                    "tool",
-                    &result.content,
-                    Some(&result.name),
-                    Some(&result.call_id),
-                    None,
-                    None,
-                    result.is_error,
-                    session_seq,
-                );
                 let message = ChatMessage::tool(result.clone());
+                session.append_chat_message(&message, session_seq);
                 history.push(message.clone());
                 request_history.push(message.clone());
                 transcript.push(message.clone());
@@ -940,19 +920,9 @@ impl Driver {
                 // format, but keep it in mind for vision-tool repetition reports.
                 if !result.images.is_empty() {
                     let note = format!("Image output from {}:", result.name);
-                    let images_json = serde_json::to_string(&result.images).ok();
                     session_seq += 1;
-                    session.append_message(
-                        "user",
-                        &note,
-                        None,
-                        None,
-                        None,
-                        images_json.as_deref(),
-                        false,
-                        session_seq,
-                    );
                     let relay = ChatMessage::user_with_images(note, result.images.clone());
+                    session.append_chat_message(&relay, session_seq);
                     history.push(relay.clone());
                     request_history.push(relay.clone());
                     transcript.push(relay.clone());

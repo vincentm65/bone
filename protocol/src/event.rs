@@ -13,6 +13,9 @@ use crate::view::ViewDiff;
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeEvent {
     Started {
+        /// Identifies the request that started this turn, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         approval: String,
         task: String,
         model: String,
@@ -92,6 +95,22 @@ pub enum RuntimeEvent {
     StateSnapshot {
         snapshot: SessionSnapshot,
     },
+    /// Correlated authoritative state response to [`RuntimeCommand::Synchronize`].
+    StateSynchronized {
+        request_id: u64,
+        /// Whether a model turn or interactive Lua command is still running.
+        busy: bool,
+        snapshot: SessionSnapshot,
+        /// Complete display transcript, included only when explicitly requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages: Option<Vec<ChatMessage>>,
+    },
+    /// The socket bridge dropped broadcast events because the client lagged.
+    ///
+    /// Clients should issue [`RuntimeCommand::Synchronize`] to repair state.
+    StreamLagged {
+        skipped: u64,
+    },
     /// Conversation-scoped snapshots of daemon-owned background processes.
     ProcessesSnapshot {
         version: u64,
@@ -153,11 +172,19 @@ pub enum RuntimeEvent {
         id: i64,
         message: String,
     },
+    /// Legacy, uncorrelated model-turn completion.
     TurnComplete,
+    /// Completion of a model turn started by a correlated prompt submission.
+    TurnCompleted {
+        request_id: u64,
+    },
     ViewDiff {
         diff: ViewDiff,
     },
     CommandComplete {
+        /// Echoes the originating [`RuntimeCommand::RunCommand`] request id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         output: String,
         submit: bool,
         display_role: Option<String>,
@@ -168,6 +195,9 @@ pub enum RuntimeEvent {
     },
     /// Result of daemon-side keymap rhs dispatch and optional Lua callback.
     KeymapDispatched {
+        /// Echoes the originating [`RuntimeCommand::KeymapDispatch`] request id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         kind: KeymapDispatchKind,
     },
 }
@@ -244,6 +274,7 @@ pub enum ConfigAction {
 /// | `ApprovalReply` / `KeyReply` | both | interactive gates mid-turn |
 /// | `Cancel` / `Steer` | both | turn control |
 /// | `CancelJob` | both | cancel one background sub-agent by id |
+/// | `Synchronize` | both | repair frontend state after event-stream lag |
 /// | `RunCommand` | both | slash commands on the daemon VM |
 /// | `NewConversation` / `LoadConversation` / `ClearConversation` | both | durable chat lifecycle |
 /// | `ReplaceConversation` | both | bulk transcript replace (e.g. compact) |
@@ -257,6 +288,9 @@ pub enum ConfigAction {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeCommand {
     SubmitPrompt {
+        /// Correlates this prompt with [`RuntimeEvent::TurnCompleted`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         text: String,
         #[serde(default)]
         images: Vec<ImageData>,
@@ -276,11 +310,21 @@ pub enum RuntimeCommand {
     },
     /// Request the current conversation's daemon-owned process snapshots.
     GetProcesses,
+    /// Request a correlated authoritative state snapshot, usually after
+    /// [`RuntimeEvent::StreamLagged`] indicates dropped broadcast events.
+    Synchronize {
+        request_id: u64,
+        #[serde(default)]
+        include_messages: bool,
+    },
     /// Cancel one daemon-owned process in the current conversation.
     CancelProcess {
         id: String,
     },
     RunCommand {
+        /// Correlates this request with [`RuntimeEvent::CommandComplete`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         name: String,
         input: String,
     },
@@ -414,6 +458,10 @@ pub enum RuntimeCommand {
     /// locally resolving action semantics. The daemon responds with a
     /// [`KeymapDispatched`] event.
     KeymapDispatch {
+        /// Correlates this request with the [`RuntimeEvent::KeymapDispatched`]
+        /// reply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         /// The action string looked up from the binding (may be a callback id).
         action: String,
     },

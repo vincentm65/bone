@@ -17,6 +17,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bone_core::llm::{ChatMessage, ChatRole};
 use bone_core::session_db::SessionDb;
 use bone_core::session_sink::{NullSessionSink, SessionSink, UsageOnlySessionSink};
 
@@ -58,7 +59,7 @@ impl SessionSink for RecordingSink {
         self.messages
             .lock()
             .unwrap()
-            .push(format!("{role}: {content} (error: {is_error})"));
+            .push(format!("{}: {} (error: {})", role, content, is_error));
     }
 
     fn record_usage(
@@ -82,8 +83,10 @@ impl SessionSink for RecordingSink {
 #[test]
 fn trait_is_externally_implementable_and_records() {
     let sink = RecordingSink::new();
-    sink.append_message("user", "hello", None, None, None, None, false, 0);
-    sink.append_message("assistant", "hi there", None, None, None, None, true, 1);
+    sink.append_chat_message(&ChatMessage::new(ChatRole::User, "hello"), 0);
+    let mut assistant = ChatMessage::new(ChatRole::Assistant, "hi there");
+    assistant.is_error = true;
+    sink.append_chat_message(&assistant, 1);
     sink.record_usage("openai", "gpt-4", 100, 50, None, None, false);
     sink.end();
 
@@ -105,7 +108,7 @@ fn null_sink_is_inert() {
     assert_eq!(sink.conv_id(), None);
 
     // Every write method must be a no-op (not panic).
-    sink.append_message("user", "ignored", None, None, None, None, false, 0);
+    sink.append_chat_message(&ChatMessage::new(ChatRole::User, "ignored"), 0);
     sink.record_usage("p", "m", 1, 1, None, None, false);
     sink.end();
     // Nothing to assert beyond "didn't panic" — that IS the contract.
@@ -116,7 +119,7 @@ fn sink_is_object_safe_via_arc_dyn() {
     // Arc<dyn SessionSink> is the injection type on AgentRequest.
     let sink: Arc<dyn SessionSink> = Arc::new(RecordingSink::new());
     assert_eq!(sink.conv_id(), Some(42));
-    sink.append_message("user", "test", None, None, None, None, false, 0);
+    sink.append_chat_message(&ChatMessage::new(ChatRole::User, "test"), 0);
     assert_eq!(sink.conv_id(), Some(42)); // still works after a call
 }
 
@@ -176,24 +179,18 @@ fn usage_only_sink_records_usage_against_parent_without_messages() {
     assert_eq!(sink.conv_id(), Some(parent_id));
 
     // Messages must not land in the parent transcript.
-    sink.append_message(
-        "user",
-        "internal subagent prompt — must not persist",
-        None,
-        None,
-        None,
-        None,
-        false,
+    sink.append_chat_message(
+        &ChatMessage::new(
+            ChatRole::User,
+            "internal subagent prompt — must not persist",
+        ),
         1,
     );
-    sink.append_message(
-        "assistant",
-        "internal subagent reply — must not persist",
-        None,
-        None,
-        None,
-        None,
-        false,
+    sink.append_chat_message(
+        &ChatMessage::new(
+            ChatRole::Assistant,
+            "internal subagent reply — must not persist",
+        ),
         2,
     );
     // Must not end (or delete) the parent conversation.

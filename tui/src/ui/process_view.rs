@@ -31,6 +31,8 @@ fn run_loop(
 ) -> io::Result<()> {
     let mut scroll = 0;
     let mut follow = true;
+    let (mut height, mut max_scroll) = redraw(term, &process, &mut scroll, follow, theme)?;
+    let mut dirty = false;
 
     loop {
         loop {
@@ -42,7 +44,10 @@ fn run_loop(
                     else {
                         return Ok(());
                     };
-                    process = next;
+                    if next != process {
+                        process = next;
+                        dirty = true;
+                    }
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -52,16 +57,10 @@ fn run_loop(
                 Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return Ok(()),
             }
         }
-        let size = term.size()?;
-        let lines = process_lines(&process, size.width as usize, theme);
-        let height = size.height.saturating_sub(1) as usize;
-        let max_scroll = lines.len().saturating_sub(height);
-        if follow {
-            scroll = max_scroll;
-        } else {
-            scroll = scroll.min(max_scroll);
+        if dirty {
+            (height, max_scroll) = redraw(term, &process, &mut scroll, follow, theme)?;
+            dirty = false;
         }
-        draw(term, &lines, scroll, process.running, follow, theme)?;
 
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -78,34 +77,60 @@ fn run_loop(
                 KeyCode::Down | KeyCode::Char('j') => {
                     scroll = scroll.saturating_add(1).min(max_scroll);
                     follow = scroll == max_scroll;
+                    dirty = true;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     scroll = scroll.saturating_sub(1);
                     follow = false;
+                    dirty = true;
                 }
                 KeyCode::PageDown => {
                     scroll = scroll.saturating_add(height).min(max_scroll);
                     follow = scroll == max_scroll;
+                    dirty = true;
                 }
                 KeyCode::PageUp => {
                     scroll = scroll.saturating_sub(height);
                     follow = false;
+                    dirty = true;
                 }
                 KeyCode::Home => {
                     scroll = 0;
                     follow = false;
+                    dirty = true;
                 }
                 KeyCode::End => {
                     scroll = max_scroll;
                     follow = true;
+                    dirty = true;
                 }
                 _ => {}
             },
-            Event::Resize(_, _) => {}
+            Event::Resize(_, _) => dirty = true,
             _ => {}
         }
     }
     Ok(())
+}
+
+fn redraw(
+    term: &mut FullscreenTerminal,
+    process: &bone_protocol::ProcessSnapshot,
+    scroll: &mut usize,
+    follow: bool,
+    theme: &crate::ui::theme::Theme,
+) -> io::Result<(usize, usize)> {
+    let size = term.size()?;
+    let lines = process_lines(process, size.width as usize, theme);
+    let height = size.height.saturating_sub(1) as usize;
+    let max_scroll = lines.len().saturating_sub(height);
+    if follow {
+        *scroll = max_scroll;
+    } else {
+        *scroll = (*scroll).min(max_scroll);
+    }
+    draw(term, &lines, *scroll, process.running, follow, theme)?;
+    Ok((height, max_scroll))
 }
 
 fn process_lines(

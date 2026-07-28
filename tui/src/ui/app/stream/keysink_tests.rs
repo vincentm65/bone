@@ -81,3 +81,21 @@ fn clear_owner_drops_stale_buffer() {
     sink.deliver(key("fresh"));
     assert_eq!(next_reply(&mut rx2), (2, key("fresh")));
 }
+
+#[test]
+fn replayed_answered_request_does_not_consume_the_next_key() {
+    let mut sink = KeySink::new();
+    let (tx, mut rx) = mpsc::unbounded_channel::<RuntimeCommand>();
+    sink.set_daemon(1, tx.clone());
+    sink.deliver(key("first"));
+    assert_eq!(next_reply(&mut rx), (1, key("first")));
+
+    // The tool owns input between requests, so this key belongs to id 2.
+    sink.deliver(key("next"));
+    sink.set_daemon(1, tx);
+    assert!(rx.try_recv().is_err(), "replay emitted a duplicate reply");
+
+    let (tx2, mut rx2) = mpsc::unbounded_channel::<RuntimeCommand>();
+    sink.set_daemon(2, tx2);
+    assert_eq!(next_reply(&mut rx2), (2, key("next")));
+}

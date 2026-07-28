@@ -10,7 +10,7 @@ use crate::ui::render::{BoneTerminal, PaneDraw};
 use crate::ui::selectable_pane::{SelectablePaneAction, apply_nav_key};
 use crate::ui::tool_display::{build_tool_row, format_shell_call_label};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::time::Instant;
 use tokio::time::Duration;
@@ -27,6 +27,9 @@ use super::{
 /// own a `KeySink` and pass it to `drain_keys`; a terminal key is delivered here.
 pub(crate) struct KeySink {
     pending: Option<PendingKeyReply>,
+    /// Request ids already answered by this pump. Synchronization may replay a
+    /// gate whose reply is still in flight; never re-arm it for the next key.
+    answered: HashSet<u64>,
     /// Keys read from the terminal while no reply slot was registered, held for
     /// the tool's next key request. A single `drain_keys` pass can read several
     /// keystrokes (fast typing) but only one reply slot exists at a time; the
@@ -60,6 +63,7 @@ impl KeySink {
     pub fn new() -> Self {
         Self {
             pending: None,
+            answered: HashSet::new(),
             buffer: std::collections::VecDeque::new(),
             owns_input: false,
         }
@@ -75,12 +79,21 @@ impl KeySink {
     /// Resolve a freshly registered reply slot from the buffer if a key is
     /// already waiting; otherwise store `reply` as the pending slot.
     fn arm(&mut self, reply: PendingKeyReply) {
+        if self.answered.contains(&reply.id)
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.id == reply.id)
+        {
+            return;
+        }
         self.owns_input = true;
         match self.buffer.pop_front() {
             Some(key) => {
                 let _ = reply
                     .command_tx
                     .send(crate::runtime::RuntimeCommand::KeyReply { id: reply.id, key });
+                self.answered.insert(reply.id);
             }
             None => self.pending = Some(reply),
         }
@@ -105,6 +118,7 @@ impl KeySink {
                 let _ = reply
                     .command_tx
                     .send(crate::runtime::RuntimeCommand::KeyReply { id: reply.id, key });
+                self.answered.insert(reply.id);
                 true
             }
             None if self.owns_input => {
@@ -292,8 +306,10 @@ impl App {
         // makes the failure recoverable instead of leaving a displayed but
         // unsubmitted message and waiting forever for turn events.
         let image_count = images.len();
+        let request_id = self.next_request();
         self.command_tx
             .send(crate::runtime::RuntimeCommand::SubmitPrompt {
+                request_id: Some(request_id),
                 text: text.clone(),
                 images,
             })
@@ -319,7 +335,7 @@ impl App {
         self.input.reset();
         self.flush_new_messages_to_scrollback(term)?;
         self.begin_streaming();
-        self.run_event_pump(term).await
+        self.run_event_pump(Some(request_id), term).await
     }
 
     fn begin_streaming(&mut self) {
@@ -337,6 +353,7 @@ impl App {
     /// response use the normal streaming path.
     pub(super) async fn adopt_daemon_turn(
         &mut self,
+        request_id: Option<u64>,
         task: String,
         display: Option<String>,
         term: &mut BoneTerminal,
@@ -345,7 +362,7 @@ impl App {
             .push(Message::user(display.as_deref().unwrap_or(&task)));
         self.flush_new_messages_to_scrollback(term)?;
         self.begin_streaming();
-        self.run_event_pump(term).await
+        self.run_event_pump(request_id, term).await
     }
 
     /// Pump the daemon's `RuntimeEvent` stream for the in-flight turn until
@@ -354,7 +371,11 @@ impl App {
     /// set by the caller (`submit_user_turn`, or the submit branch of
     /// `run_remote_command`). Shared so a model turn and a command-triggered
     /// turn render identically.
-    pub(super) async fn run_event_pump(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    pub(super) async fn run_event_pump(
+        &mut self,
+        turn_request_id: Option<u64>,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
         use crate::runtime::RuntimeEvent;
 
         let mut cur_idx: Option<usize> = None;
@@ -362,6 +383,10 @@ impl App {
             std::collections::HashMap::new();
         let mut pending_key = KeySink::new();
         let mut cancel_sent = false;
+        let mut recovering_from_lag = false;
+        let mut legacy_uncorrelated_turn = false;
+        let mut sync_pending = None;
+        let mut sync_retry_at = Instant::now();
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Separate the render cadence (90ms spinner) from key responsiveness.
@@ -431,20 +456,90 @@ impl App {
 
             tokio::select! {
                 ev = self.events_rx.recv() => match ev {
-                    // The daemon signals turn completion with TurnComplete.
-                    Ok(RuntimeEvent::TurnComplete) => break,
+                    Ok(RuntimeEvent::Started {
+                        request_id: None,
+                        ..
+                    }) if turn_request_id.is_some()
+                        && self.synchronization_supported != Some(true) =>
+                    {
+                        self.mark_legacy_runtime();
+                        legacy_uncorrelated_turn = true;
+                    }
+                    // Correlated completions cannot be confused with a stale
+                    // completion broadcast from another attached frontend.
+                    Ok(RuntimeEvent::TurnCompleted { request_id })
+                        if Some(request_id) == turn_request_id && !recovering_from_lag =>
+                    {
+                        break;
+                    }
+                    // Automated and legacy turns have no request id. A
+                    // correlated turn must never accept this unit event.
+                    Ok(RuntimeEvent::TurnComplete)
+                        if (turn_request_id.is_none() || legacy_uncorrelated_turn)
+                            && !recovering_from_lag =>
+                    {
+                        break;
+                    }
+                    Ok(RuntimeEvent::TurnCompleted { request_id })
+                        if Some(request_id) == turn_request_id =>
+                    {
+                        if sync_pending.is_none() {
+                            sync_pending = Some(self.request_full_synchronization());
+                        }
+                    }
+                    Ok(RuntimeEvent::TurnComplete)
+                        if turn_request_id.is_none() || legacy_uncorrelated_turn =>
+                    {
+                        if sync_pending.is_none() {
+                            sync_pending = Some(self.request_full_synchronization());
+                        }
+                    }
+                    Ok(RuntimeEvent::StateSynchronized {
+                        request_id,
+                        busy,
+                        snapshot,
+                        messages,
+                    }) if sync_pending == Some(request_id) => {
+                        self.synchronization_supported = Some(true);
+                        self.pending_synchronizations.remove(&request_id);
+                        self.apply_snapshot(snapshot);
+                        if busy {
+                            sync_pending = None;
+                            sync_retry_at = Instant::now() + Duration::from_millis(500);
+                        } else {
+                            if let Some(messages) = messages {
+                                self.replace_transcript(messages);
+                                crate::ui::render::Renderer::hard_reset_viewport(
+                                    term,
+                                    self.renderer.viewport_height,
+                                )?;
+                                self.renderer.reset_scrollback_state();
+                                cur_idx = None;
+                                pending.clear();
+                            }
+                            break;
+                        }
+                    }
+                    Ok(RuntimeEvent::StreamLagged { .. }) => {
+                        recovering_from_lag = true;
+                        sync_pending = Some(self.recover_from_event_lag());
+                    }
                     // Approval requests are handled here because collecting a
                     // decision may block the turn. Shared with idle/command pumps.
                     Ok(RuntimeEvent::ApprovalRequest {
                         id, call_id, name, arguments, auto_allows, preview, ..
                     }) => {
                         self.handle_approval_request(
-                            id,
-                            call_id,
-                            name,
-                            arguments,
-                            auto_allows,
-                            preview.as_deref(),
+                            super::ApprovalRequestDetails {
+                                id,
+                                call: ToolCall {
+                                    id: call_id,
+                                    name,
+                                    arguments,
+                                },
+                                auto_allows,
+                                preview,
+                            },
                             term,
                         )?;
                     }
@@ -452,15 +547,24 @@ impl App {
                         self.pump_apply_event(ev, &mut cur_idx, &mut pending, &mut pending_key, term)?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_n)) => {
-                        // Keep draining the retained backlog so TurnComplete is
-                        // not lost. Process state needs an explicit refresh because
-                        // StateSnapshot does not contain background processes.
-                        self.recover_from_event_lag();
+                        recovering_from_lag = true;
+                        sync_pending = Some(self.recover_from_event_lag());
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "runtime disconnected during turn",
+                        ));
+                    }
                 },
                 _ = ticker.tick() => {
                     self.pump_tick(term)?;
+                    if recovering_from_lag
+                        && sync_pending.is_none()
+                        && Instant::now() >= sync_retry_at
+                    {
+                        sync_pending = Some(self.request_full_synchronization());
+                    }
                 }
                 // Wake to drain keys promptly (esp. Ctrl+C); no repaint here.
                 _ = key_poll.tick() => {}
@@ -540,9 +644,11 @@ impl App {
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_pause_start = None;
 
+        let request_id = self.next_request();
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::RunCommand {
+                request_id: Some(request_id),
                 name: cmd.to_string(),
                 input: arg.to_string(),
             });
@@ -566,6 +672,9 @@ impl App {
             Option<String>,
             Option<crate::runtime::CommandAction>,
         )> = None;
+        let mut recovering_from_lag = false;
+        let mut sync_pending = None;
+        let mut sync_retry_at = Instant::now();
 
         'command: loop {
             // While an approval prompt is up (a tool the command invoked needs
@@ -617,6 +726,16 @@ impl App {
 
             tokio::select! {
                 ev = self.events_rx.recv() => match ev {
+                    Ok(RuntimeEvent::Started {
+                        request_id,
+                        task,
+                        display,
+                        ..
+                    }) => {
+                        self.adopt_daemon_turn(request_id, task, display, term)
+                            .await
+                            .ok();
+                    }
                     Ok(RuntimeEvent::ViewDiff { diff }) => {
                         live_sources.track(&diff);
                         self.apply_view_diff(diff);
@@ -630,12 +749,16 @@ impl App {
                         id, call_id, name, arguments, auto_allows, preview, ..
                     }) => {
                         self.handle_approval_request(
-                            id,
-                            call_id,
-                            name,
-                            arguments,
-                            auto_allows,
-                            preview.as_deref(),
+                            super::ApprovalRequestDetails {
+                                id,
+                                call: ToolCall {
+                                    id: call_id,
+                                    name,
+                                    arguments,
+                                },
+                                auto_allows,
+                                preview,
+                            },
                             term,
                         )
                         .ok();
@@ -646,9 +769,53 @@ impl App {
                         self.messages.push(Message::system(message));
                         self.flush_new_messages_to_scrollback(term).ok();
                     }
-                    Ok(RuntimeEvent::CommandComplete { output, submit, display_role, action }) => {
+                    Ok(RuntimeEvent::CommandComplete {
+                        request_id: response_id,
+                        output,
+                        submit,
+                        display_role,
+                        action,
+                    }) if response_id == Some(request_id)
+                        || (response_id.is_none()
+                            && self.synchronization_supported != Some(true)) =>
+                    {
+                        if response_id.is_none() {
+                            self.mark_legacy_runtime();
+                        }
                         completion = Some((output, submit, display_role, action));
                         break 'command;
+                    }
+                    Ok(RuntimeEvent::StateSynchronized {
+                        request_id,
+                        busy,
+                        snapshot,
+                        ..
+                    }) if sync_pending == Some(request_id) => {
+                        self.synchronization_supported = Some(true);
+                        self.pending_synchronizations.remove(&request_id);
+                        self.apply_snapshot(snapshot);
+                        if busy {
+                            sync_pending = None;
+                            sync_retry_at = Instant::now() + Duration::from_millis(500);
+                        } else {
+                            self.messages.push(Message::system(
+                                "command completed, but its reply was lost while recovering the event stream",
+                            ));
+                            self.flush_new_messages_to_scrollback(term).ok();
+                            break 'command;
+                        }
+                    }
+                    Ok(RuntimeEvent::StateSynchronized {
+                        request_id,
+                        snapshot,
+                        ..
+                    }) if self.pending_synchronizations.remove(&request_id) => {
+                        self.synchronization_supported = Some(true);
+                        self.apply_snapshot(snapshot);
+                    }
+                    Ok(RuntimeEvent::StreamLagged { .. }) => {
+                        recovering_from_lag = true;
+                        sync_pending = Some(self.recover_from_event_lag());
                     }
                     Ok(RuntimeEvent::ConfigSnapshot { schema, snapshot }) => {
                         self.apply_config_snapshot(schema, snapshot);
@@ -663,16 +830,27 @@ impl App {
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Keep draining retained events so CommandComplete is not
-                        // lost, and explicitly repair the process snapshot cache.
-                        self.recover_from_event_lag();
+                        recovering_from_lag = true;
+                        sync_pending = Some(self.recover_from_event_lag());
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break 'command,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        self.messages.push(Message::system(
+                            "runtime disconnected while running command",
+                        ));
+                        self.flush_new_messages_to_scrollback(term).ok();
+                        break 'command;
+                    }
                 },
                 _ = ticker.tick() => {
                     self.promote_pending_shells();
                     self.maybe_refresh_jobs_pane();
                     self.render_streaming(term).ok();
+                    if recovering_from_lag
+                        && sync_pending.is_none()
+                        && Instant::now() >= sync_retry_at
+                    {
+                        sync_pending = Some(self.request_full_synchronization());
+                    }
                 }
                 // Wake to drain keys promptly (esp. Ctrl+C); no repaint here.
                 _ = key_poll.tick() => {}
@@ -729,7 +907,7 @@ impl App {
             self.stream_estimated_received = Some(self.view.received);
             self.turn_start = Some(std::time::Instant::now());
             self.cancel_streaming = false;
-            self.run_event_pump(term).await.ok();
+            self.run_event_pump(Some(request_id), term).await.ok();
         } else if !output.is_empty() {
             if display_role.as_deref() == Some("assistant") {
                 self.show_assistant_reply(output, term).ok();
@@ -832,7 +1010,9 @@ impl App {
             // a turn. Ignoring it here avoids invalidating live message indices.
             | RuntimeEvent::FrontendState { .. }
             | RuntimeEvent::ConversationLoaded { .. }
-            | RuntimeEvent::TurnComplete => {}
+            | RuntimeEvent::StreamLagged { .. }
+            | RuntimeEvent::TurnComplete
+            | RuntimeEvent::TurnCompleted { .. } => {}
             RuntimeEvent::ConfigSnapshot { schema, snapshot } => {
                 self.apply_config_snapshot(schema, snapshot);
             }
@@ -881,6 +1061,16 @@ impl App {
             // the view in sync); post-turn / on attach it's the primary source.
             RuntimeEvent::StateSnapshot { snapshot } => {
                 self.apply_snapshot(snapshot);
+            }
+            RuntimeEvent::StateSynchronized {
+                request_id,
+                snapshot,
+                ..
+            } => {
+                if self.pending_synchronizations.remove(&request_id) {
+                    self.synchronization_supported = Some(true);
+                    self.apply_snapshot(snapshot);
+                }
             }
             RuntimeEvent::ProcessesSnapshot {
                 version,

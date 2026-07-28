@@ -89,7 +89,7 @@ fn input_history_is_bounded_by_count() {
     }
 
     assert_eq!(input.history.len(), MAX_INPUT_HISTORY_ENTRIES);
-    assert_eq!(input.history.first().map(String::as_str), Some("prompt-10"));
+    assert_eq!(input.history.front().map(String::as_str), Some("prompt-10"));
 }
 
 #[test]

@@ -33,5 +33,3 @@ default = []
 # Enables crossterm-backed terminal queries (term_width, raw-mode check).
 # The TUI crate enables this; headless builds do not.
 tui = ["dep:crossterm"]
-
-[build-dependencies]

@@ -165,6 +165,8 @@ pub struct LuaCommandReturn {
 pub struct ExtensionManager {
     /// The Lua state, shared so LuaTool can also hold a reference.
     lua: Arc<Mutex<Lua>>,
+    /// Steering prompts submitted by this Lua runtime.
+    submit_inbox: super::inbox::SubmitInbox,
     /// `true` when the Lua engine booted successfully.
     engine_ok: bool,
     /// `true` when `init.lua` was loaded without errors.
@@ -258,8 +260,13 @@ impl ExtensionManager {
         settings_registry: super::settings_registry::SharedSettingsRegistry,
         ui: super::api_ui::SharedUi,
     ) -> Self {
+        let submit_inbox = {
+            let lua = lua.lock().unwrap_or_else(|error| error.into_inner());
+            super::inbox::for_lua(&lua)
+        };
         Self {
             lua,
+            submit_inbox,
             engine_ok,
             loaded,
             commands,
@@ -288,8 +295,10 @@ impl ExtensionManager {
         lua.set_app_data(super::ctx::ConfigSnapshot(Arc::new(Mutex::new(
             crate::config::custom::CustomConfigs::default(),
         ))));
+        let submit_inbox = super::inbox::for_lua(&lua);
         Self {
             lua: Arc::new(Mutex::new(lua)),
+            submit_inbox,
             engine_ok: false,
             loaded: false,
             commands: Vec::new(),
@@ -316,6 +325,29 @@ impl ExtensionManager {
     pub fn lua_arc(&self) -> Arc<Mutex<Lua>> {
         self.lua_handle()
     }
+
+    /// Clone the steering inbox owned by this extension runtime.
+    pub(crate) fn submit_inbox(&self) -> super::inbox::SubmitInbox {
+        self.submit_inbox.clone()
+    }
+
+    /// Attach a freshly booted VM to an existing daemon's inbox.
+    ///
+    /// Prompts submitted during boot are appended before the VM is rebound, so
+    /// reloading extensions cannot lose already queued steering.
+    pub(crate) fn use_submit_inbox(&mut self, inbox: super::inbox::SubmitInbox) {
+        if self.submit_inbox.same_queue(&inbox) {
+            return;
+        }
+
+        let lua = self.lua.lock().unwrap_or_else(|error| error.into_inner());
+        for prompt in self.submit_inbox.drain() {
+            inbox.push(prompt);
+        }
+        lua.set_app_data(inbox.clone());
+        self.submit_inbox = inbox;
+    }
+
     pub fn settings_handle(&self) -> Arc<Mutex<Settings>> {
         Arc::clone(&self.settings)
     }

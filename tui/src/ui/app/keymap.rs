@@ -38,18 +38,52 @@ impl App {
         action: String,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
+        let request_id = self.next_request();
         self.command_tx
-            .send(crate::runtime::RuntimeCommand::KeymapDispatch { action })
+            .send(crate::runtime::RuntimeCommand::KeymapDispatch {
+                request_id: Some(request_id),
+                action,
+            })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "runtime disconnected"))?;
         let kind = loop {
-            let event =
-                self.events_rx.recv().await.map_err(|_| {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "runtime disconnected")
-                })?;
-            if let crate::runtime::RuntimeEvent::KeymapDispatched { kind } = event {
-                break kind;
+            match self.events_rx.recv().await {
+                Ok(crate::runtime::RuntimeEvent::KeymapDispatched {
+                    request_id: response_id,
+                    kind,
+                }) if response_id == Some(request_id)
+                    || (response_id.is_none() && self.synchronization_supported != Some(true)) =>
+                {
+                    if response_id.is_none() {
+                        self.mark_legacy_runtime();
+                    }
+                    break kind;
+                }
+                Ok(crate::runtime::RuntimeEvent::Started {
+                    request_id,
+                    task,
+                    display,
+                    ..
+                }) => {
+                    self.adopt_daemon_turn(request_id, task, display, term)
+                        .await?;
+                }
+                Ok(crate::runtime::RuntimeEvent::StreamLagged { .. })
+                | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.recover_from_event_lag();
+                    self.messages.push(crate::chat::Message::system(
+                        "keymap result was lost while repairing the event stream; the action may have completed",
+                    ));
+                    self.redraw(term)?;
+                    return Ok(());
+                }
+                Ok(event) => self.apply_idle_event(event),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "runtime disconnected",
+                    ));
+                }
             }
-            self.apply_idle_event(event);
         };
         match kind {
             bone_protocol::KeymapDispatchKind::Noop => Ok(()),

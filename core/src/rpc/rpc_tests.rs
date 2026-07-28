@@ -84,6 +84,801 @@ impl crate::llm::provider::LlmProvider for ConfigTestProvider {
     }
 }
 
+struct BlockingTestProvider {
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::provider::LlmProvider for BlockingTestProvider {
+    fn id(&self) -> &str {
+        "blocking"
+    }
+
+    fn name(&self) -> &str {
+        "Blocking"
+    }
+
+    fn model(&self) -> &str {
+        "blocking-1"
+    }
+
+    fn set_model(&mut self, _: String) {}
+
+    async fn chat_stream(
+        &self,
+        _: Vec<crate::llm::ChatMessage>,
+        _: Vec<crate::tools::ToolDefinition>,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        self.release.notified().await;
+        Ok(Box::pin(futures_util::stream::iter([Ok(
+            crate::llm::ChatEvent::TextDelta("done".into()),
+        )])))
+    }
+}
+
+fn test_daemon_ctx(
+    llm: Arc<dyn crate::llm::provider::LlmProvider>,
+    extensions: crate::ext::ExtensionManager,
+    session: crate::runtime::RuntimeSession,
+) -> (
+    DaemonCtx,
+    Hub,
+    tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
+) {
+    let submit_inbox = extensions.submit_inbox();
+    let config = crate::config::store::ConfigStore::from_legacy(
+        extensions.clone(),
+        crate::config::custom::CustomConfigs::default(),
+    );
+    let (hub, commands) = Hub::new();
+    (
+        DaemonCtx {
+            hub: hub.publisher(),
+            llm,
+            extensions,
+            submit_inbox,
+            session: Arc::new(Mutex::new(session)),
+            mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
+            approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
+            key_registry: crate::runtime::KeyReplyRegistry::new(),
+            pending_interactions: PendingInteractions::default(),
+            pending_commands: std::collections::VecDeque::new(),
+            reload_inbox: None,
+            forward_view_diffs: false,
+            config,
+            processes_seen: None,
+        },
+        hub,
+        commands,
+    )
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
+    let _guard = crate::util::test_env_lock();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(BlockingTestProvider {
+        release: release.clone(),
+    });
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(provider, extensions, session);
+    let mut events = hub.subscribe();
+
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::Synchronize {
+                request_id: 41,
+                include_messages: false,
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::StateSynchronized {
+            request_id: 41,
+            busy: false,
+            messages: None,
+            ..
+        }
+    ));
+
+    let Flow::StartTurn {
+        request_id,
+        text,
+        display,
+    } = ctx
+        .handle_idle_command(
+            RuntimeCommand::SubmitPrompt {
+                request_id: None,
+                text: "repair this state".into(),
+                images: vec![],
+            },
+            &mut commands,
+        )
+        .await
+    else {
+        panic!("prompt did not start a turn");
+    };
+
+    let command_tx = hub.command_sender();
+    let observer = tokio::spawn(async move {
+        while !matches!(events.recv().await.unwrap(), RuntimeEvent::Started { .. }) {}
+        command_tx
+            .send(RuntimeCommand::Synchronize {
+                request_id: 42,
+                include_messages: true,
+            })
+            .unwrap();
+        loop {
+            if let RuntimeEvent::StateSynchronized {
+                request_id,
+                busy,
+                snapshot,
+                messages,
+            } = events.recv().await.unwrap()
+            {
+                break (request_id, busy, snapshot, messages);
+            }
+        }
+    });
+
+    let turn = ctx.run_turn(request_id, text, display, &mut commands);
+    let synchronized = async {
+        let result = observer.await.unwrap();
+        release.notify_one();
+        result
+    };
+    let (_, (request_id, busy, snapshot, messages)) = tokio::join!(turn, synchronized);
+
+    assert_eq!(request_id, 42);
+    assert!(busy);
+    assert_eq!(snapshot.transcript_len, 1);
+    let messages = messages.expect("requested transcript was omitted");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "repair this state");
+}
+
+fn interactive_test_extensions() -> crate::ext::ExtensionManager {
+    let lua = mlua::Lua::new();
+    lua.set_app_data(crate::ext::ctx::ConfigSnapshot(Arc::new(Mutex::new(
+        crate::config::custom::CustomConfigs::default(),
+    ))));
+    let bone = lua.create_table().unwrap();
+    lua.globals().set("bone", bone.clone()).unwrap();
+    crate::ext::ops_commands::setup_register_command(&lua, &bone).unwrap();
+    lua.load(
+        r#"
+        bone.command.register("wait_for_key", function(_, ctx)
+            ctx.ui.key()
+            return { display = "done", submit = false }
+        end)
+
+        bone.command.register("wait_for_approval", function(_, ctx)
+            local result = ctx.shell("printf approved")
+            return { display = result.stdout, submit = false }
+        end)
+
+        bone.command.register("submit_output", function()
+            return { display = "follow up", submit = true }
+        end)
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    crate::ext::types::ExtensionManager::from_arc(
+        Arc::new(Mutex::new(lua)),
+        true,
+        true,
+        vec![
+            crate::ext::ops_commands::RegisteredLuaCommand {
+                name: "wait_for_key".into(),
+                description: String::new(),
+            },
+            crate::ext::ops_commands::RegisteredLuaCommand {
+                name: "wait_for_approval".into(),
+                description: String::new(),
+            },
+            crate::ext::ops_commands::RegisteredLuaCommand {
+                name: "submit_output".into(),
+                description: String::new(),
+            },
+        ],
+        Arc::new(Mutex::new(crate::config::settings::Settings::defaults())),
+        Arc::new(std::sync::RwLock::new(Default::default())),
+        crate::ext::api_ui::new_shared(),
+    )
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synchronize_reports_busy_during_interactive_command() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = interactive_test_extensions();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut events = hub.subscribe();
+    let command_tx = hub.command_sender();
+
+    let observer = tokio::spawn(async move {
+        let key_id = loop {
+            if let RuntimeEvent::KeyRequest { id } = events.recv().await.unwrap() {
+                break id;
+            }
+        };
+        command_tx
+            .send(RuntimeCommand::Synchronize {
+                request_id: 73,
+                include_messages: false,
+            })
+            .unwrap();
+        let synchronized = loop {
+            if let event @ RuntimeEvent::StateSynchronized { .. } = events.recv().await.unwrap() {
+                break event;
+            }
+        };
+        command_tx
+            .send(RuntimeCommand::KeyReply {
+                id: key_id,
+                key: bone_protocol::KeyEvent {
+                    code: "Enter".into(),
+                    char: None,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                },
+            })
+            .unwrap();
+        synchronized
+    });
+
+    let result = ctx
+        .run_interactive_command(&mut commands, "wait_for_key".into(), String::new())
+        .await;
+    assert!(result.is_some());
+    assert!(matches!(
+        observer.await.unwrap(),
+        RuntimeEvent::StateSynchronized {
+            request_id: 73,
+            busy: true,
+            messages: None,
+            ..
+        }
+    ));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synchronize_replays_and_routes_pending_command_approval() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = interactive_test_extensions();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut events = hub.subscribe();
+    let command_tx = hub.command_sender();
+
+    let observer = tokio::spawn(async move {
+        let approval_id = loop {
+            if let RuntimeEvent::ApprovalRequest { id, .. } = events.recv().await.unwrap() {
+                break id;
+            }
+        };
+        command_tx
+            .send(RuntimeCommand::Synchronize {
+                request_id: 74,
+                include_messages: false,
+            })
+            .unwrap();
+
+        let mut replayed = false;
+        loop {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::ApprovalRequest { id, .. } if id == approval_id => replayed = true,
+                RuntimeEvent::StateSynchronized {
+                    request_id: 74,
+                    busy,
+                    ..
+                } => {
+                    assert!(busy);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(replayed, "synchronize did not replay the pending approval");
+
+        command_tx
+            .send(RuntimeCommand::ApprovalReply {
+                id: approval_id,
+                outcome: bone_protocol::CallOutcome::Approve,
+            })
+            .unwrap();
+    });
+
+    let (ret, operations) = ctx
+        .run_interactive_command(&mut commands, "wait_for_approval".into(), String::new())
+        .await
+        .expect("registered command was not found");
+    observer.await.unwrap();
+
+    assert!(operations.is_empty());
+    assert_eq!(ret.expect("command returned no output").output, "approved");
+    assert_eq!(ctx.approval_registry.pending_count(), 0);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn correlated_prompt_marks_started_and_completion() {
+    let _guard = crate::util::test_env_lock();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(BlockingTestProvider {
+        release: release.clone(),
+    });
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(provider, extensions, session);
+    let mut events = hub.subscribe();
+
+    let Flow::StartTurn {
+        request_id,
+        text,
+        display,
+    } = ctx
+        .handle_idle_command(
+            RuntimeCommand::SubmitPrompt {
+                request_id: Some(91),
+                text: "correlate this".into(),
+                images: vec![],
+            },
+            &mut commands,
+        )
+        .await
+    else {
+        panic!("prompt did not start a turn");
+    };
+    release.notify_one();
+    ctx.run_turn(request_id, text, display, &mut commands).await;
+
+    let mut started = false;
+    let mut completed = false;
+    let mut legacy_complete = false;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            RuntimeEvent::Started {
+                request_id: Some(91),
+                ..
+            } => started = true,
+            RuntimeEvent::TurnCompleted { request_id: 91 } => completed = true,
+            RuntimeEvent::TurnComplete => legacy_complete = true,
+            _ => {}
+        }
+    }
+    assert!(started);
+    assert!(completed);
+    assert!(!legacy_complete);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn command_and_keymap_replies_echo_request_ids() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = interactive_test_extensions();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut events = hub.subscribe();
+
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::RunCommand {
+                request_id: Some(92),
+                name: "submit_output".into(),
+                input: String::new(),
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(
+        flow,
+        Flow::StartTurn {
+            request_id: Some(92),
+            ..
+        }
+    ));
+    loop {
+        if matches!(
+            events.recv().await.unwrap(),
+            RuntimeEvent::CommandComplete {
+                request_id: Some(92),
+                submit: true,
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::KeymapDispatch {
+                request_id: Some(93),
+                action: "toggle_panes".into(),
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+    loop {
+        if matches!(
+            events.recv().await.unwrap(),
+            RuntimeEvent::KeymapDispatched {
+                request_id: Some(93),
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn turn_queues_idle_commands_and_preserves_correlated_replies() {
+    let _guard = crate::util::test_env_lock();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(BlockingTestProvider {
+        release: release.clone(),
+    });
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(provider, extensions, session);
+    let mut observer_events = hub.subscribe();
+    let command_tx = hub.command_sender();
+
+    let Flow::StartTurn {
+        request_id,
+        text,
+        display,
+    } = ctx
+        .handle_idle_command(
+            RuntimeCommand::SubmitPrompt {
+                request_id: Some(201),
+                text: "keep the runtime busy".into(),
+                images: vec![],
+            },
+            &mut commands,
+        )
+        .await
+    else {
+        panic!("prompt did not start a turn");
+    };
+
+    let observer = tokio::spawn(async move {
+        while !matches!(
+            observer_events.recv().await.unwrap(),
+            RuntimeEvent::Started { .. }
+        ) {}
+        command_tx
+            .send(RuntimeCommand::RunCommand {
+                request_id: Some(202),
+                name: "missing".into(),
+                input: String::new(),
+            })
+            .unwrap();
+        command_tx
+            .send(RuntimeCommand::KeymapDispatch {
+                request_id: Some(203),
+                action: "toggle_panes".into(),
+            })
+            .unwrap();
+        // This response proves the two preceding FIFO commands were consumed
+        // by the busy turn and placed in DaemonCtx's idle queue.
+        command_tx
+            .send(RuntimeCommand::Synchronize {
+                request_id: 204,
+                include_messages: false,
+            })
+            .unwrap();
+        loop {
+            if matches!(
+                observer_events.recv().await.unwrap(),
+                RuntimeEvent::StateSynchronized {
+                    request_id: 204,
+                    busy: true,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+        release.notify_one();
+    });
+
+    ctx.run_turn(request_id, text, display, &mut commands).await;
+    observer.await.unwrap();
+    assert_eq!(ctx.pending_commands.len(), 2);
+
+    let mut replies = hub.subscribe();
+    let command = ctx.pending_commands.pop_front().unwrap();
+    assert!(matches!(
+        &command,
+        RuntimeCommand::RunCommand {
+            request_id: Some(202),
+            ..
+        }
+    ));
+    assert!(matches!(
+        ctx.handle_idle_command(command, &mut commands).await,
+        Flow::Continue
+    ));
+    loop {
+        if matches!(
+            replies.recv().await.unwrap(),
+            RuntimeEvent::CommandComplete {
+                request_id: Some(202),
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+
+    let command = ctx.pending_commands.pop_front().unwrap();
+    assert!(matches!(
+        &command,
+        RuntimeCommand::KeymapDispatch {
+            request_id: Some(203),
+            ..
+        }
+    ));
+    assert!(matches!(
+        ctx.handle_idle_command(command, &mut commands).await,
+        Flow::Continue
+    ));
+    loop {
+        if matches!(
+            replies.recv().await.unwrap(),
+            RuntimeEvent::KeymapDispatched {
+                request_id: Some(203),
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+    assert!(ctx.pending_commands.is_empty());
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_command_queues_idle_work_in_fifo_order() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = interactive_test_extensions();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut observer_events = hub.subscribe();
+    let command_tx = hub.command_sender();
+
+    let observer = tokio::spawn(async move {
+        let key_id = loop {
+            if let RuntimeEvent::KeyRequest { id } = observer_events.recv().await.unwrap() {
+                break id;
+            }
+        };
+        command_tx
+            .send(RuntimeCommand::RunCommand {
+                request_id: Some(301),
+                name: "missing".into(),
+                input: String::new(),
+            })
+            .unwrap();
+        command_tx
+            .send(RuntimeCommand::KeymapDispatch {
+                request_id: Some(302),
+                action: "toggle_panes".into(),
+            })
+            .unwrap();
+        command_tx.send(RuntimeCommand::NewConversation).unwrap();
+        command_tx
+            .send(RuntimeCommand::Synchronize {
+                request_id: 303,
+                include_messages: false,
+            })
+            .unwrap();
+        loop {
+            if matches!(
+                observer_events.recv().await.unwrap(),
+                RuntimeEvent::StateSynchronized {
+                    request_id: 303,
+                    busy: true,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+        command_tx
+            .send(RuntimeCommand::KeyReply {
+                id: key_id,
+                key: bone_protocol::KeyEvent {
+                    code: "Enter".into(),
+                    char: None,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                },
+            })
+            .unwrap();
+    });
+
+    let result = ctx
+        .run_interactive_command(&mut commands, "wait_for_key".into(), String::new())
+        .await;
+    assert!(result.is_some());
+    observer.await.unwrap();
+    assert_eq!(ctx.pending_commands.len(), 3);
+
+    let mut replies = hub.subscribe();
+    let command = ctx.pending_commands.pop_front().unwrap();
+    assert!(matches!(
+        &command,
+        RuntimeCommand::RunCommand {
+            request_id: Some(301),
+            ..
+        }
+    ));
+    assert!(matches!(
+        ctx.handle_idle_command(command, &mut commands).await,
+        Flow::Continue
+    ));
+    loop {
+        if matches!(
+            replies.recv().await.unwrap(),
+            RuntimeEvent::CommandComplete {
+                request_id: Some(301),
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+
+    let command = ctx.pending_commands.pop_front().unwrap();
+    assert!(matches!(
+        &command,
+        RuntimeCommand::KeymapDispatch {
+            request_id: Some(302),
+            ..
+        }
+    ));
+    assert!(matches!(
+        ctx.handle_idle_command(command, &mut commands).await,
+        Flow::Continue
+    ));
+    loop {
+        if matches!(
+            replies.recv().await.unwrap(),
+            RuntimeEvent::KeymapDispatched {
+                request_id: Some(302),
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+
+    let command = ctx.pending_commands.pop_front().unwrap();
+    assert!(matches!(&command, RuntimeCommand::NewConversation));
+    assert!(matches!(
+        ctx.handle_idle_command(command, &mut commands).await,
+        Flow::Continue
+    ));
+    assert!(ctx.pending_commands.is_empty());
+    assert!(matches!(
+        ctx.handle_idle_command(
+            RuntimeCommand::Synchronize {
+                request_id: 304,
+                include_messages: false,
+            },
+            &mut commands,
+        )
+        .await,
+        Flow::Continue
+    ));
+    loop {
+        if matches!(
+            replies.recv().await.unwrap(),
+            RuntimeEvent::StateSynchronized {
+                request_id: 304,
+                busy: false,
+                snapshot: bone_protocol::SessionSnapshot {
+                    transcript_len: 0,
+                    ..
+                },
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn daemon_actors_only_consume_their_own_submitted_prompts() {
+    let _guard = crate::util::test_env_lock();
+
+    fn actor(extensions: crate::ext::ExtensionManager, conversation_id: i64) -> DaemonCtx {
+        let submit_inbox = extensions.submit_inbox();
+        let config = crate::config::store::ConfigStore::from_legacy(
+            extensions.clone(),
+            crate::config::custom::CustomConfigs::default(),
+        );
+        let (hub, _commands) = Hub::new();
+        let mut session = crate::runtime::RuntimeSession::new(
+            crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+        );
+        session.conversation_id = Some(conversation_id);
+        DaemonCtx {
+            hub: hub.publisher(),
+            llm: Arc::new(ConfigTestProvider),
+            extensions,
+            submit_inbox,
+            session: Arc::new(Mutex::new(session)),
+            mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
+            approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
+            key_registry: crate::runtime::KeyReplyRegistry::new(),
+            pending_interactions: PendingInteractions::default(),
+            pending_commands: std::collections::VecDeque::new(),
+            reload_inbox: None,
+            forward_view_diffs: false,
+            config,
+            processes_seen: None,
+        }
+    }
+
+    let extensions_a = crate::ext::ExtensionManager::unloaded();
+    let extensions_b = crate::ext::ExtensionManager::unloaded();
+    let inbox_a = extensions_a.submit_inbox();
+    let inbox_b = extensions_b.submit_inbox();
+    let actor_a = actor(extensions_a, -9_001);
+    let actor_b = actor(extensions_b, -9_002);
+
+    inbox_a.push("a-1".into());
+    inbox_b.push("b-1".into());
+    inbox_a.push("a-2".into());
+    inbox_b.push("b-2".into());
+
+    // Poll B first to make the cross-runtime failure deterministic: the old
+    // process-global queue would have handed it A's first prompt.
+    assert_eq!(actor_b.next_background_prompt(), Some(("b-1".into(), None)));
+    assert_eq!(actor_b.next_background_prompt(), Some(("b-2".into(), None)));
+    assert_eq!(actor_a.next_background_prompt(), Some(("a-1".into(), None)));
+    assert_eq!(actor_a.next_background_prompt(), Some(("a-2".into(), None)));
+    assert!(inbox_a.pop().is_none());
+    assert!(inbox_b.pop().is_none());
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "current_thread")]
 async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
@@ -233,6 +1028,7 @@ async fn resetting_approval_updates_live_mode() {
     unsafe { std::env::set_var("BONE_DIR", dir.path()) };
 
     let extensions = crate::ext::ExtensionManager::unloaded();
+    let submit_inbox = extensions.submit_inbox();
     let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
     config
         .set_value(
@@ -248,12 +1044,15 @@ async fn resetting_approval_updates_live_mode() {
         hub: hub.publisher(),
         llm: Arc::new(ConfigTestProvider),
         extensions,
+        submit_inbox,
         session: Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
             crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
         ))),
         mode: mode.clone(),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
+        pending_interactions: PendingInteractions::default(),
+        pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
         forward_view_diffs: false,
         config,
@@ -289,6 +1088,7 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
     unsafe { std::env::set_var("BONE_DIR", dir.path()) };
 
     let extensions = crate::ext::ExtensionManager::unloaded();
+    let submit_inbox = extensions.submit_inbox();
     let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
     let before_revision = config.snapshot().revision;
     let mut persisted = crate::config::settings::Settings::load().unwrap().unwrap();
@@ -301,12 +1101,15 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         hub: hub.publisher(),
         llm: Arc::new(ConfigTestProvider),
         extensions,
+        submit_inbox,
         session: Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
             crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
         ))),
         mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
+        pending_interactions: PendingInteractions::default(),
+        pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
         forward_view_diffs: false,
         config,
@@ -355,6 +1158,30 @@ async fn dropping_remote_client_closes_its_transport() {
 }
 
 #[tokio::test]
+async fn remote_eof_closes_frontend_event_receivers() {
+    let (client_io, peer_io) = tokio::io::duplex(4096);
+    let (read_half, write_half) = tokio::io::split(client_io);
+    let client = RemoteClient::connect(read_half, write_half);
+    let mut events = client.subscribe();
+
+    drop(peer_io);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("frontend event receiver stayed open after socket EOF");
+    assert!(matches!(
+        result,
+        Err(tokio::sync::broadcast::error::RecvError::Closed)
+    ));
+
+    let mut late = client.subscribe();
+    assert!(matches!(
+        late.recv().await,
+        Err(tokio::sync::broadcast::error::RecvError::Closed)
+    ));
+}
+
+#[tokio::test]
 async fn hub_fans_out_events_and_merges_commands() {
     let (hub, mut commands_rx) = Hub::new();
 
@@ -397,6 +1224,7 @@ async fn hub_fans_out_events_and_merges_commands() {
     codec::write_message(
         &mut wc,
         &RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "hi".into(),
             images: vec![],
         },
@@ -406,6 +1234,118 @@ async fn hub_fans_out_events_and_merges_commands() {
 
     let cmd = commands_rx.recv().await.unwrap();
     assert!(matches!(cmd, RuntimeCommand::SubmitPrompt { text, .. } if text == "hi"));
+}
+
+#[tokio::test]
+async fn socket_bridge_reports_broadcast_lag() {
+    let (hub, _commands) = Hub::new();
+    let (client, server) = tokio::io::duplex(64);
+    let bridge = tokio::spawn(serve_connection(server, hub.clone(), vec![]));
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while hub.client_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("socket bridge did not subscribe");
+
+    hub.publish(RuntimeEvent::Status {
+        message: "x".repeat(256),
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !hub.events_tx.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("socket writer did not take the first event");
+
+    for index in 0..1_100 {
+        hub.publish(RuntimeEvent::Status {
+            message: index.to_string(),
+        });
+    }
+
+    let mut reader = codec::MessageReader::new(tokio::io::split(client).0);
+    assert!(matches!(
+        reader.read::<RuntimeEvent>().await.unwrap().unwrap(),
+        RuntimeEvent::Status { .. }
+    ));
+    let lagged = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
+        .await
+        .expect("lag marker timed out")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        lagged,
+        RuntimeEvent::StreamLagged { skipped } if skipped > 0
+    ));
+
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_socket_bridge_reports_broadcast_lag() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (manager, receiver) = SessionManager::new();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, |_| {
+                let (hub, mut commands) = Hub::new();
+                let publisher = hub.publisher();
+                Ok(ManagedRuntime {
+                    conversation_id: 1,
+                    hub,
+                    initial: Arc::new(Vec::new),
+                    task: Box::pin(async move {
+                        if commands.recv().await.is_some() {
+                            publisher.publish(RuntimeEvent::Status {
+                                message: "x".repeat(256),
+                            });
+                            while !publisher.events_tx.is_empty() {
+                                tokio::task::yield_now().await;
+                            }
+                            for index in 0..1_100 {
+                                publisher.publish(RuntimeEvent::Status {
+                                    message: index.to_string(),
+                                });
+                            }
+                        }
+                        std::future::pending::<()>().await;
+                    }),
+                })
+            }));
+            let (client, server) = tokio::io::duplex(64);
+            let bridge = tokio::task::spawn_local(serve_managed_connection(
+                server,
+                manager,
+                SessionTarget::Latest,
+            ));
+            let (read, mut write) = tokio::io::split(client);
+            codec::write_message(&mut write, &RuntimeCommand::GetProcesses)
+                .await
+                .unwrap();
+
+            let mut reader = codec::MessageReader::new(read);
+            assert!(matches!(
+                reader.read::<RuntimeEvent>().await.unwrap().unwrap(),
+                RuntimeEvent::Status { .. }
+            ));
+            let lagged = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
+                .await
+                .expect("managed lag marker timed out")
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                lagged,
+                RuntimeEvent::StreamLagged { skipped } if skipped > 0
+            ));
+
+            bridge.abort();
+            runner.abort();
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -450,6 +1390,7 @@ fn fake_managed_runtime(
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 max_active.fetch_max(now, Ordering::SeqCst);
                 publisher.publish(RuntimeEvent::Started {
+                    request_id: None,
                     approval: "safe".into(),
                     task: String::new(),
                     model: "test".into(),
@@ -528,6 +1469,7 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             codec::write_message(
                 &mut write_a,
                 &RuntimeCommand::SubmitPrompt {
+                    request_id: None,
                     text: "alpha".into(),
                     images: vec![],
                 },
@@ -537,6 +1479,7 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             codec::write_message(
                 &mut write_b,
                 &RuntimeCommand::SubmitPrompt {
+                    request_id: None,
                     text: "beta".into(),
                     images: vec![],
                 },
@@ -726,6 +1669,7 @@ async fn managed_actor_panic_does_not_stop_other_sessions() {
             healthy
                 .commands
                 .send(RuntimeCommand::SubmitPrompt {
+                    request_id: None,
                     text: "still alive".into(),
                     images: vec![],
                 })
@@ -931,6 +1875,7 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
                         ) {
                             let _turn = publisher.begin_turn();
                             publisher.publish(RuntimeEvent::Started {
+                                request_id: None,
                                 approval: "safe".into(),
                                 task: String::new(),
                                 model: "test".into(),
@@ -950,6 +1895,7 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
             running
                 .commands
                 .send(RuntimeCommand::SubmitPrompt {
+                    request_id: None,
                     text: "keep running".into(),
                     images: vec![],
                 })
@@ -1010,6 +1956,7 @@ async fn process_commands_are_conversation_scoped() {
     let foreign_id = registry.spawn("sleep 30".into(), foreign_scope.clone(), 60_000, None);
 
     let extensions = crate::ext::ExtensionManager::unloaded();
+    let submit_inbox = extensions.submit_inbox();
     let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
     let (hub, mut commands) = Hub::new();
     let mut events = hub.subscribe();
@@ -1021,10 +1968,13 @@ async fn process_commands_are_conversation_scoped() {
         hub: hub.publisher(),
         llm: Arc::new(ConfigTestProvider),
         extensions,
+        submit_inbox,
         session: Arc::new(Mutex::new(session)),
         mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
+        pending_interactions: PendingInteractions::default(),
+        pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
         forward_view_diffs: false,
         config,

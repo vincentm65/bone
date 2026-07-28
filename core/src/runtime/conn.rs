@@ -153,6 +153,7 @@ impl RuntimeConn for LocalConn {
             RuntimeCommand::RunCommand { .. }
             | RuntimeCommand::CancelJob { .. }
             | RuntimeCommand::GetProcesses
+            | RuntimeCommand::Synchronize { .. }
             | RuntimeCommand::CancelProcess { .. }
             | RuntimeCommand::NewConversation
             | RuntimeCommand::LoadConversation { .. }

@@ -1,10 +1,10 @@
 use super::{
-    App, ConfigView, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
-    background_pane_needs_refresh, config_rejection_message, configured_input_style,
-    edit_diff_message, idle_state_needs_redraw, job_snapshot_messages, lua_config_available,
-    orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, render_config_page,
-    run_insertion_lifecycle, should_open_agent_log, take_pending_config,
-    terminal_background_transition, terminal_dimensions_changed,
+    App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
+    approval_already_pending, background_pane_needs_refresh, config_rejection_message,
+    configured_input_style, edit_diff_message, idle_state_needs_redraw, job_snapshot_messages,
+    lua_config_available, orphaned_tool_result_row, parse_config_value, prepare_streaming_replay,
+    render_config_page, run_insertion_lifecycle, should_open_agent_log, take_pending_config,
+    take_terminal_width_change, terminal_background_transition, terminal_dimensions_changed,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
@@ -13,12 +13,35 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::VecDeque;
 
 #[test]
+fn redelivered_pending_approval_is_not_prompted_twice() {
+    let pending = PendingApproval {
+        id: 42,
+        advising: false,
+    };
+
+    assert!(approval_already_pending(Some(&pending), 42));
+    assert!(!approval_already_pending(Some(&pending), 43));
+    assert!(!approval_already_pending(None, 42));
+}
+
+#[test]
 fn terminal_dimension_changes_require_a_prior_size() {
     assert!(!terminal_dimensions_changed(None, (80, 24)));
     assert!(!terminal_dimensions_changed(Some((80, 24)), (80, 24)));
     assert!(terminal_dimensions_changed(Some((80, 24)), (100, 24)));
     assert!(terminal_dimensions_changed(Some((80, 24)), (80, 30)));
     assert!(terminal_dimensions_changed(Some((80, 24)), (100, 30)));
+}
+
+#[test]
+fn terminal_width_is_published_once_per_distinct_width() {
+    let mut published = None;
+
+    assert!(take_terminal_width_change(&mut published, 80));
+    assert!(!take_terminal_width_change(&mut published, 80));
+    assert!(take_terminal_width_change(&mut published, 120));
+    assert!(!take_terminal_width_change(&mut published, 120));
+    assert_eq!(published, Some(120));
 }
 
 #[test]
@@ -281,8 +304,10 @@ fn agent_log_enter_opens_log_with_empty_input() {
 
 #[test]
 fn agent_log_enter_submits_nonempty_input() {
-    let mut input = InputState::default();
-    input.buffer = "queue this message".into();
+    let input = InputState {
+        buffer: "queue this message".into(),
+        ..InputState::default()
+    };
 
     assert!(!should_open_agent_log(&input));
 }
@@ -333,8 +358,10 @@ fn shared_background_navigation_selects_opens_and_cancels_by_id() {
 fn background_enter_with_input_falls_through_to_submission() {
     let active_ids = vec!["activity-1".into()];
     let mut selected = Some("activity-1".into());
-    let mut input = InputState::default();
-    input.buffer = "typed message".into();
+    let input = InputState {
+        buffer: "typed message".into(),
+        ..InputState::default()
+    };
 
     assert_eq!(
         apply_nav_key(
@@ -353,8 +380,10 @@ fn queue_enter_with_input_falls_through_to_submission() {
     let mut queue = VecDeque::from(["queued".to_string()]);
     let mut selected = 0;
     let mut editing = None;
-    let mut input = InputState::default();
-    input.buffer = "typed message".into();
+    let mut input = InputState {
+        buffer: "typed message".into(),
+        ..InputState::default()
+    };
 
     assert!(!apply_queue_nav_key(
         KeyCode::Enter,
@@ -372,8 +401,10 @@ fn queue_navigation_still_works_with_input() {
     let mut queue = VecDeque::from(["first".to_string(), "second".to_string()]);
     let mut selected = 0;
     let mut editing = None;
-    let mut input = InputState::default();
-    input.buffer = "typed message".into();
+    let mut input = InputState {
+        buffer: "typed message".into(),
+        ..InputState::default()
+    };
 
     assert!(apply_queue_nav_key(
         KeyCode::Down,
@@ -690,11 +721,56 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         command_rx.try_recv().unwrap(),
         crate::runtime::RuntimeCommand::GetProcesses
     ));
-    app.recover_from_event_lag();
+    let probe_id = match command_rx.try_recv().unwrap() {
+        crate::runtime::RuntimeCommand::Synchronize {
+            request_id,
+            include_messages: false,
+        } => request_id,
+        other => panic!("expected synchronization probe, got {other:?}"),
+    };
+    app.apply_idle_event(crate::runtime::RuntimeEvent::StateSynchronized {
+        request_id: probe_id,
+        busy: false,
+        snapshot: app.view.clone(),
+        messages: None,
+    });
+    assert_eq!(app.synchronization_supported, Some(true));
+
+    let request_id = app.recover_from_event_lag();
     assert!(matches!(
         command_rx.try_recv().unwrap(),
         crate::runtime::RuntimeCommand::GetProcesses
     ));
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        crate::runtime::RuntimeCommand::Synchronize {
+            request_id: id,
+            include_messages: true,
+        } if id == request_id
+    ));
+    let original_provider = app.view.provider_id.clone();
+    let mut foreign_snapshot = app.view.clone();
+    foreign_snapshot.provider_id = "foreign-client".into();
+    app.apply_idle_event(crate::runtime::RuntimeEvent::StateSynchronized {
+        request_id: request_id.wrapping_add(1),
+        busy: false,
+        snapshot: foreign_snapshot,
+        messages: None,
+    });
+    assert_eq!(app.view.provider_id, original_provider);
+    assert!(app.pending_synchronizations.contains(&request_id));
+
+    let mut requested_snapshot = app.view.clone();
+    requested_snapshot.provider_id = "synchronized".into();
+    app.apply_idle_event(crate::runtime::RuntimeEvent::StateSynchronized {
+        request_id,
+        busy: false,
+        snapshot: requested_snapshot,
+        messages: None,
+    });
+    assert_eq!(app.view.provider_id, "synchronized");
+    assert!(!app.pending_synchronizations.contains(&request_id));
+
     app.apply_idle_event(crate::runtime::RuntimeEvent::ProcessesSnapshot {
         version: 9,
         processes: vec![bone_protocol::ProcessSnapshot {

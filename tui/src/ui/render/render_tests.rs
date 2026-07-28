@@ -3,6 +3,26 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
+fn desired_height(
+    renderer: &Renderer,
+    input: &crate::ui::input::InputState,
+    pages: &[crate::ui::pane_page::PanePage],
+    autocomplete: Option<&crate::ui::autocomplete::AutocompleteState>,
+    running: usize,
+) -> u16 {
+    renderer.desired_height(
+        &PaneSizing {
+            input,
+            prompt: None,
+            pages,
+            active_page: 0,
+            autocomplete,
+            running,
+        },
+        40,
+    )
+}
+
 #[test]
 fn terminal_background_writes_exact_osc_sequences() {
     let mut output = Vec::new();
@@ -46,18 +66,15 @@ fn initial_viewport_height_clamps_minimum_rows_to_terminal() {
 fn desired_viewport_height_tracks_input_panes_completion_and_running_rows() {
     let renderer = Renderer::new();
     let mut input = crate::ui::input::InputState::default();
-    let empty = renderer.desired_height(&input, None, 40, &[], 0, None, 0);
+    let empty = desired_height(&renderer, &input, &[], None, 0);
 
     input.buffer = "first\nsecond\nthird".into();
     input.cursor_pos = input.buffer.chars().count();
-    let multiline = renderer.desired_height(&input, None, 40, &[], 0, None, 0);
+    let multiline = desired_height(&renderer, &input, &[], None, 0);
     assert!(multiline > empty);
 
     input.reset();
-    assert_eq!(
-        renderer.desired_height(&input, None, 40, &[], 0, None, 0),
-        empty
-    );
+    assert_eq!(desired_height(&renderer, &input, &[], None, 0), empty);
 
     let page = crate::ui::pane_page::PanePage {
         source: "test".into(),
@@ -66,17 +83,17 @@ fn desired_viewport_height_tracks_input_panes_completion_and_running_rows() {
         visible_rows: 2,
         scroll: 0,
     };
-    let pane_open = renderer.desired_height(&input, None, 40, &[page], 0, None, 0);
+    let pane_open = desired_height(&renderer, &input, &[page], None, 0);
     assert!(pane_open > empty);
 
     let completion = crate::ui::autocomplete::AutocompleteState::new(vec![(
         "command".into(),
         "description".into(),
     )]);
-    let completion_open = renderer.desired_height(&input, None, 40, &[], 0, Some(&completion), 0);
+    let completion_open = desired_height(&renderer, &input, &[], Some(&completion), 0);
     assert_eq!(completion_open, empty + completion.visible_rows());
 
-    let running = renderer.desired_height(&input, None, 40, &[], 0, None, 2);
+    let running = desired_height(&renderer, &input, &[], None, 2);
     assert_eq!(running, empty + 2);
 }
 

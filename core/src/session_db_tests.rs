@@ -211,6 +211,47 @@ fn v8_migration_adds_context_checkpoints_without_touching_messages() {
 }
 
 #[test]
+fn v9_migration_adds_nullable_payload_without_touching_legacy_rows() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO messages
+             (conversation_id, role, content, seq, created_at)
+             VALUES (?1, 'user', 'legacy', 1, '2026-01-01T00:00:00Z')",
+            rusqlite::params![conv],
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "ALTER TABLE messages DROP COLUMN payload_json;
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+
+    db.setup_schema().unwrap();
+
+    let (content, payload): (String, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT content, payload_json FROM messages WHERE conversation_id = ?1",
+            rusqlite::params![conv],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(content, "legacy");
+    assert_eq!(payload, None);
+    assert_eq!(
+        db.conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn max_message_seq_tracks_highest_seq() {
     let conn = Connection::open_in_memory().unwrap();
     let db = SessionDb { conn };
@@ -273,6 +314,193 @@ fn append_turn_persists_system_messages() {
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].role, "system");
     assert_eq!(stored[0].content, "durable context");
+}
+
+#[test]
+fn complete_message_roundtrip_preserves_codex_provider_order() {
+    use crate::llm::{
+        ChatMessage, ChatRole, OutputItem, Reasoning, ReasoningItem,
+        providers::codex::build_codex_messages,
+    };
+    use crate::tools::ToolCall;
+
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("codex", "gpt-5").unwrap();
+
+    let reasoning_a = ReasoningItem {
+        id: "reasoning-a".into(),
+        encrypted_content: "encrypted-a".into(),
+    };
+    let reasoning_b = ReasoningItem {
+        id: "reasoning-b".into(),
+        encrypted_content: "encrypted-b".into(),
+    };
+    let call_a = ToolCall {
+        id: "call-a".into(),
+        name: "read".into(),
+        arguments: serde_json::json!({"path": "a"}),
+    };
+    let call_b = ToolCall {
+        id: "call-b".into(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path": "b"}),
+    };
+    let mut message = ChatMessage::new(ChatRole::Assistant, "text between calls");
+    message.name = Some("assistant-name".into());
+    message.tool_call_id = Some("provider-metadata".into());
+    message.is_error = true;
+    message.reasoning = Some(Reasoning {
+        text: "summary".into(),
+        echo_field: Some("reasoning_content".into()),
+    });
+    message.reasoning_items = vec![reasoning_a.clone(), reasoning_b.clone()];
+    message.tool_calls = vec![call_a.clone(), call_b.clone()];
+    message.output_sequence = vec![
+        OutputItem::Reasoning(reasoning_a),
+        OutputItem::ToolCall(call_a),
+        OutputItem::Text("text between calls".into()),
+        OutputItem::Reasoning(reasoning_b),
+        OutputItem::ToolCall(call_b),
+    ];
+
+    db.append_chat_message(conv, &message, 1).unwrap();
+    let history = db.list_messages(conv, 10).unwrap();
+    assert_eq!(history[0].role, "assistant");
+    assert_eq!(history[0].content, "text between calls");
+    assert!(history[0].tool_calls.as_deref().unwrap().contains("call-a"));
+    assert!(!history[0].is_error);
+    let searchable: String = db
+        .conn
+        .query_row(
+            "SELECT content FROM messages_fts
+             WHERE rowid = (SELECT id FROM messages WHERE conversation_id = ?1)",
+            rusqlite::params![conv],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(searchable.contains("text between calls"));
+    assert!(searchable.contains("call-b"));
+
+    let loaded = db.load_effective_transcript(conv).unwrap();
+    assert_eq!(loaded, vec![message]);
+
+    let provider_items = serde_json::to_value(build_codex_messages(loaded)).unwrap();
+    let provider_items = provider_items.as_array().unwrap();
+    let kinds: Vec<_> = provider_items
+        .iter()
+        .map(|item| {
+            item.get("type")
+                .or_else(|| item.get("role"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "reasoning",
+            "function_call",
+            "assistant",
+            "reasoning",
+            "function_call"
+        ]
+    );
+    assert_eq!(
+        provider_items[2]["content"][0]["text"],
+        "text between calls"
+    );
+}
+
+#[test]
+fn legacy_row_fallback_keeps_normalized_history_and_provider_order() {
+    use crate::llm::providers::codex::build_codex_messages;
+
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("codex", "gpt-5").unwrap();
+    let tool_calls = serde_json::json!([{
+        "id": "legacy-call",
+        "name": "shell",
+        "arguments": {"command": "pwd"}
+    }])
+    .to_string();
+    db.conn
+        .execute(
+            "INSERT INTO messages
+             (conversation_id, role, content, tool_calls, payload_json, seq, created_at)
+             VALUES (?1, 'assistant', 'legacy text', ?2, NULL, 1,
+                     '2026-01-01T00:00:00Z')",
+            rusqlite::params![conv, tool_calls],
+        )
+        .unwrap();
+
+    let loaded = db.load_effective_transcript(conv).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].content, "legacy text");
+    assert_eq!(loaded[0].tool_calls[0].id, "legacy-call");
+    assert!(loaded[0].reasoning.is_none());
+    assert!(loaded[0].reasoning_items.is_empty());
+    assert!(loaded[0].output_sequence.is_empty());
+
+    let provider_items = serde_json::to_value(build_codex_messages(loaded)).unwrap();
+    let provider_items = provider_items.as_array().unwrap();
+    assert_eq!(provider_items[0]["role"], "assistant");
+    assert_eq!(provider_items[1]["type"], "function_call");
+    assert_eq!(provider_items[1]["call_id"], "legacy-call");
+}
+
+#[test]
+fn context_checkpoint_roundtrip_preserves_ordered_output() {
+    use crate::llm::{ChatMessage, ChatRole, OutputItem, ReasoningItem};
+
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("codex", "gpt-5").unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "original"), 1)
+        .unwrap();
+
+    let mut compacted = ChatMessage::new(ChatRole::Assistant, "answer");
+    compacted.output_sequence = vec![
+        OutputItem::Reasoning(ReasoningItem {
+            id: "reasoning".into(),
+            encrypted_content: "encrypted".into(),
+        }),
+        OutputItem::Text("answer".into()),
+    ];
+    assert!(
+        db.save_context_checkpoint(conv, 1, std::slice::from_ref(&compacted))
+            .unwrap()
+    );
+
+    assert_eq!(db.load_effective_transcript(conv).unwrap(), vec![compacted]);
+}
+
+#[test]
+fn legacy_checkpoint_format_still_loads() {
+    use crate::llm::{ChatMessage, ChatRole};
+
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "original"), 1)
+        .unwrap();
+
+    let legacy = vec![ChatMessage::new(ChatRole::User, "legacy summary")];
+    db.conn
+        .execute(
+            "INSERT INTO conversation_context_checkpoints
+             (conversation_id, through_seq, messages_json, created_at)
+             VALUES (?1, 1, ?2, '2026-01-01T00:00:00Z')",
+            rusqlite::params![conv, serde_json::to_string(&legacy).unwrap()],
+        )
+        .unwrap();
+
+    assert_eq!(db.load_effective_transcript(conv).unwrap(), legacy);
 }
 
 #[test]

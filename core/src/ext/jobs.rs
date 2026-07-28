@@ -419,8 +419,9 @@ impl JobRegistry {
     /// cancellation flag is set. Finished jobs (among `ids`) are returned and
     /// marked consumed so they are not auto-injected again later. IDs unknown
     /// to the registry are ignored. Jobs still running when the wait ends are
-    /// reported as `pending` and stay unconsumed (they will be auto-injected
-    /// on completion).
+    /// reported as `pending`. Ordinary pending jobs remain unconsumed and
+    /// auto-inject on completion; jobs explicitly cancelled through the
+    /// registry remain consumed.
     pub fn wait_for(
         &self,
         ids: &[String],
@@ -522,11 +523,29 @@ impl JobRegistry {
         finished
     }
 
-    /// Cancel a job by setting its cancel flag. Returns `true` if the id was
-    /// found. The running task observes the flag and aborts at its next await.
+    /// Cancel an unfinished job by setting its cancel flag. Explicitly
+    /// cancelled jobs are also marked consumed so their eventual cancellation
+    /// result is not auto-injected into a later turn. Returns `true` when the
+    /// job was found and signalled.
     pub fn cancel(&self, id: &str) -> bool {
+        self.cancel_matching(id, None)
+    }
+
+    /// Cancel an unfinished job only when it belongs to `scope`.
+    ///
+    /// This is the entry point for conversation-owned APIs. The id and scope
+    /// check happen under the same registry lock so another conversation can
+    /// never cancel or consume the job between a snapshot and the mutation.
+    pub fn cancel_scoped(&self, id: &str, scope: Option<i64>) -> bool {
+        self.cancel_matching(id, Some(scope))
+    }
+
+    fn cancel_matching(&self, id: &str, required_scope: Option<Option<i64>>) -> bool {
         let mut jobs = self.lock_jobs();
-        let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
+        let Some(job) = jobs
+            .iter_mut()
+            .find(|job| job.id == id && required_scope.map_or(true, |scope| job.scope == scope))
+        else {
             return false;
         };
         if job.is_finished() {
@@ -534,6 +553,7 @@ impl JobRegistry {
         }
         job.cancel_flag.store(true, Ordering::Relaxed);
         job.activity = Some("cancelling…".to_string());
+        job.consumed = true;
         self.completed.notify_all();
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);
@@ -550,6 +570,8 @@ impl JobRegistry {
         for job in jobs.iter_mut() {
             if !job.is_finished() && job.scope == scope {
                 job.cancel_flag.store(true, Ordering::Relaxed);
+                job.activity = Some("cancelling…".to_string());
+                job.consumed = true;
                 cancelled += 1;
             }
         }

@@ -131,6 +131,7 @@ async fn local_conn_streams_turn_and_yields_outcome() {
         Arc::new(std::sync::Mutex::new(None)),
     );
     conn.send(RuntimeCommand::SubmitPrompt {
+        request_id: None,
         text: prompt.to_string(),
         images: vec![],
     });
@@ -216,6 +217,7 @@ async fn runtime_session_accumulates_state_across_turns() {
             Arc::new(std::sync::Mutex::new(None)),
         );
         conn.send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: prompt.to_string(),
             images: vec![],
         });
@@ -635,6 +637,7 @@ async fn local_cancel_unblocks_pending_approval() {
         Arc::new(Mutex::new(None)),
     );
     conn.send(RuntimeCommand::SubmitPrompt {
+        request_id: None,
         text: prompt.into(),
         images: vec![],
     });

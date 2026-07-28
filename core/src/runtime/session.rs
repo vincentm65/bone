@@ -279,17 +279,38 @@ impl RuntimeSession {
             return;
         };
         let requested_seq = self.session_seq.saturating_add(1);
-        if let Ok(allocated_seq) = db.append_message(
-            conv_id,
-            role,
-            content,
-            tool_name,
-            call_id,
-            tool_calls_json,
-            images_json,
-            false,
-            requested_seq,
-        ) {
+        let chat_role = match role {
+            "assistant" => crate::llm::ChatRole::Assistant,
+            "tool" => crate::llm::ChatRole::Tool,
+            "system" => crate::llm::ChatRole::System,
+            _ => crate::llm::ChatRole::User,
+        };
+        let mut message = ChatMessage::new(chat_role, content);
+        message.name = tool_name.map(str::to_owned);
+        message.tool_call_id = call_id.map(str::to_owned);
+        let tool_calls = tool_calls_json.map(serde_json::from_str).transpose();
+        let images = images_json.map(serde_json::from_str).transpose();
+        let persisted = match (tool_calls, images) {
+            (Ok(tool_calls), Ok(images)) => {
+                message.tool_calls = tool_calls.unwrap_or_default();
+                message.images = images.unwrap_or_default();
+                db.append_chat_message(conv_id, &message, requested_seq)
+            }
+            // Retain the legacy raw projection if a caller supplies malformed
+            // JSON instead of silently changing its history/FTS representation.
+            _ => db.append_message(
+                conv_id,
+                role,
+                content,
+                tool_name,
+                call_id,
+                tool_calls_json,
+                images_json,
+                false,
+                requested_seq,
+            ),
+        };
+        if let Ok(allocated_seq) = persisted {
             self.session_seq = allocated_seq;
         }
     }

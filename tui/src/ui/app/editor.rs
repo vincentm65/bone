@@ -9,21 +9,19 @@ use super::App;
 
 impl App {
     pub(super) async fn open_editor(&mut self, term: &mut super::BoneTerminal) -> io::Result<()> {
-        let tmp = std::env::temp_dir().join("bone-edit.txt");
-        std::fs::write(&tmp, "")?;
+        let tmp = editor_temp_path()?;
         let editor = editor_command();
 
         self.reset_terminal_background();
         Renderer::prepare_exit(term)?;
         Renderer::shutdown_terminal()?;
 
-        let editor_result = run_editor(&editor, &tmp).await;
+        let editor_result = run_editor(&editor, tmp.as_ref()).await;
         let text_result = if editor_result.as_ref().is_ok_and(|status| status.success()) {
             Some(std::fs::read_to_string(&tmp))
         } else {
             None
         };
-        std::fs::remove_file(&tmp).ok();
 
         let physical_size = crossterm::terminal::size()?;
         let initial_height = crate::ui::render::initial_viewport_height(physical_size.1);
@@ -61,6 +59,14 @@ impl App {
 
         self.force_redraw(term)
     }
+}
+
+fn editor_temp_path() -> io::Result<tempfile::TempPath> {
+    tempfile::Builder::new()
+        .prefix("bone-edit-")
+        .suffix(".txt")
+        .tempfile()
+        .map(tempfile::NamedTempFile::into_temp_path)
 }
 
 async fn run_editor(editor: &[String], path: &Path) -> io::Result<std::process::ExitStatus> {

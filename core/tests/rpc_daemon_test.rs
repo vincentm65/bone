@@ -177,6 +177,7 @@ async fn busy_turn_services_config_commands() {
 
     commands
         .send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "wait".into(),
             images: vec![],
         })
@@ -231,6 +232,7 @@ async fn prompt_received_during_turn_is_queued_and_appended_after_completion() {
 
     commands
         .send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "first".into(),
             images: vec![],
         })
@@ -243,6 +245,7 @@ async fn prompt_received_during_turn_is_queued_and_appended_after_completion() {
 
     commands
         .send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "second".into(),
             images: vec![],
         })
@@ -343,6 +346,7 @@ async fn cancel_stops_managed_shell_processes_while_idle_and_mid_turn() {
 
     commands
         .send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "wait".into(),
             images: vec![],
         })
@@ -393,6 +397,7 @@ async fn client_submits_prompt_over_socket_and_receives_turn() {
     write_message(
         &mut write_half,
         &RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "hello daemon".into(),
             images: vec![],
         },
@@ -449,6 +454,7 @@ async fn client_approves_tool_call_over_socket() {
     write_message(
         &mut write_half,
         &RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "read it".into(),
             images: vec![],
         },
@@ -514,6 +520,7 @@ async fn two_clients_both_see_the_turn() {
     write_message(
         &mut a_write,
         &RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "go".into(),
             images: vec![],
         },
@@ -654,6 +661,7 @@ async fn remote_client_bridges_commands_and_events() {
     client
         .command_sender()
         .send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "go".into(),
             images: vec![],
         })
@@ -803,6 +811,7 @@ async fn daemon_forwards_view_diffs_to_remote_client() {
     client
         .command_sender()
         .send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text: "go".into(),
             images: vec![],
         })
@@ -917,6 +926,7 @@ bone.command.register("preview", {
     client
         .command_sender()
         .send(RuntimeCommand::RunCommand {
+            request_id: None,
             name: "echo".into(),
             input: "hi".into(),
         })
@@ -940,6 +950,7 @@ bone.command.register("preview", {
     client
         .command_sender()
         .send(RuntimeCommand::RunCommand {
+            request_id: None,
             name: "preview".into(),
             input: String::new(),
         })
@@ -966,6 +977,7 @@ bone.command.register("preview", {
     client
         .command_sender()
         .send(RuntimeCommand::RunCommand {
+            request_id: None,
             name: "restart".into(),
             input: String::new(),
         })
@@ -1067,6 +1079,7 @@ bone.command.register("noop", {
     client
         .command_sender()
         .send(RuntimeCommand::RunCommand {
+            request_id: None,
             name: "noop".into(),
             input: String::new(),
         })

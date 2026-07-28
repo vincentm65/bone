@@ -441,7 +441,13 @@ where
             },
             event = attachment.events.recv() => match event {
                 Ok(event) => codec::write_message(&mut write_half, &event).await?,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    codec::write_message(
+                        &mut write_half,
+                        &RuntimeEvent::StreamLagged { skipped },
+                    )
+                    .await?;
+                }
                 Err(broadcast::error::RecvError::Closed) => {
                     codec::write_message(
                         &mut write_half,
@@ -474,7 +480,9 @@ where
 /// for it rather than broadcast to zero receivers and dropped.
 pub struct RemoteClient {
     command_tx: mpsc::UnboundedSender<RuntimeCommand>,
-    events_tx: broadcast::Sender<RuntimeEvent>,
+    /// Cleared by the socket forwarder on EOF so all receivers observe
+    /// `RecvError::Closed` even while the `RemoteClient` handle remains alive.
+    events_tx: Arc<std::sync::Mutex<Option<broadcast::Sender<RuntimeEvent>>>>,
     /// Receiver registered at `connect` time, before the forwarder spawns.
     /// Taken by the first `subscribe()`; later subscribers fork fresh ones.
     primary_rx: std::sync::Mutex<Option<broadcast::Receiver<RuntimeEvent>>>,
@@ -498,13 +506,19 @@ impl RemoteClient {
         // forwarder can send — otherwise early events race the caller's
         // `subscribe()` and are dropped on a multi-thread runtime.
         let (events_tx, primary_rx) = broadcast::channel(1024);
-        let fwd = events_tx.clone();
+        let events_tx = Arc::new(std::sync::Mutex::new(Some(events_tx)));
+        let forward_events = Arc::clone(&events_tx);
         let forwarder = tokio::spawn(async move {
             // `send` errors only when there are no receivers; that's fine — an
             // event with no subscriber is simply dropped, like the live Hub.
             while let Some(ev) = conn.next_event().await {
-                let _ = fwd.send(ev);
+                let sender = forward_events.lock().unwrap().as_ref().cloned();
+                let Some(sender) = sender else {
+                    break;
+                };
+                let _ = sender.send(ev);
             }
+            forward_events.lock().unwrap().take();
         });
         Self {
             command_tx,
@@ -525,8 +539,12 @@ impl RemoteClient {
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
         if let Some(rx) = self.primary_rx.lock().unwrap().take() {
             rx
+        } else if let Some(sender) = self.events_tx.lock().unwrap().as_ref() {
+            sender.subscribe()
         } else {
-            self.events_tx.subscribe()
+            let (sender, receiver) = broadcast::channel(1);
+            drop(sender);
+            receiver
         }
     }
 }
@@ -534,6 +552,7 @@ impl RemoteClient {
 impl Drop for RemoteClient {
     fn drop(&mut self) {
         self.forwarder.abort();
+        self.events_tx.lock().unwrap().take();
     }
 }
 
@@ -589,8 +608,14 @@ where
                         return;
                     }
                 }
-                // Dropped messages under backpressure: keep going.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    if codec::write_message(&mut w, &RuntimeEvent::StreamLagged { skipped })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => return,
             }
         }
@@ -627,9 +652,55 @@ where
 enum Flow {
     Continue,
     StartTurn {
+        /// Correlates a direct prompt or submitting command with completion.
+        request_id: Option<u64>,
         text: String,
         display: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum InteractionId {
+    Approval(u64),
+    Key(u64),
+}
+
+/// Interactive gates published to clients but not answered yet.
+///
+/// Cached request events let `Synchronize` replay a lost gate before its state
+/// reply without duplicating reply-channel state outside the registries.
+#[derive(Default)]
+struct PendingInteractions {
+    events: std::collections::BTreeMap<InteractionId, RuntimeEvent>,
+}
+
+impl PendingInteractions {
+    fn track(&mut self, event: &RuntimeEvent) {
+        let id = match event {
+            RuntimeEvent::ApprovalRequest { id, .. } => InteractionId::Approval(*id),
+            RuntimeEvent::KeyRequest { id } => InteractionId::Key(*id),
+            _ => return,
+        };
+        self.events.insert(id, event.clone());
+    }
+
+    fn remove_approval(&mut self, id: u64) {
+        self.events.remove(&InteractionId::Approval(id));
+    }
+
+    fn remove_key(&mut self, id: u64) {
+        self.events.remove(&InteractionId::Key(id));
+    }
+
+    fn replay(&self, hub: &HubPublisher) {
+        for event in self.events.values() {
+            hub.publish(event.clone());
+        }
+    }
+
+    fn clear(&mut self) {
+        self.events.clear();
+    }
 }
 
 fn is_config_command(command: &RuntimeCommand) -> bool {
@@ -661,10 +732,16 @@ struct DaemonCtx {
     hub: HubPublisher,
     llm: Arc<dyn crate::llm::provider::LlmProvider>,
     extensions: crate::ext::ExtensionManager,
+    /// Steering prompts owned by this conversation actor's Lua runtime.
+    submit_inbox: crate::ext::inbox::SubmitInbox,
     session: Arc<Mutex<crate::runtime::RuntimeSession>>,
     mode: crate::tools::SharedApprovalMode,
     approval_registry: crate::runtime::ApprovalReplyRegistry,
     key_registry: crate::runtime::KeyReplyRegistry,
+    pending_interactions: PendingInteractions,
+    /// Commands received while a turn or interactive command owns the runtime.
+    /// They are serviced in arrival order as soon as the runtime is idle.
+    pending_commands: std::collections::VecDeque<RuntimeCommand>,
     // In-process hand-off for `ReloadExtensions`. When a frontend shares the
     // Lua VM with the daemon (the in-process TUI), it boots the extensions
     // once and drops the cloned result here, letting the daemon adopt it
@@ -682,6 +759,11 @@ struct DaemonCtx {
 }
 
 impl DaemonCtx {
+    fn publish_runtime_event(&mut self, event: RuntimeEvent) {
+        self.pending_interactions.track(&event);
+        self.hub.publish(event);
+    }
+
     fn config_schema(&self) -> bone_protocol::ConfigSchema {
         let tools = self
             .session
@@ -767,6 +849,22 @@ impl DaemonCtx {
                 let s = self.session.lock().unwrap();
                 s.snapshot(self.llm.id(), self.llm.model())
             },
+        });
+    }
+
+    fn publish_synchronized_state(&self, request_id: u64, include_messages: bool, busy: bool) {
+        let (snapshot, messages) = {
+            let session = self.session.lock().unwrap();
+            let snapshot = session.snapshot(self.llm.id(), self.llm.model());
+            let messages = include_messages.then(|| session.display_transcript());
+            (snapshot, messages)
+        };
+        self.pending_interactions.replay(&self.hub);
+        self.hub.publish(RuntimeEvent::StateSynchronized {
+            request_id,
+            busy,
+            snapshot,
+            messages,
         });
     }
 
@@ -952,14 +1050,7 @@ impl DaemonCtx {
 
     fn cancel_job(&self, id: &str) {
         let scope = self.session.lock().unwrap().conversation_id;
-        let registry = crate::ext::jobs::registry();
-        if registry
-            .all_jobs()
-            .iter()
-            .any(|job| job.id == id && job.scope == scope)
-        {
-            registry.cancel(id);
-        }
+        crate::ext::jobs::registry().cancel_scoped(id, scope);
     }
 
     /// Next queued background prompt to inject as a turn when the daemon is idle,
@@ -970,7 +1061,7 @@ impl DaemonCtx {
     fn next_background_prompt(&self) -> Option<(String, Option<String>)> {
         // `bone.submit` prompts first — steering should win over passively
         // arriving job results.
-        if let Some(text) = crate::ext::inbox::pop() {
+        if let Some(text) = self.submit_inbox.pop() {
             return Some((text, None));
         }
         let scope = self.session.lock().unwrap().conversation_id;
@@ -988,8 +1079,9 @@ impl DaemonCtx {
     }
 
     /// Run a registered Lua slash command inside the daemon, forwarding its pane
-    /// diffs (`ViewDiff`) and key requests (`KeyRequest`) to clients and pumping
-    /// `KeyReply`/`Cancel` back, exactly like a turn.
+    /// diffs (`ViewDiff`) and interactive gates (`KeyRequest`,
+    /// `ApprovalRequest`) to clients and pumping their replies or `Cancel`
+    /// back, exactly like a turn.
     ///
     /// Returns:
     /// - `None` — the command name isn't registered (a genuine "unknown command").
@@ -1051,6 +1143,13 @@ impl DaemonCtx {
         let (live_tx, mut live_rx) = mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
+        let approval_gate =
+            crate::tools::SharedGate(Arc::new(crate::runtime::ChannelApprovalGate::new(
+                status_tx.clone(),
+                self.approval_registry.clone(),
+                None,
+                app_state.tool_handler.working_dir.clone(),
+            )));
 
         // The handler call blocks (Lua + nested tool calls), so run it off the
         // async runtime (spawn_blocking — the handler may nest tool calls).
@@ -1068,6 +1167,10 @@ impl DaemonCtx {
             ctx_cfg.config_schema = Some(config_schema);
             ctx_cfg.key_sender = Some(live_tx);
             ctx_cfg.runtime_status = Some(status_tx);
+            ctx_cfg.approval_gate = Some(approval_gate.clone());
+            if let Some(handler) = ctx_cfg.tool_handler.as_mut() {
+                handler.approval_gate = Some(approval_gate);
+            }
             ctx_cfg.ui = Some(shared_ui);
             ctx_cfg.cancelled = Some(cancel_for_ctx);
             ctx_cfg.conversation_operations = Some(conversation_tx);
@@ -1099,21 +1202,33 @@ impl DaemonCtx {
                     // Flush any trailing pane diffs and UI messages the handler emitted.
                     self.drain_diffs();
                     while let Ok(event) = status_rx.try_recv() {
-                        self.hub.publish(event);
+                        self.publish_runtime_event(event);
                     }
+                    self.pending_interactions.clear();
                     return res.ok().flatten();
                 }
-                Some(event) = status_rx.recv() => self.hub.publish(event),
+                Some(event) = status_rx.recv() => self.publish_runtime_event(event),
                 Some(req) = live_rx.recv() => {
                     let id = self.key_registry.register(req);
-                    self.hub.publish(RuntimeEvent::KeyRequest { id });
+                    self.publish_runtime_event(RuntimeEvent::KeyRequest { id });
                 }
                 _ = diff_timer.tick() => {
                     self.publish_processes(false);
                     self.drain_diffs();
                 }
                 cmd = commands.recv() => match cmd {
-                    Some(RuntimeCommand::KeyReply { id, key }) => { self.key_registry.resolve(id, key); }
+                    Some(RuntimeCommand::ApprovalReply { id, outcome }) => {
+                        self.approval_registry.resolve(id, outcome);
+                        self.pending_interactions.remove_approval(id);
+                    }
+                    Some(RuntimeCommand::KeyReply { id, key }) => {
+                        self.key_registry.resolve(id, key);
+                        self.pending_interactions.remove_key(id);
+                    }
+                    Some(RuntimeCommand::Synchronize {
+                        request_id,
+                        include_messages,
+                    }) => self.publish_synchronized_state(request_id, include_messages, true),
                     Some(cmd) if is_config_command(&cmd) => {
                         let _ = Box::pin(self.handle_idle_command(cmd, commands)).await;
                     }
@@ -1124,6 +1239,9 @@ impl DaemonCtx {
                         // including background sub-agents and shell processes.
                         self.cancel_background_work();
                         cancel.store(true, Ordering::Relaxed);
+                        self.approval_registry.cancel_all();
+                        self.key_registry.cancel_all();
+                        self.pending_interactions.clear();
                         self.drain_diffs();
                         return Some((None, Vec::new()));
                     }
@@ -1135,10 +1253,13 @@ impl DaemonCtx {
                         // every subsequent command). The caller publishes an
                         // empty CommandComplete, like the no-op path.
                         cancel.store(true, Ordering::Relaxed);
+                        self.approval_registry.cancel_all();
+                        self.key_registry.cancel_all();
+                        self.pending_interactions.clear();
                         self.drain_diffs();
                         return Some((None, Vec::new()));
                     }
-                    Some(_) => {} // other commands are ignored while a command runs
+                    Some(command) => self.pending_commands.push_back(command),
                 },
             }
         }
@@ -1204,7 +1325,11 @@ impl DaemonCtx {
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
     ) -> Flow {
         match cmd {
-            RuntimeCommand::SubmitPrompt { text, images } => {
+            RuntimeCommand::SubmitPrompt {
+                request_id,
+                text,
+                images,
+            } => {
                 // Push the user message to the transcript + DB before building
                 // the driver. The Driver detects the duplicate (last message is
                 // already the user prompt) and skips its own push; images are
@@ -1231,6 +1356,7 @@ impl DaemonCtx {
                     serde_json::json!({ "role": "user", "content": text }),
                 );
                 Flow::StartTurn {
+                    request_id,
                     text,
                     display: None,
                 }
@@ -1599,7 +1725,7 @@ impl DaemonCtx {
                 // An in-process frontend boots the extensions itself and leaves
                 // the cloned result in the inbox; adopt it (shared Lua VM, no
                 // disk read). Otherwise boot from disk.
-                let (booted, disk_boot) = match self
+                let (mut booted, disk_boot) = match self
                     .reload_inbox
                     .as_ref()
                     .and_then(|m| m.lock().unwrap().take())
@@ -1637,6 +1763,7 @@ impl DaemonCtx {
                     });
                     return Flow::Continue;
                 }
+                booted.manager.use_submit_inbox(self.submit_inbox.clone());
                 let old_extensions = std::mem::replace(&mut self.extensions, booted.manager);
                 self.config
                     .replace_extensions(&old_extensions, self.extensions.clone());
@@ -1664,7 +1791,11 @@ impl DaemonCtx {
                 self.publish_snapshot();
                 Flow::Continue
             }
-            RuntimeCommand::RunCommand { name, input } => {
+            RuntimeCommand::RunCommand {
+                request_id,
+                name,
+                input,
+            } => {
                 let result = self
                     .run_interactive_command(commands, name.clone(), input)
                     .await;
@@ -1675,6 +1806,7 @@ impl DaemonCtx {
                             message: format!("unknown command: {name}"),
                         });
                         self.hub.publish(RuntimeEvent::CommandComplete {
+                            request_id,
                             output: String::new(),
                             submit: false,
                             display_role: None,
@@ -1689,6 +1821,7 @@ impl DaemonCtx {
                 }
                 let Some(ret) = ret else {
                     self.hub.publish(RuntimeEvent::CommandComplete {
+                        request_id,
                         output: String::new(),
                         submit: false,
                         display_role: None,
@@ -1740,6 +1873,7 @@ impl DaemonCtx {
                     ret.output.clone()
                 };
                 self.hub.publish(RuntimeEvent::CommandComplete {
+                    request_id,
                     output,
                     submit,
                     display_role: ret.display_role.clone(),
@@ -1769,6 +1903,7 @@ impl DaemonCtx {
                         serde_json::json!({ "role": "user", "content": ret.output }),
                     );
                     Flow::StartTurn {
+                        request_id,
                         text: ret.output,
                         display: None,
                     }
@@ -1777,9 +1912,10 @@ impl DaemonCtx {
                     Flow::Continue
                 }
             }
-            RuntimeCommand::KeymapDispatch { action } => {
+            RuntimeCommand::KeymapDispatch { request_id, action } => {
                 let kind = self.extensions.dispatch_keymap(&action);
-                self.hub.publish(RuntimeEvent::KeymapDispatched { kind });
+                self.hub
+                    .publish(RuntimeEvent::KeymapDispatched { request_id, kind });
                 Flow::Continue
             }
             // Lua hook on the daemon's VM; snapshot acknowledges completion.
@@ -1799,6 +1935,13 @@ impl DaemonCtx {
             }
             RuntimeCommand::GetProcesses => {
                 self.publish_processes(true);
+                Flow::Continue
+            }
+            RuntimeCommand::Synchronize {
+                request_id,
+                include_messages,
+            } => {
+                self.publish_synchronized_state(request_id, include_messages, false);
                 Flow::Continue
             }
             RuntimeCommand::CancelProcess { id } => {
@@ -1829,10 +1972,10 @@ impl DaemonCtx {
     /// session reabsorbs the outcome and a fresh `StateSnapshot` is published.
     async fn run_turn(
         &mut self,
+        request_id: Option<u64>,
         text: String,
         mut display: Option<String>,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
-        pending_prompts: &mut std::collections::VecDeque<RuntimeCommand>,
     ) {
         use crate::runtime::{ChannelApprovalGate, LocalConn, RuntimeConn};
         use std::sync::atomic::AtomicBool;
@@ -1871,6 +2014,7 @@ impl DaemonCtx {
             self.session.lock().unwrap().turn_nudge.clone(),
         );
         conn.send(RuntimeCommand::SubmitPrompt {
+            request_id: None,
             text,
             images: vec![],
         });
@@ -1884,10 +2028,16 @@ impl DaemonCtx {
             tokio::select! {
                 ev = conn.next_event() => match ev {
                     Some(mut ev) => {
-                        if let RuntimeEvent::Started { display: event_display, .. } = &mut ev {
+                        if let RuntimeEvent::Started {
+                            request_id: event_request_id,
+                            display: event_display,
+                            ..
+                        } = &mut ev
+                        {
+                            *event_request_id = request_id;
                             *event_display = display.take();
                         }
-                        self.hub.publish(ev);
+                        self.publish_runtime_event(ev);
                     }
                     None => break, // turn drained
                 },
@@ -1904,12 +2054,23 @@ impl DaemonCtx {
                     // than leave them running after the user abandoned the turn.
                     Some(cmd @ RuntimeCommand::Cancel) => {
                         self.cancel_background_work();
+                        self.pending_interactions.clear();
                         conn.send(cmd);
                     }
-                    Some(cmd @ (RuntimeCommand::ApprovalReply { .. }
-                    | RuntimeCommand::KeyReply { .. })) => conn.send(cmd),
+                    Some(cmd @ RuntimeCommand::ApprovalReply { id, .. }) => {
+                        self.pending_interactions.remove_approval(id);
+                        conn.send(cmd);
+                    }
+                    Some(cmd @ RuntimeCommand::KeyReply { id, .. }) => {
+                        self.pending_interactions.remove_key(id);
+                        conn.send(cmd);
+                    }
                     Some(RuntimeCommand::CancelJob { id }) => self.cancel_job(&id),
                     Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
+                    Some(RuntimeCommand::Synchronize {
+                        request_id,
+                        include_messages,
+                    }) => self.publish_synchronized_state(request_id, include_messages, true),
                     Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
                     // Mid-turn Safe/Danger toggle: applies to the rest of the turn
                     // (the gate reads the shared atomic per call).
@@ -1928,7 +2089,7 @@ impl DaemonCtx {
                     // transcript insertion, persistence, hooks, and turn ordering
                     // remain identical to an idle submission.
                     Some(cmd @ RuntimeCommand::SubmitPrompt { .. }) => {
-                        pending_prompts.push_back(cmd)
+                        self.pending_commands.push_back(cmd)
                     }
                     // Width updates and ordinary hooks are safe mid-turn. Ending
                     // the conversation must wait until no turn can still persist.
@@ -1943,11 +2104,15 @@ impl DaemonCtx {
                     Some(cmd) if is_config_command(&cmd) => {
                         let _ = self.handle_idle_command(cmd, commands).await;
                     }
-                    Some(_) => {}
+                    // Requests that require the idle Lua/session owner (slash
+                    // commands, keymaps, lifecycle changes, etc.) must not
+                    // disappear merely because another client has a live turn.
+                    Some(command) => self.pending_commands.push_back(command),
                     None => break,
                 },
             }
         }
+        self.pending_interactions.clear();
         // Flush any diffs emitted between the last tick and turn end.
         if self.forward_view_diffs {
             self.drain_diffs();
@@ -1981,7 +2146,10 @@ impl DaemonCtx {
         self.hub.publish(RuntimeEvent::WorkElapsed {
             elapsed_ms: work_timer.elapsed_ms(),
         });
-        self.hub.publish(RuntimeEvent::TurnComplete);
+        match request_id {
+            Some(request_id) => self.hub.publish(RuntimeEvent::TurnCompleted { request_id }),
+            None => self.hub.publish(RuntimeEvent::TurnComplete),
+        }
     }
 }
 
@@ -2016,14 +2184,18 @@ pub async fn run_daemon(
     // daemon is the sole drain of the VM's `UiState`.
     forward_view_diffs: bool,
 ) {
+    let submit_inbox = extensions.submit_inbox();
     let mut ctx = DaemonCtx {
         hub: hub.into(),
         llm,
         extensions,
+        submit_inbox,
         session,
         mode: crate::tools::SharedApprovalMode::new(approval_mode),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
+        pending_interactions: PendingInteractions::default(),
+        pending_commands: std::collections::VecDeque::new(),
         reload_inbox,
         forward_view_diffs,
         config,
@@ -2037,11 +2209,15 @@ pub async fn run_daemon(
     // Lua-submitted prompts (`bone.submit`) so injection is daemon-owned for
     // both the in-process TUI and remote clients.
     let mut inject_timer = tokio::time::interval(std::time::Duration::from_millis(200));
-    let mut pending_prompts = std::collections::VecDeque::new();
     loop {
         let mut turn_guard = None;
-        let flow = if let Some(cmd) = pending_prompts.pop_front() {
-            turn_guard = Some(ctx.hub.begin_turn());
+        let flow = if let Some(cmd) = ctx.pending_commands.pop_front() {
+            if matches!(
+                &cmd,
+                RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
+            ) {
+                turn_guard = Some(ctx.hub.begin_turn());
+            }
             ctx.handle_idle_command(cmd, &mut commands).await
         } else {
             tokio::select! {
@@ -2068,12 +2244,22 @@ pub async fn run_daemon(
                             turn_guard = Some(ctx.hub.begin_turn());
                             match ctx
                                 .handle_idle_command(
-                                    RuntimeCommand::SubmitPrompt { text, images: vec![] },
+                                    RuntimeCommand::SubmitPrompt {
+                                        request_id: None,
+                                        text,
+                                        images: vec![],
+                                    },
                                     &mut commands,
                                 )
                                 .await
                             {
-                                Flow::StartTurn { text, .. } => Flow::StartTurn { text, display },
+                                Flow::StartTurn {
+                                    request_id, text, ..
+                                } => Flow::StartTurn {
+                                    request_id,
+                                    text,
+                                    display,
+                                },
                                 other => other,
                             }
                         }
@@ -2082,9 +2268,13 @@ pub async fn run_daemon(
                 }
             }
         };
-        if let Flow::StartTurn { text, display } = flow {
-            ctx.run_turn(text, display, &mut commands, &mut pending_prompts)
-                .await;
+        if let Flow::StartTurn {
+            request_id,
+            text,
+            display,
+        } = flow
+        {
+            ctx.run_turn(request_id, text, display, &mut commands).await;
         }
         drop(turn_guard);
     }

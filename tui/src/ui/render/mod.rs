@@ -15,13 +15,10 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, Viewport};
 use std::io::{self, Stdout, Write};
 
-use super::input::InputState;
-use super::prompt::Prompt;
 use super::theme::Theme;
 use crate::chat::Message;
 use crate::llm::TokenStats;
 use crate::tools::ApprovalMode;
-use crate::ui::pane_page::PanePage;
 use backend::BoneBackend;
 
 /// Minimum viewport rows: top-sep + input(1) + status.
@@ -48,11 +45,11 @@ pub(crate) fn max_viewport_height(terminal_height: u16) -> u16 {
 pub(crate) fn initial_viewport_height(terminal_height: u16) -> u16 {
     MIN_ROWS.min(max_viewport_height(terminal_height))
 }
-pub use bottom_pane::PaneDraw;
 pub(crate) use bottom_pane::approval_pane_lines;
 pub(crate) use bottom_pane::clamped_pane_visible_rows;
 pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
 pub use bottom_pane::{InputPreset, InputStyle};
+pub use bottom_pane::{PaneDraw, PaneSizing};
 
 pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
 
@@ -290,24 +287,11 @@ impl Renderer {
     pub fn ensure_viewport_height(
         &mut self,
         term: &mut BoneTerminal,
-        input: &InputState,
-        prompt: Option<&Prompt>,
-        pages: &[PanePage],
-        active_page: usize,
-        autocomplete: Option<&super::autocomplete::AutocompleteState>,
-        running: usize,
+        sizing: &PaneSizing<'_>,
     ) -> io::Result<()> {
         let size = term.size()?;
         let desired = self
-            .desired_height(
-                input,
-                prompt,
-                size.width,
-                pages,
-                active_page,
-                autocomplete,
-                running,
-            )
+            .desired_height(sizing, size.width)
             .min(max_viewport_height(size.height));
         let old = self.viewport_height;
         if desired != old {
@@ -436,12 +420,14 @@ impl Renderer {
     pub fn tick_spinner(&mut self, term: &mut BoneTerminal, args: &PaneDraw<'_>) -> io::Result<()> {
         self.ensure_viewport_height(
             term,
-            args.input,
-            None,
-            args.pages,
-            args.active_page,
-            None,
-            args.running.len(),
+            &PaneSizing {
+                input: args.input,
+                prompt: None,
+                pages: args.pages,
+                active_page: args.active_page,
+                autocomplete: None,
+                running: args.running.len(),
+            },
         )?;
         term.draw(|frame| self.draw_bottom_pane(frame, args, None))?;
         Ok(())
@@ -489,10 +475,10 @@ fn render_scrollback_lines_with_bg(
             width,
             height,
         };
-        if let Some(bg) = user_background {
-            if line.spans.iter().any(|span| span.style.bg == Some(bg)) {
-                buf.set_style(area, ratatui::style::Style::default().bg(bg));
-            }
+        if let Some(bg) = user_background
+            && line.spans.iter().any(|span| span.style.bg == Some(bg))
+        {
+            buf.set_style(area, ratatui::style::Style::default().bg(bg));
         }
         Paragraph::new(line.clone())
             .wrap(Wrap { trim: false })

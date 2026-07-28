@@ -74,9 +74,9 @@ pub fn setup_api(
     // bone.submit(text) — queue a prompt for the frontend to submit, like
     // typed input. Drained between turns (or queued behind the active turn).
     let submit = lua
-        .create_function(|_, text: String| {
+        .create_function(|lua, text: String| {
             if !text.trim().is_empty() {
-                crate::ext::inbox::push(text);
+                crate::ext::inbox::for_lua(lua).push(text);
             }
             Ok(())
         })

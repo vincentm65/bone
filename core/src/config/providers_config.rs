@@ -262,6 +262,10 @@ impl Default for ProvidersConfig {
     }
 }
 
+fn version_one() -> u8 {
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,8 +280,4 @@ mod tests {
         assert!(validate_reasoning_effort("HIGH").is_ok());
         assert!(validate_reasoning_effort("extreme").is_err());
     }
-}
-
-fn version_one() -> u8 {
-    1
 }

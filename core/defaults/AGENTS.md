@@ -406,6 +406,16 @@ local outcome = ctx.agent.wait({ "job-1", "job-2" }, { timeout_ms = 300000 })
 
 `ids` is optional — `ctx.agent.wait(nil)` waits on all currently running jobs. Default timeout 300s, max 900s. Jobs returned by `wait` are marked consumed so they are not auto-injected again. Esc cancels the wait (`cancelled = true`); the jobs themselves keep running and their results auto-inject later. Jobs still running at timeout are listed in `pending` and also auto-inject on completion.
 
+Cancel a running job owned by the current conversation:
+```lua
+local result = ctx.agent.cancel("job-1")
+-- result: { ok = true }
+```
+
+An explicitly cancelled job is marked consumed, so its eventual cancellation
+result is not auto-injected into a later turn. Cancelling an unknown, finished,
+or different-conversation job returns `{ ok = false }`.
+
 **Auto-injection**: when a background job finishes unconsumed and the TUI is idle, results are injected as a new turn. The agent wakes up automatically — no polling needed. Results are truncated to 16k chars at injection time. Full results are spilled under the system temp directory as `bone-jobs/job-N.txt`; the job's `result_file` field points to that path when present.
 
 **Sub-agent pane**: the interactive TUI pane is rendered by Rust from the job registry, so it keeps updating even while Lua is blocked in a wait. The old Lua hook `bone._subagents_render` is no longer used.
