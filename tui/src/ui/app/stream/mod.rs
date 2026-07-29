@@ -45,6 +45,7 @@ pub(crate) struct KeySink {
 struct DrainKeysResult {
     mode_changed: bool,
     open_transcript: bool,
+    image_paste_error: Option<String>,
     open_job: Option<String>,
     open_process: Option<String>,
     jobs_changed: bool,
@@ -434,6 +435,10 @@ impl App {
                 if drained.open_transcript {
                     self.open_transcript_view(term)?;
                 }
+                if let Some(error) = drained.image_paste_error {
+                    self.messages
+                        .push(Message::system(format!("image paste failed: {error}")));
+                }
                 if drained.jobs_changed || drained.processes_changed {
                     self.refresh_jobs_pane();
                 }
@@ -709,6 +714,10 @@ impl App {
                 }
                 if drained.open_transcript {
                     self.open_transcript_view(term).ok();
+                }
+                if let Some(error) = drained.image_paste_error {
+                    self.messages
+                        .push(Message::system(format!("image paste failed: {error}")));
                 }
                 if drained.jobs_changed || drained.processes_changed {
                     self.refresh_jobs_pane();
@@ -1488,6 +1497,13 @@ impl App {
                     // on a oneshot that was never sent or dropped.
                     if pending_key.wants_key() {
                         pending_key.deliver(key_event_from_crossterm(key.code, key.modifiers));
+                        continue;
+                    }
+                    if super::keymap::is_image_paste_key(key.code, key.modifiers) {
+                        match super::keymap::clipboard_image() {
+                            Ok(image) => input.insert_image(image),
+                            Err(error) => result.image_paste_error = Some(error),
+                        }
                         continue;
                     }
                     if key.code == KeyCode::Char('o')

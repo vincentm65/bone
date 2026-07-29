@@ -21,11 +21,7 @@ impl App {
 
         // Hard-coded fallback: paste image on Ctrl+V / Alt+V (mimics the
         // default insert binding users expect without explicit configuration).
-        if code == KeyCode::Char('v')
-            && (modifiers == KeyModifiers::CONTROL
-                || modifiers == KeyModifiers::ALT
-                || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT))
-        {
+        if is_image_paste_key(code, modifiers) {
             return Some("paste_image".to_string());
         }
         None
@@ -137,20 +133,38 @@ impl App {
     }
 }
 
-fn clipboard_image() -> Result<crate::llm::ImageData, String> {
+pub(super) fn is_image_paste_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    matches!(code, KeyCode::Char('v' | 'V'))
+        && (modifiers == KeyModifiers::CONTROL
+            || modifiers == KeyModifiers::ALT
+            || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT))
+}
+
+pub(super) fn clipboard_image() -> Result<crate::llm::ImageData, String> {
+    // Prefer the native Wayland command. `arboard` may select its X11 backend
+    // under XWayland and wait for an unreachable X server before we ever reach
+    // the working Wayland fallback.
+    #[cfg(not(target_os = "android"))]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return wayland_clipboard_image().or_else(|wayland_err| {
+            arboard_clipboard_image()
+                .map_err(|arboard_err| format!("{wayland_err}; fallback failed: {arboard_err}"))
+        });
+    }
+
     // `arboard` has no Android backend, so there we rely solely on the external
     // clipboard command fallback.
     #[cfg(not(target_os = "android"))]
     match arboard_clipboard_image() {
         Ok(image) => Ok(image),
-        Err(arboard_err) => match external_clipboard_image() {
+        Err(arboard_err) => match x11_clipboard_image() {
             Ok(image) => Ok(image),
             Err(external_err) => Err(format!("{arboard_err}; fallback failed: {external_err}")),
         },
     }
 
     #[cfg(target_os = "android")]
-    external_clipboard_image()
+    x11_clipboard_image()
 }
 
 #[cfg(not(target_os = "android"))]
@@ -182,13 +196,13 @@ fn png_image_data(png_bytes: Vec<u8>) -> crate::llm::ImageData {
     }
 }
 
-fn external_clipboard_image() -> Result<crate::llm::ImageData, String> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && let Ok(image) = run_clipboard_command("wl-paste", &["--type", "image/png"])
-    {
-        return Ok(image);
-    }
+fn wayland_clipboard_image() -> Result<crate::llm::ImageData, String> {
+    run_clipboard_command("wl-paste", &["--type", "image/png"])
+        .or_else(|_| run_clipboard_command("wl-paste", &["--type", "image/jpeg"]))
+        .or_else(|_| run_clipboard_command("wl-paste", &["--type", "image/webp"]))
+}
 
+fn x11_clipboard_image() -> Result<crate::llm::ImageData, String> {
     run_clipboard_command(
         "xclip",
         &["-selection", "clipboard", "-t", "image/png", "-o"],
@@ -283,5 +297,23 @@ fn key_matches(key_str: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
             .next()
             .is_some_and(|ch| code == KeyCode::Char(ch)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_paste_shortcuts_accept_shifted_v() {
+        assert!(is_image_paste_key(
+            KeyCode::Char('V'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        ));
+        assert!(is_image_paste_key(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL
+        ));
+        assert!(!is_image_paste_key(KeyCode::Char('v'), KeyModifiers::NONE));
     }
 }

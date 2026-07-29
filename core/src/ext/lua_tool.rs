@@ -367,6 +367,53 @@ impl Tool for LuaTool {
     }
 }
 
+/// Emit bounded image-envelope diagnostics without logging attachment data.
+fn debug_image_envelope(images: &[crate::llm::ImageData]) {
+    if std::env::var("BONE_IMAGE_DEBUG").as_deref() != Ok("1") {
+        return;
+    }
+
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    crate::ext::ctx::runtime_warn(format!(
+        "bone-lua image envelope: image_count={}",
+        images.len()
+    ));
+    for (index, image) in images.iter().enumerate() {
+        match base64::engine::general_purpose::STANDARD.decode(&image.data) {
+            Ok(bytes) => {
+                let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+                let dimensions = if png && bytes.len() >= 24 {
+                    Some((
+                        u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+                        u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+                    ))
+                } else {
+                    None
+                };
+                let dimensions = dimensions
+                    .map(|(width, height)| format!("{width}x{height}"))
+                    .unwrap_or_else(|| "unknown".to_string());
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone-lua image envelope[{index}]: media_type={} base64_bytes={} decode_ok=true decoded_bytes={} png={} dimensions={} sha256={:x}",
+                    image.media_type,
+                    image.data.len(),
+                    bytes.len(),
+                    png,
+                    dimensions,
+                    Sha256::digest(&bytes),
+                ));
+            }
+            Err(_) => crate::ext::ctx::runtime_warn(format!(
+                "bone-lua image envelope[{index}]: media_type={} base64_bytes={} decode_ok=false",
+                image.media_type,
+                image.data.len(),
+            )),
+        }
+    }
+}
+
 /// Parse tool output text — tries JSON envelope, falls back to plain text.
 fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
     match serde_json::from_str::<serde_json::Value>(text.trim()) {
@@ -392,7 +439,7 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                 .and_then(|pane_val| PaneContent::from_json(pane_val).ok());
             // Optional `images`: an array of `{ media_type, data }` (base64),
             // relayed to vision-capable models. Malformed entries are skipped.
-            let images = map
+            let images: Vec<crate::llm::ImageData> = map
                 .get("images")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -409,6 +456,7 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                 .get("ephemeral_images")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            debug_image_envelope(&images);
             Ok(ToolOutput {
                 content,
                 images,
@@ -446,14 +494,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_ephemeral_image_envelopes() {
-        let output = parse_tool_output(
-            r#"{"content":"seen","images":[{"media_type":"image/jpeg","data":"base64"}],"ephemeral_images":true}"#,
-        )
-        .unwrap();
+    fn preserves_valid_ephemeral_png_bytes() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let envelope = serde_json::json!({
+            "content": "seen",
+            "images": [{"media_type": "image/png", "data": PNG}],
+            "ephemeral_images": true,
+        });
+        let output = parse_tool_output(&envelope.to_string()).unwrap();
+        let expected = base64::engine::general_purpose::STANDARD
+            .decode(PNG)
+            .unwrap();
+        let actual = base64::engine::general_purpose::STANDARD
+            .decode(&output.images[0].data)
+            .unwrap();
 
         assert_eq!(output.images.len(), 1);
-        assert_eq!(output.images[0].data, "base64");
+        assert_eq!(output.images[0].media_type, "image/png");
+        assert_eq!(actual, expected);
+        assert_eq!(Sha256::digest(&actual), Sha256::digest(&expected));
+        assert!(actual.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(output.ephemeral_images);
     }
 }

@@ -490,6 +490,72 @@ fn codex_debug_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Emit bounded diagnostics for exactly the image data URLs about to be serialized.
+fn debug_request_images(input: &[CodexInputItem]) {
+    if std::env::var("BONE_IMAGE_DEBUG").as_deref() != Ok("1") {
+        return;
+    }
+
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let images: Vec<&str> = input
+        .iter()
+        .filter_map(|item| match item {
+            CodexInputItem::Message { content, .. } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|content| match content {
+            CodexContent::InputImage { image_url } => Some(image_url.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    crate::ext::ctx::runtime_warn(format!(
+        "codex request images: image_count={}",
+        images.len()
+    ));
+    for (index, image_url) in images.into_iter().enumerate() {
+        let Some((media_type, data)) = image_url
+            .strip_prefix("data:")
+            .and_then(|value| value.split_once(";base64,"))
+        else {
+            crate::ext::ctx::runtime_warn(format!(
+                "codex request images[{index}]: media_type=unknown base64_bytes=0 decode_ok=false"
+            ));
+            continue;
+        };
+
+        match base64::engine::general_purpose::STANDARD.decode(data) {
+            Ok(bytes) => {
+                let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+                let dimensions = if png && bytes.len() >= 24 {
+                    Some((
+                        u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+                        u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+                    ))
+                } else {
+                    None
+                };
+                let dimensions = dimensions
+                    .map(|(width, height)| format!("{width}x{height}"))
+                    .unwrap_or_else(|| "unknown".to_string());
+                crate::ext::ctx::runtime_warn(format!(
+                    "codex request images[{index}]: media_type={media_type} base64_bytes={} decode_ok=true decoded_bytes={} png={png} dimensions={dimensions} sha256={:x}",
+                    data.len(),
+                    bytes.len(),
+                    Sha256::digest(&bytes),
+                ));
+            }
+            Err(_) => crate::ext::ctx::runtime_warn(format!(
+                "codex request images[{index}]: media_type={media_type} base64_bytes={} decode_ok=false",
+                data.len(),
+            )),
+        }
+    }
+}
+
 /// Monotonic request counter so a request dump and its later usage line share a
 /// stable `#N` and consecutive requests are diffable in order.
 static CODEX_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -611,6 +677,8 @@ impl LlmProvider for CodexProvider {
             prompt_cache_key,
             include: Some(vec!["reasoning.encrypted_content"]),
         };
+
+        debug_request_images(&request.input);
 
         // Diagnostic: dump the request body (gated by BONE_CODEX_DEBUG) so the
         // matching usage line can correlate by sequence number.

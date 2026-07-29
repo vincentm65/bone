@@ -29,21 +29,36 @@ fn test_build_codex_messages_user() {
 }
 
 #[test]
-fn test_build_codex_messages_user_images() {
+fn test_build_codex_messages_preserves_valid_png_bytes() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     let messages = vec![ChatMessage::user_with_images(
         "look",
         vec![ImageData {
             media_type: "image/png".to_string(),
-            data: "abc".to_string(),
+            data: PNG.to_string(),
         }],
     )];
     let items = build_codex_messages(messages);
     let json = serde_json::to_value(&items[0]).unwrap();
+    let image_url = json["content"][1]["image_url"].as_str().unwrap();
+    let data = image_url.strip_prefix("data:image/png;base64,").unwrap();
+    let expected = base64::engine::general_purpose::STANDARD
+        .decode(PNG)
+        .unwrap();
+    let actual = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+
     assert_eq!(json["role"], "user");
     assert_eq!(json["content"][0]["type"], "input_text");
     assert_eq!(json["content"][0]["text"], "look");
     assert_eq!(json["content"][1]["type"], "input_image");
-    assert_eq!(json["content"][1]["image_url"], "data:image/png;base64,abc");
+    assert_eq!(actual, expected);
+    assert_eq!(Sha256::digest(&actual), Sha256::digest(&expected));
+    assert!(actual.starts_with(b"\x89PNG\r\n\x1a\n"));
 }
 
 #[test]

@@ -63,6 +63,16 @@ fn append_turn_messages(request_history: &mut Vec<ChatMessage>, turn_messages: &
     }
 }
 
+fn restore_ephemeral_image_relay(
+    request_history: &mut Vec<ChatMessage>,
+    relay: &mut Option<(usize, ChatMessage)>,
+) {
+    if let Some((index, message)) = relay {
+        *index = request_history.len();
+        request_history.push(message.clone());
+    }
+}
+
 #[cfg(test)]
 #[path = "driver_tests.rs"]
 mod driver_tests;
@@ -392,9 +402,10 @@ impl Driver {
         // lets each tool round extend the previous provider-cache prefix while
         // still leaving them out of the persisted transcript.
         let mut request_history = history.clone();
-        // Request-only relay for ephemeral tool images. The index stays valid
-        // across appends and is cleared whenever request history is rebuilt.
-        let mut ephemeral_image_relay: Option<usize> = None;
+        // Request-only relay for ephemeral tool images. Keep both its current
+        // index and payload so history rebuilds can restore it without ever
+        // adding the screenshot to the persisted transcript.
+        let mut ephemeral_image_relay: Option<(usize, ChatMessage)> = None;
         let mut last_turn_messages: Vec<String> = Vec::new();
         // The Codex backend returns routing state on the first request of a
         // user turn. Keep it across retries and tool rounds in this run, but
@@ -507,7 +518,10 @@ impl Driver {
                         history =
                             build_chat_history(&transcript, system_prompt_override.as_deref());
                         request_history = history.clone();
-                        ephemeral_image_relay = None;
+                        restore_ephemeral_image_relay(
+                            &mut request_history,
+                            &mut ephemeral_image_relay,
+                        );
                         last_turn_messages.clear();
                         // The rewrite invalidates the provider-report anchor
                         // (its char count belongs to the discarded history).
@@ -536,7 +550,7 @@ impl Driver {
                     let combined = format!("{base}\n\n{}", sys_appends.join("\n\n"));
                     history = build_chat_history(&transcript, Some(&combined));
                     request_history = history.clone();
-                    ephemeral_image_relay = None;
+                    restore_ephemeral_image_relay(&mut request_history, &mut ephemeral_image_relay);
                     last_turn_messages.clear();
                     let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
                     token_stats.context_length =
@@ -945,11 +959,12 @@ impl Driver {
                     let note = format!("Image output from {}:", result.name);
                     let relay = ChatMessage::user_with_images(note, result.images.clone());
                     if result.ephemeral_images {
-                        if let Some(index) = ephemeral_image_relay.take() {
+                        if let Some((index, _)) = ephemeral_image_relay.take() {
                             request_history.remove(index);
                         }
-                        ephemeral_image_relay = Some(request_history.len());
-                        request_history.push(relay);
+                        let index = request_history.len();
+                        request_history.push(relay.clone());
+                        ephemeral_image_relay = Some((index, relay));
                     } else {
                         session_seq += 1;
                         session.append_chat_message(&relay, session_seq);
