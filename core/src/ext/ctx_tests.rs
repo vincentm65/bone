@@ -868,7 +868,7 @@ async fn extension_processes_are_conversation_scoped() {
 }
 
 #[test]
-fn ctx_exec_and_codec_are_available_and_codec_is_binary_safe() {
+fn ctx_exec_and_codec_are_available_and_binary_safe() {
     let cfg = test_ctx_config();
     let lua = Lua::new();
     let ctx = create_ctx_table(&lua, &cfg).unwrap();
@@ -878,8 +878,13 @@ fn ctx_exec_and_codec_are_available_and_codec_is_binary_safe() {
         .eval()
         .unwrap();
     assert_eq!(encoded, "AP8=");
+    let hash: String = lua.load("return ctx.codec.sha256('abc')").eval().unwrap();
+    assert_eq!(
+        hash,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
     let available: bool = lua
-        .load("return type(ctx.exec) == 'function' and type(ctx.codec.base64_encode) == 'function'")
+        .load("return type(ctx.exec) == 'function' and type(ctx.codec.base64_encode) == 'function' and type(ctx.codec.sha256) == 'function'")
         .eval()
         .unwrap();
     assert!(available);

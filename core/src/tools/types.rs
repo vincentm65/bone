@@ -4,7 +4,7 @@
 //! non-wire types (`ToolDisplayConfig`, `ToolExecutionContext`,
 //! `Tool`) stay core-local.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use crate::pane_content::KeyRequest;
 use async_trait::async_trait;
@@ -20,6 +20,8 @@ pub struct ToolDisplayConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub template: Option<String>,
+    #[serde(default)]
+    pub value_labels: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     pub show: Option<bool>,
     #[serde(default)]

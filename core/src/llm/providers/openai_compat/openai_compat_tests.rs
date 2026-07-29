@@ -180,6 +180,9 @@ fn serializes_images_as_openai_content_parts() {
         vec![ImageData {
             media_type: "image/png".to_string(),
             data: "abc".to_string(),
+            width: Some(1),
+            height: Some(1),
+            sha256: Some("ignored-metadata".into()),
         }],
     )]);
     let json = serde_json::to_value(&messages[0]).unwrap();
@@ -191,6 +194,9 @@ fn serializes_images_as_openai_content_parts() {
         json["content"][1]["image_url"]["url"],
         "data:image/png;base64,abc"
     );
+    assert!(json["content"][1].get("width").is_none());
+    assert!(json["content"][1].get("height").is_none());
+    assert!(json["content"][1].get("sha256").is_none());
 }
 
 #[test]

@@ -77,6 +77,11 @@ impl LuaTool {
                     .unwrap_or_default();
 
                 let template: Option<String> = t.get::<Option<String>>("template").ok().flatten();
+                let value_labels = t
+                    .get::<mlua::Value>("value_labels")
+                    .ok()
+                    .and_then(|value| lua.from_value(value).ok())
+                    .unwrap_or_default();
 
                 let show: Option<bool> = t.get::<Option<bool>>("show").ok().flatten();
                 let show_result: Option<bool> = t.get::<Option<bool>>("show_result").ok().flatten();
@@ -85,6 +90,7 @@ impl LuaTool {
                 ToolDisplayConfig {
                     args,
                     template,
+                    value_labels,
                     show,
                     show_result,
                     eager,
@@ -437,8 +443,8 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
             let pane_page = map
                 .get("pane")
                 .and_then(|pane_val| PaneContent::from_json(pane_val).ok());
-            // Optional `images`: an array of `{ media_type, data }` (base64),
-            // relayed to vision-capable models. Malformed entries are skipped.
+            // Optional `images`: an array of image attachments (base64), relayed
+            // to vision-capable models. Malformed entries are skipped.
             let images: Vec<crate::llm::ImageData> = map
                 .get("images")
                 .and_then(|v| v.as_array())
@@ -447,7 +453,24 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                         .filter_map(|img| {
                             let media_type = img.get("media_type")?.as_str()?.to_string();
                             let data = img.get("data")?.as_str()?.to_string();
-                            Some(crate::llm::ImageData { media_type, data })
+                            let dimension = |key| {
+                                img.get(key)
+                                    .and_then(|value| value.as_u64())
+                                    .and_then(|value| u32::try_from(value).ok())
+                            };
+                            let width = dimension("width");
+                            let height = dimension("height");
+                            let sha256 = img
+                                .get("sha256")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned);
+                            Some(crate::llm::ImageData {
+                                media_type,
+                                data,
+                                width,
+                                height,
+                                sha256,
+                            })
                         })
                         .collect()
                 })
@@ -499,23 +522,35 @@ mod tests {
         use sha2::{Digest, Sha256};
 
         const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-        let envelope = serde_json::json!({
-            "content": "seen",
-            "images": [{"media_type": "image/png", "data": PNG}],
-            "ephemeral_images": true,
-        });
-        let output = parse_tool_output(&envelope.to_string()).unwrap();
         let expected = base64::engine::general_purpose::STANDARD
             .decode(PNG)
             .unwrap();
+        let expected_hash = format!("{:x}", Sha256::digest(&expected));
+        let envelope = serde_json::json!({
+            "content": "seen",
+            "images": [{
+                "media_type": "image/png",
+                "data": PNG,
+                "width": 1,
+                "height": 1,
+                "sha256": expected_hash,
+            }],
+            "ephemeral_images": true,
+        });
+        let output = parse_tool_output(&envelope.to_string()).unwrap();
         let actual = base64::engine::general_purpose::STANDARD
             .decode(&output.images[0].data)
             .unwrap();
 
         assert_eq!(output.images.len(), 1);
         assert_eq!(output.images[0].media_type, "image/png");
+        assert_eq!(output.images[0].width, Some(1));
+        assert_eq!(output.images[0].height, Some(1));
+        assert_eq!(
+            output.images[0].sha256.as_deref(),
+            Some(expected_hash.as_str())
+        );
         assert_eq!(actual, expected);
-        assert_eq!(Sha256::digest(&actual), Sha256::digest(&expected));
         assert!(actual.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(output.ephemeral_images);
     }

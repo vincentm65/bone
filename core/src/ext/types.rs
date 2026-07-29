@@ -1069,7 +1069,16 @@ pub(crate) fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::l
                 if media_type.is_empty() || data.is_empty() {
                     continue;
                 }
-                msg.images.push(crate::llm::ImageData { media_type, data });
+                let width = image.get::<Option<u32>>("width").ok().flatten();
+                let height = image.get::<Option<u32>>("height").ok().flatten();
+                let sha256 = image.get::<Option<String>>("sha256").ok().flatten();
+                msg.images.push(crate::llm::ImageData {
+                    media_type,
+                    data,
+                    width,
+                    height,
+                    sha256,
+                });
             }
         }
         msg.name = name;

@@ -39,6 +39,9 @@ fn test_build_codex_messages_preserves_valid_png_bytes() {
         vec![ImageData {
             media_type: "image/png".to_string(),
             data: PNG.to_string(),
+            width: Some(1),
+            height: Some(1),
+            sha256: Some("ignored-metadata".into()),
         }],
     )];
     let items = build_codex_messages(messages);
@@ -56,6 +59,9 @@ fn test_build_codex_messages_preserves_valid_png_bytes() {
     assert_eq!(json["content"][0]["type"], "input_text");
     assert_eq!(json["content"][0]["text"], "look");
     assert_eq!(json["content"][1]["type"], "input_image");
+    assert!(json["content"][1].get("width").is_none());
+    assert!(json["content"][1].get("height").is_none());
+    assert!(json["content"][1].get("sha256").is_none());
     assert_eq!(actual, expected);
     assert_eq!(Sha256::digest(&actual), Sha256::digest(&expected));
     assert!(actual.starts_with(b"\x89PNG\r\n\x1a\n"));

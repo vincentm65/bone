@@ -58,18 +58,6 @@ impl CommandSafety {
             _ => Self::Danger,
         }
     }
-
-    /// Apply argument-aware policy to a dynamically registered tool's declared safety.
-    pub fn for_dynamic_call(call: &ToolCall, declared: Self) -> Self {
-        if call.name == "computer" {
-            match call.arguments.get("action").and_then(Value::as_str) {
-                Some("observe") => Self::ReadOnly,
-                _ => Self::Danger,
-            }
-        } else {
-            declared
-        }
-    }
 }
 
 fn peel_shell_wrapper<'a>(command: &'a str, policy: &CommandPolicy) -> &'a str {

@@ -156,6 +156,7 @@ fn dynamic_display_args_render_in_tool_label() {
             "indices".to_string(),
         ],
         template: None,
+        value_labels: Default::default(),
         show: None,
         show_result: None,
         eager: None,
@@ -189,6 +190,7 @@ fn dynamic_display_template_renders_in_tool_label() {
     let display = ToolDisplayConfig {
         args: Vec::new(),
         template: Some("search {query}".to_string()),
+        value_labels: Default::default(),
         show: None,
         show_result: None,
         eager: None,
@@ -197,6 +199,76 @@ fn dynamic_display_template_renders_in_tool_label() {
     assert_eq!(
         tool_label(&call, &result, Some(&display)),
         "web_search search \"rust async\""
+    );
+}
+
+#[test]
+fn dynamic_display_value_labels_render_in_tool_label() {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "custom_tool".to_string(),
+        arguments: json!({ "action": "semantic_find" }),
+    };
+    let result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "custom_tool".to_string(),
+        content: String::new(),
+        images: Vec::new(),
+        ephemeral_images: false,
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+    let display = ToolDisplayConfig {
+        template: Some("{action}".to_string()),
+        value_labels: std::collections::HashMap::from([(
+            "action".to_string(),
+            std::collections::HashMap::from([(
+                "semantic_find".to_string(),
+                "finding accessible controls".to_string(),
+            )]),
+        )]),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        tool_label(&call, &result, Some(&display)),
+        "custom_tool finding accessible controls"
+    );
+}
+
+#[test]
+fn hidden_success_results_still_retain_errors() {
+    let call = ToolCall {
+        id: "call-1".to_string(),
+        name: "custom_tool".to_string(),
+        arguments: json!({}),
+    };
+    let mut result = ToolResult {
+        call_id: "call-1".to_string(),
+        name: "custom_tool".to_string(),
+        content: "machine JSON".to_string(),
+        images: Vec::new(),
+        ephemeral_images: false,
+        is_error: false,
+        pane_page: None,
+        state: None,
+    };
+    let display = ToolDisplayConfig {
+        show_result: Some(false),
+        ..Default::default()
+    };
+
+    assert!(
+        build_tool_row(&call, &result, Some(&display))
+            .content
+            .is_empty()
+    );
+    result.is_error = true;
+    result.content = "visible failure".to_string();
+    assert_eq!(
+        build_tool_row(&call, &result, Some(&display)).content,
+        "visible failure"
     );
 }
 
@@ -233,6 +305,7 @@ fn subagent_display() -> ToolDisplayConfig {
             "ids".to_string(),
         ],
         template: Some("dispatch: {tasks[].title|task}".to_string()),
+        value_labels: Default::default(),
         show: Some(true),
         show_result: Some(false),
         eager: Some(true),

@@ -785,7 +785,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     )?;
     ctx.set("exec", exec_fn)?;
 
-    // ctx.codec.base64_encode(binary_string) -> binary-safe base64 text.
+    // ctx.codec — binary-safe encoding and hashing helpers.
     let codec = lua.create_table()?;
     codec.set(
         "base64_encode",
@@ -794,6 +794,13 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             Ok(lua.create_string(
                 base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
             )?)
+        })?,
+    )?;
+    codec.set(
+        "sha256",
+        lua.create_function(|_, input: mlua::String| {
+            use sha2::{Digest, Sha256};
+            Ok(format!("{:x}", Sha256::digest(input.as_bytes())))
         })?,
     )?;
     ctx.set("codec", codec)?;

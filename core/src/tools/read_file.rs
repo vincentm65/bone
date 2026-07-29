@@ -181,6 +181,7 @@ impl ReadFileTool {
                 vec![ImageData {
                     media_type: media_type.to_string(),
                     data,
+                    ..Default::default()
                 }],
             ));
         }

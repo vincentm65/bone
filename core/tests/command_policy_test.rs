@@ -50,9 +50,9 @@ fn shell_process_actions_have_action_specific_safety() {
 }
 
 #[test]
-fn dynamic_computer_safety_only_allows_exact_observe() {
+fn dynamic_tools_use_their_declared_safety() {
     let dynamic_safety = HashMap::from([
-        ("computer".to_string(), CommandSafety::Danger),
+        ("dangerous_dynamic".to_string(), CommandSafety::Danger),
         ("read_only_dynamic".to_string(), CommandSafety::ReadOnly),
     ]);
     let handler = ToolHandler::with_enabled_safety_and_display(
@@ -64,25 +64,9 @@ fn dynamic_computer_safety_only_allows_exact_observe() {
     );
 
     assert_eq!(
-        handler.safety_for_call(&call("computer", json!({ "action": "observe" }))),
-        CommandSafety::ReadOnly
+        handler.safety_for_call(&call("dangerous_dynamic", json!({}))),
+        CommandSafety::Danger
     );
-
-    for arguments in [
-        json!({}),
-        json!({ "action": null }),
-        json!({ "action": 1 }),
-        json!({ "action": "Observe" }),
-        json!({ "action": "unknown" }),
-        json!({ "action": "move" }),
-    ] {
-        assert_eq!(
-            handler.safety_for_call(&call("computer", arguments.clone())),
-            CommandSafety::Danger,
-            "arguments: {arguments}"
-        );
-    }
-
     assert_eq!(
         handler.safety_for_call(&call("read_only_dynamic", json!({}))),
         CommandSafety::ReadOnly

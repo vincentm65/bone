@@ -46,6 +46,9 @@ fn history_rebuild_restores_ephemeral_image_relay() {
     let image = crate::llm::ImageData {
         media_type: "image/png".to_string(),
         data: "png-data".to_string(),
+        width: Some(1920),
+        height: Some(1080),
+        sha256: Some("abc123def456".into()),
     };
     let relay = ChatMessage::user_with_images("screenshot", vec![image]);
     let mut request_history = vec![ChatMessage::new(ChatRole::User, "rebuilt")];
@@ -56,4 +59,10 @@ fn history_rebuild_restores_ephemeral_image_relay() {
     assert_eq!(ephemeral_relay.as_ref().map(|(index, _)| *index), Some(1));
     assert_eq!(request_history.len(), 2);
     assert_eq!(request_history[1].images[0].data, "png-data");
+    assert_eq!(request_history[1].images[0].width, Some(1920));
+    assert_eq!(request_history[1].images[0].height, Some(1080));
+    assert_eq!(
+        request_history[1].images[0].sha256.as_deref(),
+        Some("abc123def456")
+    );
 }

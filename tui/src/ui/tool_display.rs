@@ -20,7 +20,7 @@ pub fn build_tool_row(
     };
     // ShellTool caps stdout/stderr before returning; retained shell content is
     // the full post-cap output used by the expanded transcript viewer.
-    let content = if is_shell || show_result {
+    let content = if is_shell || show_result || result.is_error {
         result.content.clone()
     } else {
         String::new()
@@ -93,7 +93,7 @@ fn truncate_label(s: &str, max: usize) -> String {
 
 fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<String> {
     if let Some(template) = display.template.as_deref()
-        && let Some(rendered) = render_display_template(template, &call.arguments)
+        && let Some(rendered) = render_display_template(template, &call.arguments, display)
         && !rendered.trim().is_empty()
     {
         return Some(format!("{} {}", call.name, rendered.trim()));
@@ -106,7 +106,12 @@ fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<
             call.arguments
                 .get(arg)
                 .filter(|value| !value.is_null())
-                .map(|value| format!("{arg}={}", format_display_value(value)))
+                .map(|value| {
+                    format!(
+                        "{arg}={}",
+                        format_labeled_display_value(arg, value, display)
+                    )
+                })
         })
         .collect::<Vec<_>>();
 
@@ -126,7 +131,11 @@ fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<
 /// to nothing (array arg absent or empty) — this lets a "list" template apply
 /// only when the list is present (e.g. a dispatch label that shouldn't render
 /// for non-dispatch actions), falling back to the `args` label instead.
-fn render_display_template(template: &str, arguments: &Value) -> Option<String> {
+fn render_display_template(
+    template: &str,
+    arguments: &Value,
+    display: &ToolDisplayConfig,
+) -> Option<String> {
     let map = arguments.as_object();
     let mut out = String::new();
     let mut rest = template;
@@ -160,9 +169,8 @@ fn render_display_template(template: &str, arguments: &Value) -> Option<String> 
                 empty_array_placeholder = true;
             }
             out.push_str(&items.join(", "));
-        } else {
-            let value = map.and_then(|m| m.get(key));
-            out.push_str(&value.map(format_display_value).unwrap_or_default());
+        } else if let Some(value) = map.and_then(|map| map.get(key)) {
+            out.push_str(&format_labeled_display_value(key, value, display));
         }
     }
     out.push_str(rest);
@@ -186,6 +194,14 @@ fn pick_field(el: &Value, fields: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn format_labeled_display_value(arg: &str, value: &Value, display: &ToolDisplayConfig) -> String {
+    value
+        .as_str()
+        .and_then(|value| display.value_labels.get(arg)?.get(value))
+        .cloned()
+        .unwrap_or_else(|| format_display_value(value))
 }
 
 fn format_display_value(value: &Value) -> String {

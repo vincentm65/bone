@@ -372,7 +372,6 @@ impl ToolHandler {
         self.dynamic_safety
             .get(&call.name)
             .copied()
-            .map(|declared| CommandSafety::for_dynamic_call(call, declared))
             .unwrap_or_else(|| CommandSafety::for_call(call))
     }
 

@@ -965,6 +965,9 @@ impl Tool for EphemeralImageTool {
             images: vec![bone_core::llm::ImageData {
                 media_type: "image/jpeg".into(),
                 data: format!("ephemeral-base64-{call}"),
+                width: Some(100 + call as u32),
+                height: Some(200 + call as u32),
+                sha256: Some(format!("sha256-{call}")),
             }],
             ephemeral_images: true,
             ..Default::default()
@@ -1025,14 +1028,32 @@ async fn driver_keeps_only_latest_ephemeral_image_in_request_history() {
 
     let captured = llm.captured.lock().unwrap();
     assert_eq!(captured.len(), 3);
-    let image_data = |messages: &[ChatMessage]| {
+    let images = |messages: &[ChatMessage]| {
         messages
             .iter()
-            .flat_map(|message| message.images.iter().map(|image| image.data.clone()))
+            .flat_map(|message| message.images.iter().cloned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(image_data(&captured[1]), vec!["ephemeral-base64-1"]);
-    assert_eq!(image_data(&captured[2]), vec!["ephemeral-base64-2"]);
+    assert_eq!(
+        images(&captured[1]),
+        vec![bone_core::llm::ImageData {
+            media_type: "image/jpeg".into(),
+            data: "ephemeral-base64-1".into(),
+            width: Some(101),
+            height: Some(201),
+            sha256: Some("sha256-1".into()),
+        }]
+    );
+    assert_eq!(
+        images(&captured[2]),
+        vec![bone_core::llm::ImageData {
+            media_type: "image/jpeg".into(),
+            data: "ephemeral-base64-2".into(),
+            width: Some(102),
+            height: Some(202),
+            sha256: Some("sha256-2".into()),
+        }]
+    );
 
     for message in outcome
         .transcript

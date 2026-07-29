@@ -600,6 +600,9 @@ bone.tool.register({
       show_result = true,    -- show the result in the pane
       args = { "action" },   -- which arg values to display
       template = "{action}", -- format string for the row label
+      value_labels = {        -- optional readable labels for scalar values
+          action = { run = "running", status = "checking status" },
+      },
       eager = false,         -- render the row at call time, not on result
   }
   ```

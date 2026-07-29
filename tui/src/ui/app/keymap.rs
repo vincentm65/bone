@@ -193,6 +193,7 @@ fn png_image_data(png_bytes: Vec<u8>) -> crate::llm::ImageData {
     crate::llm::ImageData {
         media_type: "image/png".to_string(),
         data: base64::engine::general_purpose::STANDARD.encode(png_bytes),
+        ..Default::default()
     }
 }
 
@@ -244,6 +245,7 @@ fn run_clipboard_command(command: &str, args: &[&str]) -> Result<crate::llm::Ima
     Ok(crate::llm::ImageData {
         media_type: media_type.to_string(),
         data: base64::engine::general_purpose::STANDARD.encode(output.stdout),
+        ..Default::default()
     })
 }
 /// Match a Lua key string (e.g. "<C-p>", "<S-Tab>") against a KeyCode + modifiers.
