@@ -187,7 +187,7 @@ impl ConfigStore {
         }
         super::providers_config::validate_reasoning_effort(&update.reasoning_effort)
             .map_err(|error| (inner.revision, error))?;
-        if update.max_concurrency == 0 {
+        if update.max_concurrency == Some(0) {
             return Err((
                 inner.revision,
                 format!("providers.{}.max_concurrency must be at least 1", update.id),
@@ -211,7 +211,7 @@ impl ConfigStore {
                 endpoint: update.endpoint.clone(),
                 handler: update.handler.clone(),
                 context_window_tokens: update.context_window_tokens,
-                max_concurrency: Some(update.max_concurrency),
+                max_concurrency: update.max_concurrency,
                 reasoning_effort: update.reasoning_effort.clone(),
             },
         );
@@ -561,7 +561,7 @@ impl ConfigStore {
                 endpoint: provider.endpoint.clone(),
                 handler: provider.handler.clone(),
                 context_window_tokens: provider.context_window_tokens,
-                max_concurrency: provider.max_concurrency(),
+                max_concurrency: provider.max_concurrency,
                 reasoning_effort: provider.reasoning_effort.clone(),
                 api_key_configured: !provider.api_key.is_empty(),
             })
@@ -702,7 +702,7 @@ impl ConfigStore {
     ) -> Result<(), (u64, String)> {
         self.mutate(expected, |inner| {
             super::providers_config::validate_reasoning_effort(&update.reasoning_effort)?;
-            if update.max_concurrency == 0 {
+            if update.max_concurrency == Some(0) {
                 return Err(format!(
                     "providers.{}.max_concurrency must be at least 1",
                     update.id
@@ -724,7 +724,7 @@ impl ConfigStore {
                 endpoint: update.endpoint,
                 handler: update.handler,
                 context_window_tokens: update.context_window_tokens,
-                max_concurrency: Some(update.max_concurrency),
+                max_concurrency: update.max_concurrency,
                 reasoning_effort: update.reasoning_effort,
             };
             let mut candidate = inner.providers.clone();
@@ -897,7 +897,7 @@ mod tests {
             endpoint: "/chat/completions".into(),
             handler: "openai".into(),
             context_window_tokens: None,
-            max_concurrency: 1,
+            max_concurrency: None,
             reasoning_effort: "extreme".into(),
             api_key: None,
         };

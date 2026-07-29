@@ -1781,9 +1781,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "openai".into()),
                 context_window_tokens: entry.get("context_window_tokens")?,
-                max_concurrency: entry
-                    .get::<Option<usize>>("max_concurrency")?
-                    .unwrap_or(crate::config::ProviderEntry::DEFAULT_MAX_CONCURRENCY),
+                max_concurrency: entry.get("max_concurrency")?,
                 reasoning_effort: entry
                     .get::<Option<String>>("reasoning_effort")?
                     .unwrap_or_default(),
@@ -1901,7 +1899,7 @@ async fn wall_elapsed(ms: Option<u64>) {
 
 async fn acquire_provider_slot(
     provider: &str,
-    max_concurrency: usize,
+    max_concurrency: Option<usize>,
     cancelled: Option<&Arc<AtomicBool>>,
     wall_timeout_ms: Option<u64>,
 ) -> Result<(crate::ext::provider_slots::ProviderPermit, Option<u64>), String> {
@@ -2290,7 +2288,7 @@ struct InheritedCtx {
 struct BuiltAgent {
     request: crate::agent::AgentRequest,
     provider: String,
-    max_concurrency: usize,
+    max_concurrency: Option<usize>,
     activity: Arc<AtomicU64>,
     timeout_ms: u64,
     wall_timeout_ms: Option<u64>,
@@ -2454,7 +2452,7 @@ fn build_agent_request(
         .providers
         .get(&provider_id)
         .ok_or_else(|| format!("unknown provider `{provider_id}`"))?
-        .max_concurrency();
+        .max_concurrency;
     let max_tokens = match opt_u64(opts, "max_tokens") {
         Some(0) | None => None,
         Some(n) if n <= u32::MAX as u64 => Some(n as u32),

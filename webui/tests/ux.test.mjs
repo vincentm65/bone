@@ -286,11 +286,11 @@ test("primary dynamic controls use native buttons", () => {
   assert.match(css, /:focus-visible/);
 });
 
-test("provider editor exposes and preserves max concurrency", () => {
+test("provider editor supports optional max concurrency", () => {
   const providerEditor = js.slice(js.indexOf("const PROVIDER_FIELDS"), js.indexOf("// Inline add-provider form"));
   assert.match(providerEditor, /key: "max_concurrency"/);
-  assert.match(providerEditor, /Max concurrency must be a positive integer/);
-  assert.match(bridge, /max_concurrency: merged\.max_concurrency \?\? 1/);
+  assert.match(providerEditor, /Max concurrency must be blank or a positive integer/);
+  assert.match(bridge, /max_concurrency: merged\.max_concurrency \?\? null/);
 });
 
 test("subagent calls render as agent cards with live per-task status", () => {

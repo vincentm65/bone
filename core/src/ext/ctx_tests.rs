@@ -624,11 +624,11 @@ fn provider_slot_wait_counts_toward_wall_timeout() {
     unsafe { std::env::set_var("BONE_DIR", temp.path()) };
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let _held = crate::ext::provider_slots::acquire("wall-test", 1, None)
+        let _held = crate::ext::provider_slots::acquire("wall-test", Some(1), None)
             .await
             .unwrap();
         let started = std::time::Instant::now();
-        let error = acquire_provider_slot("wall-test", 1, None, Some(20))
+        let error = acquire_provider_slot("wall-test", Some(1), None, Some(20))
             .await
             .err()
             .unwrap();

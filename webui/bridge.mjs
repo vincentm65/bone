@@ -689,7 +689,7 @@ function providerUpdate(id, provider, fields = {}) {
     endpoint: merged.endpoint ?? "",
     handler: merged.handler ?? "",
     context_window_tokens: merged.context_window_tokens ?? null,
-    max_concurrency: merged.max_concurrency ?? 1,
+    max_concurrency: merged.max_concurrency ?? null,
     reasoning_effort: merged.reasoning_effort ?? "",
     ...(Object.hasOwn(fields, "api_key") ? { api_key: fields.api_key } : {}),
   };

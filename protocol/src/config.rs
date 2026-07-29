@@ -61,8 +61,8 @@ pub struct ProviderConfig {
     pub endpoint: String,
     pub handler: String,
     pub context_window_tokens: Option<u64>,
-    #[serde(default = "default_provider_max_concurrency")]
-    pub max_concurrency: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
     pub reasoning_effort: String,
     pub api_key_configured: bool,
 }
@@ -78,15 +78,11 @@ pub struct ProviderUpdate {
     pub endpoint: String,
     pub handler: String,
     pub context_window_tokens: Option<u64>,
-    #[serde(default = "default_provider_max_concurrency")]
-    pub max_concurrency: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
     pub reasoning_effort: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-}
-
-fn default_provider_max_concurrency() -> usize {
-    1
 }
 
 #[cfg(test)]
@@ -103,7 +99,7 @@ mod tests {
             endpoint: "/chat/completions".into(),
             handler: "openai".into(),
             context_window_tokens: None,
-            max_concurrency: 1,
+            max_concurrency: None,
             reasoning_effort: String::new(),
             api_key_configured: true,
         };
@@ -125,6 +121,7 @@ mod tests {
             "reasoning_effort": ""
         }))
         .unwrap();
+        assert_eq!(update.max_concurrency, None);
         assert_eq!(update.api_key, None);
     }
 }

@@ -111,7 +111,7 @@ pub struct ProviderEntry {
     pub context_window_tokens: Option<u64>,
 
     /// Maximum delegated agents that may use this provider at once, shared
-    /// across Bone processes. Missing values preserve the historical default.
+    /// across Bone processes. Missing values mean unlimited concurrency.
     #[serde(default, deserialize_with = "optional_usize")]
     pub max_concurrency: Option<usize>,
 
@@ -215,13 +215,6 @@ pub fn validate_reasoning_effort(value: &str) -> Result<(), String> {
 }
 
 impl ProviderEntry {
-    pub const DEFAULT_MAX_CONCURRENCY: usize = 1;
-
-    pub fn max_concurrency(&self) -> usize {
-        self.max_concurrency
-            .unwrap_or(Self::DEFAULT_MAX_CONCURRENCY)
-    }
-
     /// Non-empty reasoning effort for request builders. Empty/`default` → None.
     pub fn reasoning_effort_opt(&self) -> Option<String> {
         match self.reasoning_effort.trim() {

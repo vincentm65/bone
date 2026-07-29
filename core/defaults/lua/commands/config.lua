@@ -87,7 +87,7 @@ local function edit_provider(ctx, provider)
       api_key = "",
       api_key_configured = provider.api_key_configured == true,
       context_window_tokens = provider.context_window_tokens,
-      max_concurrency = provider.max_concurrency or 1,
+      max_concurrency = provider.max_concurrency,
       reasoning_effort = provider.reasoning_effort or "",
    }
 
@@ -101,7 +101,7 @@ local function edit_provider(ctx, provider)
          "api_key \u{00b7} " .. (entry.api_key ~= "" and mask_secret(entry.api_key)
             or (entry.api_key_configured and "(configured)" or "(empty)")),
          "context_window_tokens \u{00b7} " .. tostring(entry.context_window_tokens or "unknown"),
-         "max_concurrency \u{00b7} " .. tostring(entry.max_concurrency),
+         "max_concurrency \u{00b7} " .. tostring(entry.max_concurrency or "unlimited"),
          "reasoning_effort \u{00b7} " .. (entry.reasoning_effort ~= "" and entry.reasoning_effort or "default"),
          "Save changes",
       }
@@ -137,13 +137,17 @@ local function edit_provider(ctx, provider)
          local value = edit_text(ctx, "context_window_tokens", entry.context_window_tokens or "")
          if value ~= nil then entry.context_window_tokens = tonumber(value) end
       elseif choice == labels[8] then
-         local value = edit_text(ctx, "max_concurrency", entry.max_concurrency)
+         local value = edit_text(ctx, "max_concurrency", entry.max_concurrency or "")
          if value ~= nil then
-            local limit = tonumber(value)
-            if limit and limit >= 1 and limit == math.floor(limit) then
-               entry.max_concurrency = limit
+            if value == "" then
+               entry.max_concurrency = nil
             else
-               ctx.ui.notify("Max concurrency must be a positive integer", "error")
+               local limit = tonumber(value)
+               if limit and limit >= 1 and limit == math.floor(limit) then
+                  entry.max_concurrency = limit
+               else
+                  ctx.ui.notify("Max concurrency must be blank or a positive integer", "error")
+               end
             end
          end
       elseif choice == labels[9] then

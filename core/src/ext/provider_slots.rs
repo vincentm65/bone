@@ -9,12 +9,12 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 pub struct ProviderPermit {
-    _file: File,
+    _file: Option<File>,
 }
 
 pub async fn acquire(
     provider: &str,
-    max_concurrency: usize,
+    max_concurrency: Option<usize>,
     cancelled: Option<&Arc<AtomicBool>>,
 ) -> Result<ProviderPermit, String> {
     acquire_in(
@@ -29,9 +29,12 @@ pub async fn acquire(
 async fn acquire_in(
     root: &Path,
     provider: &str,
-    max_concurrency: usize,
+    max_concurrency: Option<usize>,
     cancelled: Option<&Arc<AtomicBool>>,
 ) -> Result<ProviderPermit, String> {
+    let Some(max_concurrency) = max_concurrency else {
+        return Ok(ProviderPermit { _file: None });
+    };
     let dir = root.join(provider_key(provider));
     std::fs::create_dir_all(&dir).map_err(|error| {
         format!(
@@ -56,7 +59,9 @@ async fn acquire_in(
                     format!("failed to open provider slot {}: {error}", path.display())
                 })?;
             match file.try_lock_exclusive() {
-                Ok(()) => return Ok(ProviderPermit { _file: file }),
+                Ok(()) => {
+                    return Ok(ProviderPermit { _file: Some(file) });
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => {
                     return Err(format!(
@@ -93,12 +98,14 @@ mod tests {
     #[tokio::test]
     async fn caps_one_provider_and_releases_on_drop() {
         let root = temp_dir();
-        let first = acquire_in(root.path(), "local", 1, None).await.unwrap();
+        let first = acquire_in(root.path(), "local", Some(1), None)
+            .await
+            .unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let waiting = tokio::spawn({
             let path = root.path().to_path_buf();
             let cancelled = cancelled.clone();
-            async move { acquire_in(&path, "local", 1, Some(&cancelled)).await }
+            async move { acquire_in(&path, "local", Some(1), Some(&cancelled)).await }
         });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(!waiting.is_finished());
@@ -107,18 +114,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_limit_is_unlimited() {
+        let root = temp_dir();
+        let _first = acquire_in(root.path(), "local", None, None).await.unwrap();
+        assert!(acquire_in(root.path(), "local", None, None).await.is_ok());
+        assert!(!root.path().join(provider_key("local")).exists());
+    }
+
+    #[tokio::test]
     async fn different_providers_have_independent_slots() {
         let root = temp_dir();
-        let _first = acquire_in(root.path(), "local-a", 1, None).await.unwrap();
-        assert!(acquire_in(root.path(), "local-b", 1, None).await.is_ok());
+        let _first = acquire_in(root.path(), "local-a", Some(1), None)
+            .await
+            .unwrap();
+        assert!(
+            acquire_in(root.path(), "local-b", Some(1), None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn waiting_is_cancellable() {
         let root = temp_dir();
-        let _first = acquire_in(root.path(), "local", 1, None).await.unwrap();
+        let _first = acquire_in(root.path(), "local", Some(1), None)
+            .await
+            .unwrap();
         let cancelled = Arc::new(AtomicBool::new(true));
-        let error = acquire_in(root.path(), "local", 1, Some(&cancelled))
+        let error = acquire_in(root.path(), "local", Some(1), Some(&cancelled))
             .await
             .err()
             .unwrap();

@@ -939,7 +939,7 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
                 endpoint: "/chat/completions".into(),
                 handler: "unsupported".into(),
                 context_window_tokens: None,
-                max_concurrency: 1,
+                max_concurrency: None,
                 reasoning_effort: String::new(),
             },
             expected_revision: revision,

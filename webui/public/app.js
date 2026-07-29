@@ -2060,7 +2060,7 @@ const PROVIDER_FIELDS = [
   { key: "endpoint", label: "Endpoint",    placeholder: "/chat/completions", type: "text" },
   { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex", "grok_build"] },
   { key: "context_window_tokens", label: "Context window", placeholder: "Unknown", type: "number" },
-  { key: "max_concurrency", label: "Max concurrency", placeholder: "1", type: "number" },
+  { key: "max_concurrency", label: "Max concurrency", placeholder: "Unlimited", type: "number" },
   { key: "reasoning_effort", label: "Reasoning effort", placeholder: "Default", type: "select", options: ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"], effortHandlers: ["codex", "openai", "grok_build"] },
 ];
 
@@ -2221,11 +2221,15 @@ async function saveProviderField(providerKey, fieldKey, value) {
   const prov = state.providers.find((p) => p.key === providerKey);
   if (!prov) return;
   if (fieldKey === "max_concurrency") {
-    value = Number(value);
-    if (!Number.isInteger(value) || value < 1) {
-      toast("Max concurrency must be a positive integer");
-      renderProviderPicker();
-      return;
+    if (value.trim() === "") {
+      value = null;
+    } else {
+      value = Number(value);
+      if (!Number.isInteger(value) || value < 1) {
+        toast("Max concurrency must be blank or a positive integer");
+        renderProviderPicker();
+        return;
+      }
     }
   }
   const oldVal = prov[fieldKey];
