@@ -83,11 +83,11 @@ fn sandbox_blocks_dangerous_apis() {
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("probe.lua"), SANDBOX_PROBE_TOOL).unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -155,11 +155,11 @@ fn sandbox_blocks_dangerous_apis() {
 #[test]
 fn default_tools_boot_cleanly() {
     let config_dir = common::temp_dir("defaults-boot");
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -206,11 +206,11 @@ fn lua_tool_schemas_strip_legacy_boolean_required() {
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("legacy_required.lua"), LEGACY_REQUIRED_TOOL).unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -282,11 +282,11 @@ bone.tool.register({{
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -367,11 +367,11 @@ fn tools_call_depth_limit_enforced() {
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("depth.lua"), DEPTH_COUNTER_TOOL).unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -449,11 +449,11 @@ fn agent_run_depth_limit_enforced() {
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("agent_depth.lua"), AGENT_DEPTH_TOOL).unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -542,11 +542,11 @@ fn event_ctx_has_ui_notify_but_not_tools_agent_shell() {
     // Write init.lua with the event handler.
     std::fs::write(config_dir.join("init.lua"), EVENT_CTX_PROBE_V2).unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -606,11 +606,11 @@ fn reload_picks_up_new_tools_and_commands() {
     std::fs::create_dir_all(&tools_dir).unwrap();
 
     // Boot once — no custom tools.
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted1 = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -658,7 +658,7 @@ bone.command.register("reload_test_cmd", {
     let booted2 = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         bone_core::ext::BootOptions::default(),
         "test-model",

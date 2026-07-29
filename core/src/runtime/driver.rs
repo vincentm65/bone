@@ -75,6 +75,7 @@ mod driver_tests;
 pub struct Driver {
     pub llm: Arc<dyn LlmProvider>,
     pub extensions: ExtensionManager,
+    pub config_store: crate::config::store::ConfigStore,
     pub tools: ToolHandler,
     pub session: Arc<dyn SessionSink>,
     /// Resolves tool-call approval. Headless uses [`crate::tools::AutoApprovalGate`];
@@ -223,6 +224,7 @@ impl Driver {
         let Driver {
             llm,
             extensions,
+            config_store,
             mut tools,
             session,
             gate,
@@ -242,6 +244,17 @@ impl Driver {
             conversation_id,
             turn_nudge,
         } = self;
+        let tool_names = tools
+            .all_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        let command_names = extensions
+            .commands()
+            .iter()
+            .map(|command| command.name.clone())
+            .collect::<Vec<_>>();
+        let config_schema = config_store.schema_for(&tool_names, &command_names);
         let is_cancelled = || {
             cancel
                 .as_ref()
@@ -379,6 +392,9 @@ impl Driver {
         // lets each tool round extend the previous provider-cache prefix while
         // still leaving them out of the persisted transcript.
         let mut request_history = history.clone();
+        // Request-only relay for ephemeral tool images. The index stays valid
+        // across appends and is cleared whenever request history is rebuilt.
+        let mut ephemeral_image_relay: Option<usize> = None;
         let mut last_turn_messages: Vec<String> = Vec::new();
         // The Codex backend returns routing state on the first request of a
         // user turn. Keep it across retries and tool rounds in this run, but
@@ -446,6 +462,8 @@ impl Driver {
                     system_prompt_override.clone(),
                     Vec::new(),
                     transcript.clone(),
+                    config_store.clone(),
+                    config_schema.clone(),
                     nudge.clone(),
                 );
                 let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
@@ -489,6 +507,7 @@ impl Driver {
                         history =
                             build_chat_history(&transcript, system_prompt_override.as_deref());
                         request_history = history.clone();
+                        ephemeral_image_relay = None;
                         last_turn_messages.clear();
                         // The rewrite invalidates the provider-report anchor
                         // (its char count belongs to the discarded history).
@@ -517,6 +536,7 @@ impl Driver {
                     let combined = format!("{base}\n\n{}", sys_appends.join("\n\n"));
                     history = build_chat_history(&transcript, Some(&combined));
                     request_history = history.clone();
+                    ephemeral_image_relay = None;
                     last_turn_messages.clear();
                     let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
                     token_stats.context_length =
@@ -858,6 +878,8 @@ impl Driver {
                 system_prompt_override.clone(),
                 Vec::new(),
                 transcript.clone(),
+                config_store.clone(),
+                config_schema.clone(),
                 nudge.clone(),
             ));
             // Re-read each round so a mid-turn Safe/Danger toggle takes effect
@@ -904,7 +926,10 @@ impl Driver {
                 };
                 emit_event(events, event_sender.as_ref(), &event);
                 session_seq += 1;
-                let message = ChatMessage::tool(result.clone());
+                let mut message = ChatMessage::tool(result.clone());
+                if result.ephemeral_images {
+                    message.images.clear();
+                }
                 session.append_chat_message(&message, session_seq);
                 history.push(message.clone());
                 request_history.push(message.clone());
@@ -912,21 +937,27 @@ impl Driver {
                 persist_messages.push(message);
 
                 // The OpenAI wire format cannot carry images in a tool-role
-                // message, so relay any tool-returned images to vision-capable
-                // models as a follow-up user message. Note: this persists a
-                // mid-turn user message, which makes Qwen-family chat templates
-                // drop the turn's echoed reasoning (same mechanism
-                // apply_turn_messages avoids) — unavoidable here given the wire
-                // format, but keep it in mind for vision-tool repetition reports.
+                // message, so relay tool-returned images to vision-capable
+                // models as a follow-up user message. Ephemeral relays live only
+                // in request history, and each new one replaces the previous
+                // screenshot from this assistant turn.
                 if !result.images.is_empty() {
                     let note = format!("Image output from {}:", result.name);
-                    session_seq += 1;
                     let relay = ChatMessage::user_with_images(note, result.images.clone());
-                    session.append_chat_message(&relay, session_seq);
-                    history.push(relay.clone());
-                    request_history.push(relay.clone());
-                    transcript.push(relay.clone());
-                    persist_messages.push(relay);
+                    if result.ephemeral_images {
+                        if let Some(index) = ephemeral_image_relay.take() {
+                            request_history.remove(index);
+                        }
+                        ephemeral_image_relay = Some(request_history.len());
+                        request_history.push(relay);
+                    } else {
+                        session_seq += 1;
+                        session.append_chat_message(&relay, session_seq);
+                        history.push(relay.clone());
+                        request_history.push(relay.clone());
+                        transcript.push(relay.clone());
+                        persist_messages.push(relay);
+                    }
                 }
             }
 

@@ -50,6 +50,9 @@ pub struct ToolResult {
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageData>,
+    /// Image attachments that exist only for the current provider tool loop.
+    #[serde(skip)]
+    pub ephemeral_images: bool,
     pub is_error: bool,
     #[serde(skip)]
     pub pane_page: Option<crate::view::PaneContent>,
@@ -68,6 +71,7 @@ impl ToolResult {
             name: name.into(),
             content: output.content,
             images: output.images,
+            ephemeral_images: output.ephemeral_images,
             pane_page: output.pane_page,
             state: output.state,
             ..Default::default()

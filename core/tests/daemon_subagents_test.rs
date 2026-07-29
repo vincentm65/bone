@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,7 +66,6 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.yaml"), "version: 1\n").unwrap();
     std::fs::write(
         config_dir.join("init.lua"),
         r#"bone.subagent.register({
@@ -75,14 +76,15 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
 "#,
     )
     .unwrap();
+    let old_bone = std::env::var_os("BONE_DIR");
     unsafe { std::env::set_var("BONE_DIR", &config_dir) };
 
+    let config = common::config_store_in(&config_dir);
     let settings = Arc::new(Mutex::new(Settings::load().unwrap().unwrap()));
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
     let booted = ext::boot_with_tools_shared(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         BootOptions::default(),
         "mock-1",
@@ -92,7 +94,7 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let (hub, commands) = Hub::new();
     let mut events = hub.subscribe();
-    let config = bone_core::config::store::ConfigStore::new(booted.manager.clone()).unwrap();
+    config.attach_extensions(booted.manager.clone());
     let initial_revision = config.snapshot().revision;
     let daemon = tokio::spawn(run_daemon(
         hub.publisher(),
@@ -184,4 +186,10 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
 
     daemon.abort();
     std::fs::remove_dir_all(config_dir).unwrap();
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }

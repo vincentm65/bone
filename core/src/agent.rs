@@ -1,7 +1,7 @@
 //! Headless agent turn loop: drives a provider through chat history, tool calls, and session persistence without the TUI.
 
 use crate::chat::build_chat_history;
-use crate::config::custom::CustomConfigs;
+use crate::config::store::ConfigStore;
 use crate::llm::{
     ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
     token_tracker::CHARS_PER_TOKEN,
@@ -219,9 +219,9 @@ pub struct AgentRequest {
     pub max_tokens: Option<u32>,
     pub approval_gate: Option<crate::tools::SharedGate>,
     pub transcript: Option<Vec<ChatMessage>>,
-    /// Daemon-loaded compatibility snapshot inherited by delegated agents so
-    /// they never reload configuration independently.
-    pub config_snapshot: Option<CustomConfigs>,
+    /// Canonical daemon configuration inherited by delegated agents so they
+    /// never reload configuration independently.
+    pub config_store: Option<ConfigStore>,
     /// Shared cancel flag (the driving session's Esc token). Threaded into
     /// the subagent's `Driver` so its tools — including the shell — can be
     /// killed mid-execution when the user cancels, rather than only at the
@@ -385,6 +385,7 @@ struct AgentSetup {
     token_stats: TokenStats,
     transcript: Vec<ChatMessage>,
     system_prompt_override: Option<String>,
+    config_store: ConfigStore,
 }
 
 /// Perform the synchronous setup for a headless agent (config loading,
@@ -397,7 +398,7 @@ struct AgentSetup {
 /// Otherwise the provider is constructed from config.
 pub fn resolve_provider(
     request: &AgentRequest,
-    custom: &mut CustomConfigs,
+    config: Option<&ConfigStore>,
     providers_config: &mut crate::config::ProvidersConfig,
 ) -> Result<Arc<dyn crate::llm::provider::LlmProvider>, String> {
     if let Some(llm) = request.llm.as_ref() {
@@ -411,10 +412,14 @@ pub fn resolve_provider(
     let provider_id = request
         .provider
         .clone()
-        .or_else(|| non_empty(custom.get_last_provider().as_str()).map(str::to_string))
+        .or_else(|| non_empty(providers_config.last_provider.as_str()).map(str::to_string))
         .ok_or_else(|| "no provider configured".to_string())?;
     if request.provider.is_some() && request.agent_depth == 0 {
-        custom.set_last_provider(&provider_id);
+        let config = config.ok_or_else(|| "configuration store is unavailable".to_string())?;
+        let revision = config.snapshot().revision;
+        config
+            .set_active_provider(&provider_id, revision)
+            .map_err(|(_, error)| error)?;
         providers_config.last_provider = provider_id.clone();
     }
     if let Some(model) = request.model.as_deref() {
@@ -434,7 +439,6 @@ pub fn resolve_provider(
 #[cfg(test)]
 mod resolve_provider_tests {
     use super::{AgentRequest, resolve_provider};
-    use crate::config::custom::CustomConfigs;
     use crate::llm::provider::{ChatMessage, LlmError, LlmProvider, ResponseStream};
     use crate::tools::{ApprovalMode, ToolDefinition};
     use async_trait::async_trait;
@@ -483,14 +487,13 @@ mod resolve_provider_tests {
             approval_gate: None,
             transcript: None,
             cancel: None,
-            config_snapshot: None,
+            config_store: None,
         }
     }
 
     fn resolve(request: &AgentRequest) -> Result<Arc<dyn LlmProvider>, String> {
-        let mut custom = CustomConfigs::default();
-        let mut providers = custom.derive_providers_config();
-        resolve_provider(request, &mut custom, &mut providers)
+        let mut providers = crate::config::ProvidersConfig::default();
+        resolve_provider(request, None, &mut providers)
     }
 
     #[test]
@@ -503,12 +506,11 @@ mod resolve_provider_tests {
 
     #[test]
     fn injection_bypasses_provider_config_without_side_effects() {
-        let mut custom = CustomConfigs::default();
-        let mut providers = custom.derive_providers_config();
+        let mut providers = crate::config::ProvidersConfig::default();
         let request = request(Arc::new(MockProvider));
-        let resolved = resolve_provider(&request, &mut custom, &mut providers).unwrap();
+        let resolved = resolve_provider(&request, None, &mut providers).unwrap();
         assert_eq!(resolved.id(), "mock");
-        assert!(custom.get_last_provider().is_empty());
+        assert!(providers.last_provider.is_empty());
     }
 
     #[test]
@@ -523,17 +525,13 @@ mod resolve_provider_tests {
 }
 
 fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
-    let config = match request.config_snapshot.clone() {
-        Some(snapshot) => crate::config::store::ConfigStore::from_legacy(
-            crate::ext::ExtensionManager::unloaded(),
-            snapshot,
-        ),
-        None => crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())?,
+    let config = match request.config_store.clone() {
+        Some(config) => config,
+        None => ConfigStore::new(crate::ext::ExtensionManager::unloaded())?,
     };
-    let mut custom = config.legacy_snapshot();
     let mut providers_config = config.providers_config();
 
-    let llm = resolve_provider(request, &mut custom, &mut providers_config)?;
+    let llm = resolve_provider(request, Some(&config), &mut providers_config)?;
 
     // Boot Lua extension system and build tool handler.
     let provider = format!("{} ({})", llm.name(), llm.id());
@@ -541,7 +539,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     let booted = crate::ext::boot_with_tools_shared(
         &crate::config::bone_dir(),
         &std::env::current_dir().unwrap_or_default(),
-        &mut custom,
+        &config,
         true,
         crate::ext::BootOptions {
             agent_depth: request.agent_depth,
@@ -585,6 +583,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         token_stats: TokenStats::new(),
         transcript,
         system_prompt_override,
+        config_store: config,
     })
 }
 
@@ -631,6 +630,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         token_stats,
         transcript,
         system_prompt_override,
+        config_store,
     } = setup;
 
     // Keep a handle on the session sink so we can surface any persistence
@@ -645,6 +645,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let driver = crate::runtime::Driver {
         llm,
         extensions,
+        config_store,
         tools,
         session,
         gate: request

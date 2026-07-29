@@ -85,6 +85,7 @@ impl Tool for PaneTool {
         Ok(ToolOutput {
             content: "pane result".to_string(),
             images: Vec::new(),
+            ephemeral_images: false,
             pane_page: Some(pane),
             state: None,
         })

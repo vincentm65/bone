@@ -67,16 +67,16 @@ bone.subagent.register({ name = "lua-only", description = "lua agent" })
     .unwrap();
 
     let mut settings = Settings::defaults();
-    settings.inner.subagents.insert(
+    let mut subagents = std::collections::BTreeMap::new();
+    subagents.insert(
         "shared".into(),
         SubagentSettings {
             description: "from config".into(),
             system_prompt: Some("configured prompt".into()),
-            max_concurrency: Some(6),
             ..Default::default()
         },
     );
-    settings.inner.subagents.insert(
+    subagents.insert(
         "disabled".into(),
         SubagentSettings {
             description: "disabled agent".into(),
@@ -84,6 +84,7 @@ bone.subagent.register({ name = "lua-only", description = "lua agent" })
             ..Default::default()
         },
     );
+    settings.replace_domains(subagents, std::collections::BTreeMap::new());
 
     let result = boot(
         &dir,
@@ -102,14 +103,13 @@ bone.subagent.register({ name = "lua-only", description = "lua agent" })
         .unwrap()
         .get("_subagents")
         .unwrap();
-    let agents: Vec<(String, String, Option<usize>)> = entries
+    let agents: Vec<(String, String)> = entries
         .sequence_values::<mlua::Table>()
         .map(|entry| {
             let entry = entry.unwrap();
             (
                 entry.get("name").unwrap(),
                 entry.get("description").unwrap(),
-                entry.get("max_concurrency").ok(),
             )
         })
         .collect();
@@ -119,8 +119,8 @@ bone.subagent.register({ name = "lua-only", description = "lua agent" })
     assert_eq!(
         agents,
         vec![
-            ("shared".into(), "from config".into(), Some(6)),
-            ("lua-only".into(), "lua agent".into(), None),
+            ("shared".into(), "from config".into()),
+            ("lua-only".into(), "lua agent".into()),
         ]
     );
     assert!(

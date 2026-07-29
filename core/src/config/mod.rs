@@ -1,9 +1,7 @@
-//! User configuration loading: YAML config files, custom configs, and provider entries.
+//! User configuration loading: canonical YAML domains and provider entries.
 
-pub mod custom;
 pub mod domains;
 pub mod error;
-mod migration;
 pub mod providers_config;
 pub mod settings;
 pub mod store;
@@ -153,9 +151,18 @@ impl UserConfig {
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
 const DEFAULT_AGENTS_MD: &str = include_str!("../../defaults/AGENTS.md");
 
-pub fn seed_command_policy_if_missing() {
+pub fn seed_command_policy_if_missing() -> Result<(), String> {
     let path = command_policy_path();
-    seed_file_if_missing(&path, DEFAULT_COMMAND_POLICY);
+    match fs::metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            domains::write_bytes(&path, DEFAULT_COMMAND_POLICY.as_bytes(), None)
+                .map_err(|error| format!("cannot create {}: {error}", path.display()))?;
+        }
+        Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+    }
+    crate::tools::command_policy::validate_command_policy_path(&path)
+        .map_err(|error| error.to_string())
 }
 
 /// Keep the application-owned agent reference synchronized with this build.
@@ -250,11 +257,12 @@ pub fn needs_onboarding() -> bool {
 
 /// Seed the always-safe, selection-independent config (command policy, AGENTS,
 /// and Lua libraries). Idempotent.
-pub fn seed_base() {
-    seed_command_policy_if_missing();
+pub fn seed_base() -> Result<(), String> {
+    seed_command_policy_if_missing()?;
     sync_agents_md();
     migrate_memory_to_catalog(&bone_dir());
     ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
+    Ok(())
 }
 
 const MEMORY_CATALOG_MIGRATION_MARKER: &str = ".memory-catalog-migrated";
@@ -329,15 +337,16 @@ fn migrate_memory_to_catalog_with_hash(dir: &Path, bundled_command_sha256: &str)
 
 /// Seed base config plus default tools, filtered by the onboarding selection.
 /// `None` seeds every bundled tool (default / upgrade behavior).
-pub fn seed_all_with(selection: Option<&SetupSelection>) {
-    seed_base();
+pub fn seed_all_with(selection: Option<&SetupSelection>) -> Result<(), String> {
+    seed_base()?;
     let allow = selection.map(SetupSelection::tool_set);
     ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), allow.as_ref(), false);
+    Ok(())
 }
 
 /// Seed using whatever selection is persisted on disk (or all, if none).
-pub fn seed_all_with_persisted() {
-    seed_all_with(load_setup_selection().as_ref());
+pub fn seed_all_with_persisted() -> Result<(), String> {
+    seed_all_with(load_setup_selection().as_ref())
 }
 
 /// The user's `init.lua` choice in the onboarding wizard.
@@ -393,7 +402,7 @@ pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io
         seed_starter_subagent()?;
     }
 
-    seed_base();
+    seed_base().map_err(std::io::Error::other)?;
     ext::seed_default_lua_tools(
         &bone_dir().join("lua/tools"),
         Some(&selection.tool_set()),
@@ -569,7 +578,6 @@ mod tests {
                         model: Some("custom-model".into()),
                         approval: "danger".into(),
                         timeout_ms: Some(42_000),
-                        max_concurrency: Some(3),
                         enabled: false,
                     },
                 ),

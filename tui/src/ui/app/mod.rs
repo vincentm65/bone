@@ -633,7 +633,7 @@ pub struct App {
     /// registration order. Each id's segments are appended to the native
     /// status bar; re-setting the same id updates it in place.
     lua_status: Vec<(String, Vec<crate::runtime::view::StatusSegment>)>,
-    /// Call IDs that already have a tool row in chat (to avoid duplicates).
+    /// Call IDs whose edit preview already represents the tool result.
     shown_tool_rows: std::collections::HashSet<String>,
     /// In-flight shell commands (call_id, formatted label, start time), shown as
     /// a transient strip above the input while running.
@@ -2058,6 +2058,20 @@ impl App {
     /// into scrollback at the current terminal width. Used after a physical
     /// resize, where reflowed/duplicated viewport rows can't be erased in place.
     fn rebuild_scrollback_after_resize(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
+        let stream_idx = self
+            .streaming
+            .then(|| self.messages.len().checked_sub(1))
+            .flatten();
+        self.rebuild_scrollback(terminal, stream_idx)
+    }
+
+    /// Wipe native scrollback and replay messages, optionally preserving one
+    /// actively streaming assistant message's incremental-rendering state.
+    fn rebuild_scrollback(
+        &mut self,
+        terminal: &mut BoneTerminal,
+        stream_idx: Option<usize>,
+    ) -> io::Result<()> {
         let physical_height = crossterm::terminal::size()?.1;
         let clamped_height = self
             .renderer
@@ -2072,15 +2086,9 @@ impl App {
         // recursively trigger another resize rebuild.
         self.ensure_viewport_height(terminal)?;
 
-        // The in-progress streamed assistant message (if any) is flushed via the
-        // streaming path rather than as a committed message, and `scrollback_cursor`
-        // counts it as already accounted for. Re-flush committed messages up to
-        // it, then replay the streamed portion so the counters line up.
-        let stream_idx = if self.streaming {
-            self.messages.len().checked_sub(1)
-        } else {
-            None
-        };
+        // An in-progress streamed assistant message is flushed via the
+        // streaming path rather than as a committed message. Re-flush committed
+        // messages up to it, then replay the streamed portion.
         let committed_end = stream_idx.unwrap_or(self.messages.len());
         self.renderer
             .flush_new_to_scrollback(&self.messages[..committed_end], terminal)?;
@@ -3448,6 +3456,7 @@ impl App {
                             endpoint: provider.endpoint.clone(),
                             handler: provider.handler.clone(),
                             context_window_tokens: provider.context_window_tokens,
+                            max_concurrency: provider.max_concurrency,
                             reasoning_effort: provider.reasoning_effort.clone(),
                             api_key: None,
                         };

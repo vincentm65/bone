@@ -17,8 +17,6 @@ pub struct SubagentDefinition {
     pub approval: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_concurrency: Option<usize>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Definition origin. Changing a Lua definition through an agent manager

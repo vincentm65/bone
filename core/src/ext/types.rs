@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt};
 
-use crate::config::settings::{BoneSettings, Settings};
+use crate::config::settings::{Settings, SubagentSettings};
 use crate::tools::ToolCall;
 use bone_protocol::KeymapDispatchKind;
 
@@ -184,11 +184,10 @@ pub struct ExtensionManager {
 }
 
 pub(crate) fn collect_subagents(
-    settings: &BoneSettings,
+    subagents: &std::collections::BTreeMap<String, SubagentSettings>,
     lua: &Lua,
 ) -> Vec<bone_protocol::SubagentDefinition> {
-    let mut agents: std::collections::BTreeMap<_, _> = settings
-        .subagents
+    let mut agents: std::collections::BTreeMap<_, _> = subagents
         .iter()
         .map(|(name, agent)| {
             (
@@ -201,7 +200,6 @@ pub(crate) fn collect_subagents(
                     model: agent.model.clone(),
                     approval: agent.approval.clone(),
                     timeout_ms: agent.timeout_ms,
-                    max_concurrency: agent.max_concurrency,
                     enabled: agent.enabled,
                     source: "config".into(),
                 },
@@ -235,7 +233,6 @@ pub(crate) fn collect_subagents(
                     model: entry.get("model").ok(),
                     approval: entry.get("approval").unwrap_or_else(|_| "safe".into()),
                     timeout_ms: entry.get("timeout_ms").ok(),
-                    max_concurrency: entry.get("max_concurrency").ok(),
                     enabled: true,
                     source: "lua".into(),
                 });
@@ -292,9 +289,6 @@ impl ExtensionManager {
     /// (eventually) a headless/Driver path that does not own a Lua runtime.
     pub fn unloaded() -> Self {
         let lua = Lua::new();
-        lua.set_app_data(super::ctx::ConfigSnapshot(Arc::new(Mutex::new(
-            crate::config::custom::CustomConfigs::default(),
-        ))));
         let submit_inbox = super::inbox::for_lua(&lua);
         Self {
             lua: Arc::new(Mutex::new(lua)),
@@ -400,15 +394,10 @@ impl ExtensionManager {
     /// Structured definitions for frontends. Lua registrations are promoted
     /// into canonical config when edited or enabled/disabled.
     pub fn subagents(&self) -> Vec<bone_protocol::SubagentDefinition> {
-        let settings = self
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .resolved()
-            .clone();
+        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
         self.lua
             .lock()
-            .map(|lua| collect_subagents(&settings, &lua))
+            .map(|lua| collect_subagents(settings.subagents(), &lua))
             .unwrap_or_default()
     }
 
@@ -502,28 +491,6 @@ impl ExtensionManager {
     /// Replace the runtime mirror after the configuration store commits.
     pub fn replace_settings(&self, settings: Settings) {
         *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
-    }
-
-    /// Install the daemon-loaded compatibility snapshot used by legacy Lua
-    /// config helpers. Callbacks read this in-memory snapshot instead of
-    /// independently reloading configuration files.
-    pub fn replace_config_snapshot(&self, config: crate::config::custom::CustomConfigs) {
-        self.lua
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .set_app_data(super::ctx::ConfigSnapshot(Arc::new(Mutex::new(config))));
-    }
-
-    pub fn config_snapshot(&self) -> crate::config::custom::CustomConfigs {
-        let lua = self.lua.lock().unwrap_or_else(|error| error.into_inner());
-        let snapshot = lua
-            .app_data_ref::<super::ctx::ConfigSnapshot>()
-            .expect("extension config snapshot must be installed during boot");
-        snapshot
-            .0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
     }
 
     /// The base banner lines from `bone.banner()` (no client-side update/catalog

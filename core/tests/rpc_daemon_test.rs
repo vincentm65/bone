@@ -7,6 +7,8 @@
 //! attach concurrently — proving the `nvim --embed`-style attach path end to end
 //! with no real provider and no terminal.
 
+mod common;
+
 use async_trait::async_trait;
 use futures_util::StreamExt; // for .boxed()
 use std::sync::{Arc, Mutex};
@@ -885,11 +887,11 @@ bone.command.register("preview", {
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -899,12 +901,13 @@ bone.command.register("preview", {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
+    config.attach_extensions(extensions.clone());
     tokio::spawn(run_daemon(
         hub.publisher(),
         commands_rx,
         provider,
         extensions.clone(),
-        bone_core::config::store::ConfigStore::new(extensions).unwrap(),
+        config,
         session,
         ApprovalMode::Safe,
         None,
@@ -1038,11 +1041,11 @@ bone.command.register("noop", {
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         bone_core::ext::BootOptions::default(),
         "test-model",
@@ -1052,12 +1055,13 @@ bone.command.register("noop", {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
+    config.attach_extensions(extensions.clone());
     tokio::spawn(run_daemon(
         hub.publisher(),
         commands_rx,
         provider,
         extensions.clone(),
-        bone_core::config::store::ConfigStore::new(extensions).unwrap(),
+        config,
         session,
         ApprovalMode::Safe,
         None,
@@ -1140,11 +1144,11 @@ bone.command.register("ping", {
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         bone_core::ext::BootOptions::default(),
         "test-model",

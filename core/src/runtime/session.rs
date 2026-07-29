@@ -331,6 +331,7 @@ impl RuntimeSession {
         &self,
         llm: Arc<dyn LlmProvider>,
         extensions: ExtensionManager,
+        config_store: crate::config::store::ConfigStore,
         approval_mode: SharedApprovalMode,
         gate: Arc<dyn ApprovalGate>,
         runtime_events: UnboundedSender<RuntimeEvent>,
@@ -341,6 +342,7 @@ impl RuntimeSession {
         Driver {
             llm,
             extensions,
+            config_store,
             tools: self.tools.clone(),
             session: session_sink,
             gate,

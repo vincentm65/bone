@@ -126,10 +126,8 @@ fn test_daemon_ctx(
     tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
 ) {
     let submit_inbox = extensions.submit_inbox();
-    let config = crate::config::store::ConfigStore::from_legacy(
-        extensions.clone(),
-        crate::config::custom::CustomConfigs::default(),
-    );
+    let config = crate::config::store::ConfigStore::for_test();
+    config.attach_extensions(extensions.clone());
     let (hub, commands) = Hub::new();
     (
         DaemonCtx {
@@ -246,9 +244,6 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
 
 fn interactive_test_extensions() -> crate::ext::ExtensionManager {
     let lua = mlua::Lua::new();
-    lua.set_app_data(crate::ext::ctx::ConfigSnapshot(Arc::new(Mutex::new(
-        crate::config::custom::CustomConfigs::default(),
-    ))));
     let bone = lua.create_table().unwrap();
     lua.globals().set("bone", bone.clone()).unwrap();
     crate::ext::ops_commands::setup_register_command(&lua, &bone).unwrap();
@@ -830,10 +825,8 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
 
     fn actor(extensions: crate::ext::ExtensionManager, conversation_id: i64) -> DaemonCtx {
         let submit_inbox = extensions.submit_inbox();
-        let config = crate::config::store::ConfigStore::from_legacy(
-            extensions.clone(),
-            crate::config::custom::CustomConfigs::default(),
-        );
+        let config = crate::config::store::ConfigStore::for_test();
+        config.attach_extensions(extensions.clone());
         let (hub, _commands) = Hub::new();
         let mut session = crate::runtime::RuntimeSession::new(
             crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
@@ -894,8 +887,6 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
     ));
     unsafe { std::env::set_var("BONE_DIR", &dir) };
 
-    crate::config::custom::seed_builtin_pages(None, false);
-    let mut custom = crate::config::custom::CustomConfigs::load();
     let provider = |handler: &str| crate::config::ProviderEntry {
         label: "Mock".into(),
         base_url: "http://localhost".into(),
@@ -904,15 +895,18 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
         endpoint: "/chat/completions".into(),
         handler: handler.into(),
         context_window_tokens: None,
+        max_concurrency: None,
         reasoning_effort: String::new(),
     };
-    custom
-        .upsert_provider_entry("mock", &provider("openai"))
-        .unwrap();
-    custom
-        .upsert_provider_entry("bad", &provider("unsupported"))
-        .unwrap();
-    custom.try_set_last_provider("mock").unwrap();
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers
+        .providers
+        .insert("mock".into(), provider("openai"));
+    providers
+        .providers
+        .insert("bad".into(), provider("unsupported"));
+    providers.last_provider = "mock".into();
+    crate::config::domains::persist_providers(&providers).unwrap();
 
     let extensions = crate::ext::ExtensionManager::unloaded();
     let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
@@ -945,6 +939,7 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
                 endpoint: "/chat/completions".into(),
                 handler: "unsupported".into(),
                 context_window_tokens: None,
+                max_concurrency: 1,
                 reasoning_effort: String::new(),
             },
             expected_revision: revision,

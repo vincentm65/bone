@@ -207,6 +207,15 @@ impl LuaTool {
         if let Some(state) = &context.app_state {
             state.apply_to(&mut ctx_cfg);
         }
+        if ctx_cfg.config_store.is_none()
+            && let Some(store) = context
+                .tool_handler
+                .as_ref()
+                .and_then(|handler| handler.config_store.clone())
+        {
+            ctx_cfg.config_schema = Some(store.schema());
+            ctx_cfg.config_store = Some(store);
+        }
         ctx_cfg.key_sender = events;
         ctx_cfg.ui = Some(ui.clone());
         ctx_cfg.call_id = Some(context.call_id.clone());
@@ -363,7 +372,7 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
     match serde_json::from_str::<serde_json::Value>(text.trim()) {
         Ok(obj) if obj.is_object() => {
             let map = obj.as_object().unwrap();
-            if !["content", "state", "pane", "images"]
+            if !["content", "state", "pane", "images", "ephemeral_images"]
                 .iter()
                 .any(|key| map.contains_key(*key))
             {
@@ -396,9 +405,14 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let ephemeral_images = map
+                .get("ephemeral_images")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             Ok(ToolOutput {
                 content,
                 images,
+                ephemeral_images,
                 pane_page,
                 state,
             })
@@ -428,5 +442,18 @@ mod tests {
 
         assert_eq!(output.content, "done");
         assert_eq!(output.state.as_deref(), Some("saved"));
+        assert!(!output.ephemeral_images);
+    }
+
+    #[test]
+    fn parses_ephemeral_image_envelopes() {
+        let output = parse_tool_output(
+            r#"{"content":"seen","images":[{"media_type":"image/jpeg","data":"base64"}],"ephemeral_images":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].data, "base64");
+        assert!(output.ephemeral_images);
     }
 }

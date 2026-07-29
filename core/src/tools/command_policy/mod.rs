@@ -1,14 +1,10 @@
 //! Command safety classification and allow/deny policy enforcement.
 
-use std::sync::OnceLock;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config;
 use crate::tools::types::ToolCall;
-
-const DEFAULT_COMMAND_POLICY: &str = include_str!("../../../default-command-policy.yaml");
 
 /// Safety classification for shell commands and tools.
 ///
@@ -62,11 +58,23 @@ impl CommandSafety {
             _ => Self::Danger,
         }
     }
+
+    /// Apply argument-aware policy to a dynamically registered tool's declared safety.
+    pub fn for_dynamic_call(call: &ToolCall, declared: Self) -> Self {
+        if call.name == "computer" {
+            match call.arguments.get("action").and_then(Value::as_str) {
+                Some("observe") => Self::ReadOnly,
+                _ => Self::Danger,
+            }
+        } else {
+            declared
+        }
+    }
 }
 
-fn peel_shell_wrapper(command: &str) -> &str {
+fn peel_shell_wrapper<'a>(command: &'a str, policy: &CommandPolicy) -> &'a str {
     let trimmed = command.trim_start();
-    for shell in &command_policy().shell_wrappers {
+    for shell in &policy.shell_wrappers {
         if let Some(rest) = strip_command_prefix(trimmed, shell) {
             let rest = rest.trim_start();
             return peel_shell_args(rest).unwrap_or(rest);
@@ -126,13 +134,14 @@ pub fn classify_command(command: &str) -> CommandSafety {
     {
         return CommandSafety::Danger;
     }
-    shell_segments(peel_shell_wrapper(command))
+    let policy = command_policy();
+    shell_segments(peel_shell_wrapper(command, &policy))
         .into_iter()
-        .map(|segment| classify_segment(&segment))
+        .map(|segment| classify_segment(&segment, &policy))
         .fold(CommandSafety::ReadOnly, |max, safety| max.max(safety))
 }
 
-fn classify_segment(command: &str) -> CommandSafety {
+fn classify_segment(command: &str, policy: &CommandPolicy) -> CommandSafety {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return CommandSafety::ReadOnly;
@@ -187,7 +196,6 @@ fn classify_segment(command: &str) -> CommandSafety {
         return CommandSafety::Danger;
     }
 
-    let policy = command_policy();
     if names
         .iter()
         .any(|token| policy.danger.contains(token) || policy.package_managers.contains(token))
@@ -298,7 +306,7 @@ struct RawCommandPolicy {
     package_managers: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CommandPolicy {
     shell_wrappers: Vec<String>,
     read_only: Vec<String>,
@@ -306,24 +314,20 @@ pub(crate) struct CommandPolicy {
     package_managers: Vec<String>,
 }
 
-fn command_policy() -> &'static CommandPolicy {
-    static POLICY: OnceLock<CommandPolicy> = OnceLock::new();
-    POLICY.get_or_init(|| {
-        load_command_policy().unwrap_or_else(|error| {
-            crate::ext::ctx::runtime_warn_once(format!("bone: warning: {error}"));
-            resolve_command_policy(default_raw_command_policy())
+fn command_policy() -> CommandPolicy {
+    config::seed_command_policy_if_missing()
+        .and_then(|_| load_command_policy().map_err(|error| error.to_string()))
+        .unwrap_or_else(|error| {
+            crate::ext::ctx::runtime_warn_once(format!(
+                "bone: warning: {error}; using conservative command policy"
+            ));
+            CommandPolicy::default()
         })
-    })
 }
 
 pub(crate) fn load_command_policy() -> Result<CommandPolicy, crate::config::error::ConfigError> {
     let path = config::command_policy_path();
-    let raw = if path.exists() {
-        load_raw_command_policy(&path)?
-    } else {
-        default_raw_command_policy()
-    };
-    Ok(resolve_command_policy(raw))
+    load_raw_command_policy(&path).map(resolve_command_policy)
 }
 
 pub(crate) fn validate_command_policy_path(
@@ -352,11 +356,6 @@ fn resolve_command_policy(raw: RawCommandPolicy) -> CommandPolicy {
         danger: normalize_list(danger),
         package_managers: normalize_list(raw.package_managers),
     }
-}
-
-fn default_raw_command_policy() -> RawCommandPolicy {
-    serde_yaml::from_str(DEFAULT_COMMAND_POLICY)
-        .expect("bundled default-command-policy.yaml must be valid")
 }
 
 fn normalize_list(values: Vec<String>) -> Vec<String> {
@@ -420,4 +419,71 @@ fn has_dangerous_git_command(tokens: &[String]) -> bool {
                     | "tag"
             )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandSafety, classify_command};
+
+    #[test]
+    fn classification_observes_policy_in_current_bone_dir() {
+        let _guard = crate::util::test_env_lock();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(
+            first.path().join("command-policy.yaml"),
+            "read_only: [first-only]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("command-policy.yaml"),
+            "read_only: [second-only]\n",
+        )
+        .unwrap();
+        let old_bone_dir = std::env::var_os("BONE_DIR");
+
+        let result = std::panic::catch_unwind(|| {
+            // SAFETY: held under test_env_lock; restored below.
+            unsafe { std::env::set_var("BONE_DIR", first.path()) };
+            assert_eq!(classify_command("first-only"), CommandSafety::ReadOnly);
+            assert_eq!(classify_command("second-only"), CommandSafety::Danger);
+
+            unsafe { std::env::set_var("BONE_DIR", second.path()) };
+            assert_eq!(classify_command("first-only"), CommandSafety::Danger);
+            assert_eq!(classify_command("second-only"), CommandSafety::ReadOnly);
+        });
+
+        match old_bone_dir {
+            Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+            None => unsafe { std::env::remove_var("BONE_DIR") },
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn malformed_policy_falls_back_to_danger() {
+        let _guard = crate::util::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("command-policy.yaml"), "read_only: [").unwrap();
+        let old_bone_dir = std::env::var_os("BONE_DIR");
+
+        let result = std::panic::catch_unwind(|| {
+            // SAFETY: held under test_env_lock; restored below.
+            unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+            assert_eq!(
+                classify_command("custom-read-command"),
+                CommandSafety::Danger
+            );
+        });
+
+        match old_bone_dir {
+            Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+            None => unsafe { std::env::remove_var("BONE_DIR") },
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
 }

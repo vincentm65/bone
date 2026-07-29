@@ -1109,11 +1109,7 @@ impl App {
                     .and_then(|d| d.eager)
                     .unwrap_or(false)
                 {
-                    // Tools that declare `display.eager` (e.g. `subagent`, whose
-                    // dispatch/wait calls block until the agents finish) would
-                    // otherwise only show their row on completion. Render it now;
-                    // the id is recorded in `shown_tool_rows` so the later
-                    // `ToolResult` event doesn't render a duplicate.
+                    // Eager rows are immutable once written to native scrollback.
                     self.pump_show_eager_row(&call, cur_idx, term)?;
                 }
                 if call.name == "shell" {
@@ -1156,7 +1152,14 @@ impl App {
                     pending.remove(&call_id);
                 } else if let Some(call) = pending.remove(&call_id) {
                     let display = self.wire_tools.display_for_call(&call);
-                    self.messages.push(build_tool_row(&call, &result, display));
+                    let eager = display.and_then(|display| display.eager).unwrap_or(false);
+                    if !eager {
+                        self.messages.push(build_tool_row(&call, &result, display));
+                    } else if is_error
+                        && let Some(row) = orphaned_tool_result_row(name, true)
+                    {
+                        self.messages.push(row);
+                    }
                 } else if let Some(row) = orphaned_tool_result_row(name, is_error) {
                     self.messages.push(row);
                 }
@@ -1286,13 +1289,7 @@ impl App {
         }
     }
 
-    /// Render an `display.eager` tool row to scrollback at dispatch time,
-    /// mirroring the `ToolResult` rendering path with a synthetic (empty,
-    /// non-error) result. The label is derived purely from the call arguments
-    /// (the tool's declared `display`) and such tools hide their result, so
-    /// nothing is lost by showing the row before the call finishes. The call id
-    /// is recorded in `shown_tool_rows` so the later `ToolResult` event skips
-    /// the duplicate.
+    /// Render a `display.eager` tool row at dispatch time.
     fn pump_show_eager_row(
         &mut self,
         call: &ToolCall,
@@ -1309,8 +1306,8 @@ impl App {
             ..Default::default()
         };
         let display = self.wire_tools.display_for_call(call);
-        self.messages.push(build_tool_row(call, &result, display));
-        self.shown_tool_rows.insert(call.id.clone());
+        let row = build_tool_row(call, &result, display);
+        self.messages.push(row);
         self.flush_new_messages_to_scrollback(term)?;
         Ok(())
     }

@@ -26,17 +26,9 @@ unsafe extern "C" {
 }
 
 #[cfg(unix)]
-const SIGKILL: i32 = 9;
-
-/// Signal the child's whole process group so grandchildren (the actual
-/// download/build the shell spawned) die with it, not just the wrapper.
-/// `setsid()` in `pre_exec` makes the child a group leader (pgid == pid), so a
-/// signal to the group (`-pid`) reaches the entire tree.
-#[cfg(unix)]
 fn kill_process_group(pid: u32) {
-    // Negative pid => the whole process group.
     unsafe {
-        let _ = kill(-(pid as i32), SIGKILL);
+        let _ = kill(-(pid as i32), 9);
     }
 }
 
@@ -49,6 +41,32 @@ async fn kill_process_tree(pid: u32) {
         .stderr(Stdio::null())
         .status()
         .await;
+}
+
+pub struct DirectExecRequest {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub stdin: Option<Vec<u8>>,
+    pub working_dir: Option<PathBuf>,
+    pub timeout_ms: u64,
+    pub cancel: Option<Arc<AtomicBool>>,
+    pub max_output_bytes: usize,
+}
+
+pub struct DirectExecOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub timed_out: bool,
+    pub cancelled: bool,
+    pub output_limit_exceeded: bool,
+}
+
+pub struct DirectExecError {
+    pub spawned: bool,
+    pub message: String,
 }
 
 pub struct ScriptRequest {
@@ -67,6 +85,29 @@ pub struct ScriptOutput {
     pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+struct ProcessRequest {
+    program: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    stdin: Option<Vec<u8>>,
+    working_dir: Option<PathBuf>,
+    timeout_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+struct ProcessOutput {
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    timed_out: bool,
+    cancelled: bool,
+    output_limit_exceeded: bool,
+}
+
+enum StreamError {
+    OutputLimit,
+    Other(String),
 }
 
 /// Returns the shell program, its argument flag, and a label for descriptions.
@@ -94,46 +135,6 @@ fn which(name: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok()
-}
-
-fn spawn_script(
-    request: ScriptRequest,
-) -> Result<
-    (
-        tokio::process::Child,
-        tokio::process::ChildStdout,
-        tokio::process::ChildStderr,
-    ),
-    String,
-> {
-    if request.command.contains('\0') {
-        return Err("shell command must not contain NUL bytes".to_string());
-    }
-    let (shell, shell_arg, _) = shell_command();
-    let mut cmd = Command::new(shell);
-    cmd.arg(shell_arg)
-        .arg(request.command)
-        .envs(request.env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    if let Some(working_dir) = request.working_dir {
-        cmd.current_dir(working_dir);
-    }
-    // Detach controlling tty so sudo/ssh (reading /dev/tty) fail cleanly
-    // instead of corrupting the TUI and swallowing keystrokes.
-    #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            setsid();
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().map_err(crate::util::errstr)?;
-    let stdout = child.stdout.take().ok_or("failed to capture stdout")?;
-    let stderr = child.stderr.take().ok_or("failed to capture stderr")?;
-    Ok((child, stdout, stderr))
 }
 
 const CAPTURE_BYTES: usize = 2 * 1024 * 1024;
@@ -191,6 +192,193 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
     run_script_stream(request, |_, _| Ok(())).await
 }
 
+async fn run_process_stream<F>(
+    request: ProcessRequest,
+    mut emit: F,
+) -> Result<ProcessOutput, DirectExecError>
+where
+    F: FnMut(bool, &[u8]) -> Result<(), StreamError>,
+{
+    let mut command = Command::new(request.program);
+    command
+        .args(request.args)
+        .envs(request.env)
+        .stdin(if request.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(working_dir) = request.working_dir {
+        command.current_dir(working_dir);
+    }
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            setsid();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|error| DirectExecError {
+        spawned: false,
+        message: error.to_string(),
+    })?;
+    let pid = child.id().ok_or_else(|| DirectExecError {
+        spawned: true,
+        message: "failed to obtain child process id".into(),
+    })?;
+    if let Some(input) = request.stdin
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(&input).await;
+        });
+    }
+    let stdout = child.stdout.take().ok_or_else(|| DirectExecError {
+        spawned: true,
+        message: "failed to capture stdout".into(),
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| DirectExecError {
+        spawned: true,
+        message: "failed to capture stderr".into(),
+    })?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(16);
+    for (is_stderr, mut reader) in [
+        (
+            false,
+            Box::new(stdout) as Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        ),
+        (true, Box::new(stderr)),
+    ] {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) if tx.send((is_stderr, buf[..n].to_vec())).await.is_err() => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+    }
+    drop(tx);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms);
+    let mut status = None;
+    let mut output_open = true;
+    let mut timed_out = false;
+    let mut cancelled = false;
+    let mut stream_error = None;
+    loop {
+        if status.is_some() && !output_open {
+            break;
+        }
+        tokio::select! {
+            biased;
+            _ = await_cancel(request.cancel.as_ref()) => { cancelled = true; break; }
+            _ = tokio::time::sleep_until(deadline) => { timed_out = true; break; }
+            result = child.wait(), if status.is_none() => {
+                status = Some(result.map_err(|error| DirectExecError {
+                    spawned: true,
+                    message: error.to_string(),
+                })?);
+            }
+            chunk = rx.recv(), if output_open => match chunk {
+                Some((is_stderr, bytes)) => if let Err(error) = emit(is_stderr, &bytes) {
+                    stream_error = Some(error);
+                    break;
+                },
+                None => output_open = false,
+            }
+        }
+    }
+    if timed_out || cancelled || stream_error.is_some() {
+        #[cfg(unix)]
+        kill_process_group(pid);
+        #[cfg(windows)]
+        kill_process_tree(pid).await;
+        let _ = child.start_kill();
+        if status.is_none() {
+            status = Some(child.wait().await.map_err(|error| DirectExecError {
+                spawned: true,
+                message: error.to_string(),
+            })?);
+        }
+    }
+    if stream_error.is_none() {
+        while let Some((is_stderr, bytes)) = rx.recv().await {
+            if let Err(error) = emit(is_stderr, &bytes) {
+                stream_error = Some(error);
+                break;
+            }
+        }
+    }
+    let output_limit_exceeded = matches!(stream_error, Some(StreamError::OutputLimit));
+    if let Some(StreamError::Other(message)) = stream_error {
+        return Err(DirectExecError {
+            spawned: true,
+            message,
+        });
+    }
+    let status = status.ok_or_else(|| DirectExecError {
+        spawned: true,
+        message: "process ended without status".into(),
+    })?;
+    Ok(ProcessOutput {
+        exit_code: status.code(),
+        signal: exit_signal(&status),
+        timed_out,
+        cancelled,
+        output_limit_exceeded,
+    })
+}
+
+pub async fn run_direct_exec(
+    request: DirectExecRequest,
+) -> Result<DirectExecOutput, DirectExecError> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut total = 0usize;
+    let max_output_bytes = request.max_output_bytes;
+    let output = run_process_stream(
+        ProcessRequest {
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            stdin: request.stdin,
+            working_dir: request.working_dir,
+            timeout_ms: request.timeout_ms,
+            cancel: request.cancel,
+        },
+        |is_stderr, bytes| {
+            total = total.saturating_add(bytes.len());
+            if total > max_output_bytes {
+                return Err(StreamError::OutputLimit);
+            }
+            if is_stderr {
+                stderr.extend_from_slice(bytes);
+            } else {
+                stdout.extend_from_slice(bytes);
+            }
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(DirectExecOutput {
+        stdout,
+        stderr,
+        exit_code: output.exit_code,
+        signal: output.signal,
+        timed_out: output.timed_out,
+        cancelled: output.cancelled,
+        output_limit_exceeded: output.output_limit_exceeded,
+    })
+}
+
 /// Run a script while observing each stdout/stderr chunk. The shared executor
 /// owns timeout, cancellation, process-tree cleanup, reaping, and final output.
 pub(crate) async fn run_script_stream<F>(
@@ -200,119 +388,51 @@ pub(crate) async fn run_script_stream<F>(
 where
     F: FnMut(bool, &[u8]) -> Result<(), String>,
 {
+    if request.command.contains('\0') {
+        return Err("shell command must not contain NUL bytes".into());
+    }
     let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
-    let cancel = request.cancel.clone();
-    let (mut child, stdout, stderr) = spawn_script(request)?;
-    // A small bounded queue lets slow consumers apply backpressure to both OS
-    // pipes instead of buffering arbitrary command output in the daemon.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(16);
-    let tx_out = tx.clone();
-    tokio::spawn(async move {
-        let mut reader = stdout;
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if tx_out.send((false, buf[..n].to_vec())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    let tx_err = tx.clone();
-    tokio::spawn(async move {
-        let mut reader = stderr;
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if tx_err.send((true, buf[..n].to_vec())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    drop(tx);
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let (shell, shell_arg, _) = shell_command();
     let mut out = OutputCapture::new();
     let mut err = OutputCapture::new();
-    let mut status = None;
-    let mut timed_out = false;
-    let mut cancelled = false;
-    let mut emit_error = None;
-    let mut output_open = true;
-    loop {
-        tokio::select! {
-            biased;
-            _ = await_cancel(cancel.as_ref()) => { cancelled = true; break; }
-            _ = tokio::time::sleep_until(deadline) => { timed_out = true; break; }
-            r = child.wait() => { status = Some(r.map_err(crate::util::errstr)?); break; }
-            chunk = rx.recv(), if output_open => match chunk {
-                Some((is_err, bytes)) => {
-                    if is_err { err.push(&bytes) } else { out.push(&bytes) }
-                    if let Err(error) = emit(is_err, &bytes) {
-                        emit_error = Some(error);
-                        break;
-                    }
-                }
-                // Once both pipe readers have stopped, disable this select
-                // branch. Otherwise `recv()` would repeatedly resolve to
-                // `None` while the child is still running.
-                None => output_open = false,
+    let output = run_process_stream(
+        ProcessRequest {
+            program: shell.into(),
+            args: vec![shell_arg.into(), request.command],
+            env: request.env,
+            stdin: None,
+            working_dir: request.working_dir,
+            timeout_ms,
+            cancel: request.cancel,
+        },
+        |is_stderr, bytes| {
+            if is_stderr {
+                err.push(bytes)
+            } else {
+                out.push(bytes)
             }
-        }
-    }
-    if timed_out || cancelled || emit_error.is_some() {
-        #[cfg(unix)]
-        if let Some(pid) = child.id() {
-            kill_process_group(pid);
-        }
-        #[cfg(windows)]
-        if let Some(pid) = child.id() {
-            kill_process_tree(pid).await;
-        }
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-    }
-    while let Some((is_err, bytes)) = rx.recv().await {
-        if is_err {
-            err.push(&bytes)
-        } else {
-            out.push(&bytes)
-        }
-        if !timed_out
-            && !cancelled
-            && emit_error.is_none()
-            && let Err(error) = emit(is_err, &bytes)
-        {
-            emit_error = Some(error);
-        }
-    }
+            emit(is_stderr, bytes).map_err(StreamError::Other)
+        },
+    )
+    .await
+    .map_err(|error| error.message)?;
     let stdout = out.render(500);
     let stderr = err.render(100);
-    if let Some(error) = emit_error {
-        return Err(error);
-    }
-    if cancelled || timed_out {
-        let why = if cancelled {
+    if output.cancelled || output.timed_out {
+        let why = if output.cancelled {
             "cancelled by user".to_string()
         } else {
             format!("timed out after {timeout_ms}ms")
         };
-        let mut msg = format!("[{why}; partial output]\nstdout:\n{stdout}");
+        let mut message = format!("[{why}; partial output]\nstdout:\n{stdout}");
         if !stderr.is_empty() {
-            msg.push_str(&format!("\nstderr:\n{stderr}"));
+            message.push_str(&format!("\nstderr:\n{stderr}"));
         }
-        return Err(msg);
+        return Err(message);
     }
-    let status = status.ok_or("process ended without status")?;
     Ok(ScriptOutput {
-        exit_code: status.code(),
-        signal: exit_signal(&status),
+        exit_code: output.exit_code,
+        signal: output.signal,
         stdout,
         stderr,
     })

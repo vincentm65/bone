@@ -110,6 +110,11 @@ pub struct ProviderEntry {
     #[serde(default, deserialize_with = "optional_u64")]
     pub context_window_tokens: Option<u64>,
 
+    /// Maximum delegated agents that may use this provider at once, shared
+    /// across Bone processes. Missing values preserve the historical default.
+    #[serde(default, deserialize_with = "optional_usize")]
+    pub max_concurrency: Option<usize>,
+
     /// Reasoning effort for backends that expose it (Codex Responses
     /// `reasoning.effort`, OpenAI-compatible Chat Completions
     /// `reasoning_effort` for xAI/Grok, etc.). Empty means model default.
@@ -121,13 +126,29 @@ fn optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    optional_number(deserializer)
+}
+
+fn optional_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_number(deserializer)
+}
+
+fn optional_number<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum Value {
-        Number(u64),
+    enum Value<T> {
+        Number(T),
         String(String),
     }
-    match Option::<Value>::deserialize(deserializer)? {
+    match Option::<Value<T>>::deserialize(deserializer)? {
         None => Ok(None),
         Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
         Some(Value::Number(value)) => Ok(Some(value)),
@@ -194,46 +215,19 @@ pub fn validate_reasoning_effort(value: &str) -> Result<(), String> {
 }
 
 impl ProviderEntry {
+    pub const DEFAULT_MAX_CONCURRENCY: usize = 1;
+
+    pub fn max_concurrency(&self) -> usize {
+        self.max_concurrency
+            .unwrap_or(Self::DEFAULT_MAX_CONCURRENCY)
+    }
+
     /// Non-empty reasoning effort for request builders. Empty/`default` → None.
     pub fn reasoning_effort_opt(&self) -> Option<String> {
         match self.reasoning_effort.trim() {
             "" | "default" => None,
             effort => Some(effort.to_ascii_lowercase()),
         }
-    }
-
-    /// Deserialize a ProviderEntry from a nested YAML map value
-    /// (as stored in a CustomConfigPage field).
-    pub fn from_nested(val: &serde_yaml::Value) -> Option<Self> {
-        let map = val.as_mapping()?;
-        let get = |key: &str| -> String {
-            map.get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
-        let get_with_default = |key: &str, fallback: &str| -> String {
-            map.get(key)
-                .and_then(|v| v.as_str())
-                .map(|s| {
-                    if s.is_empty() {
-                        fallback.to_string()
-                    } else {
-                        s.to_string()
-                    }
-                })
-                .unwrap_or_else(|| fallback.to_string())
-        };
-        Some(ProviderEntry {
-            label: get("label"),
-            base_url: get("base_url"),
-            model: get("model"),
-            api_key: get("api_key").into(),
-            endpoint: get_with_default("endpoint", &default_endpoint()),
-            handler: get_with_default("handler", &default_handler()),
-            context_window_tokens: get("context_window_tokens").parse().ok(),
-            reasoning_effort: get("reasoning_effort"),
-        })
     }
 }
 

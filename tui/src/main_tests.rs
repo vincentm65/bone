@@ -20,6 +20,7 @@ fn provider_update(id: &str, model: &str) -> ProviderUpdate {
         endpoint: "/chat/completions".into(),
         handler: "openai".into(),
         context_window_tokens: None,
+        max_concurrency: 1,
         reasoning_effort: String::new(),
         api_key: None,
     }

@@ -178,6 +178,7 @@ impl State {
                 endpoint: entry.endpoint.clone(),
                 handler: entry.handler.clone(),
                 context_window_tokens: entry.context_window_tokens,
+                max_concurrency: entry.max_concurrency(),
                 reasoning_effort: entry.reasoning_effort.clone(),
                 api_key: Some(key.to_string()),
             };

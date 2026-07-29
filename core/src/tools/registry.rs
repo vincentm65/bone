@@ -209,6 +209,9 @@ pub struct ToolHandler {
     /// Propagated to nested/subagent calls via the recursive `self.clone()` in
     /// `execute_one_live`, so tools see the same `ctx` as slash commands.
     pub(crate) app_state: Option<crate::ext::ctx::AppCtxState>,
+    /// Canonical daemon configuration for bare tool execution before an app
+    /// snapshot has been attached.
+    pub(crate) config_store: Option<crate::config::store::ConfigStore>,
     /// Stable project directory used to resolve relative tool paths.
     pub working_dir: Option<std::path::PathBuf>,
     /// Session-scoped file snapshots backing `read_file`/`write_file`/
@@ -256,6 +259,7 @@ impl ToolHandler {
             cancel_token: None,
             approval_gate: None,
             app_state: None,
+            config_store: None,
             working_dir: std::env::current_dir().ok(),
             snapshots: std::sync::Arc::new(std::sync::RwLock::new(Default::default())),
             shared_state: crate::ext::ctx::new_shared_state(),
@@ -286,6 +290,11 @@ impl ToolHandler {
     /// already captured by Lua tools during boot).
     pub fn with_shared_state(mut self, shared_state: crate::ext::ctx::SharedState) -> Self {
         self.shared_state = shared_state;
+        self
+    }
+
+    pub fn with_config_store(mut self, config_store: crate::config::store::ConfigStore) -> Self {
+        self.config_store = Some(config_store);
         self
     }
 
@@ -363,6 +372,7 @@ impl ToolHandler {
         self.dynamic_safety
             .get(&call.name)
             .copied()
+            .map(|declared| CommandSafety::for_dynamic_call(call, declared))
             .unwrap_or_else(|| CommandSafety::for_call(call))
     }
 

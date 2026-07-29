@@ -200,6 +200,7 @@ async fn runtime_session_accumulates_state_across_turns() {
         let driver = session.build_driver(
             llm,
             ExtensionManager::unloaded(),
+            common::config_store(),
             SharedApprovalMode::new(ApprovalMode::Safe),
             Arc::new(AutoApprovalGate),
             tx.clone(),
@@ -285,6 +286,7 @@ fn driver_with_gate(
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
     (driver, prompt)
@@ -316,6 +318,7 @@ fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
     (driver, prompt)
@@ -459,6 +462,7 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: Some(parent_id),
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -726,6 +730,7 @@ async fn driver_key_reply_completes_turn() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -841,11 +846,11 @@ end)
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         BootOptions::default(),
         "test-model",
@@ -880,6 +885,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -934,6 +940,110 @@ impl LlmProvider for CapturingProvider {
     }
 }
 
+struct EphemeralImageTool {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Tool for EphemeralImageTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "ephemeral_image".into(),
+            description: "returns a transient image".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    async fn execute(&self, _arguments: serde_json::Value) -> Result<String, String> {
+        unreachable!("execute_output is used")
+    }
+
+    async fn execute_output(&self, _arguments: serde_json::Value) -> Result<ToolOutput, String> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Ok(ToolOutput {
+            content: format!("screenshot {call}"),
+            images: vec![bone_core::llm::ImageData {
+                media_type: "image/jpeg".into(),
+                data: format!("ephemeral-base64-{call}"),
+            }],
+            ephemeral_images: true,
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn driver_keeps_only_latest_ephemeral_image_in_request_history() {
+    let prompt = "observe";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, None);
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-vision".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![ChatEvent::ToolCall(ToolCall {
+                id: "image-2".into(),
+                name: "ephemeral_image".into(),
+                arguments: serde_json::json!({}),
+            })],
+            vec![ChatEvent::ToolCall(ToolCall {
+                id: "image-1".into(),
+                name: "ephemeral_image".into(),
+                arguments: serde_json::json!({}),
+            })],
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools().register(EphemeralImageTool {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Danger),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(captured.len(), 3);
+    let image_data = |messages: &[ChatMessage]| {
+        messages
+            .iter()
+            .flat_map(|message| message.images.iter().map(|image| image.data.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(image_data(&captured[1]), vec!["ephemeral-base64-1"]);
+    assert_eq!(image_data(&captured[2]), vec!["ephemeral-base64-2"]);
+
+    for message in outcome
+        .transcript
+        .iter()
+        .chain(outcome.persist_messages.iter())
+    {
+        assert!(message.images.is_empty());
+        assert!(!message.content.contains("ephemeral-base64"));
+    }
+}
+
 #[tokio::test]
 async fn driver_propagates_parent_context_to_lua_tools() {
     let config_dir = common::temp_dir("driver-lua-tool-context");
@@ -956,11 +1066,11 @@ bone.tool.register({
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         BootOptions::default(),
         "boot-model",
@@ -1001,6 +1111,7 @@ bone.tool.register({
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: Some(77),
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -1047,11 +1158,11 @@ bone.tool.register({
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         BootOptions::default(),
         "boot-model",
@@ -1093,6 +1204,7 @@ bone.tool.register({
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -1157,6 +1269,7 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -1201,11 +1314,11 @@ end)
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         BootOptions::default(),
         "test-model",
@@ -1251,6 +1364,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -1320,14 +1434,11 @@ end)
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs {
-        pages: Vec::new(),
-        settings: Some(bone_core::config::settings::Settings::defaults()),
-    };
+    let config = common::config_store();
     let booted = boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         BootOptions::default(),
         "test-model",
@@ -1358,6 +1469,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
 
@@ -1413,11 +1525,11 @@ end)
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         BootOptions::default(),
         "test-model",
@@ -1457,6 +1569,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 
@@ -1702,6 +1815,7 @@ async fn repeated_identical_failing_tool_call_aborts() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 

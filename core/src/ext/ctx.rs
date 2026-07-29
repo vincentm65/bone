@@ -10,23 +10,15 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Table, Value};
 
-use crate::tools::shell::{ScriptRequest, run_script, run_script_lines};
+use crate::config::store::ConfigStore;
+use crate::tools::shell::{
+    DirectExecRequest, ScriptRequest, run_direct_exec, run_script, run_script_lines,
+};
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
 
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone)]
-pub(crate) struct ConfigSnapshot(pub Arc<Mutex<crate::config::custom::CustomConfigs>>);
-
-fn config_snapshot(
-    lua: &Lua,
-) -> Result<Arc<Mutex<crate::config::custom::CustomConfigs>>, mlua::Error> {
-    lua.app_data_ref::<ConfigSnapshot>()
-        .map(|snapshot| Arc::clone(&snapshot.0))
-        .ok_or_else(|| mlua::Error::external("daemon configuration snapshot is unavailable"))
-}
 
 /// Run an async future to completion from inside a synchronous Lua callback.
 /// Wraps the `block_in_place` + current-runtime `block_on` dance used by every
@@ -210,6 +202,8 @@ pub struct AppCtxState {
     pub tool_handler: Box<crate::tools::registry::ToolHandler>,
     pub usage: UsageContext,
     pub conversation_history: Vec<crate::llm::ChatMessage>,
+    pub config_store: crate::config::store::ConfigStore,
+    pub config_schema: bone_protocol::ConfigSchema,
     /// Steering text injected mid-turn via Ctrl+Enter.
     pub turn_nudge: Option<String>,
 }
@@ -230,6 +224,8 @@ impl AppCtxState {
         system_prompt_override: Option<String>,
         by_provider: Vec<UsageProviderContext>,
         history: Vec<crate::llm::ChatMessage>,
+        config_store: crate::config::store::ConfigStore,
+        config_schema: bone_protocol::ConfigSchema,
         turn_nudge: Option<String>,
     ) -> Self {
         let est = estimate_prompt_tokens(tools);
@@ -243,6 +239,8 @@ impl AppCtxState {
             tool_handler: Box::new(tools.clone()),
             usage: build_usage_context(stats, &est, by_provider),
             conversation_history: history,
+            config_store,
+            config_schema,
             turn_nudge,
         }
     }
@@ -262,6 +260,8 @@ impl AppCtxState {
         cfg.shared_state = self.tool_handler.shared_state.clone();
         cfg.usage = Some(self.usage.clone());
         cfg.conversation_history = Some(self.conversation_history.clone());
+        cfg.config_store = Some(self.config_store.clone());
+        cfg.config_schema = Some(self.config_schema.clone());
         cfg.turn_nudge = self.turn_nudge.clone();
     }
 }
@@ -326,6 +326,9 @@ pub(crate) fn lua_log(config_dir: &str, level: &str, msg: &str) {
 
 /// Create the `ctx` table for a single tool invocation.
 pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
+    cfg.config_store
+        .as_ref()
+        .ok_or_else(|| mlua::Error::external("daemon configuration store is unavailable"))?;
     let ctx = lua.create_table()?;
 
     ctx.set("config_dir", cfg.config_dir.as_str())?;
@@ -472,6 +475,80 @@ fn build_fs_table(lua: &Lua) -> Result<Table, mlua::Error> {
     Ok(fs_table)
 }
 
+const LUA_EXEC_MAX_ARGS: usize = 1024;
+const LUA_EXEC_MAX_ARG_BYTES: usize = 1024 * 1024;
+const LUA_EXEC_MAX_OUTPUT: usize = 25 * 1024 * 1024;
+const LUA_EXEC_DEFAULT_OUTPUT: usize = 8 * 1024 * 1024;
+const LUA_EXEC_MAX_DIAGNOSTIC: usize = 4096;
+
+fn validate_exec_string(value: &str, label: &str) -> Result<(), mlua::Error> {
+    if value.as_bytes().contains(&0) {
+        return Err(mlua::Error::external(format!(
+            "{label} must not contain NUL bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn quote_exec_preview(value: &str) -> String {
+    if value.is_empty() {
+        return "''".into();
+    }
+    let mut out = String::from("'");
+    for byte in value.bytes() {
+        if byte == b'\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(byte as char);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn require_exec_approval(
+    program: &str,
+    args: &[String],
+    redact: bool,
+    mode: crate::tools::ApprovalMode,
+    gate: Option<&crate::tools::SharedGate>,
+) -> Result<(), mlua::Error> {
+    let preview = if redact {
+        format!("{} [arguments redacted]", quote_exec_preview(program))
+    } else {
+        std::iter::once(program)
+            .chain(args.iter().map(String::as_str))
+            .map(quote_exec_preview)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let safety = if redact {
+        crate::tools::command_policy::CommandSafety::Danger
+    } else {
+        crate::tools::command_policy::classify_command(&preview)
+    };
+    let call = ToolCall {
+        id: format!(
+            "lua_exec_{}",
+            LUA_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ),
+        name: "shell".into(),
+        arguments: serde_json::json!({ "command": preview }),
+    };
+    let allowed = mode.allows_safety(safety);
+    let outcome = match gate {
+        Some(gate) => block_on(gate.0.decide(None, allowed, &call)),
+        None => crate::tools::approval::decide_call(None, allowed),
+    };
+    match outcome {
+        bone_protocol::CallOutcome::Approve => Ok(()),
+        bone_protocol::CallOutcome::Blocked(reason) => Err(mlua::Error::external(reason)),
+        bone_protocol::CallOutcome::Denied => Err(mlua::Error::external(
+            crate::tools::approval::denied_message(mode, safety),
+        )),
+    }
+}
+
 fn require_shell_approval(
     command: &str,
     mode: crate::tools::ApprovalMode,
@@ -506,8 +583,7 @@ fn require_shell_approval(
 }
 
 /// Set the top-level I/O primitives on `ctx`: `shell`, `shell_streaming`,
-/// `read_file`, `write_file`. These hang directly off `ctx` (not a sub-table),
-/// so this takes the `ctx` table and sets onto it rather than returning one.
+/// `read_file`, `write_file`, and direct `exec`.
 fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
     // ctx.process is the extension-safe managed-process API.  Plugins never
     // receive a child handle, so Bone retains process-tree cancellation and
@@ -586,6 +662,142 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         })?,
     )?;
     ctx.set("process", process)?;
+
+    // ctx.exec(program, args?, opts?) uses direct argv, never a shell.
+    let exec_mode = cfg.approval_mode;
+    let exec_gate = cfg.approval_gate.clone();
+    let exec_cwd = cfg.cwd.clone();
+    let exec_cancel = cfg.cancelled.clone();
+    let exec_fn = lua.create_function(
+        move |lua, (program, args, opts): (mlua::String, Option<Table>, Option<Table>)| {
+            let program = program.to_str()?.to_string();
+            validate_exec_string(&program, "program")?;
+            let mut argv = Vec::new();
+            if let Some(args) = args {
+                for i in 1..=LUA_EXEC_MAX_ARGS + 1 {
+                    let value: Value = args.get(i)?;
+                    if matches!(value, Value::Nil) {
+                        break;
+                    }
+                    let arg = match value {
+                        Value::String(s) => s.to_str()?.to_string(),
+                        _ => return Err(mlua::Error::external("args must be an array of strings")),
+                    };
+                    validate_exec_string(&arg, "argument")?;
+                    argv.push(arg);
+                    if argv.len() > LUA_EXEC_MAX_ARGS {
+                        return Err(mlua::Error::external("too many arguments"));
+                    }
+                }
+            }
+            let timeout_ms = opt_u64(&opts, "timeout_ms").unwrap_or(120_000);
+            if timeout_ms == 0 || timeout_ms > 3_600_000 {
+                return Err(mlua::Error::external(
+                    "timeout_ms must be between 1 and 3600000",
+                ));
+            }
+            let max_output = opt_u64(&opts, "max_output_bytes")
+                .unwrap_or(LUA_EXEC_DEFAULT_OUTPUT as u64) as usize;
+            if max_output == 0 || max_output > LUA_EXEC_MAX_OUTPUT {
+                return Err(mlua::Error::external(
+                    "max_output_bytes exceeds the 25 MiB limit",
+                ));
+            }
+            if program.len() + argv.iter().map(String::len).sum::<usize>() > LUA_EXEC_MAX_ARG_BYTES
+            {
+                return Err(mlua::Error::external(
+                    "program and arguments exceed the byte limit",
+                ));
+            }
+            let redact = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("redact_args").ok())
+                .flatten()
+                .unwrap_or(false);
+            require_exec_approval(&program, &argv, redact, exec_mode, exec_gate.as_ref())?;
+            let mut env = Vec::new();
+            let stdin = if let Some(opts) = &opts {
+                if let Some(value) = opts.get::<Option<mlua::String>>("stdin")? {
+                    Some(value.as_bytes().to_vec())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(opts) = &opts {
+                if let Some(table) = opts.get::<Option<Table>>("env")? {
+                    for pair in table.pairs::<String, mlua::String>() {
+                        let (key, value) = pair?;
+                        validate_exec_string(&key, "environment name")?;
+                        let value = value.to_str()?.to_string();
+                        validate_exec_string(&value, "environment value")?;
+                        env.push((key, value));
+                        if env.len() > LUA_EXEC_MAX_ARGS {
+                            return Err(mlua::Error::external("too many environment entries"));
+                        }
+                    }
+                }
+            }
+            let result = match block_on(run_direct_exec(DirectExecRequest {
+                program,
+                args: argv,
+                env,
+                stdin,
+                working_dir: Some(exec_cwd.clone().into()),
+                timeout_ms,
+                cancel: exec_cancel.clone(),
+                max_output_bytes: max_output,
+            })) {
+                Ok(out) => {
+                    let result = lua.create_table()?;
+                    result.set("spawned", true)?;
+                    result.set("timed_out", out.timed_out)?;
+                    result.set("cancelled", out.cancelled)?;
+                    result.set("output_limit_exceeded", out.output_limit_exceeded)?;
+                    result.set("stdout", lua.create_string(&out.stdout)?)?;
+                    result.set("stderr", lua.create_string(&out.stderr)?)?;
+                    result.set("exit_code", out.exit_code)?;
+                    result.set("signal", out.signal)?;
+                    result
+                }
+                Err(error) => {
+                    let result = lua.create_table()?;
+                    result.set("spawned", error.spawned)?;
+                    result.set("timed_out", false)?;
+                    result.set("cancelled", false)?;
+                    result.set("output_limit_exceeded", false)?;
+                    result.set(
+                        "error",
+                        error
+                            .message
+                            .chars()
+                            .take(LUA_EXEC_MAX_DIAGNOSTIC)
+                            .collect::<String>(),
+                    )?;
+                    result.set("stdout", lua.create_string(b"")?)?;
+                    result.set("stderr", lua.create_string(b"")?)?;
+                    result
+                }
+            };
+            Ok(Value::Table(result))
+        },
+    )?;
+    ctx.set("exec", exec_fn)?;
+
+    // ctx.codec.base64_encode(binary_string) -> binary-safe base64 text.
+    let codec = lua.create_table()?;
+    codec.set(
+        "base64_encode",
+        lua.create_function(|lua, input: mlua::String| {
+            use base64::Engine;
+            Ok(lua.create_string(
+                base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
+            )?)
+        })?,
+    )?;
+    ctx.set("codec", codec)?;
+
     // ctx.shell(command, opts?) → { stdout, stderr, exit_code }
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
@@ -1304,26 +1516,6 @@ fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
     Ok(db_table)
 }
 
-fn canonical_display_value(namespace: &str, key: &str, value: String) -> serde_yaml::Value {
-    let is_bool = (namespace == "general" && key == "show_thinking")
-        || (namespace == "status"
-            && (key.starts_with("status_show_") || key == "status_spinner_text_rotate"));
-    if is_bool {
-        return match value.as_str() {
-            "true" => serde_yaml::Value::Bool(true),
-            "false" => serde_yaml::Value::Bool(false),
-            _ => serde_yaml::Value::String(value),
-        };
-    }
-    if namespace == "status"
-        && matches!(key, "status_spinner_speed" | "status_spinner_text_speed")
-        && let Ok(number) = value.parse::<u64>()
-    {
-        return serde_yaml::Value::Number(number.into());
-    }
-    serde_yaml::Value::String(value)
-}
-
 /// Build the read-only `ctx.settings` extension-settings API.
 fn build_settings_table(lua: &Lua) -> Result<Table, mlua::Error> {
     let table = lua.create_table()?;
@@ -1559,6 +1751,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                 row.set("endpoint", provider.endpoint)?;
                 row.set("handler", provider.handler)?;
                 row.set("reasoning_effort", provider.reasoning_effort)?;
+                row.set("max_concurrency", provider.max_concurrency)?;
                 row.set("api_key_configured", provider.api_key_configured)?;
                 if let Some(tokens) = provider.context_window_tokens {
                     row.set("context_window_tokens", tokens)?;
@@ -1588,6 +1781,9 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "openai".into()),
                 context_window_tokens: entry.get("context_window_tokens")?,
+                max_concurrency: entry
+                    .get::<Option<usize>>("max_concurrency")?
+                    .unwrap_or(crate::config::ProviderEntry::DEFAULT_MAX_CONCURRENCY),
                 reasoning_effort: entry
                     .get::<Option<String>>("reasoning_effort")?
                     .unwrap_or_default(),
@@ -1619,7 +1815,6 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                     .get::<Option<String>>("approval")?
                     .unwrap_or_else(|| "safe".into()),
                 timeout_ms: entry.get("timeout_ms")?,
-                max_concurrency: entry.get("max_concurrency")?,
                 enabled: entry.get::<Option<bool>>("enabled")?.unwrap_or(true),
                 source: "config".into(),
             };
@@ -1660,281 +1855,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
 /// Build the `ctx.config` table: read-only access to persisted YAML config plus
 /// the read/write helpers backing the customize UI (pages, provider entries).
 fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
-    if cfg.config_store.is_some() {
-        return build_canonical_config_table(lua, cfg);
-    }
-    let config_table = lua.create_table()?;
-    config_table.set("dir", cfg.config_dir.as_str())?;
-
-    // ctx.config.get(section, key)
-    let config_get_fn = lua.create_function(|lua, (section, key): (String, String)| {
-        let snapshot = config_snapshot(lua)?;
-        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
-        if crate::config::settings::Settings::is_canonical(&section, &key) {
-            let value = canonical_display_value(&section, &key, custom.get_value(&section, &key));
-            return yaml_to_lua(lua, &value);
-        }
-        let value = custom
-            .pages
-            .iter()
-            .find(|(namespace, _)| namespace == &section)
-            .and_then(|(_, page)| page.fields.iter().find(|field| field.key == key))
-            .and_then(|field| field.value.as_ref().or(field.default.as_ref()));
-        match value {
-            Some(value) => yaml_to_lua(lua, value),
-            None => Ok(Value::Nil),
-        }
-    })?;
-    config_table.set("get", config_get_fn)?;
-
-    // ctx.config.get_table(section)
-    let config_get_table_fn = lua.create_function(|lua, section: String| {
-        let snapshot = config_snapshot(lua)?;
-        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(settings) = custom.settings.as_ref() {
-            let resolved = settings.resolved();
-            let value = match section.as_str() {
-                "theme" => Some(serde_yaml::to_value(&resolved.theme)),
-                "tools" => Some(serde_yaml::to_value(&resolved.tools)),
-                "commands" => Some(serde_yaml::to_value(&resolved.commands)),
-                "keymaps" => Some(serde_yaml::to_value(&resolved.keymaps)),
-                _ => None,
-            };
-            if let Some(value) = value {
-                return yaml_to_lua(lua, &value.map_err(mlua::Error::external)?);
-            }
-        }
-
-        let Some((_, page)) = custom
-            .pages
-            .iter()
-            .find(|(namespace, _)| namespace == &section)
-        else {
-            return Ok(Value::Nil);
-        };
-        let mut page = page.clone();
-        for field in &mut page.fields {
-            if crate::config::settings::Settings::is_canonical(&section, &field.key) {
-                field.value = Some(canonical_display_value(
-                    &section,
-                    &field.key,
-                    custom.get_value(&section, &field.key),
-                ));
-            }
-        }
-        let value = serde_yaml::to_value(page).map_err(mlua::Error::external)?;
-        yaml_to_lua(lua, &value)
-    })?;
-    config_table.set("get_table", config_get_table_fn)?;
-
-    let active_provider = cfg.provider.clone().unwrap_or_default();
-
-    // ctx.config.get_pages() -> array of { namespace, title, fields = [...] }
-    let get_pages_fn = lua.create_function(|lua, _: ()| {
-        let snapshot = config_snapshot(lua)?;
-        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
-        let mut ordered: Vec<(String, crate::config::custom::CustomConfigPage)> = Vec::new();
-        for preferred in ["general", "providers", "tools"] {
-            if let Some((ns, page)) = custom.pages.iter().find(|(ns, _)| ns == preferred) {
-                ordered.push((ns.clone(), page.clone()));
-            }
-        }
-        for (ns, page) in &custom.pages {
-            if !ordered.iter().any(|(existing, _)| existing == ns) {
-                ordered.push((ns.clone(), page.clone()));
-            }
-        }
-
-        let pages = lua.create_table()?;
-        for (ns, page) in ordered {
-            let page_tbl = lua.create_table()?;
-            page_tbl.set("namespace", ns.as_str())?;
-            page_tbl.set("title", page.title)?;
-            let fields_tbl = lua.create_table()?;
-            for field in page.fields {
-                let field_tbl = lua.create_table()?;
-                field_tbl.set("key", field.key.as_str())?;
-                field_tbl.set(
-                    "label",
-                    field.label.as_deref().unwrap_or(field.key.as_str()),
-                )?;
-                field_tbl.set(
-                    "type",
-                    match field.field_type {
-                        crate::config::custom::ConfigFieldType::String => "string",
-                        crate::config::custom::ConfigFieldType::Number => "number",
-                        crate::config::custom::ConfigFieldType::Bool => "bool",
-                        crate::config::custom::ConfigFieldType::Enum => "enum",
-                        crate::config::custom::ConfigFieldType::Provider => "provider",
-                    },
-                )?;
-                field_tbl.set("value", custom.get_value(&ns, &field.key))?;
-                let options = lua.create_table()?;
-                for option in field.options {
-                    options.push(option)?;
-                }
-                field_tbl.set("options", options)?;
-                fields_tbl.push(field_tbl)?;
-            }
-            page_tbl.set("fields", fields_tbl)?;
-            pages.push(page_tbl)?;
-        }
-
-        let bone: Table = lua.globals().get("bone")?;
-        let settings_api: Table = bone.get("settings")?;
-        let extension_pages: mlua::Function = settings_api.get("_pages")?;
-        for page in extension_pages
-            .call::<Table>(())?
-            .sequence_values::<Table>()
-        {
-            let page = page?;
-            let fields: Table = page.get("fields")?;
-            for field in fields.sequence_values::<Table>() {
-                let field = field?;
-                let value: Value = field.get("value")?;
-                let display = match value {
-                    Value::Boolean(value) => value.to_string(),
-                    Value::Integer(value) => value.to_string(),
-                    Value::Number(value) => value.to_string(),
-                    Value::String(value) => value.to_str()?.to_string(),
-                    _ => String::new(),
-                };
-                field.set("value", display)?;
-            }
-            pages.push(page)?;
-        }
-        Ok(Value::Table(pages))
-    })?;
-    config_table.set("get_pages", get_pages_fn)?;
-
-    // ctx.config.set_value(namespace, key, value) -> true; raises a Lua error
-    // when canonical validation or atomic persistence fails so `/config` can
-    // surface the failure instead of pretending the edit was saved.
-    let set_value_fn =
-        lua.create_function(|lua, (namespace, key, value): (String, String, String)| {
-            let bone: Table = lua.globals().get("bone")?;
-            let settings_api: Table = bone.get("settings")?;
-            let pages: mlua::Function = settings_api.get("_pages")?;
-            for page in pages.call::<Table>(())?.sequence_values::<Table>() {
-                let page = page?;
-                if page.get::<String>("namespace")? == namespace {
-                    return Err(mlua::Error::external(format!(
-                        "extension setting {namespace}.{key} is read-only here; use a daemon config mutation"
-                    )));
-                }
-            }
-
-            let snapshot = config_snapshot(lua)?;
-            let mut custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
-            custom
-                .try_set_value(&namespace, &key, value)
-                .map_err(mlua::Error::external)?;
-            Ok(true)
-        })?;
-    config_table.set("set_value", set_value_fn)?;
-
-    // ctx.config.cycle_field(namespace, key, current) -> string|nil
-    let cycle_field_fn =
-        lua.create_function(|lua, (namespace, key, current): (String, String, String)| {
-            let bone: Table = lua.globals().get("bone")?;
-            let settings_api: Table = bone.get("settings")?;
-            let pages: mlua::Function = settings_api.get("_pages")?;
-            for page in pages.call::<Table>(())?.sequence_values::<Table>() {
-                let page = page?;
-                if page.get::<String>("namespace")? != namespace {
-                    continue;
-                }
-                for field in page.get::<Table>("fields")?.sequence_values::<Table>() {
-                    let field = field?;
-                    if field.get::<String>("key")? != key {
-                        continue;
-                    }
-                    return match field.get::<String>("type")?.as_str() {
-                        "bool" => Ok(Some((current != "true").to_string())),
-                        "enum" => {
-                            let options: Vec<String> = field
-                                .get::<Table>("options")?
-                                .sequence_values::<String>()
-                                .collect::<mlua::Result<_>>()?;
-                            let index = options
-                                .iter()
-                                .position(|item| item == &current)
-                                .unwrap_or(0);
-                            Ok(options.get((index + 1) % options.len().max(1)).cloned())
-                        }
-                        _ => Ok(None),
-                    };
-                }
-            }
-            let snapshot = config_snapshot(lua)?;
-            let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
-            Ok(custom.cycle_field(&namespace, &key, &current))
-        })?;
-    config_table.set("cycle_field", cycle_field_fn)?;
-
-    // ctx.config.list_providers() -> sorted provider summaries.
-    let list_active_provider = active_provider.clone();
-    let list_providers_fn = lua.create_function(move |lua, _: ()| {
-        let snapshot = config_snapshot(lua)?;
-        let custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
-        let providers = custom.derive_providers_config();
-        let mut ids: Vec<String> = providers.providers.keys().cloned().collect();
-        ids.sort();
-        let out = lua.create_table()?;
-        for id in ids {
-            let Some(entry) = providers.providers.get(&id) else {
-                continue;
-            };
-            let row = lua.create_table()?;
-            row.set("id", id.as_str())?;
-            row.set("label", entry.label.as_str())?;
-            row.set("model", entry.model.as_str())?;
-            row.set("base_url", entry.base_url.as_str())?;
-            row.set("endpoint", entry.endpoint.as_str())?;
-            row.set("handler", entry.handler.as_str())?;
-            row.set("api_key", entry.api_key.as_str())?;
-            row.set("reasoning_effort", entry.reasoning_effort.as_str())?;
-            if let Some(tokens) = entry.context_window_tokens {
-                row.set("context_window_tokens", tokens)?;
-            }
-            row.set("active", id == list_active_provider)?;
-            out.push(row)?;
-        }
-        Ok(Value::Table(out))
-    })?;
-    config_table.set("list_providers", list_providers_fn)?;
-
-    // ctx.config.set_provider_entry(id, entry)
-    let set_provider_entry_fn = lua.create_function(|lua, (id, entry): (String, Table)| {
-        let provider = crate::config::ProviderEntry {
-            label: entry.get::<Option<String>>("label")?.unwrap_or_default(),
-            base_url: entry.get::<Option<String>>("base_url")?.unwrap_or_default(),
-            model: entry.get::<Option<String>>("model")?.unwrap_or_default(),
-            api_key: entry
-                .get::<Option<String>>("api_key")?
-                .unwrap_or_default()
-                .into(),
-            endpoint: entry
-                .get::<Option<String>>("endpoint")?
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "/chat/completions".to_string()),
-            handler: entry
-                .get::<Option<String>>("handler")?
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "openai".to_string()),
-            context_window_tokens: entry.get::<Option<u64>>("context_window_tokens")?,
-            reasoning_effort: entry
-                .get::<Option<String>>("reasoning_effort")?
-                .unwrap_or_default(),
-        };
-        let snapshot = config_snapshot(lua)?;
-        let mut custom = snapshot.lock().unwrap_or_else(|error| error.into_inner());
-        custom.set_provider_entry("providers", &id, &provider);
-        Ok(true)
-    })?;
-    config_table.set("set_provider_entry", set_provider_entry_fn)?;
-
-    Ok(config_table)
+    build_canonical_config_table(lua, cfg)
 }
 
 /// Maximum nesting depth for subagent calls. Sub-agents cannot spawn
@@ -1978,9 +1899,31 @@ async fn wall_elapsed(ms: Option<u64>) {
     }
 }
 
+async fn acquire_provider_slot(
+    provider: &str,
+    max_concurrency: usize,
+    cancelled: Option<&Arc<AtomicBool>>,
+    wall_timeout_ms: Option<u64>,
+) -> Result<(crate::ext::provider_slots::ProviderPermit, Option<u64>), String> {
+    let started = tokio::time::Instant::now();
+    let permit = tokio::select! {
+        result = crate::ext::provider_slots::acquire(provider, max_concurrency, cancelled) => result?,
+        _ = wall_elapsed(wall_timeout_ms) => {
+            return Err(prefix_err(None, &wall_message(wall_timeout_ms)));
+        }
+    };
+    let remaining =
+        wall_timeout_ms.map(|limit| limit.saturating_sub(started.elapsed().as_millis() as u64));
+    Ok((permit, remaining))
+}
+
 /// Create the `ctx.agent` table with `run` and `run_stream` functions.
 fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
     let agent_table = lua.create_table()?;
+    let store = cfg
+        .config_store
+        .clone()
+        .ok_or_else(|| mlua::Error::external("daemon configuration store is unavailable"))?;
 
     // Captures shared by all three dispatch closures. Built once and cloned
     // per closure (each needs its own 'static copy).
@@ -2001,17 +1944,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // Blocking: run a sub-agent to completion and return its result.
     let inherited_run = inherited.clone();
     let cancelled_run = cancelled_flag.clone();
+    let store_run = store.clone();
     let run_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         let tool_allowlist = extract_tool_allowlist(&opts);
-        let config = config_snapshot(lua)?
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
         let built = match build_agent_request(
             prompt,
             &opts,
             &inherited_run,
-            config,
+            store_run.clone(),
             RUN_OPT_KEYS,
             None,
             tool_allowlist,
@@ -2021,6 +1961,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         };
         let BuiltAgent {
             mut request,
+            provider,
+            max_concurrency,
             activity,
             timeout_ms,
             wall_timeout_ms,
@@ -2028,14 +1970,25 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
         let cancelled = cancelled_run.clone();
         request.cancel = cancelled.clone();
-        let response = block_on(run_agent_with_watchdog(
-            request,
-            activity,
-            timeout_ms,
-            wall_timeout_ms,
-            cancelled,
-            None,
-        ));
+        let response = block_on(async {
+            let (_permit, wall_timeout_ms) = acquire_provider_slot(
+                &provider,
+                max_concurrency,
+                cancelled.as_ref(),
+                wall_timeout_ms,
+            )
+            .await?;
+            activity.store(crate::agent::now_epoch_ms(), Ordering::Relaxed);
+            run_agent_with_watchdog(
+                request,
+                activity,
+                timeout_ms,
+                wall_timeout_ms,
+                cancelled,
+                None,
+            )
+            .await
+        });
 
         agent_result_to_lua(lua, response)
     })?;
@@ -2045,6 +1998,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // Blocking like `run`, but forwards live events to Lua callbacks.
     let inherited_stream = inherited.clone();
     let cancelled_stream = cancelled_flag.clone();
+    let store_stream = store.clone();
     let run_stream_fn =
         lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
             // Extract Lua callbacks from opts.
@@ -2053,15 +2007,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::agent::AgentRunEvent>();
             let tool_allowlist = extract_tool_allowlist(&opts);
-            let config = config_snapshot(lua)?
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone();
             let built = match build_agent_request(
                 prompt,
                 &opts,
                 &inherited_stream,
-                config,
+                store_stream.clone(),
                 RUN_STREAM_OPT_KEYS,
                 Some(tx),
                 tool_allowlist,
@@ -2071,6 +2021,8 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             };
             let BuiltAgent {
                 mut request,
+                provider,
+                max_concurrency,
                 activity,
                 timeout_ms,
                 wall_timeout_ms,
@@ -2079,6 +2031,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             let cancelled = cancelled_stream.clone();
             request.cancel = cancelled.clone();
             let response = block_on(async {
+                let (_permit, wall_timeout_ms) = acquire_provider_slot(
+                    &provider,
+                    max_concurrency,
+                    cancelled.as_ref(),
+                    wall_timeout_ms,
+                )
+                .await?;
+                activity.store(crate::agent::now_epoch_ms(), Ordering::Relaxed);
                 let agent_future = crate::agent::run_agent(request);
                 tokio::pin!(agent_future);
 
@@ -2120,6 +2080,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // Dispatch a non-blocking background agent run. Results are queryable
     // via ctx.agent.jobs() or delivered through the TUI peek/mark flow.
     let inherited_spawn = inherited.clone();
+    let store_spawn = store.clone();
     // Scope spawned jobs to the current conversation so the daemon only cancels
     // / auto-injects results into the conversation that dispatched them.
     let spawn_scope = cfg.session_id;
@@ -2131,13 +2092,10 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             return agent_err(lua, "sub-agents cannot spawn background jobs");
         }
 
-        // Read agent name (registered sub-agent name, default "") and the
-        // per-template concurrency cap and tool allowlist from opts.
+        // Read agent name (registered sub-agent name, default ""), title, and
+        // tool allowlist from opts.
         let agent_name: String = opt_str(&opts, "agent").unwrap_or_default();
         let title: String = opt_str(&opts, "title").unwrap_or_default();
-        let max_concurrency: usize = opt_u64(&opts, "max_concurrency")
-            .map(|n| n.max(1) as usize)
-            .unwrap_or(1);
         let tool_allowlist = extract_tool_allowlist(&opts);
 
         let handle = tokio::runtime::Handle::try_current()
@@ -2145,15 +2103,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
         // Build the request first so a bad-opts error never leaves an orphan
         // job in the registry.
-        let config = config_snapshot(lua)?
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
         let built = match build_agent_request(
             prompt.clone(),
             &opts,
             &inherited_spawn,
-            config,
+            store_spawn.clone(),
             SPAWN_OPT_KEYS,
             None,
             tool_allowlist,
@@ -2167,7 +2121,6 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             agent_name,
             prompt,
             title,
-            max_concurrency,
             spawn_scope,
             Some(inherited_spawn.cwd.clone()),
         );
@@ -2182,6 +2135,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
     // Continue a completed job with its saved conversation transcript.
     let inherited_followup = inherited.clone();
+    let store_followup = store;
     let followup_scope = cfg.session_id;
     let followup_fn = lua.create_function(
         move |lua, (prior_id, prompt, opts): (String, String, Option<Table>)| {
@@ -2195,21 +2149,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             };
             let agent_name: String = opt_str(&opts, "agent").unwrap_or_default();
             let title: String = opt_str(&opts, "title").unwrap_or_default();
-            let max_concurrency = opt_u64(&opts, "max_concurrency")
-                .map(|n| n.max(1) as usize)
-                .unwrap_or(1);
             let handle = tokio::runtime::Handle::try_current().map_err(|e| {
                 mlua::Error::external(format!("followup requires a tokio runtime: {e}"))
             })?;
-            let config = config_snapshot(lua)?
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone();
             let mut built = match build_agent_request(
                 prompt.clone(),
                 &opts,
                 &inherited_followup,
-                config,
+                store_followup.clone(),
                 SPAWN_OPT_KEYS,
                 None,
                 extract_tool_allowlist(&opts),
@@ -2224,7 +2171,6 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 agent_name,
                 prompt,
                 title,
-                max_concurrency,
                 followup_scope,
                 Some(inherited_followup.cwd.clone()),
             );
@@ -2343,6 +2289,8 @@ struct InheritedCtx {
 /// inactivity timeout, and an optional wall-clock deadline.
 struct BuiltAgent {
     request: crate::agent::AgentRequest,
+    provider: String,
+    max_concurrency: usize,
     activity: Arc<AtomicU64>,
     timeout_ms: u64,
     wall_timeout_ms: Option<u64>,
@@ -2355,7 +2303,6 @@ fn launch_background_job(
     agent: String,
     task: String,
     title: String,
-    max_concurrency: usize,
     scope: Option<i64>,
     working_dir: Option<std::path::PathBuf>,
 ) -> String {
@@ -2368,7 +2315,7 @@ fn launch_background_job(
         agent,
         task,
         title,
-        max_concurrency,
+        provider: built.provider.clone(),
         scope,
         cancel_flag: job_cancel.clone(),
     });
@@ -2382,24 +2329,36 @@ fn launch_background_job(
     }));
     let BuiltAgent {
         request,
+        provider,
+        max_concurrency,
         activity,
         timeout_ms,
         wall_timeout_ms,
     } = built;
     let spawned_id = id.clone();
     handle.spawn(async move {
-        while !crate::ext::jobs::registry().try_start(&spawned_id) {
-            if job_cancel.load(Ordering::Relaxed) {
+        let (_permit, wall_timeout_ms) = match acquire_provider_slot(
+            &provider,
+            max_concurrency,
+            Some(&job_cancel),
+            wall_timeout_ms,
+        )
+        .await
+        {
+            Ok(acquired) => acquired,
+            Err(error) => {
                 crate::ext::jobs::registry().complete_with_tokens(
                     &spawned_id,
-                    Err("cancelled while queued".into()),
+                    Err(error),
                     0,
                     0,
                     None,
                 );
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        if !crate::ext::jobs::registry().start(&spawned_id) {
+            return;
         }
         activity.store(crate::agent::now_epoch_ms(), Ordering::Relaxed);
         let event_job_id = spawned_id.clone();
@@ -2471,7 +2430,7 @@ fn build_agent_request(
     prompt: String,
     opts: &Option<Table>,
     inherited: &InheritedCtx,
-    config_snapshot: crate::config::custom::CustomConfigs,
+    config_store: ConfigStore,
     allowed_keys: &[&str],
     event_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentRunEvent>>,
     tool_allowlist: Option<Vec<String>>,
@@ -2486,6 +2445,16 @@ fn build_agent_request(
         &inherited.model,
         allowed_keys,
     )?;
+    let providers = config_store.providers_config();
+    let provider_id = provider
+        .clone()
+        .or_else(|| (!providers.last_provider.is_empty()).then(|| providers.last_provider.clone()))
+        .ok_or_else(|| "no provider configured".to_string())?;
+    let max_concurrency = providers
+        .providers
+        .get(&provider_id)
+        .ok_or_else(|| format!("unknown provider `{provider_id}`"))?
+        .max_concurrency();
     let max_tokens = match opt_u64(opts, "max_tokens") {
         Some(0) | None => None,
         Some(n) if n <= u32::MAX as u64 => Some(n as u32),
@@ -2524,11 +2493,13 @@ fn build_agent_request(
         max_tokens,
         approval_gate,
         transcript: None,
-        config_snapshot: Some(config_snapshot),
+        config_store: Some(config_store),
         cancel: None,
     };
     Ok(BuiltAgent {
         request,
+        provider: provider_id,
+        max_concurrency,
         activity,
         timeout_ms,
         wall_timeout_ms,
@@ -2573,7 +2544,6 @@ const SPAWN_OPT_KEYS: &[&str] = &[
     "wall_timeout_ms",
     "agent",
     "title",
-    "max_concurrency",
     "tools",
 ];
 
@@ -2918,47 +2888,6 @@ async fn await_cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicB
         }
     } else {
         std::future::pending::<()>().await;
-    }
-}
-
-/// Convert a serde_yaml::Value to a Lua value.
-fn yaml_to_lua(lua: &Lua, val: &serde_yaml::Value) -> Result<Value, mlua::Error> {
-    match val {
-        serde_yaml::Value::Null => Ok(Value::Nil),
-        serde_yaml::Value::Bool(b) => Ok(Value::Boolean(*b)),
-        serde_yaml::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(Value::Number(f))
-            } else {
-                Ok(Value::Nil)
-            }
-        }
-        serde_yaml::Value::String(s) => {
-            let s = lua.create_string(s)?;
-            Ok(Value::String(s))
-        }
-        serde_yaml::Value::Sequence(arr) => {
-            let t = lua.create_table()?;
-            for item in arr {
-                t.push(yaml_to_lua(lua, item)?)?;
-            }
-            Ok(Value::Table(t))
-        }
-        serde_yaml::Value::Mapping(map) => {
-            let t = lua.create_table()?;
-            for (k, v) in map {
-                let key_str = match k {
-                    serde_yaml::Value::String(s) => s.as_str(),
-                    serde_yaml::Value::Number(_) => continue,
-                    _ => continue,
-                };
-                t.set(key_str, yaml_to_lua(lua, v)?)?;
-            }
-            Ok(Value::Table(t))
-        }
-        serde_yaml::Value::Tagged(tagged) => yaml_to_lua(lua, &tagged.value),
     }
 }
 

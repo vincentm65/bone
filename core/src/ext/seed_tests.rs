@@ -2,17 +2,29 @@ use super::*;
 
 #[test]
 fn canonical_disabled_tools_are_excluded() {
-    let mut settings = crate::config::settings::Settings::defaults();
-    settings.inner.tools.disabled = vec!["cron".into()];
-    let custom = crate::config::custom::CustomConfigs {
-        settings: Some(settings),
-        ..Default::default()
-    };
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let config =
+        crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+    let revision = config.snapshot().revision;
+    config
+        .set_enabled("tools", "cron", false, revision)
+        .unwrap();
 
     assert_eq!(
-        configured_tool_names(&custom, vec!["shell".into(), "cron".into()]),
+        configured_tool_names(&config, vec!["shell".into(), "cron".into()]),
         vec!["shell"]
     );
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }
 
 #[test]
@@ -122,13 +134,13 @@ fn force_overwrites_existing_file() {
 
     let (first, content) = DEFAULT_LUA_COMMANDS[0];
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(first), "-- user edit with canonical-config-v5\n").unwrap();
+    std::fs::write(dir.join(first), "-- user edit with canonical-config-v6\n").unwrap();
 
     // Without force, an existing current-format file is left untouched.
     seed_default_lua_commands(&dir, None, false);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
-        "-- user edit with canonical-config-v5\n",
+        "-- user edit with canonical-config-v6\n",
         "without force, existing file should be preserved"
     );
 
@@ -197,6 +209,8 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
     std::fs::write(&config, "-- canonical-config-v4\n").unwrap();
     assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v5\n").unwrap();
+    assert!(should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    std::fs::write(&config, "-- canonical-config-v6\n").unwrap();
     assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);

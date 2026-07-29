@@ -696,7 +696,19 @@ function onToolCall(ev) {
 
 function onToolResult(ev) {
   const card = state.tools.get(ev.call_id);
-  if (!card) return;
+  if (!card) {
+    // A successful result without its call has no safe label or arguments to
+    // display. Errors remain visible as a minimal diagnostic.
+    if (!ev.is_error) return;
+    const orphan = el("div", "tool orphan");
+    const title = el("div", "tool-title");
+    title.appendChild(el("span", "tool-verb", (ev.name || "tool").replace(/_/g, " ")));
+    title.appendChild(el("span", "tool-summary", ev.is_error ? "Failed" : "Done"));
+    orphan.appendChild(title);
+    activeContainer().appendChild(orphan);
+    scrollDown();
+    return;
+  }
   card.classList.remove("running");
   const status = card.querySelector(".tool-status");
   status.classList.remove("running");
@@ -2048,6 +2060,7 @@ const PROVIDER_FIELDS = [
   { key: "endpoint", label: "Endpoint",    placeholder: "/chat/completions", type: "text" },
   { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex", "grok_build"] },
   { key: "context_window_tokens", label: "Context window", placeholder: "Unknown", type: "number" },
+  { key: "max_concurrency", label: "Max concurrency", placeholder: "1", type: "number" },
   { key: "reasoning_effort", label: "Reasoning effort", placeholder: "Default", type: "select", options: ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"], effortHandlers: ["codex", "openai", "grok_build"] },
 ];
 
@@ -2160,6 +2173,10 @@ function createProvInput(providerKey, fieldKey, value, placeholder, type, isApiK
   input.type = isApiKey ? "password" : type || "text";
   input.value = value;
   input.placeholder = placeholder;
+  if (fieldKey === "max_concurrency") {
+    input.min = "1";
+    input.step = "1";
+  }
   input.onchange = () => saveProviderField(providerKey, fieldKey, input.value);
   input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
   wrap.appendChild(input);
@@ -2203,6 +2220,14 @@ function createProvSelect(providerKey, fieldKey, value, options) {
 async function saveProviderField(providerKey, fieldKey, value) {
   const prov = state.providers.find((p) => p.key === providerKey);
   if (!prov) return;
+  if (fieldKey === "max_concurrency") {
+    value = Number(value);
+    if (!Number.isInteger(value) || value < 1) {
+      toast("Max concurrency must be a positive integer");
+      renderProviderPicker();
+      return;
+    }
+  }
   const oldVal = prov[fieldKey];
   prov[fieldKey] = value;
   if (providerKey === state.providerId && fieldKey === "model") state.model = value;
@@ -2555,7 +2580,7 @@ function agentInput(value, multiline = false) {
 function renderAgentEditor(agent = null) {
   const wrap = $("agents-fields");
   wrap.innerHTML = "";
-  const draft = agent || { name: "", description: "", system_prompt: "", provider: "", model: "", approval: "safe", timeout_ms: "", max_concurrency: 1, enabled: true, source: "config" };
+  const draft = agent || { name: "", description: "", system_prompt: "", provider: "", model: "", approval: "safe", timeout_ms: "", enabled: true, source: "config" };
   const fields = {
     name: agentInput(draft.name),
     description: agentInput(draft.description),
@@ -2564,7 +2589,6 @@ function renderAgentEditor(agent = null) {
     model: agentInput(draft.model),
     approval: enumEl(draft.approval || "safe", ["safe", "danger"], () => {}),
     timeout_ms: agentInput(draft.timeout_ms == null ? "" : String(draft.timeout_ms)),
-    max_concurrency: agentInput(draft.max_concurrency == null ? "1" : String(draft.max_concurrency)),
     enabled: switchEl(draft.enabled !== false, () => {}),
   };
   if (agent) fields.name.disabled = true;
@@ -2576,7 +2600,6 @@ function renderAgentEditor(agent = null) {
     ["model", "Model", "Blank inherits the active model"],
     ["approval", "Approval", "Safe asks before risky tools"],
     ["timeout_ms", "Timeout (ms)", "Optional, maximum 900000"],
-    ["max_concurrency", "Max concurrency", "Maximum simultaneous jobs for this agent"],
     ["enabled", "Enabled", "Available to the delegation tool"],
   ]) wrap.appendChild(setRow(label, desc, fields[key]));
 
@@ -2588,12 +2611,10 @@ function renderAgentEditor(agent = null) {
     const name = fields.name.value.trim();
     const description = fields.description.value.trim();
     const timeoutText = fields.timeout_ms.value.trim();
-    const maxConcurrency = Number(fields.max_concurrency.value.trim());
     if (!/^[A-Za-z0-9_-]+$/.test(name)) return toast("Name may contain only letters, digits, - and _");
     if (!description) return toast("Description is required");
     const timeout = timeoutText ? Number(timeoutText) : null;
     if (timeout != null && (!Number.isInteger(timeout) || timeout < 1 || timeout > 900000)) return toast("Timeout must be 1–900000 ms");
-    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) return toast("Max concurrency must be a positive integer");
     const definition = {
       name,
       description,
@@ -2602,7 +2623,6 @@ function renderAgentEditor(agent = null) {
       model: fields.model.value.trim() || null,
       approval: fields.approval.value,
       timeout_ms: timeout,
-      max_concurrency: maxConcurrency,
       enabled: fields.enabled.querySelector("input").checked,
       source: "config",
     };

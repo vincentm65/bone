@@ -5,7 +5,6 @@ fn unloaded_manager_exposes_inert_defaults() {
     let manager = ExtensionManager::unloaded();
 
     assert!(!manager.is_available());
-    assert!(manager.config_snapshot().pages.is_empty());
     assert!(manager.commands().is_empty());
     assert!(matches!(
         manager.dispatch_tool_call("write_file", "call_1", &serde_json::json!({}), "danger"),
@@ -70,12 +69,14 @@ fn extension_settings_pages_follow_command_enablement() {
 
     let mut settings = crate::config::settings::Settings::defaults();
     settings.inner.commands.disabled.push("example".into());
-    settings
-        .inner
-        .extensions
-        .entry("example".into())
-        .or_default()
-        .insert("value".into(), ExtensionValue::String("persisted".into()));
+    let extensions = std::collections::BTreeMap::from([(
+        "example".into(),
+        std::collections::BTreeMap::from([(
+            "value".into(),
+            ExtensionValue::String("persisted".into()),
+        )]),
+    )]);
+    settings.replace_domains(std::collections::BTreeMap::new(), extensions);
     manager.replace_settings(settings.clone());
 
     let namespaces = |pages: &[SettingsPage]| {

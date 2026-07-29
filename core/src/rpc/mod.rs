@@ -1113,6 +1113,7 @@ impl DaemonCtx {
 
         // App-derived ctx snapshot, assembled from the session + provider the same
         // way the TUI's `app_ctx_state` does.
+        let config_schema = self.config_schema();
         let app_state = {
             let s = self.session.lock().unwrap();
             let by_provider = crate::ext::ctx::usage_by_provider_context(
@@ -1130,12 +1131,12 @@ impl DaemonCtx {
                 None,
                 by_provider,
                 s.transcript.clone(),
+                self.config.clone(),
+                config_schema.clone(),
                 s.turn_nudge.lock().unwrap().clone(),
             )
         };
 
-        let config = self.config.clone();
-        let config_schema = self.config_schema();
         let lua = self.extensions.lua_handle();
         let shared_ui = self.extensions.ui_handle();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1163,8 +1164,6 @@ impl DaemonCtx {
             let shared_state = app_state.tool_handler.shared_state.clone();
             let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
             app_state.apply_to(&mut ctx_cfg);
-            ctx_cfg.config_store = Some(config);
-            ctx_cfg.config_schema = Some(config_schema);
             ctx_cfg.key_sender = Some(live_tx);
             ctx_cfg.runtime_status = Some(status_tx);
             ctx_cfg.approval_gate = Some(approval_gate.clone());
@@ -1734,14 +1733,13 @@ impl DaemonCtx {
                     None => {
                         let config_dir = crate::config::bone_dir();
                         let cwd = std::env::current_dir().unwrap_or_default();
-                        let mut custom = self.extensions.config_snapshot();
                         let model = self.llm.model().to_string();
                         let provider = format!("{} ({})", self.llm.name(), self.llm.id());
                         (
                             crate::ext::boot_with_tools_shared(
                                 &config_dir,
                                 &cwd,
-                                &mut custom,
+                                &self.config,
                                 true,
                                 crate::ext::BootOptions {
                                     agent_depth: 0,
@@ -1996,6 +1994,7 @@ impl DaemonCtx {
             s.build_driver(
                 self.llm.clone(),
                 self.extensions.clone(),
+                self.config.clone(),
                 self.mode.clone(),
                 gate,
                 rt_tx.clone(),

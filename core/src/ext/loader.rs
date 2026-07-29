@@ -43,24 +43,33 @@ pub fn boot(
     let settings_arc = if let Some(settings) = shared_settings {
         settings
     } else {
-        let settings = match Settings::load() {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                let s = Settings::migrate_from_pages(&[]);
-                if let Err(e) = s.save() {
-                    log_boot_warning(
-                        config_dir,
-                        format_args!("could not write canonical settings: {e}"),
-                    );
+        let loaded = (|| -> Result<Settings, String> {
+            let mut settings = match Settings::load().map_err(|error| error.to_string())? {
+                Some(settings) => settings,
+                None => {
+                    let settings = Settings::defaults();
+                    settings.save().map_err(|error| error.to_string())?;
+                    settings
                 }
-                s
-            }
-            Err(e) => {
+            };
+            crate::config::domains::load_or_seed_providers()?;
+            let subagents = crate::config::domains::load_or_seed_subagents()?.subagents;
+            let extensions = crate::config::domains::load_or_seed_extensions()?.extensions;
+            settings.replace_domains(subagents, extensions);
+            Ok(settings)
+        })();
+        let settings = match loaded {
+            Ok(settings) => settings,
+            Err(error) => {
                 log_boot_warning(
                     config_dir,
-                    format_args!("could not load canonical settings: {e}"),
+                    format_args!("could not load canonical configuration: {error}"),
                 );
-                Settings::defaults()
+                return BootResult {
+                    manager: ExtensionManager::unloaded(),
+                    tools: Vec::new(),
+                    shared_state: crate::ext::ctx::new_shared_state(),
+                };
             }
         };
         Arc::new(Mutex::new(settings))
@@ -94,10 +103,8 @@ pub fn boot(
     if !subagent {
         let settings = settings_arc
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .resolved()
-            .clone();
-        if let Err(e) = super::ops_tools::register_config_subagents(&lua, &settings) {
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(e) = super::ops_tools::register_config_subagents(&lua, settings.subagents()) {
             log_boot_warning(
                 config_dir,
                 format_args!("could not load configured sub-agents: {e}"),

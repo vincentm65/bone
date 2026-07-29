@@ -2,8 +2,7 @@
 //!
 //! Provides a versioned, validated, atomically persisted YAML file for the
 //! canonical subset of configuration: general toggles, UI/input/spinner fields,
-//! theme, and keymaps.  `CustomConfigs` routes legacy `/config` page keys
-//! through this module.
+//! theme, and keymaps.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -43,7 +42,7 @@ impl std::fmt::Display for SettingsError {
                 path.display()
             ),
             Self::Parse(s) => write!(f, "settings parse error: {s}"),
-            Self::BadVersion(v) => write!(f, "unsupported settings version {v}; expected 1 or 2"),
+            Self::BadVersion(v) => write!(f, "unsupported settings version {v}; expected 2"),
             Self::Validation(s) => write!(f, "settings validation error: {s}"),
         }
     }
@@ -97,8 +96,6 @@ pub struct SubagentSettings {
     pub approval: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_concurrency: Option<usize>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -112,7 +109,6 @@ impl Default for SubagentSettings {
             model: None,
             approval: default_approval(),
             timeout_ms: None,
-            max_concurrency: None,
             enabled: true,
         }
     }
@@ -141,14 +137,6 @@ pub struct BoneSettings {
     pub commands: EnablementSettings,
     #[serde(default)]
     pub keymaps: KeymapSettings,
-    /// Legacy migration inputs. Canonical values live in `subagents.yaml` and
-    /// are never serialized back into `config.yaml`.
-    #[serde(default, skip_serializing)]
-    pub subagents: BTreeMap<String, SubagentSettings>,
-    /// Legacy migration inputs. Canonical values live in `extensions.yaml` and
-    /// are never serialized back into `config.yaml`.
-    #[serde(default, skip_serializing)]
-    pub extensions: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
 }
 
 impl Default for BoneSettings {
@@ -161,8 +149,6 @@ impl Default for BoneSettings {
             tools: EnablementSettings::default(),
             commands: EnablementSettings::default(),
             keymaps: KeymapSettings::default(),
-            subagents: BTreeMap::new(),
-            extensions: BTreeMap::new(),
         }
     }
 }
@@ -539,6 +525,8 @@ fn prune_defaults(value: &mut serde_yaml::Value, defaults: &serde_yaml::Value, r
 pub struct Settings {
     pub(crate) inner: BoneSettings,
     pub(crate) revision: u64,
+    subagents: BTreeMap<String, SubagentSettings>,
+    extensions: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
 }
 
 impl Settings {
@@ -546,6 +534,8 @@ impl Settings {
         Self {
             inner: BoneSettings::default(),
             revision: 0,
+            subagents: BTreeMap::new(),
+            extensions: BTreeMap::new(),
         }
     }
 
@@ -557,10 +547,6 @@ impl Settings {
         self.revision
     }
 
-    pub(crate) fn validate(&self) -> Result<(), SettingsError> {
-        validate_settings(&self.inner)
-    }
-
     pub fn into_resolved(self) -> BoneSettings {
         self.inner
     }
@@ -570,8 +556,12 @@ impl Settings {
         subagents: BTreeMap<String, SubagentSettings>,
         extensions: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
     ) {
-        self.inner.subagents = subagents;
-        self.inner.extensions = extensions;
+        self.subagents = subagents;
+        self.extensions = extensions;
+    }
+
+    pub(crate) fn subagents(&self) -> &BTreeMap<String, SubagentSettings> {
+        &self.subagents
     }
 
     /// Load `config.yaml` from the resolved Bone configuration directory. Returns
@@ -592,16 +582,20 @@ impl Settings {
         let inner: BoneSettings =
             serde_yaml::from_str(raw).map_err(|e| SettingsError::Parse(e.to_string()))?;
 
-        if !matches!(inner.version, 1 | 2) {
+        if inner.version != 2 {
             return Err(SettingsError::BadVersion(inner.version));
         }
 
         validate_general(&inner.general)?;
         validate_theme(&inner.theme)?;
         validate_keymaps(&inner.keymaps)?;
-        validate_subagents(&inner.subagents)?;
 
-        Ok(Some(Self { inner, revision: 0 }))
+        Ok(Some(Self {
+            inner,
+            revision: 0,
+            subagents: BTreeMap::new(),
+            extensions: BTreeMap::new(),
+        }))
     }
 
     /// Atomically write to `config.yaml` via a same-directory temporary file.
@@ -643,16 +637,13 @@ impl Settings {
     {
         let _guard = acquire_settings_write_lock(path)?;
         let mut candidate = Self::load_path(path)?.unwrap_or_else(|| self.clone());
-        // Runtime snapshots merge separately persisted domains that are skipped
-        // when config.yaml is serialized. Preserve them across core setting writes.
-        candidate.inner.subagents = self.inner.subagents.clone();
-        candidate.inner.extensions = self.inner.extensions.clone();
+        candidate.subagents = self.subagents.clone();
+        candidate.extensions = self.extensions.clone();
         mutate(&mut candidate)?;
         validate_settings(&candidate.inner)?;
         candidate.revision = self.revision.saturating_add(1);
         candidate.write_path(path)?;
-        self.inner = candidate.inner;
-        self.revision = candidate.revision;
+        *self = candidate;
         Ok(())
     }
 
@@ -673,7 +664,6 @@ impl Settings {
         }
         self.update_path(settings_path, |candidate| {
             candidate
-                .inner
                 .extensions
                 .entry(namespace.to_string())
                 .or_default()
@@ -684,7 +674,7 @@ impl Settings {
 
     pub fn extension_value(&self, path: &str) -> Option<&ExtensionValue> {
         let (namespace, key) = path.split_once('.')?;
-        self.inner.extensions.get(namespace)?.get(key)
+        self.extensions.get(namespace)?.get(key)
     }
 
     // ── Canonical key routing (legacy page keys → new hierarchy) ──────────
@@ -891,92 +881,6 @@ impl Settings {
         }
     }
 
-    // ── Migration ─────────────────────────────────────────────────────────
-
-    /// One-time migration from legacy page values.
-    /// Non-canonical fields (providers, tools, commands, compaction) are ignored.
-    pub fn migrate_from_pages(pages: &[(String, crate::config::custom::CustomConfigPage)]) -> Self {
-        use crate::config::custom::CustomConfigs;
-
-        let temp = CustomConfigs {
-            pages: pages.to_vec(),
-            settings: None,
-        };
-
-        let approval = match temp.get_value("general", "approval_mode").as_str() {
-            "safe" | "danger" => temp.get_value("general", "approval_mode"),
-            _ => default_approval(),
-        };
-        let show_reasoning = temp.get_value("general", "show_thinking") == "true";
-        let input_preset = match temp.get_value("general", "input_preset").as_str() {
-            "custom" | "lines" | "box" | "filled" => {
-                Some(temp.get_value("general", "input_preset"))
-            }
-            _ => None,
-        };
-
-        let ui = UiSettings {
-            input: UiInputSettings {
-                preset: input_preset,
-                ..Default::default()
-            },
-            status_show_model: temp.get_value("status", "status_show_model") != "false",
-            status_show_approval: temp.get_value("status", "status_show_approval") != "false",
-            status_show_tokens_curr: temp.get_value("status", "status_show_tokens_curr") != "false",
-            status_show_tokens_in: temp.get_value("status", "status_show_tokens_in") != "false",
-            status_show_tokens_out: temp.get_value("status", "status_show_tokens_out") != "false",
-            status_show_tokens_total: temp.get_value("status", "status_show_tokens_total")
-                != "false",
-            status_show_queue: temp.get_value("status", "status_show_queue") != "false",
-            status_show_spinner: temp.get_value("status", "status_show_spinner") != "false",
-            status_show_timer: temp.get_value("status", "status_show_timer") != "false",
-            spinner_style: {
-                let v = temp.get_value("status", "status_spinner_style");
-                if v.is_empty() {
-                    default_spinner_style()
-                } else {
-                    v
-                }
-            },
-            spinner_text: {
-                let v = temp.get_value("status", "status_spinner_text");
-                if v.is_empty() {
-                    default_spinner_text()
-                } else {
-                    v
-                }
-            },
-            spinner_speed: temp
-                .get_value("status", "status_spinner_speed")
-                .parse::<u64>()
-                .unwrap_or(0),
-            spinner_text_rotate: temp.get_value("status", "status_spinner_text_rotate") != "false",
-            spinner_text_speed: temp
-                .get_value("status", "status_spinner_text_speed")
-                .parse::<u64>()
-                .unwrap_or(0),
-            spinner_custom: temp.get_value("status", "status_spinner_text_custom"),
-        };
-
-        Self {
-            inner: BoneSettings {
-                version: 2,
-                general: GeneralSettings {
-                    approval,
-                    show_reasoning,
-                },
-                ui,
-                theme: ThemeSettings::default(),
-                tools: EnablementSettings::default(),
-                commands: EnablementSettings::default(),
-                keymaps: KeymapSettings::default(),
-                subagents: BTreeMap::new(),
-                extensions: BTreeMap::new(),
-            },
-            revision: 0,
-        }
-    }
-
     // ── Internal UI get/set ──────────────────────────────────────────────
 
     fn get_ui(&self, key: &str) -> String {
@@ -1073,13 +977,12 @@ impl Settings {
 // ── Validation ───────────────────────────────────────────────────────────────
 
 fn validate_settings(settings: &BoneSettings) -> Result<(), SettingsError> {
-    if !matches!(settings.version, 1 | 2) {
+    if settings.version != 2 {
         return Err(SettingsError::BadVersion(settings.version));
     }
     validate_general(&settings.general)?;
     validate_theme(&settings.theme)?;
-    validate_keymaps(&settings.keymaps)?;
-    validate_subagents(&settings.subagents)
+    validate_keymaps(&settings.keymaps)
 }
 
 fn validate_subagent_name(name: &str) -> Result<(), SettingsError> {
@@ -1113,11 +1016,6 @@ fn validate_subagent(name: &str, agent: &SubagentSettings) -> Result<(), Setting
     {
         return Err(SettingsError::Validation(format!(
             "subagents.{name}.timeout_ms must be between 1 and 900000"
-        )));
-    }
-    if agent.max_concurrency == Some(0) {
-        return Err(SettingsError::Validation(format!(
-            "subagents.{name}.max_concurrency must be at least 1"
         )));
     }
     Ok(())
@@ -1340,14 +1238,6 @@ mod tests {
         let mut settings = Settings::defaults();
         settings.inner.general.approval = "danger".into();
         settings.inner.ui.input.preset = Some("box".into());
-        settings.inner.subagents.insert(
-            "researcher".into(),
-            SubagentSettings {
-                description: "Investigates the codebase".into(),
-                system_prompt: Some("Report file and line references.".into()),
-                ..Default::default()
-            },
-        );
         settings.save_path(&path).unwrap();
         settings.inner.general.approval = "safe".into();
         settings.save_path(&path).unwrap();
@@ -1363,7 +1253,6 @@ mod tests {
         let loaded = Settings::load_path(&path).unwrap().unwrap();
         assert_eq!(loaded.inner.general.approval, "safe");
         assert_eq!(loaded.inner.ui.input.preset.as_deref(), Some("box"));
-        assert!(loaded.inner.subagents.is_empty());
         let raw = fs::read_to_string(&path).unwrap();
         assert!(raw.contains("version: 2"));
         assert!(!raw.contains("subagents:"));
@@ -1451,46 +1340,6 @@ mod tests {
 
         let _ = fs::remove_file(malformed);
         let _ = fs::remove_file(bad_version);
-    }
-
-    #[test]
-    fn migrates_supported_legacy_page_values() {
-        use crate::config::custom::{ConfigField, ConfigFieldType, CustomConfigPage};
-
-        let field = |key: &str, value: serde_yaml::Value| ConfigField {
-            key: key.into(),
-            label: None,
-            field_type: ConfigFieldType::String,
-            options: Vec::new(),
-            default: None,
-            value: Some(value),
-        };
-        let pages = vec![
-            (
-                "general".into(),
-                CustomConfigPage {
-                    title: "General".into(),
-                    fields: vec![
-                        field("approval_mode", "danger".into()),
-                        field("show_thinking", true.into()),
-                        field("input_preset", "box".into()),
-                    ],
-                },
-            ),
-            (
-                "status".into(),
-                CustomConfigPage {
-                    title: "Status".into(),
-                    fields: vec![field("status_show_timer", false.into())],
-                },
-            ),
-        ];
-
-        let migrated = Settings::migrate_from_pages(&pages);
-        assert_eq!(migrated.inner.general.approval, "danger");
-        assert!(migrated.inner.general.show_reasoning);
-        assert_eq!(migrated.inner.ui.input.preset.as_deref(), Some("box"));
-        assert!(!migrated.inner.ui.status_show_timer);
     }
 
     // ── Cross-process lock tests ──────────────────────────────────────────

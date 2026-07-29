@@ -15,6 +15,14 @@ pub struct ConfigStore {
     extensions: Arc<Mutex<Vec<crate::ext::ExtensionManager>>>,
 }
 
+impl std::fmt::Debug for ConfigStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfigStore")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Typed aggregate owned by the daemon configuration service.
 struct Inner {
     revision: u64,
@@ -24,70 +32,53 @@ struct Inner {
     extension_values: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
     disabled_tools: Vec<String>,
     disabled_commands: Vec<String>,
-    legacy: super::custom::CustomConfigs,
 }
 
 impl ConfigStore {
-    pub fn new(extensions: crate::ext::ExtensionManager) -> Result<Self, String> {
-        super::migration::migrate()?;
-        let path = super::settings::settings_path();
-        let core = super::settings::Settings::load()
-            .map_err(|error| format!("cannot load {}: {error}", path.display()))?
-            .ok_or_else(|| format!("configuration migration did not create {}", path.display()))?;
-        Ok(Self::from_legacy(
-            extensions,
-            super::custom::CustomConfigs {
-                settings: Some(core),
-                ..Default::default()
-            },
-        ))
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let core = Settings::defaults();
+        let extensions = crate::ext::ExtensionManager::unloaded();
+        extensions.replace_settings(core.clone());
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                revision: core.revision(),
+                core,
+                providers: super::ProvidersConfig::default(),
+                subagents: BTreeMap::new(),
+                extension_values: BTreeMap::new(),
+                disabled_tools: Vec::new(),
+                disabled_commands: Vec::new(),
+            })),
+            extensions: Arc::new(Mutex::new(vec![extensions])),
+        }
     }
 
-    pub(crate) fn from_legacy(
-        extensions: crate::ext::ExtensionManager,
-        legacy: super::custom::CustomConfigs,
-    ) -> Self {
-        let core = legacy.settings.clone().unwrap_or_else(Settings::defaults);
-        let legacy_version = core.resolved().version;
-        let providers = match super::domains::load_providers() {
-            Ok(Some(config)) => config,
-            Ok(None) => legacy.derive_providers_config(),
-            Err(error) => {
-                crate::ext::ctx::runtime_warn_once(format!("bone: warning: {error}"));
-                super::ProvidersConfig::default()
+    pub fn new(extensions: crate::ext::ExtensionManager) -> Result<Self, String> {
+        super::seed_command_policy_if_missing()?;
+        let path = super::settings::settings_path();
+        let core = match super::settings::Settings::load()
+            .map_err(|error| format!("cannot load {}: {error}", path.display()))?
+        {
+            Some(settings) => settings,
+            None => {
+                let settings = Settings::defaults();
+                settings
+                    .save()
+                    .map_err(|error| format!("cannot create {}: {error}", path.display()))?;
+                settings
             }
         };
-        let subagents = match super::domains::load_subagents() {
-            Ok(Some(config)) => config.subagents,
-            Ok(None) => core.resolved().subagents.clone(),
-            Err(error) => {
-                crate::ext::ctx::runtime_warn_once(format!("bone: warning: {error}"));
-                BTreeMap::new()
-            }
-        };
-        let extension_values = match super::domains::load_extensions() {
-            Ok(Some(config)) => config.extensions,
-            Ok(None) => core.resolved().extensions.clone(),
-            Err(error) => {
-                crate::ext::ctx::runtime_warn_once(format!("bone: warning: {error}"));
-                BTreeMap::new()
-            }
-        };
-        let disabled_tools = if legacy_version >= 2 {
-            core.resolved().tools.disabled.clone()
-        } else {
-            legacy.disabled_names("tools")
-        };
-        let disabled_commands = if legacy_version >= 2 {
-            core.resolved().commands.disabled.clone()
-        } else {
-            legacy.disabled_names("commands")
-        };
+        let providers = super::domains::load_or_seed_providers()?;
+        let subagents = super::domains::load_or_seed_subagents()?.subagents;
+        let extension_values = super::domains::load_or_seed_extensions()?.extensions;
+        let disabled_tools = core.resolved().tools.disabled.clone();
+        let disabled_commands = core.resolved().commands.disabled.clone();
         let mut runtime_settings = core.clone();
         runtime_settings.replace_domains(subagents.clone(), extension_values.clone());
         extensions.replace_settings(runtime_settings);
         let revision = core.revision();
-        Self {
+        Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 revision,
                 core,
@@ -96,10 +87,9 @@ impl ConfigStore {
                 extension_values,
                 disabled_tools,
                 disabled_commands,
-                legacy,
             })),
             extensions: Arc::new(Mutex::new(vec![extensions])),
-        }
+        })
     }
 
     /// Attach an extension runtime and keep it synchronized with future mutations.
@@ -136,13 +126,11 @@ impl ConfigStore {
 
     fn sync_extension(&self, extensions: &crate::ext::ExtensionManager) {
         extensions.replace_settings(self.runtime_settings_snapshot());
-        extensions.replace_config_snapshot(self.legacy_snapshot());
     }
 
-    fn sync_extensions(&self, settings: Settings, legacy: super::custom::CustomConfigs) {
+    fn sync_extensions(&self, settings: Settings) {
         for extensions in self.extension_managers() {
             extensions.replace_settings(settings.clone());
-            extensions.replace_config_snapshot(legacy.clone());
         }
     }
 
@@ -182,15 +170,6 @@ impl ConfigStore {
             .clone()
     }
 
-    /// Compatibility snapshot for runtime surfaces not yet migrated from the
-    /// legacy page model. The daemon performs the only filesystem load.
-    pub fn legacy_snapshot(&self) -> super::custom::CustomConfigs {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        let mut legacy = inner.legacy.clone();
-        legacy.settings = Some(Self::runtime_settings(&inner));
-        legacy
-    }
-
     pub fn provider_candidate_config(
         &self,
         update: &ProviderUpdate,
@@ -208,6 +187,12 @@ impl ConfigStore {
         }
         super::providers_config::validate_reasoning_effort(&update.reasoning_effort)
             .map_err(|error| (inner.revision, error))?;
+        if update.max_concurrency == 0 {
+            return Err((
+                inner.revision,
+                format!("providers.{}.max_concurrency must be at least 1", update.id),
+            ));
+        }
         let mut config = inner.providers.clone();
         let api_key = update.api_key.clone().map(Into::into).unwrap_or_else(|| {
             config
@@ -226,6 +211,7 @@ impl ConfigStore {
                 endpoint: update.endpoint.clone(),
                 handler: update.handler.clone(),
                 context_window_tokens: update.context_window_tokens,
+                max_concurrency: Some(update.max_concurrency),
                 reasoning_effort: update.reasoning_effort.clone(),
             },
         );
@@ -260,10 +246,8 @@ impl ConfigStore {
         inner.core = loaded;
         inner.revision = inner.revision.saturating_add(1);
         let settings = Self::runtime_settings(&inner);
-        let mut legacy = inner.legacy.clone();
-        legacy.settings = Some(settings.clone());
         drop(inner);
-        self.sync_extensions(settings, legacy);
+        self.sync_extensions(settings);
         Ok(())
     }
 
@@ -577,6 +561,7 @@ impl ConfigStore {
                 endpoint: provider.endpoint.clone(),
                 handler: provider.handler.clone(),
                 context_window_tokens: provider.context_window_tokens,
+                max_concurrency: provider.max_concurrency(),
                 reasoning_effort: provider.reasoning_effort.clone(),
                 api_key_configured: !provider.api_key.is_empty(),
             })
@@ -622,10 +607,8 @@ impl ConfigStore {
             Ok(value) => {
                 inner.revision = inner.revision.saturating_add(1);
                 let settings = Self::runtime_settings(&inner);
-                let mut legacy = inner.legacy.clone();
-                legacy.settings = Some(settings.clone());
                 drop(inner);
-                self.sync_extensions(settings, legacy);
+                self.sync_extensions(settings);
                 Ok(value)
             }
             Err(error) => Err((inner.revision, error)),
@@ -719,6 +702,12 @@ impl ConfigStore {
     ) -> Result<(), (u64, String)> {
         self.mutate(expected, |inner| {
             super::providers_config::validate_reasoning_effort(&update.reasoning_effort)?;
+            if update.max_concurrency == 0 {
+                return Err(format!(
+                    "providers.{}.max_concurrency must be at least 1",
+                    update.id
+                ));
+            }
             let api_key = update.api_key.map(Into::into).unwrap_or_else(|| {
                 inner
                     .providers
@@ -735,6 +724,7 @@ impl ConfigStore {
                 endpoint: update.endpoint,
                 handler: update.handler,
                 context_window_tokens: update.context_window_tokens,
+                max_concurrency: Some(update.max_concurrency),
                 reasoning_effort: update.reasoning_effort,
             };
             let mut candidate = inner.providers.clone();
@@ -851,7 +841,6 @@ impl ConfigStore {
             model: agent.model.filter(|value| !value.is_empty()),
             approval: agent.approval,
             timeout_ms: agent.timeout_ms,
-            max_concurrency: agent.max_concurrency,
             enabled: agent.enabled,
         };
         self.mutate_subagents(expected, &setting, move |candidate| {
@@ -908,6 +897,7 @@ mod tests {
             endpoint: "/chat/completions".into(),
             handler: "openai".into(),
             context_window_tokens: None,
+            max_concurrency: 1,
             reasoning_effort: "extreme".into(),
             api_key: None,
         };
@@ -917,6 +907,40 @@ mod tests {
         let after = store.snapshot();
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.providers, before.providers);
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn command_policy_is_seeded_privately_and_malformed_content_fails_unchanged() {
+        let _guard = crate::util::test_env_lock();
+        let previous = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+        ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+        let path = dir.path().join("command-policy.yaml");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let malformed = "read_only: [\n";
+        std::fs::write(&path, malformed).unwrap();
+        let error = ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+            .err()
+            .expect("malformed command policy should fail");
+        assert!(error.contains("command-policy.yaml"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
 
         unsafe {
             match previous {
@@ -937,39 +961,10 @@ mod tests {
         let error = ConfigStore::new(crate::ext::ExtensionManager::unloaded())
             .err()
             .expect("malformed configuration should fail");
-        assert!(error.contains("cannot migrate"));
+        assert!(error.contains("cannot load"));
 
         unsafe {
             match previous {
-                Some(value) => std::env::set_var("BONE_DIR", value),
-                None => std::env::remove_var("BONE_DIR"),
-            }
-        }
-    }
-
-    #[test]
-    fn successful_migration_makes_legacy_pages_inert() {
-        let _guard = crate::util::test_env_lock();
-        let old_bone = std::env::var_os("BONE_DIR");
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
-
-        super::super::migration::migrate().unwrap();
-        let legacy_dir = dir.path().join("config");
-        std::fs::create_dir_all(&legacy_dir).unwrap();
-        let legacy = "this is not a valid config page\n";
-        std::fs::write(legacy_dir.join("general.yaml"), legacy).unwrap();
-
-        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
-
-        assert_eq!(store.snapshot().values["general"]["approval"], "safe");
-        assert!(store.legacy_snapshot().pages.is_empty());
-        assert_eq!(
-            std::fs::read_to_string(legacy_dir.join("general.yaml")).unwrap(),
-            legacy
-        );
-        unsafe {
-            match old_bone {
                 Some(value) => std::env::set_var("BONE_DIR", value),
                 None => std::env::remove_var("BONE_DIR"),
             }
@@ -1067,11 +1062,12 @@ mod tests {
         let after = store.snapshot();
         assert_eq!(after.revision, before.revision + 1);
         assert_eq!(after.values["general"]["show_reasoning"], true);
-        assert_eq!(
+        assert!(
             extensions
-                .config_snapshot()
-                .get_value("general", "show_thinking"),
-            "true"
+                .frontend_settings()
+                .settings
+                .general
+                .show_reasoning
         );
 
         unsafe {
@@ -1128,6 +1124,7 @@ mod tests {
                 endpoint: "/chat/completions".into(),
                 handler: "openai".into(),
                 context_window_tokens: None,
+                max_concurrency: None,
                 reasoning_effort: String::new(),
             },
         );
@@ -1171,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_mutation_refreshes_attached_compatibility_snapshot() {
+    fn successful_mutation_refreshes_attached_runtime_settings() {
         let _guard = crate::util::test_env_lock();
         let old_bone = std::env::var_os("BONE_DIR");
         let dir = std::env::temp_dir().join(format!(
@@ -1194,11 +1191,12 @@ mod tests {
             .unwrap();
 
         for extensions in [initial, attached] {
-            assert_eq!(
+            assert!(
                 extensions
-                    .config_snapshot()
-                    .get_value("general", "show_thinking"),
-                "true"
+                    .frontend_settings()
+                    .settings
+                    .general
+                    .show_reasoning
             );
         }
 
@@ -1248,7 +1246,7 @@ mod tests {
         assert!(after_upsert.values["subagents"]["reviewer"]["enabled"] == true);
         assert_eq!(extensions.subagents(), vec![test_subagent("reviewer")]);
         let persisted = Settings::load().unwrap().unwrap();
-        assert!(persisted.resolved().subagents.is_empty());
+        assert!(persisted.subagents().is_empty());
         let persisted_subagents = super::super::domains::load_subagents()
             .unwrap()
             .unwrap()

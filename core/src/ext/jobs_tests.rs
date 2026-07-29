@@ -4,13 +4,13 @@ fn fresh_registry() -> JobRegistry {
     JobRegistry::new()
 }
 
-/// A `NewJob` with default cap (1) and a fresh cancel flag.
+/// A queued `NewJob` with a provider and fresh cancel flag.
 fn new_job(agent: &str, task: &str) -> NewJob {
     NewJob {
         agent: agent.to_string(),
         task: task.to_string(),
         title: String::new(),
-        max_concurrency: 1,
+        provider: "test-provider".into(),
         scope: None,
         cancel_flag: Arc::new(AtomicBool::new(false)),
     }
@@ -31,58 +31,49 @@ fn create_and_snapshot() {
     let job = &arr[0];
     assert_eq!(job["id"], "job-1");
     assert_eq!(job["agent"], "researcher");
-    assert_eq!(job["status"], "running");
+    assert_eq!(job["provider"], "test-provider");
+    assert_eq!(job["status"], "queued");
     assert!(job["result"].is_null());
 }
 
 #[test]
-fn create_queues_at_concurrency_cap() {
+fn start_marks_a_queued_job_running() {
     let reg = fresh_registry();
-    let id1 = create_default(&reg, "coder", "task one");
-    let id2 = reg.create(new_job("coder", "task two"));
+    let id = create_default(&reg, "coder", "task one");
+    assert!(reg.start(&id));
     assert_eq!(
         reg.all_jobs()
             .into_iter()
-            .find(|j| j.id == id2)
+            .find(|job| job.id == id)
             .unwrap()
             .status,
-        JobStatus::Queued
+        JobStatus::Running
     );
-    assert!(!reg.try_start(&id2));
-
-    // Once the first job finishes, the agent is free again.
-    reg.complete(&id1, Ok("done".into()));
-    assert!(reg.try_start(&id2));
+    assert!(reg.start(&id));
 }
 
 #[test]
-fn create_respects_concurrency_cap() {
+fn create_records_provider() {
     let reg = fresh_registry();
-    // max_concurrency=2 allows two jobs.
-    create_default(&reg, "parallel", "task one");
-    reg.create(NewJob {
-        max_concurrency: 2,
-        ..new_job("parallel", "task two")
-    });
-    let third = reg.create(NewJob {
-        max_concurrency: 2,
-        ..new_job("parallel", "task three")
+    let id = reg.create(NewJob {
+        provider: "other-provider".into(),
+        ..new_job("parallel", "task")
     });
     assert_eq!(
         reg.all_jobs()
             .into_iter()
-            .find(|j| j.id == third)
+            .find(|job| job.id == id)
             .unwrap()
-            .status,
-        JobStatus::Queued
+            .provider,
+        "other-provider"
     );
 }
 
 #[test]
-fn create_allows_different_agents_concurrently() {
+fn create_always_starts_queued() {
     let reg = fresh_registry();
     create_default(&reg, "a", "t1");
-    assert_eq!(reg.all_jobs().last().unwrap().status, JobStatus::Running);
+    assert_eq!(reg.all_jobs().last().unwrap().status, JobStatus::Queued);
 }
 
 #[test]

@@ -4,7 +4,7 @@ mod cli;
 mod deps;
 mod install;
 
-use bone::config::{UserConfig, custom::CustomConfigs};
+use bone::config::UserConfig;
 use bone::llm::provider::LlmProvider;
 use bone::llm::providers;
 use bone::run;
@@ -83,7 +83,7 @@ struct RuntimeHostBoot {
 /// id).
 fn boot_runtime_host_for(
     provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
-    custom: &mut CustomConfigs,
+    config: &bone::config::store::ConfigStore,
     target: bone::rpc::SessionTarget,
     settings: std::sync::Arc<std::sync::Mutex<bone::config::settings::Settings>>,
 ) -> std::io::Result<RuntimeHostBoot> {
@@ -92,7 +92,7 @@ fn boot_runtime_host_for(
     let booted = bone::ext::boot_with_tools_shared(
         &bone::config::bone_dir(),
         &std::env::current_dir()?,
-        custom,
+        config,
         true,
         bone::ext::BootOptions {
             agent_depth: 0,
@@ -181,7 +181,6 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     let factory = move |target: bone::rpc::SessionTarget| {
         // Every actor boots from the current daemon-owned configuration. CLI
         // provider/model overrides remain fixed for the life of this process.
-        let mut custom = factory_config.legacy_snapshot();
         let (provider_id, providers_config) = actor_provider_config(
             &factory_config,
             cli_provider.as_deref(),
@@ -190,11 +189,10 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         let provider = providers::create_provider_with_config(&provider_id, &providers_config)
             .map_err(|error| error.to_string())?;
         let provider = std::sync::Arc::from(provider);
-        let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
-        let settings = std::sync::Arc::new(std::sync::Mutex::new(
-            factory_config.runtime_settings_snapshot(),
-        ));
-        let mut boot = boot_runtime_host_for(provider, &mut custom, target, settings)
+        let settings_snapshot = factory_config.runtime_settings_snapshot();
+        let approval_mode = approval_mode(&settings_snapshot.resolved().general.approval);
+        let settings = std::sync::Arc::new(std::sync::Mutex::new(settings_snapshot));
+        let mut boot = boot_runtime_host_for(provider, &factory_config, target, settings)
             .map_err(|err| err.to_string())?;
         let conversation_id = boot
             .session
@@ -449,7 +447,7 @@ async fn main() -> std::io::Result<()> {
 
     // `bone setup` — explicit (re)run of the onboarding wizard.
     if args.first().map(String::as_str) == Some("setup") {
-        bone::config::seed_base();
+        bone::config::seed_base().map_err(std::io::Error::other)?;
         let theme = configured_theme();
         // Exit 2 on cancel so a parent (e.g. the tmux `/setup` popup) can tell
         // a cancelled wizard from an applied one.
@@ -460,7 +458,7 @@ async fn main() -> std::io::Result<()> {
     // `bone catalog` — browse/install/remove optional tools & commands. Used
     // both directly and by the `/catalog` tmux popup.
     if matches!(args.first().map(String::as_str), Some("catalog")) {
-        bone::config::seed_base();
+        bone::config::seed_base().map_err(std::io::Error::other)?;
         if args.len() > 1 {
             let [action, name] = &args[1..] else {
                 eprintln!("Usage: bone catalog install|remove NAME");
@@ -502,13 +500,13 @@ async fn main() -> std::io::Result<()> {
     if interactive && bone::config::needs_onboarding() {
         // Fresh install: seed the always-safe base so the wizard can `require`
         // its libs, then run onboarding (writes the selection + init.lua).
-        bone::config::seed_base();
+        bone::config::seed_base().map_err(std::io::Error::other)?;
         let theme = configured_theme();
         bone::ui::setup::run(&theme, true)?;
     }
     // Seed tools (and base) filtered by whatever selection is now persisted;
     // None ⇒ seed everything (default / upgrade behavior).
-    bone::config::seed_all_with_persisted();
+    bone::config::seed_all_with_persisted().map_err(std::io::Error::other)?;
 
     if args.first().map(String::as_str) == Some("run") {
         let request = run::parse_run_args(&args[1..]).map_err(std::io::Error::other)?;
@@ -562,8 +560,8 @@ async fn main() -> std::io::Result<()> {
     // Normal TUI mode
     let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded())
         .map_err(std::io::Error::other)?;
-    let mut custom = config.legacy_snapshot();
-    let approval_mode = approval_mode(&custom.get_value("general", "approval_mode"));
+    let settings_snapshot = config.runtime_settings_snapshot();
+    let approval_mode = approval_mode(&settings_snapshot.resolved().general.approval);
     // Frontend settings arrive from the daemon-owned FrontendState snapshot.
     let cfg = UserConfig::default();
     let mut providers_config = config.providers_config();
@@ -623,13 +621,8 @@ async fn main() -> std::io::Result<()> {
     // The interactive TUI starts a fresh conversation each launch (clean slate);
     // past chats remain in the DB and are reachable via /history. Only the
     // multi-chat `bone serve` / web UI resumes the latest conversation on attach.
-    let settings = std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot()));
-    let boot = boot_runtime_host_for(
-        provider,
-        &mut custom,
-        bone::rpc::SessionTarget::New,
-        settings,
-    )?;
+    let settings = std::sync::Arc::new(std::sync::Mutex::new(settings_snapshot));
+    let boot = boot_runtime_host_for(provider, &config, bone::rpc::SessionTarget::New, settings)?;
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
     let command_tx = hub.command_sender();

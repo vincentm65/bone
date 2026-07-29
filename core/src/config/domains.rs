@@ -65,6 +65,57 @@ pub fn load_providers() -> Result<Option<super::ProvidersConfig>, String> {
     Ok(loaded)
 }
 
+pub fn load_or_seed_providers() -> Result<super::ProvidersConfig, String> {
+    if let Some(config) = load_providers()? {
+        return Ok(config);
+    }
+    let mut config = super::ProvidersConfig::default();
+    for (id, label, base_url, model, endpoint, handler) in [
+        (
+            "local",
+            "llama.cpp",
+            "http://127.0.0.1:8080",
+            "local",
+            "/v1/chat/completions",
+            "openai",
+        ),
+        (
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            "gpt-4o",
+            "/chat/completions",
+            "openai",
+        ),
+        (
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com",
+            "claude-sonnet-4-20250514",
+            "/messages",
+            "anthropic",
+        ),
+    ] {
+        config.providers.insert(
+            id.into(),
+            super::ProviderEntry {
+                label: label.into(),
+                base_url: base_url.into(),
+                model: model.into(),
+                api_key: super::ProviderCredential::default(),
+                endpoint: endpoint.into(),
+                handler: handler.into(),
+                context_window_tokens: None,
+                max_concurrency: None,
+                reasoning_effort: String::new(),
+            },
+        );
+    }
+    validate_providers(&config)?;
+    persist_providers(&config)?;
+    Ok(config)
+}
+
 pub(crate) fn validate_providers(config: &super::ProvidersConfig) -> Result<(), String> {
     if config.version != 1 {
         return Err(format!(
@@ -80,6 +131,13 @@ pub(crate) fn validate_providers(config: &super::ProvidersConfig) -> Result<(), 
             super::providers_path().display()
         ));
     }
+    for (id, provider) in &config.providers {
+        if provider.max_concurrency == Some(0) {
+            return Err(format!("providers.{id}.max_concurrency must be at least 1"));
+        }
+        super::providers_config::validate_reasoning_effort(&provider.reasoning_effort)
+            .map_err(|error| format!("providers.{id}.{error}"))?;
+    }
     Ok(())
 }
 
@@ -94,6 +152,15 @@ pub fn load_subagents() -> Result<Option<SubagentsConfig>, String> {
     Ok(loaded)
 }
 
+pub fn load_or_seed_subagents() -> Result<SubagentsConfig, String> {
+    if let Some(config) = load_subagents()? {
+        return Ok(config);
+    }
+    let config = SubagentsConfig::default();
+    persist_subagents(&config.subagents)?;
+    Ok(config)
+}
+
 pub fn load_extensions() -> Result<Option<ExtensionsConfig>, String> {
     let path = extensions_path();
     let loaded: Option<ExtensionsConfig> = load_versioned(&path)?;
@@ -101,6 +168,15 @@ pub fn load_extensions() -> Result<Option<ExtensionsConfig>, String> {
         validate_version(config.version, &path)?;
     }
     Ok(loaded)
+}
+
+pub fn load_or_seed_extensions() -> Result<ExtensionsConfig, String> {
+    if let Some(config) = load_extensions()? {
+        return Ok(config);
+    }
+    let config = ExtensionsConfig::default();
+    persist_extensions(&config.extensions)?;
+    Ok(config)
 }
 
 fn validate_version(version: u8, path: &Path) -> Result<(), String> {
@@ -122,6 +198,7 @@ fn load_versioned<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<
 }
 
 pub fn persist_providers(values: &super::ProvidersConfig) -> Result<(), String> {
+    validate_providers(values)?;
     write_document(&super::providers_path(), values, None)
 }
 
@@ -155,9 +232,17 @@ pub(crate) fn write_document<T: Serialize>(
     value: &T,
     permissions_from: Option<&Path>,
 ) -> Result<(), String> {
+    let yaml = serde_yaml::to_string(value).map_err(|error| error.to_string())?;
+    write_bytes(path, yaml.as_bytes(), permissions_from)
+}
+
+pub(crate) fn write_bytes(
+    path: &Path,
+    content: &[u8],
+    permissions_from: Option<&Path>,
+) -> Result<(), String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let yaml = serde_yaml::to_string(value).map_err(|error| error.to_string())?;
     let permissions = std::fs::metadata(path)
         .ok()
         .or_else(|| permissions_from.and_then(|path| std::fs::metadata(path).ok()))
@@ -167,5 +252,58 @@ pub(crate) fn write_document<T: Serialize>(
         use std::os::unix::fs::PermissionsExt;
         Some(std::fs::Permissions::from_mode(0o600))
     });
-    crate::tools::write_atomic::write_atomic_sync(path, yaml.as_bytes(), permissions)
+    crate::tools::write_atomic::write_atomic_sync(path, content, permissions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persist_providers;
+    use crate::config::{ProviderCredential, ProviderEntry, ProvidersConfig};
+
+    #[test]
+    fn invalid_provider_updates_preserve_existing_document() {
+        let _guard = crate::util::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.yaml");
+        let original = b"version: 1\nactive: ''\nproviders: {}\n";
+        std::fs::write(&path, original).unwrap();
+        let old_bone_dir = std::env::var_os("BONE_DIR");
+
+        let result = std::panic::catch_unwind(|| {
+            // SAFETY: held under test_env_lock; restored below.
+            unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+            for (max_concurrency, reasoning_effort, expected_error) in [
+                (Some(0), "", "max_concurrency must be at least 1"),
+                (None, "extreme", "unsupported reasoning_effort"),
+            ] {
+                let mut config = ProvidersConfig::default();
+                config.providers.insert(
+                    "test".into(),
+                    ProviderEntry {
+                        label: "Test".into(),
+                        base_url: String::new(),
+                        model: String::new(),
+                        api_key: ProviderCredential::default(),
+                        endpoint: "/chat/completions".into(),
+                        handler: "openai".into(),
+                        context_window_tokens: None,
+                        max_concurrency,
+                        reasoning_effort: reasoning_effort.into(),
+                    },
+                );
+
+                let error = persist_providers(&config).unwrap_err();
+                assert!(error.contains(expected_error), "{error}");
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            }
+        });
+
+        match old_bone_dir {
+            Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+            None => unsafe { std::env::remove_var("BONE_DIR") },
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
 }

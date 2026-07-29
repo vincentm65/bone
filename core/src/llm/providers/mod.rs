@@ -68,7 +68,3 @@ pub fn create_provider_with_config(
     }
     Err(LlmError::new_with_kind(LlmErrorKind::Config, msg))
 }
-
-#[cfg(test)]
-#[path = "providers_tests.rs"]
-mod providers_tests;

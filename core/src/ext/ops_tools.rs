@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt, Table};
 
-use crate::config::settings::{BoneSettings, Settings};
+use crate::config::settings::{Settings, SubagentSettings};
 
 /// Create `bone.tool.register` and the `bone._tools` storage array.
 pub(crate) fn setup_register_tool(lua: &Lua, bone: &Table) -> Result<(), String> {
@@ -111,12 +111,10 @@ pub(crate) fn setup_register_subagent(
     let list_settings = Arc::clone(&settings);
     let list = lua
         .create_function(move |lua, ()| {
-            let resolved = list_settings
+            let settings = list_settings
                 .lock()
-                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?
-                .resolved()
-                .clone();
-            lua.to_value(&super::types::collect_subagents(&resolved, lua))
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
+            lua.to_value(&super::types::collect_subagents(settings.subagents(), lua))
         })
         .map_err(crate::util::errstr)?;
     subagent.set("list", list).map_err(crate::util::errstr)?;
@@ -128,11 +126,14 @@ pub(crate) fn setup_register_subagent(
 
 /// Seed enabled canonical YAML definitions before `init.lua` runs. Config wins
 /// duplicate names; later matching Lua registrations are silently ignored.
-pub(crate) fn register_config_subagents(lua: &Lua, settings: &BoneSettings) -> Result<(), String> {
+pub(crate) fn register_config_subagents(
+    lua: &Lua,
+    subagents: &std::collections::BTreeMap<String, SubagentSettings>,
+) -> Result<(), String> {
     let bone: Table = lua.globals().get("bone").map_err(crate::util::errstr)?;
     let subagent: Table = bone.get("subagent").map_err(crate::util::errstr)?;
     let register: mlua::Function = subagent.get("register").map_err(crate::util::errstr)?;
-    for (name, config) in settings.subagents.iter().filter(|(_, agent)| agent.enabled) {
+    for (name, config) in subagents.iter().filter(|(_, agent)| agent.enabled) {
         let entry = lua.create_table().map_err(crate::util::errstr)?;
         entry
             .set("name", name.as_str())
@@ -166,17 +167,12 @@ pub(crate) fn register_config_subagents(lua: &Lua, settings: &BoneSettings) -> R
                 .set("timeout_ms", value)
                 .map_err(crate::util::errstr)?;
         }
-        if let Some(value) = config.max_concurrency {
-            entry
-                .set("max_concurrency", value)
-                .map_err(crate::util::errstr)?;
-        }
         register.call::<()>(entry).map_err(crate::util::errstr)?;
     }
     let configured: Table = bone
         .get("_config_subagent_names")
         .map_err(crate::util::errstr)?;
-    for name in settings.subagents.keys() {
+    for name in subagents.keys() {
         configured
             .set(name.as_str(), true)
             .map_err(crate::util::errstr)?;

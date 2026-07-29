@@ -36,6 +36,11 @@ pub fn isolate_bone_dir(path: &Path) -> BoneDirGuard {
 }
 
 #[allow(dead_code)]
+pub fn config_store() -> bone::config::store::ConfigStore {
+    bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded()).unwrap()
+}
+
+#[allow(dead_code)]
 pub fn temp_dir(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

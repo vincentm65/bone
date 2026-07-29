@@ -14,7 +14,7 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
         token_sent: 0,
         token_received: 0,
         result_file: None,
-        max_concurrency: 1,
+        provider: "test-provider".into(),
         activity: None,
         trace: Vec::new(),
         events: Vec::new(),

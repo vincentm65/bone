@@ -26,11 +26,11 @@ fn boot(config_dir: &std::path::Path) -> bone_core::ext::BootedTools {
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("task_list.lua"), TASK_LIST).unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     bone_core::ext::boot_with_tools(
         config_dir,
         config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",

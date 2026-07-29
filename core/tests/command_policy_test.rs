@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use serde_json::json;
 
-use bone_core::tools::ApprovalMode;
-use bone_core::tools::ToolCall;
 use bone_core::tools::command_policy::{CommandSafety, classify_command};
+use bone_core::tools::registry::{ToolHandler, ToolRegistry};
+use bone_core::tools::{ApprovalMode, ToolCall};
 
 fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
     ToolCall {
@@ -44,6 +46,50 @@ fn shell_process_actions_have_action_specific_safety() {
             json!({ "action": "kill", "id": "process-1" })
         )),
         CommandSafety::Danger
+    );
+}
+
+#[test]
+fn dynamic_computer_safety_only_allows_exact_observe() {
+    let dynamic_safety = HashMap::from([
+        ("computer".to_string(), CommandSafety::Danger),
+        ("read_only_dynamic".to_string(), CommandSafety::ReadOnly),
+    ]);
+    let handler = ToolHandler::with_enabled_safety_and_display(
+        ToolRegistry::new(),
+        &[],
+        HashMap::new(),
+        dynamic_safety,
+        HashMap::new(),
+    );
+
+    assert_eq!(
+        handler.safety_for_call(&call("computer", json!({ "action": "observe" }))),
+        CommandSafety::ReadOnly
+    );
+
+    for arguments in [
+        json!({}),
+        json!({ "action": null }),
+        json!({ "action": 1 }),
+        json!({ "action": "Observe" }),
+        json!({ "action": "unknown" }),
+        json!({ "action": "move" }),
+    ] {
+        assert_eq!(
+            handler.safety_for_call(&call("computer", arguments.clone())),
+            CommandSafety::Danger,
+            "arguments: {arguments}"
+        );
+    }
+
+    assert_eq!(
+        handler.safety_for_call(&call("read_only_dynamic", json!({}))),
+        CommandSafety::ReadOnly
+    );
+    assert_eq!(
+        handler.safety_for_call(&call("shell", json!({ "command": "pwd" }))),
+        CommandSafety::ReadOnly
     );
 }
 

@@ -1,5 +1,16 @@
 use super::*;
 
+/// Create a CtxConfig with a minimal test ConfigStore and schema so that
+/// `create_ctx_table` does not reject the config as missing its daemon store.
+fn test_ctx_config() -> CtxConfig {
+    let shared = new_shared_state();
+    let store = crate::config::store::ConfigStore::for_test();
+    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
+    cfg.config_schema = Some(store.schema());
+    cfg.config_store = Some(store);
+    cfg
+}
+
 #[test]
 fn canonical_config_pages_and_mutations_use_the_daemon_store() {
     let _guard = crate::util::test_env_lock();
@@ -90,68 +101,52 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
 }
 
 #[test]
-fn config_get_uses_installed_snapshot_instead_of_filesystem() {
-    let temp = tempfile::tempdir().unwrap();
-    let page_dir = temp.path().join("config");
-    std::fs::create_dir(&page_dir).unwrap();
-    std::fs::write(
-        page_dir.join("general.yaml"),
-        "title: General\nfields:\n  - key: approval_mode\n    value: danger\n",
-    )
-    .unwrap();
-
+fn config_get_uses_canonical_store_instead_of_filesystem() {
     let lua = Lua::new();
-    let custom = crate::config::custom::CustomConfigs {
-        pages: Vec::new(),
-        settings: Some(crate::config::settings::Settings::defaults()),
-    };
-    lua.set_app_data(ConfigSnapshot(Arc::new(Mutex::new(custom))));
-    let cfg = CtxConfig::new(
-        temp.path().to_string_lossy().into_owned(),
-        new_shared_state(),
-    );
+    let store = crate::config::store::ConfigStore::for_test();
+    let mut cfg = CtxConfig::new("/tmp".into(), new_shared_state());
+    cfg.config_schema = Some(store.schema_for(&[], &[]));
+    cfg.config_store = Some(store);
     let config = build_config_table(&lua, &cfg).unwrap();
     let get: mlua::Function = config.get("get").unwrap();
 
-    assert_eq!(
-        get.call::<String>(("general", "approval_mode")).unwrap(),
-        "safe"
-    );
+    assert_eq!(get.call::<String>(("general", "approval")).unwrap(), "safe");
 }
 
 #[test]
-fn config_get_table_exposes_canonical_enablement_from_snapshot() {
+fn config_get_table_exposes_canonical_enablement() {
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
     let lua = Lua::new();
-    let mut settings = crate::config::settings::Settings::defaults();
-    settings.inner.commands.disabled.push("compact".into());
-    settings.inner.tools.disabled.push("cron".into());
-    let custom = crate::config::custom::CustomConfigs {
-        pages: Vec::new(),
-        settings: Some(settings),
-    };
-    lua.set_app_data(ConfigSnapshot(Arc::new(Mutex::new(custom))));
-    let cfg = CtxConfig::new("/tmp".into(), new_shared_state());
+    let store =
+        crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+    let schema = store.schema_for(&["cron".into()], &["compact".into()]);
+    let revision = store.snapshot().revision;
+    store
+        .set_enabled("commands", "compact", false, revision)
+        .unwrap();
+    let revision = store.snapshot().revision;
+    store.set_enabled("tools", "cron", false, revision).unwrap();
+    let mut cfg = CtxConfig::new("/tmp".into(), new_shared_state());
+    cfg.config_schema = Some(schema);
+    cfg.config_store = Some(store);
     let config = build_config_table(&lua, &cfg).unwrap();
     let get_table: mlua::Function = config.get("get_table").unwrap();
 
     let commands: mlua::Table = get_table.call("commands").unwrap();
     let tools: mlua::Table = get_table.call("tools").unwrap();
-    assert_eq!(
-        commands
-            .get::<mlua::Table>("disabled")
-            .unwrap()
-            .get::<String>(1)
-            .unwrap(),
-        "compact"
-    );
-    assert_eq!(
-        tools
-            .get::<mlua::Table>("disabled")
-            .unwrap()
-            .get::<String>(1)
-            .unwrap(),
-        "cron"
-    );
+    assert!(!commands.get::<bool>("compact").unwrap());
+    assert!(!tools.get::<bool>("cron").unwrap());
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -327,8 +322,7 @@ fn ui_status_and_info_notify_emit_runtime_status() {
     use crate::runtime::RuntimeEvent;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
-    let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
-    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
+    let mut cfg = test_ctx_config();
     cfg.runtime_status = Some(tx);
 
     let lua = Lua::new();
@@ -370,8 +364,7 @@ fn ui_notice_emits_runtime_notice() {
     use crate::runtime::RuntimeEvent;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
-    let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
-    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
+    let mut cfg = test_ctx_config();
     cfg.runtime_status = Some(tx);
 
     let lua = Lua::new();
@@ -397,8 +390,7 @@ fn ui_notice_emits_runtime_notice() {
 // must not panic — it falls back to stderr.
 #[test]
 fn ui_status_without_frontend_is_inert() {
-    let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
-    let cfg = CtxConfig::new("/tmp".to_string(), shared);
+    let cfg = test_ctx_config();
     assert!(cfg.runtime_status.is_none());
 
     let lua = Lua::new();
@@ -421,6 +413,8 @@ fn sample_app_state() -> AppCtxState {
         crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "hello"),
         crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "hi there"),
     ];
+    let config_store = crate::config::store::ConfigStore::for_test();
+    let config_schema = config_store.schema_for(&[], &[]);
     AppCtxState::new(
         &tools,
         &stats,
@@ -432,6 +426,8 @@ fn sample_app_state() -> AppCtxState {
         None,
         Vec::new(),
         history,
+        config_store,
+        config_schema,
         None,
     )
 }
@@ -620,6 +616,31 @@ fn wall_elapsed_none_stays_pending() {
     );
 }
 
+#[test]
+fn provider_slot_wait_counts_toward_wall_timeout() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let temp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", temp.path()) };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _held = crate::ext::provider_slots::acquire("wall-test", 1, None)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let error = acquire_provider_slot("wall-test", 1, None, Some(20))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("wall-clock limit"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    });
+    match old_bone {
+        Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
+}
+
 // Regression: tools and before_turn must share one session-scoped map so a
 // value written by a tool (e.g. task_list) is readable from before_turn.
 // Passing the same Arc into both CtxConfigs is the host contract; separate
@@ -629,7 +650,8 @@ fn ctx_state_is_shared_across_contexts() {
     let shared = new_shared_state();
 
     // Writer context (stands in for a tool invocation).
-    let writer_cfg = CtxConfig::new("/tmp".to_string(), shared.clone());
+    let mut writer_cfg = test_ctx_config();
+    writer_cfg.shared_state = shared.clone();
     let lua_w = Lua::new();
     let ctx_w = create_ctx_table(&lua_w, &writer_cfg).unwrap();
     lua_w.globals().set("ctx", ctx_w).unwrap();
@@ -639,7 +661,8 @@ fn ctx_state_is_shared_across_contexts() {
         .unwrap();
 
     // Reader context, built the same way the before_turn hook is.
-    let reader_cfg = CtxConfig::new("/tmp".to_string(), shared);
+    let mut reader_cfg = test_ctx_config();
+    reader_cfg.shared_state = shared;
     let lua_r = Lua::new();
     let ctx_r = create_ctx_table(&lua_r, &reader_cfg).unwrap();
     lua_r.globals().set("ctx", ctx_r).unwrap();
@@ -669,7 +692,8 @@ fn ctx_state_is_isolated_across_fresh_maps() {
 
 #[test]
 fn extension_shell_primitives_enforce_safe_mode() {
-    let cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let _guard = crate::util::test_env_lock();
+    let cfg = test_ctx_config();
     let lua = Lua::new();
     let ctx = create_ctx_table(&lua, &cfg).unwrap();
     lua.globals().set("ctx", ctx).unwrap();
@@ -703,7 +727,8 @@ impl crate::tools::ApprovalGate for BlockingGate {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn extension_shell_primitives_use_approval_gate() {
-    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let _guard = crate::util::test_env_lock();
+    let mut cfg = test_ctx_config();
     cfg.approval_mode = crate::tools::ApprovalMode::Danger;
     cfg.approval_gate = Some(crate::tools::SharedGate(Arc::new(BlockingGate)));
     let lua = Lua::new();
@@ -728,12 +753,13 @@ async fn extension_shell_primitives_use_approval_gate() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn extension_shell_primitives_honor_cancellation() {
+    let _guard = crate::util::test_env_lock();
     for expression in [
         r#"ctx.shell("sleep 30 & wait")"#,
         r#"ctx.shell_streaming("sleep 30 & wait", function() end)"#,
     ] {
         let cancelled = Arc::new(AtomicBool::new(false));
-        let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+        let mut cfg = test_ctx_config();
         cfg.approval_mode = crate::tools::ApprovalMode::Danger;
         cfg.cancelled = Some(cancelled.clone());
         let lua = Lua::new();
@@ -762,7 +788,8 @@ async fn extension_shell_primitives_honor_cancellation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shell_streaming_callback_error_reaps_process_tree() {
-    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let _guard = crate::util::test_env_lock();
+    let mut cfg = test_ctx_config();
     cfg.approval_mode = crate::tools::ApprovalMode::Danger;
     let lua = Lua::new();
     let ctx = create_ctx_table(&lua, &cfg).unwrap();
@@ -793,7 +820,8 @@ async fn shell_streaming_callback_error_reaps_process_tree() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn extension_processes_are_conversation_scoped() {
-    let mut cfg_a = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let _guard = crate::util::test_env_lock();
+    let mut cfg_a = test_ctx_config();
     cfg_a.approval_mode = crate::tools::ApprovalMode::Danger;
     cfg_a.session_id = Some(101);
     let lua_a = Lua::new();
@@ -804,7 +832,7 @@ async fn extension_processes_are_conversation_scoped() {
         .eval()
         .unwrap();
 
-    let mut cfg_b = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let mut cfg_b = test_ctx_config();
     cfg_b.session_id = Some(202);
     let lua_b = Lua::new();
     let ctx_b = create_ctx_table(&lua_b, &cfg_b).unwrap();
@@ -840,8 +868,115 @@ async fn extension_processes_are_conversation_scoped() {
 }
 
 #[test]
+fn ctx_exec_and_codec_are_available_and_codec_is_binary_safe() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+    let encoded: String = lua
+        .load("return ctx.codec.base64_encode('\\0\\255')")
+        .eval()
+        .unwrap();
+    assert_eq!(encoded, "AP8=");
+    let available: bool = lua
+        .load("return type(ctx.exec) == 'function' and type(ctx.codec.base64_encode) == 'function'")
+        .eval()
+        .unwrap();
+    assert!(available);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctx_exec_passes_metacharacters_as_literal_argv() {
+    let _guard = crate::util::test_env_lock();
+    let mut cfg = test_ctx_config();
+    cfg.approval_mode = crate::tools::ApprovalMode::Danger;
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+    let output: String = lua
+        .load(r#"return ctx.exec("printf", {"%s", "$(not-a-command); *"}).stdout"#)
+        .eval()
+        .unwrap();
+    assert_eq!(output, "$(not-a-command); *");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctx_exec_reports_timeout_and_output_limit() {
+    let _guard = crate::util::test_env_lock();
+    let mut cfg = test_ctx_config();
+    cfg.approval_mode = crate::tools::ApprovalMode::Danger;
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+    let missing: (bool, bool) = lua
+        .load(
+            r#"local r=ctx.exec("/definitely/not/a/bone-command", {}); return r.spawned,type(r.error)=="string""#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(missing, (false, true));
+    let timed_out: (bool, bool) = lua
+        .load(r#"local r=ctx.exec("sleep", {"2"}, {timeout_ms=20}); return r.spawned,r.timed_out"#)
+        .eval()
+        .unwrap();
+    assert_eq!(timed_out, (true, true));
+    let started = std::time::Instant::now();
+    let descendant_timed_out: bool = lua
+        .load(r#"return ctx.exec("sh", {"-c", "sleep 2 &"}, {timeout_ms=20}).timed_out"#)
+        .eval()
+        .unwrap();
+    assert!(descendant_timed_out);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    let limited: bool = lua
+        .load(r#"return ctx.exec("printf", {"123456789"}, {max_output_bytes=4}).output_limit_exceeded"#)
+        .eval()
+        .unwrap();
+    assert!(limited);
+}
+
+struct CaptureExecGate(Arc<Mutex<String>>);
+
+#[async_trait::async_trait]
+impl crate::tools::ApprovalGate for CaptureExecGate {
+    async fn decide(
+        &self,
+        _: Option<String>,
+        _: bool,
+        call: &ToolCall,
+    ) -> bone_protocol::CallOutcome {
+        *self.0.lock().unwrap() = call.arguments.to_string();
+        bone_protocol::CallOutcome::Blocked("blocked".into())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctx_exec_redacted_approval_does_not_expose_arguments() {
+    let _guard = crate::util::test_env_lock();
+    let seen = Arc::new(Mutex::new(String::new()));
+    let mut cfg = test_ctx_config();
+    cfg.approval_mode = crate::tools::ApprovalMode::Danger;
+    cfg.approval_gate = Some(crate::tools::SharedGate(Arc::new(CaptureExecGate(
+        seen.clone(),
+    ))));
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+    let _: (bool, String) = lua.load(r#"local ok,e=pcall(function() ctx.exec("echo", {"SECRET-ARG"}, {redact_args=true}) end); return ok,tostring(e)"#).eval().unwrap();
+    let preview = seen.lock().unwrap().clone();
+    assert!(
+        !preview.contains("SECRET-ARG"),
+        "redacted approval leaked argv: {preview}"
+    );
+}
+
+#[test]
 fn runtime_info_exposes_read_only_execution_metadata() {
-    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let mut cfg = test_ctx_config();
     cfg.session_id = Some(42);
     cfg.provider = Some("openrouter".into());
     cfg.model = Some("test-model".into());
@@ -866,7 +1001,7 @@ fn runtime_info_exposes_read_only_execution_metadata() {
 #[test]
 fn conversation_submit_and_load_queue_generic_operations() {
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let mut cfg = test_ctx_config();
     cfg.conversation_operations = Some(tx);
     let lua = Lua::new();
     let ctx = create_ctx_table(&lua, &cfg).unwrap();
@@ -891,7 +1026,7 @@ fn conversation_submit_and_load_queue_generic_operations() {
 #[test]
 fn ui_apply_accepts_protocol_view_diffs() {
     let ui = crate::ext::api_ui::new_shared();
-    let mut cfg = CtxConfig::new("/tmp".to_string(), new_shared_state());
+    let mut cfg = test_ctx_config();
     cfg.ui = Some(ui.clone());
     let lua = Lua::new();
     let ctx = create_ctx_table(&lua, &cfg).unwrap();

@@ -25,7 +25,7 @@ const MAX_TRACE_LINES: usize = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
-    /// Waiting for a concurrency slot on its agent template.
+    /// Waiting for a concurrency slot on its provider.
     Queued,
     Running,
     Done,
@@ -57,8 +57,8 @@ pub struct Job {
     /// Path to a file holding the full result when it exceeds the
     /// injection limit (results are truncated when delivered inline).
     pub result_file: Option<String>,
-    /// Maximum concurrent jobs allowed for this agent template.
-    pub max_concurrency: usize,
+    /// Provider used by the job's delegated agent.
+    pub provider: String,
     /// What the job is doing right now (last tool-call summary), for live UI.
     pub activity: Option<String>,
     /// Recent tool-call summaries (up to [`MAX_TRACE_LINES`]), appended to
@@ -94,14 +94,14 @@ impl Job {
 /// sites stay readable and new fields (e.g. Tier 3 scope) don't grow the
 /// positional argument list.
 pub struct NewJob {
-    /// Agent template name (used for the per-template concurrency count).
+    /// Agent template name used for display.
     pub agent: String,
     /// The task prompt handed to the agent.
     pub task: String,
     /// Short human-readable summary for display (empty falls back to `task`).
     pub title: String,
-    /// How many jobs may run concurrently for this agent template.
-    pub max_concurrency: usize,
+    /// Provider used by this delegated run.
+    pub provider: String,
     /// Conversation the job belongs to (used to scope cancel/inject); `None`
     /// for single-conversation callers.
     pub scope: Option<i64>,
@@ -158,36 +158,26 @@ impl JobRegistry {
         self.jobs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Create a new job. Starts Running when the agent has a free concurrency
-    /// slot, otherwise Queued — the spawner's runner task starts it via
-    /// [`JobRegistry::try_start`] when a slot frees. Never rejects.
+    /// Create a queued job. Its runner marks it Running after acquiring a
+    /// cross-process provider slot.
     pub fn create(&self, job: NewJob) -> String {
         let NewJob {
             agent,
             task,
             title,
-            max_concurrency,
+            provider,
             scope,
             cancel_flag,
         } = job;
         let now = current_unix_seconds();
         let mut jobs = self.lock_jobs();
-        let running_for_agent = jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Running && j.agent == agent)
-            .count();
-        let status = if running_for_agent >= max_concurrency {
-            JobStatus::Queued
-        } else {
-            JobStatus::Running
-        };
         let id = format!("job-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         jobs.push(Job {
             id: id.clone(),
             agent,
             task,
             title,
-            status,
+            status: JobStatus::Queued,
             result: None,
             started_at: now,
             finished_at: None,
@@ -195,7 +185,7 @@ impl JobRegistry {
             token_sent: 0,
             token_received: 0,
             result_file: None,
-            max_concurrency,
+            provider,
             activity: None,
             trace: Vec::new(),
             events: Vec::new(),
@@ -221,34 +211,18 @@ impl JobRegistry {
         id
     }
 
-    /// Transition a Queued job to Running if it is the oldest queued job for
-    /// its agent and the agent has a free slot. Returns `true` when started
-    /// (or when the job is already Running); the caller polls until then.
-    /// FIFO per agent: insertion order in the vec is dispatch order.
-    pub fn try_start(&self, id: &str) -> bool {
+    /// Mark a queued job Running after its provider slot has been acquired.
+    pub fn start(&self, id: &str) -> bool {
         let now = current_unix_seconds();
         let mut jobs = self.lock_jobs();
-        let Some(idx) = jobs.iter().position(|j| j.id == id) else {
+        let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
             return false;
         };
-        match jobs[idx].status {
-            JobStatus::Running => return true,
-            JobStatus::Queued => {}
-            _ => return false,
+        if job.status != JobStatus::Queued {
+            return job.status == JobStatus::Running;
         }
-        let agent = jobs[idx].agent.clone();
-        let running = jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Running && j.agent == agent)
-            .count();
-        let head = jobs
-            .iter()
-            .position(|j| j.status == JobStatus::Queued && j.agent == agent);
-        if running >= jobs[idx].max_concurrency || head != Some(idx) {
-            return false;
-        }
-        jobs[idx].status = JobStatus::Running;
-        jobs[idx].started_at = now;
+        job.status = JobStatus::Running;
+        job.started_at = now;
         drop(jobs);
         self.version.fetch_add(1, Ordering::Relaxed);
         true

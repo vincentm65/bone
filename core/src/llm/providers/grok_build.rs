@@ -126,6 +126,7 @@ impl GrokBuildProvider {
             endpoint: self.endpoint.clone(),
             handler: "openai".to_string(),
             context_window_tokens: self.context_window_tokens,
+            max_concurrency: None,
             reasoning_effort: self.reasoning_effort.clone(),
         }
     }

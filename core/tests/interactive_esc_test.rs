@@ -2,6 +2,8 @@
 //! when the client sends an Esc key reply. This reproduces the config-picker
 //! Esc freeze in `--connect` mode.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -116,11 +118,11 @@ bone.command.register("picker", {
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store_in(&config_dir);
     let booted = ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         BootOptions::default(),
         "test-model",
@@ -131,12 +133,13 @@ bone.command.register("picker", {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider);
     let (hub, commands_rx) = Hub::new();
     let publisher = hub.publisher();
+    config.attach_extensions(extensions.clone());
     tokio::spawn(run_daemon(
         publisher,
         commands_rx,
         provider,
-        extensions.clone(),
-        bone_core::config::store::ConfigStore::new(extensions).unwrap(),
+        extensions,
+        config,
         session,
         bone_core::tools::ApprovalMode::Safe,
         None,

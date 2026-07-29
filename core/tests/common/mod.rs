@@ -1,5 +1,28 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[allow(dead_code)]
+pub fn config_store() -> bone_core::config::store::ConfigStore {
+    config_store_in(&temp_dir("canonical-config"))
+}
+
+#[allow(dead_code)]
+pub fn config_store_in(config_dir: &Path) -> bone_core::config::store::ConfigStore {
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = std::env::var_os("BONE_DIR");
+    unsafe { std::env::set_var("BONE_DIR", config_dir) };
+    let store =
+        bone_core::config::store::ConfigStore::new(bone_core::ext::ExtensionManager::unloaded());
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+    store.unwrap()
+}
 
 #[allow(dead_code)]
 pub fn temp_dir(label: &str) -> PathBuf {

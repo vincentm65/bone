@@ -23,8 +23,8 @@ fn nested_request(session_sink: Option<Arc<dyn SessionSink>>) -> AgentRequest {
         max_tokens: None,
         approval_gate: None,
         transcript: None,
+        config_store: Some(crate::config::store::ConfigStore::for_test()),
         cancel: None,
-        config_snapshot: None,
     }
 }
 

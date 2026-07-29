@@ -49,11 +49,11 @@ fn nested_lua_tool_call_does_not_deadlock() {
     std::fs::write(tools_dir.join("outer.lua"), OUTER_TOOL).unwrap();
     std::fs::write(tools_dir.join("inner.lua"), INNER_TOOL).unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone_core::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone_core::ext::BootOptions::default(),
         "test-model",

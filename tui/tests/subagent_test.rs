@@ -12,14 +12,14 @@ use std::time::Duration;
 
 use bone::tools::types::ToolCall;
 
-/// Build a default `NewJob` (cap 1, no parent, fresh cancel flag) for tests
-/// that seed the registry directly.
+/// Build a default queued `NewJob` with a provider and fresh cancel flag for
+/// tests that seed the registry directly.
 fn test_job(agent: &str, task: &str) -> bone::ext::jobs::NewJob {
     bone::ext::jobs::NewJob {
         agent: agent.into(),
         task: task.into(),
         title: String::new(),
-        max_concurrency: 1,
+        provider: "test-provider".into(),
         scope: None,
         cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
@@ -85,7 +85,6 @@ bone.tool.register({
                 title = task.title,
                 system_prompt = agent and agent.system_prompt or nil,
                 timeout_ms = agent and agent.timeout_ms or nil,
-                max_concurrency = agent and agent.max_concurrency or 1,
                 tools = agent and agent.tools or nil,
             })
             if spawned.ok then table.insert(ids, spawned.id) end
@@ -117,11 +116,11 @@ fn two_agents_registered_and_listed_in_tool() {
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
     seed_subagent_tool(&config_dir);
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -177,11 +176,10 @@ fn separate_subagents_config_registers_tool_before_runtime_sync() {
     let config =
         bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded()).unwrap();
     let settings = std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot()));
-    let mut custom = config.legacy_snapshot();
     let booted = bone::ext::boot_with_tools_shared(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -206,11 +204,11 @@ fn no_agents_registered_no_tool() {
     let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -236,11 +234,11 @@ fn tool_allowlist_narrows_exposed_tools() {
     let _bone_dir = common::isolate_bone_dir(&config_dir);
     common::seed_catalog_into(&config_dir);
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions {
             tool_allowlist: Some(vec!["read_file".to_string()]),
@@ -275,11 +273,14 @@ fn spawn_lifecycle_no_provider() {
     std::fs::write(config_dir.join("init.lua"), TWO_AGENTS_INIT).unwrap();
     seed_subagent_tool(&config_dir);
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
+    config
+        .set_active_provider("local", config.snapshot().revision)
+        .unwrap();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -398,11 +399,14 @@ fn dispatch_with_wait_returns_results_inline() {
     .unwrap();
     seed_subagent_tool(&config_dir);
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
+    config
+        .set_active_provider("local", config.snapshot().revision)
+        .unwrap();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -471,11 +475,11 @@ fn wait_action_collects_dispatched_job() {
     .unwrap();
     seed_subagent_tool(&config_dir);
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -561,11 +565,11 @@ fn depth_guard_rejects_spawn_at_depth_1() {
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("depth_guard.lua"), SPAWN_AT_DEPTH).unwrap();
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -641,7 +645,7 @@ fn rust_jobs_pane_returns_valid_panepage() {
             token_sent: 0,
             token_received: 0,
             result_file: None,
-            max_concurrency: 1,
+            provider: "test-provider".into(),
             activity: None,
             trace: Vec::new(),
             events: Vec::new(),
@@ -662,7 +666,7 @@ fn rust_jobs_pane_returns_valid_panepage() {
             token_sent: 0,
             token_received: 0,
             result_file: None,
-            max_concurrency: 1,
+            provider: "test-provider".into(),
             activity: None,
             trace: Vec::new(),
             events: Vec::new(),
@@ -739,11 +743,11 @@ fn cancel_running_job_via_lua_tool() {
     std::fs::create_dir_all(&tools_dir).unwrap();
     std::fs::write(tools_dir.join("cancel.lua"), CANCEL_TOOL_LUA).unwrap();
 
-    let mut custom = bone::config::custom::CustomConfigs::default();
+    let config = common::config_store();
     let booted = bone::ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         false,
         bone::ext::BootOptions::default(),
         "test-model",
@@ -763,7 +767,7 @@ fn cancel_running_job_via_lua_tool() {
         agent: "cancel-target".into(),
         task: "unique-task-cancel-via-lua".into(),
         title: String::new(),
-        max_concurrency: 1,
+        provider: "test-provider".into(),
         scope: None,
         cancel_flag: cancel_flag.clone(),
     });

@@ -93,6 +93,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunRequest, String> {
 
 pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> {
     let config_dir = crate::config::bone_dir();
+    let config = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())?;
 
     // Try Lua command expansion first.
     if let Some(prompt) = expand_lua_command(
@@ -101,6 +102,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         request.approval_mode,
         request.provider.clone(),
         request.model.clone(),
+        config.clone(),
     )
     .await
     {
@@ -121,7 +123,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
             max_tokens: None,
             approval_gate: None,
             transcript: None,
-            config_snapshot: None,
+            config_store: Some(config),
             cancel: None,
         })
         .await;
@@ -145,7 +147,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         max_tokens: None,
         approval_gate: None,
         transcript: None,
-        config_snapshot: None,
+        config_store: Some(config),
         cancel: None,
     })
     .await
@@ -159,6 +161,7 @@ async fn expand_lua_command(
     approval_mode: crate::tools::ApprovalMode,
     provider: Option<String>,
     model: Option<String>,
+    config: crate::config::store::ConfigStore,
 ) -> Option<String> {
     let trimmed = prompt.trim();
     let command = trimmed.strip_prefix('/')?;
@@ -177,16 +180,12 @@ async fn expand_lua_command(
     // Run blocking Lua execution on a separate thread to avoid blocking the tokio worker.
     tokio::task::spawn_blocking(move || {
         // Boot extensions for command lookup only — no config sync/persist.
-        let config =
-            crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
-                .ok()?;
-        let mut custom = config.legacy_snapshot();
         let settings =
             std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot()));
         let booted = ext::boot_with_tools_shared(
             &config_dir_owned,
             &std::env::current_dir().unwrap_or_default(),
-            &mut custom,
+            &config,
             false,
             ext::BootOptions {
                 agent_depth: 0,
@@ -197,6 +196,7 @@ async fn expand_lua_command(
             &provider.clone().unwrap_or_default(),
             settings,
         );
+        config.attach_extensions(booted.manager.clone());
         let lua = booted.manager.lua_handle();
         let lua = lua.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -209,11 +209,26 @@ async fn expand_lua_command(
         // Create ctx table.
         let config_dir_str = config_dir_owned.to_string_lossy().to_string();
         let shared_state = booted.tools.shared_state.clone();
+        let tool_names = booted
+            .tools
+            .all_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        let command_names = booted
+            .manager
+            .commands()
+            .iter()
+            .map(|command| command.name.clone())
+            .collect::<Vec<_>>();
+        let config_schema = config.schema_for(&tool_names, &command_names);
         let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir_str, shared_state);
         ctx_cfg.tool_handler = Some(booted.tools);
         ctx_cfg.approval_mode = approval_mode;
         ctx_cfg.provider = provider;
         ctx_cfg.model = model;
+        ctx_cfg.config_store = Some(config);
+        ctx_cfg.config_schema = Some(config_schema);
         let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
         // Release the project Lua mutex before calling into Lua: a nested

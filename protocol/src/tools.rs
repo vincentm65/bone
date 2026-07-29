@@ -27,6 +27,9 @@ pub struct ToolDefinition {
 pub struct ToolOutput {
     pub content: String,
     pub images: Vec<ImageData>,
+    /// Keep image data only in the current provider tool loop. Ephemeral images
+    /// are never added to durable transcript/session history.
+    pub ephemeral_images: bool,
     pub pane_page: Option<PaneContent>,
     pub state: Option<String>,
 }

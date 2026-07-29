@@ -339,7 +339,7 @@ bone.subagent.register({
 })
 ```
 
-Fields: `name` (required, unique), `description` (required), `system_prompt`, `provider`, `model`, `approval`, `timeout_ms`, `max_concurrency`. Duplicates are skipped with a warning. `bone.subagent.list()` returns the resolved config-backed and Lua-registered definitions.
+Fields: `name` (required, unique), `description` (required), `system_prompt`, `provider`, `model`, `approval`, `timeout_ms`. Duplicates are skipped with a warning. `bone.subagent.list()` returns the resolved config-backed and Lua-registered definitions.
 
 Sub-agents cannot spawn nested sub-agents. When `bone.agent_depth > 0`, the default `subagent` delegation tool is not registered, and Rust also rejects attempts to spawn another agent from inside a sub-agent.
 
@@ -376,7 +376,7 @@ local result = ctx.agent.spawn("Research Rust async runtimes", {
 -- result: { ok = true, id = "job-1", error = nil }
 ```
 
-Opts for `spawn` and `followup`: `{ agent, title, approval, provider, model, system_prompt, timeout_ms, wall_timeout_ms, max_concurrency, tools }`. `title` is the human-readable job label, `max_concurrency` limits parallel jobs for that agent template, and `tools` is the subagent tool allow-list. Sub-agents (`agent_depth > 0`) cannot spawn, follow up, or wait on background jobs.
+Opts for `spawn` and `followup`: `{ agent, title, approval, provider, model, system_prompt, timeout_ms, wall_timeout_ms, tools }`. `title` is the human-readable job label and `tools` is the subagent tool allow-list. Delegated runs share the selected provider's configured concurrency limit across Bone processes. Sub-agents (`agent_depth > 0`) cannot spawn, follow up, or wait on background jobs.
 
 Query all jobs:
 ```lua

@@ -443,7 +443,7 @@ fn job_with_events(events: Vec<crate::ext::jobs::JobEvent>) -> crate::ext::jobs:
         token_sent: 0,
         token_received: 0,
         result_file: None,
-        max_concurrency: 1,
+        provider: "test-provider".into(),
         activity: None,
         trace: Vec::new(),
         events,

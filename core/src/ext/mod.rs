@@ -17,6 +17,7 @@ pub mod ops_commands;
 pub mod ops_events;
 pub mod ops_plugins;
 pub mod ops_tools;
+pub mod provider_slots;
 pub mod settings_registry;
 pub mod snapshots;
 pub mod types;
@@ -107,9 +108,9 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
         || (name == "subagent.lua" && !existing.contains("eager"))
-        // Config now exposes validated provider reasoning effort alongside the
-        // daemon's typed aggregate schema; refresh older seeded copies.
-        || (name == "config.lua" && !existing.contains("canonical-config-v5")))
+        // Config now exposes the delegated-run concurrency limit in the
+        // provider editor; refresh older seeded copies.
+        || (name == "config.lua" && !existing.contains("canonical-config-v6")))
 }
 
 /// Boot the Lua extension system.
@@ -139,109 +140,78 @@ pub fn boot_shared(
     loader::boot(config_dir, cwd, opts, model, provider, Some(settings))
 }
 
-/// Full boot sequence: load tools, boot extensions, register Lua tools,
-/// optionally sync the registry into `custom` (persisted), and build a
-/// configured `ToolHandler`.
+/// Full boot sequence: boot extensions, register Lua tools, and build a
+/// configured `ToolHandler` from canonical daemon configuration.
 pub fn boot_with_tools(
     config_dir: &Path,
     cwd: &Path,
-    custom: &mut super::config::custom::CustomConfigs,
-    sync: bool,
+    config: &super::config::store::ConfigStore,
+    _sync: bool,
     opts: BootOptions,
     model: &str,
     provider: &str,
 ) -> BootedTools {
-    boot_with_tools_inner(config_dir, cwd, custom, sync, opts, model, provider, None)
+    boot_with_tools_inner(config_dir, cwd, config, opts, model, provider)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn boot_with_tools_shared(
     config_dir: &Path,
     cwd: &Path,
-    custom: &mut super::config::custom::CustomConfigs,
-    sync: bool,
+    config: &super::config::store::ConfigStore,
+    _sync: bool,
     opts: BootOptions,
     model: &str,
     provider: &str,
-    settings: std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>,
+    _settings: std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>,
 ) -> BootedTools {
-    boot_with_tools_inner(
-        config_dir,
-        cwd,
-        custom,
-        sync,
-        opts,
-        model,
-        provider,
-        Some(settings),
-    )
+    boot_with_tools_inner(config_dir, cwd, config, opts, model, provider)
 }
 
 fn configured_tool_names(
-    custom: &super::config::custom::CustomConfigs,
+    config: &super::config::store::ConfigStore,
     all_tool_names: Vec<String>,
 ) -> Vec<String> {
-    if let Some(settings) = custom
-        .settings
-        .as_ref()
-        .filter(|settings| settings.resolved().version >= 2)
-    {
-        let disabled = &settings.resolved().tools.disabled;
-        all_tool_names
-            .into_iter()
-            .filter(|name| !disabled.contains(name))
-            .collect()
-    } else {
-        let names = custom.enabled_tool_names();
-        if names.is_empty() {
-            all_tool_names
-        } else {
-            names
-        }
-    }
+    let disabled = config.snapshot().disabled_tools;
+    all_tool_names
+        .into_iter()
+        .filter(|name| !disabled.contains(name))
+        .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn boot_with_tools_inner(
     config_dir: &Path,
     cwd: &Path,
-    custom: &mut super::config::custom::CustomConfigs,
-    sync: bool,
+    config: &super::config::store::ConfigStore,
     opts: BootOptions,
     model: &str,
     provider: &str,
-    settings: Option<std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>>,
 ) -> BootedTools {
-    // Per-agent tool allowlist, captured before `opts` is moved into `boot`.
     let tool_allowlist = opts.tool_allowlist.clone();
     let BootResult {
         manager: extensions,
         tools: lua_tools,
         shared_state,
-    } = match settings {
-        Some(settings) => boot_shared(config_dir, cwd, opts, model, provider, settings),
-        None => boot(config_dir, cwd, opts, model, provider),
-    };
-    extensions.replace_config_snapshot(custom.clone());
+    } = boot_shared(
+        config_dir,
+        cwd,
+        opts,
+        model,
+        provider,
+        std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot())),
+    );
 
     let mut loaded = super::tools::load_tools();
     super::tools::register_lua_tools(&mut loaded, lua_tools);
 
-    let all_tool_names: Vec<String> = loaded
+    let all_tool_names = loaded
         .registry
         .definitions()
         .iter()
-        .map(|d| d.name.clone())
+        .map(|definition| definition.name.clone())
         .collect();
+    let mut enabled = configured_tool_names(config, all_tool_names);
 
-    let mut enabled = if sync {
-        configured_tool_names(custom, all_tool_names)
-    } else {
-        all_tool_names
-    };
-
-    // A per-agent allowlist further narrows the enabled set: a sub-agent only
-    // sees tools that are both globally enabled and named in its allowlist.
     if let Some(allow) = &tool_allowlist {
         enabled.retain(|name| allow.contains(name));
     }
@@ -254,8 +224,8 @@ fn boot_with_tools_inner(
         loaded.dynamic_state,
     )
     .with_working_dir(cwd)
-    // Same Arc the Lua tools captured at collect time, so ctx.state is one map.
-    .with_shared_state(shared_state);
+    .with_shared_state(shared_state)
+    .with_config_store(config.clone());
 
     BootedTools {
         manager: extensions,

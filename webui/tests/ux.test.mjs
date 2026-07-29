@@ -286,6 +286,13 @@ test("primary dynamic controls use native buttons", () => {
   assert.match(css, /:focus-visible/);
 });
 
+test("provider editor exposes and preserves max concurrency", () => {
+  const providerEditor = js.slice(js.indexOf("const PROVIDER_FIELDS"), js.indexOf("// Inline add-provider form"));
+  assert.match(providerEditor, /key: "max_concurrency"/);
+  assert.match(providerEditor, /Max concurrency must be a positive integer/);
+  assert.match(bridge, /max_concurrency: merged\.max_concurrency \?\? 1/);
+});
+
 test("subagent calls render as agent cards with live per-task status", () => {
   // Dedicated card path for the runtime's `subagent` tool.
   assert.match(js, /name === "subagent"/);
@@ -303,7 +310,8 @@ test("subagent calls render as agent cards with live per-task status", () => {
   assert.match(js, /function renderAgents/);
   assert.match(js, /upsert_subagent/);
   assert.match(js, /set_subagent_enabled/);
-  assert.match(js, /max_concurrency/);
+  const agentEditor = js.slice(js.indexOf("function renderAgentEditor"), js.indexOf("function renderAgents"));
+  assert.doesNotMatch(agentEditor, /max_concurrency/);
   assert.doesNotMatch(js, /Lua · read-only/);
   assert.match(css, /\.agent-row \{/);
   assert.match(css, /\.tool-status\.bg/);
@@ -445,6 +453,14 @@ test("renderTaskList escapes agent-controlled task text (no HTML injection)", ()
     "task text in expanded list must be safe text");
   assert.equal(itemsEl.childNodes[1].querySelector(".task-text").textContent, "safe task",
     "second task text must be safe text");
+});
+
+test("orphan tool errors remain visible without exposing result content", () => {
+  assert.match(js, /if \(!card\) \{[\s\S]*tool orphan[\s\S]*activeContainer\(\)\.appendChild\(orphan\)/);
+  assert.doesNotMatch(
+    js.slice(js.indexOf("if (!card) {", js.indexOf("function onToolResult")), js.indexOf("card.classList.remove", js.indexOf("function onToolResult"))),
+    /ev\.content|ev\.arguments/,
+  );
 });
 
 test("stats charts have keyboard-accessible spoken values", () => {

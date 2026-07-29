@@ -7,6 +7,8 @@
 //! the interactive `ctx.ui.key()` loop, and the post-complete snapshot await.
 //! The test asserts the whole thing completes within a timeout.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -77,6 +79,8 @@ async fn await_state_snapshot_unblocks_after_reply_bearing_command() {
             .unwrap()
             .as_nanos()
     ));
+    let old_bone = std::env::var_os("BONE_DIR");
+    unsafe { std::env::set_var("BONE_DIR", &config_dir) };
     let cmd_dir = config_dir.join("lua/commands");
     std::fs::create_dir_all(&cmd_dir).unwrap();
 
@@ -103,11 +107,11 @@ bone.command.register("cfgapply", {
     )
     .unwrap();
 
-    let mut custom = bone_core::config::custom::CustomConfigs::default();
+    let config = common::config_store_in(&config_dir);
     let booted = ext::boot_with_tools(
         &config_dir,
         &config_dir,
-        &mut custom,
+        &config,
         true,
         BootOptions::default(),
         "test-model",
@@ -118,12 +122,13 @@ bone.command.register("cfgapply", {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider);
     let (hub, commands_rx) = Hub::new();
     let publisher = hub.publisher();
+    config.attach_extensions(extensions.clone());
     tokio::spawn(run_daemon(
         publisher,
         commands_rx,
         provider,
-        extensions.clone(),
-        bone_core::config::store::ConfigStore::new(extensions).unwrap(),
+        extensions,
+        config,
         session,
         bone_core::tools::ApprovalMode::Safe,
         None,
@@ -225,4 +230,10 @@ bone.command.register("cfgapply", {
     eprintln!(
         "snapshots seen before CommandComplete: {snapshots_before_complete}; await_state_snapshot unblocked"
     );
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }
