@@ -518,7 +518,7 @@ impl JobRegistry {
         let mut jobs = self.lock_jobs();
         let Some(job) = jobs
             .iter_mut()
-            .find(|job| job.id == id && required_scope.map_or(true, |scope| job.scope == scope))
+            .find(|job| job.id == id && required_scope.is_none_or(|scope| job.scope == scope))
         else {
             return false;
         };

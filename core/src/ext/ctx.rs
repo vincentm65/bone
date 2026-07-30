@@ -1116,25 +1116,22 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             require_exec_approval(&program, &argv, redact, exec_mode, exec_gate.as_ref())?;
             let mut env = Vec::new();
             let stdin = if let Some(opts) = &opts {
-                if let Some(value) = opts.get::<Option<mlua::String>>("stdin")? {
-                    Some(value.as_bytes().to_vec())
-                } else {
-                    None
-                }
+                opts.get::<Option<mlua::String>>("stdin")?
+                    .map(|value| value.as_bytes().to_vec())
             } else {
                 None
             };
-            if let Some(opts) = &opts {
-                if let Some(table) = opts.get::<Option<Table>>("env")? {
-                    for pair in table.pairs::<String, mlua::String>() {
-                        let (key, value) = pair?;
-                        validate_exec_string(&key, "environment name")?;
-                        let value = value.to_str()?.to_string();
-                        validate_exec_string(&value, "environment value")?;
-                        env.push((key, value));
-                        if env.len() > LUA_EXEC_MAX_ARGS {
-                            return Err(mlua::Error::external("too many environment entries"));
-                        }
+            if let Some(opts) = &opts
+                && let Some(table) = opts.get::<Option<Table>>("env")?
+            {
+                for pair in table.pairs::<String, mlua::String>() {
+                    let (key, value) = pair?;
+                    validate_exec_string(&key, "environment name")?;
+                    let value = value.to_str()?.to_string();
+                    validate_exec_string(&value, "environment value")?;
+                    env.push((key, value));
+                    if env.len() > LUA_EXEC_MAX_ARGS {
+                        return Err(mlua::Error::external("too many environment entries"));
                     }
                 }
             }
@@ -1190,9 +1187,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         "base64_encode",
         lua.create_function(|lua, input: mlua::String| {
             use base64::Engine;
-            Ok(lua.create_string(
-                base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
-            )?)
+            lua.create_string(base64::engine::general_purpose::STANDARD.encode(input.as_bytes()))
         })?,
     )?;
     codec.set(

@@ -937,8 +937,7 @@ mod tests {
         let malformed = "read_only: [\n";
         std::fs::write(&path, malformed).unwrap();
         let error = ConfigStore::new(crate::ext::ExtensionManager::unloaded())
-            .err()
-            .expect("malformed command policy should fail");
+            .expect_err("malformed command policy should fail");
         assert!(error.contains("command-policy.yaml"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
 
@@ -959,8 +958,7 @@ mod tests {
         std::fs::write(dir.path().join("config.yaml"), "version: 2\ngeneral: [\n").unwrap();
 
         let error = ConfigStore::new(crate::ext::ExtensionManager::unloaded())
-            .err()
-            .expect("malformed configuration should fail");
+            .expect_err("malformed configuration should fail");
         assert!(error.contains("cannot load"));
 
         unsafe {
