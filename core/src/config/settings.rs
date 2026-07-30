@@ -564,6 +564,10 @@ impl Settings {
         &self.subagents
     }
 
+    pub(crate) fn extensions(&self) -> &BTreeMap<String, BTreeMap<String, ExtensionValue>> {
+        &self.extensions
+    }
+
     /// Load `config.yaml` from the resolved Bone configuration directory. Returns
     /// `Ok(None)` when the file does not exist (caller should migrate), `Err(...)`
     /// when it exists but is corrupt or has a bad version.

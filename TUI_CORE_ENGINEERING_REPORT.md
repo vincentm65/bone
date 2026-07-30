@@ -3,7 +3,7 @@
 Date: 2026-07-27
 
 Scope: `tui/`, `core/`, and the `protocol/` boundary between them. Build, test,
-dependency, and CI observations are included where they affect safe refactoring.
+and dependency observations are included where they affect safe refactoring.
 
 Goal: reduce accidental complexity, coupling, build/test weight, and runtime
 risk without removing user-visible features.
@@ -86,9 +86,9 @@ Completed:
 - The duplicate PNG version, unused TUI dependencies, excess `syntect` features,
   and empty core build dependencies were removed. The resolved lockfile is 11
   packages smaller.
-- The build script shares one Lua-source collector, and CI now enforces
+- The build script shares one Lua-source collector. Local validation covers
   formatting, all-target compilation, strict Clippy, full/default-minimal Rust
-  tests, web tests, and macOS/Windows compilation.
+  tests, and web tests.
 - The existing public `SessionSink::append_message` implementation contract is
   retained; a typed `append_chat_message` path adds lossless built-in
   persistence without forcing external sink implementations to change.
@@ -909,7 +909,7 @@ deterministic tests or an explicitly documented exception.
 - Add terminal/fullscreen RAII guards.
 - Use a unique editor tempfile.
 - Deduplicate terminal-width sends and dirty-check process rendering.
-- Land the low-risk dependency cleanup and PR CI.
+- Land the low-risk dependency cleanup.
 
 Exit gate: all modes pass; old DB fixtures load; provider payloads remain
 equivalent; two managed conversations remain isolated.
@@ -997,7 +997,7 @@ behavior, and release upgrade flows remain compatible.
    deterministic two-actor regression test.
 2. **Durable replay:** `PersistedMessageV2`, schema migration, old-row fallback,
    and exact provider-payload round-trip tests.
-3. **TUI safety and baseline:** terminal RAII, unique editor tempfile, PR CI,
+3. **TUI safety and baseline:** terminal RAII, unique editor tempfile,
    strict-lint cleanup, dependency quick wins, and recorded size/build metrics.
 
 After those, the request-correlated protocol and unified TUI event reducer are

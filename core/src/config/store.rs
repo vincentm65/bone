@@ -35,20 +35,31 @@ struct Inner {
 }
 
 impl ConfigStore {
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        let core = Settings::defaults();
-        let extensions = crate::ext::ExtensionManager::unloaded();
-        extensions.replace_settings(core.clone());
+    #[doc(hidden)]
+    pub fn for_test() -> Self {
+        Self::for_test_with_extensions(crate::ext::ExtensionManager::unloaded())
+    }
+
+    #[doc(hidden)]
+    pub fn for_test_with_extensions(extensions: crate::ext::ExtensionManager) -> Self {
+        let core = extensions
+            .settings_handle()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let subagents = core.subagents().clone();
+        let extension_values = core.extensions().clone();
+        let disabled_tools = core.resolved().tools.disabled.clone();
+        let disabled_commands = core.resolved().commands.disabled.clone();
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 revision: core.revision(),
                 core,
                 providers: super::ProvidersConfig::default(),
-                subagents: BTreeMap::new(),
-                extension_values: BTreeMap::new(),
-                disabled_tools: Vec::new(),
-                disabled_commands: Vec::new(),
+                subagents,
+                extension_values,
+                disabled_tools,
+                disabled_commands,
             })),
             extensions: Arc::new(Mutex::new(vec![extensions])),
         }

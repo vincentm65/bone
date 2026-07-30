@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 pub fn config_store() -> bone_core::config::store::ConfigStore {
-    config_store_in(&temp_dir("canonical-config"))
+    bone_core::config::store::ConfigStore::for_test()
 }
 
 #[allow(dead_code)]
@@ -26,20 +27,18 @@ pub fn config_store_in(config_dir: &Path) -> bone_core::config::store::ConfigSto
 
 #[allow(dead_code)]
 pub fn temp_dir(label: &str) -> PathBuf {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("bone-{label}-{suffix}"))
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("bone-{label}-{}-{suffix}-{id}", std::process::id()))
 }
 
 #[allow(dead_code)]
 pub fn temp_path(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("bone-{label}-{nanos}"))
+    temp_dir(label)
 }
 
 /// Copy the in-repo catalog tools/commands into `config_dir/lua/{tools,commands}`,
