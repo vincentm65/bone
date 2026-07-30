@@ -4,9 +4,12 @@
 //! implementations with full policy enforcement.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Table, Value};
 
@@ -19,6 +22,365 @@ use crate::tools::write_atomic::write_atomic;
 
 /// Counter for synthetic Lua tool call IDs.
 static LUA_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+static MONOTONIC_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+const LUA_PNG_MAX_PIXELS: u64 = 40_000_000;
+const LUA_PNG_MAX_DECODED_BYTES: usize = 160 * 1024 * 1024;
+const LUA_PNG_MAX_ENCODED_BYTES: usize = 192 * 1024 * 1024;
+const LUA_TIMER_MAX_MS: u64 = 60_000;
+
+struct DecodedPng {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+fn decode_png_rgba(input: &[u8]) -> Result<DecodedPng, mlua::Error> {
+    if input.len() < 24 || !input.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(mlua::Error::external("invalid PNG"));
+    }
+    let mut decoder = png::Decoder::new_with_limits(
+        Cursor::new(input),
+        png::Limits {
+            bytes: LUA_PNG_MAX_DECODED_BYTES,
+        },
+    );
+    decoder.set_transformations(
+        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+    );
+    let mut reader = decoder
+        .read_info()
+        .map_err(|_| mlua::Error::external("invalid PNG"))?;
+    let (width, height) = reader.info().size();
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| mlua::Error::external("PNG dimensions are too large"))?;
+    if width == 0 || height == 0 || pixels > LUA_PNG_MAX_PIXELS {
+        return Err(mlua::Error::external("PNG dimensions are too large"));
+    }
+    let output_size = reader
+        .output_buffer_size()
+        .ok_or_else(|| mlua::Error::external("PNG output is too large"))?;
+    if output_size > LUA_PNG_MAX_DECODED_BYTES {
+        return Err(mlua::Error::external("PNG output is too large"));
+    }
+    let mut decoded = vec![0; output_size];
+    let info = reader
+        .next_frame(&mut decoded)
+        .map_err(|_| mlua::Error::external("invalid PNG"))?;
+    decoded.truncate(info.buffer_size());
+
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => decoded,
+        png::ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity(pixels as usize * 4);
+            for pixel in decoded.chunks_exact(3) {
+                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+            rgba
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity(pixels as usize * 4);
+            for pixel in decoded.chunks_exact(2) {
+                rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+            rgba
+        }
+        png::ColorType::Grayscale => {
+            let mut rgba = Vec::with_capacity(pixels as usize * 4);
+            for value in decoded {
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+            rgba
+        }
+        png::ColorType::Indexed => {
+            return Err(mlua::Error::external("PNG palette expansion failed"));
+        }
+    };
+    if rgba.len() != pixels as usize * 4 {
+        return Err(mlua::Error::external("invalid PNG pixel data"));
+    }
+    Ok(DecodedPng {
+        width,
+        height,
+        rgba,
+    })
+}
+
+fn check_png_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), mlua::Error> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        Err(mlua::Error::external("PNG operation cancelled"))
+    } else {
+        Ok(())
+    }
+}
+
+struct BoundedPngOutput<'a> {
+    bytes: Vec<u8>,
+    cancelled: Option<&'a AtomicBool>,
+}
+
+impl std::io::Write for BoundedPngOutput<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self
+            .cancelled
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "PNG operation cancelled",
+            ));
+        }
+        let new_len = self
+            .bytes
+            .len()
+            .checked_add(buf.len())
+            .filter(|len| *len <= LUA_PNG_MAX_ENCODED_BYTES)
+            .ok_or_else(|| std::io::Error::other("encoded PNG is too large"))?;
+        self.bytes.reserve(new_len - self.bytes.len());
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_png_rgba(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<u8>, mlua::Error> {
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| mlua::Error::external("PNG output is too large"))?;
+    if rgba.len() != expected || rgba.len() > LUA_PNG_MAX_DECODED_BYTES {
+        return Err(mlua::Error::external("invalid PNG pixel data"));
+    }
+
+    let mut output = BoundedPngOutput {
+        bytes: Vec::new(),
+        cancelled,
+    };
+    let encoded = {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(rgba))
+    };
+    if encoded.is_err() {
+        check_png_cancelled(cancelled)?;
+        return Err(mlua::Error::external("PNG encoding failed"));
+    }
+    Ok(output.bytes)
+}
+
+fn fit_png_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    if width <= max_width && height <= max_height {
+        return (width, height);
+    }
+
+    if u64::from(max_width) * u64::from(height) <= u64::from(max_height) * u64::from(width) {
+        let resized_height =
+            (u64::from(height) * u64::from(max_width) / u64::from(width)).max(1) as u32;
+        (max_width, resized_height)
+    } else {
+        let resized_width =
+            (u64::from(width) * u64::from(max_height) / u64::from(height)).max(1) as u32;
+        (resized_width, max_height)
+    }
+}
+
+fn box_resample_horizontal(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    resized_width: u32,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<u8>, mlua::Error> {
+    debug_assert!(resized_width > 0 && resized_width <= width);
+    let output_len = u64::from(resized_width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .filter(|bytes| *bytes <= LUA_PNG_MAX_DECODED_BYTES)
+        .ok_or_else(|| mlua::Error::external("PNG resize output is too large"))?;
+    let mut output = vec![0_u8; output_len];
+    let input_stride = width as usize * 4;
+    let output_stride = resized_width as usize * 4;
+    let width = u64::from(width);
+    let resized_width_u64 = u64::from(resized_width);
+
+    for y in 0..height as usize {
+        check_png_cancelled(cancelled)?;
+        let input_row = &rgba[y * input_stride..(y + 1) * input_stride];
+        let output_row = &mut output[y * output_stride..(y + 1) * output_stride];
+        for output_x in 0..resized_width_u64 {
+            if output_x & 4095 == 0 {
+                check_png_cancelled(cancelled)?;
+            }
+            let left = output_x * width;
+            let right = (output_x + 1) * width;
+            let first_input_x = left / resized_width_u64;
+            let last_input_x = (right - 1) / resized_width_u64;
+            let mut alpha_sum = 0_u64;
+            let mut color_alpha_sum = [0_u64; 3];
+
+            for input_x in first_input_x..=last_input_x {
+                let input_left = input_x * resized_width_u64;
+                let input_right = (input_x + 1) * resized_width_u64;
+                let weight = right.min(input_right) - left.max(input_left);
+                let offset = input_x as usize * 4;
+                let alpha = u64::from(input_row[offset + 3]);
+                alpha_sum += alpha * weight;
+                for channel in 0..3 {
+                    color_alpha_sum[channel] +=
+                        u64::from(input_row[offset + channel]) * alpha * weight;
+                }
+            }
+
+            let output_offset = output_x as usize * 4;
+            output_row[output_offset + 3] = ((alpha_sum + width / 2) / width) as u8;
+            if let Some(alpha_sum) = std::num::NonZeroU64::new(alpha_sum) {
+                let alpha_sum = alpha_sum.get();
+                for channel in 0..3 {
+                    output_row[output_offset + channel] =
+                        ((color_alpha_sum[channel] + alpha_sum / 2) / alpha_sum) as u8;
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn box_resample_vertical(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    resized_height: u32,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<u8>, mlua::Error> {
+    debug_assert!(resized_height > 0 && resized_height <= height);
+    let output_len = u64::from(width)
+        .checked_mul(u64::from(resized_height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .filter(|bytes| *bytes <= LUA_PNG_MAX_DECODED_BYTES)
+        .ok_or_else(|| mlua::Error::external("PNG resize output is too large"))?;
+    let mut output = vec![0_u8; output_len];
+    let stride = width as usize * 4;
+    let height = u64::from(height);
+    let resized_height_u64 = u64::from(resized_height);
+
+    for output_y in 0..resized_height_u64 {
+        check_png_cancelled(cancelled)?;
+        let top = output_y * height;
+        let bottom = (output_y + 1) * height;
+        let first_input_y = top / resized_height_u64;
+        let last_input_y = (bottom - 1) / resized_height_u64;
+        let output_row = &mut output[output_y as usize * stride..(output_y as usize + 1) * stride];
+
+        for x in 0..width as usize {
+            if x & 4095 == 0 {
+                check_png_cancelled(cancelled)?;
+            }
+            let mut alpha_sum = 0_u64;
+            let mut color_alpha_sum = [0_u64; 3];
+            for input_y in first_input_y..=last_input_y {
+                let input_top = input_y * resized_height_u64;
+                let input_bottom = (input_y + 1) * resized_height_u64;
+                let weight = bottom.min(input_bottom) - top.max(input_top);
+                let offset = input_y as usize * stride + x * 4;
+                let alpha = u64::from(rgba[offset + 3]);
+                alpha_sum += alpha * weight;
+                for channel in 0..3 {
+                    color_alpha_sum[channel] += u64::from(rgba[offset + channel]) * alpha * weight;
+                }
+            }
+
+            let output_offset = x * 4;
+            output_row[output_offset + 3] = ((alpha_sum + height / 2) / height) as u8;
+            if let Some(alpha_sum) = std::num::NonZeroU64::new(alpha_sum) {
+                let alpha_sum = alpha_sum.get();
+                for channel in 0..3 {
+                    output_row[output_offset + channel] =
+                        ((color_alpha_sum[channel] + alpha_sum / 2) / alpha_sum) as u8;
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn resize_png_rgba(
+    decoded: &DecodedPng,
+    resized_width: u32,
+    resized_height: u32,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<u8>, mlua::Error> {
+    match (
+        resized_width == decoded.width,
+        resized_height == decoded.height,
+    ) {
+        (true, true) => Ok(decoded.rgba.clone()),
+        (false, true) => box_resample_horizontal(
+            &decoded.rgba,
+            decoded.width,
+            decoded.height,
+            resized_width,
+            cancelled,
+        ),
+        (true, false) => box_resample_vertical(
+            &decoded.rgba,
+            decoded.width,
+            decoded.height,
+            resized_height,
+            cancelled,
+        ),
+        (false, false) => {
+            let horizontal_first_pixels = u64::from(resized_width) * u64::from(decoded.height);
+            let vertical_first_pixels = u64::from(decoded.width) * u64::from(resized_height);
+            if horizontal_first_pixels <= vertical_first_pixels {
+                let intermediate = box_resample_horizontal(
+                    &decoded.rgba,
+                    decoded.width,
+                    decoded.height,
+                    resized_width,
+                    cancelled,
+                )?;
+                box_resample_vertical(
+                    &intermediate,
+                    resized_width,
+                    decoded.height,
+                    resized_height,
+                    cancelled,
+                )
+            } else {
+                let intermediate = box_resample_vertical(
+                    &decoded.rgba,
+                    decoded.width,
+                    decoded.height,
+                    resized_height,
+                    cancelled,
+                )?;
+                box_resample_horizontal(
+                    &intermediate,
+                    decoded.width,
+                    resized_height,
+                    resized_width,
+                    cancelled,
+                )
+            }
+        }
+    }
+}
 
 /// Run an async future to completion from inside a synchronous Lua callback.
 /// Wraps the `block_in_place` + current-runtime `block_on` dance used by every
@@ -585,6 +947,43 @@ fn require_shell_approval(
 /// Set the top-level I/O primitives on `ctx`: `shell`, `shell_streaming`,
 /// `read_file`, `write_file`, and direct `exec`.
 fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
+    // ctx.time — monotonic timestamps and a cancellable native timer. These
+    // avoid wall-clock freshness bugs and subprocess-based sleeps in tools.
+    let time = lua.create_table()?;
+    time.set(
+        "monotonic_ms",
+        lua.create_function(|_, (): ()| {
+            let epoch = MONOTONIC_EPOCH.get_or_init(Instant::now);
+            Ok(epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+        })?,
+    )?;
+    let timer_cancel = cfg.cancelled.clone();
+    time.set(
+        "sleep_ms",
+        lua.create_function(move |_, milliseconds: u64| {
+            if milliseconds > LUA_TIMER_MAX_MS {
+                return Err(mlua::Error::external(format!(
+                    "sleep_ms must be from 0 through {LUA_TIMER_MAX_MS}"
+                )));
+            }
+            let deadline = Instant::now() + Duration::from_millis(milliseconds);
+            loop {
+                if timer_cancel
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    return Err(mlua::Error::external("timer cancelled"));
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return Ok(true);
+                }
+                std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
+            }
+        })?,
+    )?;
+    ctx.set("time", time)?;
+
     // ctx.process is the extension-safe managed-process API.  Plugins never
     // receive a child handle, so Bone retains process-tree cancellation and
     // bounded output ownership.
@@ -801,6 +1200,226 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         lua.create_function(|_, input: mlua::String| {
             use sha2::{Digest, Sha256};
             Ok(format!("{:x}", Sha256::digest(input.as_bytes())))
+        })?,
+    )?;
+    codec.set(
+        "random_hex",
+        lua.create_function(|_, bytes: Option<u8>| {
+            let bytes = bytes.unwrap_or(16);
+            if !(8..=64).contains(&bytes) {
+                return Err(mlua::Error::external(
+                    "random_hex byte count must be from 8 through 64",
+                ));
+            }
+            let mut random = vec![0_u8; usize::from(bytes)];
+            getrandom::fill(&mut random)
+                .map_err(|_| mlua::Error::external("secure random generation failed"))?;
+            let mut encoded = String::with_capacity(random.len() * 2);
+            for byte in random {
+                write!(&mut encoded, "{byte:02x}")
+                    .map_err(|_| mlua::Error::external("random encoding failed"))?;
+            }
+            Ok(encoded)
+        })?,
+    )?;
+    let png_tiles_cancel = cfg.cancelled.clone();
+    codec.set(
+        "png_tiles",
+        lua.create_function(
+            move |lua, (input, columns, rows): (mlua::String, Option<u32>, Option<u32>)| {
+                use sha2::{Digest, Sha256};
+
+                let columns = columns.unwrap_or(32);
+                let rows = rows.unwrap_or(18);
+                if !(1..=128).contains(&columns) || !(1..=128).contains(&rows) {
+                    return Err(mlua::Error::external(
+                        "PNG tile columns and rows must be from 1 through 128",
+                    ));
+                }
+                check_png_cancelled(png_tiles_cancel.as_deref())?;
+                let decoded = decode_png_rgba(&input.as_bytes())?;
+                check_png_cancelled(png_tiles_cancel.as_deref())?;
+                if columns > decoded.width || rows > decoded.height {
+                    return Err(mlua::Error::external(
+                        "PNG tile grid exceeds image dimensions",
+                    ));
+                }
+
+                let hashes = lua.create_table()?;
+                let mut index = 1;
+                let stride = decoded.width as usize * 4;
+                for row in 0..rows {
+                    check_png_cancelled(png_tiles_cancel.as_deref())?;
+                    let top = row * decoded.height / rows;
+                    let bottom = (row + 1) * decoded.height / rows;
+                    for column in 0..columns {
+                        check_png_cancelled(png_tiles_cancel.as_deref())?;
+                        let left = column * decoded.width / columns;
+                        let right = (column + 1) * decoded.width / columns;
+                        let mut digest = Sha256::new();
+                        digest.update(left.to_be_bytes());
+                        digest.update(top.to_be_bytes());
+                        digest.update((right - left).to_be_bytes());
+                        digest.update((bottom - top).to_be_bytes());
+                        for y in top..bottom {
+                            check_png_cancelled(png_tiles_cancel.as_deref())?;
+                            let start = y as usize * stride + left as usize * 4;
+                            let end = y as usize * stride + right as usize * 4;
+                            digest.update(&decoded.rgba[start..end]);
+                        }
+                        hashes.set(index, format!("{:x}", digest.finalize()))?;
+                        index += 1;
+                    }
+                }
+
+                let result = lua.create_table()?;
+                result.set("width", decoded.width)?;
+                result.set("height", decoded.height)?;
+                result.set("columns", columns)?;
+                result.set("rows", rows)?;
+                result.set("hashes", hashes)?;
+                Ok(result)
+            },
+        )?,
+    )?;
+    let png_resize_cancel = cfg.cancelled.clone();
+    codec.set(
+        "png_resize",
+        lua.create_function(
+            move |lua, (input, max_width, max_height): (mlua::String, u32, u32)| {
+                if max_width == 0 || max_height == 0 {
+                    return Err(mlua::Error::external(
+                        "PNG resize bounds must be greater than zero",
+                    ));
+                }
+                check_png_cancelled(png_resize_cancel.as_deref())?;
+                let decoded = decode_png_rgba(&input.as_bytes())?;
+                check_png_cancelled(png_resize_cancel.as_deref())?;
+                let (width, height) =
+                    fit_png_dimensions(decoded.width, decoded.height, max_width, max_height);
+                let resized = width != decoded.width || height != decoded.height;
+
+                let result = lua.create_table()?;
+                result.set("width", width)?;
+                result.set("height", height)?;
+                result.set("resized", resized)?;
+                if resized {
+                    let rgba =
+                        resize_png_rgba(&decoded, width, height, png_resize_cancel.as_deref())?;
+                    check_png_cancelled(png_resize_cancel.as_deref())?;
+                    let png = encode_png_rgba(width, height, &rgba, png_resize_cancel.as_deref())?;
+                    check_png_cancelled(png_resize_cancel.as_deref())?;
+                    result.set("png", lua.create_string(&png)?)?;
+                } else {
+                    result.set("png", input)?;
+                }
+                Ok(result)
+            },
+        )?,
+    )?;
+    let png_region_cancel = cfg.cancelled.clone();
+    codec.set(
+        "png_region_sha256",
+        lua.create_function(
+            move |lua, (input, x, y, width, height): (mlua::String, u32, u32, u32, u32)| {
+                use sha2::{Digest, Sha256};
+
+                if width == 0 || height == 0 {
+                    return Err(mlua::Error::external(
+                        "PNG region width and height must be greater than zero",
+                    ));
+                }
+                check_png_cancelled(png_region_cancel.as_deref())?;
+                let decoded = decode_png_rgba(&input.as_bytes())?;
+                let right = x.checked_add(width).filter(|right| *right <= decoded.width);
+                let bottom = y
+                    .checked_add(height)
+                    .filter(|bottom| *bottom <= decoded.height);
+                if right.is_none() || bottom.is_none() {
+                    return Err(mlua::Error::external("PNG region is outside image bounds"));
+                }
+
+                let mut digest = Sha256::new();
+                digest.update(width.to_be_bytes());
+                digest.update(height.to_be_bytes());
+                let stride = decoded.width as usize * 4;
+                for row in y..y + height {
+                    check_png_cancelled(png_region_cancel.as_deref())?;
+                    let start = row as usize * stride + x as usize * 4;
+                    let end = start + width as usize * 4;
+                    digest.update(&decoded.rgba[start..end]);
+                }
+
+                let result = lua.create_table()?;
+                result.set("width", width)?;
+                result.set("height", height)?;
+                result.set("sha256", format!("{:x}", digest.finalize()))?;
+                Ok(result)
+            },
+        )?,
+    )?;
+    let png_diff_cancel = cfg.cancelled.clone();
+    codec.set(
+        "png_diff",
+        lua.create_function(move |lua, (before, after): (mlua::String, mlua::String)| {
+            check_png_cancelled(png_diff_cancel.as_deref())?;
+            let before = decode_png_rgba(&before.as_bytes())?;
+            check_png_cancelled(png_diff_cancel.as_deref())?;
+            let after = decode_png_rgba(&after.as_bytes())?;
+            check_png_cancelled(png_diff_cancel.as_deref())?;
+            if before.width != after.width || before.height != after.height {
+                return Err(mlua::Error::external("PNG dimensions differ"));
+            }
+
+            let mut changed_pixels = 0_u64;
+            let mut absolute_difference = 0_u64;
+            let mut left = before.width;
+            let mut top = before.height;
+            let mut right = 0_u32;
+            let mut bottom = 0_u32;
+            for (index, (left_pixel, right_pixel)) in before
+                .rgba
+                .chunks_exact(4)
+                .zip(after.rgba.chunks_exact(4))
+                .enumerate()
+            {
+                if index & 4095 == 0 {
+                    check_png_cancelled(png_diff_cancel.as_deref())?;
+                }
+                let mut changed = false;
+                for channel in 0..4 {
+                    let difference = u8::abs_diff(left_pixel[channel], right_pixel[channel]);
+                    absolute_difference += u64::from(difference);
+                    changed |= difference != 0;
+                }
+                if changed {
+                    changed_pixels += 1;
+                    let x = index as u32 % before.width;
+                    let y = index as u32 / before.width;
+                    left = left.min(x);
+                    top = top.min(y);
+                    right = right.max(x);
+                    bottom = bottom.max(y);
+                }
+            }
+
+            let result = lua.create_table()?;
+            result.set("equal", changed_pixels == 0)?;
+            result.set("changed_pixels", changed_pixels)?;
+            let samples = u64::from(before.width) * u64::from(before.height) * 4;
+            result.set(
+                "mean_absolute_difference",
+                absolute_difference as f64 / (samples as f64 * 255.0),
+            )?;
+            if changed_pixels > 0 {
+                let bounds = lua.create_table()?;
+                bounds.set("x", left)?;
+                bounds.set("y", top)?;
+                bounds.set("width", right - left + 1)?;
+                bounds.set("height", bottom - top + 1)?;
+                result.set("bounds", bounds)?;
+            }
+            Ok(result)
         })?,
     )?;
     ctx.set("codec", codec)?;

@@ -883,11 +883,610 @@ fn ctx_exec_and_codec_are_available_and_binary_safe() {
         hash,
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
+    let random: String = lua.load("return ctx.codec.random_hex(16)").eval().unwrap();
+    assert_eq!(random.len(), 32);
+    assert!(random.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let available: bool = lua
         .load("return type(ctx.exec) == 'function' and type(ctx.codec.base64_encode) == 'function' and type(ctx.codec.sha256) == 'function'")
         .eval()
         .unwrap();
     assert!(available);
+}
+
+fn test_png(width: u32, height: u32, color: png::ColorType, pixels: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(color);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(pixels).unwrap();
+    }
+    output
+}
+
+fn test_rgba_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+    test_png(width, height, png::ColorType::Rgba, pixels)
+}
+
+fn test_png_crc(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn append_test_png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    output.extend_from_slice(kind);
+    output.extend_from_slice(data);
+    let mut crc_input = Vec::with_capacity(kind.len() + data.len());
+    crc_input.extend_from_slice(kind);
+    crc_input.extend_from_slice(data);
+    output.extend_from_slice(&test_png_crc(&crc_input).to_be_bytes());
+}
+
+/// Construct a syntactically valid PNG header without allocating its pixels.
+/// `decode_png_rgba` checks the declared dimensions before decoding IDAT.
+fn test_png_header(width: u32, height: u32) -> Vec<u8> {
+    let mut output = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    append_test_png_chunk(&mut output, b"IHDR", &ihdr);
+    append_test_png_chunk(&mut output, b"IDAT", &[]);
+    append_test_png_chunk(&mut output, b"IEND", &[]);
+    output
+}
+
+#[test]
+fn ctx_time_is_monotonic_and_sleep_is_native() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let (before, after): (u64, u64) = lua
+        .load(
+            r#"
+            local before = ctx.time.monotonic_ms()
+            assert(ctx.time.sleep_ms(2))
+            return before, ctx.time.monotonic_ms()
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(after >= before);
+}
+
+#[test]
+fn ctx_time_sleep_honors_cancellation_and_bounds() {
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let mut cfg = test_ctx_config();
+    cfg.cancelled = Some(cancelled.clone());
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let already_cancelled = lua
+        .load("return ctx.time.sleep_ms(1000)")
+        .eval::<bool>()
+        .unwrap_err()
+        .to_string();
+    assert!(already_cancelled.contains("timer cancelled"));
+
+    cancelled.store(false, Ordering::Relaxed);
+    let cancel_from_thread = cancelled.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        cancel_from_thread.store(true, Ordering::Relaxed);
+    });
+    let started = Instant::now();
+    let mid_sleep_cancelled = lua
+        .load("return ctx.time.sleep_ms(5000)")
+        .eval::<bool>()
+        .unwrap_err()
+        .to_string();
+    canceller.join().unwrap();
+    assert!(mid_sleep_cancelled.contains("timer cancelled"));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "cancelled timer did not return promptly"
+    );
+
+    cancelled.store(false, Ordering::Relaxed);
+    let (zero_succeeds, over_limit_fails): (bool, bool) = lua
+        .load(
+            r#"
+            local zero_succeeds = ctx.time.sleep_ms(0)
+            local over_limit_succeeds = pcall(function()
+                ctx.time.sleep_ms(60001)
+            end)
+            return zero_succeeds, not over_limit_succeeds
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(zero_succeeds);
+    assert!(over_limit_fails);
+}
+
+#[test]
+fn ctx_codec_random_hex_is_bounded_and_fresh() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let (default_token, first, second, maximum, below_fails, above_fails): (
+        String,
+        String,
+        String,
+        String,
+        bool,
+        bool,
+    ) = lua
+        .load(
+            r#"
+            local default_token = ctx.codec.random_hex()
+            local first = ctx.codec.random_hex(8)
+            local second = ctx.codec.random_hex(8)
+            local maximum = ctx.codec.random_hex(64)
+            local below_succeeds = pcall(function() ctx.codec.random_hex(7) end)
+            local above_succeeds = pcall(function() ctx.codec.random_hex(65) end)
+            return default_token, first, second, maximum,
+                   not below_succeeds, not above_succeeds
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(default_token.len(), 32);
+    assert_eq!(first.len(), 16);
+    assert_eq!(second.len(), 16);
+    assert_ne!(first, second);
+    assert_eq!(maximum.len(), 128);
+    assert!(
+        [default_token, first, second, maximum]
+            .into_iter()
+            .all(|token| token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    );
+    assert!(below_fails);
+    assert!(above_fails);
+}
+
+#[test]
+fn ctx_png_tiles_and_diff_are_binary_safe() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let before = test_rgba_png(
+        2,
+        2,
+        &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+    );
+    let after = test_rgba_png(
+        2,
+        2,
+        &[0, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+    );
+    lua.globals()
+        .set("before_png", lua.create_string(&before).unwrap())
+        .unwrap();
+    lua.globals()
+        .set("after_png", lua.create_string(&after).unwrap())
+        .unwrap();
+
+    let (before_hash, after_hash, changed, x, y): (String, String, u64, u32, u32) = lua
+        .load(
+            r#"
+            local before_tiles = ctx.codec.png_tiles(before_png, 2, 2)
+            local after_tiles = ctx.codec.png_tiles(after_png, 2, 2)
+            local diff = ctx.codec.png_diff(before_png, after_png)
+            return before_tiles.hashes[2], after_tiles.hashes[2],
+                   diff.changed_pixels, diff.bounds.x, diff.bounds.y
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_ne!(before_hash, after_hash);
+    assert_eq!(changed, 1);
+    assert_eq!((x, y), (1, 0));
+}
+
+#[test]
+fn ctx_png_codecs_normalize_color_formats_to_rgba() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let rgb = test_png(2, 1, png::ColorType::Rgb, &[1, 2, 3, 4, 5, 6]);
+    let rgba = test_rgba_png(2, 1, &[1, 2, 3, 255, 4, 5, 6, 255]);
+    let grayscale_alpha = test_png(2, 1, png::ColorType::GrayscaleAlpha, &[42, 17, 200, 255]);
+    let grayscale_rgba = test_rgba_png(2, 1, &[42, 42, 42, 17, 200, 200, 200, 255]);
+    for (name, value) in [
+        ("rgb_png", rgb),
+        ("rgba_png", rgba),
+        ("grayscale_alpha_png", grayscale_alpha),
+        ("grayscale_rgba_png", grayscale_rgba),
+    ] {
+        lua.globals()
+            .set(name, lua.create_string(&value).unwrap())
+            .unwrap();
+    }
+
+    let (rgb_equal, gray_equal, rgb_hashes_match, gray_hashes_match): (bool, bool, bool, bool) =
+        lua.load(
+            r#"
+            local rgb_diff = ctx.codec.png_diff(rgb_png, rgba_png)
+            local gray_diff = ctx.codec.png_diff(
+                grayscale_alpha_png,
+                grayscale_rgba_png
+            )
+            local rgb_tiles = ctx.codec.png_tiles(rgb_png, 2, 1)
+            local rgba_tiles = ctx.codec.png_tiles(rgba_png, 2, 1)
+            local gray_tiles = ctx.codec.png_tiles(grayscale_alpha_png, 2, 1)
+            local gray_rgba_tiles = ctx.codec.png_tiles(grayscale_rgba_png, 2, 1)
+            return rgb_diff.equal and rgb_diff.bounds == nil,
+                   gray_diff.equal and gray_diff.bounds == nil,
+                   rgb_tiles.hashes[1] == rgba_tiles.hashes[1]
+                       and rgb_tiles.hashes[2] == rgba_tiles.hashes[2],
+                   gray_tiles.hashes[1] == gray_rgba_tiles.hashes[1]
+                       and gray_tiles.hashes[2] == gray_rgba_tiles.hashes[2]
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(rgb_equal);
+    assert!(gray_equal);
+    assert!(rgb_hashes_match);
+    assert!(gray_hashes_match);
+}
+
+#[test]
+fn ctx_png_resize_preserves_aspect_ratio_and_never_upscales() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let wide = test_rgba_png(4, 2, &[10, 20, 30, 255].repeat(8));
+    let tall = test_rgba_png(2, 4, &[40, 50, 60, 255].repeat(8));
+    let small = test_png(2, 1, png::ColorType::Rgb, &[1, 2, 3, 4, 5, 6]);
+    for (name, value) in [
+        ("wide_png", wide),
+        ("tall_png", tall),
+        ("small_png", small.clone()),
+    ] {
+        lua.globals()
+            .set(name, lua.create_string(&value).unwrap())
+            .unwrap();
+    }
+
+    let wide_result: Table = lua
+        .load("return ctx.codec.png_resize(wide_png, 2, 100)")
+        .eval()
+        .unwrap();
+    let wide_output: mlua::String = wide_result.get("png").unwrap();
+    let wide_decoded = decode_png_rgba(&wide_output.as_bytes()).unwrap();
+    assert_eq!(
+        (
+            wide_result.get::<u32>("width").unwrap(),
+            wide_result.get::<u32>("height").unwrap(),
+            wide_result.get::<bool>("resized").unwrap(),
+        ),
+        (2, 1, true)
+    );
+    assert_eq!((wide_decoded.width, wide_decoded.height), (2, 1));
+
+    let tall_result: Table = lua
+        .load("return ctx.codec.png_resize(tall_png, 100, 2)")
+        .eval()
+        .unwrap();
+    let tall_output: mlua::String = tall_result.get("png").unwrap();
+    let tall_decoded = decode_png_rgba(&tall_output.as_bytes()).unwrap();
+    assert_eq!(
+        (
+            tall_result.get::<u32>("width").unwrap(),
+            tall_result.get::<u32>("height").unwrap(),
+            tall_result.get::<bool>("resized").unwrap(),
+        ),
+        (1, 2, true)
+    );
+    assert_eq!((tall_decoded.width, tall_decoded.height), (1, 2));
+
+    let small_result: Table = lua
+        .load("return ctx.codec.png_resize(small_png, 20, 20)")
+        .eval()
+        .unwrap();
+    let small_output: mlua::String = small_result.get("png").unwrap();
+    assert_eq!(small_output.as_bytes().as_ref(), small.as_slice());
+    assert_eq!(
+        (
+            small_result.get::<u32>("width").unwrap(),
+            small_result.get::<u32>("height").unwrap(),
+            small_result.get::<bool>("resized").unwrap(),
+        ),
+        (2, 1, false)
+    );
+}
+
+#[test]
+fn ctx_png_resize_filters_in_premultiplied_alpha_space() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    // Transparent red next to opaque blue should downsample to translucent
+    // blue, not purple. This catches straight-alpha color bleeding.
+    let alpha = test_rgba_png(2, 1, &[255, 0, 0, 0, 0, 0, 255, 255]);
+    lua.globals()
+        .set("alpha_png", lua.create_string(&alpha).unwrap())
+        .unwrap();
+    let output: mlua::String = lua
+        .load("return ctx.codec.png_resize(alpha_png, 1, 1).png")
+        .eval()
+        .unwrap();
+    let decoded = decode_png_rgba(&output.as_bytes()).unwrap();
+    assert_eq!((decoded.width, decoded.height), (1, 1));
+    assert_eq!(decoded.rgba, [0, 0, 255, 128]);
+}
+
+#[test]
+fn ctx_png_region_sha256_is_normalized_and_localized() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let base = test_rgba_png(
+        3,
+        2,
+        &[
+            1, 1, 1, 255, 10, 20, 30, 255, 40, 50, 60, 255, 2, 2, 2, 255, 70, 80, 90, 255, 100,
+            110, 120, 255,
+        ],
+    );
+    let outside_change = test_rgba_png(
+        3,
+        2,
+        &[
+            9, 9, 9, 255, 10, 20, 30, 255, 40, 50, 60, 255, 8, 8, 8, 255, 70, 80, 90, 255, 100,
+            110, 120, 255,
+        ],
+    );
+    let inside_change = test_rgba_png(
+        3,
+        2,
+        &[
+            1, 1, 1, 255, 11, 20, 30, 255, 40, 50, 60, 255, 2, 2, 2, 255, 70, 80, 90, 255, 100,
+            110, 120, 255,
+        ],
+    );
+    let normalized_rgb = test_png(2, 1, png::ColorType::Rgb, &[10, 20, 30, 40, 50, 60]);
+    let normalized_rgba = test_rgba_png(2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]);
+    for (name, value) in [
+        ("base_png", base),
+        ("outside_png", outside_change),
+        ("inside_png", inside_change),
+        ("normalized_rgb_png", normalized_rgb),
+        ("normalized_rgba_png", normalized_rgba),
+    ] {
+        lua.globals()
+            .set(name, lua.create_string(&value).unwrap())
+            .unwrap();
+    }
+
+    let (base_hash, outside_hash, inside_hash, width, height): (String, String, String, u32, u32) =
+        lua.load(
+            r#"
+            local base = ctx.codec.png_region_sha256(base_png, 1, 0, 2, 2)
+            local outside = ctx.codec.png_region_sha256(
+                outside_png, 1, 0, 2, 2
+            )
+            local inside = ctx.codec.png_region_sha256(
+                inside_png, 1, 0, 2, 2
+            )
+            return base.sha256, outside.sha256, inside.sha256,
+                   base.width, base.height
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(base_hash.len(), 64);
+    assert_eq!(base_hash, outside_hash);
+    assert_ne!(base_hash, inside_hash);
+    assert_eq!((width, height), (2, 2));
+    let normalized_match: bool = lua
+        .load(
+            r#"
+            return ctx.codec.png_region_sha256(
+                       normalized_rgb_png, 0, 0, 2, 1
+                   ).sha256
+                == ctx.codec.png_region_sha256(
+                       normalized_rgba_png, 0, 0, 2, 1
+                   ).sha256
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(normalized_match);
+}
+
+#[test]
+fn ctx_png_codecs_reject_bad_bounds_limits_and_cancellation() {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut cfg = test_ctx_config();
+    cfg.cancelled = Some(cancelled.clone());
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let valid = test_rgba_png(2, 2, &[0; 16]);
+    let oversized_header = test_png_header(40_000_001, 1);
+    lua.globals()
+        .set("valid_png", lua.create_string(&valid).unwrap())
+        .unwrap();
+    lua.globals()
+        .set(
+            "oversized_png",
+            lua.create_string(&oversized_header).unwrap(),
+        )
+        .unwrap();
+
+    let (zero_width, zero_height, zero_region, outside_region, oversized): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = lua
+        .load(
+            r#"
+            local zero_width = pcall(function()
+                ctx.codec.png_resize(valid_png, 0, 1)
+            end)
+            local zero_height = pcall(function()
+                ctx.codec.png_resize(valid_png, 1, 0)
+            end)
+            local zero_region = pcall(function()
+                ctx.codec.png_region_sha256(valid_png, 0, 0, 0, 1)
+            end)
+            local outside_region = pcall(function()
+                ctx.codec.png_region_sha256(valid_png, 1, 1, 2, 1)
+            end)
+            local oversized = pcall(function()
+                ctx.codec.png_resize(oversized_png, 1, 1)
+            end)
+            return not zero_width, not zero_height, not zero_region,
+                   not outside_region, not oversized
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(zero_width);
+    assert!(zero_height);
+    assert!(zero_region);
+    assert!(outside_region);
+    assert!(oversized);
+
+    cancelled.store(true, Ordering::Relaxed);
+    let (resize_cancelled, region_cancelled, tiles_cancelled, diff_cancelled): (
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = lua
+        .load(
+            r#"
+            local resize_ok, resize_error = pcall(function()
+                ctx.codec.png_resize(valid_png, 1, 1)
+            end)
+            local region_ok, region_error = pcall(function()
+                ctx.codec.png_region_sha256(valid_png, 0, 0, 1, 1)
+            end)
+            local tiles_ok, tiles_error = pcall(function()
+                ctx.codec.png_tiles(valid_png, 1, 1)
+            end)
+            local diff_ok, diff_error = pcall(function()
+                ctx.codec.png_diff(valid_png, valid_png)
+            end)
+            return not resize_ok
+                       and tostring(resize_error):find(
+                           "PNG operation cancelled", 1, true
+                       ) ~= nil,
+                   not region_ok
+                       and tostring(region_error):find(
+                           "PNG operation cancelled", 1, true
+                       ) ~= nil,
+                   not tiles_ok
+                       and tostring(tiles_error):find(
+                           "PNG operation cancelled", 1, true
+                       ) ~= nil,
+                   not diff_ok
+                       and tostring(diff_error):find(
+                           "PNG operation cancelled", 1, true
+                       ) ~= nil
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(resize_cancelled);
+    assert!(region_cancelled);
+    assert!(tiles_cancelled);
+    assert!(diff_cancelled);
+}
+
+#[test]
+fn ctx_png_codecs_reject_invalid_inputs_and_resource_limits() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let valid = test_rgba_png(2, 2, &[0; 16]);
+    let different_dimensions = test_rgba_png(1, 1, &[0; 4]);
+    let oversized_header = test_png_header(40_000_001, 1);
+    for (name, value) in [
+        ("valid_png", valid),
+        ("different_dimensions_png", different_dimensions),
+        ("oversized_png", oversized_header),
+    ] {
+        lua.globals()
+            .set(name, lua.create_string(&value).unwrap())
+            .unwrap();
+    }
+
+    let (invalid_fails, zero_grid_fails, large_grid_fails, dimensions_fail, oversized_fails): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = lua
+        .load(
+            r#"
+            local invalid_ok = pcall(function()
+                ctx.codec.png_tiles("not a png", 1, 1)
+            end)
+            local zero_grid_ok = pcall(function()
+                ctx.codec.png_tiles(valid_png, 0, 1)
+            end)
+            local large_grid_ok = pcall(function()
+                ctx.codec.png_tiles(valid_png, 3, 1)
+            end)
+            local dimensions_ok = pcall(function()
+                ctx.codec.png_diff(valid_png, different_dimensions_png)
+            end)
+            local oversized_ok, oversized_error = pcall(function()
+                ctx.codec.png_tiles(oversized_png, 1, 1)
+            end)
+            return not invalid_ok, not zero_grid_ok, not large_grid_ok,
+                   not dimensions_ok,
+                   not oversized_ok
+                       and tostring(oversized_error):find(
+                           "PNG dimensions are too large",
+                           1,
+                           true
+                       ) ~= nil
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(invalid_fails);
+    assert!(zero_grid_fails);
+    assert!(large_grid_fails);
+    assert!(dimensions_fail);
+    assert!(oversized_fails);
 }
 
 #[cfg(unix)]

@@ -177,7 +177,17 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | **Files** | | Read/write |
 | `ctx.read_file(path)` | `string` | Read entire file contents (raises Lua error on failure) |
 | `ctx.write_file(path, content)` | `true` | Create new file; fails if file exists (raises Lua error) |
-
+| **`ctx.time.*`** | | Native monotonic time and cancellable waits |
+| `ctx.time.monotonic_ms()` | `integer` | Monotonic milliseconds since an arbitrary process-local epoch |
+| `ctx.time.sleep_ms(ms)` | `true` | Sleep for 0–60,000 ms; raises a Lua error if the turn is cancelled |
+| **`ctx.codec.*`** | | Binary-safe encoding, hashing, randomness, and PNG analysis |
+| `ctx.codec.base64_encode(bytes)` | `string` | Base64-encode a Lua string without UTF-8 conversion |
+| `ctx.codec.sha256(bytes)` | `string` | Lowercase hexadecimal SHA-256 digest |
+| `ctx.codec.random_hex(bytes?)` | `string` | Secure random bytes as lowercase hex (default 16 bytes; range 8–64) |
+| `ctx.codec.png_tiles(png, columns?, rows?)` | `table` | Decode PNG bytes and return image/grid dimensions plus row-major SHA-256 tile hashes |
+| `ctx.codec.png_resize(png, max_width, max_height)` | `table` | Fit a PNG within positive bounds without upscaling; returns `{png, width, height, resized}` |
+| `ctx.codec.png_region_sha256(png, x, y, width, height)` | `table` | Hash a bounded normalized RGBA region; returns `{width, height, sha256}` |
+| `ctx.codec.png_diff(before, after)` | `table` | Compare equal-sized PNGs and return equality, changed pixels, normalized mean difference, and optional change bounds |
 | **`ctx.ui.*`** | | UI output |
 | `ctx.ui.notify(msg, level?)` | | Show notification (`"info"`, `"warn"`, `"error"`); forwarded to the frontend as a status line when one is attached |
 | `ctx.ui.status(msg)` | | Surface a *transient* live status line to the attached frontend (TUI); may be replaced. Stderr fallback when headless |
@@ -252,6 +262,7 @@ Not all `ctx` fields are available in every handler type:
 | `fs` | yes | yes | — |
 | `shell` / `shell_streaming` | yes | yes | — |
 | `read_file` / `write_file` | yes | yes | — |
+| `time` / `codec` | yes | yes | — |
 | `ui.notify` | yes | yes | yes |
 | `ui.status` / `ui.notice` / `ui.pane` / `ui.apply` / `ui.key` / `ui.width` | yes | yes | — |
 | `runtime` / `model` / `usage` | yes | yes | — |
@@ -288,6 +299,45 @@ The transcript returned by `history()` is the live in-memory history used for th
 { timeout_ms = 120000 }  -- min 1000, max 300000
 ```
 Default timeout: 120s for `ctx.shell`, 300s for `ctx.shell_streaming`. Commands run through the same approval and policy system as the native `shell` tool.
+
+#### Native time and PNG codecs
+
+Use `ctx.time.monotonic_ms()` for TTLs, elapsed time, and freshness checks.
+Unlike wall-clock timestamps it cannot move backward when the system clock is
+adjusted. `ctx.time.sleep_ms(ms)` avoids launching a subprocess for short waits
+and checks the active turn's cancellation flag at least every 10 ms. Individual
+waits are limited to 60 seconds.
+
+The codec helpers accept binary Lua strings:
+
+```lua
+local nonce = ctx.codec.random_hex(16) -- 128 bits, rendered as 32 hex chars
+local tiles = ctx.codec.png_tiles(png_bytes, 32, 18)
+local overview = ctx.codec.png_resize(png_bytes, 1400, 900)
+local target = ctx.codec.png_region_sha256(png_bytes, 100, 80, 40, 24)
+local diff = ctx.codec.png_diff(previous_png, current_png)
+
+if not diff.equal then
+    ctx.log.debug({
+        changed_pixels = diff.changed_pixels,
+        bounds = diff.bounds, -- {x, y, width, height}; nil when equal
+    })
+end
+```
+
+PNG input is normalized to 8-bit RGBA before hashing or comparison, so
+equivalent RGB, grayscale, palette, and alpha encodings compare consistently.
+Images are bounded to 40 million pixels and 160 MiB of decoded data. Tile
+dimensions are each limited to 1–128 and cannot exceed the image dimensions.
+`png_resize` uses a deterministic separable box-area filter in
+premultiplied-alpha space, preserves aspect ratio, and returns the original PNG
+bytes when the input already fits. Its bounds must be positive, and output
+encoding is capped at 192 MiB. Region coordinates use zero-based pixels and
+must fit entirely inside the image; the digest covers the region dimensions
+and normalized row-major RGBA bytes. `png_diff` requires both images to have
+identical dimensions. PNG tile hashing, comparison, resize, and region hashing
+check turn cancellation at decode boundaries and throughout their processing
+loops.
 
 #### Managed processes
 

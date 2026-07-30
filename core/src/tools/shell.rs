@@ -392,6 +392,7 @@ where
         return Err("shell command must not contain NUL bytes".into());
     }
     let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
+    let cancel = request.cancel.clone();
     let (shell, shell_arg, _) = shell_command();
     let mut out = OutputCapture::new();
     let mut err = OutputCapture::new();
@@ -411,7 +412,16 @@ where
             } else {
                 out.push(bytes)
             }
-            emit(is_stderr, bytes).map_err(StreamError::Other)
+            // Buffered pipe bytes are still captured for the final partial
+            // output, but cancellation must stop observable callbacks.
+            if cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                Ok(())
+            } else {
+                emit(is_stderr, bytes).map_err(StreamError::Other)
+            }
         },
     )
     .await
@@ -495,6 +505,7 @@ where
 {
     const MAX_LINE_BYTES: usize = MAX_TOOL_LINE_CHARS * 4;
 
+    let cancel = request.cancel.clone();
     let mut pending = Vec::new();
     let mut pending_truncated = false;
     let result = run_script_stream(request, |is_err, bytes| {
@@ -515,7 +526,15 @@ where
                 if pending.last() == Some(&b'\r') {
                     pending.pop();
                 }
-                callback(render_stream_line(&pending, pending_truncated))?;
+                // The cancel flag can flip while an earlier callback is
+                // running. Check between complete lines so a second line from
+                // the same OS read is not delivered after cancellation.
+                if !cancel
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    callback(render_stream_line(&pending, pending_truncated))?;
+                }
                 pending.clear();
                 pending_truncated = false;
             }
