@@ -44,6 +44,42 @@ impl<W: Write> BoneBackend<W> {
             SetAttribute(Attribute::Reset)
         )
     }
+
+    #[cfg(not(windows))]
+    fn draw_with_width<'a, I>(&mut self, content: I, width: u16) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        let cells = content.collect::<Vec<_>>();
+        let mut pending_start = 0;
+        let mut row_start = 0;
+
+        while row_start < cells.len() {
+            let y = cells[row_start].1;
+            let mut row_end = row_start + 1;
+            while row_end < cells.len() && cells[row_end].1 == y {
+                row_end += 1;
+            }
+
+            if let Some(fill_start) = background_suffix_start(&cells[row_start..row_end], width) {
+                let fill_start = row_start + fill_start;
+                if pending_start < fill_start {
+                    self.inner
+                        .draw(cells[pending_start..fill_start].iter().copied())?;
+                }
+                let (x, y, cell) = cells[fill_start];
+                self.clear_background_suffix(x, y, cell.bg)?;
+                pending_start = row_end;
+            }
+
+            row_start = row_end;
+        }
+
+        if pending_start < cells.len() {
+            self.inner.draw(cells[pending_start..].iter().copied())?;
+        }
+        Ok(())
+    }
 }
 
 impl<W: Write> Write for BoneBackend<W> {
@@ -69,37 +105,8 @@ impl<W: Write> Backend for BoneBackend<W> {
 
         #[cfg(not(windows))]
         {
-            let cells = content.collect::<Vec<_>>();
-            let mut pending_start = 0;
-            let mut row_start = 0;
-
-            while row_start < cells.len() {
-                let y = cells[row_start].1;
-                let mut row_end = row_start + 1;
-                while row_end < cells.len() && cells[row_end].1 == y {
-                    row_end += 1;
-                }
-
-                if let Some(fill_start) =
-                    background_suffix_start(&cells[row_start..row_end], self.size()?.width)
-                {
-                    let fill_start = row_start + fill_start;
-                    if pending_start < fill_start {
-                        self.inner
-                            .draw(cells[pending_start..fill_start].iter().copied())?;
-                    }
-                    let (x, y, cell) = cells[fill_start];
-                    self.clear_background_suffix(x, y, cell.bg)?;
-                    pending_start = row_end;
-                }
-
-                row_start = row_end;
-            }
-
-            if pending_start < cells.len() {
-                self.inner.draw(cells[pending_start..].iter().copied())?;
-            }
-            Ok(())
+            let width = self.size()?.width;
+            self.draw_with_width(content, width)
         }
     }
 
@@ -206,5 +213,42 @@ fn to_crossterm_color(color: Color) -> CrosstermColor {
         Color::White => CrosstermColor::White,
         Color::Indexed(index) => CrosstermColor::AnsiValue(index),
         Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+
+    #[test]
+    fn full_width_background_uses_erase_to_end_instead_of_padding_spaces() {
+        let width = 80;
+        let area = Rect::new(0, 0, width, 1);
+        let mut next = Buffer::empty(area);
+        next.set_style(area, Style::default().bg(Color::DarkGray));
+        next.set_string(
+            0,
+            0,
+            "> text",
+            Style::default().fg(Color::White).bg(Color::DarkGray),
+        );
+        let previous = Buffer::empty(area);
+        let mut backend = BoneBackend::new(Vec::<u8>::new());
+
+        backend
+            .draw_with_width(previous.diff(&next).into_iter(), width)
+            .unwrap();
+        Backend::flush(&mut backend).unwrap();
+        let output = String::from_utf8_lossy(backend.inner.writer());
+
+        assert!(
+            output.contains("\u{1b}[K"),
+            "expected erase-to-line-end: {output:?}"
+        );
+        assert!(
+            !output.contains("    "),
+            "printed background padding: {output:?}"
+        );
     }
 }
