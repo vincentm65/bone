@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "bone"
-version = "2.4.4"
+version = "2.4.5"
 dependencies = [
  "arboard",
  "base64",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "bone-core"
-version = "2.4.4"
+version = "2.4.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "bone-protocol"
-version = "2.4.4"
+version = "2.4.5"
 dependencies = [
  "num-format",
  "serde",

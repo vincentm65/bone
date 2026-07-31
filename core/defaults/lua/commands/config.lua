@@ -1,5 +1,5 @@
 -- /config — interactive settings editor.
--- canonical-config-v7
+-- canonical-config-v8
 --
 -- Renders its own styled bottom pane (full span control) for the tabbed
 -- settings overview, and reuses `ui.menu` only for the isolated sub-prompts
@@ -82,6 +82,40 @@ local REASONING_EFFORTS = {
    { label = "XHigh", value = "xhigh" },
 }
 
+local PROVIDER_HANDLERS = { "openai", "anthropic", "codex", "grok_build" }
+
+local function next_provider_handler(current)
+   for i, handler in ipairs(PROVIDER_HANDLERS) do
+      if handler == current then
+         return PROVIDER_HANDLERS[(i % #PROVIDER_HANDLERS) + 1]
+      end
+   end
+   return PROVIDER_HANDLERS[1]
+end
+
+local function save_provider_field(ctx, provider_id, entry, field)
+   local ok, result = pcall(ctx.config.set_provider_entry, provider_id, entry)
+   if not ok then
+      ctx.ui.notify("Could not save " .. field .. ": " .. tostring(result), "error")
+      return false
+   end
+   if result ~= true then
+      ctx.ui.notify("Could not save " .. field .. ": save was rejected", "error")
+      return false
+   end
+   ctx.ui.notify("Saved " .. field .. ".", "info")
+   return true
+end
+
+local function update_provider_field(ctx, provider_id, entry, field, value)
+   local previous = entry[field]
+   if previous == value then return false end
+   entry[field] = value
+   if save_provider_field(ctx, provider_id, entry, field) then return true end
+   entry[field] = previous
+   return false
+end
+
 local function edit_provider(ctx, provider)
    local entry = {
       label = provider.label or "",
@@ -96,6 +130,9 @@ local function edit_provider(ctx, provider)
       reasoning_effort = provider.reasoning_effort or "",
       fast_mode = provider.fast_mode == true,
    }
+
+   local selected = 1
+   local changed = false
 
    while true do
       local labels = {
@@ -115,52 +152,90 @@ local function edit_provider(ctx, provider)
          labels[#labels + 1] = "fast_mode \u{00b7} " .. (entry.fast_mode and "on" or "off")
          fast_index = #labels
       end
-      labels[#labels + 1] = "Save changes"
-      local save_index = #labels
       local result = ask(ctx, {
-         question = "Edit provider: " .. provider.id,
+         question = "Edit provider: " .. provider.id .. "  \u{00b7}  changes save immediately",
          type = "single_select",
          options = labels,
+         default = selected,
          allow_custom = false,
       })
-      if not result then return false end
+      if not result then return changed end
+      selected = result.selected or selected
       local choice = result.value
       if choice == labels[1] then
          local value = edit_text(ctx, "label", entry.label)
-         if value ~= nil then entry.label = value end
+         if value ~= nil then
+            changed = update_provider_field(ctx, provider.id, entry, "label", value) or changed
+         end
       elseif choice == labels[2] then
          local value = edit_text(ctx, "model", entry.model)
-         if value ~= nil then entry.model = value end
+         if value ~= nil then
+            changed = update_provider_field(ctx, provider.id, entry, "model", value) or changed
+         end
       elseif choice == labels[3] then
          local value = edit_text(ctx, "base_url", entry.base_url)
-         if value ~= nil then entry.base_url = value end
+         if value ~= nil then
+            changed = update_provider_field(ctx, provider.id, entry, "base_url", value) or changed
+         end
       elseif choice == labels[4] then
          local value = edit_text(ctx, "endpoint", entry.endpoint)
-         if value ~= nil then entry.endpoint = value end
+         if value ~= nil then
+            changed = update_provider_field(ctx, provider.id, entry, "endpoint", value) or changed
+         end
       elseif choice == labels[5] then
-         entry.handler = entry.handler == "codex" and "openai" or "codex"
+         local previous_handler = entry.handler
+         local previous_fast_mode = entry.fast_mode
+         entry.handler = next_provider_handler(entry.handler)
          if entry.handler ~= "codex" then entry.fast_mode = false end
+         if save_provider_field(ctx, provider.id, entry, "handler") then
+            changed = true
+         else
+            entry.handler = previous_handler
+            entry.fast_mode = previous_fast_mode
+         end
       elseif choice == labels[6] then
          local value = edit_text(ctx, "api_key", "")
          if value ~= nil and value ~= "" then
             entry.api_key = value
-            entry.api_key_configured = true
+            if save_provider_field(ctx, provider.id, entry, "api_key") then
+               entry.api_key = ""
+               entry.api_key_configured = true
+               changed = true
+            else
+               entry.api_key = ""
+            end
          end
       elseif choice == labels[7] then
          local value = edit_text(ctx, "context_window_tokens", entry.context_window_tokens or "")
-         if value ~= nil then entry.context_window_tokens = tonumber(value) end
+         if value ~= nil then
+            local tokens = value == "" and nil or tonumber(value)
+            if value ~= "" and (not tokens or tokens < 1 or tokens ~= math.floor(tokens)) then
+               ctx.ui.notify("Context window must be blank or a positive integer", "error")
+            else
+               changed = update_provider_field(
+                  ctx, provider.id, entry, "context_window_tokens", tokens
+               ) or changed
+            end
+         end
       elseif choice == labels[8] then
          local value = edit_text(ctx, "max_concurrency", entry.max_concurrency or "")
          if value ~= nil then
+            local limit = nil
             if value == "" then
-               entry.max_concurrency = nil
+               limit = nil
             else
-               local limit = tonumber(value)
+               limit = tonumber(value)
                if limit and limit >= 1 and limit == math.floor(limit) then
-                  entry.max_concurrency = limit
+                  -- valid; save below
                else
                   ctx.ui.notify("Max concurrency must be blank or a positive integer", "error")
+                  limit = false
                end
+            end
+            if limit ~= false then
+               changed = update_provider_field(
+                  ctx, provider.id, entry, "max_concurrency", limit
+               ) or changed
             end
          end
       elseif choice == labels[9] then
@@ -179,13 +254,14 @@ local function edit_provider(ctx, provider)
             initial_custom = selected == nil and current ~= "",
          })
          if result then
-            entry.reasoning_effort = result.value
+            changed = update_provider_field(
+               ctx, provider.id, entry, "reasoning_effort", result.value
+            ) or changed
          end
       elseif fast_index and choice == labels[fast_index] then
-         entry.fast_mode = not entry.fast_mode
-      elseif choice == labels[save_index] then
-         ctx.config.set_provider_entry(provider.id, entry)
-         return true
+         changed = update_provider_field(
+            ctx, provider.id, entry, "fast_mode", not entry.fast_mode
+         ) or changed
       end
    end
 end
@@ -241,7 +317,7 @@ local function row_spans(row, selected, pad_w)
       sp[#sp + 1] = span(active and "\u{25cf} " or "\u{25cb} ", active and COL.green or COL.dim)
       sp[#sp + 1] = span(pad(pr.id, pad_w) .. "  ", fg, mods)
       sp[#sp + 1] = span(pad(pr.model or "", 18) .. "  ", selected and COL.amber or COL.dim, mods)
-      sp[#sp + 1] = span(pad(pr.handler or "openai", 7) .. "  ", COL.blue)
+      sp[#sp + 1] = span(pad(pr.handler or "openai", 10) .. "  ", COL.blue)
       local url = pr.base_url or ""
       if #url > 38 then url = url:sub(1, 36) .. "\u{2026}" end
       sp[#sp + 1] = span(url, COL.dim)
@@ -301,27 +377,39 @@ local function run(ctx, start_ns)
       local ns = page.namespace
       local rows = build_rows(ctx, page)
       local total = #rows
+      local is_providers = ns == "providers"
       -- Only re-seed `sel` when we actually switch tabs; otherwise keep the
       -- live cursor (so Up/Down mutations survive the next iteration instead
       -- of being overwritten by a stale saved value).
       if ns ~= cur_ns then
-         sel = cursor[ns] or 1
+         sel = cursor[ns]
+         if not sel and is_providers then
+            for i, row in ipairs(rows) do
+               if row.provider.active then
+                  sel = i
+                  break
+               end
+            end
+         end
+         sel = sel or 1
          scroll_first = 1
          cur_ns = ns
       end
       sel = clamp(sel, 1, math.max(1, total))
       cursor[ns] = sel
-      local is_providers = ns == "providers"
+      local visible_body_rows = is_providers and body_rows - 1 or body_rows
 
       -- Windowing so the cursor stays in view without user scrolling.
       local first, last
-      if total <= body_rows then
+      if total <= visible_body_rows then
          first, last, scroll_first = 1, total, 1
       else
-         scroll_first = clamp(scroll_first, 1, total - body_rows + 1)
+         scroll_first = clamp(scroll_first, 1, total - visible_body_rows + 1)
          if sel < scroll_first then scroll_first = sel end
-         if sel > scroll_first + body_rows - 1 then scroll_first = sel - body_rows + 1 end
-         first, last = scroll_first, scroll_first + body_rows - 1
+         if sel > scroll_first + visible_body_rows - 1 then
+            scroll_first = sel - visible_body_rows + 1
+         end
+         first, last = scroll_first, scroll_first + visible_body_rows - 1
       end
 
       local lines = {}
@@ -350,6 +438,16 @@ local function run(ctx, start_ns)
          ) })
       else
          local pad_w = label_width(rows)
+         if is_providers then
+            pad_w = math.max(pad_w, #"Provider")
+            lines[#lines + 1] = line_of({
+               span("   ", COL.dim),
+               span(pad("Provider", pad_w) .. "  ", COL.dim, { "bold" }),
+               span(pad("Model", 18) .. "  ", COL.dim, { "bold" }),
+               span(pad("Handler", 10) .. "  ", COL.dim, { "bold" }),
+               span("Base URL", COL.dim, { "bold" }),
+            })
+         end
          if first > 1 then
             lines[#lines + 1] = line_of({ span("  \u{2191} " .. (first - 1) .. " more", COL.dim) })
          end

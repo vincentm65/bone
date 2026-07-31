@@ -34,21 +34,25 @@ use std::path::{Component, Path};
 
 use sha2::{Digest, Sha256};
 
+// These hashes identify pristine bundled config commands. A version marker
+// alone cannot distinguish an untouched seed from a user-customized copy, so
+// only exact legacy files are safe to replace during migrations.
 // SHA-256 899462e75e1316e19d9ec9e6c853672b70b9c88617b3c25c3a743a373152c8fe
-// identifies the bundled canonical-config-v6 command. A version marker alone
-// cannot distinguish the untouched seed from a user-customized copy, so only
-// this exact legacy file is safe to replace during the v7 migration.
 const CANONICAL_CONFIG_V6_SHA256: [u8; 32] = [
     137, 148, 98, 231, 94, 19, 22, 225, 157, 158, 201, 230, 200, 83, 103, 43, 112, 185, 200, 134,
     23, 179, 194, 92, 58, 116, 58, 55, 49, 82, 200, 254,
 ];
 
-fn is_unmodified_canonical_config_v6(existing: &str) -> bool {
-    if !existing.contains("canonical-config-v6") {
-        return false;
-    }
+// SHA-256 f583a2a1003ca2ab2555ff34a0ce29da0411561dec32e3a1720db34071fe67b4
+const CANONICAL_CONFIG_V7_SHA256: [u8; 32] = [
+    245, 131, 162, 161, 0, 60, 162, 171, 37, 85, 255, 52, 160, 206, 41, 218, 4, 17, 86, 29, 236,
+    50, 227, 161, 114, 13, 179, 64, 113, 254, 103, 180,
+];
+
+fn is_unmodified_canonical_config(existing: &str) -> bool {
     let digest: [u8; 32] = Sha256::digest(existing.as_bytes()).into();
-    digest == CANONICAL_CONFIG_V6_SHA256
+    (existing.contains("canonical-config-v6") && digest == CANONICAL_CONFIG_V6_SHA256)
+        || (existing.contains("canonical-config-v7") && digest == CANONICAL_CONFIG_V7_SHA256)
 }
 
 fn is_safe_leaf_name(name: &str) -> bool {
@@ -127,10 +131,9 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
         || (name == "subagent.lua" && !existing.contains("eager"))
-        // Config now exposes provider effort presets/custom values and the
-        // Codex-only fast-mode flag. Refresh only the exact bundled v6 seed;
-        // preserve any copy the user has edited, even if its marker is v6.
-        || (name == "config.lua" && is_unmodified_canonical_config_v6(&existing)))
+        // Config migrations refresh only exact bundled v6/v7 seeds; preserve
+        // any copy the user has edited, even if it has a known marker.
+        || (name == "config.lua" && is_unmodified_canonical_config(&existing)))
 }
 
 /// Boot the Lua extension system.
