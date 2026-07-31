@@ -2372,6 +2372,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                 row.set("endpoint", provider.endpoint)?;
                 row.set("handler", provider.handler)?;
                 row.set("reasoning_effort", provider.reasoning_effort)?;
+                row.set("fast_mode", provider.fast_mode)?;
                 row.set("max_concurrency", provider.max_concurrency)?;
                 row.set("api_key_configured", provider.api_key_configured)?;
                 if let Some(tokens) = provider.context_window_tokens {
@@ -2406,6 +2407,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                 reasoning_effort: entry
                     .get::<Option<String>>("reasoning_effort")?
                     .unwrap_or_default(),
+                fast_mode: entry.get::<Option<bool>>("fast_mode")?,
                 api_key: entry
                     .get::<Option<String>>("api_key")?
                     .filter(|value| !value.is_empty()),

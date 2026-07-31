@@ -195,6 +195,7 @@ fn test_codex_request_serializes_prompt_cache_key() {
             effort: Some("high".to_string()),
             summary: "auto",
         }),
+        service_tier: Some("priority"),
         tools: None,
         tool_choice: None,
         prompt_cache_key: Some("bone-codex-thread-42".to_string()),
@@ -205,6 +206,7 @@ fn test_codex_request_serializes_prompt_cache_key() {
     assert_eq!(json["prompt_cache_key"], "bone-codex-thread-42");
     assert_eq!(json["reasoning"]["effort"], "high");
     assert_eq!(json["reasoning"]["summary"], "auto");
+    assert_eq!(json["service_tier"], "priority");
     assert_eq!(json["input"].as_array().unwrap().len(), 1);
 }
 
@@ -232,6 +234,7 @@ fn test_codex_request_omits_optional_fields_when_unset() {
         stream: true,
         store: false,
         reasoning: None,
+        service_tier: None,
         tools: None,
         tool_choice: None,
         prompt_cache_key: None,
@@ -243,6 +246,7 @@ fn test_codex_request_omits_optional_fields_when_unset() {
     assert!(!obj.contains_key("prompt_cache_key"));
     assert!(!obj.contains_key("tool_choice"));
     assert!(!obj.contains_key("tools"));
+    assert!(!obj.contains_key("service_tier"));
     assert!(!obj.contains_key("temperature"));
     assert!(!obj.contains_key("top_p"));
     assert_eq!(json["store"], false);

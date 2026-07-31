@@ -266,6 +266,7 @@ fn from_entry_reads_reasoning_effort() {
         context_window_tokens: Some(131_072),
         max_concurrency: None,
         reasoning_effort: "HIGH".into(),
+        fast_mode: false,
     };
     let provider = OpenAiCompatProvider::from_entry("grok", &entry);
     assert_eq!(provider.reasoning_effort.as_deref(), Some("high"));

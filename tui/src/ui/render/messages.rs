@@ -130,7 +130,7 @@ fn render_tool_with_hint(
         debug_assert_eq!(visual_idx, wrapped.len());
     }
 
-    if tool.is_shell {
+    if tool.is_shell || tool.is_error {
         render_shell_output(
             content,
             tool.is_error,

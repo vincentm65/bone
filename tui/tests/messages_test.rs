@@ -65,6 +65,35 @@ fn tool_content_highlights_links_after_plain_text() {
 }
 
 #[test]
+fn tool_errors_use_shell_style_gutter() {
+    let tool = ToolDisplay {
+        label: "read_file tui/src/ui/render.rs".to_string(),
+        is_error: true,
+        is_shell: false,
+    };
+    let mut lines = Vec::new();
+
+    render_tool(
+        &tool,
+        "could not resolve `tui/src/ui/render.rs`: No such file or directory (os error 2)",
+        0,
+        &Theme::default(),
+        &mut lines,
+        120,
+        false,
+    );
+
+    let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+    assert_eq!(
+        rendered,
+        vec![
+            "  ✕ read_file tui/src/ui/render.rs",
+            "      ╰ could not resolve `tui/src/ui/render.rs`: No such file or directory (os error 2)",
+        ]
+    );
+}
+
+#[test]
 fn file_tool_labels_highlight_path_and_mute_summary() {
     let theme = Theme::default();
     for name in ["read_file", "write_file", "edit_file"] {

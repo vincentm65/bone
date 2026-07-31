@@ -169,6 +169,8 @@ providers:
     label: Codex
     handler: codex
     model: gpt-5.6
+    reasoning_effort: xhigh
+    fast_mode: true
   local-3090:
     label: Local 3090
     handler: openai
@@ -187,6 +189,12 @@ Only a complete `${ENV_VAR}` scalar is resolved from the process environment at
 runtime. Other strings, including partial interpolation such as
 `prefix-${ENV_VAR}`, are preserved exactly. Plaintext credentials remain
 supported.
+
+`reasoning_effort` offers `low`, `medium`, `high`, and `xhigh` presets, but is
+an open string so provider-specific values such as `ultra` also pass through.
+Empty or `default` omits the request option. `fast_mode` is Codex-only; when
+enabled it sends the Responses API priority service tier and is otherwise
+omitted.
 
 A future keyring integration may use an explicit reference form, but it is not required for the initial refactor.
 

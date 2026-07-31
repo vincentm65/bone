@@ -196,15 +196,13 @@ impl ConfigStore {
                 ),
             ));
         }
-        super::providers_config::validate_reasoning_effort(&update.reasoning_effort)
-            .map_err(|error| (inner.revision, error))?;
-        if update.max_concurrency == Some(0) {
-            return Err((
-                inner.revision,
-                format!("providers.{}.max_concurrency must be at least 1", update.id),
-            ));
-        }
         let mut config = inner.providers.clone();
+        let fast_mode = update.fast_mode.unwrap_or_else(|| {
+            config
+                .providers
+                .get(&update.id)
+                .is_some_and(|entry| entry.fast_mode)
+        });
         let api_key = update.api_key.clone().map(Into::into).unwrap_or_else(|| {
             config
                 .providers
@@ -224,8 +222,10 @@ impl ConfigStore {
                 context_window_tokens: update.context_window_tokens,
                 max_concurrency: update.max_concurrency,
                 reasoning_effort: update.reasoning_effort.clone(),
+                fast_mode,
             },
         );
+        super::domains::validate_providers(&config).map_err(|error| (inner.revision, error))?;
         Ok(config)
     }
 
@@ -574,6 +574,7 @@ impl ConfigStore {
                 context_window_tokens: provider.context_window_tokens,
                 max_concurrency: provider.max_concurrency,
                 reasoning_effort: provider.reasoning_effort.clone(),
+                fast_mode: provider.fast_mode,
                 api_key_configured: !provider.api_key.is_empty(),
             })
             .collect();
@@ -712,13 +713,13 @@ impl ConfigStore {
         expected: u64,
     ) -> Result<(), (u64, String)> {
         self.mutate(expected, |inner| {
-            super::providers_config::validate_reasoning_effort(&update.reasoning_effort)?;
-            if update.max_concurrency == Some(0) {
-                return Err(format!(
-                    "providers.{}.max_concurrency must be at least 1",
-                    update.id
-                ));
-            }
+            let fast_mode = update.fast_mode.unwrap_or_else(|| {
+                inner
+                    .providers
+                    .providers
+                    .get(&update.id)
+                    .is_some_and(|entry| entry.fast_mode)
+            });
             let api_key = update.api_key.map(Into::into).unwrap_or_else(|| {
                 inner
                     .providers
@@ -737,9 +738,11 @@ impl ConfigStore {
                 context_window_tokens: update.context_window_tokens,
                 max_concurrency: update.max_concurrency,
                 reasoning_effort: update.reasoning_effort,
+                fast_mode,
             };
             let mut candidate = inner.providers.clone();
             candidate.providers.insert(update.id.clone(), entry);
+            super::domains::validate_providers(&candidate)?;
             super::domains::persist_providers(&candidate)?;
             inner.providers = candidate;
             Ok(())
@@ -892,7 +895,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_mutation_rejects_unsupported_reasoning_effort() {
+    fn provider_mutation_accepts_custom_reasoning_effort() {
         let _guard = crate::util::test_env_lock();
         let previous = std::env::var_os("BONE_DIR");
         let dir = tempfile::tempdir().unwrap();
@@ -909,15 +912,79 @@ mod tests {
             handler: "openai".into(),
             context_window_tokens: None,
             max_concurrency: None,
-            reasoning_effort: "extreme".into(),
+            reasoning_effort: "ultra".into(),
+            fast_mode: None,
             api_key: None,
         };
 
-        let error = store.upsert_provider(update, before.revision).unwrap_err();
-        assert!(error.1.contains("unsupported reasoning_effort"));
+        store.upsert_provider(update, before.revision).unwrap();
         let after = store.snapshot();
-        assert_eq!(after.revision, before.revision);
-        assert_eq!(after.providers, before.providers);
+        assert_eq!(after.revision, before.revision + 1);
+        assert_eq!(
+            after
+                .providers
+                .iter()
+                .find(|provider| provider.id == "test")
+                .unwrap()
+                .reasoning_effort,
+            "ultra"
+        );
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn provider_mutation_rejects_invalid_completed_candidates() {
+        let _guard = crate::util::test_env_lock();
+        let previous = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+        for (id, max_concurrency, fast_mode, expected_error) in [
+            (
+                "zero-concurrency",
+                Some(0),
+                Some(false),
+                "max_concurrency must be at least 1",
+            ),
+            (
+                "non-codex-fast",
+                None,
+                Some(true),
+                "fast_mode is only supported by the codex handler",
+            ),
+        ] {
+            let before = store.snapshot();
+            let update = ProviderUpdate {
+                id: id.into(),
+                label: "Invalid".into(),
+                base_url: "http://localhost".into(),
+                model: "test-model".into(),
+                endpoint: "/chat/completions".into(),
+                handler: "openai".into(),
+                context_window_tokens: None,
+                max_concurrency,
+                reasoning_effort: String::new(),
+                fast_mode,
+                api_key: None,
+            };
+
+            let error = store.upsert_provider(update, before.revision).unwrap_err();
+            assert!(error.1.contains(expected_error), "{}", error.1);
+            let after = store.snapshot();
+            assert_eq!(after.revision, before.revision);
+            assert!(!after.providers.iter().any(|provider| provider.id == id));
+        }
+
+        let persisted = super::super::domains::load_providers().unwrap().unwrap();
+        assert!(!persisted.providers.contains_key("zero-concurrency"));
+        assert!(!persisted.providers.contains_key("non-codex-fast"));
 
         unsafe {
             match previous {
@@ -1135,6 +1202,7 @@ mod tests {
                 context_window_tokens: None,
                 max_concurrency: None,
                 reasoning_effort: String::new(),
+                fast_mode: false,
             },
         );
         super::super::domains::persist_providers(&providers).unwrap();

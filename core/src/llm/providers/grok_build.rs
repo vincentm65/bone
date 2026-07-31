@@ -128,6 +128,7 @@ impl GrokBuildProvider {
             context_window_tokens: self.context_window_tokens,
             max_concurrency: None,
             reasoning_effort: self.reasoning_effort.clone(),
+            fast_mode: false,
         }
     }
 }

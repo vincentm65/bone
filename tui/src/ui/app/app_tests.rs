@@ -1,3 +1,4 @@
+use super::stream::{StreamAttempt, discard_stream_attempt};
 use super::{
     App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
     approval_already_pending, background_pane_needs_refresh, config_rejection_message,
@@ -22,6 +23,41 @@ fn only_actual_retry_statuses_are_persisted() {
     assert!(!is_retry_status(
         "running shell: grep -R 'stream error, will retry' core/src"
     ));
+}
+
+#[test]
+fn discarded_stream_attempt_removes_only_partial_agent_rows() {
+    let mut messages = vec![
+        crate::chat::Message::user("request"),
+        crate::ui::tool_display::shell_row("rg needle", "match".into(), false),
+        crate::chat::Message::assistant("exit code: 0\nstdout:\nleaked partial"),
+        crate::chat::Message::system("image paste failed: clipboard unavailable"),
+        crate::chat::Message::tool_row("eager_tool".into(), false),
+    ];
+    let mut attempt = StreamAttempt::default();
+    attempt.track_message(2);
+    attempt.track_message(4);
+    let mut cur_idx = Some(2);
+
+    assert!(discard_stream_attempt(
+        &mut messages,
+        &mut attempt,
+        &mut cur_idx
+    ));
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2].role, bone_protocol::ChatRole::System);
+    assert_eq!(
+        messages[2].content,
+        "image paste failed: clipboard unavailable"
+    );
+    assert!(cur_idx.is_none());
+
+    assert!(!discard_stream_attempt(
+        &mut messages,
+        &mut attempt,
+        &mut cur_idx
+    ));
+    assert_eq!(messages.len(), 3);
 }
 
 #[test]

@@ -458,6 +458,47 @@ async fn cancel_kills_promptly_and_returns_partial_output() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn cancel_does_not_wait_for_an_escaped_descendant_pipe() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_task = cancel.clone();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let mut ready_tx = Some(ready_tx);
+    let task = tokio::spawn(async move {
+        run_script_lines(
+            ScriptRequest {
+                command: "setsid sh -c 'sleep 2' & printf 'ready\\n'; sleep 30".into(),
+                env: Vec::new(),
+                timeout_ms: 30_000,
+                working_dir: None,
+                cancel: Some(cancel_for_task),
+            },
+            |_| {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(());
+                }
+                Ok(())
+            },
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
+        .await
+        .expect("escaped descendant did not start")
+        .expect("shell ended before cancellation");
+    let started = Instant::now();
+    cancel.store(true, Ordering::Relaxed);
+    let error = match task.await.unwrap() {
+        Ok(_) => panic!("command should be cancelled"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("cancelled by user"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_does_not_invoke_callbacks_for_buffered_output() {
     let cancel = Arc::new(AtomicBool::new(false));

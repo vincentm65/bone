@@ -763,6 +763,8 @@ body.hide-meter .composer-tokens { display: none; }
 .prov-input:focus, .prov-select:focus { border-color: var(--accent-line); box-shadow: 0 0 0 2px var(--accent-soft); }
 .prov-select { font-size: 11px; padding: 6px 8px; }
 .prov-input-wrap { display: flex; align-items: center; gap: 4px; }
+.prov-effort { display: grid; gap: 5px; }
+.prov-check { width: 18px; height: 18px; margin: 3px 0; accent-color: var(--accent); }
 .prov-key-toggle { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border: none; background: none; cursor: pointer; font-size: 12px; padding: 0; border-radius: 4px; transition: background 0.12s; }
 .prov-key-toggle:hover { background: var(--surface-3); }
 

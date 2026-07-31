@@ -117,9 +117,20 @@ pub struct ProviderEntry {
 
     /// Reasoning effort for backends that expose it (Codex Responses
     /// `reasoning.effort`, OpenAI-compatible Chat Completions
-    /// `reasoning_effort` for xAI/Grok, etc.). Empty means model default.
+    /// `reasoning_effort` for xAI/Grok, Anthropic `output_config.effort`, etc.).
+    /// Empty/`default` means the model default; other values pass through.
     #[serde(default, deserialize_with = "string_or_default")]
     pub reasoning_effort: String,
+
+    /// Request Codex's priority service tier. This is intentionally provider
+    /// configuration rather than a generic LLM option: only the Codex handler
+    /// reads it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fast_mode: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -195,31 +206,19 @@ fn default_handler() -> String {
     "openai".to_string()
 }
 
-pub const REASONING_EFFORTS: &[&str] = &[
-    "default", "none", "minimal", "low", "medium", "high", "xhigh", "max",
-];
-
-pub fn validate_reasoning_effort(value: &str) -> Result<(), String> {
-    let value = value.trim();
-    if value.is_empty()
-        || REASONING_EFFORTS
-            .iter()
-            .any(|effort| value.eq_ignore_ascii_case(effort))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "unsupported reasoning_effort {value:?}; expected default, none, minimal, low, medium, high, xhigh, or max"
-        ))
-    }
-}
-
 impl ProviderEntry {
     /// Non-empty reasoning effort for request builders. Empty/`default` → None.
     pub fn reasoning_effort_opt(&self) -> Option<String> {
-        match self.reasoning_effort.trim() {
-            "" | "default" => None,
-            effort => Some(effort.to_ascii_lowercase()),
+        let effort = self.reasoning_effort.trim();
+        if effort.is_empty() || effort.eq_ignore_ascii_case("default") {
+            return None;
+        }
+        match effort.to_ascii_lowercase().as_str() {
+            "low" => Some("low".into()),
+            "medium" => Some("medium".into()),
+            "high" => Some("high".into()),
+            "xhigh" => Some("xhigh".into()),
+            _ => Some(effort.to_string()),
         }
     }
 }
@@ -258,13 +257,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validates_supported_reasoning_efforts() {
-        assert!(validate_reasoning_effort("").is_ok());
-        assert!(validate_reasoning_effort("default").is_ok());
-        for effort in REASONING_EFFORTS {
-            assert!(validate_reasoning_effort(effort).is_ok(), "{effort}");
-        }
-        assert!(validate_reasoning_effort("HIGH").is_ok());
-        assert!(validate_reasoning_effort("extreme").is_err());
+    fn reasoning_effort_presets_are_canonical_and_custom_values_pass_through() {
+        let mut entry: ProviderEntry = serde_yaml::from_str("reasoning_effort: HIGH").unwrap();
+        assert_eq!(entry.reasoning_effort_opt().as_deref(), Some("high"));
+        entry.reasoning_effort = " ultra ".into();
+        assert_eq!(entry.reasoning_effort_opt().as_deref(), Some("ultra"));
+        entry.reasoning_effort = "FutureMode".into();
+        assert_eq!(entry.reasoning_effort_opt().as_deref(), Some("FutureMode"));
+        entry.reasoning_effort = "DEFAULT".into();
+        assert_eq!(entry.reasoning_effort_opt(), None);
     }
 }

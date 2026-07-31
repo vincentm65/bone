@@ -180,6 +180,7 @@ impl State {
                 context_window_tokens: entry.context_window_tokens,
                 max_concurrency: entry.max_concurrency,
                 reasoning_effort: entry.reasoning_effort.clone(),
+                fast_mode: Some(entry.fast_mode),
                 api_key: Some(key.to_string()),
             };
             if self.config.upsert_provider(update, revision).is_ok()

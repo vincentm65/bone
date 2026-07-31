@@ -22,6 +22,7 @@ fn provider_update(id: &str, model: &str) -> ProviderUpdate {
         context_window_tokens: None,
         max_concurrency: None,
         reasoning_effort: String::new(),
+        fast_mode: None,
         api_key: None,
     }
 }

@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigSchema {
     pub pages: Vec<ConfigPage>,
@@ -64,6 +68,8 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     pub reasoning_effort: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fast_mode: bool,
     pub api_key_configured: bool,
 }
 
@@ -81,6 +87,9 @@ pub struct ProviderUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     pub reasoning_effort: String,
+    /// Omitted updates preserve the provider's current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
@@ -101,6 +110,7 @@ mod tests {
             context_window_tokens: None,
             max_concurrency: None,
             reasoning_effort: String::new(),
+            fast_mode: false,
             api_key_configured: true,
         };
         let json = serde_json::to_value(provider).unwrap();
@@ -122,6 +132,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(update.max_concurrency, None);
+        assert_eq!(update.fast_mode, None);
         assert_eq!(update.api_key, None);
     }
 }

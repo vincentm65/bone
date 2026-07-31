@@ -16,6 +16,8 @@ use crate::llm::provider::{
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
+const FAST_SERVICE_TIER: &str = "priority";
+
 /// Codex provider — adapts the Codex Responses API to bone's internal shape.
 /// Uses `instructions`+`input` (not messages), Codex-format tools,
 /// and normalizes streaming SSE events including function_call deltas.
@@ -28,6 +30,7 @@ pub struct CodexProvider {
     id: String,
     label: String,
     reasoning_effort: Option<String>,
+    fast_mode: bool,
     context_window_tokens: Option<u64>,
 }
 
@@ -47,12 +50,17 @@ impl CodexProvider {
             api_key: entry.api_key.resolve_or_warn(),
             endpoint: entry.endpoint.clone(),
             reasoning_effort: entry.reasoning_effort_opt(),
+            fast_mode: entry.fast_mode,
             context_window_tokens: entry.context_window_tokens,
         }
     }
 
     fn chat_url(&self) -> String {
         format!("{}{}", self.base_url, self.endpoint)
+    }
+
+    fn service_tier(&self) -> Option<&'static str> {
+        self.fast_mode.then_some(FAST_SERVICE_TIER)
     }
 }
 
@@ -65,6 +73,10 @@ pub struct CodexRequest {
     pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<CodexReasoning>,
+    /// Codex fast mode is the Responses API priority service tier. Keep this
+    /// separate from reasoning effort: the two controls are independent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<CodexTool>>,
     /// Mirror the Codex CLI request shape: when tools are present it sends an
@@ -672,6 +684,7 @@ impl LlmProvider for CodexProvider {
                 effort: self.reasoning_effort.clone(),
                 summary: "auto",
             }),
+            service_tier: self.service_tier(),
             tools,
             tool_choice,
             prompt_cache_key,
@@ -995,11 +1008,28 @@ fn resolve_codex_api_key(config_key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodexResponse, extract_response_events, output_index, process_summary_event};
+    use super::{
+        CodexProvider, CodexResponse, extract_response_events, output_index, process_summary_event,
+    };
     use crate::llm::provider::ChatEvent;
     use crate::tools::TRUNCATED_ARGS_KEY;
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn fast_mode_maps_to_priority_service_tier() {
+        let enabled = serde_yaml::from_str("handler: codex\nfast_mode: true\n").unwrap();
+        assert_eq!(
+            CodexProvider::from_entry("codex", &enabled).service_tier(),
+            Some("priority")
+        );
+
+        let disabled = serde_yaml::from_str("handler: codex\n").unwrap();
+        assert_eq!(
+            CodexProvider::from_entry("codex", &disabled).service_tier(),
+            None
+        );
+    }
 
     #[test]
     fn completed_tool_calls_follow_argument_contract() {

@@ -3458,6 +3458,7 @@ impl App {
                             context_window_tokens: provider.context_window_tokens,
                             max_concurrency: provider.max_concurrency,
                             reasoning_effort: provider.reasoning_effort.clone(),
+                            fast_mode: Some(provider.fast_mode),
                             api_key: None,
                         };
                         let request_id =

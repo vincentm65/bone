@@ -1,5 +1,5 @@
 -- /config — interactive settings editor.
--- canonical-config-v6
+-- canonical-config-v7
 --
 -- Renders its own styled bottom pane (full span control) for the tabbed
 -- settings overview, and reuses `ui.menu` only for the isolated sub-prompts
@@ -75,7 +75,12 @@ local function save_value(ctx, namespace, key, value)
    return result == true
 end
 
-local REASONING_EFFORTS = { "default", "none", "minimal", "low", "medium", "high", "xhigh", "max" }
+local REASONING_EFFORTS = {
+   { label = "Low", value = "low" },
+   { label = "Med", value = "medium" },
+   { label = "High", value = "high" },
+   { label = "XHigh", value = "xhigh" },
+}
 
 local function edit_provider(ctx, provider)
    local entry = {
@@ -89,6 +94,7 @@ local function edit_provider(ctx, provider)
       context_window_tokens = provider.context_window_tokens,
       max_concurrency = provider.max_concurrency,
       reasoning_effort = provider.reasoning_effort or "",
+      fast_mode = provider.fast_mode == true,
    }
 
    while true do
@@ -103,8 +109,14 @@ local function edit_provider(ctx, provider)
          "context_window_tokens \u{00b7} " .. tostring(entry.context_window_tokens or "unknown"),
          "max_concurrency \u{00b7} " .. tostring(entry.max_concurrency or "unlimited"),
          "reasoning_effort \u{00b7} " .. (entry.reasoning_effort ~= "" and entry.reasoning_effort or "default"),
-         "Save changes",
       }
+      local fast_index = nil
+      if entry.handler == "codex" then
+         labels[#labels + 1] = "fast_mode \u{00b7} " .. (entry.fast_mode and "on" or "off")
+         fast_index = #labels
+      end
+      labels[#labels + 1] = "Save changes"
+      local save_index = #labels
       local result = ask(ctx, {
          question = "Edit provider: " .. provider.id,
          type = "single_select",
@@ -127,6 +139,7 @@ local function edit_provider(ctx, provider)
          if value ~= nil then entry.endpoint = value end
       elseif choice == labels[5] then
          entry.handler = entry.handler == "codex" and "openai" or "codex"
+         if entry.handler ~= "codex" then entry.fast_mode = false end
       elseif choice == labels[6] then
          local value = edit_text(ctx, "api_key", "")
          if value ~= nil and value ~= "" then
@@ -151,16 +164,26 @@ local function edit_provider(ctx, provider)
             end
          end
       elseif choice == labels[9] then
+         local current = entry.reasoning_effort
+         local selected = nil
+         for i, option in ipairs(REASONING_EFFORTS) do
+            if option.value == current then selected = i end
+         end
          local result = ask(ctx, {
             question = "Select reasoning_effort",
             type = "single_select",
             options = REASONING_EFFORTS,
-            allow_custom = false,
+            default = selected or 1,
+            allow_custom = true,
+            initial = selected and "" or current,
+            initial_custom = selected == nil and current ~= "",
          })
          if result then
-            entry.reasoning_effort = result.value == "default" and "" or result.value
+            entry.reasoning_effort = result.value
          end
-      elseif choice == labels[10] then
+      elseif fast_index and choice == labels[fast_index] then
+         entry.fast_mode = not entry.fast_mode
+      elseif choice == labels[save_index] then
          ctx.config.set_provider_entry(provider.id, entry)
          return true
       end

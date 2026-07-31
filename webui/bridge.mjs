@@ -691,6 +691,7 @@ function providerUpdate(id, provider, fields = {}) {
     context_window_tokens: merged.context_window_tokens ?? null,
     max_concurrency: merged.max_concurrency ?? null,
     reasoning_effort: merged.reasoning_effort ?? "",
+    fast_mode: merged.handler === "codex" && (merged.fast_mode ?? false),
     ...(Object.hasOwn(fields, "api_key") ? { api_key: fields.api_key } : {}),
   };
 }

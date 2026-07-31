@@ -1,4 +1,7 @@
-use super::{PartialToolUse, build_request_parts, finish_tool_use, usage_input_tokens};
+use super::{
+    MessagesRequest, OutputConfig, PartialToolUse, build_request_parts, finish_tool_use,
+    usage_input_tokens,
+};
 use crate::llm::provider::ChatEvent;
 use crate::llm::{ChatMessage, ChatRole};
 use serde_json::json;
@@ -66,4 +69,21 @@ fn empty_tool_input_becomes_empty_object() {
         Some(ChatEvent::ToolCall(call)) => assert_eq!(call.arguments, json!({})),
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn reasoning_effort_uses_anthropic_output_config() {
+    let request = MessagesRequest {
+        model: "claude-test".into(),
+        max_tokens: 100,
+        stream: true,
+        output_config: Some(OutputConfig {
+            effort: "ultra".into(),
+        }),
+        system: Vec::new(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let json = serde_json::to_value(request).unwrap();
+    assert_eq!(json["output_config"]["effort"], "ultra");
 }

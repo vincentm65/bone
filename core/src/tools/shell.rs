@@ -246,6 +246,7 @@ where
         message: "failed to capture stderr".into(),
     })?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(16);
+    let mut readers = Vec::with_capacity(2);
     for (is_stderr, mut reader) in [
         (
             false,
@@ -254,7 +255,7 @@ where
         (true, Box::new(stderr)),
     ] {
         let tx = tx.clone();
-        tokio::spawn(async move {
+        readers.push(tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf).await {
@@ -263,7 +264,7 @@ where
                     Ok(_) => {}
                 }
             }
-        });
+        }));
     }
     drop(tx);
 
@@ -310,11 +311,27 @@ where
         }
     }
     if stream_error.is_none() {
-        while let Some((is_stderr, bytes)) = rx.recv().await {
+        // After cancellation/timeout, do not wait for pipe EOF: a descendant
+        // may have escaped the killed process group while retaining stdout or
+        // stderr, which would wedge the cancelled turn here indefinitely.
+        while let Ok((is_stderr, bytes)) = rx.try_recv() {
             if let Err(error) = emit(is_stderr, &bytes) {
                 stream_error = Some(error);
                 break;
             }
+        }
+        if !timed_out && !cancelled {
+            while let Some((is_stderr, bytes)) = rx.recv().await {
+                if let Err(error) = emit(is_stderr, &bytes) {
+                    stream_error = Some(error);
+                    break;
+                }
+            }
+        }
+    }
+    if timed_out || cancelled || stream_error.is_some() {
+        for reader in readers {
+            reader.abort();
         }
     }
     let output_limit_exceeded = matches!(stream_error, Some(StreamError::OutputLimit));

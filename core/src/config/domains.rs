@@ -108,6 +108,7 @@ pub fn load_or_seed_providers() -> Result<super::ProvidersConfig, String> {
                 context_window_tokens: None,
                 max_concurrency: None,
                 reasoning_effort: String::new(),
+                fast_mode: false,
             },
         );
     }
@@ -135,8 +136,11 @@ pub(crate) fn validate_providers(config: &super::ProvidersConfig) -> Result<(), 
         if provider.max_concurrency == Some(0) {
             return Err(format!("providers.{id}.max_concurrency must be at least 1"));
         }
-        super::providers_config::validate_reasoning_effort(&provider.reasoning_effort)
-            .map_err(|error| format!("providers.{id}.{error}"))?;
+        if provider.fast_mode && provider.handler != "codex" {
+            return Err(format!(
+                "providers.{id}.fast_mode is only supported by the codex handler"
+            ));
+        }
     }
     Ok(())
 }
@@ -272,9 +276,14 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             // SAFETY: held under test_env_lock; restored below.
             unsafe { std::env::set_var("BONE_DIR", dir.path()) };
-            for (max_concurrency, reasoning_effort, expected_error) in [
-                (Some(0), "", "max_concurrency must be at least 1"),
-                (None, "extreme", "unsupported reasoning_effort"),
+            for (max_concurrency, handler, fast_mode, expected_error) in [
+                (
+                    Some(0),
+                    "openai",
+                    false,
+                    "max_concurrency must be at least 1",
+                ),
+                (None, "openai", true, "fast_mode is only supported"),
             ] {
                 let mut config = ProvidersConfig::default();
                 config.providers.insert(
@@ -285,10 +294,11 @@ mod tests {
                         model: String::new(),
                         api_key: ProviderCredential::default(),
                         endpoint: "/chat/completions".into(),
-                        handler: "openai".into(),
+                        handler: handler.into(),
                         context_window_tokens: None,
                         max_concurrency,
-                        reasoning_effort: reasoning_effort.into(),
+                        reasoning_effort: "ultra".into(),
+                        fast_mode,
                     },
                 );
 

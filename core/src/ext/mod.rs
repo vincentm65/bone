@@ -32,6 +32,25 @@ include!(concat!(env!("OUT_DIR"), "/default_lua_libs.rs"));
 use std::collections::HashSet;
 use std::path::{Component, Path};
 
+use sha2::{Digest, Sha256};
+
+// SHA-256 899462e75e1316e19d9ec9e6c853672b70b9c88617b3c25c3a743a373152c8fe
+// identifies the bundled canonical-config-v6 command. A version marker alone
+// cannot distinguish the untouched seed from a user-customized copy, so only
+// this exact legacy file is safe to replace during the v7 migration.
+const CANONICAL_CONFIG_V6_SHA256: [u8; 32] = [
+    137, 148, 98, 231, 94, 19, 22, 225, 157, 158, 201, 230, 200, 83, 103, 43, 112, 185, 200, 134,
+    23, 179, 194, 92, 58, 116, 58, 55, 49, 82, 200, 254,
+];
+
+fn is_unmodified_canonical_config_v6(existing: &str) -> bool {
+    if !existing.contains("canonical-config-v6") {
+        return false;
+    }
+    let digest: [u8; 32] = Sha256::digest(existing.as_bytes()).into();
+    digest == CANONICAL_CONFIG_V6_SHA256
+}
+
 fn is_safe_leaf_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains(['/', '\\', '\0'])
@@ -108,9 +127,10 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
         || (name == "subagent.lua" && !existing.contains("eager"))
-        // Config now exposes the delegated-run concurrency limit in the
-        // provider editor; refresh older seeded copies.
-        || (name == "config.lua" && !existing.contains("canonical-config-v6")))
+        // Config now exposes provider effort presets/custom values and the
+        // Codex-only fast-mode flag. Refresh only the exact bundled v6 seed;
+        // preserve any copy the user has edited, even if its marker is v6.
+        || (name == "config.lua" && is_unmodified_canonical_config_v6(&existing)))
 }
 
 /// Boot the Lua extension system.

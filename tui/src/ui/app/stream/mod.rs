@@ -234,6 +234,58 @@ pub(super) fn is_retry_status(message: &str) -> bool {
     message.starts_with("retry") || message.starts_with("stream error, will retry:")
 }
 
+fn is_stream_retry_status(message: &str) -> bool {
+    message.starts_with("stream error, will retry:")
+}
+
+#[derive(Debug, Default)]
+pub(super) struct StreamAttempt {
+    active: bool,
+    message_indices: Vec<usize>,
+}
+
+impl StreamAttempt {
+    fn begin(&mut self) {
+        self.active = true;
+    }
+
+    pub(super) fn track_message(&mut self, index: usize) {
+        self.begin();
+        if !self.message_indices.contains(&index) {
+            self.message_indices.push(index);
+        }
+    }
+
+    fn commit(&mut self) {
+        self.active = false;
+        self.message_indices.clear();
+    }
+}
+
+/// Remove only the UI rows produced by a provider attempt that the driver
+/// discarded. Other rows can be appended while the stream is live (for
+/// example, an image-paste failure), so truncating the whole suffix would lose
+/// unrelated messages.
+pub(super) fn discard_stream_attempt(
+    messages: &mut Vec<Message>,
+    attempt: &mut StreamAttempt,
+    cur_idx: &mut Option<usize>,
+) -> bool {
+    if !attempt.active {
+        return false;
+    }
+    attempt.message_indices.sort_unstable();
+    attempt.message_indices.dedup();
+    for index in attempt.message_indices.drain(..).rev() {
+        if index < messages.len() {
+            messages.remove(index);
+        }
+    }
+    attempt.active = false;
+    *cur_idx = None;
+    true
+}
+
 fn refresh_queue_page(
     queue: &VecDeque<String>,
     selected: &mut usize,
@@ -384,6 +436,10 @@ impl App {
         use crate::runtime::RuntimeEvent;
 
         let mut cur_idx: Option<usize> = None;
+        // Rows created by the current provider attempt. A retry discards that
+        // attempt in the driver, so the TUI must rewind those rows while
+        // preserving unrelated messages appended during the stream.
+        let mut stream_attempt = StreamAttempt::default();
         let mut pending: std::collections::HashMap<String, crate::tools::ToolCall> =
             std::collections::HashMap::new();
         let mut pending_key = KeySink::new();
@@ -553,7 +609,14 @@ impl App {
                         )?;
                     }
                     Ok(ev) => {
-                        self.pump_apply_event(ev, &mut cur_idx, &mut pending, &mut pending_key, term)?;
+                        self.pump_apply_event(
+                            ev,
+                            &mut cur_idx,
+                            &mut stream_attempt,
+                            &mut pending,
+                            &mut pending_key,
+                            term,
+                        )?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_n)) => {
                         recovering_from_lag = true;
@@ -940,6 +1003,7 @@ impl App {
         &mut self,
         ev: crate::runtime::RuntimeEvent,
         cur_idx: &mut Option<usize>,
+        stream_attempt: &mut StreamAttempt,
         pending: &mut std::collections::HashMap<String, crate::tools::ToolCall>,
         pending_key: &mut KeySink,
         term: &mut BoneTerminal,
@@ -951,11 +1015,13 @@ impl App {
                 // honoring its minimum on-screen retention.
                 self.fade_thinking_pane();
                 let idx = self.pump_ensure_assistant(cur_idx);
+                stream_attempt.track_message(idx);
                 self.bump_estimated_received(text.len());
                 self.messages[idx].content.push_str(&text);
                 self.flush_streaming_to_scrollback(idx, term)?;
             }
             RuntimeEvent::ReasoningDelta { text } => {
+                stream_attempt.begin();
                 // Reasoning is always retained in the Driver transcript for
                 // echo-back; here we optionally surface it live. When disabled
                 // (default), drop it — only the spinner shows.
@@ -987,7 +1053,16 @@ impl App {
                 // invisible: retries / stream errors. Lua that wants a message
                 // kept in the transcript emits `RuntimeEvent::Notice` instead
                 // (see below) rather than relying on the host to guess.
-                if is_retry_status(&message) {
+                if is_stream_retry_status(&message) {
+                    self.pump_discarded_attempt(
+                        stream_attempt,
+                        cur_idx,
+                        pending,
+                        pending_key,
+                        term,
+                    )?;
+                    self.pump_notice(format!("⚠ {message}"), cur_idx, term)?;
+                } else if is_retry_status(&message) {
                     self.pump_notice(format!("⚠ {message}"), cur_idx, term)?;
                 }
             }
@@ -1001,6 +1076,13 @@ impl App {
             // `outcome.result` never reaches us — this event is the only signal.
             // Surface it as a persistent notice so the turn doesn't end silently.
             RuntimeEvent::Failed { message } => {
+                self.pump_discarded_attempt(
+                    stream_attempt,
+                    cur_idx,
+                    pending,
+                    pending_key,
+                    term,
+                )?;
                 self.pump_notice(format!("⚠ turn failed: {message}"), cur_idx, term)?;
             }
             RuntimeEvent::ConversationLoadFailed { message, .. } => {
@@ -1100,7 +1182,8 @@ impl App {
                 // Ensure an assistant message precedes the tool row so the
                 // user→assistant→tool transition doesn't add an extra blank
                 // line (msg_to_lines only blanks across a User boundary).
-                self.pump_ensure_assistant(cur_idx);
+                let assistant_idx = self.pump_ensure_assistant(cur_idx);
+                stream_attempt.track_message(assistant_idx);
                 // Tool-call arguments are part of the completion the model
                 // generated, so count them toward the live estimate too.
                 let arg_len = serde_json::to_string(&arguments)
@@ -1119,7 +1202,11 @@ impl App {
                     .unwrap_or(false)
                 {
                     // Eager rows are immutable once written to native scrollback.
+                    let first_new_row = self.messages.len();
                     self.pump_show_eager_row(&call, cur_idx, term)?;
+                    for index in first_new_row..self.messages.len() {
+                        stream_attempt.track_message(index);
+                    }
                 }
                 if call.name == "shell" {
                     let label = format_shell_call_label(&call.arguments);
@@ -1136,6 +1223,10 @@ impl App {
                 is_error,
                 content,
             } => {
+                // Receiving a result proves the provider attempt that produced
+                // this call completed successfully. Its streamed rows are now
+                // committed and must not be removed by a later attempt's retry.
+                stream_attempt.commit();
                 // The tool finished, so it won't re-arm a key request — release
                 // input ownership latched by any `ctx.ui.key()` call, otherwise
                 // every later keystroke this turn buffers instead of reaching
@@ -1179,6 +1270,32 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn pump_discarded_attempt(
+        &mut self,
+        stream_attempt: &mut StreamAttempt,
+        cur_idx: &mut Option<usize>,
+        pending: &mut std::collections::HashMap<String, crate::tools::ToolCall>,
+        pending_key: &mut KeySink,
+        term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        if !discard_stream_attempt(&mut self.messages, stream_attempt, cur_idx) {
+            return Ok(());
+        }
+
+        pending.clear();
+        pending_key.clear_owner();
+        self.shown_tool_rows.clear();
+        self.running_shells.clear();
+        self.pending_shells.clear();
+        self.clear_thinking_pane();
+        self.stream_estimated_received = Some(self.view.received);
+
+        // The discarded text may already be in immutable native scrollback.
+        // Rebuild from the pruned message model to remove it before the
+        // retry notice or replacement attempt is rendered.
+        self.rebuild_scrollback(term, None)
     }
 
     /// Push a one-off notice (retry/error) into scrollback mid-turn. Finalizes

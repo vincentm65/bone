@@ -2061,7 +2061,8 @@ const PROVIDER_FIELDS = [
   { key: "handler",  label: "Handler",     placeholder: "openai",         type: "select", options: ["openai", "anthropic", "codex", "grok_build"] },
   { key: "context_window_tokens", label: "Context window", placeholder: "Unknown", type: "number" },
   { key: "max_concurrency", label: "Max concurrency", placeholder: "Unlimited", type: "number" },
-  { key: "reasoning_effort", label: "Reasoning effort", placeholder: "Default", type: "select", options: ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"], effortHandlers: ["codex", "openai", "grok_build"] },
+  { key: "reasoning_effort", label: "Reasoning effort", type: "effort" },
+  { key: "fast_mode", label: "Fast mode", type: "checkbox", handlers: ["codex"] },
 ];
 
 let _provExpanded = null;   // key of expanded card (null = collapsed)
@@ -2128,12 +2129,19 @@ function renderProviderPicker() {
     // Expanded editor (hidden by default)
     const editor = el("div", "prov-editor");
     for (const fd of PROVIDER_FIELDS) {
-      if (fd.effortHandlers && !fd.effortHandlers.includes(p.handler)) continue;
+      if (fd.handlers && !fd.handlers.includes(p.handler)) continue;
       const field = el("div", "prov-field");
       const lbl = el("label", null, fd.label);
-      const input = fd.type === "select"
-        ? createProvSelect(p.key, fd.key, p[fd.key] ?? "", fd.options)
-        : createProvInput(p.key, fd.key, p[fd.key] ?? "", fd.placeholder, fd.type, fd.key === "api_key");
+      let input;
+      if (fd.type === "select") {
+        input = createProvSelect(p.key, fd.key, p[fd.key] ?? "", fd.options);
+      } else if (fd.type === "effort") {
+        input = createProvEffort(p.key, p[fd.key] ?? "");
+      } else if (fd.type === "checkbox") {
+        input = createProvCheckbox(p.key, fd.key, p[fd.key] === true);
+      } else {
+        input = createProvInput(p.key, fd.key, p[fd.key] ?? "", fd.placeholder, fd.type, fd.key === "api_key");
+      }
       field.appendChild(lbl);
       field.appendChild(input);
       editor.appendChild(field);
@@ -2217,6 +2225,59 @@ function createProvSelect(providerKey, fieldKey, value, options) {
   return sel;
 }
 
+const REASONING_EFFORT_PRESETS = [
+  ["Low", "low"],
+  ["Med", "medium"],
+  ["High", "high"],
+  ["XHigh", "xhigh"],
+];
+
+function createProvEffort(providerKey, value) {
+  const wrap = el("div", "prov-effort");
+  const select = document.createElement("select");
+  select.className = "prov-select";
+  const isPreset = REASONING_EFFORT_PRESETS.some(([, preset]) => preset === value);
+  for (const [label, preset] of REASONING_EFFORT_PRESETS) {
+    const option = document.createElement("option");
+    option.value = preset;
+    option.textContent = label;
+    option.selected = preset === value;
+    select.appendChild(option);
+  }
+  const custom = document.createElement("option");
+  custom.value = "__custom__";
+  custom.textContent = "Custom";
+  custom.selected = !isPreset;
+  select.appendChild(custom);
+
+  const input = document.createElement("input");
+  input.className = "prov-input";
+  input.value = isPreset ? "" : value;
+  input.placeholder = "Custom value (for example ultra)";
+  input.hidden = isPreset;
+  input.onchange = () => saveProviderField(providerKey, "reasoning_effort", input.value.trim());
+  input.onkeydown = (event) => { if (event.key === "Enter") input.blur(); };
+  select.onchange = () => {
+    if (select.value === "__custom__") {
+      input.hidden = false;
+      input.focus();
+    } else {
+      saveProviderField(providerKey, "reasoning_effort", select.value);
+    }
+  };
+  wrap.append(select, input);
+  return wrap;
+}
+
+function createProvCheckbox(providerKey, fieldKey, checked) {
+  const input = document.createElement("input");
+  input.className = "prov-check";
+  input.type = "checkbox";
+  input.checked = checked;
+  input.onchange = () => saveProviderField(providerKey, fieldKey, input.checked);
+  return input;
+}
+
 async function saveProviderField(providerKey, fieldKey, value) {
   const prov = state.providers.find((p) => p.key === providerKey);
   if (!prov) return;
@@ -2233,7 +2294,13 @@ async function saveProviderField(providerKey, fieldKey, value) {
     }
   }
   const oldVal = prov[fieldKey];
+  const oldFastMode = prov.fast_mode;
   prov[fieldKey] = value;
+  const fields = { [fieldKey]: value };
+  if (fieldKey === "handler" && value !== "codex") {
+    prov.fast_mode = false;
+    fields.fast_mode = false;
+  }
   if (providerKey === state.providerId && fieldKey === "model") state.model = value;
   renderModelLabel();
   renderProviderPicker();
@@ -2241,9 +2308,10 @@ async function saveProviderField(providerKey, fieldKey, value) {
   try { await requestJson(`/api/providers/${providerKey}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ field: fieldKey, value }),
+    body: JSON.stringify({ fields }),
   }); toast("Saved"); } catch (error) {
     prov[fieldKey] = oldVal;
+    prov.fast_mode = oldFastMode;
     toast(`Save failed: ${error.message}`);
     renderProviderPicker();
   }

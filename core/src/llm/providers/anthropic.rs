@@ -39,6 +39,7 @@ pub struct AnthropicProvider {
     id: String,
     label: String,
     max_tokens: Option<u32>,
+    reasoning_effort: Option<String>,
     context_window_tokens: Option<u64>,
 }
 
@@ -58,6 +59,7 @@ impl AnthropicProvider {
             api_key: entry.api_key.resolve_or_warn(),
             endpoint: entry.endpoint.clone(),
             max_tokens: None,
+            reasoning_effort: entry.reasoning_effort_opt(),
             context_window_tokens: entry.context_window_tokens,
         }
     }
@@ -74,11 +76,18 @@ struct MessagesRequest {
     model: String,
     max_tokens: u32,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     system: Vec<SystemBlock>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
+}
+
+#[derive(Serialize)]
+struct OutputConfig {
+    effort: String,
 }
 
 #[derive(Serialize)]
@@ -272,6 +281,10 @@ impl LlmProvider for AnthropicProvider {
             model: self.model.clone(),
             max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             stream: true,
+            output_config: self
+                .reasoning_effort
+                .clone()
+                .map(|effort| OutputConfig { effort }),
             system,
             messages: msgs,
             tools: anthropic_tools(tools),

@@ -293,6 +293,15 @@ test("provider editor supports optional max concurrency", () => {
   assert.match(bridge, /max_concurrency: merged\.max_concurrency \?\? null/);
 });
 
+test("provider editor supports custom effort and Codex-only fast mode", () => {
+  const providerEditor = js.slice(js.indexOf("const PROVIDER_FIELDS"), js.indexOf("// Inline add-provider form"));
+  assert.match(providerEditor, /\["Med", "medium"\]/);
+  assert.match(providerEditor, /\["XHigh", "xhigh"\]/);
+  assert.match(providerEditor, /Custom value \(for example ultra\)/);
+  assert.match(providerEditor, /key: "fast_mode"[^\n]+handlers: \["codex"\]/);
+  assert.match(bridge, /fast_mode: merged\.handler === "codex"/);
+});
+
 test("subagent calls render as agent cards with live per-task status", () => {
   // Dedicated card path for the runtime's `subagent` tool.
   assert.match(js, /name === "subagent"/);
