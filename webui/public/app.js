@@ -590,7 +590,7 @@ function appendReasoning(text) {
 // ── tool cards ──────────────────────────────────────────────────────────────
 
 const TOOL_VERBS = {
-  shell: "Run", bash: "Run", read_file: "Read", write_file: "Write", edit_file: "Edit",
+  shell: "Run", bash: "Run", read_file: "Read", create_file: "Create", edit_file: "Edit",
   apply_patch: "Patch", search: "Search", grep: "Search", list: "List", ls: "List",
   glob: "Find", web: "Fetch", fetch: "Fetch", web_search: "Search",
 };
@@ -671,11 +671,11 @@ function onToolCall(ev) {
   head.onclick = toggleTool;
   head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleTool(); } };
 
-  // File-writing tools get an "open in canvas" affordance. write_file content is
+  // File-writing tools get an "open in canvas" affordance. create_file content is
   // available right now; edit_file's diff arrives with the result — defer the
   // button until we have the diff so we never show "nothing to show yet".
   const path = ev.arguments && (ev.arguments.path || ev.arguments.file_path);
-  if (path && ev.name === "write_file" && typeof ev.arguments.content === "string") {
+  if (path && ev.name === "create_file" && typeof ev.arguments.content === "string") {
     const open = card.querySelector(".tool-open");
     open.classList.remove("hidden");
     open.onclick = (e) => { e.stopPropagation(); focusArtifact(path); };
@@ -890,7 +890,7 @@ function jobResultsCard(content) {
 
 // ── canvas: split-screen artifact / diff viewer ──────────────────────────────
 //
-// One artifact per file path. write_file → a live "doc" (markdown rendered) or
+// One artifact per file path. create_file → a live "doc" (markdown rendered) or
 // "file" (plain) view; edit_file → a colour-coded "diff" parsed from the result.
 // The canvas opens automatically with the latest artifact and keeps a tab strip
 // so you can step back through what the agent has written this turn.

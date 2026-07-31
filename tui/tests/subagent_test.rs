@@ -255,7 +255,7 @@ fn tool_allowlist_narrows_exposed_tools() {
         "allowlisted tool should remain; got: {names:?}",
     );
     assert!(
-        !names.contains(&"write_file"),
+        !names.contains(&"create_file"),
         "non-allowlisted tool should be filtered out; got: {names:?}",
     );
 

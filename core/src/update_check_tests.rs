@@ -1,6 +1,9 @@
-use super::{InstallKind, THROTTLE, cache_file, check_due_from, is_newer_version, shell_quote};
-use serde_json::json;
-use std::path::{Path, PathBuf};
+use super::{
+    InstallKind, THROTTLE, cache_file, cargo_source_path_from_metadata,
+    cargo_source_root_from_home, check_due_from, detect_install_kind_from, is_newer_version,
+    source_update_commands,
+};
+use std::path::PathBuf;
 
 fn without_config_dir<F, R>(f: F) -> R
 where
@@ -46,37 +49,88 @@ fn compares_versions_as_versions() {
     assert!(!is_newer_version("2.2.4", "2.2.4"));
     assert!(!is_newer_version("2.2.0", "2.2"));
     assert!(!is_newer_version("2.0.9", "2.2.4"));
+    assert!(is_newer_version("2.5.0", "2.5.0-beta.1"));
+    assert!(is_newer_version("2.5.0-beta.2", "2.5.0-beta.1"));
+    assert!(!is_newer_version("2.5.0-beta.1", "2.5.0"));
+    assert!(!is_newer_version("not-a-version", "2.5.0"));
 }
 
 #[test]
-fn quotes_update_paths_for_shell() {
-    assert_eq!(shell_quote(Path::new("/tmp/bone")), "/tmp/bone");
-    assert_eq!(shell_quote(Path::new("/tmp/my bone")), "'/tmp/my bone'");
+fn source_update_commands_work_in_windows_shells() {
+    let commands = source_update_commands(&PathBuf::from(r"C:\Users\Vincent Miranda\bone"), true);
+    assert_eq!(
+        commands,
+        concat!(
+            "git -C \"C:\\Users\\Vincent Miranda\\bone\" pull --ff-only\n",
+            "cargo install --path \"C:\\Users\\Vincent Miranda\\bone\\tui\" --force"
+        )
+    );
+    assert!(!commands.contains("&&"));
+    assert!(!commands.contains("cd "));
 }
 
 #[test]
-fn reads_latest_from_github_tags_or_release_json() {
-    let kind = InstallKind::Git(PathBuf::from("/tmp/bone"));
+fn reads_source_checkout_from_cargo_install_metadata() {
+    let metadata = r#"{
+        "installs": {
+            "other 1.0.0 (registry+https://example.invalid)": {"bins":["other"]},
+            "bone 2.4.3 (path+file:///tmp/bone/tui)": {"bins":["bone"]}
+        }
+    }"#;
     assert_eq!(
-        kind.latest_from_json(&json!([{ "name": "v2.2.7" }, { "name": "v2.2.8" }]))
-            .as_deref(),
-        Some("2.2.8")
-    );
-    assert_eq!(
-        kind.latest_from_json(&json!({ "tag_name": "v2.2.9" }))
-            .as_deref(),
-        Some("2.2.9")
+        cargo_source_path_from_metadata(metadata),
+        Some(PathBuf::from("/tmp/bone/tui"))
     );
 }
 
 #[test]
-fn reads_latest_from_npm_json() {
+fn resolves_cargo_install_back_to_its_git_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join("bone");
+    let tui = checkout.join("tui");
+    let cargo_home = dir.path().join("cargo-home");
+    std::fs::create_dir_all(checkout.join(".git")).unwrap();
+    std::fs::create_dir_all(&tui).unwrap();
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    let source = reqwest::Url::from_directory_path(&tui).unwrap();
+    let key = format!("bone 2.4.3 (path+{source})");
+    let metadata = serde_json::json!({ "installs": { (key): { "bins": ["bone"] } } });
+    std::fs::write(
+        cargo_home.join(".crates2.json"),
+        serde_json::to_vec(&metadata).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(cargo_source_root_from_home(&cargo_home), Some(checkout));
+}
+
+#[test]
+fn detects_native_binary_nested_in_an_npm_platform_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("node_modules/bone-agent-linux-x64");
+    let executable = package.join("bin/bone");
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"bone-agent-linux-x64"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(detect_install_kind_from(&executable), InstallKind::Npm);
+}
+
+#[test]
+fn update_notices_prefer_the_in_app_command_when_supported() {
     assert_eq!(
-        InstallKind::Npm
-            .latest_from_json(&json!({ "version": "2.2.8" }))
-            .as_deref(),
-        Some("2.2.8")
+        InstallKind::Npm.notice("2.5.0"),
+        "bone 2.5.0 available — run /update or `bone update`"
     );
+    assert!(InstallKind::Npm.can_apply());
+    assert_eq!(
+        InstallKind::Cargo(Some(PathBuf::from("/tmp/bone"))).can_apply(),
+        !cfg!(windows)
+    );
+    assert!(!InstallKind::Cargo(None).can_apply());
 }
 
 #[test]

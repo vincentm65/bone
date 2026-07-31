@@ -6,10 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      version:
-        description: npm version to publish
-        required: true
-        default: 2.0.0
       tag:
         description: npm dist-tag
         required: true
@@ -49,7 +45,45 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }}
+      - name: release vars
+        id: rel
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+            tag="${{ inputs.tag }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" == *-* ]]; then tag="next"; else tag="latest"; fi
+          fi
+          if [ "$tag" = "latest" ]; then channel="stable"; else channel="$tag"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - name: verify release version
+        shell: bash
+        run: |
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [ "$cargo_version" != "${{ steps.rel.outputs.version }}" ]; then
+            echo "release version ${{ steps.rel.outputs.version }} does not match Cargo.toml $cargo_version" >&2
+            exit 1
+          fi
+      - name: build release binary
+        shell: bash
+        env:
+          BONE_GIT_SHA: ${{ github.sha }}
+          BONE_BUILD_CHANNEL: ${{ steps.rel.outputs.channel }}
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: verify binary identity
+        shell: bash
+        run: |
+          output="$(target/${{ matrix.target }}/release/${{ matrix.binary }} version --verbose)"
+          printf '%s\n' "$output"
+          grep -F "bone ${{ steps.rel.outputs.version }}" <<<"$output"
+          grep -F "commit: ${GITHUB_SHA:0:12}" <<<"$output"
+          grep -F "target: ${{ matrix.target }}" <<<"$output"
+          grep -F "profile: release" <<<"$output"
+          grep -F "channel: ${{ steps.rel.outputs.channel }}" <<<"$output"
       - name: stage binary
         shell: bash
         run: |
@@ -77,7 +111,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ inputs.version }}"
+            version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
             tag="${{ inputs.tag }}"
           else
             version="${GITHUB_REF_NAME#v}"
@@ -98,6 +132,8 @@ jobs:
           NODE
         env:
           VERSION: ${{ steps.rel.outputs.version }}
+      - name: test npm launcher
+        run: node --test npm/bone-agent/test/*.test.mjs
       - uses: actions/download-artifact@v4
         with:
           name: bone-linux-x64

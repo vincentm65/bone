@@ -214,7 +214,7 @@ pub struct ToolHandler {
     pub(crate) config_store: Option<crate::config::store::ConfigStore>,
     /// Stable project directory used to resolve relative tool paths.
     pub working_dir: Option<std::path::PathBuf>,
-    /// Session-scoped file snapshots backing `read_file`/`write_file`/
+    /// Session-scoped file snapshots backing `read_file`/`create_file`/
     /// `edit_file`. Behind an `Arc<RwLock<..>>` so every cloned handler in a
     /// turn (and across turns) shares one store — the driver clones the
     /// `ToolHandler` per turn but never swaps this `Arc`, so snapshots persist

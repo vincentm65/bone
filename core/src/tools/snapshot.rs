@@ -1,6 +1,6 @@
 //! Session-scoped snapshot store for safe file edits.
 //!
-//! Records the normalized content of each file `read_file`/`write_file`
+//! Records the normalized content of each file `read_file`/`create_file`
 //! produced. `edit_file` uses the latest snapshot internally to prove it is
 //! editing text the model saw and to detect stale reads. Lives behind an
 //! `Arc<RwLock<..>>` on the [`crate::tools::registry::ToolHandler`]

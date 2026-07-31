@@ -3128,7 +3128,7 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         let summary = match call.name.as_str() {
-            "read_file" | "write_file" | "edit_file" => {
+            "read_file" | "create_file" | "edit_file" => {
                 call.arguments["path"].as_str().unwrap_or("?").to_string()
             }
             "shell" => call.arguments["command"]

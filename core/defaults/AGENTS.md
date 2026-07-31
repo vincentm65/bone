@@ -176,7 +176,7 @@ To edit existing files, first call `read_file`, then use `ctx.tools.call("edit_f
 | `ctx.shell_streaming(cmd, cb, opts?)` | `table` | Calls `cb(line)` per stdout line; returns `{stdout, stderr, exit_code}` |
 | **Files** | | Read/write |
 | `ctx.read_file(path)` | `string` | Read entire file contents (raises Lua error on failure) |
-| `ctx.write_file(path, content)` | `true` | Create new file; fails if file exists (raises Lua error) |
+| `ctx.create_file(path, content)` | `true` | Create new file; fails if file exists (raises Lua error) |
 | **`ctx.time.*`** | | Native monotonic time and cancellable waits |
 | `ctx.time.monotonic_ms()` | `integer` | Monotonic milliseconds since an arbitrary process-local epoch |
 | `ctx.time.sleep_ms(ms)` | `true` | Sleep for 0–60,000 ms; raises a Lua error if the turn is cancelled |
@@ -261,7 +261,7 @@ Not all `ctx` fields are available in every handler type:
 | `log` | yes | yes | — |
 | `fs` | yes | yes | — |
 | `shell` / `shell_streaming` | yes | yes | — |
-| `read_file` / `write_file` | yes | yes | — |
+| `read_file` / `create_file` | yes | yes | — |
 | `time` / `codec` | yes | yes | — |
 | `ui.notify` | yes | yes | yes |
 | `ui.status` / `ui.notice` / `ui.pane` / `ui.apply` / `ui.key` / `ui.width` | yes | yes | — |
@@ -498,13 +498,14 @@ These are compiled into bone and do not require any seeding or installation:
 
 - **shell** — Run commands and manage their background process lifecycle
 - **read_file** — Read a UTF-8 text file
-- **write_file** — Create a new UTF-8 text file
+- **create_file** — Create a new UTF-8 text file; never overwrites
 - **edit_file** — Replace one exact unique text block in an existing file (`{ path, old_text, new_text }`)
 
 Use the dedicated file tools as the default interface for file contents:
 
 - Use `read_file` rather than `cat`, `head`, `tail`, or `sed`.
-- Use `write_file` rather than `tee`, `printf`, heredocs, or redirection.
+- Use `create_file` only when the path does not exist; never delete an existing
+  file merely to make `create_file` applicable.
 - Read first, then use `edit_file` rather than `sed -i`, scripts, heredocs, or redirection.
 - Use `shell` only when a file tool explicitly recommends it, for a bulk
   multi-file operation, or when no dedicated file tool supports the operation.
@@ -639,7 +640,7 @@ bone.tool.register({
 
 ### Tool Fields
 
-- **name** — unique string identifier. Native tools (`shell`, `read_file`, `write_file`, `edit_file`) cannot be overridden.
+- **name** — unique string identifier. Native tools (`shell`, `read_file`, `create_file`, `edit_file`) cannot be overridden.
 - **description** — shown to the LLM when deciding which tool to call.
 - **parameters** — JSON Schema object describing the tool's arguments.
 - **safety** — `"read_only"` or `"danger"`. In safe mode only `read_only` tools auto-run; in danger mode everything auto-runs.

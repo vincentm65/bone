@@ -14,6 +14,39 @@ use cli::{approval_mode, has_flag, parse_cli_options, parse_listen_addr, parse_p
 use deps::ensure_deps;
 use install::do_install;
 
+fn render_version_report(
+    verbose: bool,
+    status: Option<&bone::update_check::VersionStatus>,
+) -> String {
+    let mut report = if verbose {
+        bone::build_info::verbose()
+    } else {
+        bone::build_info::summary()
+    };
+    if verbose || status.is_some() {
+        let install_source = status
+            .map(|status| status.install_source.clone())
+            .unwrap_or_else(bone::update_check::install_source);
+        report.push_str("\ninstall: ");
+        report.push_str(&install_source);
+    }
+    if let Some(status) = status {
+        report.push_str("\nlatest: ");
+        report.push_str(&status.latest);
+        if status.update_available {
+            report.push_str("\nstatus: update available\nupdate: ");
+            report.push_str(if status.can_apply {
+                "bone update"
+            } else {
+                &status.update_hint
+            });
+        } else {
+            report.push_str("\nstatus: up to date");
+        }
+    }
+    report
+}
+
 /// Wrap a future so a panic inside it is logged instead of silently killing
 /// the spawned task.
 ///
@@ -442,6 +475,26 @@ async fn run_connect(args: &[String]) -> std::io::Result<()> {
 async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
+        println!("{}", bone::build_info::summary());
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("version") {
+        let verbose = has_flag(&args[1..], "--verbose");
+        let status = if has_flag(&args[1..], "--check") {
+            Some(
+                tokio::task::spawn_blocking(bone::update_check::check_now)
+                    .await
+                    .map_err(std::io::Error::other)?
+                    .map_err(std::io::Error::other)?,
+            )
+        } else {
+            None
+        };
+        println!("{}", render_version_report(verbose, status.as_ref()));
+        return Ok(());
+    }
+
     // Shared bootstrap for all entry points
     ensure_deps();
 
@@ -476,7 +529,13 @@ async fn main() -> std::io::Result<()> {
     // `bone update` — check and apply self-updates for npm/git installs. Used
     // both directly and by the `/update` tmux popup.
     if args.first().map(String::as_str) == Some("update") {
-        match bone::update_check::run_interactive_update(has_flag(&args[1..], "--yes")) {
+        let assume_yes = has_flag(&args[1..], "--yes");
+        let update = tokio::task::spawn_blocking(move || {
+            bone::update_check::run_interactive_update(assume_yes)
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+        match update {
             Ok(changed) => std::process::exit(if changed { 0 } else { 2 }),
             Err(err) => {
                 eprintln!("Update failed: {err}");

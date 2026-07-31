@@ -2,6 +2,7 @@
 
 pub mod approval;
 pub mod command_policy;
+pub mod create_file;
 pub mod edit_file;
 pub mod read_file;
 pub mod registry;
@@ -10,7 +11,6 @@ pub mod snapshot;
 pub mod state_map;
 pub mod types;
 pub mod write_atomic;
-pub mod write_file;
 
 use registry::ToolRegistry;
 
@@ -90,7 +90,7 @@ pub fn register_lua_tools(loaded: &mut LoadedTools, lua_tools: Vec<LuaTool>) {
 pub fn builtin_tools() -> ToolRegistry {
     ToolRegistry::new()
         .register(read_file::ReadFileTool)
-        .register(write_file::WriteFileTool)
+        .register(create_file::CreateFileTool)
         .register(edit_file::EditFileTool)
         .register(shell::ShellTool)
 }

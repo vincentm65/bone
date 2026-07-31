@@ -743,7 +743,7 @@ pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "write_file" => call
+        "create_file" => call
             .arguments
             .get("path")
             .and_then(|v| v.as_str())

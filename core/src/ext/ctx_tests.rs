@@ -300,7 +300,7 @@ fn tool_definition_array_serializes_correctly() {
             input_schema: serde_json::json!({}),
         },
         crate::tools::ToolDefinition {
-            name: "write_file".into(),
+            name: "create_file".into(),
             description: "Write".into(),
             input_schema: serde_json::json!({}),
         },

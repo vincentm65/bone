@@ -96,7 +96,7 @@ fn tool_errors_use_shell_style_gutter() {
 #[test]
 fn file_tool_labels_highlight_path_and_mute_summary() {
     let theme = Theme::default();
-    for name in ["read_file", "write_file", "edit_file"] {
+    for name in ["read_file", "create_file", "edit_file"] {
         let tool = ToolDisplay {
             label: format!("{name} src/main.rs (lines 1-10, 10 read)"),
             is_error: false,

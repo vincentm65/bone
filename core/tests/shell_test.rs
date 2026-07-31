@@ -380,7 +380,7 @@ async fn obvious_shell_file_writes_redirect_to_dedicated_tools() {
             .await
             .expect_err(command);
         assert!(
-            error.contains("write_file") || error.contains("edit_file"),
+            error.contains("create_file") || error.contains("edit_file"),
             "{command}: {error}"
         );
     }

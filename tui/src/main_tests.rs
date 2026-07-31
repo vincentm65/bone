@@ -1,5 +1,7 @@
 use super::cli::{approval_mode, has_flag, parse_provider_model};
-use super::{actor_provider_config, configured_theme, resolve_configured_theme};
+use super::{
+    actor_provider_config, configured_theme, render_version_report, resolve_configured_theme,
+};
 use bone::config::settings::SettingsError;
 use bone::tools::ApprovalMode;
 use bone_protocol::ProviderUpdate;
@@ -60,6 +62,26 @@ fn has_flag_detects_presence() {
         &args(&["--listen", "x"]),
         "--shutdown-on-stdin-eof"
     ));
+}
+
+#[test]
+fn version_report_exposes_build_and_update_identity() {
+    let status = bone::update_check::VersionStatus {
+        current: bone::build_info::VERSION.into(),
+        latest: "9.9.9".into(),
+        update_available: true,
+        install_source: "npm".into(),
+        update_hint: "npm install -g bone-agent@latest".into(),
+        can_apply: true,
+    };
+    let report = render_version_report(true, Some(&status));
+    assert!(report.starts_with(&format!("bone {}\n", bone::build_info::VERSION)));
+    assert!(report.contains("commit: "));
+    assert!(report.contains("target: "));
+    assert!(report.contains("install: npm"));
+    assert!(report.contains("latest: 9.9.9"));
+    assert!(report.contains("status: update available"));
+    assert!(report.contains("update: bone update"));
 }
 
 #[test]

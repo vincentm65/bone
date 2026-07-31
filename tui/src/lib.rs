@@ -9,6 +9,6 @@ pub mod ui;
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub use bone_core::{
-    agent, chat, commands, config, ext, llm, pane_content, processes, rpc, run, runtime,
-    session_db, session_sink, shell_split, tools, update_check, util,
+    agent, build_info, chat, commands, config, ext, llm, pane_content, processes, rpc, run,
+    runtime, session_db, session_sink, shell_split, tools, update_check, util,
 };

@@ -43,7 +43,7 @@ impl CommandSafety {
     pub fn for_call(call: &ToolCall) -> Self {
         match call.name.as_str() {
             "read_file" => Self::ReadOnly,
-            "write_file" | "edit_file" => Self::Danger,
+            "create_file" | "edit_file" => Self::Danger,
             "shell" => match call.arguments.get("action").and_then(Value::as_str) {
                 Some("list" | "status") => Self::ReadOnly,
                 Some("kill") => Self::Danger,

@@ -9,7 +9,7 @@ text-file attachments through the picker, clipboard, or drag and drop.
 
 The layout is three columns — **sidebar │ chat │ canvas**. The canvas is a
 resizable split-screen panel that opens automatically as the agent works:
-`write_file` of a Markdown plan renders live as a document, other writes show
+`create_file` of a Markdown plan renders live as a document, other writes show
 as a file view, and `edit_file` renders a colour-coded diff parsed from the
 result. Each touched file becomes a tab so you can step back through them; drag
 the divider to resize, or toggle the panel from the header. The canvas can also
@@ -79,7 +79,7 @@ the daemon's revisioned configuration protocol via bridge endpoints.
 | Token + cost meter              | `state_snapshot` / `token_usage`                       |
 | New chat / Stop                 | `new_conversation` / `cancel`                          |
 | History replay on attach        | `conversation_loaded`                                  |
-| **Canvas** doc / diff viewer    | `tool_call` (write_file content) / `tool_result` (edit_file diff) |
+| **Canvas** doc / diff viewer    | `tool_call` (create_file content) / `tool_result` (edit_file diff) |
 | Live theme accent               | `frontend_state.theme` / `view_diff` (`set_highlight`) |
 
 ### Bridge endpoints

@@ -178,7 +178,7 @@ fn tool_label_spans(
     let p = line.find(' ').unwrap_or(line.len());
     let (name, rest) = line.split_at(p);
     let mut spans = vec![Span::styled(name.to_string(), name_style)];
-    if !matches!(name, "read_file" | "write_file" | "edit_file") {
+    if !matches!(name, "read_file" | "create_file" | "edit_file") {
         if !rest.is_empty() {
             spans.push(Span::styled(rest.to_string(), rest_style));
         }

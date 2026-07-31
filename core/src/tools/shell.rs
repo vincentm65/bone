@@ -626,14 +626,14 @@ fn reject_obvious_file_write(command: &str) -> Result<(), String> {
     }
 
     if first == "tee" {
-        return Err("use write_file for a new file or read_file followed by edit_file for an existing file instead of `tee`".to_string());
+        return Err("use create_file for a new file or read_file followed by edit_file for an existing file instead of `tee`".to_string());
     }
 
     let content_emitter = matches!(first.as_str(), "echo" | "printf" | "cat");
     let redirects_output = lower.contains(" >") || lower.contains(" 1>") || lower.contains(">>");
     let pipes_to_tee = lower.contains("| tee ") || lower.ends_with("| tee");
     if content_emitter && (redirects_output || pipes_to_tee) {
-        return Err("use write_file for a new file or read_file followed by edit_file for an existing file instead of shell redirection".to_string());
+        return Err("use create_file for a new file or read_file followed by edit_file for an existing file instead of shell redirection".to_string());
     }
 
     Ok(())
@@ -727,7 +727,7 @@ impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         let (_, _, shell_label) = shell_command();
         let desc = format!(
-            "Run a non-interactive shell command with {shell_label}, or manage background commands started by this tool. Use action=run (the default), list, status, or kill. Do not use shell to read, create, or edit file contents when read_file, write_file, or edit_file can do it. File-tool fallbacks are appropriate only when a file tool recommends shell, for bulk multi-file operations, or when no dedicated tool supports the operation. Run returns exit code, stdout, and stderr."
+            "Run a non-interactive shell command with {shell_label}, or manage background commands started by this tool. Use action=run (the default), list, status, or kill. Do not use shell to read, create, or edit file contents when read_file, create_file, or edit_file can do it. File-tool fallbacks are appropriate only when a file tool recommends shell, for bulk multi-file operations, or when no dedicated tool supports the operation. Run returns exit code, stdout, and stderr."
         );
         let cmd_desc =
             format!("Command to execute with {shell_label} for action=run. Runs without stdin.");

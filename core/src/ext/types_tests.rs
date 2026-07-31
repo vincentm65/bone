@@ -7,7 +7,7 @@ fn unloaded_manager_exposes_inert_defaults() {
     assert!(!manager.is_available());
     assert!(manager.commands().is_empty());
     assert!(matches!(
-        manager.dispatch_tool_call("write_file", "call_1", &serde_json::json!({}), "danger"),
+        manager.dispatch_tool_call("create_file", "call_1", &serde_json::json!({}), "danger"),
         EventDispatchResult::Continue
     ));
 

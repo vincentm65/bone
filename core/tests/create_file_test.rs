@@ -5,22 +5,31 @@ use std::path::PathBuf;
 use serde_json::json;
 use tokio::fs;
 
+use bone_core::tools::create_file::CreateFileTool;
 use bone_core::tools::types::{Tool, ToolExecutionContext};
-use bone_core::tools::write_file::WriteFileTool;
 
 fn temp_path(name: &str) -> PathBuf {
-    common::temp_path(&format!("write-file-{name}"))
+    common::temp_path(&format!("create-file-{name}"))
+}
+
+#[test]
+fn advertises_the_create_only_contract() {
+    let definition = CreateFileTool.definition();
+
+    assert_eq!(definition.name, "create_file");
+    assert!(definition.description.contains("never overwrites"));
+    assert!(definition.description.contains("Never delete"));
 }
 
 #[tokio::test]
 async fn creates_new_file() {
     let path = temp_path("creates").join("nested/file.txt");
-    let tool = WriteFileTool;
+    let tool = CreateFileTool;
 
     let result = tool
         .execute(json!({ "path": path, "content": "hello" }))
         .await
-        .expect("write_file should create a new file");
+        .expect("create_file should create a new file");
 
     assert!(result.contains("wrote"));
     assert_eq!(
@@ -42,7 +51,7 @@ async fn refuses_to_overwrite_existing_file() {
     fs::write(&path, "original")
         .await
         .expect("test setup should create existing file");
-    let tool = WriteFileTool;
+    let tool = CreateFileTool;
 
     let result = tool
         .execute(json!({ "path": path, "content": "replacement" }))
@@ -76,7 +85,7 @@ async fn refuses_dangling_symlink() {
     let path = temp_path("dangling-link.txt");
     let target = temp_path("missing-target.txt");
     symlink(&target, &path).expect("setup symlink");
-    let tool = WriteFileTool;
+    let tool = CreateFileTool;
 
     let result = tool
         .execute(json!({ "path": path, "content": "replacement" }))
@@ -103,7 +112,7 @@ async fn live_writes_allow_parent_and_absolute_paths_and_snapshot_canonical_path
     let context = ToolExecutionContext::default().with_working_dir(root.clone());
 
     for path in [parent_path, absolute_path] {
-        WriteFileTool
+        CreateFileTool
             .execute_output_live(
                 json!({ "path": path, "content": "outside" }),
                 None,
@@ -138,7 +147,7 @@ async fn live_writes_allow_symlinked_parent_and_snapshot_canonical_path() {
     symlink(&outside, root.join("link")).unwrap();
     let context = ToolExecutionContext::default().with_working_dir(root.clone());
 
-    WriteFileTool
+    CreateFileTool
         .execute_output_live(
             json!({ "path": "link/outside.txt", "content": "outside" }),
             None,
@@ -172,7 +181,7 @@ async fn live_write_recovers_poisoned_snapshot_store() {
     })
     .join();
 
-    WriteFileTool
+    CreateFileTool
         .execute_output_live(
             json!({ "path": "created.txt", "content": "created" }),
             None,

@@ -1,4 +1,4 @@
-//! The `write_file` tool: creates a new file atomically (fails if it exists).
+//! The `create_file` tool: creates a new file atomically (fails if it exists).
 //!
 //! On success it records the file's normalized content as a fresh snapshot
 //! (all lines visible — the model just authored them) so a following
@@ -16,7 +16,7 @@ use crate::tools::snapshot::{self, Snapshots};
 use crate::tools::types::{Tool, ToolDefinition, ToolExecutionContext, ToolOutput};
 use crate::tools::write_atomic::write_atomic;
 
-pub struct WriteFileTool;
+pub struct CreateFileTool;
 
 #[derive(Deserialize)]
 struct Args {
@@ -25,11 +25,11 @@ struct Args {
 }
 
 #[async_trait]
-impl Tool for WriteFileTool {
+impl Tool for CreateFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "write_file".to_string(),
-            description: "Preferred tool for creating file contents; use this instead of shell commands such as tee, printf, heredocs, or redirection. Creates a NEW UTF-8 text file and errors if the path already exists. To change an existing file, read it and use edit_file with path, old_text, and new_text.".to_string(),
+            name: "create_file".to_string(),
+            description: "Create a NEW UTF-8 text file; use this instead of shell commands such as tee, printf, heredocs, or redirection. This tool never overwrites and errors if the path already exists. Never delete an existing file just to make create_file succeed. To change an existing file, read it and use edit_file with path, old_text, and new_text.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -49,7 +49,7 @@ impl Tool for WriteFileTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        write_file_inner(arguments, None, None).await
+        create_file_inner(arguments, None, None).await
     }
 
     async fn execute_output_live(
@@ -58,7 +58,7 @@ impl Tool for WriteFileTool {
         _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
         context: ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
-        write_file_inner(
+        create_file_inner(
             arguments,
             Some(&context.snapshots),
             context.working_dir.as_deref(),
@@ -68,7 +68,7 @@ impl Tool for WriteFileTool {
     }
 }
 
-async fn write_file_inner(
+async fn create_file_inner(
     arguments: Value,
     snapshots: Option<&Snapshots>,
     working_dir: Option<&Path>,
@@ -89,7 +89,7 @@ async fn write_file_inner(
     match fs::symlink_metadata(&path).await {
         Ok(_) => {
             return Err(
-                "file already exists — write_file only creates new files. Do NOT retry write_file for this path. \
+                "file already exists — create_file only creates new files. Do NOT retry create_file for this path, and do not delete the existing file to make create_file succeed. \
                  To change it, read the file and call edit_file with path, old_text, and new_text."
                     .to_string(),
             );

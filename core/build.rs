@@ -1,4 +1,96 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn command_output(command: &mut Command) -> Option<String> {
+    let output = command.output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn git_revision(manifest_dir: &Path) -> String {
+    if let Ok(revision) = env::var("BONE_GIT_SHA")
+        && !revision.trim().is_empty()
+    {
+        return revision.trim().chars().take(12).collect();
+    }
+
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(manifest_dir)
+        .args(["rev-parse", "--short=12", "HEAD"]);
+    let Some(mut revision) = command_output(&mut command) else {
+        return "unknown".into();
+    };
+
+    let mut status = Command::new("git");
+    status
+        .arg("-C")
+        .arg(manifest_dir)
+        .args(["status", "--porcelain"]);
+    if command_output(&mut status).is_some() {
+        revision.push_str("-dirty");
+    }
+    revision
+}
+
+fn emit_build_identity(manifest_dir: &Path) {
+    for name in ["BONE_GIT_SHA", "BONE_BUILD_CHANNEL"] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    let git_dir = manifest_dir.join("../.git");
+    let mut git_inputs = vec![git_dir.join("HEAD"), git_dir.join("index")];
+    let mut symbolic_ref = Command::new("git");
+    symbolic_ref
+        .arg("-C")
+        .arg(manifest_dir)
+        .args(["symbolic-ref", "-q", "HEAD"]);
+    if let Some(reference) = command_output(&mut symbolic_ref) {
+        git_inputs.push(git_dir.join(reference));
+    }
+    for path in git_inputs {
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
+    // The identity is embedded by this crate but describes the complete Bone
+    // binary. Re-run this build script when any workspace source can change
+    // the resulting executable, including newly added (untracked) files.
+    let workspace_root = manifest_dir
+        .parent()
+        .expect("core crate is inside the workspace root");
+    for relative in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "core/Cargo.toml",
+        "core/src",
+        "protocol/Cargo.toml",
+        "protocol/src",
+        "tui/Cargo.toml",
+        "tui/src",
+    ] {
+        let path = workspace_root.join(relative);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
+    let revision = git_revision(manifest_dir);
+    let target = env::var("TARGET").unwrap_or_else(|_| "unknown".into());
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".into());
+    let channel = env::var("BONE_BUILD_CHANNEL").unwrap_or_else(|_| "dev".into());
+    println!("cargo:rustc-env=BONE_GIT_SHA={revision}");
+    println!("cargo:rustc-env=BONE_BUILD_TARGET={target}");
+    println!("cargo:rustc-env=BONE_BUILD_PROFILE={profile}");
+    println!("cargo:rustc-env=BONE_BUILD_CHANNEL={channel}");
+}
 
 /// Collect sorted `.lua` files. Missing directories are valid: optional
 /// built-ins can move to the catalog without making source builds fail.
@@ -57,6 +149,8 @@ fn generate_lua_table(
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    emit_build_identity(&manifest_dir);
 
     for (source, output, constant, recursive) in [
         (

@@ -24,6 +24,18 @@ bone
 
 The first launch walks you through provider setup. You can run the wizard again at any time with `bone setup`.
 
+The npm release is the canonical stable build on supported Linux, macOS, and
+Windows systems. Check an installation or apply an available update with:
+
+```sh
+bone version --verbose --check
+bone update
+```
+
+Bone checks the npm stable channel in the background and shows a persistent
+startup notice when the installed version is behind. Updates are never applied
+silently, so offline use continues to work.
+
 ### Build from source
 
 Bone uses stable Rust:
@@ -36,6 +48,17 @@ cargo build --release
 ```
 
 Run `bone install` to add the built binary to your `PATH`.
+Source installations are not rebuilt by `git pull`; update them with:
+
+```sh
+git pull --ff-only
+cargo install --path tui --force
+```
+
+`bone version --verbose` includes the package version, source revision, target,
+build profile, release channel, and detected installation source. This makes it
+possible to distinguish an old executable from newly pulled source even when
+both use the same package version.
 
 ## What it does
 

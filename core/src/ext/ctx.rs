@@ -1,6 +1,6 @@
 //! ctx table — creates the context table passed to Lua tool `execute(params, ctx)`.
 //!
-//! Provides `shell`, `read_file`, `write_file` that delegate to the native
+//! Provides `shell`, `read_file`, `create_file` that delegate to the native
 //! implementations with full policy enforcement.
 
 use std::collections::HashMap;
@@ -384,7 +384,7 @@ fn resize_png_rgba(
 
 /// Run an async future to completion from inside a synchronous Lua callback.
 /// Wraps the `block_in_place` + current-runtime `block_on` dance used by every
-/// blocking ctx primitive (`shell`, `read_file`, `write_file`, `tools.call`,
+/// blocking ctx primitive (`shell`, `read_file`, `create_file`, `tools.call`,
 /// the agent dispatch paths).
 pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
@@ -714,7 +714,7 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
 
     ctx.set("fs", build_fs_table(lua)?)?;
 
-    // ctx.shell / ctx.shell_streaming / ctx.read_file / ctx.write_file — the
+    // ctx.shell / ctx.shell_streaming / ctx.read_file / ctx.create_file — the
     // top-level I/O primitives (set directly on ctx, not under a sub-table).
     add_io_primitives(lua, &ctx, cfg)?;
 
@@ -945,7 +945,7 @@ fn require_shell_approval(
 }
 
 /// Set the top-level I/O primitives on `ctx`: `shell`, `shell_streaming`,
-/// `read_file`, `write_file`, and direct `exec`.
+/// `read_file`, `create_file`, and direct `exec`.
 fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
     // ctx.time — monotonic timestamps and a cancellable native timer. These
     // avoid wall-clock freshness bugs and subprocess-based sleeps in tools.
@@ -1493,11 +1493,11 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     })?;
     ctx.set("read_file", read_fn)?;
 
-    // ctx.write_file(path, content) → true or nil, error_string
-    let write_fn = lua.create_function(|_, (path, content): (String, String)| {
+    // ctx.create_file(path, content) → true or nil, error_string
+    let create_fn = lua.create_function(|_, (path, content): (String, String)| {
         let result = block_on(async {
             let path = Path::new(&path);
-            // Reject if file exists — same policy as native write_file tool.
+            // Reject if file exists — same policy as native create_file tool.
             if path.exists() {
                 return Err("file already exists; use edit_file for modifications".to_string());
             }
@@ -1516,7 +1516,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             Err(e) => Err(mlua::Error::external(e)),
         }
     })?;
-    ctx.set("write_file", write_fn)?;
+    ctx.set("create_file", create_fn)?;
 
     Ok(())
 }

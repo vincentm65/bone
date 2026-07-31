@@ -25,7 +25,7 @@ async fn run_one(tool_call: ToolCall) -> bone_core::tools::ToolResult {
 
 #[tokio::test]
 async fn null_arguments_are_rejected_with_required_fields() {
-    let result = run_one(call("write_file", Value::Null)).await;
+    let result = run_one(call("create_file", Value::Null)).await;
 
     assert!(result.is_error);
     assert!(
