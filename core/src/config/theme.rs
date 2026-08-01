@@ -205,7 +205,7 @@ pub fn role_names() -> impl Iterator<Item = &'static str> {
     ROLES.iter().map(|entry| entry.name)
 }
 
-/// Generate the exhaustive public role table embedded in the default AGENTS.md.
+/// Generate the exhaustive public role table embedded in the default configuration documentation.
 pub fn role_docs_markdown() -> String {
     let mut output = String::from("| Role | Channel | Runtime |\n|---|---|:---:|\n");
     for name in role_names() {
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn checked_in_role_documentation_is_current() {
-        let docs = include_str!("../../defaults/AGENTS.md");
+        let docs = include_str!("../../defaults/docs/configuration.md");
         let documented = docs
             .split("<!-- BEGIN GENERATED THEME ROLES -->\n")
             .nth(1)

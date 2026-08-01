@@ -150,6 +150,26 @@ impl UserConfig {
 
 const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.yaml");
 const DEFAULT_AGENTS_MD: &str = include_str!("../../defaults/AGENTS.md");
+const DEFAULT_CORE_DOCS: &[(&str, &str)] = &[
+    (
+        "architecture.md",
+        include_str!("../../defaults/docs/architecture.md"),
+    ),
+    (
+        "configuration.md",
+        include_str!("../../defaults/docs/configuration.md"),
+    ),
+    (
+        "extension-api.md",
+        include_str!("../../defaults/docs/extension-api.md"),
+    ),
+    ("agents.md", include_str!("../../defaults/docs/agents.md")),
+    ("ui.md", include_str!("../../defaults/docs/ui.md")),
+    (
+        "development.md",
+        include_str!("../../defaults/docs/development.md"),
+    ),
+];
 
 pub fn seed_command_policy_if_missing() -> Result<(), String> {
     let path = command_policy_path();
@@ -169,6 +189,14 @@ pub fn seed_command_policy_if_missing() -> Result<(), String> {
 pub fn sync_agents_md() {
     let path = bone_dir().join("AGENTS.md");
     sync_bundled_file(&path, DEFAULT_AGENTS_MD);
+}
+
+/// Keep the bundled core reference documents synchronized with this build.
+pub fn sync_core_docs() {
+    let docs_dir = bone_dir().join("docs");
+    for (name, content) in DEFAULT_CORE_DOCS {
+        sync_bundled_file(&docs_dir.join(name), content);
+    }
 }
 
 fn sync_bundled_file(path: &Path, content: &str) {
@@ -260,6 +288,7 @@ pub fn needs_onboarding() -> bool {
 pub fn seed_base() -> Result<(), String> {
     seed_command_policy_if_missing()?;
     sync_agents_md();
+    sync_core_docs();
     migrate_memory_to_catalog(&bone_dir());
     ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
     Ok(())
@@ -484,8 +513,9 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
 #[cfg(test)]
 mod tests {
     use super::{
-        InitChoice, SetupSelection, apply_onboarding, domains, migrate_memory_to_catalog,
-        migrate_memory_to_catalog_with_hash, settings::SubagentSettings, sync_bundled_file,
+        DEFAULT_CORE_DOCS, InitChoice, SetupSelection, apply_onboarding, domains,
+        migrate_memory_to_catalog, migrate_memory_to_catalog_with_hash, seed_base,
+        settings::SubagentSettings, sync_bundled_file,
     };
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
@@ -696,6 +726,32 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "version 2");
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn core_docs_are_synced_during_base_seed() {
+        with_test_bone_dir(|dir| {
+            seed_base().unwrap();
+
+            for &(name, content) in DEFAULT_CORE_DOCS {
+                assert_eq!(
+                    fs::read_to_string(dir.join("docs").join(name)).unwrap(),
+                    content
+                );
+            }
+
+            for &(name, _) in DEFAULT_CORE_DOCS {
+                fs::write(dir.join("docs").join(name), "stale").unwrap();
+            }
+            seed_base().unwrap();
+
+            for &(name, content) in DEFAULT_CORE_DOCS {
+                assert_eq!(
+                    fs::read_to_string(dir.join("docs").join(name)).unwrap(),
+                    content
+                );
+            }
+        });
     }
 
     #[test]

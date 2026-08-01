@@ -57,6 +57,6 @@ Rules:
 
 Config:
 - The bone config directory is printed below as \"Resolved config directory\".
-- For tool, command, and Lua API docs, read AGENTS.md in that directory.
+- For core architecture, configuration, extension, agent, UI, and development docs, read the generated AGENTS.md index and the relevant topic files in the resolved config directory: docs/architecture.md, docs/configuration.md, docs/extension-api.md, docs/agents.md, docs/ui.md, and docs/development.md.
 - After directly editing config.yaml, providers.yaml, subagents.yaml, extensions.yaml, or command-policy.yaml, tell the user to restart.
 ";
