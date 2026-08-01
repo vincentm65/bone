@@ -24,7 +24,8 @@ TUI / headless runner / web bridge / remote client
   session snapshots, tool types, and view types that cross a frontend boundary.
 - `tui` owns the native terminal client and its rendering/input code.
 - `webui` is a Node/browser client and bridge for `bone serve`; it is not another
-  runtime or persistence layer.
+  runtime or core conversation-persistence layer. Its bridge may maintain durable
+  web-only metadata, such as conversation titles and archived status.
 
 Keep dependencies flowing toward `core` and `protocol`. Core must not depend on
 terminal rendering details.
@@ -66,11 +67,13 @@ approvals are conversation-scoped.
 
 ## Durable versus ephemeral state
 
-The SQLite database is the durable source for conversations, messages, and
-runtime records. The model-facing transcript may be a compacted/effective view;
-display history remains complete. In-memory driver state, live view components,
-status text, cancellation flags, and pending events are ephemeral and must not
-be treated as persisted configuration.
+The core-owned SQLite tables are the durable source for conversations, messages, and
+runtime records. The web bridge may add durable web-only metadata in
+`webui_conversations`; that metadata does not replace or mutate core-owned transcript
+state. The model-facing transcript may be a compacted/effective view; display history
+remains complete. In-memory driver state, live view components, status text,
+cancellation flags, and pending events are ephemeral and must not be treated as
+persisted configuration.
 
 Configuration has a separate authority: the daemon's `ConfigStore` loads and
 validates the canonical YAML domains, produces one revisioned snapshot, and
@@ -87,4 +90,5 @@ broadcasts it to clients. See [Configuration](configuration.md).
   remain associated with its conversation and turn.
 - Cancellation is cooperative: the driver checks it between stream/tool work and
   tools receive the same cancellation path.
-- Durable writes happen in core/session code, not in a frontend renderer.
+- Durable core conversation and runtime writes happen in core/session code, not in a
+  frontend renderer. The web bridge may write only its web-only metadata table.

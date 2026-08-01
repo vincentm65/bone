@@ -64,10 +64,13 @@ The daemon distributes one revisioned configuration schema and resolved values.
 The TUI and web settings views submit typed mutations and render the returned
 snapshot. Provider credentials are redacted in frontend snapshots.
 
-The daemon owns conversation history and active transcript state. A client may
-request list/load/new actions and render the resulting snapshot, but it must not
-write the session database. On reconnect, restore the selected conversation by
-id and request authoritative state rather than replaying guessed local state.
+The daemon owns core conversation history and active transcript state. A client may
+request list/load/new actions and render the resulting snapshot, but clients must not
+write core-owned conversation or message tables. The web bridge may persist web-only
+metadata, including title and archive state, in `webui_conversations`; it must not
+modify core-owned messages or transcript state. On reconnect, restore the selected
+conversation by id and request authoritative state rather than replaying guessed local
+state.
 
 ## Adding a client feature
 
