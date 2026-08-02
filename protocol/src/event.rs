@@ -281,6 +281,7 @@ pub enum ConfigAction {
 /// | `AppendMessage` | both | frontend-local context (e.g. `!shell`) into daemon transcript |
 /// | `SwitchProvider` / `ReloadExtensions` / `ReloadSettings` | both | runtime config |
 /// | `SetApprovalMode` | both | UI Safe/Danger → daemon gate |
+/// | `SetIncognito` | both | session-scoped save pause (no DB writes while on) |
 /// | `SetTerminalWidth` | both | Lua `ctx.ui.width` on the daemon VM |
 /// | `DispatchHook` | both (esp. remote) | fire Lua hooks when the client has no local VM |
 /// | `KeymapDispatch` | both | resolve keymap rhs on the daemon |
@@ -426,6 +427,13 @@ pub enum RuntimeCommand {
     /// the UI instead of staying pinned at its startup value.
     SetApprovalMode {
         mode: String,
+    },
+    /// Toggle session-scoped incognito mode. While on, the daemon writes
+    /// nothing to the session database (no messages, usage, or new conversation
+    /// rows); toggling off mints a fresh conversation and persists the whole
+    /// in-memory transcript into it.
+    SetIncognito {
+        enabled: bool,
     },
     /// Append a message to the daemon's transcript without running a turn. Used
     /// for context the frontend produces locally (e.g. inline `!command` output)

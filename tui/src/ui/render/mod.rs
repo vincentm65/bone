@@ -62,6 +62,8 @@ pub struct StatusInfo {
     pub streaming: bool,
     pub approval_mode: ApprovalMode,
     pub queue_len: usize,
+    /// Whether the session is in incognito mode (no durable writes while on).
+    pub incognito: bool,
     pub status_show: std::collections::HashMap<String, bool>,
     /// Formatted elapsed time string (e.g. "1:23") for the current turn.
     pub elapsed: Option<String>,

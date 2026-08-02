@@ -29,6 +29,7 @@ pub struct CodexProvider {
     endpoint: String,
     id: String,
     label: String,
+    max_tokens: Option<u32>,
     reasoning_effort: Option<String>,
     fast_mode: bool,
     context_window_tokens: Option<u64>,
@@ -49,6 +50,7 @@ impl CodexProvider {
             model: entry.model.clone(),
             api_key: entry.api_key.resolve_or_warn(),
             endpoint: entry.endpoint.clone(),
+            max_tokens: None,
             reasoning_effort: entry.reasoning_effort_opt(),
             fast_mode: entry.fast_mode,
             context_window_tokens: entry.context_window_tokens,
@@ -71,6 +73,8 @@ pub struct CodexRequest {
     pub input: Vec<CodexInputItem>,
     pub stream: bool,
     pub store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<CodexReasoning>,
     /// Codex fast mode is the Responses API priority service tier. Keep this
@@ -639,6 +643,10 @@ impl LlmProvider for CodexProvider {
         self.model = model;
     }
 
+    fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
+        self.max_tokens = max_tokens;
+    }
+
     fn context_window_tokens(&self) -> Option<u64> {
         self.context_window_tokens
     }
@@ -680,6 +688,7 @@ impl LlmProvider for CodexProvider {
             input: input_items,
             stream: true,
             store: false,
+            max_output_tokens: self.max_tokens,
             reasoning: Some(CodexReasoning {
                 effort: self.reasoning_effort.clone(),
                 summary: "auto",
@@ -1011,7 +1020,7 @@ mod tests {
     use super::{
         CodexProvider, CodexResponse, extract_response_events, output_index, process_summary_event,
     };
-    use crate::llm::provider::ChatEvent;
+    use crate::llm::provider::{ChatEvent, LlmProvider};
     use crate::tools::TRUNCATED_ARGS_KEY;
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -1029,6 +1038,18 @@ mod tests {
             CodexProvider::from_entry("codex", &disabled).service_tier(),
             None
         );
+    }
+
+    #[test]
+    fn max_tokens_maps_to_responses_output_cap() {
+        let entry = serde_yaml::from_str("handler: codex\n").unwrap();
+        let mut provider = CodexProvider::from_entry("codex", &entry);
+
+        provider.set_max_tokens(Some(12_000));
+        assert_eq!(provider.max_tokens, Some(12_000));
+
+        provider.set_max_tokens(None);
+        assert_eq!(provider.max_tokens, None);
     }
 
     #[test]

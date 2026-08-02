@@ -1068,6 +1068,18 @@ impl super::Renderer {
             status_spans.push(sep());
         }
 
+        // Incognito badge: rendered while the session is detached from durable
+        // storage, so the user always sees that chats are not being saved.
+        if status_info.incognito {
+            status_spans.push(Span::styled(
+                "INC",
+                Style::default()
+                    .fg(self.theme.palette.warn)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            status_spans.push(sep());
+        }
+
         if status_info.show("status_show_approval") {
             status_spans.push(Span::styled(
                 status_info.approval_mode.label().to_string(),

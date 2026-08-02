@@ -60,6 +60,10 @@ pub struct SessionSnapshot {
     pub session_seq: i64,
     pub provider_id: String,
     pub provider_model: String,
+    /// Session-scoped incognito mode: while on, no durable writes happen and
+    /// `conversation_id` is `None`. Defaults off for daemons that predate it.
+    #[serde(default)]
+    pub incognito: bool,
 }
 
 impl SessionSnapshot {

@@ -2182,6 +2182,7 @@ impl App {
             spinner_active,
             self.approval_mode,
             self.queue.len(),
+            self.view.incognito,
             &self.user_config,
             elapsed,
         );
@@ -2510,6 +2511,7 @@ pub(crate) fn stream_status_info_with_token_stats(
     streaming: bool,
     approval_mode: crate::tools::ApprovalMode,
     queue_len: usize,
+    incognito: bool,
     cfg: &crate::config::UserConfig,
     elapsed: Option<String>,
 ) -> StatusInfo {
@@ -2561,6 +2563,7 @@ pub(crate) fn stream_status_info_with_token_stats(
         streaming,
         approval_mode,
         queue_len,
+        incognito,
         status_show: cfg.status_show.clone(),
         elapsed,
         lua_status: Vec::new(),
@@ -3423,6 +3426,30 @@ impl App {
         }
         if cmd == "update" {
             return self.open_update(term);
+        }
+        if cmd == "incognito" {
+            let enabled = match arg.trim() {
+                // Empty arg toggles from the daemon-mirrored snapshot state.
+                "" => !self.view.incognito,
+                "on" => true,
+                "off" => false,
+                other => {
+                    return self.show_reply(
+                        format!("Unknown option `{other}` — usage: /incognito [on|off]"),
+                        term,
+                    );
+                }
+            };
+            // The daemon publishes the Status reply (success or failure) before
+            // the awaited snapshot; the await loop applies it to `messages`, so
+            // no duplicate client reply. Flush + redraw to render it now.
+            self.send_and_await_snapshot(
+                crate::runtime::RuntimeCommand::SetIncognito { enabled },
+                Some(term),
+            )
+            .await;
+            self.flush_new_messages_to_scrollback(term)?;
+            return self.redraw(term);
         }
 
         let prev_provider = self.view.provider_id.clone();

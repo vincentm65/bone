@@ -161,6 +161,7 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::SwitchProvider { .. }
             | RuntimeCommand::ReplaceConversation { .. }
             | RuntimeCommand::SetApprovalMode { .. }
+            | RuntimeCommand::SetIncognito { .. }
             | RuntimeCommand::AppendMessage { .. }
             | RuntimeCommand::DispatchHook { .. }
             | RuntimeCommand::SetTerminalWidth { .. }

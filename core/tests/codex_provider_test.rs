@@ -191,6 +191,7 @@ fn test_codex_request_serializes_prompt_cache_key() {
         input: build_codex_messages(vec![ChatMessage::new(ChatRole::User, "hi")]),
         stream: true,
         store: false,
+        max_output_tokens: Some(12_000),
         reasoning: Some(bone_core::llm::providers::codex::CodexReasoning {
             effort: Some("high".to_string()),
             summary: "auto",
@@ -204,6 +205,7 @@ fn test_codex_request_serializes_prompt_cache_key() {
 
     let json = serde_json::to_value(request).unwrap();
     assert_eq!(json["prompt_cache_key"], "bone-codex-thread-42");
+    assert_eq!(json["max_output_tokens"], 12_000);
     assert_eq!(json["reasoning"]["effort"], "high");
     assert_eq!(json["reasoning"]["summary"], "auto");
     assert_eq!(json["service_tier"], "priority");
@@ -233,6 +235,7 @@ fn test_codex_request_omits_optional_fields_when_unset() {
         input: build_codex_messages(vec![ChatMessage::new(ChatRole::User, "hi")]),
         stream: true,
         store: false,
+        max_output_tokens: None,
         reasoning: None,
         service_tier: None,
         tools: None,
@@ -244,6 +247,7 @@ fn test_codex_request_omits_optional_fields_when_unset() {
     let json = serde_json::to_value(request).unwrap();
     let obj = json.as_object().unwrap();
     assert!(!obj.contains_key("prompt_cache_key"));
+    assert!(!obj.contains_key("max_output_tokens"));
     assert!(!obj.contains_key("tool_choice"));
     assert!(!obj.contains_key("tools"));
     assert!(!obj.contains_key("service_tier"));

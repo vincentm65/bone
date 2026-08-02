@@ -43,6 +43,7 @@ fn status_info() -> StatusInfo {
         streaming: false,
         approval_mode: ApprovalMode::Safe,
         queue_len: 0,
+        incognito: false,
         status_show,
         elapsed: None,
         lua_status: Vec::new(),

@@ -2017,3 +2017,114 @@ async fn process_commands_are_conversation_scoped() {
         }
     }
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn set_incognito_publishes_status_and_snapshot_and_blocks_loads() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut events = hub.subscribe();
+
+    ctx.handle_idle_command(
+        RuntimeCommand::SetIncognito { enabled: true },
+        &mut commands,
+    )
+    .await;
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::Status { message } if message.contains("Incognito on")
+    ));
+    let RuntimeEvent::StateSnapshot { snapshot } = events.recv().await.unwrap() else {
+        panic!("expected snapshot");
+    };
+    assert!(snapshot.incognito);
+
+    // While incognito the daemon refuses to re-attach a conversation: that
+    // would silently resume DB writes behind the INC badge.
+    ctx.handle_idle_command(RuntimeCommand::LoadConversation { id: 7 }, &mut commands)
+        .await;
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::ConversationLoadFailed { id: 7, message } if message.contains("incognito")
+    ));
+
+    ctx.handle_idle_command(
+        RuntimeCommand::SetIncognito { enabled: false },
+        &mut commands,
+    )
+    .await;
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::Status { message } if message.contains("Incognito off")
+    ));
+    let RuntimeEvent::StateSnapshot { snapshot } = events.recv().await.unwrap() else {
+        panic!("expected snapshot");
+    };
+    assert!(!snapshot.incognito);
+}
+
+#[test]
+fn incognito_transitions_cancel_jobs_in_the_departing_scope() {
+    let _guard = crate::util::test_env_lock();
+    let scope = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % i64::MAX as u128) as i64;
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.conversation_id = Some(scope);
+    let (mut ctx, _hub, _commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let registry = crate::ext::jobs::registry();
+
+    let persisted_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let persisted_job = registry.create(crate::ext::jobs::NewJob {
+        agent: "test".into(),
+        task: "persisted scope".into(),
+        title: "persisted scope".into(),
+        provider: "test".into(),
+        scope: Some(scope),
+        cancel_flag: persisted_flag.clone(),
+    });
+    assert!(registry.start(&persisted_job));
+
+    ctx.set_incognito(true);
+    assert!(persisted_flag.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(ctx.session.lock().unwrap().incognito);
+
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    ctx.session.lock().unwrap().session_db = Some(db);
+    let incognito_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let incognito_job = registry.create(crate::ext::jobs::NewJob {
+        agent: "test".into(),
+        task: "incognito scope".into(),
+        title: "incognito scope".into(),
+        provider: "test".into(),
+        scope: None,
+        cancel_flag: incognito_flag.clone(),
+    });
+    assert!(registry.start(&incognito_job));
+
+    // Re-applying the current mode is a no-op and must not cancel its work.
+    ctx.set_incognito(true);
+    assert!(!incognito_flag.load(std::sync::atomic::Ordering::Relaxed));
+
+    ctx.set_incognito(false);
+    assert!(incognito_flag.load(std::sync::atomic::Ordering::Relaxed));
+    let session = ctx.session.lock().unwrap();
+    assert!(!session.incognito);
+    assert!(session.conversation_id.is_some());
+    drop(session);
+
+    registry.complete(&persisted_job, Err("cancelled".into()));
+    registry.complete(&incognito_job, Err("cancelled".into()));
+}

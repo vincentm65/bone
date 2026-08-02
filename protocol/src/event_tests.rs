@@ -106,6 +106,7 @@ fn every_runtime_event_variant_round_trips() {
                 session_seq: 15,
                 provider_id: "openai".into(),
                 provider_model: "gpt-4o".into(),
+                incognito: false,
             },
         },
         RuntimeEvent::StateSynchronized {
@@ -277,6 +278,7 @@ fn every_runtime_command_variant_round_trips() {
         RuntimeCommand::SetApprovalMode {
             mode: "danger".into(),
         },
+        RuntimeCommand::SetIncognito { enabled: true },
         RuntimeCommand::AppendMessage {
             role: "user".into(),
             content: "context".into(),
@@ -303,6 +305,26 @@ fn every_runtime_command_variant_round_trips() {
             "round-trip {cmd:?}"
         );
     }
+}
+
+#[test]
+fn session_snapshot_incognito_defaults_off_for_legacy_wire_messages() {
+    // A snapshot serialized by a daemon predating the flag has no `incognito`
+    // key and must deserialize with it off.
+    let snapshot: SessionSnapshot = serde_json::from_value(json!({
+        "sent": 0, "received": 0, "cached": 0, "cost": 0.0, "request_count": 0,
+        "context_length": 0, "transcript_len": 0, "conversation_id": null,
+        "session_seq": 0, "provider_id": "", "provider_model": ""
+    }))
+    .unwrap();
+    assert!(!snapshot.incognito);
+    let snapshot: SessionSnapshot = serde_json::from_value(json!({
+        "sent": 1, "received": 2, "cached": 0, "cost": 0.0, "request_count": 1,
+        "context_length": 3, "transcript_len": 4, "conversation_id": null,
+        "session_seq": 5, "provider_id": "p", "provider_model": "m", "incognito": true
+    }))
+    .unwrap();
+    assert!(snapshot.incognito);
 }
 
 #[test]

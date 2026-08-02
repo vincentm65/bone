@@ -17,6 +17,10 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("e", "open system editor for input"),
     ("exit", "exit bone"),
     ("help", "show this message"),
+    (
+        "incognito",
+        "pause saving this and future chats to the database (toggle)",
+    ),
     ("model", "set or show model (/model <name>)"),
     ("new", "clear chat history (alias for /clear)"),
     ("provider", "pick or switch provider (/provider <name>)"),
@@ -40,8 +44,22 @@ mod tests {
     #[test]
     fn only_builtin_commands_are_protected() {
         for command in [
-            "catalog", "clear", "config", "edit", "e", "exit", "help", "model", "new", "provider",
-            "quit", "setup", "stats", "tools", "update",
+            "catalog",
+            "clear",
+            "config",
+            "edit",
+            "e",
+            "exit",
+            "help",
+            "incognito",
+            "model",
+            "new",
+            "provider",
+            "quit",
+            "setup",
+            "stats",
+            "tools",
+            "update",
         ] {
             assert!(
                 is_protected_builtin(command),

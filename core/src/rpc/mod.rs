@@ -944,6 +944,31 @@ impl DaemonCtx {
         }
     }
 
+    /// Toggle session-scoped incognito mode. Publishes a Status (success or
+    /// failure) and always a fresh snapshot so every client's view-model
+    /// (including the INC badge) follows the daemon's authoritative state.
+    fn set_incognito(&mut self, enabled: bool) {
+        let changing = self.session.lock().unwrap().incognito != enabled;
+        if changing {
+            // Background work belongs to the scope being left. Cancel it before
+            // `conversation_id` changes so its result cannot be orphaned.
+            self.cancel_background_work();
+        }
+        let result = self
+            .session
+            .lock()
+            .unwrap()
+            .set_incognito(enabled, self.llm.as_ref());
+        self.hub.publish(RuntimeEvent::Status {
+            message: match result {
+                Ok(()) if enabled => "Incognito on — chats are not saved".into(),
+                Ok(()) => "Incognito off — saving resumed".into(),
+                Err(err) => err,
+            },
+        });
+        self.publish_snapshot();
+    }
+
     fn finish_subagent_change(
         &self,
         path: String,
@@ -1265,6 +1290,17 @@ impl DaemonCtx {
     }
 
     fn load_conversation(&mut self, id: i64) {
+        // Refuse while incognito: re-attaching `conversation_id` would silently
+        // resume DB writes behind the INC badge. The user must explicitly turn
+        // incognito off (which persists the pending transcript) first.
+        if self.session.lock().unwrap().incognito {
+            self.hub.publish(RuntimeEvent::ConversationLoadFailed {
+                id,
+                message: "cannot load a conversation while incognito — turn incognito off first"
+                    .into(),
+            });
+            return;
+        }
         let loaded = {
             let s = self.session.lock().unwrap();
             s.session_db.as_ref().and_then(|db| {
@@ -1371,7 +1407,10 @@ impl DaemonCtx {
                     // stacking another empty row (and publish a fresh snapshot
                     // below so the client still resets its view).
                     let already_empty = s.transcript.is_empty() && s.session_seq == 0;
-                    if !already_empty && let Some(db) = s.session_db.as_ref() {
+                    if !already_empty
+                        && !s.incognito
+                        && let Some(db) = s.session_db.as_ref()
+                    {
                         if let Some(conv_id) = s.conversation_id {
                             let _ = db.end_conversation(conv_id);
                         }
@@ -1401,6 +1440,10 @@ impl DaemonCtx {
             }
             RuntimeCommand::SetApprovalMode { mode: mode_str } => {
                 self.persist_mode(&mode_str);
+                Flow::Continue
+            }
+            RuntimeCommand::SetIncognito { enabled } => {
+                self.set_incognito(enabled);
                 Flow::Continue
             }
             RuntimeCommand::AppendMessage { role, content } => {

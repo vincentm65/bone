@@ -94,6 +94,12 @@ pub struct RuntimeSession {
     /// Shared steer nudge, wired into `LocalConn` so Ctrl+Enter can set it
     /// during an active turn.
     pub turn_nudge: Arc<Mutex<Option<String>>>,
+    /// Session-scoped incognito mode. While on, `conversation_id` is `None`, so
+    /// every DB write path (which guards on `conversation_id: Option<i64>`)
+    /// no-ops and reads fall back to the in-memory transcript. The DB itself
+    /// stays open; toggling off mints a fresh conversation and persists the
+    /// whole in-memory transcript into it.
+    pub incognito: bool,
 }
 
 impl RuntimeSession {
@@ -106,6 +112,7 @@ impl RuntimeSession {
             session_db: None,
             conversation_id: None,
             session_seq: 0,
+            incognito: false,
             turn_nudge: Arc::new(Mutex::new(None)),
         }
     }
@@ -322,6 +329,50 @@ impl RuntimeSession {
         self.append_db_message("user", content, None, None, None, images_json);
     }
 
+    /// Toggle session-scoped incognito mode.
+    ///
+    /// Turning on ends the active conversation (mirroring `/new`) and clears
+    /// `conversation_id` (the DB stays open — reads / `display_transcript` fall
+    /// back to the in-memory transcript), so every write path that guards on
+    /// `conversation_id: Option<i64>` no-ops: no messages, no usage, no new
+    /// conversation rows, no checkpoints.
+    ///
+    /// Turning off mints a fresh conversation and persists the whole in-memory
+    /// transcript into it (no usage — nothing was recorded while incognito).
+    /// On a persistence failure incognito stays on and the error message is
+    /// returned so the caller can surface it.
+    pub fn set_incognito(&mut self, on: bool, llm: &dyn LlmProvider) -> Result<(), String> {
+        if on {
+            // End the conversation being left so it does not linger as a
+            // permanently "open" row in the history list (same as `/new`).
+            if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id) {
+                let _ = db.end_conversation(conv_id);
+            }
+            self.incognito = true;
+            self.conversation_id = None;
+            return Ok(());
+        }
+        if self.incognito
+            && let Some(db) = self.session_db.as_ref()
+        {
+            let conv_id = db
+                .create_conversation(llm.id(), llm.model())
+                .map_err(|err| format!("failed to create conversation: {err}"))?;
+            let next_seq =
+                match db.append_turn_with_checkpoint(conv_id, 0, &self.transcript, &[], None) {
+                    Ok(next_seq) => next_seq,
+                    Err(err) => {
+                        let _ = db.end_conversation(conv_id);
+                        return Err(format!("failed to persist incognito transcript: {err}"));
+                    }
+                };
+            self.conversation_id = Some(conv_id);
+            self.session_seq = next_seq;
+        }
+        self.incognito = false;
+        Ok(())
+    }
+
     /// Build a [`Driver`] for one turn from the current session state. The
     /// caller supplies the per-turn wiring (shared `llm`/`extensions`, the
     /// approval gate + mode, the frontend event stream, key registry, cancel
@@ -433,6 +484,7 @@ impl RuntimeSession {
             session_seq: self.session_seq,
             provider_id: provider_id.to_string(),
             provider_model: provider_model.to_string(),
+            incognito: self.incognito,
         }
     }
 }
