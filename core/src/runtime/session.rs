@@ -390,6 +390,11 @@ impl RuntimeSession {
         cancel: Arc<AtomicBool>,
         session_sink: Arc<dyn SessionSink>,
     ) -> Driver {
+        let settings = config_store.runtime_settings_snapshot();
+        let system_prompt = crate::llm::prompts::system_prompt_with_base(
+            settings.resolved().general.system_prompt.as_deref(),
+        );
+        let history = build_chat_history(&self.transcript, Some(&system_prompt));
         Driver {
             llm,
             extensions,
@@ -406,10 +411,10 @@ impl RuntimeSession {
             runtime_events: Some(runtime_events),
             key_reply_registry: Some(key_registry),
             cancel: Some(cancel),
-            history: build_chat_history(&self.transcript, None),
+            history,
             transcript: self.transcript.clone(),
             token_stats: self.token_stats.clone(),
-            system_prompt_override: None,
+            system_prompt_override: Some(system_prompt),
             conversation_id: self.conversation_id,
             turn_nudge: self.turn_nudge.clone(),
         }

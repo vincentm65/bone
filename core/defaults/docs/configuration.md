@@ -42,6 +42,19 @@ the environment.
 `init.lua` is for lightweight startup wiring. Put substantial implementations in
 purpose-specific Lua files and do not define a second settings table there.
 
+## Main-agent system prompt
+
+`general.system_prompt` is a nullable daemon-owned string that replaces Bone's
+built-in base prompt for normal main-agent turns. Bone still appends the generated
+configuration-directory and current-working-directory context, and Lua
+`before_turn.system_prompt_append` hooks remain additive.
+
+Changes made through a frontend or the daemon configuration API apply when the
+next main-agent turn is built. Unsetting or resetting the value to `null` restores
+the built-in base prompt without removing the generated runtime context. Explicit
+`bone run --system-prompt` values and delegated or subagent prompt overrides are
+separate and are not replaced by this setting.
+
 ## Theme values
 
 Theme modules live at `lua/themes/<name>.lua`, return a settings table, and are

@@ -1139,6 +1139,10 @@ impl DaemonCtx {
         // App-derived ctx snapshot, assembled from the session + provider the same
         // way the TUI's `app_ctx_state` does.
         let config_schema = self.config_schema();
+        let settings = self.config.runtime_settings_snapshot();
+        let system_prompt = crate::llm::prompts::system_prompt_with_base(
+            settings.resolved().general.system_prompt.as_deref(),
+        );
         let app_state = {
             let s = self.session.lock().unwrap();
             let by_provider = crate::ext::ctx::usage_by_provider_context(
@@ -1153,7 +1157,7 @@ impl DaemonCtx {
                 self.llm.id(),
                 self.llm.model(),
                 self.llm.context_window_tokens(),
-                None,
+                Some(system_prompt),
                 by_provider,
                 s.transcript.clone(),
                 self.config.clone(),

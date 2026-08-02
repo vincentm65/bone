@@ -292,19 +292,37 @@ body.hide-meter .meter { display: none; }
 .prose > *:first-child { margin-top: 0; }
 .prose > *:last-child { margin-bottom: 0; }
 .prose p { margin: 0 0 12px; }
-.prose h1, .prose h2, .prose h3 { margin: 24px 0 10px; line-height: 1.25; font-weight: 680; letter-spacing: -.015em; }
+.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 { margin: 24px 0 10px; line-height: 1.25; font-weight: 680; letter-spacing: -.015em; }
 .prose h1 { font-size: 1.45em; padding-bottom: 8px; border-bottom: 1px solid var(--border); } .prose h2 { font-size: 1.22em; } .prose h3 { font-size: 1.06em; color: color-mix(in srgb, var(--text) 90%, var(--accent)); }
+.prose h4 { font-size: 1em; } .prose h5 { font-size: .94em; color: var(--text-dim); } .prose h6 { font-size: .88em; color: var(--text-faint); text-transform: uppercase; letter-spacing: .06em; }
 .prose ul, .prose ol { margin: 0 0 12px; padding-left: 22px; }
 .prose li { margin: 3px 0; }
 .prose li::marker { color: var(--text-faint); }
 .prose .task-item { list-style: none; margin-left: -20px; display: flex; align-items: baseline; gap: 9px; }
-.prose .task-item input { accent-color: var(--accent); transform: translateY(1px); }
+.prose .task-check { width: 1.25em; color: var(--text-faint); font-family: var(--mono); text-align: center; flex: none; }
+.prose .task-check.checked { color: var(--accent); }
 .prose del { color: var(--text-faint); text-decoration-color: var(--text-faint); }
 .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-line); }
 .prose a:hover { background: var(--accent-soft); border-radius: 3px; }
 .prose img { display: block; max-width: 100%; max-height: 520px; margin: 14px 0; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.prose figure { margin: 16px 0; }
+.prose figure > img { margin-bottom: 7px; }
+.prose figcaption, .prose caption { color: var(--text-faint); font-size: .84em; text-align: left; }
 .prose blockquote { margin: 0 0 14px; padding: 8px 14px; border-left: 3px solid var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 45%, transparent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; color: var(--text-dim); }
 .prose hr { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+.prose details { margin: 0 0 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--surface) 75%, transparent); }
+.prose summary { padding: 8px 11px; color: var(--text-dim); font-weight: 600; cursor: pointer; }
+.prose details[open] > summary { border-bottom: 1px solid var(--border); }
+.prose details > :not(summary) { margin-left: 12px; margin-right: 12px; }
+.prose dl { margin: 0 0 14px; }
+.prose dt { margin-top: 8px; font-weight: 650; }
+.prose dd { margin-left: 20px; color: var(--text-dim); }
+.prose kbd, .prose samp { font-family: var(--mono); font-size: .84em; }
+.prose kbd { padding: 1px 5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface-2); }
+.prose mark { padding: 0 2px; border-radius: 2px; background: color-mix(in srgb, var(--amber) 30%, transparent); color: var(--text); }
+.prose abbr[title], .prose dfn[title] { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+.prose address, .prose cite, .prose figcaption { font-style: italic; }
+.prose small { color: var(--text-faint); }
 .prose code { font-family: var(--mono); font-size: 0.88em; background: var(--surface-2); border: 1px solid var(--border); color: color-mix(in srgb, var(--text) 88%, var(--accent)); padding: 1px 6px; border-radius: 6px; }
 .prose pre { position: relative; background: #0b0d12; border: 1px solid var(--border-strong); border-radius: 11px; padding: 39px 17px 16px; overflow-x: auto; margin: 16px 0 18px; box-shadow: 0 14px 32px -26px #000; }
 .prose pre::before { content: ""; position: absolute; inset: 0 0 auto; height: 29px; background: rgba(255,255,255,.025); border-bottom: 1px solid var(--border); }

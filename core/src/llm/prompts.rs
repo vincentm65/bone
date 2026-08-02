@@ -2,13 +2,25 @@
 
 use crate::config::bone_dir;
 
-/// Default system prompt injected at the start of every conversation.
+/// Bone's built-in system prompt with runtime context.
 pub fn system_prompt() -> String {
+    system_prompt_with_base(None)
+}
+
+/// System prompt injected at the start of a normal conversation.
+///
+/// A configured base replaces Bone's built-in base prompt, while runtime
+/// configuration-directory and working-directory context is always appended.
+pub fn system_prompt_with_base(configured_base: Option<&str>) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let bone = bone_dir().display().to_string();
-    format!("{SYSTEM_PROMPT}Resolved config directory: {bone}\nCurrent working directory: {cwd}\n")
+    let base = configured_base.unwrap_or(SYSTEM_PROMPT);
+    let separator = if base.ends_with('\n') { "" } else { "\n\n" };
+    format!(
+        "{base}{separator}Resolved config directory: {bone}\nCurrent working directory: {cwd}\n"
+    )
 }
 
 /// System prompt for any headless delegated agent (`ctx.agent.run`/`spawn` at
@@ -60,3 +72,25 @@ Config:
 - For core architecture, configuration, extension, agent, UI, and development docs, read the generated AGENTS.md index and the relevant topic files in the resolved config directory: docs/architecture.md, docs/configuration.md, docs/extension-api.md, docs/agents.md, docs/ui.md, and docs/development.md.
 - After directly editing config.yaml, providers.yaml, subagents.yaml, extensions.yaml, or command-policy.yaml, tell the user to restart.
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_prompt_includes_builtin_base_and_runtime_context() {
+        let prompt = system_prompt();
+        assert!(prompt.starts_with(SYSTEM_PROMPT));
+        assert!(prompt.contains("Resolved config directory: "));
+        assert!(prompt.contains("Current working directory: "));
+    }
+
+    #[test]
+    fn configured_prompt_replaces_only_the_builtin_base() {
+        let prompt = system_prompt_with_base(Some("Custom main-agent instructions."));
+        assert!(prompt.starts_with("Custom main-agent instructions.\n\n"));
+        assert!(!prompt.contains("You are bone, a coding assistant"));
+        assert!(prompt.contains("Resolved config directory: "));
+        assert!(prompt.contains("Current working directory: "));
+    }
+}

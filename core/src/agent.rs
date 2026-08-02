@@ -438,7 +438,7 @@ pub fn resolve_provider(
 
 #[cfg(test)]
 mod resolve_provider_tests {
-    use super::{AgentRequest, resolve_provider};
+    use super::{AgentRequest, agent_setup, resolve_provider};
     use crate::llm::provider::{ChatMessage, LlmError, LlmProvider, ResponseStream};
     use crate::tools::{ApprovalMode, ToolDefinition};
     use async_trait::async_trait;
@@ -491,6 +491,32 @@ mod resolve_provider_tests {
         }
     }
 
+    fn request_with_config(
+        llm: Arc<dyn LlmProvider>,
+        config: crate::config::store::ConfigStore,
+    ) -> AgentRequest {
+        let mut req = request(llm);
+        req.config_store = Some(config);
+        req.session_sink = Some(Arc::new(crate::session_sink::NullSessionSink));
+        req
+    }
+
+    /// Run `f` with `BONE_DIR` pointed at a fresh tempdir, restoring the prior
+    /// value (or removing the variable) on drop.
+    fn with_bone_dir(f: impl FnOnce(tempfile::TempDir) -> ()) {
+        let _guard = crate::util::test_env_lock();
+        let previous = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+        f(dir);
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
+
     fn resolve(request: &AgentRequest) -> Result<Arc<dyn LlmProvider>, String> {
         let mut providers = crate::config::ProvidersConfig::default();
         resolve_provider(request, None, &mut providers)
@@ -521,6 +547,42 @@ mod resolve_provider_tests {
             resolve(&request).err().as_deref(),
             Some("max_tokens is not supported with an injected provider")
         );
+    }
+
+    #[test]
+    fn headless_prompt_overrides_ignore_the_daemon_main_prompt() {
+        with_bone_dir(|_dir| {
+            let config = crate::config::store::ConfigStore::for_test();
+            let revision = config.snapshot().revision;
+            config
+                .set_value(
+                    "general.system_prompt",
+                    serde_json::json!("Daemon main-agent prompt"),
+                    revision,
+                )
+                .unwrap();
+
+            let top_level = {
+                let mut req = request_with_config(Arc::new(MockProvider), config.clone());
+                req.system_prompt = Some("Explicit bone run prompt".into());
+                agent_setup(&req).unwrap()
+            };
+            assert_eq!(
+                top_level.system_prompt_override.as_deref(),
+                Some("Explicit bone run prompt")
+            );
+            assert_eq!(top_level.history[0].content, "Explicit bone run prompt");
+
+            let mut delegated = request_with_config(Arc::new(MockProvider), config);
+            delegated.agent_depth = 1;
+            delegated.system_prompt = Some("Delegated persona".into());
+            let delegated = agent_setup(&delegated).unwrap();
+            let delegated_prompt = delegated.system_prompt_override.unwrap();
+            assert!(delegated_prompt.starts_with("Delegated persona\n\nRules:"));
+            assert!(delegated_prompt.contains("You run non-interactively"));
+            assert!(!delegated_prompt.contains("Daemon main-agent prompt"));
+            assert_eq!(delegated.history[0].content, delegated_prompt);
+        });
     }
 }
 

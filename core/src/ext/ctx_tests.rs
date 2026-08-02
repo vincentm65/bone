@@ -402,7 +402,7 @@ fn ui_status_without_frontend_is_inert() {
 
 // ── AppCtxState parity (commands ⇆ tools share one ctx) ─────────────────────
 
-fn sample_app_state() -> AppCtxState {
+fn sample_app_state(system_prompt_override: Option<String>) -> AppCtxState {
     let tools =
         crate::tools::registry::ToolHandler::new(crate::tools::registry::ToolRegistry::default());
     let stats = crate::llm::TokenStats {
@@ -423,7 +423,7 @@ fn sample_app_state() -> AppCtxState {
         "openrouter",
         "gemini",
         Some(131_072),
-        None,
+        system_prompt_override,
         Vec::new(),
         history,
         config_store,
@@ -439,12 +439,24 @@ fn cfg_from(state: &AppCtxState) -> CtxConfig {
     cfg
 }
 
+#[test]
+fn app_ctx_state_usage_measures_active_system_prompt() {
+    let prompt = "Configured main-agent prompt";
+    let state = sample_app_state(Some(prompt.into()));
+
+    assert_eq!(state.usage.system_prompt_chars, prompt.len() as u64);
+    assert_eq!(
+        state.usage.system_prompt_tokens,
+        estimate_tokens(prompt.len() as u64)
+    );
+}
+
 // The single mapping (`apply_to`) populates every app-derived field. Both the
 // command runner and the tool path route through it, so this is the parity
 // guarantee at the CtxConfig level.
 #[test]
 fn app_ctx_state_apply_to_populates_all_app_fields() {
-    let cfg = cfg_from(&sample_app_state());
+    let cfg = cfg_from(&sample_app_state(None));
 
     assert_eq!(cfg.session_id, Some(42));
     assert_eq!(cfg.provider.as_deref(), Some("openrouter"));
@@ -460,7 +472,7 @@ fn app_ctx_state_apply_to_populates_all_app_fields() {
 // handler actually reads).
 #[test]
 fn app_ctx_state_exposes_app_fields_through_lua_ctx() {
-    let cfg = cfg_from(&sample_app_state());
+    let cfg = cfg_from(&sample_app_state(None));
     let lua = Lua::new();
     let ctx = create_ctx_table(&lua, &cfg).unwrap();
     lua.globals().set("ctx", ctx).unwrap();

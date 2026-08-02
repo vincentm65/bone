@@ -58,6 +58,24 @@ Themes are resolved by core and sent as snapshots; clients centralize their
 colors through the configured theme. Preserve per-span styling when wrapping,
 and keep text content independent from terminal/browser decoration.
 
+### Web model-content safety
+
+The web client renders model Markdown and permitted inline or block HTML through
+one central renderer for live streaming, completed turns, tool-boundary snapshots,
+canvas Markdown, command output, and replayed history. The complete rendered
+result is sanitized as hostile input by the pinned browser DOMPurify asset before
+it is inserted into the document.
+
+The sanitizer uses an explicit allowlist of inert semantic elements and
+attributes. It removes scripts and event handlers, forms and controls, embedding
+or navigation primitives, dangerous metadata, SVG and MathML, arbitrary
+`data-*` attributes, and unsafe URLs or resources. Links accept only approved
+HTTP(S), `mailto:`, local-path, and fragment destinations; the application owns
+their new-tab target and `rel="noopener noreferrer"` values. Images accept only
+HTTPS or local-path sources and receive application-owned lazy-loading,
+decoding, and referrer-policy attributes. Bone's CSS, rather than model-supplied
+styles or classes, owns presentation.
+
 ## Configuration and session UX
 
 The daemon distributes one revisioned configuration schema and resolved values.

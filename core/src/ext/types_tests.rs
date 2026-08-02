@@ -118,7 +118,7 @@ fn parses_conversation_load_with_id() {
     action.set("messages", messages).unwrap();
     action.set("conversation_id", 7i64).unwrap();
 
-    let parsed = parse_lua_return_action(&action).expect("action parsed");
+    let parsed = parse_lua_return_action(&action, false).expect("action parsed");
     assert!(parsed.conversation_replace.is_none());
     let load = parsed.conversation_load.expect("load payload");
     assert_eq!(load.conversation_id, Some(7));
@@ -135,41 +135,35 @@ fn conversation_replace_still_parses() {
     action.set("action", "conversation.replace").unwrap();
     action.set("messages", messages).unwrap();
 
-    let parsed = parse_lua_return_action(&action).expect("action parsed");
+    let parsed = parse_lua_return_action(&action, false).expect("action parsed");
     assert!(parsed.conversation_load.is_none());
     assert_eq!(parsed.conversation_replace.expect("replace").len(), 1);
 }
 
 #[test]
-fn parses_turn_shaping_without_action() {
+fn turn_shaping_fields_parse_before_turn_and_on_command_returns() {
     let lua = Lua::new();
-    let t = lua.create_table().unwrap();
-    t.set("system_prompt_append", "Plan only; do not edit.")
-        .unwrap();
-    t.set("turn_message", "Task list: 1/3 done.").unwrap();
+    let action = lua.create_table().unwrap();
+    action.set("system_prompt_append", "Plan only.").unwrap();
+    action.set("turn_message", "Current state.").unwrap();
     let tools = lua.create_table().unwrap();
     tools.push("read_file").unwrap();
-    tools.push("shell").unwrap();
-    t.set("tool_filter", tools).unwrap();
+    action.set("tool_filter", tools).unwrap();
 
-    let parsed = parse_lua_return_action(&t).expect("shaping parsed without action key");
-    assert_eq!(
-        parsed.system_prompt_append.as_deref(),
-        Some("Plan only; do not edit.")
-    );
-    assert_eq!(parsed.turn_message.as_deref(), Some("Task list: 1/3 done."));
-    assert_eq!(
-        parsed.tool_filter,
-        Some(vec!["read_file".to_string(), "shell".to_string()])
-    );
-    assert!(parsed.conversation_replace.is_none());
+    for before_turn in [true, false] {
+        let parsed = parse_lua_return_action(&action, before_turn).unwrap();
+        assert_eq!(parsed.system_prompt_append.as_deref(), Some("Plan only."));
+        assert_eq!(parsed.turn_message.as_deref(), Some("Current state."));
+        assert_eq!(parsed.tool_filter, Some(vec!["read_file".to_string()]));
+        assert!(parsed.conversation_replace.is_none());
+    }
 }
 
 #[test]
 fn empty_table_yields_no_action() {
     let lua = Lua::new();
     let t = lua.create_table().unwrap();
-    assert!(parse_lua_return_action(&t).is_none());
+    assert!(parse_lua_return_action(&t, false).is_none());
 }
 
 #[test]
@@ -224,7 +218,7 @@ fn parses_conversation_load_with_only_id() {
     action.set("action", "conversation.load").unwrap();
     action.set("conversation_id", 7i64).unwrap();
 
-    let parsed = parse_lua_return_action(&action).expect("action parsed");
+    let parsed = parse_lua_return_action(&action, false).expect("action parsed");
     let load = parsed.conversation_load.expect("load payload");
     assert_eq!(load.conversation_id, Some(7));
     assert!(load.messages.is_empty());
@@ -239,7 +233,75 @@ fn conversation_load_without_id_is_ignored() {
     action.set("action", "conversation.load").unwrap();
     action.set("messages", messages).unwrap();
 
-    assert!(parse_lua_return_action(&action).is_none());
+    assert!(parse_lua_return_action(&action, false).is_none());
+}
+
+fn compact_action(lua: &Lua, instruction: Option<&str>, keep: Option<mlua::Value>) -> mlua::Table {
+    let compact = lua.create_table().unwrap();
+    if let Some(instruction) = instruction {
+        compact.set("instruction", instruction).unwrap();
+    }
+    if let Some(keep) = keep {
+        compact.set("keep_recent_turns", keep).unwrap();
+    }
+    let conversation = lua.create_table().unwrap();
+    conversation.set("compact", compact).unwrap();
+    let action = lua.create_table().unwrap();
+    action.set("conversation", conversation).unwrap();
+    action
+}
+
+#[test]
+fn parses_before_turn_compaction_with_default_and_explicit_retention() {
+    let lua = Lua::new();
+    let defaulted = compact_action(&lua, Some("summarize"), None);
+    let parsed = parse_lua_return_action(&defaulted, true).unwrap();
+    assert_eq!(
+        parsed.conversation_compact,
+        Some(ConversationCompact {
+            instruction: "summarize".into(),
+            keep_recent_turns: 2,
+        })
+    );
+
+    let explicit = compact_action(&lua, Some("checkpoint"), Some(mlua::Value::Integer(0)));
+    let parsed = parse_lua_return_action(&explicit, true).unwrap();
+    assert_eq!(parsed.conversation_compact.unwrap().keep_recent_turns, 0);
+}
+
+#[test]
+fn rejects_malformed_compaction_and_ignores_it_outside_before_turn() {
+    let lua = Lua::new();
+    for action in [
+        compact_action(&lua, None, None),
+        compact_action(&lua, Some("ok"), Some(mlua::Value::Integer(-1))),
+        compact_action(&lua, Some("ok"), Some(mlua::Value::Number(2.5))),
+    ] {
+        assert!(parse_lua_return_action(&action, true).is_none());
+    }
+
+    let valid = compact_action(&lua, Some("summarize"), None);
+    assert!(parse_lua_return_action(&valid, false).is_none());
+
+    let malformed_with_shaping = compact_action(&lua, Some("   "), None);
+    malformed_with_shaping
+        .set("turn_message", "still valid")
+        .unwrap();
+    let parsed = parse_lua_return_action(&malformed_with_shaping, true).unwrap();
+    assert!(parsed.conversation_compact.is_none());
+    assert_eq!(parsed.turn_message.as_deref(), Some("still valid"));
+}
+
+#[test]
+fn compaction_is_omitted_from_command_actions() {
+    let action = LuaReturnAction {
+        conversation_compact: Some(ConversationCompact {
+            instruction: "summarize".into(),
+            keep_recent_turns: 2,
+        }),
+        ..Default::default()
+    };
+    assert!(action.to_command_action().is_none());
 }
 
 #[test]
@@ -248,12 +310,12 @@ fn parses_config_actions() {
 
     let apply = lua.create_table().unwrap();
     apply.set("action", "config.apply").unwrap();
-    let parsed = parse_lua_return_action(&apply).expect("apply action");
+    let parsed = parse_lua_return_action(&apply, false).expect("apply action");
     assert!(matches!(parsed.config_action, Some(ConfigAction::Apply)));
 
     let reload = lua.create_table().unwrap();
     reload.set("action", "config.reload_tools").unwrap();
-    let parsed = parse_lua_return_action(&reload).expect("reload action");
+    let parsed = parse_lua_return_action(&reload, false).expect("reload action");
     assert!(matches!(
         parsed.config_action,
         Some(ConfigAction::ReloadTools)
@@ -262,7 +324,7 @@ fn parses_config_actions() {
     let switch = lua.create_table().unwrap();
     switch.set("action", "config.switch_provider").unwrap();
     switch.set("provider", "openai").unwrap();
-    let parsed = parse_lua_return_action(&switch).expect("switch action");
+    let parsed = parse_lua_return_action(&switch, false).expect("switch action");
     assert!(matches!(
         parsed.config_action,
         Some(ConfigAction::SwitchProvider { ref id }) if id == "openai"

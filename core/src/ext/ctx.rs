@@ -590,7 +590,7 @@ impl AppCtxState {
         config_schema: bone_protocol::ConfigSchema,
         turn_nudge: Option<String>,
     ) -> Self {
-        let est = estimate_prompt_tokens(tools);
+        let est = estimate_prompt_tokens(tools, system_prompt_override.as_deref());
         Self {
             session_id,
             provider: provider.to_string(),
@@ -3522,13 +3522,16 @@ pub(crate) struct PromptTokenEstimate {
     pub sys_tokens: u64,
 }
 
-/// Estimate token counts for the serialized tool schema and the system prompt.
+/// Estimate token counts for the serialized tool schema and active system prompt.
 pub(crate) fn estimate_prompt_tokens(
     tools: &crate::tools::registry::ToolHandler,
+    system_prompt_override: Option<&str>,
 ) -> PromptTokenEstimate {
     let defs = tools.definitions();
     let schema_chars = serde_json::to_string(&defs).unwrap_or_default().len() as u64;
-    let sys_chars = crate::llm::prompts::system_prompt().len() as u64;
+    let sys_chars = system_prompt_override
+        .map(str::len)
+        .unwrap_or_else(|| crate::llm::prompts::system_prompt().len()) as u64;
     PromptTokenEstimate {
         tool_count: defs.len() as u64,
         schema_chars,

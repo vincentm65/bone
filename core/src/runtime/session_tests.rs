@@ -275,6 +275,65 @@ fn incognito_off_removes_new_conversation_when_persist_fails() {
 }
 
 #[test]
+fn main_session_builds_each_turn_from_current_configured_prompt() {
+    fn build(session: &RuntimeSession, config: &crate::config::store::ConfigStore) -> Driver {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        session.build_driver(
+            Arc::new(TestProvider),
+            ExtensionManager::unloaded(),
+            config.clone(),
+            SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
+            Arc::new(crate::tools::AutoApprovalGate),
+            tx,
+            KeyReplyRegistry::new(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(crate::session_sink::NullSessionSink),
+        )
+    }
+
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let config = crate::config::store::ConfigStore::for_test();
+    let session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+
+    config
+        .set_value(
+            "general.system_prompt",
+            serde_json::json!("First configured prompt"),
+            config.snapshot().revision,
+        )
+        .unwrap();
+    let first = build(&session, &config);
+    let first_prompt = first.system_prompt_override.as_ref().unwrap();
+    assert_eq!(&first.history[0].content, first_prompt);
+    assert!(first_prompt.starts_with("First configured prompt\n\n"));
+    assert!(first_prompt.contains(&dir.path().display().to_string()));
+
+    config
+        .set_value(
+            "general.system_prompt",
+            serde_json::json!("Changed for the next turn"),
+            config.snapshot().revision,
+        )
+        .unwrap();
+    let second = build(&session, &config);
+    let second_prompt = second.system_prompt_override.as_ref().unwrap();
+    assert_eq!(&second.history[0].content, second_prompt);
+    assert!(second_prompt.starts_with("Changed for the next turn\n\n"));
+    assert!(!second_prompt.contains("First configured prompt"));
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
 fn snapshot_carries_the_incognito_flag() {
     let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
     let llm = TestProvider;
@@ -283,4 +342,87 @@ fn snapshot_carries_the_incognito_flag() {
     assert!(session.snapshot("p", "m").incognito);
     session.set_incognito(false, &llm).unwrap();
     assert!(!session.snapshot("p", "m").incognito);
+}
+
+#[test]
+fn transcript_replacement_persists_compacted_view_without_losing_history() {
+    fn contents(messages: &[ChatMessage]) -> Vec<&str> {
+        messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect()
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let db = SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let conversation = db.create_conversation("test", "model").unwrap();
+    let prior = vec![
+        ChatMessage::new(ChatRole::User, "first request"),
+        ChatMessage::new(ChatRole::Assistant, "first answer"),
+        ChatMessage::new(ChatRole::User, "follow-up"),
+        ChatMessage::new(ChatRole::Assistant, "second answer"),
+        ChatMessage::new(ChatRole::User, "final question"),
+    ];
+    let sequence = db
+        .append_turn_with_checkpoint(conversation, 0, &prior, &[], None)
+        .unwrap();
+
+    let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+    session.session_db = Some(db);
+    session.conversation_id = Some(conversation);
+    session.session_seq = sequence;
+    session.transcript = prior.clone();
+
+    let current = ChatMessage::new(ChatRole::Assistant, "current answer");
+    let compacted = vec![
+        ChatMessage::new(ChatRole::User, "compacted summary of prior turns"),
+        current.clone(),
+    ];
+    let (result, persistence_error) = session.apply_outcome(DriverOutcome {
+        result: Ok(crate::agent::AgentResponse {
+            content: "current answer".into(),
+            transcript: Vec::new(),
+        }),
+        tools: ToolHandler::new(builtin_tools()),
+        transcript: compacted,
+        token_stats: Default::default(),
+        persist_messages: vec![current],
+        transcript_replaced: true,
+        usage: Vec::new(),
+    });
+    result.unwrap();
+    assert!(persistence_error.is_none(), "checkpoint write must succeed");
+
+    let db = session.session_db.as_ref().unwrap();
+    let effective = db.load_effective_transcript(conversation).unwrap();
+    assert_eq!(
+        contents(&session.transcript),
+        ["compacted summary of prior turns", "current answer"]
+    );
+    assert_eq!(contents(&effective), contents(&session.transcript));
+    assert_eq!(
+        contents(&session.display_transcript()),
+        [
+            "first request",
+            "first answer",
+            "follow-up",
+            "second answer",
+            "final question",
+            "current answer",
+        ]
+    );
+
+    let checkpoint_count: i64 = db
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_context_checkpoints WHERE conversation_id = ?1",
+            rusqlite::params![conversation],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(checkpoint_count, 1);
+    assert_eq!(
+        db.load_messages(conversation).unwrap().len(),
+        prior.len() + 1
+    );
 }

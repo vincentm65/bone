@@ -1,19 +1,71 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import test from "node:test";
+import { promisify } from "node:util";
 import vm from "node:vm";
-import { renderMarkdown } from "../public/markdown.js";
+import { isSafeImageUrl, isSafeLinkUrl } from "../public/markdown.js";
 
-const [html, css, js, bridge, markdown, canvasCore] = await Promise.all([
+const execFileAsync = promisify(execFile);
+
+const [html, css, js, bridge, markdown, canvasCore, dompurify] = await Promise.all([
   readFile(new URL("../public/index.html", import.meta.url), "utf8"),
   readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
   readFile(new URL("../public/app.js", import.meta.url), "utf8"),
   readFile(new URL("../bridge.mjs", import.meta.url), "utf8"),
   readFile(new URL("../public/markdown.js", import.meta.url), "utf8"),
   readFile(new URL("../public/canvas-core.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/dompurify-3.4.12.min.js", import.meta.url), "utf8"),
 ]);
 
-const markdownContext = { render: renderMarkdown };
+async function renderMarkdownInBrowser(inputs, t) {
+  const encodedInputs = encodeURIComponent(JSON.stringify(inputs));
+  const page = `<!doctype html><title>pending</title>
+    <script src="/dompurify.js"></script>
+    <script type="module">
+      import { renderMarkdown } from "/markdown.js";
+      const inputs = JSON.parse(decodeURIComponent("${encodedInputs}"));
+      document.title = encodeURIComponent(JSON.stringify(inputs.map((input) => renderMarkdown(input))));
+    </script>`;
+  const server = createServer((request, response) => {
+    if (request.url === "/dompurify.js") {
+      response.writeHead(200, { "content-type": "text/javascript" });
+      response.end(dompurify);
+    } else if (request.url === "/markdown.js") {
+      response.writeHead(200, { "content-type": "text/javascript" });
+      response.end(markdown);
+    } else {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(page);
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const { port } = server.address();
+    let stdout;
+    try {
+      ({ stdout } = await execFileAsync("chromium", [
+        "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-background-networking",
+        "--virtual-time-budget=1000", "--dump-dom", `http://127.0.0.1:${port}/`,
+      ], { maxBuffer: 2 * 1024 * 1024 }));
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        t.skip("chromium is not installed");
+        return null;
+      }
+      throw error;
+    }
+    const title = stdout.match(/<title>([^<]*)<\/title>/)?.[1];
+    assert.ok(title && title !== "pending", "browser completed Markdown rendering");
+    return JSON.parse(decodeURIComponent(title));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
 
 test("daemon config response remains canonical", async () => {
   const source = bridge.slice(
@@ -224,28 +276,77 @@ test("streaming conversations expose reading and recovery controls", () => {
   assert.match(css, /\.approval \{ position: sticky/);
 });
 
-test("chat rendering supports rich markdown and highlighted code", () => {
-  assert.match(markdown, /function safeHref/);
-  assert.match(markdown, /function highlightCode/);
-  assert.match(markdown, /data-language=/);
-  assert.match(markdown, /class="task-item"/);
-  assert.match(markdown, /loading="lazy"/);
+test("chat rendering supports Markdown, inline HTML, and block HTML", async (t) => {
+  assert.match(html, /dompurify-3\.4\.12\.min\.js[^]*type="module" src="\/app\.js"/);
   assert.match(css, /\.tok-keyword/);
-  assert.match(css, /\.code-language/);
-  assert.match(css, /\.prose \.task-item/);
+  assert.match(css, /\.prose details/);
+  assert.match(css, /\.prose kbd/);
 
-  const rendered = markdownContext.render("- [x] done\n\n~~old~~ and [safe](https://example.com)\n\n```js\nconst n = 42; // note\n```");
+  const [rendered, rawHtml, malformed] = await renderMarkdownInBrowser([
+    "- [x] done\n\n~~old~~ and [safe](https://example.com)\n\n```js\nconst n = 42; // note\n```",
+    "Inline <kbd>Ctrl</kbd> and <mark>safe</mark>.\n\n<section><h4>Title</h4><p>Body</p></section>\n\n<details open><summary>More</summary><p>Extra</p></details>",
+    "<div><strong>open",
+  ], t) || [];
+  if (!rendered) return;
   assert.match(rendered, /class="task-item"/);
   assert.match(rendered, /<del>old<\/del>/);
   assert.match(rendered, /tok-keyword/);
   assert.match(rendered, /tok-number/);
   assert.match(rendered, /tok-comment/);
   assert.match(rendered, /data-language="js"/);
-  assert.equal(markdownContext.render("[bad](javascript:alert(1))").includes('href="javascript:'), false);
-  assert.equal(markdownContext.render("first\nsecond"), "<p>first<br/>second</p>");
-  assert.equal(markdownContext.render("first<br>second<br />third"), "<p>first<br/>second<br/>third</p>");
-  assert.equal(markdownContext.render("`<br>`"), "<p><code>&lt;br&gt;</code></p>");
-  assert.match(markdownContext.render("<script>alert(1)</script>"), /&lt;script&gt;/);
+  assert.match(rendered, /href="https:\/\/example\.com"/);
+  assert.match(rendered, /target="_blank"/);
+  assert.match(rendered, /rel="noopener noreferrer"/);
+  assert.match(rawHtml, /<p>Inline <kbd>Ctrl<\/kbd> and <mark>safe<\/mark>\.<\/p>/);
+  assert.match(rawHtml, /<section><h4>Title<\/h4><p>Body<\/p><\/section>/);
+  assert.match(rawHtml, /<details open=""><summary>More<\/summary><p>Extra<\/p><\/details>/);
+  assert.equal(malformed, "<div><strong>open</strong></div>");
+});
+
+test("rendered HTML rejects active content and normalizes safe resources", async (t) => {
+  assert.equal(isSafeLinkUrl("javascript:alert(1)"), false);
+  assert.equal(isSafeLinkUrl("java\nscript:alert(1)"), false);
+  assert.equal(isSafeLinkUrl("//evil.example/path"), false);
+  assert.equal(isSafeLinkUrl("https://example.com"), true);
+  assert.equal(isSafeLinkUrl("/local"), true);
+  assert.equal(isSafeImageUrl("http://example.com/image.png"), false);
+  assert.equal(isSafeImageUrl("data:image/png;base64,AAAA"), false);
+  assert.equal(isSafeImageUrl("https://example.com/image.png"), true);
+
+  const hostile = `<script>alert(1)</script>
+    <a href="javascript:alert(2)" onclick="alert(3)" target="_self" rel="opener">bad</a>
+    <a href="https://example.com/ok" onclick="alert(4)" target="_self" rel="opener">good</a>
+    <p data-language="evil" data-owner="model">metadata</p>
+    <img src="data:image/svg+xml,<svg onload=alert(5)>" onerror="alert(6)">
+    <img src="http://example.com/insecure.png"><img src="https://example.com/safe.png" onload="alert(7)">
+    <form action="https://evil.example"><input autofocus><button>submit</button><textarea>x</textarea></form>
+    <iframe srcdoc="<script>alert(8)</script>"></iframe><meta http-equiv="refresh" content="0;url=https://evil.example">
+    <svg><script>alert(9)</script><a xlink:href="javascript:alert(10)">svg</a></svg>
+    <math><mi xlink:href="data:x">math</mi></math><style>body{display:none}</style>`;
+  const [rendered] = await renderMarkdownInBrowser([hostile], t) || [];
+  if (!rendered) return;
+  assert.doesNotMatch(rendered, /<(?:script|style|form|input|button|textarea|iframe|meta|svg|math)\b/i);
+  assert.doesNotMatch(rendered, /\s(?:on\w+|style|srcdoc|srcset|id|name|data-[\w-]+)=/i);
+  assert.doesNotMatch(rendered, /javascript:|data:image|http:\/\/example\.com\/insecure/i);
+  assert.match(rendered, /<p>metadata<\/p>/);
+  assert.match(rendered, /<a>bad<\/a>/);
+  assert.match(rendered, /<a href="https:\/\/example\.com\/ok" target="_blank" rel="noopener noreferrer">good<\/a>/);
+  assert.match(rendered, /<img src="https:\/\/example\.com\/safe\.png" loading="lazy" decoding="async" referrerpolicy="no-referrer">/);
+});
+
+test("streaming, final, and replay paths share the sanitized renderer", async (t) => {
+  assert.match(js, /state\.asstEl\.innerHTML = renderMarkdown\(state\.asstRaw\) \+ '<span class="caret"><\/span>'/);
+  assert.match(js, /function onFinished\(\)[^]*state\.asstEl\.innerHTML = renderMarkdown\(state\.asstRaw\)/);
+  assert.match(js, /renderStoredMessage[^]*el\("div", "prose", renderMarkdown\(m\.content\)\)/);
+  const outputs = await renderMarkdownInBrowser([
+    "<scr",
+    "<script>alert(1)",
+    "<script>alert(1)</script><p>safe</p>",
+  ], t);
+  if (!outputs) return;
+  assert.doesNotMatch(outputs[0], /<script/i);
+  assert.doesNotMatch(outputs[1], /<script|alert/i);
+  assert.equal(outputs[2], "<p>safe</p>");
 });
 
 test("thinking states are simple, animated, and motion-safe", () => {

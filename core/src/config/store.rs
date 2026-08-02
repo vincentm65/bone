@@ -384,6 +384,14 @@ impl ConfigStore {
                             serde_json::json!(false),
                         ),
                         field(
+                            "general.system_prompt",
+                            "system_prompt",
+                            "System prompt",
+                            "string",
+                            &[],
+                            serde_json::Value::Null,
+                        ),
+                        field(
                             "ui.input.preset",
                             "input_preset",
                             "Input style",
@@ -894,6 +902,100 @@ impl ConfigStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn system_prompt_schema_mutation_reset_and_persistence() {
+        let _guard = crate::util::test_env_lock();
+        let previous = std::env::var_os("BONE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+        let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+        let schema = store.schema();
+        let field = schema
+            .pages
+            .iter()
+            .find(|page| page.namespace == "general")
+            .and_then(|page| {
+                page.fields
+                    .iter()
+                    .find(|field| field.path == "general.system_prompt")
+            })
+            .expect("general.system_prompt schema field");
+        assert_eq!(field.value_type, "string");
+        assert_eq!(field.default, serde_json::Value::Null);
+
+        let assert_value = |expected: Option<&str>| {
+            let snapshot = store.snapshot();
+            assert_eq!(
+                snapshot.values["general"]["system_prompt"],
+                expected
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null)
+            );
+            assert_eq!(
+                store
+                    .runtime_settings_snapshot()
+                    .resolved()
+                    .general
+                    .system_prompt
+                    .as_deref(),
+                expected
+            );
+            assert_eq!(
+                Settings::load()
+                    .unwrap()
+                    .unwrap()
+                    .resolved()
+                    .general
+                    .system_prompt
+                    .as_deref(),
+                expected
+            );
+            assert_eq!(
+                std::fs::read_to_string(super::super::settings::settings_path())
+                    .unwrap()
+                    .contains("system_prompt:"),
+                expected.is_some()
+            );
+        };
+
+        store
+            .set_value(
+                "general.system_prompt",
+                serde_json::json!("Configured base prompt"),
+                store.snapshot().revision,
+            )
+            .unwrap();
+        assert_value(Some("Configured base prompt"));
+
+        store
+            .set_value(
+                "general.system_prompt",
+                serde_json::Value::Null,
+                store.snapshot().revision,
+            )
+            .unwrap();
+        assert_value(None);
+
+        store
+            .set_value(
+                "general.system_prompt",
+                serde_json::json!("Configured again"),
+                store.snapshot().revision,
+            )
+            .unwrap();
+        store
+            .reset_value("general.system_prompt", store.snapshot().revision)
+            .unwrap();
+        assert_value(None);
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("BONE_DIR", value),
+                None => std::env::remove_var("BONE_DIR"),
+            }
+        }
+    }
     #[test]
     fn provider_mutation_accepts_custom_reasoning_effort() {
         let _guard = crate::util::test_env_lock();

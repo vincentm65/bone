@@ -162,6 +162,8 @@ pub struct GeneralSettings {
     pub approval: String,
     #[serde(default)]
     pub show_reasoning: bool,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 fn default_approval() -> String {
@@ -173,6 +175,7 @@ impl Default for GeneralSettings {
         Self {
             approval: default_approval(),
             show_reasoning: false,
+            system_prompt: None,
         }
     }
 }
@@ -1281,6 +1284,7 @@ mod tests {
         original.inner.ui.status_show_timer = false;
         let verbose = serde_yaml::to_string(original.resolved()).unwrap();
         assert!(verbose.contains("show_reasoning: false"));
+        assert!(verbose.contains("system_prompt: null"));
         assert!(verbose.contains("theme:"));
         fs::write(&path, verbose).unwrap();
 
