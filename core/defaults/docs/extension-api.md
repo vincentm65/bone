@@ -90,6 +90,37 @@ Core command names remain protected and cannot be overridden. A command with
 settings should register its namespace through `bone.settings.define` rather
 than writing YAML directly.
 
+## before_turn return values
+
+`before_turn` may return a table that shapes the upcoming request without going through
+protocol commands or runtime events:
+
+- `conversation = { compact = { instruction = "<required non-empty string>",
+    keep_recent_turns = 2 } }` compacts the model-facing transcript. The
+  instruction describes what the compacted view should preserve.
+  `keep_recent_turns` is optional, defaults to `2`, and must be a non-negative
+  integer. Empty or tool-generating private output is retried once. The prompt asks
+  for a concise checkpoint, but Bone does not reject or truncate non-empty plain text
+  based on length. Transport, stream, and cancellation failures are not retried. If
+  compaction ultimately fails, the transcript is unchanged and the normal turn
+  continues.
+- `system_prompt_append` and `turn_message` are transient per-turn values.
+- `tool_filter` is a per-turn allow-list of tool names.
+
+Handlers run in registration order. The first valid compaction request wins. All
+hooks still run, and their `system_prompt_append` values are accumulated before the
+private request. Any `conversation.replace` from the same hook pass takes precedence
+and skips compaction. Successful compaction atomically replaces model-facing history
+with one stable synthetic user checkpoint followed by the requested recent complete
+turns, including the submitted user turn. The effective checkpoint is persisted while
+full display history remains intact.
+
+The private request uses the active provider and finalized system prompt, the current
+conversation id and turn state, and all original tools; it ignores `tool_filter` and
+runs before transient `turn_message` insertion. Its output and tool calls are neither
+surfaced nor executed. Compaction is not represented by a protocol `CommandAction` or
+a public runtime event.
+
 ## Events
 
 ```lua

@@ -50,6 +50,26 @@ the in-process daemon used with the TUI and for standalone `bone serve`. A TUI
 or web client sends commands and renders events; it does not own authoritative
 transcript, approval, job, or configuration state.
 
+## Turn execution
+
+A submitted turn may make multiple normal provider requests while executing tools.
+Before those requests, all hooks run and their `system_prompt_append` values finalize
+the active system prompt. A requested private compaction then uses that prompt, the
+active provider, conversation id and shared turn state, the current history, and all
+original tools. It ignores the per-turn `tool_filter` and runs before transient
+`turn_message` insertion and normal tool filtering. Private output is not surfaced,
+and private tool calls are not executed.
+
+At most one compaction cycle runs per submitted turn, with one repair request only
+when output is empty or generates a tool call. The prompt asks for a concise checkpoint,
+but Bone does not reject or truncate a non-empty plain-text checkpoint based on its
+length. Transport, stream, and cancellation failures are not retried. Any final failure
+leaves the transcript unchanged and the normal turn continues. Success atomically
+replaces model-facing history with one stable synthetic user checkpoint followed by
+retained complete turns, including the submitted user turn. The effective checkpoint
+is persisted to SQLite while complete display history remains intact. Compaction is
+private driver behavior, not a protocol command action or public runtime event.
+
 ## Data flow
 
 1. A client sends a `RuntimeCommand` through the local or newline-JSON runtime

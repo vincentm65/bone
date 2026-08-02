@@ -13,7 +13,7 @@ mod common;
 use bone_core::agent::AgentRunEvent;
 use bone_core::chat::build_chat_history;
 use bone_core::ext::{BootOptions, ExtensionManager, boot_with_tools};
-use bone_core::llm::provider::LlmProvider;
+use bone_core::llm::provider::{LlmProvider, ProviderRequestContext};
 use bone_core::llm::{
     ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, ResponseStream, TokenStats,
 };
@@ -38,6 +38,7 @@ use bone_core::tools::{
 /// connection-level error (so tests can exercise the connection retry path).
 enum MockAttempt {
     Stream(Vec<Result<ChatEvent, LlmError>>),
+    Pending,
     ConnErr(LlmError),
 }
 
@@ -91,6 +92,7 @@ impl LlmProvider for MockProvider {
             .unwrap_or(MockAttempt::Stream(vec![]));
         match attempt {
             MockAttempt::Stream(events) => Ok(futures_util::stream::iter(events).boxed()),
+            MockAttempt::Pending => Ok(futures_util::stream::pending().boxed()),
             MockAttempt::ConnErr(e) => Err(e),
         }
     }
@@ -940,6 +942,74 @@ impl LlmProvider for CapturingProvider {
     }
 }
 
+#[tokio::test]
+async fn driver_appends_lua_prompt_text_to_configured_main_prompt() {
+    let config_dir = common::temp_dir("driver-configured-system-prompt");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"
+bone.on("before_turn", function()
+    return { system_prompt_append = "Lua turn instructions" }
+end)
+"#,
+    )
+    .unwrap();
+
+    let config = common::config_store();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &config,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let base = bone_core::llm::prompts::system_prompt_with_base(Some("Configured base"));
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-1".into(),
+        script: Mutex::new(vec![vec![ChatEvent::TextDelta("done".into())]]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: booted.manager,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, Some(&base)),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: Some(base.clone()),
+        conversation_id: None,
+        config_store: config,
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.unwrap().content, "done");
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0][0].content,
+        format!("{base}\n\nLua turn instructions")
+    );
+
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
 struct EphemeralImageTool {
     calls: std::sync::atomic::AtomicUsize,
 }
@@ -1741,6 +1811,559 @@ async fn driver_does_not_retry_non_retryable_stream_error() {
     let result = driver.run(prompt).await;
     let err = result.err().expect("should fail without retrying");
     assert!(err.contains("max_output_tokens"), "unexpected error: {err}");
+}
+
+// --- Conversation compaction ---
+
+#[derive(Clone)]
+struct CompactionCapture {
+    messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    context: ProviderRequestContext,
+}
+
+struct CompactionProvider {
+    attempts: Mutex<Vec<MockAttempt>>,
+    captures: Mutex<Vec<CompactionCapture>>,
+}
+
+impl CompactionProvider {
+    fn new(attempts: Vec<MockAttempt>) -> Self {
+        Self {
+            attempts: Mutex::new(attempts.into_iter().rev().collect()),
+            captures: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn respond(&self) -> Result<ResponseStream, LlmError> {
+        match self
+            .attempts
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or(MockAttempt::Stream(Vec::new()))
+        {
+            MockAttempt::Stream(events) => Ok(futures_util::stream::iter(events).boxed()),
+            MockAttempt::Pending => Ok(futures_util::stream::pending().boxed()),
+            MockAttempt::ConnErr(error) => Err(error),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for CompactionProvider {
+    fn id(&self) -> &str {
+        "compaction-mock"
+    }
+
+    fn name(&self) -> &str {
+        "Compaction Mock"
+    }
+
+    fn model(&self) -> &str {
+        "compaction-model"
+    }
+
+    fn set_model(&mut self, _model: String) {}
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
+        self.captures.lock().unwrap().push(CompactionCapture {
+            messages,
+            tools,
+            context: ProviderRequestContext::default(),
+        });
+        self.respond()
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
+        self.captures.lock().unwrap().push(CompactionCapture {
+            messages,
+            tools,
+            context,
+        });
+        self.respond()
+    }
+}
+
+fn compaction_test_driver(
+    name: &str,
+    lua_source: &str,
+    llm: Arc<CompactionProvider>,
+    transcript: Vec<ChatMessage>,
+    runtime_events: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
+) -> (Driver, std::path::PathBuf) {
+    let config_dir = common::temp_dir(name);
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("init.lua"), lua_source).unwrap();
+    let config = common::config_store();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &config,
+        false,
+        BootOptions::default(),
+        "compaction-model",
+        "Compaction Mock",
+    );
+    let base = "Configured compaction base".to_string();
+    let history = build_chat_history(&transcript, Some(&base));
+    (
+        Driver {
+            llm,
+            extensions: booted.manager,
+            config_store: config,
+            tools: ToolHandler::new(builtin_tools()),
+            session: Arc::new(NullSessionSink),
+            gate: Arc::new(AutoApprovalGate),
+            approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+            agent_depth: 0,
+            activity: None,
+            on_token_usage: None,
+            events: false,
+            event_sender: None,
+            runtime_events,
+            key_reply_registry: None,
+            cancel: None,
+            history,
+            transcript,
+            token_stats: TokenStats::new(),
+            system_prompt_override: Some(base),
+            conversation_id: Some(42),
+            turn_nudge: Arc::new(Mutex::new(None)),
+        },
+        config_dir,
+    )
+}
+
+#[tokio::test]
+async fn compaction_success_uses_final_context_and_keeps_private_output_private() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return {
+        system_prompt_append = "append-one",
+        turn_message = "TRANSIENT-MARKER",
+        tool_filter = {},
+        conversation = { compact = { instruction = "FIRST-INSTRUCTION", keep_recent_turns = 1 } },
+    }
+end)
+bone.on("before_turn", function()
+    return {
+        system_prompt_append = "append-two",
+        conversation = { compact = { instruction = "SECOND-INSTRUCTION", keep_recent_turns = 0 } },
+    }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("PRIVATE-CHECKPOINT".into()))]),
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("normal answer".into()))]),
+    ]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "u1"),
+        ChatMessage::new(ChatRole::Assistant, "a1"),
+        ChatMessage::new(ChatRole::User, "u2"),
+        ChatMessage::new(ChatRole::Assistant, "a2"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (driver, config_dir) = compaction_test_driver(
+        "driver-compaction-success",
+        lua,
+        llm.clone(),
+        transcript,
+        Some(tx),
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "normal answer");
+    assert!(outcome.transcript_replaced);
+    assert_eq!(outcome.transcript.len(), 5);
+    assert_eq!(outcome.transcript[0].role, ChatRole::User);
+    assert!(outcome.transcript[0].content.contains("PRIVATE-CHECKPOINT"));
+    assert_eq!(outcome.transcript[1].content, "u2");
+    assert_eq!(outcome.transcript[2].content, "a2");
+    assert_eq!(outcome.transcript[3].content, prompt);
+
+    let captures = llm.captures.lock().unwrap();
+    assert_eq!(captures.len(), 2);
+    let private = &captures[0];
+    let normal = &captures[1];
+    assert!(
+        private.messages[0]
+            .content
+            .contains("Configured compaction base")
+    );
+    assert!(private.messages[0].content.contains("append-one"));
+    assert!(private.messages[0].content.contains("append-two"));
+    assert!(
+        private
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("FIRST-INSTRUCTION")
+    );
+    assert!(
+        !private
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("SECOND-INSTRUCTION")
+    );
+    assert!(
+        private
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("TRANSIENT-MARKER"))
+    );
+    assert!(
+        normal
+            .messages
+            .iter()
+            .any(|message| message.content.contains("TRANSIENT-MARKER"))
+    );
+    assert!(!private.tools.is_empty());
+    assert!(normal.tools.is_empty());
+    assert_eq!(private.context.conversation_id, Some(42));
+    assert_eq!(normal.context.conversation_id, Some(42));
+    assert!(Arc::ptr_eq(
+        private.context.turn_state.as_ref().unwrap(),
+        normal.context.turn_state.as_ref().unwrap()
+    ));
+    drop(captures);
+
+    let mut surfaced = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let RuntimeEvent::TextDelta { text } = event {
+            surfaced.push_str(&text);
+        }
+    }
+    assert_eq!(surfaced, "normal answer");
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn compaction_tool_output_repairs_once_without_executing_private_call() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![
+        MockAttempt::Stream(vec![Ok(ChatEvent::ToolCall(ToolCall {
+            id: "private-call".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "path": "must-not-run" }),
+        }))]),
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("repaired checkpoint".into()))]),
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
+    ]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "old"),
+        ChatMessage::new(ChatRole::Assistant, "old answer"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let (driver, config_dir) = compaction_test_driver(
+        "driver-compaction-repair",
+        lua,
+        llm.clone(),
+        transcript,
+        None,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
+    assert!(outcome.transcript_replaced);
+    assert_eq!(llm.captures.lock().unwrap().len(), 3);
+    assert!(
+        outcome
+            .transcript
+            .iter()
+            .all(|message| message.role != ChatRole::Tool)
+    );
+    assert!(
+        outcome
+            .transcript
+            .iter()
+            .all(|message| message.tool_calls.is_empty())
+    );
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn large_compaction_output_is_accepted_without_repair() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
+end)
+"#;
+    let large_checkpoint = "x".repeat(20_000);
+    let llm = Arc::new(CompactionProvider::new(vec![
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta(large_checkpoint.clone()))]),
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
+    ]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "old"),
+        ChatMessage::new(ChatRole::Assistant, "old answer"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let (driver, config_dir) = compaction_test_driver(
+        "driver-compaction-large-output",
+        lua,
+        llm.clone(),
+        transcript,
+        None,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
+    assert!(outcome.transcript_replaced);
+    assert!(
+        outcome
+            .transcript
+            .iter()
+            .any(|message| message.content.contains(&large_checkpoint))
+    );
+    assert_eq!(llm.captures.lock().unwrap().len(), 2);
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn compaction_transport_failure_does_not_repair_or_replace_transcript() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![
+        MockAttempt::ConnErr(LlmError::new_with_kind(
+            LlmErrorKind::Connection,
+            "private failure",
+        )),
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
+    ]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "old"),
+        ChatMessage::new(ChatRole::Assistant, "old answer"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let original = transcript.clone();
+    let (driver, config_dir) = compaction_test_driver(
+        "driver-compaction-transport",
+        lua,
+        llm.clone(),
+        transcript,
+        None,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
+    assert!(!outcome.transcript_replaced);
+    assert_eq!(llm.captures.lock().unwrap().len(), 2);
+    assert_eq!(&outcome.transcript[..original.len()], original.as_slice());
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn same_pass_replacement_skips_compaction() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "must not run" } } }
+end)
+bone.on("before_turn", function()
+    return {
+        action = "conversation.replace",
+        messages = { { role = "user", content = "replacement wins" } },
+    }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![MockAttempt::Stream(vec![
+        Ok(ChatEvent::TextDelta("done".into())),
+    ])]));
+    let prompt = "current";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let (driver, config_dir) = compaction_test_driver(
+        "driver-compaction-replace",
+        lua,
+        llm.clone(),
+        transcript,
+        None,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
+    assert!(outcome.transcript_replaced);
+    assert_eq!(outcome.transcript[0].content, "replacement wins");
+    assert_eq!(llm.captures.lock().unwrap().len(), 1);
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn compaction_runs_only_once_across_normal_tool_rounds() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "compact once", keep_recent_turns = 0 } } }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("checkpoint once".into()))]),
+        MockAttempt::Stream(vec![Ok(ChatEvent::ToolCall(ToolCall {
+            id: "normal-call".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "path": "Cargo.toml" }),
+        }))]),
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
+    ]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "old"),
+        ChatMessage::new(ChatRole::Assistant, "old answer"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let (driver, config_dir) = compaction_test_driver(
+        "driver-compaction-one-cycle",
+        lua,
+        llm.clone(),
+        transcript,
+        None,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
+    let captures = llm.captures.lock().unwrap();
+    assert_eq!(
+        captures.len(),
+        3,
+        "one private request plus two normal rounds"
+    );
+    assert_eq!(
+        captures
+            .iter()
+            .filter(|capture| capture
+                .messages
+                .last()
+                .is_some_and(|message| message.content.contains("Output only the checkpoint text")))
+            .count(),
+        1,
+        "later before_turn passes must not start another compaction cycle"
+    );
+    drop(captures);
+    assert_eq!(
+        outcome
+            .transcript
+            .iter()
+            .filter(|message| message.content.contains("checkpoint once"))
+            .count(),
+        1
+    );
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn empty_compaction_and_empty_repair_leave_transcript_unchanged() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![
+        MockAttempt::Stream(Vec::new()),
+        MockAttempt::Stream(Vec::new()),
+        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
+    ]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "old"),
+        ChatMessage::new(ChatRole::Assistant, "old answer"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let original = transcript.clone();
+    let (driver, config_dir) = compaction_test_driver(
+        "driver-compaction-empty",
+        lua,
+        llm.clone(),
+        transcript,
+        None,
+    );
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
+    assert!(!outcome.transcript_replaced);
+    assert_eq!(&outcome.transcript[..original.len()], original.as_slice());
+    let captures = llm.captures.lock().unwrap();
+    assert_eq!(captures.len(), 3);
+    assert!(
+        captures[1]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("only repair attempt")
+    );
+    drop(captures);
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn cancellation_during_private_compaction_does_not_repair_or_replace_transcript() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![MockAttempt::Pending]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "old"),
+        ChatMessage::new(ChatRole::Assistant, "old answer"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let original = transcript.clone();
+    let (mut driver, config_dir) = compaction_test_driver(
+        "driver-compaction-cancelled",
+        lua,
+        llm.clone(),
+        transcript,
+        None,
+    );
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    driver.cancel = Some(cancel.clone());
+
+    let run = tokio::spawn(driver.run_to_outcome(prompt));
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if llm.captures.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("private compaction request did not start");
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+        .await
+        .expect("private compaction did not observe cancellation")
+        .expect("driver task panicked");
+    assert_eq!(outcome.result.as_ref().unwrap().content, "");
+    assert!(!outcome.transcript_replaced);
+    assert_eq!(outcome.transcript, original);
+    assert_eq!(llm.captures.lock().unwrap().len(), 1);
+    std::fs::remove_dir_all(config_dir).ok();
 }
 
 // --- Cancellation ---

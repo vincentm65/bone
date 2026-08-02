@@ -26,6 +26,221 @@ use crate::session_sink::SessionSink;
 use crate::tools::registry::ToolHandler;
 use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult};
 
+const COMPACTION_CHECKPOINT_PREFIX: &str =
+    "Conversation checkpoint (synthetic; earlier messages compacted):\n\n";
+
+#[derive(Debug, PartialEq, Eq)]
+enum CompactionCycleResult {
+    Success(String),
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CompactionAttemptResult {
+    Valid(String),
+    Invalid,
+    TransportFailure,
+    Cancelled,
+}
+
+fn compaction_suffix_start(messages: &[ChatMessage], keep_recent_turns: usize) -> usize {
+    let user_starts = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| (message.role == ChatRole::User).then_some(index))
+        .collect::<Vec<_>>();
+    if user_starts.is_empty() {
+        return 0;
+    }
+
+    let retained_turns = keep_recent_turns.saturating_add(1);
+    let mut start = user_starts[user_starts.len().saturating_sub(retained_turns)];
+
+    // A user boundary normally keeps tool calls and results together. If a
+    // malformed transcript links a retained result to an earlier call, widen
+    // the suffix to that call's turn. Missing or duplicate ids are ambiguous,
+    // so retain the complete transcript rather than risk splitting a tool chain.
+    loop {
+        let mut widened = start;
+        for (result_index, result) in messages.iter().enumerate().skip(start) {
+            if result.role != ChatRole::Tool {
+                continue;
+            }
+            let Some(call_id) = result.tool_call_id.as_deref() else {
+                return 0;
+            };
+            let call_positions = messages
+                .iter()
+                .enumerate()
+                .flat_map(|(message_index, message)| {
+                    message
+                        .tool_calls
+                        .iter()
+                        .filter(move |call| call.id == call_id)
+                        .map(move |_| message_index)
+                })
+                .collect::<Vec<_>>();
+            if call_positions.len() != 1 {
+                return 0;
+            }
+            let call_index = call_positions[0];
+            if call_index < start {
+                let Some(turn_start) = user_starts
+                    .iter()
+                    .copied()
+                    .take_while(|index| *index <= call_index)
+                    .last()
+                else {
+                    return 0;
+                };
+                widened = widened.min(turn_start);
+            }
+            let matching_results = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| {
+                    message.role == ChatRole::Tool
+                        && message.tool_call_id.as_deref() == Some(call_id)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if matching_results.len() != 1 || matching_results[0] != result_index {
+                return 0;
+            }
+        }
+        if widened == start {
+            return start;
+        }
+        start = widened;
+    }
+}
+
+fn compaction_prompt(instruction: &str, trailing_messages: usize, repair: bool) -> String {
+    let repair_text = if repair {
+        "The previous checkpoint was invalid. This is the only repair attempt. Output non-empty plain text and do not call tools.\n\n"
+    } else {
+        ""
+    };
+    format!(
+        "{repair_text}Create a 3,000–3,200-token plain-text conversation checkpoint. \
+         The final {trailing_messages} transcript messages will remain verbatim after the checkpoint, \
+         so preserve the important context from the earlier conversation without repeating that suffix. \
+         Follow this instruction:\n\n{instruction}\n\nOutput only the checkpoint text. Do not call tools."
+    )
+}
+
+fn checkpoint_message(text: &str) -> ChatMessage {
+    ChatMessage::new(
+        ChatRole::User,
+        format!("{COMPACTION_CHECKPOINT_PREFIX}{}", text.trim()),
+    )
+}
+
+async fn wait_for_cancel(cancel: Option<Arc<std::sync::atomic::AtomicBool>>) {
+    match cancel {
+        Some(flag) => {
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn run_compaction_attempt(
+    llm: &Arc<dyn LlmProvider>,
+    prefix: &[ChatMessage],
+    tool_defs: &[crate::tools::ToolDefinition],
+    context: ProviderRequestContext,
+    instruction: &str,
+    trailing_messages: usize,
+    repair: bool,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> CompactionAttemptResult {
+    let mut request = prefix.to_vec();
+    request.push(ChatMessage::new(
+        ChatRole::User,
+        compaction_prompt(instruction, trailing_messages, repair),
+    ));
+    let send = llm.chat_stream_with_context(request, tool_defs.to_vec(), context);
+    let mut stream = match tokio::select! {
+        biased;
+        _ = wait_for_cancel(cancel.clone()) => return CompactionAttemptResult::Cancelled,
+        result = send => result,
+    } {
+        Ok(stream) => stream,
+        Err(_) => return CompactionAttemptResult::TransportFailure,
+    };
+
+    let mut text = String::new();
+    while let Some(event) = tokio::select! {
+        biased;
+        _ = wait_for_cancel(cancel.clone()) => return CompactionAttemptResult::Cancelled,
+        event = stream.next() => event,
+    } {
+        match event {
+            Ok(ChatEvent::TextDelta(delta)) => text.push_str(&delta),
+            Ok(ChatEvent::ToolCall(_)) => return CompactionAttemptResult::Invalid,
+            Ok(ChatEvent::ReasoningDelta { .. })
+            | Ok(ChatEvent::EncryptedReasoning { .. })
+            | Ok(ChatEvent::TokenUsage { .. }) => {}
+            Err(_) => return CompactionAttemptResult::TransportFailure,
+        }
+    }
+
+    if text.trim().is_empty() {
+        CompactionAttemptResult::Invalid
+    } else {
+        CompactionAttemptResult::Valid(text)
+    }
+}
+
+async fn run_compaction_cycle(
+    llm: &Arc<dyn LlmProvider>,
+    prefix: &[ChatMessage],
+    tool_defs: &[crate::tools::ToolDefinition],
+    context: ProviderRequestContext,
+    instruction: &str,
+    trailing_messages: usize,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> CompactionCycleResult {
+    let initial = run_compaction_attempt(
+        llm,
+        prefix,
+        tool_defs,
+        context.clone(),
+        instruction,
+        trailing_messages,
+        false,
+        cancel.clone(),
+    )
+    .await;
+    match initial {
+        CompactionAttemptResult::Valid(text) => CompactionCycleResult::Success(text),
+        CompactionAttemptResult::Cancelled => CompactionCycleResult::Cancelled,
+        CompactionAttemptResult::TransportFailure => CompactionCycleResult::Failed,
+        CompactionAttemptResult::Invalid => match run_compaction_attempt(
+            llm,
+            prefix,
+            tool_defs,
+            context,
+            instruction,
+            trailing_messages,
+            true,
+            cancel,
+        )
+        .await
+        {
+            CompactionAttemptResult::Valid(text) => CompactionCycleResult::Success(text),
+            CompactionAttemptResult::Cancelled => CompactionCycleResult::Cancelled,
+            CompactionAttemptResult::Invalid | CompactionAttemptResult::TransportFailure => {
+                CompactionCycleResult::Failed
+            }
+        },
+    }
+}
+
 /// Maximum turns a sub-agent (agent_depth > 0) may take before the driver
 /// breaks the loop with an error. This is a hard backstop against tool-looping;
 /// the top-level agent (depth 0) is uncapped.
@@ -134,11 +349,11 @@ pub struct DriverOutcome {
     pub transcript: Vec<ChatMessage>,
     pub token_stats: TokenStats,
     /// Messages produced during this turn that still need durable persistence.
-    /// Kept separately because a `conversation.replace` compaction can shorten
+    /// Kept separately because a model-facing transcript replacement can shorten
     /// or reshape `transcript`, making a pre-turn transcript index invalid.
     pub persist_messages: Vec<ChatMessage>,
-    /// True when a `conversation.replace` action changed the model-facing
-    /// transcript and the resulting view needs a durable checkpoint.
+    /// True when `conversation.replace` or successful private compaction changed
+    /// the model-facing transcript and the resulting view needs a durable checkpoint.
     pub transcript_replaced: bool,
     /// Per-request usage captured during the turn. The Driver also reports these
     /// to its `session` sink, but a frontend that runs with a `NullSessionSink`
@@ -407,6 +622,9 @@ impl Driver {
         // adding the screenshot to the persisted transcript.
         let mut ephemeral_image_relay: Option<(usize, ChatMessage)> = None;
         let mut last_turn_messages: Vec<String> = Vec::new();
+        // A submitted user turn may run several provider/tool rounds, but its
+        // before_turn hooks may start at most one compaction cycle.
+        let mut compaction_cycle_used = false;
         // The Codex backend returns routing state on the first request of a
         // user turn. Keep it across retries and tool rounds in this run, but
         // create a fresh cell for every later submitted user message/run.
@@ -481,8 +699,8 @@ impl Driver {
                 // Give before_turn handlers a live status channel so they can
                 // surface progress to the attached frontend (e.g. compaction).
                 ctx_cfg.runtime_status = runtime_events.clone();
-                // Thread the turn cancel flag so pressing Esc aborts an
-                // in-flight compaction (`ctx.agent.run` watches this).
+                // Thread the turn cancel flag through blocking hooks and private
+                // compaction requests.
                 ctx_cfg.cancelled = cancel.clone();
                 // Subagents (depth > 0) run with no runtime_status channel, so
                 // `ctx.ui.status`/`notify` would otherwise fall back to stderr
@@ -492,18 +710,16 @@ impl Driver {
 
                 let mut sys_appends: Vec<String> = Vec::new();
                 let mut tool_filter: Option<Vec<String>> = None;
-                // Run before_turn on a blocking thread: handlers like
-                // auto-compaction call `ctx.agent.run`, which blocks (via
-                // `block_in_place`). Dispatching inline would freeze the
-                // frontend's poll loop for the whole summarization. Cloning the
-                // manager (shared `Arc<Mutex<Lua>>`) and awaiting the join lets
-                // this future yield so the UI keeps animating.
+                let mut replacement: Option<Vec<ChatMessage>> = None;
+                let mut compact = None;
+                // Run Lua on a blocking thread so arbitrary handlers cannot
+                // freeze the frontend poll loop. Cloning the manager (shared
+                // `Arc<Mutex<Lua>>`) and awaiting the join keeps this future
+                // yielding while a handler runs.
                 let ext_for_hook = extensions.clone();
-                // Race the hook against cancel so a Ctrl+C during a slow
-                // before_turn (e.g. auto-compaction) returns control now
-                // instead of parking the turn until summarization finishes.
-                // Dropping the handle detaches the blocking task; cooperative
-                // handlers observe `ctx.cancelled` and abort on their own.
+                // Race the hook against cancel so a slow before_turn handler
+                // returns control promptly. Dropping the handle detaches the
+                // blocking task; cooperative handlers observe `ctx.cancelled`.
                 let actions = tokio::select! {
                     biased;
                     _ = await_cancel() => break 'turn Ok(String::new()),
@@ -513,22 +729,10 @@ impl Driver {
                 };
                 for action in actions {
                     if let Some(new_messages) = action.conversation_replace {
-                        transcript = new_messages;
-                        transcript_replaced = true;
-                        history =
-                            build_chat_history(&transcript, system_prompt_override.as_deref());
-                        request_history = history.clone();
-                        restore_ephemeral_image_relay(
-                            &mut request_history,
-                            &mut ephemeral_image_relay,
-                        );
-                        last_turn_messages.clear();
-                        // The rewrite invalidates the provider-report anchor
-                        // (its char count belongs to the discarded history).
-                        token_stats.clear_context_anchor();
-                        let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
-                        token_stats.context_length =
-                            token_stats.anchored_context_estimate(prompt_chars);
+                        replacement = Some(new_messages);
+                    }
+                    if compact.is_none() {
+                        compact = action.conversation_compact;
                     }
                     if let Some(s) = action.system_prompt_append {
                         sys_appends.push(s);
@@ -541,25 +745,91 @@ impl Driver {
                     }
                 }
 
-                // Append to the system prompt for this turn by rebuilding history
-                // from the (possibly just-replaced) transcript.
-                if !sys_appends.is_empty() {
+                // Finalize the active system prompt only after every hook has
+                // run. A replacement from this pass takes precedence over the
+                // first compaction request and uses the same rebuild path.
+                let active_system_prompt = if sys_appends.is_empty() {
+                    system_prompt_override.clone()
+                } else {
                     let base = system_prompt_override
                         .clone()
                         .unwrap_or_else(crate::llm::prompts::system_prompt);
-                    let combined = format!("{base}\n\n{}", sys_appends.join("\n\n"));
-                    history = build_chat_history(&transcript, Some(&combined));
+                    Some(format!("{base}\n\n{}", sys_appends.join("\n\n")))
+                };
+                let had_replacement = replacement.is_some();
+                let mut history_rebuilt = had_replacement || !sys_appends.is_empty();
+                if let Some(new_messages) = replacement {
+                    transcript = new_messages;
+                    transcript_replaced = true;
+                    history = build_chat_history(&transcript, active_system_prompt.as_deref());
                     request_history = history.clone();
                     restore_ephemeral_image_relay(&mut request_history, &mut ephemeral_image_relay);
                     last_turn_messages.clear();
+                    token_stats.clear_context_anchor();
+                } else if !sys_appends.is_empty() {
+                    history = build_chat_history(&transcript, active_system_prompt.as_deref());
+                    request_history = history.clone();
+                    restore_ephemeral_image_relay(&mut request_history, &mut ephemeral_image_relay);
+                    last_turn_messages.clear();
+                }
+
+                if !had_replacement && !compaction_cycle_used {
+                    if let Some(compact) = compact {
+                        compaction_cycle_used = true;
+                        let suffix_start =
+                            compaction_suffix_start(&transcript, compact.keep_recent_turns);
+                        let suffix = transcript[suffix_start..].to_vec();
+                        match run_compaction_cycle(
+                            &llm,
+                            &history,
+                            &tool_defs,
+                            ProviderRequestContext {
+                                conversation_id,
+                                turn_state: Some(Arc::clone(&turn_state)),
+                            },
+                            &compact.instruction,
+                            suffix.len(),
+                            cancel.clone(),
+                        )
+                        .await
+                        {
+                            CompactionCycleResult::Success(checkpoint) => {
+                                let mut candidate = Vec::with_capacity(suffix.len() + 1);
+                                candidate.push(checkpoint_message(&checkpoint));
+                                candidate.extend(suffix);
+                                // Commit only after the complete candidate has
+                                // been built and the checkpoint validated.
+                                transcript = candidate;
+                                transcript_replaced = true;
+                                history_rebuilt = true;
+                                history = build_chat_history(
+                                    &transcript,
+                                    active_system_prompt.as_deref(),
+                                );
+                                request_history = history.clone();
+                                restore_ephemeral_image_relay(
+                                    &mut request_history,
+                                    &mut ephemeral_image_relay,
+                                );
+                                last_turn_messages.clear();
+                                token_stats.clear_context_anchor();
+                            }
+                            CompactionCycleResult::Failed => {}
+                            CompactionCycleResult::Cancelled => {
+                                break 'turn Ok(String::new());
+                            }
+                        }
+                    }
+                }
+
+                if history_rebuilt {
                     let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
                     token_stats.context_length =
                         token_stats.anchored_context_estimate(prompt_chars);
                 }
 
-                // Narrow the tools the model sees for this turn. When several
-                // `before_turn` handlers return a filter, the last in
-                // registration order wins.
+                // Narrow only the resumed normal request. Private compaction
+                // always receives the complete original tool definition set.
                 if let Some(allow) = tool_filter {
                     turn_tool_defs.retain(|d| allow.iter().any(|n| n == &d.name));
                     if turn_tool_defs.is_empty() {
