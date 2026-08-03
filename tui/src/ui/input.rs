@@ -488,11 +488,11 @@ impl InputState {
                 InputAction::Redraw
             }
             KeyCode::Up => {
-                self.history_up();
+                let _ = self.history_up();
                 InputAction::Redraw
             }
             KeyCode::Down => {
-                self.history_down();
+                let _ = self.history_down();
                 InputAction::Redraw
             }
             KeyCode::Esc => {
@@ -503,28 +503,47 @@ impl InputState {
         }
     }
 
-    pub fn history_up(&mut self) {
+    /// Move toward older submitted inputs. Returns whether the selection moved.
+    pub fn history_up(&mut self) -> bool {
         if self.history.is_empty() {
-            return;
+            return false;
         }
         let idx = self.history_index.unwrap_or(self.history.len());
-        if idx > 0 {
-            self.history_index = Some(idx - 1);
-            self.buffer = self.history[idx - 1].clone();
-            self.cursor_pos = self.buffer.chars().count();
+        if idx == 0 {
+            return false;
         }
+        self.history_index = Some(idx - 1);
+        self.buffer = self.history[idx - 1].clone();
+        self.cursor_pos = self.buffer.chars().count();
+        true
     }
 
-    pub fn history_down(&mut self) {
-        if let Some(idx) = self.history_index {
-            if idx + 1 < self.history.len() {
-                self.history_index = Some(idx + 1);
-                self.buffer = self.history[idx + 1].clone();
-            } else {
-                self.history_index = None;
-                self.buffer.clear();
-            }
+    /// Move toward newer submitted inputs. Returns whether the selection moved.
+    pub fn history_down(&mut self) -> bool {
+        let Some(idx) = self.history_index else {
+            return false;
+        };
+        if idx + 1 < self.history.len() {
+            self.history_index = Some(idx + 1);
+            self.buffer = self.history[idx + 1].clone();
+        } else {
+            self.history_index = None;
+            self.buffer.clear();
+        }
+        self.cursor_pos = self.buffer.chars().count();
+        true
+    }
+
+    /// Select the oldest submitted input, or clear the live input if none exists.
+    pub fn select_oldest_history(&mut self) {
+        if let Some(first) = self.history.front() {
+            self.history_index = Some(0);
+            self.buffer = first.clone();
             self.cursor_pos = self.buffer.chars().count();
+        } else {
+            self.history_index = None;
+            self.buffer.clear();
+            self.cursor_pos = 0;
         }
     }
 }

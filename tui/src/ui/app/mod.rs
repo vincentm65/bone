@@ -25,7 +25,7 @@ use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
 use super::render::{BoneTerminal, MAX_PANE_ROWS, PaneDraw, PaneSizing, Renderer, StatusInfo};
-use super::selectable_pane::{SelectablePaneAction, apply_nav_key};
+use super::selectable_pane::{SelectablePaneAction, apply_agent_nav_key, apply_nav_key};
 
 fn should_open_agent_log(input: &InputState) -> bool {
     input.buffer.trim().is_empty()
@@ -653,6 +653,8 @@ pub struct App {
     jobs_last_refresh: std::time::Instant,
     /// Job selected in the native Agents pane.
     selected_job_id: Option<String>,
+    /// Whether Up/Down currently navigates agent rows rather than input history.
+    agent_list_focused: bool,
     /// Process selected in the native Processes pane.
     selected_process_id: Option<String>,
     /// Set after the user was warned that quitting kills running sub-agent
@@ -778,6 +780,7 @@ impl App {
             processes_seen_version: u64::MAX,
             jobs_last_refresh: std::time::Instant::now(),
             selected_job_id: None,
+            agent_list_focused: false,
             selected_process_id: None,
             quit_despite_jobs: false,
             terminal_bg_set: false,
@@ -2369,7 +2372,8 @@ impl App {
                 self.panes_visible = true;
             }
         } else {
-            // No running jobs — hide the pane.
+            // No running jobs — hide the pane and release its navigation focus.
+            self.agent_list_focused = false;
             self.active_page = PanePage::remove(
                 &mut self.pages,
                 crate::ui::jobs_pane::PANE_SOURCE,
@@ -2645,6 +2649,7 @@ impl App {
                 self.handle_key(key.code, key.modifiers, term).await
             }
             Event::Paste(text) => {
+                self.agent_list_focused = false;
                 self.input.insert_paste(&text);
                 self.update_autocomplete();
                 self.redraw(term)
@@ -2807,7 +2812,7 @@ impl App {
                 &mut self.selected_process_id,
                 should_open_agent_log(&self.input),
             ) {
-                SelectablePaneAction::Unhandled => {}
+                SelectablePaneAction::Unhandled | SelectablePaneAction::InputChanged => {}
                 SelectablePaneAction::SelectionChanged => {
                     self.refresh_jobs_pane();
                     return self.redraw(term);
@@ -2824,14 +2829,27 @@ impl App {
 
         if self.agents_pane_active() {
             let active_ids = active_job_ids();
-            match apply_nav_key(
-                code,
-                modifiers,
-                &active_ids,
-                &mut self.selected_job_id,
-                should_open_agent_log(&self.input),
-            ) {
+            let allow_open = should_open_agent_log(&self.input);
+            let action =
+                if self.autocomplete.is_none() || !matches!(code, KeyCode::Up | KeyCode::Down) {
+                    apply_agent_nav_key(
+                        code,
+                        modifiers,
+                        &active_ids,
+                        &mut self.selected_job_id,
+                        &mut self.input,
+                        &mut self.agent_list_focused,
+                        allow_open,
+                    )
+                } else {
+                    SelectablePaneAction::Unhandled
+                };
+            match action {
                 SelectablePaneAction::Unhandled => {}
+                SelectablePaneAction::InputChanged => {
+                    self.update_autocomplete();
+                    return self.redraw(term);
+                }
                 SelectablePaneAction::SelectionChanged => {
                     self.refresh_jobs_pane();
                     return self.redraw(term);
@@ -2917,6 +2935,11 @@ impl App {
         // Check Lua keymap bindings before default input handling.
         if let Some(action) = self.lookup_keymap(code, modifiers) {
             return self.handle_keymap_action(action, term).await;
+        }
+
+        // Editing the prompt returns arrow navigation to input history.
+        if !matches!(code, KeyCode::Up | KeyCode::Down) {
+            self.agent_list_focused = false;
         }
 
         // Detect a non-bracketed paste flood: if more key events are already

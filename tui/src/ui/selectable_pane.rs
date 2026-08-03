@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+use super::input::InputState;
 use super::pane_page::PanePage;
 use crate::ui::theme::Theme;
 
@@ -12,6 +13,7 @@ pub(crate) const VISIBLE_ROWS: usize = 8;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SelectablePaneAction {
     Unhandled,
+    InputChanged,
     SelectionChanged,
     Open(String),
     Cancel(String),
@@ -47,6 +49,61 @@ pub(crate) fn apply_nav_key(
             .map(|index| SelectablePaneAction::Cancel(active_ids[index].clone()))
             .unwrap_or(SelectablePaneAction::Unhandled),
         _ => SelectablePaneAction::Unhandled,
+    }
+}
+
+/// Treat submitted inputs and agent rows as one vertical navigation sequence.
+/// The input sits below the pane: Up walks history before entering the pane at
+/// its bottom row; Down leaves the bottom row through history back to live input.
+pub(crate) fn apply_agent_nav_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    active_ids: &[String],
+    selected_id: &mut Option<String>,
+    input: &mut InputState,
+    pane_focused: &mut bool,
+    allow_open: bool,
+) -> SelectablePaneAction {
+    if !modifiers.is_empty() {
+        return SelectablePaneAction::Unhandled;
+    }
+
+    match code {
+        KeyCode::Up if !*pane_focused => {
+            if input.history_up() {
+                SelectablePaneAction::InputChanged
+            } else if input.history_index.is_none() && !input.buffer.is_empty() {
+                SelectablePaneAction::Unhandled
+            } else if let Some(last) = active_ids.last() {
+                *pane_focused = true;
+                *selected_id = Some(last.clone());
+                SelectablePaneAction::SelectionChanged
+            } else {
+                SelectablePaneAction::Unhandled
+            }
+        }
+        KeyCode::Down if !*pane_focused => {
+            if input.history_down() {
+                SelectablePaneAction::InputChanged
+            } else {
+                SelectablePaneAction::Unhandled
+            }
+        }
+        KeyCode::Down if !active_ids.is_empty() => {
+            let current = selected_id
+                .as_deref()
+                .and_then(|id| active_ids.iter().position(|active| active == id))
+                .unwrap_or(active_ids.len() - 1);
+            if current + 1 < active_ids.len() {
+                *selected_id = Some(active_ids[current + 1].clone());
+                SelectablePaneAction::SelectionChanged
+            } else {
+                *pane_focused = false;
+                input.select_oldest_history();
+                SelectablePaneAction::InputChanged
+            }
+        }
+        _ => apply_nav_key(code, modifiers, active_ids, selected_id, allow_open),
     }
 }
 
@@ -185,6 +242,116 @@ mod tests {
                 SelectablePaneAction::Unhandled
             );
         }
+    }
+
+    #[test]
+    fn agent_navigation_continues_through_input_history_in_both_directions() {
+        let ids = vec!["agent-top".into(), "agent-bottom".into()];
+        let mut selected = Some("agent-top".into());
+        let mut input = InputState::default();
+        input.buffer = "oldest input".into();
+        input.reset();
+        input.buffer = "newest input".into();
+        input.reset();
+        let mut pane_focused = false;
+
+        for expected in ["newest input", "oldest input"] {
+            assert_eq!(
+                apply_agent_nav_key(
+                    KeyCode::Up,
+                    KeyModifiers::NONE,
+                    &ids,
+                    &mut selected,
+                    &mut input,
+                    &mut pane_focused,
+                    true,
+                ),
+                SelectablePaneAction::InputChanged
+            );
+            assert_eq!(input.buffer, expected);
+        }
+
+        assert_eq!(
+            apply_agent_nav_key(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                &ids,
+                &mut selected,
+                &mut input,
+                &mut pane_focused,
+                true,
+            ),
+            SelectablePaneAction::SelectionChanged
+        );
+        assert!(pane_focused);
+        assert_eq!(selected.as_deref(), Some("agent-bottom"));
+
+        apply_agent_nav_key(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+            &ids,
+            &mut selected,
+            &mut input,
+            &mut pane_focused,
+            true,
+        );
+        assert_eq!(selected.as_deref(), Some("agent-top"));
+        apply_agent_nav_key(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+            &ids,
+            &mut selected,
+            &mut input,
+            &mut pane_focused,
+            true,
+        );
+        assert_eq!(selected.as_deref(), Some("agent-bottom"));
+
+        assert_eq!(
+            apply_agent_nav_key(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+                &ids,
+                &mut selected,
+                &mut input,
+                &mut pane_focused,
+                true,
+            ),
+            SelectablePaneAction::InputChanged
+        );
+        assert!(!pane_focused);
+        assert_eq!(input.buffer, "oldest input");
+        assert!(input.history_down());
+        assert_eq!(input.buffer, "newest input");
+        assert!(input.history_down());
+        assert!(input.buffer.is_empty());
+    }
+
+    #[test]
+    fn agent_navigation_preserves_live_input_without_history() {
+        let ids = vec!["agent".into()];
+        let mut selected = Some("agent".into());
+        let mut input = InputState {
+            buffer: "unsent draft".into(),
+            cursor_pos: 12,
+            ..Default::default()
+        };
+        let mut pane_focused = false;
+
+        assert_eq!(
+            apply_agent_nav_key(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                &ids,
+                &mut selected,
+                &mut input,
+                &mut pane_focused,
+                true,
+            ),
+            SelectablePaneAction::Unhandled
+        );
+        assert_eq!(input.buffer, "unsent draft");
+        assert!(!pane_focused);
     }
 
     #[test]

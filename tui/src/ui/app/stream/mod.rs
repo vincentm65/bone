@@ -7,7 +7,7 @@ use crate::tools::{ApprovalMode, Tool, ToolCall};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
-use crate::ui::selectable_pane::{SelectablePaneAction, apply_nav_key};
+use crate::ui::selectable_pane::{SelectablePaneAction, apply_agent_nav_key, apply_nav_key};
 use crate::ui::tool_display::{build_tool_row, format_shell_call_label};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::{HashSet, VecDeque};
@@ -476,6 +476,7 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut self.selected_job_id,
+                    &mut self.agent_list_focused,
                     &mut self.selected_process_id,
                     &self.processes,
                     &mut self.queue_selected,
@@ -763,6 +764,7 @@ impl App {
                     &mut self.pages,
                     &mut self.active_page,
                     &mut self.selected_job_id,
+                    &mut self.agent_list_focused,
                     &mut self.selected_process_id,
                     &self.processes,
                     &mut self.queue_selected,
@@ -1565,6 +1567,7 @@ impl App {
         pages: &mut Vec<PanePage>,
         active_page: &mut usize,
         selected_job_id: &mut Option<String>,
+        agent_list_focused: &mut bool,
         selected_process_id: &mut Option<String>,
         processes: &[bone_protocol::ProcessSnapshot],
         queue_selected: &mut usize,
@@ -1594,6 +1597,7 @@ impl App {
                             shift: false,
                         });
                     } else {
+                        *agent_list_focused = false;
                         input.insert_paste(&text);
                     }
                 }
@@ -1689,7 +1693,8 @@ impl App {
                             selected_process_id,
                             should_open_agent_log(input),
                         ) {
-                            SelectablePaneAction::Unhandled => {}
+                            SelectablePaneAction::Unhandled
+                            | SelectablePaneAction::InputChanged => {}
                             SelectablePaneAction::SelectionChanged => {
                                 result.processes_changed = true;
                                 continue;
@@ -1711,14 +1716,18 @@ impl App {
                             .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE);
                     if agents_active {
                         let active_ids = active_job_ids();
-                        match apply_nav_key(
+                        let allow_open = should_open_agent_log(input);
+                        match apply_agent_nav_key(
                             key.code,
                             key.modifiers,
                             &active_ids,
                             selected_job_id,
-                            should_open_agent_log(input),
+                            input,
+                            agent_list_focused,
+                            allow_open,
                         ) {
                             SelectablePaneAction::Unhandled => {}
+                            SelectablePaneAction::InputChanged => continue,
                             SelectablePaneAction::SelectionChanged => {
                                 result.jobs_changed = true;
                                 continue;
@@ -1753,6 +1762,9 @@ impl App {
                         && apply_pane_nav_key(key.code, key.modifiers, pages, active_page)
                     {
                         continue;
+                    }
+                    if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                        *agent_list_focused = false;
                     }
                     let mut next = Some(Event::Key(key));
                     while let Some(event) = next {
