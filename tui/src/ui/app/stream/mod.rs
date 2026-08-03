@@ -1597,7 +1597,10 @@ impl App {
                             shift: false,
                         });
                     } else {
-                        *agent_list_focused = false;
+                        if *agent_list_focused {
+                            *agent_list_focused = false;
+                            result.jobs_changed = true;
+                        }
                         input.insert_paste(&text);
                     }
                 }
@@ -1717,6 +1720,7 @@ impl App {
                     if agents_active {
                         let active_ids = active_job_ids();
                         let allow_open = should_open_agent_log(input);
+                        let was_agent_list_focused = *agent_list_focused;
                         match apply_agent_nav_key(
                             key.code,
                             key.modifiers,
@@ -1727,7 +1731,12 @@ impl App {
                             allow_open,
                         ) {
                             SelectablePaneAction::Unhandled => {}
-                            SelectablePaneAction::InputChanged => continue,
+                            SelectablePaneAction::InputChanged => {
+                                if was_agent_list_focused != *agent_list_focused {
+                                    result.jobs_changed = true;
+                                }
+                                continue;
+                            }
                             SelectablePaneAction::SelectionChanged => {
                                 result.jobs_changed = true;
                                 continue;
@@ -1763,8 +1772,9 @@ impl App {
                     {
                         continue;
                     }
-                    if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                    if !matches!(key.code, KeyCode::Up | KeyCode::Down) && *agent_list_focused {
                         *agent_list_focused = false;
+                        result.jobs_changed = true;
                     }
                     let mut next = Some(Event::Key(key));
                     while let Some(event) = next {

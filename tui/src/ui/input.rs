@@ -534,6 +534,13 @@ impl InputState {
         true
     }
 
+    /// Select the live input after leaving submitted-input history.
+    pub fn select_live_input(&mut self) {
+        self.history_index = None;
+        self.buffer.clear();
+        self.cursor_pos = 0;
+    }
+
     /// Select the oldest submitted input, or clear the live input if none exists.
     pub fn select_oldest_history(&mut self) {
         if let Some(first) = self.history.front() {

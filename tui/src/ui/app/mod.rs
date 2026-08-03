@@ -2362,10 +2362,14 @@ impl App {
             .collect();
         crate::ui::selectable_pane::reconcile_selection(&mut self.selected_job_id, &active_ids);
         if has_running {
+            let visible_selection = self
+                .agent_list_focused
+                .then(|| self.selected_job_id.as_deref())
+                .flatten();
             if let Some(page) = crate::ui::jobs_pane::render_selected(
                 &self.renderer.theme,
                 &jobs,
-                self.selected_job_id.as_deref(),
+                visible_selection,
             ) {
                 let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
                 self.active_page = new_active;
@@ -2649,7 +2653,10 @@ impl App {
                 self.handle_key(key.code, key.modifiers, term).await
             }
             Event::Paste(text) => {
-                self.agent_list_focused = false;
+                if self.agent_list_focused {
+                    self.agent_list_focused = false;
+                    self.refresh_jobs_pane();
+                }
                 self.input.insert_paste(&text);
                 self.update_autocomplete();
                 self.redraw(term)
@@ -2830,6 +2837,7 @@ impl App {
         if self.agents_pane_active() {
             let active_ids = active_job_ids();
             let allow_open = should_open_agent_log(&self.input);
+            let was_agent_list_focused = self.agent_list_focused;
             let action =
                 if self.autocomplete.is_none() || !matches!(code, KeyCode::Up | KeyCode::Down) {
                     apply_agent_nav_key(
@@ -2847,6 +2855,9 @@ impl App {
             match action {
                 SelectablePaneAction::Unhandled => {}
                 SelectablePaneAction::InputChanged => {
+                    if was_agent_list_focused != self.agent_list_focused {
+                        self.refresh_jobs_pane();
+                    }
                     self.update_autocomplete();
                     return self.redraw(term);
                 }
@@ -2938,8 +2949,9 @@ impl App {
         }
 
         // Editing the prompt returns arrow navigation to input history.
-        if !matches!(code, KeyCode::Up | KeyCode::Down) {
+        if !matches!(code, KeyCode::Up | KeyCode::Down) && self.agent_list_focused {
             self.agent_list_focused = false;
+            self.refresh_jobs_pane();
         }
 
         // Detect a non-bracketed paste flood: if more key events are already

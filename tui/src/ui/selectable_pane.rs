@@ -75,6 +75,7 @@ pub(crate) fn apply_agent_nav_key(
             } else if input.history_index.is_none() && !input.buffer.is_empty() {
                 SelectablePaneAction::Unhandled
             } else if let Some(last) = active_ids.last() {
+                input.select_live_input();
                 *pane_focused = true;
                 *selected_id = Some(last.clone());
                 SelectablePaneAction::SelectionChanged
@@ -285,6 +286,8 @@ mod tests {
         );
         assert!(pane_focused);
         assert_eq!(selected.as_deref(), Some("agent-bottom"));
+        assert!(input.buffer.is_empty());
+        assert!(input.history_index.is_none());
 
         apply_agent_nav_key(
             KeyCode::Up,
