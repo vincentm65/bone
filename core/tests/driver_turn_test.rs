@@ -2049,6 +2049,57 @@ end)
         }
     }
     assert_eq!(surfaced, "normal answer");
+    assert_eq!(outcome.usage.len(), 2);
+    assert!(outcome.usage.iter().all(|usage| usage.is_estimated));
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn compaction_usage_is_counted_like_normal_requests() {
+    let lua = r#"
+bone.on("before_turn", function()
+    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
+end)
+"#;
+    let llm = Arc::new(CompactionProvider::new(vec![
+        MockAttempt::Stream(vec![
+            Ok(ChatEvent::TextDelta("checkpoint".into())),
+            Ok(ChatEvent::TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                cached_tokens: Some(1),
+                cost: Some(0.1),
+            }),
+        ]),
+        MockAttempt::Stream(vec![
+            Ok(ChatEvent::TextDelta("done".into())),
+            Ok(ChatEvent::TokenUsage {
+                prompt_tokens: 30,
+                completion_tokens: 4,
+                cached_tokens: Some(2),
+                cost: Some(0.2),
+            }),
+        ]),
+    ]));
+    let prompt = "current";
+    let transcript = vec![
+        ChatMessage::new(ChatRole::User, "old"),
+        ChatMessage::new(ChatRole::Assistant, "old answer"),
+        ChatMessage::new(ChatRole::User, prompt),
+    ];
+    let (driver, config_dir) =
+        compaction_test_driver("driver-compaction-usage", lua, llm, transcript, None);
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.token_stats.request_count, 2);
+    assert_eq!(outcome.token_stats.sent, 40);
+    assert_eq!(outcome.token_stats.received, 6);
+    assert_eq!(outcome.token_stats.cached, 3);
+    assert!((outcome.token_stats.cost - 0.3).abs() < f64::EPSILON);
+    assert_eq!(outcome.usage.len(), 2);
+    assert!(outcome.usage.iter().all(|usage| !usage.is_estimated));
+    assert_eq!(outcome.usage[0].prompt_tokens, 10);
+    assert_eq!(outcome.usage[1].prompt_tokens, 30);
     std::fs::remove_dir_all(config_dir).ok();
 }
 

@@ -157,12 +157,19 @@ async fn run_compaction_attempt(
     trailing_messages: usize,
     repair: bool,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    record_usage: &mut impl FnMut(u32, u32, Option<u32>, Option<f64>, bool),
 ) -> CompactionAttemptResult {
     let mut request = prefix.to_vec();
     request.push(ChatMessage::new(
         ChatRole::User,
         compaction_prompt(instruction, trailing_messages, repair),
     ));
+    let prompt_chars = estimate_context_chars(
+        &request,
+        serde_json::to_string(tool_defs)
+            .map(|json| json.chars().count())
+            .unwrap_or(0),
+    );
     let send = llm.chat_stream_with_context(request, tool_defs.to_vec(), context);
     let mut stream = match tokio::select! {
         biased;
@@ -174,22 +181,50 @@ async fn run_compaction_attempt(
     };
 
     let mut text = String::new();
+    let mut completion_chars = 0;
+    let mut generated_tool_call = false;
+    let mut had_usage = false;
     while let Some(event) = tokio::select! {
         biased;
         _ = wait_for_cancel(cancel.clone()) => return CompactionAttemptResult::Cancelled,
         event = stream.next() => event,
     } {
         match event {
-            Ok(ChatEvent::TextDelta(delta)) => text.push_str(&delta),
-            Ok(ChatEvent::ToolCall(_)) => return CompactionAttemptResult::Invalid,
-            Ok(ChatEvent::ReasoningDelta { .. })
-            | Ok(ChatEvent::EncryptedReasoning { .. })
-            | Ok(ChatEvent::TokenUsage { .. }) => {}
+            Ok(ChatEvent::TextDelta(delta)) => {
+                completion_chars += delta.chars().count();
+                text.push_str(&delta);
+            }
+            Ok(ChatEvent::ToolCall(call)) => {
+                generated_tool_call = true;
+                completion_chars += call.arguments.to_string().chars().count();
+            }
+            Ok(ChatEvent::ReasoningDelta { text, .. }) => {
+                completion_chars += text.chars().count();
+            }
+            Ok(ChatEvent::EncryptedReasoning { .. }) => {}
+            Ok(ChatEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cost,
+            }) => {
+                had_usage = true;
+                record_usage(prompt_tokens, completion_tokens, cached_tokens, cost, false);
+            }
             Err(_) => return CompactionAttemptResult::TransportFailure,
         }
     }
+    if !had_usage {
+        record_usage(
+            estimate_tokens(prompt_chars),
+            estimate_tokens(completion_chars),
+            None,
+            None,
+            true,
+        );
+    }
 
-    if text.trim().is_empty() {
+    if generated_tool_call || text.trim().is_empty() {
         CompactionAttemptResult::Invalid
     } else {
         CompactionAttemptResult::Valid(text)
@@ -204,6 +239,7 @@ async fn run_compaction_cycle(
     instruction: &str,
     trailing_messages: usize,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    record_usage: &mut impl FnMut(u32, u32, Option<u32>, Option<f64>, bool),
 ) -> CompactionCycleResult {
     let initial = run_compaction_attempt(
         llm,
@@ -214,6 +250,7 @@ async fn run_compaction_cycle(
         trailing_messages,
         false,
         cancel.clone(),
+        record_usage,
     )
     .await;
     match initial {
@@ -229,6 +266,7 @@ async fn run_compaction_cycle(
             trailing_messages,
             true,
             cancel,
+            record_usage,
         )
         .await
         {
@@ -779,20 +817,55 @@ impl Driver {
                         let suffix_start =
                             compaction_suffix_start(&transcript, compact.keep_recent_turns);
                         let suffix = transcript[suffix_start..].to_vec();
-                        match run_compaction_cycle(
-                            &llm,
-                            &history,
-                            &tool_defs,
-                            ProviderRequestContext {
-                                conversation_id,
-                                turn_state: Some(Arc::clone(&turn_state)),
-                            },
-                            &compact.instruction,
-                            suffix.len(),
-                            cancel.clone(),
-                        )
-                        .await
-                        {
+                        let compaction_result = {
+                            let mut record_compaction_usage =
+                                |prompt_tokens,
+                                 completion_tokens,
+                                 cached_tokens,
+                                 cost,
+                                 is_estimated| {
+                                    token_stats.record_request(
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        cached_tokens,
+                                        cost,
+                                    );
+                                    session.record_usage(
+                                        llm.id(),
+                                        llm.model(),
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        cached_tokens,
+                                        cost,
+                                        is_estimated,
+                                    );
+                                    usage_records.push(UsageRecord {
+                                        provider: llm.id().to_string(),
+                                        model: llm.model().to_string(),
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        cached_tokens,
+                                        cost,
+                                        is_estimated,
+                                    });
+                                    report_usage(&token_stats);
+                                };
+                            run_compaction_cycle(
+                                &llm,
+                                &history,
+                                &tool_defs,
+                                ProviderRequestContext {
+                                    conversation_id,
+                                    turn_state: Some(Arc::clone(&turn_state)),
+                                },
+                                &compact.instruction,
+                                suffix.len(),
+                                cancel.clone(),
+                                &mut record_compaction_usage,
+                            )
+                            .await
+                        };
+                        match compaction_result {
                             CompactionCycleResult::Success(checkpoint) => {
                                 let mut candidate = Vec::with_capacity(suffix.len() + 1);
                                 candidate.push(checkpoint_message(&checkpoint));
