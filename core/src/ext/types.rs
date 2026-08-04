@@ -38,13 +38,9 @@ pub enum EventDispatchResult {
 /// Generic action returned by a Lua command or hook.
 #[derive(Debug, Clone, Default)]
 pub struct LuaReturnAction {
-    /// When set, replace the active conversation transcript with these messages.
-    /// Used by compaction: swaps the transcript but keeps the rendered scrollback
-    /// and the current conversation id.
+    /// When set, replace the active conversation transcript with these messages
+    /// while keeping the rendered scrollback and current conversation id.
     pub conversation_replace: Option<Vec<crate::llm::ChatMessage>>,
-    /// Before-turn-only request to compact the model-facing conversation through
-    /// the active provider. Never projected onto command actions.
-    pub conversation_compact: Option<ConversationCompact>,
     /// When set, load a past conversation as the active chat: clears the current
     /// scrollback/transcript and resumes the given conversation in place.
     pub conversation_load: Option<ConversationLoad>,
@@ -69,13 +65,6 @@ pub struct LuaReturnAction {
     /// Config/runtime mutation requested by an interactive Lua command. These
     /// are applied by the TUI `App` after the Lua command returns.
     pub config_action: Option<ConfigAction>,
-}
-
-/// Payload for a before-turn `conversation.compact` request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationCompact {
-    pub instruction: String,
-    pub keep_recent_turns: usize,
 }
 
 /// Payload for the `conversation.load` action (`/history`).
@@ -887,12 +876,12 @@ fn lua_value_to_json(value: mlua::Value) -> mlua::Result<serde_json::Value> {
 }
 
 /// Parse a `LuaReturnAction` from a Lua table returned by a handler.
-/// Returns `None` when no recognized action key is present. Compaction is
-/// accepted only for `before_turn`; legacy turn-shaping fields remain parseable
-/// on command returns but are not projected onto protocol command actions.
+/// Returns `None` when no recognized action key is present. Legacy turn-shaping
+/// fields remain parseable on command returns but are not projected onto protocol
+/// command actions.
 pub(crate) fn parse_lua_return_action(
     table: &mlua::Table,
-    before_turn: bool,
+    _before_turn: bool,
 ) -> Option<LuaReturnAction> {
     let mut out = LuaReturnAction::default();
     let mut any = false;
@@ -967,48 +956,6 @@ pub(crate) fn parse_lua_return_action(
             "bone-lua warn: unknown action '{other}'; ignoring"
         )),
         None => {}
-    }
-
-    if before_turn {
-        match table.get::<mlua::Value>("conversation") {
-            Ok(mlua::Value::Nil) => {}
-            Ok(mlua::Value::Table(conversation)) => {
-                match conversation.get::<mlua::Value>("compact") {
-                    Ok(mlua::Value::Nil) => {}
-                    Ok(mlua::Value::Table(compact)) => {
-                        let instruction = compact
-                            .get::<Option<String>>("instruction")
-                            .ok()
-                            .flatten()
-                            .filter(|value| !value.trim().is_empty());
-                        let keep_recent_turns =
-                            match compact.get::<mlua::Value>("keep_recent_turns") {
-                                Ok(mlua::Value::Nil) => Some(2),
-                                Ok(mlua::Value::Integer(value)) => usize::try_from(value).ok(),
-                                _ => None,
-                            };
-                        match (instruction, keep_recent_turns) {
-                            (Some(instruction), Some(keep_recent_turns)) => {
-                                out.conversation_compact = Some(ConversationCompact {
-                                    instruction,
-                                    keep_recent_turns,
-                                });
-                                any = true;
-                            }
-                            _ => crate::ext::ctx::runtime_warn_once(
-                                "bone-lua warn: conversation.compact requires a non-empty instruction and a non-negative integer keep_recent_turns; ignoring",
-                            ),
-                        }
-                    }
-                    Ok(_) | Err(_) => crate::ext::ctx::runtime_warn_once(
-                        "bone-lua warn: conversation.compact must be a table; ignoring",
-                    ),
-                }
-            }
-            Ok(_) | Err(_) => crate::ext::ctx::runtime_warn_once(
-                "bone-lua warn: conversation must be a table; ignoring",
-            ),
-        }
     }
 
     // Keep parsing legacy turn-shaping fields on command returns for

@@ -765,6 +765,63 @@ impl DaemonCtx {
         self.hub.publish(event);
     }
 
+    fn record_private_llm_usage(
+        &mut self,
+        records: &Arc<Mutex<Vec<crate::ext::ctx::PrivateLlmUsage>>>,
+        provider: &str,
+        model: &str,
+    ) {
+        let records = std::mem::take(
+            &mut *records
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for usage in records {
+            let (sent, received, context_length, persistence_error) = {
+                let mut session = self.session.lock().unwrap();
+                session.token_stats.record_request(
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.cached_tokens,
+                    usage.cost,
+                );
+                let persistence_error = match (session.session_db.as_ref(), session.conversation_id)
+                {
+                    (Some(db), Some(conversation_id)) => db
+                        .record_usage(
+                            conversation_id,
+                            provider,
+                            model,
+                            usage.prompt_tokens,
+                            usage.completion_tokens,
+                            usage.cached_tokens,
+                            usage.cost,
+                            usage.is_estimated,
+                        )
+                        .err()
+                        .map(|error| error.to_string()),
+                    _ => None,
+                };
+                (
+                    session.token_stats.sent,
+                    session.token_stats.received,
+                    session.token_stats.context_length,
+                    persistence_error,
+                )
+            };
+            self.publish_runtime_event(RuntimeEvent::TokenUsage {
+                sent,
+                received,
+                context_length,
+            });
+            if let Some(error) = persistence_error {
+                self.hub.publish(RuntimeEvent::Status {
+                    message: format!("failed to persist command LLM usage: {error}"),
+                });
+            }
+        }
+    }
+
     fn config_schema(&self) -> bone_protocol::ConfigSchema {
         let tools = self
             .session
@@ -1171,6 +1228,13 @@ impl DaemonCtx {
         let shared_ui = self.extensions.ui_handle();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_ctx = cancel.clone();
+        let private_usage_records = Arc::new(Mutex::new(Vec::new()));
+        let private_usage_for_ctx = Arc::clone(&private_usage_records);
+        let private_provider = Arc::clone(&self.llm);
+        let private_provider_id = self.llm.id().to_string();
+        let private_provider_model = self.llm.model().to_string();
+        let private_conversation_id = app_state.session_id;
+        let private_turn_state = Arc::new(std::sync::OnceLock::new());
         let (live_tx, mut live_rx) = mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
@@ -1202,6 +1266,15 @@ impl DaemonCtx {
             }
             ctx_cfg.ui = Some(shared_ui);
             ctx_cfg.cancelled = Some(cancel_for_ctx);
+            ctx_cfg.private_llm = Some(crate::ext::ctx::PrivateLlmContext {
+                provider: private_provider,
+                request_context: crate::llm::provider::ProviderRequestContext {
+                    conversation_id: private_conversation_id,
+                    turn_state: Some(private_turn_state),
+                    max_tokens: None,
+                },
+                usage_records: private_usage_for_ctx,
+            });
             ctx_cfg.conversation_operations = Some(conversation_tx);
             // The handler exists; from here every outcome is `Some(_)` so the daemon
             // never mistakes a ran command for an unknown one.
@@ -1233,6 +1306,11 @@ impl DaemonCtx {
                     while let Ok(event) = status_rx.try_recv() {
                         self.publish_runtime_event(event);
                     }
+                    self.record_private_llm_usage(
+                        &private_usage_records,
+                        &private_provider_id,
+                        &private_provider_model,
+                    );
                     self.pending_interactions.clear();
                     return res.ok().flatten();
                 }
@@ -1270,20 +1348,38 @@ impl DaemonCtx {
                         cancel.store(true, Ordering::Relaxed);
                         self.approval_registry.cancel_all();
                         self.key_registry.cancel_all();
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            &mut handle,
+                        )
+                        .await;
+                        self.record_private_llm_usage(
+                            &private_usage_records,
+                            &private_provider_id,
+                            &private_provider_model,
+                        );
                         self.pending_interactions.clear();
                         self.drain_diffs();
                         return Some((None, Vec::new()));
                     }
                     None => {
                         // Signal the blocking handler, then stop waiting for
-                        // it. Cooperative handlers/tools poll this flag and
-                        // self-abort; detaching the handle ensures we don't
-                        // wedge on a non-cooperative one (which would ignore
-                        // every subsequent command). The caller publishes an
-                        // empty CommandComplete, like the no-op path.
+                        // it. Cooperative handlers/tools poll this flag. Give a
+                        // private provider request a bounded grace period to
+                        // publish usage without wedging on arbitrary Lua.
                         cancel.store(true, Ordering::Relaxed);
                         self.approval_registry.cancel_all();
                         self.key_registry.cancel_all();
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            &mut handle,
+                        )
+                        .await;
+                        self.record_private_llm_usage(
+                            &private_usage_records,
+                            &private_provider_id,
+                            &private_provider_model,
+                        );
                         self.pending_interactions.clear();
                         self.drain_diffs();
                         return Some((None, Vec::new()));

@@ -688,7 +688,7 @@ impl LlmProvider for CodexProvider {
             input: input_items,
             stream: true,
             store: false,
-            max_output_tokens: self.max_tokens,
+            max_output_tokens: context.max_tokens.or(self.max_tokens),
             reasoning: Some(CodexReasoning {
                 effort: self.reasoning_effort.clone(),
                 summary: "auto",

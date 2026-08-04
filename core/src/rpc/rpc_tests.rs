@@ -291,6 +291,346 @@ fn interactive_test_extensions() -> crate::ext::ExtensionManager {
     )
 }
 
+fn private_command_extensions() -> crate::ext::ExtensionManager {
+    let lua = mlua::Lua::new();
+    let bone = lua.create_table().unwrap();
+    lua.globals().set("bone", bone.clone()).unwrap();
+    crate::ext::ops_commands::setup_register_command(&lua, &bone).unwrap();
+    lua.load(
+        r#"
+        bone.command.register("private_replace", function(_, ctx)
+            local result = ctx.llm.complete({
+                messages = {
+                    { role = "system", content = "summarize privately" },
+                    { role = "user", content = "full transcript" },
+                },
+                tools = {},
+                max_tokens = 4000,
+            })
+            if not result.ok then
+                return { display = result.error, submit = false }
+            end
+            return {
+                action = "conversation.replace",
+                messages = {
+                    { role = "user", content = result.content },
+                },
+            }
+        end)
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    crate::ext::types::ExtensionManager::from_arc(
+        Arc::new(Mutex::new(lua)),
+        true,
+        true,
+        vec![crate::ext::ops_commands::RegisteredLuaCommand {
+            name: "private_replace".into(),
+            description: String::new(),
+        }],
+        Arc::new(Mutex::new(crate::config::settings::Settings::defaults())),
+        Arc::new(std::sync::RwLock::new(Default::default())),
+        crate::ext::api_ui::new_shared(),
+    )
+}
+
+#[derive(Debug)]
+struct CapturedPrivateCommandRequest {
+    messages: Vec<crate::llm::ChatMessage>,
+    tools: Vec<crate::tools::ToolDefinition>,
+    context: crate::llm::provider::ProviderRequestContext,
+}
+
+struct PrivateCommandProvider {
+    requests: Arc<Mutex<Vec<CapturedPrivateCommandRequest>>>,
+}
+
+struct CancellingPrivateCommandProvider {
+    waiting_after_usage: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::provider::LlmProvider for CancellingPrivateCommandProvider {
+    fn id(&self) -> &str {
+        "private-command-cancel"
+    }
+
+    fn name(&self) -> &str {
+        "Private command cancellation"
+    }
+
+    fn model(&self) -> &str {
+        "private-command-cancel-model"
+    }
+
+    fn set_model(&mut self, _: String) {}
+
+    async fn chat_stream(
+        &self,
+        _: Vec<crate::llm::ChatMessage>,
+        _: Vec<crate::tools::ToolDefinition>,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        unreachable!("private command must use request context")
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        _: Vec<crate::llm::ChatMessage>,
+        _: Vec<crate::tools::ToolDefinition>,
+        _: crate::llm::provider::ProviderRequestContext,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        let waiting_after_usage = Arc::clone(&self.waiting_after_usage);
+        Ok(Box::pin(futures_util::stream::unfold(0, move |state| {
+            let waiting_after_usage = Arc::clone(&waiting_after_usage);
+            async move {
+                if state == 0 {
+                    Some((
+                        Ok(crate::llm::ChatEvent::TokenUsage {
+                            prompt_tokens: 7,
+                            completion_tokens: 3,
+                            cached_tokens: Some(2),
+                            cost: Some(0.5),
+                        }),
+                        1,
+                    ))
+                } else {
+                    waiting_after_usage.notify_one();
+                    std::future::pending().await
+                }
+            }
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::llm::provider::LlmProvider for PrivateCommandProvider {
+    fn id(&self) -> &str {
+        "private-command"
+    }
+
+    fn name(&self) -> &str {
+        "Private command"
+    }
+
+    fn model(&self) -> &str {
+        "private-command-model"
+    }
+
+    fn set_model(&mut self, _: String) {}
+
+    async fn chat_stream(
+        &self,
+        _: Vec<crate::llm::ChatMessage>,
+        _: Vec<crate::tools::ToolDefinition>,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        unreachable!("private command must use request context")
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<crate::llm::ChatMessage>,
+        tools: Vec<crate::tools::ToolDefinition>,
+        context: crate::llm::provider::ProviderRequestContext,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(CapturedPrivateCommandRequest {
+                messages,
+                tools,
+                context,
+            });
+        Ok(Box::pin(futures_util::stream::iter([
+            Ok(crate::llm::ChatEvent::TextDelta("safe checkpoint".into())),
+            Ok(crate::llm::ChatEvent::TokenUsage {
+                prompt_tokens: 9,
+                completion_tokens: 2,
+                cached_tokens: Some(1),
+                cost: Some(0.25),
+            }),
+        ])))
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_command_private_completion_returns_replace_and_accounts_usage() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = private_command_extensions();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(PrivateCommandProvider {
+        requests: Arc::clone(&requests),
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let conversation_id = db
+        .create_conversation("private-command", "private-command-model")
+        .unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    session.conversation_id = Some(conversation_id);
+    session.transcript.push(crate::llm::ChatMessage::new(
+        crate::llm::ChatRole::User,
+        "original history",
+    ));
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(provider, extensions, session);
+    let mut events = hub.subscribe();
+
+    let (ret, operations) = ctx
+        .run_interactive_command(&mut commands, "private_replace".into(), String::new())
+        .await
+        .expect("registered command was not found");
+    assert!(operations.is_empty());
+    let replacement = ret
+        .expect("command returned no action")
+        .action
+        .and_then(|action| action.conversation_replace)
+        .expect("conversation.replace was not returned");
+    assert_eq!(replacement.len(), 1);
+    assert_eq!(replacement[0].content, "safe checkpoint");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "completion must make one provider request"
+    );
+    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages[0].content, "summarize privately");
+    assert_eq!(requests[0].messages[1].content, "full transcript");
+    assert!(requests[0].tools.is_empty());
+    assert_eq!(requests[0].context.conversation_id, Some(conversation_id));
+    assert!(requests[0].context.turn_state.is_some());
+    assert_eq!(requests[0].context.max_tokens, Some(4000));
+    drop(requests);
+
+    let session = ctx.session.lock().unwrap();
+    assert_eq!(session.transcript[0].content, "original history");
+    assert_eq!(session.token_stats.sent, 9);
+    assert_eq!(session.token_stats.received, 2);
+    assert_eq!(session.token_stats.cached, 1);
+    assert_eq!(session.token_stats.cost, 0.25);
+    assert_eq!(session.token_stats.request_count, 1);
+    let persisted = session
+        .session_db
+        .as_ref()
+        .unwrap()
+        .conversation_usage(conversation_id)
+        .unwrap();
+    assert_eq!(persisted.prompt_tokens, 9);
+    assert_eq!(persisted.completion_tokens, 2);
+    assert_eq!(persisted.cached_tokens, 1);
+    assert_eq!(persisted.cost, 0.25);
+    assert_eq!(persisted.request_count, 1);
+    drop(session);
+
+    assert!(matches!(
+        ctx.handle_idle_command(
+            RuntimeCommand::ReplaceConversation {
+                messages: replacement.clone(),
+            },
+            &mut commands,
+        )
+        .await,
+        Flow::Continue
+    ));
+    let session = ctx.session.lock().unwrap();
+    assert_eq!(session.transcript, replacement);
+    let effective = session
+        .session_db
+        .as_ref()
+        .unwrap()
+        .load_effective_transcript(conversation_id)
+        .unwrap();
+    assert_eq!(effective, replacement);
+    drop(session);
+
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        RuntimeEvent::TokenUsage {
+            sent: 9,
+            received: 2,
+            context_length: 9,
+        }
+    ));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_command_cancellation_drains_private_usage_with_bounded_grace() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = private_command_extensions();
+    let waiting_after_usage = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(CancellingPrivateCommandProvider {
+        waiting_after_usage: Arc::clone(&waiting_after_usage),
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let conversation_id = db
+        .create_conversation("private-command-cancel", "private-command-cancel-model")
+        .unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    session.conversation_id = Some(conversation_id);
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(provider, extensions, session);
+    let mut events = hub.subscribe();
+    let command_tx = hub.command_sender();
+
+    let cancel = tokio::spawn(async move {
+        waiting_after_usage.notified().await;
+        command_tx.send(RuntimeCommand::Cancel).unwrap();
+    });
+    let started = std::time::Instant::now();
+    let (ret, operations) = ctx
+        .run_interactive_command(&mut commands, "private_replace".into(), String::new())
+        .await
+        .expect("registered command was not found");
+    cancel.await.unwrap();
+
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    assert!(ret.is_none());
+    assert!(operations.is_empty());
+    let session = ctx.session.lock().unwrap();
+    assert_eq!(session.token_stats.sent, 7);
+    assert_eq!(session.token_stats.received, 3);
+    assert_eq!(session.token_stats.cached, 2);
+    assert_eq!(session.token_stats.cost, 0.5);
+    assert_eq!(session.token_stats.request_count, 1);
+    let persisted = session
+        .session_db
+        .as_ref()
+        .unwrap()
+        .conversation_usage(conversation_id)
+        .unwrap();
+    assert_eq!(persisted.prompt_tokens, 7);
+    assert_eq!(persisted.completion_tokens, 3);
+    assert_eq!(persisted.cached_tokens, 2);
+    assert_eq!(persisted.cost, 0.5);
+    assert_eq!(persisted.request_count, 1);
+    drop(session);
+
+    let mut saw_usage = false;
+    while let Ok(event) = events.try_recv() {
+        if matches!(
+            event,
+            RuntimeEvent::TokenUsage {
+                sent: 7,
+                received: 3,
+                context_length: 7,
+            }
+        ) {
+            saw_usage = true;
+        }
+    }
+    assert!(saw_usage);
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn synchronize_reports_busy_during_interactive_command() {

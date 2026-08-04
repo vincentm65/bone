@@ -581,7 +581,7 @@ impl LlmProvider for OpenAiCompatProvider {
             stream: true,
             tools: openai_tools(tools),
             stream_options,
-            max_tokens: self.max_tokens,
+            max_tokens: context.max_tokens.or(self.max_tokens),
             reasoning_effort: self.reasoning_effort.clone(),
         };
 

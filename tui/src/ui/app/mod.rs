@@ -1157,12 +1157,16 @@ impl App {
     ) -> io::Result<Option<String>> {
         let mut action_reply = None;
         if let Some(new_messages) = action.conversation_replace {
-            // Send the replacement to the daemon (idempotent).
-            let _ = self
-                .command_tx
-                .send(crate::runtime::RuntimeCommand::ReplaceConversation {
+            // Wait for the daemon to apply and persist the replacement before
+            // returning to the blocking terminal input loop or accepting the
+            // next prompt.
+            self.send_and_await_snapshot(
+                crate::runtime::RuntimeCommand::ReplaceConversation {
                     messages: new_messages,
-                });
+                },
+                Some(term),
+            )
+            .await;
         }
 
         if let Some(load) = action.conversation_load {

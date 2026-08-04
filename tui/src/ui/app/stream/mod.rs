@@ -847,6 +847,19 @@ impl App {
                         self.messages.push(Message::system(message));
                         self.flush_new_messages_to_scrollback(term).ok();
                     }
+                    Ok(RuntimeEvent::TokenUsage {
+                        sent,
+                        received,
+                        context_length,
+                    }) => {
+                        // Private command completions are not rendered as a
+                        // turn, but their usage is still authoritative session
+                        // usage and must update the status bar immediately.
+                        self.view.sent = sent;
+                        self.view.received = received;
+                        self.view.context_length = context_length;
+                        self.stream_estimated_received = Some(received);
+                    }
                     Ok(RuntimeEvent::CommandComplete {
                         request_id: response_id,
                         output,

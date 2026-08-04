@@ -53,22 +53,25 @@ transcript, approval, job, or configuration state.
 ## Turn execution
 
 A submitted turn may make multiple normal provider requests while executing tools.
-Before those requests, all hooks run and their `system_prompt_append` values finalize
-the active system prompt. A requested private compaction then uses that prompt, the
-active provider, conversation id and shared turn state, the current history, and all
-original tools. It ignores the per-turn `tool_filter` and runs before transient
-`turn_message` insertion and normal tool filtering. Private output is not surfaced,
-and private tool calls are not executed.
+Before those requests, hooks run and may shape the request. Compaction is implemented
+in catalog Lua rather than as dedicated Rust policy. Lua owns thresholds, history
+selection, prompts, repair, checkpoint formatting, continuation wording, notices,
+and replacement policy. It supplies explicit messages, tools, and an optional positive
+`max_tokens` to `ctx.llm.complete`, which performs exactly one private provider request
+with no agent/tool loop. Private text is not surfaced, and returned tool calls are
+exposed to Lua without execution. Cancellation and usage are accounted by the
+authoritative Driver turn or daemon command path.
 
-At most one compaction cycle runs per submitted turn, with one repair request only
-when output is empty or generates a tool call. The prompt asks for a concise checkpoint,
-but Bone does not reject or truncate a non-empty plain-text checkpoint based on its
-length. Transport, stream, and cancellation failures are not retried. Any final failure
-leaves the transcript unchanged and the normal turn continues. Success atomically
-replaces model-facing history with one stable synthetic user checkpoint followed by
-retained complete turns, including the submitted user turn. The effective checkpoint
-is persisted to SQLite while complete display history remains intact. Compaction is
-private driver behavior, not a protocol command action or public runtime event.
+Transcript mutation occurs only when a validated `conversation.replace` result is
+applied. Automatic compaction applies it in the active Driver turn; manual `/compact`
+returns the same generic action for the frontend to send to the daemon. Success replaces
+model-facing history with a Lua-formatted checkpoint and retained recent turns. The
+effective checkpoint is persisted to SQLite while complete display history remains
+intact. Compaction-specific behavior is not a Rust runtime primitive or public event.
+
+`bone run` slash-command expansion intentionally has no private completion access
+because it has no durable conversation or command usage owner. Headless `before_turn`
+hooks still run inside the authoritative Driver and may use private completion.
 
 ## Data flow
 

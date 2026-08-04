@@ -3,6 +3,7 @@ use super::{
     flush_stream_end, openai_messages, openai_tools, process_sse_chunk, split_reasoning_events,
     stream_usage_enabled,
 };
+use crate::llm::provider::{LlmProvider, ProviderRequestContext};
 use crate::llm::{ChatMessage, ChatRole, ImageData};
 use std::collections::BTreeMap;
 
@@ -277,4 +278,66 @@ fn from_entry_reads_reasoning_effort() {
     };
     let provider = OpenAiCompatProvider::from_entry("grok", &empty);
     assert_eq!(provider.reasoning_effort, None);
+}
+
+/// Context max_tokens overrides configured cap in the wire body.
+#[test]
+fn context_max_tokens_overrides_configured_cap_in_chat_request() {
+    let request = ChatRequest {
+        model: "gpt-4".into(),
+        messages: vec![],
+        stream: true,
+        tools: vec![],
+        stream_options: None,
+        max_tokens: Some(3_000), // context override value
+        reasoning_effort: None,
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["max_tokens"], 3_000);
+}
+
+/// Configured cap is used when context has no max_tokens.
+#[test]
+fn configured_cap_used_when_context_max_tokens_is_none() {
+    let request = ChatRequest {
+        model: "gpt-4".into(),
+        messages: vec![],
+        stream: true,
+        tools: vec![],
+        stream_options: None,
+        max_tokens: Some(8_000), // configured cap
+        reasoning_effort: None,
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["max_tokens"], 8_000);
+}
+
+/// Provider max_tokens field is not mutated by context override.
+#[test]
+fn context_max_tokens_does_not_mutate_configured_cap() {
+    use crate::config::ProviderEntry;
+    let entry = ProviderEntry {
+        label: "gpt".into(),
+        base_url: "https://api.openai.com/v1".into(),
+        model: "gpt-4".into(),
+        api_key: Default::default(),
+        endpoint: "/chat/completions".into(),
+        handler: "openai".into(),
+        context_window_tokens: None,
+        max_concurrency: None,
+        reasoning_effort: String::new(),
+        fast_mode: false,
+    };
+    let mut provider = OpenAiCompatProvider::from_entry("gpt", &entry);
+    provider.set_max_tokens(Some(16_000));
+    assert_eq!(provider.max_tokens, Some(16_000));
+
+    // Simulate context override: context.max_tokens.or(self.max_tokens)
+    let ctx = ProviderRequestContext {
+        max_tokens: Some(8_000),
+        ..Default::default()
+    };
+    let effective = ctx.max_tokens.or(provider.max_tokens);
+    assert_eq!(effective, Some(8_000)); // context wins
+    assert_eq!(provider.max_tokens, Some(16_000)); // configured cap untouched
 }

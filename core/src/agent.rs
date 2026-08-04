@@ -214,8 +214,7 @@ pub struct AgentRequest {
     /// available.
     pub tool_allowlist: Option<Vec<String>>,
     /// Optional cap on output tokens for this run. Applied to a freshly
-    /// constructed provider (not an injected one). Used by context compaction
-    /// to bound the summarization model's output.
+    /// constructed provider, not an injected one.
     pub max_tokens: Option<u32>,
     pub approval_gate: Option<crate::tools::SharedGate>,
     pub transcript: Option<Vec<ChatMessage>>,
@@ -737,9 +736,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
     let before = session_report.persist_failures();
     let result = driver.run(&request.prompt).await;
 
-    // Only the top-level run (depth 0) warns — subagent/compaction runs are
-    // internal and a stderr line would be noise. Best-effort: the turn still
-    // succeeded, so this is a warning, not an error.
+    // Only the top-level run (depth 0) warns; delegated runs are internal and
+    // a stderr line would be noise. Best-effort: the turn still succeeded, so
+    // this is a warning, not an error.
     let failures = session_report.persist_failures().saturating_sub(before);
     if request.agent_depth == 0 && failures > 0 {
         crate::ext::ctx::runtime_warn(format!(

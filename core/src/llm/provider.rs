@@ -162,6 +162,9 @@ pub struct ProviderRequestContext {
     /// capture it from the first response and replay it for retries and tool
     /// rounds, but it must not be reused by a later user turn.
     pub turn_state: Option<Arc<OnceLock<String>>>,
+    /// Optional request-local output cap. This overrides the provider's
+    /// configured default without mutating the shared provider instance.
+    pub max_tokens: Option<u32>,
 }
 
 #[async_trait]

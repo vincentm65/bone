@@ -38,7 +38,6 @@ use bone_core::tools::{
 /// connection-level error (so tests can exercise the connection retry path).
 enum MockAttempt {
     Stream(Vec<Result<ChatEvent, LlmError>>),
-    Pending,
     ConnErr(LlmError),
 }
 
@@ -92,7 +91,6 @@ impl LlmProvider for MockProvider {
             .unwrap_or(MockAttempt::Stream(vec![]));
         match attempt {
             MockAttempt::Stream(events) => Ok(futures_util::stream::iter(events).boxed()),
-            MockAttempt::Pending => Ok(futures_util::stream::pending().boxed()),
             MockAttempt::ConnErr(e) => Err(e),
         }
     }
@@ -940,6 +938,395 @@ impl LlmProvider for CapturingProvider {
         let events = self.script.lock().unwrap().pop().unwrap_or_default();
         Ok(futures_util::stream::iter(events.into_iter().map(Ok)).boxed())
     }
+}
+
+enum PrivateDriverAttempt {
+    Stream(Vec<ChatEvent>),
+    UsageThenPending(ChatEvent),
+}
+
+struct CapturedRequest {
+    messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    context: ProviderRequestContext,
+}
+
+struct PrivateDriverProvider {
+    model: String,
+    attempts: Mutex<Vec<PrivateDriverAttempt>>,
+    captured: Mutex<Vec<CapturedRequest>>,
+}
+
+#[async_trait]
+impl LlmProvider for PrivateDriverProvider {
+    fn id(&self) -> &str {
+        "private-mock"
+    }
+
+    fn name(&self) -> &str {
+        "Private Driver Provider"
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
+        self.chat_stream_with_context(messages, tools, ProviderRequestContext::default())
+            .await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
+        self.captured.lock().unwrap().push(CapturedRequest {
+            messages,
+            tools,
+            context,
+        });
+        let attempt = self.attempts.lock().unwrap().remove(0);
+        match attempt {
+            PrivateDriverAttempt::Stream(events) => {
+                Ok(futures_util::stream::iter(events.into_iter().map(Ok)).boxed())
+            }
+            PrivateDriverAttempt::UsageThenPending(usage) => {
+                Ok(futures_util::stream::iter([Ok(usage)])
+                    .chain(futures_util::stream::pending())
+                    .boxed())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RecordedUsage {
+    provider: String,
+    model: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cached_tokens: Option<u32>,
+    cost: Option<f64>,
+    is_estimated: bool,
+}
+
+#[derive(Default)]
+struct RecordingUsageSink {
+    usage: Mutex<Vec<RecordedUsage>>,
+}
+
+impl SessionSink for RecordingUsageSink {
+    fn conv_id(&self) -> Option<i64> {
+        Some(42)
+    }
+
+    fn append_message(
+        &self,
+        _role: &str,
+        _content: &str,
+        _tool_name: Option<&str>,
+        _tool_call_id: Option<&str>,
+        _tool_calls: Option<&str>,
+        _images: Option<&str>,
+        _is_error: bool,
+        _seq: i64,
+    ) {
+    }
+
+    fn record_usage(
+        &self,
+        provider: &str,
+        model: &str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cached_tokens: Option<u32>,
+        cost: Option<f64>,
+        is_estimated: bool,
+    ) {
+        self.usage.lock().unwrap().push(RecordedUsage {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cost,
+            is_estimated,
+        });
+    }
+
+    fn end(&self) {}
+}
+
+fn private_completion_extensions(name: &str, hook: &str) -> (std::path::PathBuf, ExtensionManager) {
+    let config_dir = common::temp_dir(name);
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("init.lua"), hook).unwrap();
+    let config = common::config_store();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &config,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    (config_dir, booted.manager)
+}
+
+#[tokio::test]
+async fn driver_private_completion_is_one_shot_replaced_and_fully_accounted() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-private-completion",
+        r#"
+bone.on("before_turn", function(_event, ctx)
+    local result = ctx.llm.complete({
+        messages = {
+            { role = "system", content = "private system" },
+            { role = "user", content = "private prompt" },
+        },
+        tools = {},
+        max_tokens = 4000,
+    })
+    if not result.ok or result.content ~= "PRIVATE SECRET" then
+        return nil
+    end
+    return {
+        action = "conversation.replace",
+        messages = { { role = "user", content = "safe checkpoint" } },
+    }
+end)
+"#,
+    );
+    let llm = Arc::new(PrivateDriverProvider {
+        model: "private-model".into(),
+        attempts: Mutex::new(vec![
+            PrivateDriverAttempt::Stream(vec![
+                ChatEvent::TextDelta("PRIVATE SECRET".into()),
+                ChatEvent::TokenUsage {
+                    prompt_tokens: 11,
+                    completion_tokens: 3,
+                    cached_tokens: Some(2),
+                    cost: Some(0.5),
+                },
+            ]),
+            PrivateDriverAttempt::Stream(vec![
+                ChatEvent::TextDelta("public answer".into()),
+                ChatEvent::TokenUsage {
+                    prompt_tokens: 7,
+                    completion_tokens: 2,
+                    cached_tokens: Some(1),
+                    cost: Some(0.25),
+                },
+            ]),
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let sink = Arc::new(RecordingUsageSink::default());
+    let callback_usage = Arc::new(Mutex::new(Vec::new()));
+    let callback_capture = Arc::clone(&callback_usage);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, mut runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+    let prompt = "original prompt";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: sink.clone(),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: Some(Arc::new(move |sent, received| {
+            callback_capture.lock().unwrap().push((sent, received));
+        })),
+        events: true,
+        event_sender: Some(event_tx),
+        runtime_events: Some(runtime_tx),
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, None),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: Some(42),
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "public answer");
+    assert!(outcome.transcript_replaced);
+    assert_eq!(
+        outcome
+            .transcript
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        ["safe checkpoint", "public answer"]
+    );
+    assert!(
+        outcome
+            .transcript
+            .iter()
+            .all(|message| !message.content.contains("PRIVATE SECRET"))
+    );
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2, "one private and one normal request");
+    assert_eq!(captured[0].messages.len(), 2);
+    assert_eq!(captured[0].messages[0].content, "private system");
+    assert_eq!(captured[0].messages[1].content, "private prompt");
+    assert!(captured[0].tools.is_empty());
+    assert_eq!(captured[0].context.max_tokens, Some(4000));
+    assert!(!captured[1].tools.is_empty());
+    assert_eq!(captured[1].context.max_tokens, None);
+    assert_eq!(captured[0].context.conversation_id, Some(42));
+    assert_eq!(captured[1].context.conversation_id, Some(42));
+    assert!(Arc::ptr_eq(
+        captured[0].context.turn_state.as_ref().unwrap(),
+        captured[1].context.turn_state.as_ref().unwrap()
+    ));
+    drop(captured);
+
+    assert_eq!(outcome.token_stats.sent, 18);
+    assert_eq!(outcome.token_stats.received, 5);
+    assert_eq!(outcome.token_stats.cached, 3);
+    assert_eq!(outcome.token_stats.cost, 0.75);
+    assert_eq!(outcome.token_stats.request_count, 2);
+    assert_eq!(outcome.usage.len(), 2);
+    assert_eq!(outcome.usage[0].prompt_tokens, 11);
+    assert_eq!(outcome.usage[1].prompt_tokens, 7);
+    assert_eq!(*callback_usage.lock().unwrap(), [(11, 3), (18, 5)]);
+
+    let persisted = sink.usage.lock().unwrap();
+    assert_eq!(persisted.len(), 2);
+    assert_eq!(persisted[0].provider, "private-mock");
+    assert_eq!(persisted[0].model, "private-model");
+    assert_eq!(persisted[0].prompt_tokens, 11);
+    assert_eq!(persisted[0].completion_tokens, 3);
+    assert_eq!(persisted[0].cached_tokens, Some(2));
+    assert_eq!(persisted[0].cost, Some(0.5));
+    assert!(!persisted[0].is_estimated);
+    drop(persisted);
+
+    let events = collect_events(&mut event_rx);
+    let runtime_events = collect_runtime_events(&mut runtime_rx);
+    for events in [&events, &runtime_events] {
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::TokenUsage {
+                sent: 11,
+                received: 3,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::TokenUsage {
+                sent: 18,
+                received: 5,
+                ..
+            }
+        )));
+        assert!(events.iter().all(|event| {
+            !matches!(event, RuntimeEvent::TextDelta { text } if text.contains("PRIVATE SECRET"))
+        }));
+    }
+
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
+async fn driver_cancellation_drains_private_usage_with_bounded_grace() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-private-completion-cancel",
+        r#"
+bone.on("before_turn", function(_event, ctx)
+    ctx.llm.complete({
+        messages = { { role = "user", content = "wait privately" } },
+        tools = {},
+        max_tokens = 4000,
+    })
+end)
+"#,
+    );
+    let usage = ChatEvent::TokenUsage {
+        prompt_tokens: 13,
+        completion_tokens: 4,
+        cached_tokens: Some(1),
+        cost: Some(0.125),
+    };
+    let llm = Arc::new(PrivateDriverProvider {
+        model: "private-model".into(),
+        attempts: Mutex::new(vec![PrivateDriverAttempt::UsageThenPending(usage)]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let sink = Arc::new(RecordingUsageSink::default());
+    let callback_usage = Arc::new(Mutex::new(Vec::new()));
+    let callback_capture = Arc::clone(&callback_usage);
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_later = Arc::clone(&cancel);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        cancel_later.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let prompt = "original prompt";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: sink.clone(),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: Some(Arc::new(move |sent, received| {
+            callback_capture.lock().unwrap().push((sent, received));
+        })),
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: Some(cancel),
+        history: build_chat_history(&transcript, None),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: Some(42),
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        driver.run_to_outcome(prompt),
+    )
+    .await
+    .expect("cancellation must return promptly");
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    assert_eq!(outcome.result.unwrap().content, "");
+    assert_eq!(llm.captured.lock().unwrap().len(), 1, "no normal request");
+    assert_eq!(outcome.token_stats.sent, 13);
+    assert_eq!(outcome.token_stats.received, 4);
+    assert_eq!(outcome.usage.len(), 1);
+    assert_eq!(*callback_usage.lock().unwrap(), [(13, 4)]);
+    assert_eq!(sink.usage.lock().unwrap().len(), 1);
+
+    std::fs::remove_dir_all(config_dir).ok();
 }
 
 #[tokio::test]
@@ -1811,616 +2198,6 @@ async fn driver_does_not_retry_non_retryable_stream_error() {
     let result = driver.run(prompt).await;
     let err = result.err().expect("should fail without retrying");
     assert!(err.contains("max_output_tokens"), "unexpected error: {err}");
-}
-
-// --- Conversation compaction ---
-
-#[derive(Clone)]
-struct CompactionCapture {
-    messages: Vec<ChatMessage>,
-    tools: Vec<ToolDefinition>,
-    context: ProviderRequestContext,
-}
-
-struct CompactionProvider {
-    attempts: Mutex<Vec<MockAttempt>>,
-    captures: Mutex<Vec<CompactionCapture>>,
-}
-
-impl CompactionProvider {
-    fn new(attempts: Vec<MockAttempt>) -> Self {
-        Self {
-            attempts: Mutex::new(attempts.into_iter().rev().collect()),
-            captures: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn respond(&self) -> Result<ResponseStream, LlmError> {
-        match self
-            .attempts
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or(MockAttempt::Stream(Vec::new()))
-        {
-            MockAttempt::Stream(events) => Ok(futures_util::stream::iter(events).boxed()),
-            MockAttempt::Pending => Ok(futures_util::stream::pending().boxed()),
-            MockAttempt::ConnErr(error) => Err(error),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for CompactionProvider {
-    fn id(&self) -> &str {
-        "compaction-mock"
-    }
-
-    fn name(&self) -> &str {
-        "Compaction Mock"
-    }
-
-    fn model(&self) -> &str {
-        "compaction-model"
-    }
-
-    fn set_model(&mut self, _model: String) {}
-
-    async fn chat_stream(
-        &self,
-        messages: Vec<ChatMessage>,
-        tools: Vec<ToolDefinition>,
-    ) -> Result<ResponseStream, LlmError> {
-        self.captures.lock().unwrap().push(CompactionCapture {
-            messages,
-            tools,
-            context: ProviderRequestContext::default(),
-        });
-        self.respond()
-    }
-
-    async fn chat_stream_with_context(
-        &self,
-        messages: Vec<ChatMessage>,
-        tools: Vec<ToolDefinition>,
-        context: ProviderRequestContext,
-    ) -> Result<ResponseStream, LlmError> {
-        self.captures.lock().unwrap().push(CompactionCapture {
-            messages,
-            tools,
-            context,
-        });
-        self.respond()
-    }
-}
-
-fn compaction_test_driver(
-    name: &str,
-    lua_source: &str,
-    llm: Arc<CompactionProvider>,
-    transcript: Vec<ChatMessage>,
-    runtime_events: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
-) -> (Driver, std::path::PathBuf) {
-    let config_dir = common::temp_dir(name);
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("init.lua"), lua_source).unwrap();
-    let config = common::config_store();
-    let booted = boot_with_tools(
-        &config_dir,
-        &config_dir,
-        &config,
-        false,
-        BootOptions::default(),
-        "compaction-model",
-        "Compaction Mock",
-    );
-    let base = "Configured compaction base".to_string();
-    let history = build_chat_history(&transcript, Some(&base));
-    (
-        Driver {
-            llm,
-            extensions: booted.manager,
-            config_store: config,
-            tools: ToolHandler::new(builtin_tools()),
-            session: Arc::new(NullSessionSink),
-            gate: Arc::new(AutoApprovalGate),
-            approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
-            agent_depth: 0,
-            activity: None,
-            on_token_usage: None,
-            events: false,
-            event_sender: None,
-            runtime_events,
-            key_reply_registry: None,
-            cancel: None,
-            history,
-            transcript,
-            token_stats: TokenStats::new(),
-            system_prompt_override: Some(base),
-            conversation_id: Some(42),
-            turn_nudge: Arc::new(Mutex::new(None)),
-        },
-        config_dir,
-    )
-}
-
-#[tokio::test]
-async fn compaction_success_uses_final_context_and_keeps_private_output_private() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return {
-        system_prompt_append = "append-one",
-        turn_message = "TRANSIENT-MARKER",
-        tool_filter = {},
-        conversation = { compact = { instruction = "FIRST-INSTRUCTION", keep_recent_turns = 1 } },
-    }
-end)
-bone.on("before_turn", function()
-    return {
-        system_prompt_append = "append-two",
-        conversation = { compact = { instruction = "SECOND-INSTRUCTION", keep_recent_turns = 0 } },
-    }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("PRIVATE-CHECKPOINT".into()))]),
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("normal answer".into()))]),
-    ]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "u1"),
-        ChatMessage::new(ChatRole::Assistant, "a1"),
-        ChatMessage::new(ChatRole::User, "u2"),
-        ChatMessage::new(ChatRole::Assistant, "a2"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (driver, config_dir) = compaction_test_driver(
-        "driver-compaction-success",
-        lua,
-        llm.clone(),
-        transcript,
-        Some(tx),
-    );
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.result.as_ref().unwrap().content, "normal answer");
-    assert!(outcome.transcript_replaced);
-    assert_eq!(outcome.transcript.len(), 5);
-    assert_eq!(outcome.transcript[0].role, ChatRole::User);
-    assert!(outcome.transcript[0].content.contains("PRIVATE-CHECKPOINT"));
-    assert_eq!(outcome.transcript[1].content, "u2");
-    assert_eq!(outcome.transcript[2].content, "a2");
-    assert_eq!(outcome.transcript[3].content, prompt);
-
-    let captures = llm.captures.lock().unwrap();
-    assert_eq!(captures.len(), 2);
-    let private = &captures[0];
-    let normal = &captures[1];
-    assert!(
-        private.messages[0]
-            .content
-            .contains("Configured compaction base")
-    );
-    assert!(private.messages[0].content.contains("append-one"));
-    assert!(private.messages[0].content.contains("append-two"));
-    assert!(
-        private
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("FIRST-INSTRUCTION")
-    );
-    assert!(
-        !private
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("SECOND-INSTRUCTION")
-    );
-    assert!(
-        private
-            .messages
-            .iter()
-            .all(|message| !message.content.contains("TRANSIENT-MARKER"))
-    );
-    assert!(
-        normal
-            .messages
-            .iter()
-            .any(|message| message.content.contains("TRANSIENT-MARKER"))
-    );
-    assert!(
-        normal.messages.iter().any(|message| message
-            .content
-            .contains("Resume the current user request from this checkpoint")),
-        "the resumed request must explicitly tell the agent to continue"
-    );
-    assert!(!private.tools.is_empty());
-    assert!(normal.tools.is_empty());
-    assert_eq!(private.context.conversation_id, Some(42));
-    assert_eq!(normal.context.conversation_id, Some(42));
-    assert!(Arc::ptr_eq(
-        private.context.turn_state.as_ref().unwrap(),
-        normal.context.turn_state.as_ref().unwrap()
-    ));
-    drop(captures);
-
-    let mut surfaced = String::new();
-    while let Ok(event) = rx.try_recv() {
-        if let RuntimeEvent::TextDelta { text } = event {
-            surfaced.push_str(&text);
-        }
-    }
-    assert_eq!(surfaced, "normal answer");
-    assert_eq!(outcome.usage.len(), 2);
-    assert!(outcome.usage.iter().all(|usage| usage.is_estimated));
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn compaction_usage_is_counted_like_normal_requests() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![
-        MockAttempt::Stream(vec![
-            Ok(ChatEvent::TextDelta("checkpoint".into())),
-            Ok(ChatEvent::TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 2,
-                cached_tokens: Some(1),
-                cost: Some(0.1),
-            }),
-        ]),
-        MockAttempt::Stream(vec![
-            Ok(ChatEvent::TextDelta("done".into())),
-            Ok(ChatEvent::TokenUsage {
-                prompt_tokens: 30,
-                completion_tokens: 4,
-                cached_tokens: Some(2),
-                cost: Some(0.2),
-            }),
-        ]),
-    ]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "old"),
-        ChatMessage::new(ChatRole::Assistant, "old answer"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let (driver, config_dir) =
-        compaction_test_driver("driver-compaction-usage", lua, llm, transcript, None);
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.token_stats.request_count, 2);
-    assert_eq!(outcome.token_stats.sent, 40);
-    assert_eq!(outcome.token_stats.received, 6);
-    assert_eq!(outcome.token_stats.cached, 3);
-    assert!((outcome.token_stats.cost - 0.3).abs() < f64::EPSILON);
-    assert_eq!(outcome.usage.len(), 2);
-    assert!(outcome.usage.iter().all(|usage| !usage.is_estimated));
-    assert_eq!(outcome.usage[0].prompt_tokens, 10);
-    assert_eq!(outcome.usage[1].prompt_tokens, 30);
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn compaction_tool_output_repairs_once_without_executing_private_call() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![
-        MockAttempt::Stream(vec![Ok(ChatEvent::ToolCall(ToolCall {
-            id: "private-call".into(),
-            name: "read_file".into(),
-            arguments: serde_json::json!({ "path": "must-not-run" }),
-        }))]),
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("repaired checkpoint".into()))]),
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
-    ]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "old"),
-        ChatMessage::new(ChatRole::Assistant, "old answer"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let (driver, config_dir) = compaction_test_driver(
-        "driver-compaction-repair",
-        lua,
-        llm.clone(),
-        transcript,
-        None,
-    );
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
-    assert!(outcome.transcript_replaced);
-    assert_eq!(llm.captures.lock().unwrap().len(), 3);
-    assert!(
-        outcome
-            .transcript
-            .iter()
-            .all(|message| message.role != ChatRole::Tool)
-    );
-    assert!(
-        outcome
-            .transcript
-            .iter()
-            .all(|message| message.tool_calls.is_empty())
-    );
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn large_compaction_output_is_accepted_without_repair() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
-end)
-"#;
-    let large_checkpoint = "x".repeat(20_000);
-    let llm = Arc::new(CompactionProvider::new(vec![
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta(large_checkpoint.clone()))]),
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
-    ]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "old"),
-        ChatMessage::new(ChatRole::Assistant, "old answer"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let (driver, config_dir) = compaction_test_driver(
-        "driver-compaction-large-output",
-        lua,
-        llm.clone(),
-        transcript,
-        None,
-    );
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
-    assert!(outcome.transcript_replaced);
-    assert!(
-        outcome
-            .transcript
-            .iter()
-            .any(|message| message.content.contains(&large_checkpoint))
-    );
-    assert_eq!(llm.captures.lock().unwrap().len(), 2);
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn compaction_transport_failure_does_not_repair_or_replace_transcript() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![
-        MockAttempt::ConnErr(LlmError::new_with_kind(
-            LlmErrorKind::Connection,
-            "private failure",
-        )),
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
-    ]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "old"),
-        ChatMessage::new(ChatRole::Assistant, "old answer"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let original = transcript.clone();
-    let (driver, config_dir) = compaction_test_driver(
-        "driver-compaction-transport",
-        lua,
-        llm.clone(),
-        transcript,
-        None,
-    );
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
-    assert!(!outcome.transcript_replaced);
-    assert_eq!(llm.captures.lock().unwrap().len(), 2);
-    assert_eq!(&outcome.transcript[..original.len()], original.as_slice());
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn same_pass_replacement_skips_compaction() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "must not run" } } }
-end)
-bone.on("before_turn", function()
-    return {
-        action = "conversation.replace",
-        messages = { { role = "user", content = "replacement wins" } },
-    }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![MockAttempt::Stream(vec![
-        Ok(ChatEvent::TextDelta("done".into())),
-    ])]));
-    let prompt = "current";
-    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let (driver, config_dir) = compaction_test_driver(
-        "driver-compaction-replace",
-        lua,
-        llm.clone(),
-        transcript,
-        None,
-    );
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
-    assert!(outcome.transcript_replaced);
-    assert_eq!(outcome.transcript[0].content, "replacement wins");
-    assert_eq!(llm.captures.lock().unwrap().len(), 1);
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn compaction_runs_only_once_across_normal_tool_rounds() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "compact once", keep_recent_turns = 0 } } }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("checkpoint once".into()))]),
-        MockAttempt::Stream(vec![Ok(ChatEvent::ToolCall(ToolCall {
-            id: "normal-call".into(),
-            name: "read_file".into(),
-            arguments: serde_json::json!({ "path": "Cargo.toml" }),
-        }))]),
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
-    ]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "old"),
-        ChatMessage::new(ChatRole::Assistant, "old answer"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let (driver, config_dir) = compaction_test_driver(
-        "driver-compaction-one-cycle",
-        lua,
-        llm.clone(),
-        transcript,
-        None,
-    );
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
-    let captures = llm.captures.lock().unwrap();
-    assert_eq!(
-        captures.len(),
-        3,
-        "one private request plus two normal rounds"
-    );
-    assert_eq!(
-        captures
-            .iter()
-            .filter(|capture| capture
-                .messages
-                .last()
-                .is_some_and(|message| message.content.contains("Output only the checkpoint text")))
-            .count(),
-        1,
-        "later before_turn passes must not start another compaction cycle"
-    );
-    drop(captures);
-    assert_eq!(
-        outcome
-            .transcript
-            .iter()
-            .filter(|message| message.content.contains("checkpoint once"))
-            .count(),
-        1
-    );
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn empty_compaction_and_empty_repair_leave_transcript_unchanged() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![
-        MockAttempt::Stream(Vec::new()),
-        MockAttempt::Stream(Vec::new()),
-        MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
-    ]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "old"),
-        ChatMessage::new(ChatRole::Assistant, "old answer"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let original = transcript.clone();
-    let (driver, config_dir) = compaction_test_driver(
-        "driver-compaction-empty",
-        lua,
-        llm.clone(),
-        transcript,
-        None,
-    );
-
-    let outcome = driver.run_to_outcome(prompt).await;
-    assert_eq!(outcome.result.as_ref().unwrap().content, "done");
-    assert!(!outcome.transcript_replaced);
-    assert_eq!(&outcome.transcript[..original.len()], original.as_slice());
-    let captures = llm.captures.lock().unwrap();
-    assert_eq!(captures.len(), 3);
-    assert!(
-        captures[1]
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("only repair attempt")
-    );
-    drop(captures);
-    std::fs::remove_dir_all(config_dir).ok();
-}
-
-#[tokio::test]
-async fn cancellation_during_private_compaction_does_not_repair_or_replace_transcript() {
-    let lua = r#"
-bone.on("before_turn", function()
-    return { conversation = { compact = { instruction = "summarize", keep_recent_turns = 0 } } }
-end)
-"#;
-    let llm = Arc::new(CompactionProvider::new(vec![MockAttempt::Pending]));
-    let prompt = "current";
-    let transcript = vec![
-        ChatMessage::new(ChatRole::User, "old"),
-        ChatMessage::new(ChatRole::Assistant, "old answer"),
-        ChatMessage::new(ChatRole::User, prompt),
-    ];
-    let original = transcript.clone();
-    let (mut driver, config_dir) = compaction_test_driver(
-        "driver-compaction-cancelled",
-        lua,
-        llm.clone(),
-        transcript,
-        None,
-    );
-    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    driver.cancel = Some(cancel.clone());
-
-    let run = tokio::spawn(driver.run_to_outcome(prompt));
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if llm.captures.lock().unwrap().len() == 1 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("private compaction request did not start");
-    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), run)
-        .await
-        .expect("private compaction did not observe cancellation")
-        .expect("driver task panicked");
-    assert_eq!(outcome.result.as_ref().unwrap().content, "");
-    assert!(!outcome.transcript_replaced);
-    assert_eq!(outcome.transcript, original);
-    assert_eq!(llm.captures.lock().unwrap().len(), 1);
-    std::fs::remove_dir_all(config_dir).ok();
 }
 
 // --- Cancellation ---

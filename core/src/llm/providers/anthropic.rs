@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
-    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
-    http_error, parse_tool_arguments, streaming_client,
+    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ProviderRequestContext,
+    ResponseStream, http_error, parse_tool_arguments, streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -276,10 +276,23 @@ impl LlmProvider for AnthropicProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
+        self.chat_stream_with_context(messages, tools, ProviderRequestContext::default())
+            .await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
         let (system, msgs) = build_request_parts(messages);
         let request = MessagesRequest {
             model: self.model.clone(),
-            max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            max_tokens: context
+                .max_tokens
+                .or(self.max_tokens)
+                .unwrap_or(DEFAULT_MAX_TOKENS),
             stream: true,
             output_config: self
                 .reasoning_effort

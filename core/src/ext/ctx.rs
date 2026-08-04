@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Table, Value};
 
 use crate::config::store::ConfigStore;
+use crate::llm::provider::{LlmProvider, ProviderRequestContext};
 use crate::tools::shell::{
     DirectExecRequest, ScriptRequest, run_direct_exec, run_script, run_script_lines,
 };
@@ -471,6 +473,22 @@ pub enum ConversationOperation {
     Load(i64),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PrivateLlmUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub cached_tokens: Option<u32>,
+    pub cost: Option<f64>,
+    pub is_estimated: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct PrivateLlmContext {
+    pub provider: Arc<dyn LlmProvider>,
+    pub request_context: ProviderRequestContext,
+    pub usage_records: Arc<Mutex<Vec<PrivateLlmUsage>>>,
+}
+
 pub struct CtxConfig {
     pub config_dir: String,
     pub cwd: String,
@@ -493,6 +511,9 @@ pub struct CtxConfig {
     pub agent_depth: usize,
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
+    /// Request-scoped provider access for one private completion. This is set
+    /// only by authoritative runtime paths that can account for provider usage.
+    pub(crate) private_llm: Option<PrivateLlmContext>,
     pub conversation_history: Option<Vec<crate::llm::ChatMessage>>,
     /// Canonical daemon configuration available to interactive Lua commands.
     pub config_store: Option<crate::config::store::ConfigStore>,
@@ -535,6 +556,7 @@ impl CtxConfig {
             agent_depth: 0,
             cancelled: None,
             usage: None,
+            private_llm: None,
             conversation_history: None,
             config_store: None,
             config_schema: None,
@@ -723,6 +745,9 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
 
     // ctx.usage.snapshot() → current conversation usage details.
     ctx.set("usage", build_usage_table(lua, cfg)?)?;
+
+    // ctx.llm.complete(opts) → one private request through the active provider.
+    ctx.set("llm", build_llm_table(lua, cfg)?)?;
 
     // ctx.conversation — active conversation snapshot + daemon-owned operations.
     ctx.set("conversation", build_conversation_table(lua, cfg)?)?;
@@ -1699,6 +1724,264 @@ fn build_runtime_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
     })?;
     runtime_table.set("info", info_fn)?;
     Ok(runtime_table)
+}
+
+/// Build the `ctx.llm` table. `complete` performs exactly one private provider
+/// request: no agent loop, tool execution, transcript mutation, or frontend text.
+fn build_llm_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
+    let llm_table = lua.create_table()?;
+    let private_llm = cfg.private_llm.clone();
+    let cancelled = cfg.cancelled.clone();
+    let complete = lua.create_function(move |lua, opts: Table| {
+        let Some(private_llm) = private_llm.clone() else {
+            return private_llm_error(lua, "private LLM completion is unavailable", false);
+        };
+
+        for pair in opts.clone().pairs::<Value, Value>() {
+            let (key, _) = pair?;
+            let Value::String(key) = key else {
+                return private_llm_error(lua, "LLM completion option keys must be strings", false);
+            };
+            let key = key.to_str()?;
+            if !matches!(key.as_ref(), "messages" | "tools" | "max_tokens") {
+                return private_llm_error(
+                    lua,
+                    format!("unknown LLM completion option '{key}'"),
+                    false,
+                );
+            }
+        }
+
+        let messages_value: Value = opts.raw_get("messages")?;
+        let messages: Vec<crate::llm::ChatMessage> =
+            match lua.from_value::<Vec<crate::llm::ChatMessage>>(messages_value) {
+                Ok(messages) if !messages.is_empty() => messages,
+                Ok(_) => return private_llm_error(lua, "messages must not be empty", false),
+                Err(error) => {
+                    return private_llm_error(lua, format!("invalid messages: {error}"), false);
+                }
+            };
+        let tools = match opts.raw_get::<Value>("tools")? {
+            Value::Nil => Vec::new(),
+            value => match lua.from_value::<Vec<crate::tools::ToolDefinition>>(value) {
+                Ok(tools) => tools,
+                Err(error) => {
+                    return private_llm_error(lua, format!("invalid tools: {error}"), false);
+                }
+            },
+        };
+        let max_tokens = match opts.raw_get::<Value>("max_tokens")? {
+            Value::Nil => None,
+            Value::Integer(value) if value > 0 && value <= i64::from(u32::MAX) => {
+                Some(value as u32)
+            }
+            _ => {
+                return private_llm_error(
+                    lua,
+                    "max_tokens must be a positive 32-bit integer",
+                    false,
+                );
+            }
+        };
+
+        let mut request_context = private_llm.request_context.clone();
+        request_context.max_tokens = max_tokens;
+        let completion = block_on(run_private_completion(
+            private_llm.provider.clone(),
+            request_context,
+            messages,
+            tools,
+            cancelled.clone(),
+        ));
+        if let Some(usage) = completion.usage.clone() {
+            private_llm
+                .usage_records
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(usage);
+        }
+        private_llm_completion_to_lua(lua, completion)
+    })?;
+    llm_table.set("complete", complete)?;
+    Ok(llm_table)
+}
+
+struct PrivateLlmCompletion {
+    content: String,
+    tool_calls: Vec<crate::tools::ToolCall>,
+    usage: Option<PrivateLlmUsage>,
+    error: Option<String>,
+    cancelled: bool,
+}
+
+fn private_llm_error(
+    lua: &Lua,
+    error: impl Into<String>,
+    cancelled: bool,
+) -> Result<Value, mlua::Error> {
+    private_llm_completion_to_lua(
+        lua,
+        PrivateLlmCompletion {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            usage: None,
+            error: Some(error.into()),
+            cancelled,
+        },
+    )
+}
+
+fn private_llm_completion_to_lua(
+    lua: &Lua,
+    completion: PrivateLlmCompletion,
+) -> Result<Value, mlua::Error> {
+    let result = lua.create_table()?;
+    result.set("ok", completion.error.is_none() && !completion.cancelled)?;
+    result.set("content", completion.content)?;
+    result.set("tool_calls", lua.to_value(&completion.tool_calls)?)?;
+    result.set("cancelled", completion.cancelled)?;
+    if let Some(error) = completion.error {
+        result.set("error", error)?;
+    }
+    if let Some(usage) = completion.usage {
+        let value = serde_json::json!({
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "cached_tokens": usage.cached_tokens,
+            "cost": usage.cost,
+            "is_estimated": usage.is_estimated,
+        });
+        result.set("usage", lua.to_value(&value)?)?;
+    }
+    Ok(Value::Table(result))
+}
+
+async fn wait_for_llm_cancel(cancelled: Option<Arc<AtomicBool>>) {
+    match cancelled {
+        Some(flag) => {
+            while !flag.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn run_private_completion(
+    provider: Arc<dyn LlmProvider>,
+    request_context: ProviderRequestContext,
+    messages: Vec<crate::llm::ChatMessage>,
+    tools: Vec<crate::tools::ToolDefinition>,
+    cancelled: Option<Arc<AtomicBool>>,
+) -> PrivateLlmCompletion {
+    let prompt_chars = crate::agent::estimate_context_chars(
+        &messages,
+        serde_json::to_string(&tools)
+            .map(|json| json.chars().count())
+            .unwrap_or(0),
+    );
+    let request = provider.chat_stream_with_context(messages, tools, request_context);
+    let mut stream = match tokio::select! {
+        biased;
+        _ = wait_for_llm_cancel(cancelled.clone()) => {
+            return PrivateLlmCompletion {
+                content: String::new(),
+                tool_calls: Vec::new(),
+                usage: None,
+                error: Some("LLM completion cancelled".to_string()),
+                cancelled: true,
+            };
+        }
+        result = request => result,
+    } {
+        Ok(stream) => stream,
+        Err(error) => {
+            return PrivateLlmCompletion {
+                content: String::new(),
+                tool_calls: Vec::new(),
+                usage: None,
+                error: Some(error.to_string()),
+                cancelled: false,
+            };
+        }
+    };
+
+    let mut content = String::new();
+    let mut tool_calls = Vec::new();
+    let mut completion_chars = 0usize;
+    let mut usage = None;
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = wait_for_llm_cancel(cancelled.clone()) => {
+                return PrivateLlmCompletion {
+                    content,
+                    tool_calls,
+                    usage,
+                    error: Some("LLM completion cancelled".to_string()),
+                    cancelled: true,
+                };
+            }
+            event = stream.next() => event,
+        };
+        let Some(event) = event else { break };
+        match event {
+            Ok(crate::llm::ChatEvent::TextDelta(delta)) => {
+                completion_chars += delta.chars().count();
+                content.push_str(&delta);
+            }
+            Ok(crate::llm::ChatEvent::ReasoningDelta { text, .. }) => {
+                completion_chars += text.chars().count();
+            }
+            Ok(crate::llm::ChatEvent::EncryptedReasoning { .. }) => {}
+            Ok(crate::llm::ChatEvent::ToolCall(call)) => {
+                completion_chars += serde_json::to_string(&call)
+                    .map(|json| json.chars().count())
+                    .unwrap_or(0);
+                tool_calls.push(call);
+            }
+            Ok(crate::llm::ChatEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cost,
+            }) => {
+                usage = Some(PrivateLlmUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    cost,
+                    is_estimated: false,
+                });
+            }
+            Err(error) => {
+                return PrivateLlmCompletion {
+                    content,
+                    tool_calls,
+                    usage,
+                    error: Some(error.to_string()),
+                    cancelled: false,
+                };
+            }
+        }
+    }
+
+    let usage = usage.or_else(|| {
+        Some(PrivateLlmUsage {
+            prompt_tokens: crate::agent::estimate_tokens(prompt_chars),
+            completion_tokens: crate::agent::estimate_tokens(completion_chars),
+            cached_tokens: None,
+            cost: None,
+            is_estimated: true,
+        })
+    });
+    PrivateLlmCompletion {
+        content,
+        tool_calls,
+        usage,
+        error: None,
+        cancelled: false,
+    }
 }
 
 /// Build the `ctx.usage` table: `snapshot()` returns the current conversation's

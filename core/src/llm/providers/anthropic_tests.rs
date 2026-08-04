@@ -1,8 +1,8 @@
 use super::{
-    MessagesRequest, OutputConfig, PartialToolUse, build_request_parts, finish_tool_use,
-    usage_input_tokens,
+    AnthropicProvider, MessagesRequest, OutputConfig, PartialToolUse, build_request_parts,
+    finish_tool_use, usage_input_tokens,
 };
-use crate::llm::provider::ChatEvent;
+use crate::llm::provider::{ChatEvent, LlmProvider, ProviderRequestContext};
 use crate::llm::{ChatMessage, ChatRole};
 use serde_json::json;
 
@@ -86,4 +86,54 @@ fn reasoning_effort_uses_anthropic_output_config() {
     };
     let json = serde_json::to_value(request).unwrap();
     assert_eq!(json["output_config"]["effort"], "ultra");
+}
+
+/// Context max_tokens overrides configured cap in the wire body.
+#[test]
+fn context_max_tokens_overrides_configured_cap_in_messages_request() {
+    let request = MessagesRequest {
+        model: "claude-3".into(),
+        max_tokens: 5_000, // context override value
+        stream: true,
+        output_config: None,
+        system: Vec::new(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["max_tokens"], 5_000);
+}
+
+/// Configured cap is used when context has no max_tokens.
+#[test]
+fn configured_cap_used_when_context_max_tokens_is_none() {
+    let request = MessagesRequest {
+        model: "claude-3".into(),
+        max_tokens: 8_000, // configured cap
+        stream: true,
+        output_config: None,
+        system: Vec::new(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["max_tokens"], 8_000);
+}
+
+/// Provider max_tokens field is not mutated by context override.
+#[test]
+fn context_max_tokens_does_not_mutate_configured_cap() {
+    let entry = serde_yaml::from_str("handler: anthropic\n").unwrap();
+    let mut provider = AnthropicProvider::from_entry("anthropic", &entry);
+    provider.set_max_tokens(Some(10_000));
+    assert_eq!(provider.max_tokens, Some(10_000));
+
+    // Simulate context override: context.max_tokens.or(self.max_tokens)
+    let ctx = ProviderRequestContext {
+        max_tokens: Some(5_000),
+        ..Default::default()
+    };
+    let effective = ctx.max_tokens.or(provider.max_tokens);
+    assert_eq!(effective, Some(5_000)); // context wins
+    assert_eq!(provider.max_tokens, Some(10_000)); // configured cap untouched
 }

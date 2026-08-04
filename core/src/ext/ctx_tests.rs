@@ -1682,3 +1682,278 @@ fn db_query_prefix_allows_select_and_with() {
     assert!(!is_allowed_db_query_prefix("UPDATE t SET x = 1"));
     assert!(!is_allowed_db_query_prefix("PRAGMA table_info(t)"));
 }
+
+#[derive(Clone)]
+enum PrivateTestResponse {
+    Events(Vec<Result<crate::llm::ChatEvent, crate::llm::LlmError>>),
+    Error(crate::llm::LlmError),
+    Pending,
+}
+
+struct PrivateTestProvider {
+    responses: Mutex<std::collections::VecDeque<PrivateTestResponse>>,
+    contexts: Mutex<Vec<ProviderRequestContext>>,
+}
+
+impl PrivateTestProvider {
+    fn new(responses: Vec<PrivateTestResponse>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            contexts: Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn response(&self) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        let response = self.responses.lock().unwrap().pop_front().unwrap();
+        match response {
+            PrivateTestResponse::Events(events) => Ok(Box::pin(futures_util::stream::iter(events))),
+            PrivateTestResponse::Error(error) => Err(error),
+            PrivateTestResponse::Pending => std::future::pending().await,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for PrivateTestProvider {
+    fn id(&self) -> &str {
+        "private-test"
+    }
+
+    fn name(&self) -> &str {
+        "Private Test"
+    }
+
+    fn model(&self) -> &str {
+        "test-model"
+    }
+
+    fn set_model(&mut self, _model: String) {}
+
+    async fn chat_stream(
+        &self,
+        _messages: Vec<crate::llm::ChatMessage>,
+        _tools: Vec<crate::tools::ToolDefinition>,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        self.response().await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        _messages: Vec<crate::llm::ChatMessage>,
+        _tools: Vec<crate::tools::ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        self.contexts.lock().unwrap().push(context);
+        self.response().await
+    }
+}
+
+fn private_llm_test_config(
+    provider: Arc<PrivateTestProvider>,
+    cancelled: Option<Arc<AtomicBool>>,
+) -> (
+    CtxConfig,
+    Arc<Mutex<Vec<PrivateLlmUsage>>>,
+    Arc<OnceLock<String>>,
+) {
+    let mut cfg = test_ctx_config();
+    let usage_records = Arc::new(Mutex::new(Vec::new()));
+    let turn_state = Arc::new(OnceLock::new());
+    cfg.cancelled = cancelled;
+    cfg.private_llm = Some(PrivateLlmContext {
+        provider,
+        request_context: ProviderRequestContext {
+            conversation_id: Some(42),
+            turn_state: Some(Arc::clone(&turn_state)),
+            max_tokens: None,
+        },
+        usage_records: Arc::clone(&usage_records),
+    });
+    (cfg, usage_records, turn_state)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_llm_complete_returns_content_tool_calls_and_reported_usage() {
+    let provider = Arc::new(PrivateTestProvider::new(vec![PrivateTestResponse::Events(
+        vec![
+            Ok(crate::llm::ChatEvent::ReasoningDelta {
+                text: "thinking".into(),
+                echo_field: None,
+            }),
+            Ok(crate::llm::ChatEvent::TextDelta("checkpoint".into())),
+            Ok(crate::llm::ChatEvent::ToolCall(crate::tools::ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: serde_json::json!({"key": "value"}),
+            })),
+            Ok(crate::llm::ChatEvent::TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                cached_tokens: Some(80),
+                cost: Some(0.25),
+            }),
+        ],
+    )]));
+    let (cfg, usage_records, turn_state) = private_llm_test_config(provider.clone(), None);
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+
+    let result: serde_json::Value = lua
+        .from_value(
+            lua.load(
+                r#"return ctx.llm.complete({
+                    messages = {{ role = "user", content = "summarize" }},
+                    tools = {},
+                    max_tokens = 321,
+                })"#,
+            )
+            .eval()
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["cancelled"], false);
+    assert_eq!(result["content"], "checkpoint");
+    assert_eq!(result["tool_calls"][0]["name"], "lookup");
+    assert_eq!(result["usage"]["prompt_tokens"], 100);
+    assert_eq!(result["usage"]["is_estimated"], false);
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(contexts[0].conversation_id, Some(42));
+    assert_eq!(contexts[0].max_tokens, Some(321));
+    assert!(Arc::ptr_eq(
+        contexts[0].turn_state.as_ref().unwrap(),
+        &turn_state
+    ));
+    let usage = usage_records.lock().unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].completion_tokens, 20);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_llm_complete_estimates_usage_without_provider_event() {
+    let provider = Arc::new(PrivateTestProvider::new(vec![PrivateTestResponse::Events(
+        vec![
+            Ok(crate::llm::ChatEvent::ReasoningDelta {
+                text: "hidden reasoning".into(),
+                echo_field: None,
+            }),
+            Ok(crate::llm::ChatEvent::TextDelta("answer".into())),
+        ],
+    )]));
+    let (cfg, usage_records, _) = private_llm_test_config(provider, None);
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+
+    let result: serde_json::Value = lua
+        .from_value(
+            lua.load(
+                r#"return ctx.llm.complete({
+                    messages = {{ role = "user", content = "prompt" }},
+                })"#,
+            )
+            .eval()
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["usage"]["is_estimated"], true);
+    assert!(result["usage"]["prompt_tokens"].as_u64().unwrap() > 0);
+    assert!(result["usage"]["completion_tokens"].as_u64().unwrap() > 0);
+    let usage = usage_records.lock().unwrap();
+    assert_eq!(usage.len(), 1);
+    assert!(usage[0].is_estimated);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_llm_complete_returns_transport_and_stream_errors() {
+    let transport =
+        crate::llm::LlmError::new_with_kind(crate::llm::LlmErrorKind::Connection, "request failed");
+    let stream =
+        crate::llm::LlmError::new_with_kind(crate::llm::LlmErrorKind::Parse, "stream failed");
+    let provider = Arc::new(PrivateTestProvider::new(vec![
+        PrivateTestResponse::Error(transport),
+        PrivateTestResponse::Events(vec![Err(stream)]),
+    ]));
+    let (cfg, usage_records, _) = private_llm_test_config(provider, None);
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+
+    for expected in ["request failed", "stream failed"] {
+        let result: serde_json::Value = lua
+            .from_value(
+                lua.load(
+                    r#"return ctx.llm.complete({
+                        messages = {{ role = "user", content = "prompt" }}
+                    })"#,
+                )
+                .eval()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["cancelled"], false);
+        assert_eq!(result["error"], expected);
+    }
+    assert!(usage_records.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_llm_complete_honors_cancellation() {
+    let provider = Arc::new(PrivateTestProvider::new(vec![PrivateTestResponse::Pending]));
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let (cfg, usage_records, _) = private_llm_test_config(provider, Some(cancelled));
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+
+    let result: serde_json::Value = lua
+        .from_value(
+            lua.load(
+                r#"return ctx.llm.complete({
+                    messages = {{ role = "user", content = "prompt" }}
+                })"#,
+            )
+            .eval()
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["cancelled"], true);
+    assert!(result["error"].as_str().unwrap().contains("cancelled"));
+    assert!(usage_records.lock().unwrap().is_empty());
+}
+
+#[test]
+fn private_llm_complete_is_unavailable_without_authoritative_runtime() {
+    let lua = Lua::new();
+    let cfg = test_ctx_config();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+
+    let result: serde_json::Value = lua
+        .from_value(
+            lua.load(
+                r#"return ctx.llm.complete({
+                    messages = {{ role = "user", content = "prompt" }}
+                })"#,
+            )
+            .eval()
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["cancelled"], false);
+    assert_eq!(result["error"], "private LLM completion is unavailable");
+}
