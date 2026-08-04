@@ -1371,6 +1371,7 @@ fn fake_managed_runtime(
 
     let (hub, mut commands) = Hub::new();
     let publisher = hub.publisher();
+    let initial_hub = hub.clone();
     let initial = Arc::new(move || {
         let snapshot = bone_protocol::SessionSnapshot {
             conversation_id: Some(id),
@@ -1379,11 +1380,13 @@ fn fake_managed_runtime(
         vec![RuntimeEvent::ConversationLoaded {
             messages: Vec::new(),
             snapshot,
+            busy: initial_hub.is_busy(),
         }]
     });
     let task = Box::pin(async move {
         while let Some(command) = commands.recv().await {
             if let RuntimeCommand::SubmitPrompt { text, .. } = command {
+                let _turn = publisher.begin_turn();
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 max_active.fetch_max(now, Ordering::SeqCst);
                 publisher.publish(RuntimeEvent::Started {
@@ -1442,7 +1445,7 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             ));
             let serve_b = tokio::task::spawn_local(serve_managed_connection(
                 server_b,
-                manager,
+                manager.clone(),
                 SessionTarget::Latest,
             ));
             let (read_a, mut write_a) = tokio::io::split(client_a);
@@ -1484,6 +1487,29 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             .await
             .unwrap();
 
+            let started: RuntimeEvent = read_a.read().await.unwrap().unwrap();
+            assert!(matches!(started, RuntimeEvent::Started { .. }));
+
+            // A newly attached client must learn that actor 1 is already mid-turn,
+            // even though it missed the actor's Started event.
+            let (client_c, server_c) = tokio::io::duplex(4096);
+            let serve_c = tokio::task::spawn_local(serve_managed_connection(
+                server_c,
+                manager,
+                SessionTarget::Conversation(1),
+            ));
+            let (read_c, _) = tokio::io::split(client_c);
+            let mut read_c = codec::MessageReader::new(read_c);
+            let attached: RuntimeEvent = read_c.read().await.unwrap().unwrap();
+            assert!(matches!(
+                attached,
+                RuntimeEvent::ConversationLoaded {
+                    busy: true,
+                    snapshot,
+                    ..
+                } if snapshot.conversation_id == Some(1)
+            ));
+
             async fn finished<R: AsyncRead + Unpin>(
                 reader: &mut codec::MessageReader<R>,
             ) -> String {
@@ -1505,6 +1531,7 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
 
             serve_a.abort();
             serve_b.abort();
+            serve_c.abort();
             runner.abort();
         })
         .await;

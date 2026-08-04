@@ -849,7 +849,11 @@ impl App {
             RuntimeEvent::ProcessesSnapshot { version, processes } => {
                 self.apply_processes_snapshot(version, processes)
             }
-            RuntimeEvent::ConversationLoaded { messages, snapshot } => {
+            RuntimeEvent::ConversationLoaded {
+                messages,
+                snapshot,
+                busy: _,
+            } => {
                 self.reset_transient_ui_state(true);
                 self.cancel_streaming = false;
                 self.apply_snapshot(snapshot);
@@ -1460,12 +1464,15 @@ impl App {
         let mut recovery_request = None;
         loop {
             match self.events_rx.recv().await {
-                Ok(crate::runtime::RuntimeEvent::ConversationLoaded { messages, snapshot })
-                    if snapshot.conversation_id == Some(id) =>
-                {
+                Ok(crate::runtime::RuntimeEvent::ConversationLoaded {
+                    messages,
+                    snapshot,
+                    busy,
+                }) if snapshot.conversation_id == Some(id) => {
                     self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
                         messages,
                         snapshot,
+                        busy,
                     });
                     Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
                     self.renderer.reset_scrollback_state();
@@ -1494,6 +1501,7 @@ impl App {
                         self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
                             messages,
                             snapshot,
+                            busy: false,
                         });
                         Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
                         self.renderer.reset_scrollback_state();

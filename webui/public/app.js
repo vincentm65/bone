@@ -31,6 +31,7 @@ const state = {
   sending: false,
   asstEl: null,
   asstRaw: "",
+  asstFrame: null,
   reasonEl: null,
   reasonDetails: null,
   tools: new Map(),
@@ -63,6 +64,7 @@ const state = {
   watched: new Set(),
   runningConvs: new Set(),
   pendingWorkElapsed: null,
+  navigationGeneration: 0,
   // conversation id -> Date.now() when its current turn started; drives the
   // live elapsed timer next to each running chat in the sidebar.
   runStart: new Map(),
@@ -106,6 +108,37 @@ const taskCache = new Map();
 const liveEventCache = new Map();
 let replayingLiveEvents = false;
 let conversations = [];
+let routingQueue = Promise.resolve();
+let pendingSubmitRequest = null;
+const watchRequests = new Map();
+
+function routeConversation(generation, command) {
+  const pending = routingQueue.then(() => {
+    if (generation !== state.navigationGeneration) return false;
+    return send(command);
+  });
+  routingQueue = pending.catch(() => false);
+  return pending;
+}
+
+function recoverNavigation(token) {
+  if (state.awaitingLoad !== token) return false;
+  const previous = Object.hasOwn(token, "from") ? token.from : state.conversationId;
+  token.failed = true;
+  state.awaitingLoad = null;
+  state.conversationId = previous ?? null;
+  desiredConversationId = previous ?? null;
+  if (Object.hasOwn(token, "draftChat")) state.draftChat = token.draftChat;
+  if (previous == null) sessionStorage.removeItem("bone-active-conversation");
+  else sessionStorage.setItem("bone-active-conversation", String(previous));
+  if (previous != null && Object.hasOwn(token, "from")) {
+    state.runningConvs.delete(previous);
+    unwatchConversation(previous);
+  }
+  renderChats();
+  updateRunningIndicators();
+  return true;
+}
 
 const LIVE_EVENT_TYPES = new Set([
   "started", "notice", "reasoning_delta", "text_delta", "tool_call",
@@ -217,23 +250,31 @@ async function send(command) {
 async function watchConversation(id) {
   if (id == null || !state.session) return false;
   if (state.watched.has(id)) return true;
-  state.watched.add(id);
-  try {
-    const response = await fetch(`/api/watch?session=${state.session}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ conversation_id: id }),
-    });
-    if (!response.ok) throw new Error(await response.text());
-    return true;
-  } catch {
-    state.watched.delete(id);
-    return false;
-  }
+  if (watchRequests.has(id)) return watchRequests.get(id);
+  const request = (async () => {
+    try {
+      const response = await fetch(`/api/watch?session=${state.session}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ conversation_id: id }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      state.watched.add(id);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      watchRequests.delete(id);
+    }
+  })();
+  watchRequests.set(id, request);
+  return request;
 }
 
 async function unwatchConversation(id) {
-  if (id == null || !state.watched.has(id)) return;
+  if (id == null) return;
+  if (watchRequests.has(id)) await watchRequests.get(id);
+  if (!state.watched.has(id)) return;
   state.watched.delete(id);
   await fetch(`/api/unwatch?session=${state.session}`, {
     method: "POST",
@@ -248,6 +289,16 @@ function onWatchEvent(convId, ev) {
   if (convId == null || (convId === state.conversationId && !state.awaitingLoad)) return;
   cacheLiveEvent(convId, ev);
   switch (ev.type) {
+    case "conversation_loaded":
+      if (ev.busy) {
+        state.runningConvs.add(convId);
+        markRunning(convId, true);
+      } else {
+        state.runningConvs.delete(convId);
+        markRunning(convId, false);
+      }
+      updateRunningIndicators();
+      return;
     case "started":
       state.runningConvs.add(convId);
       markRunning(convId, true);
@@ -335,8 +386,9 @@ setInterval(tickRunningTimers, 1000);
 // `state_snapshot` and `conversation_loaded` carry the conversation id we match
 // against, `status` lets a failed switch recover, and `frontend_state` is global.
 function onEvent(ev) {
-  const routing = ev.type === "conversation_loaded" || ev.type === "state_snapshot" ||
-                  ev.type === "status" || ev.type === "frontend_state";
+  const routing = ev.type === "conversation_loaded" || ev.type === "conversation_load_failed" ||
+                  ev.type === "state_snapshot" || ev.type === "status" ||
+                  ev.type === "frontend_state";
   if (state.awaitingLoad && !routing) {
     // Frames already queued by the actor we just left still belong to its live
     // tail. Preserve them instead of either bleeding them into the target or
@@ -353,6 +405,7 @@ function dispatchEvent(ev) {
     case "frontend_state": return onFrontendState(ev);
     case "state_snapshot": return onSnapshot(ev.snapshot);
     case "conversation_loaded": return onConversationLoaded(ev);
+    case "conversation_load_failed": return onConversationLoadFailed(ev);
     case "started":
       state.sawStarted = true;
       // A turn we didn't submit ourselves is a daemon-injected one — typically
@@ -553,15 +606,36 @@ function activeContainer() {
   return state.asstEl.parentElement;
 }
 
+function cancelAssistantFrame() {
+  if (state.asstFrame === null) return;
+  cancelAnimationFrame(state.asstFrame);
+  state.asstFrame = null;
+}
+
+function flushAssistantMarkdown(enhance = false) {
+  cancelAssistantFrame();
+  if (!state.asstEl) return;
+  state.asstEl.classList.remove("streaming");
+  state.asstEl.innerHTML = renderMarkdown(state.asstRaw);
+  if (enhance) enhanceContent(state.asstEl);
+}
+
 function appendText(text) {
   hideThinking();
   // Remove thinking once prose starts — it's no longer relevant.
   if (state.reasonDetails) { state.reasonDetails.remove(); state.reasonDetails = null; state.reasonEl = null; }
   ensureAssistant();
   state.asstRaw += text;
-  state.asstEl.innerHTML = renderMarkdown(state.asstRaw) + '<span class="caret"></span>';
-  state.asstEl.parentElement.appendChild(state.asstEl); // keep prose last
-  scrollDown();
+  if (state.asstFrame !== null) return;
+  state.asstFrame = requestAnimationFrame(() => {
+    state.asstFrame = null;
+    if (!state.asstEl) return;
+    const caret = el("span", "caret");
+    state.asstEl.classList.add("streaming");
+    state.asstEl.replaceChildren(document.createTextNode(state.asstRaw), caret);
+    state.asstEl.parentElement.appendChild(state.asstEl); // keep prose last
+    scrollDown();
+  });
 }
 
 function appendReasoning(text) {
@@ -638,7 +712,7 @@ function onToolCall(ev) {
   // comes after.
   let hadText = false;
   if (state.asstEl && state.asstRaw) {
-    state.asstEl.innerHTML = renderMarkdown(state.asstRaw);
+    flushAssistantMarkdown();
     state.asstRaw = "";
     hadText = true;
   }
@@ -1290,7 +1364,8 @@ function onStatus(message) {
   // so the tab recovers rather than silently dropping every later event.
   if (state.awaitingLoad) {
     if (/failed to (load|create) conversation/i.test(message)) {
-      state.awaitingLoad = null;
+      const token = state.awaitingLoad;
+      recoverNavigation(token);
       return systemLine(message, true);
     }
     // Other statuses mid-switch are strays from the actor we left; don't bleed
@@ -1407,7 +1482,10 @@ function captureKey(e) {
 
 // ── interact pane (ask_user) rendering ───────────────────────────────────────
 
-const interactState = { active: false, multi: false, queue: [], model: null, total: 0, hasCustom: false };
+const interactState = {
+  active: false, multi: false, queue: [], model: null, total: 0, hasCustom: false,
+  identity: "", optionCache: new Map(),
+};
 
 function splitInteractLine(line) {
   if (typeof line === "string") {
@@ -1494,45 +1572,134 @@ function parseInteractPane(comp) {
   return model;
 }
 
-function renderInteractPane(model) {
-  interactState.active = true;
-  interactState.multi = model.multi;
-  interactState.model = model;
-  interactState.total = model.scrollAbove + model.options.length + model.scrollBelow;
-  interactState.hasCustom = !!model.custom;
+function setInteractText(node, value) {
+  if (node.textContent !== value) node.textContent = value;
+}
 
-  $("interact").classList.remove("hidden");
-  $("interact-kicker").textContent = model.title || "Question";
-  $("interact-q").textContent = model.question || "Choose an option";
+function makeInteractOption(key, kind) {
+  const row = el("button", `interact-opt interact-${kind}`);
+  row.type = "button";
+  row.dataset.key = key;
+  row.setAttribute("role", "option");
+  row.appendChild(el("span", "interact-choice"));
+  const copy = el("span", "interact-opt-copy");
+  copy.appendChild(el("span", "interact-opt-label"));
+  copy.appendChild(el("span", "interact-opt-description"));
+  row.appendChild(copy);
+  return row;
+}
+
+function patchInteractOption(row, option, index, multi) {
+  row.className = "interact-opt interact-option" + (option.selected ? " selected" : "") + (multi ? " multi" : "");
+  row.dataset.index = index;
+  row.setAttribute("aria-selected", String(option.selected));
+  if (multi) row.setAttribute("aria-checked", String(option.checked));
+  else row.removeAttribute("aria-checked");
+  const choice = row.querySelector(".interact-choice");
+  choice.className = "interact-choice" + (option.checked ? " checked" : "");
+  setInteractText(choice, multi && option.checked ? "✓" : "");
+  setInteractText(row.querySelector(".interact-opt-label"), option.label);
+  const description = row.querySelector(".interact-opt-description");
+  setInteractText(description, option.description || "");
+  description.classList.toggle("hidden", !option.description);
+  row.onclick = () => clickInteractOption(Number(row.dataset.index));
+}
+
+function patchInteractCustom(row, custom) {
+  row.className = "interact-opt interact-custom" + (custom.selected ? " selected" : "");
+  row.setAttribute("aria-selected", String(custom.selected));
+  const choice = row.querySelector(".interact-choice");
+  choice.className = "interact-choice custom-choice";
+  setInteractText(choice, "+");
+  const label = row.querySelector(".interact-opt-label");
+  setInteractText(label, custom.value || "Type a custom answer…");
+  label.classList.toggle("placeholder", !custom.value);
+  const description = row.querySelector(".interact-opt-description");
+  setInteractText(description, "Custom answer");
+  description.classList.remove("hidden");
+  row.onclick = clickInteractCustom;
+}
+
+function makeInteractMore(key, code) {
+  const row = el("button", "interact-more");
+  row.type = "button";
+  row.dataset.key = key;
+  row.onclick = () => enqueueKeys([K(code)]);
+  return row;
+}
+
+function patchInteractOptions(model) {
+  const opts = $("interact-options");
+  opts.setAttribute("aria-multiselectable", String(model.multi));
+  const existing = new Map(Array.from(opts.children, (node) => [node.dataset.key, node]));
+  const rows = [];
+  const use = (key, create) => {
+    const node = existing.get(key) || create();
+    existing.delete(key);
+    rows.push(node);
+    return node;
+  };
+
+  const selectedPosition = model.options.findIndex((option) => option.selected);
+  const selectedIndex = selectedPosition >= 0 ? model.scrollAbove + selectedPosition : model.scrollAbove;
+  for (let index = 0; index < interactState.total;) {
+    const option = interactState.optionCache.get(index);
+    if (option) {
+      const key = `option-${index}`;
+      const row = use(key, () => makeInteractOption(key, "option"));
+      patchInteractOption(row, option, index, model.multi);
+      index++;
+      continue;
+    }
+    const start = index;
+    while (index < interactState.total && !interactState.optionCache.has(index)) index++;
+    const count = index - start;
+    const above = start < selectedIndex;
+    const key = `more-${start}-${index - 1}`;
+    const row = use(key, () => makeInteractMore(key, above ? "PageUp" : "PageDown"));
+    row.onclick = () => enqueueKeys([K(above ? "PageUp" : "PageDown")]);
+    setInteractText(row, above ? `↑ ${count} earlier option${count === 1 ? "" : "s"}` : `${count} more option${count === 1 ? "" : "s"} ↓`);
+  }
+  if (model.custom) {
+    const row = use("custom", () => makeInteractOption("custom", "custom"));
+    patchInteractCustom(row, model.custom);
+  }
+  if (model.text) {
+    const row = use("text", () => {
+      const field = el("div", "interact-text");
+      field.dataset.key = "text";
+      field.setAttribute("role", "textbox");
+      field.setAttribute("aria-label", "Your answer");
+      field.appendChild(el("span", "interact-text-value"));
+      field.appendChild(el("span", "interact-caret"));
+      return field;
+    });
+    const value = row.querySelector(".interact-text-value");
+    setInteractText(value, model.text.value || "Type your answer…");
+    value.classList.toggle("placeholder", !model.text.value);
+  }
+
+  rows.forEach((node, index) => {
+    if (opts.children[index] !== node) opts.insertBefore(node, opts.children[index] || null);
+  });
+  for (const node of existing.values()) node.remove();
+  const selected = opts.querySelector(".selected");
+  if (selected && !selected.matches(":hover") && selected.offsetParent) selected.scrollIntoView({ block: "nearest" });
+}
+
+function patchInteractPreview(model) {
+  const preview = $("interact-preview");
   const hasPreview = !!(model.preview && model.preview.title);
   $("interact").classList.toggle("has-preview", hasPreview);
   $("interact-body").classList.toggle("previewing", hasPreview);
-
-  const opts = $("interact-options");
-  opts.innerHTML = "";
-  if (model.scrollAbove) opts.appendChild(moreRow("↑ " + model.scrollAbove + " more", K("PageUp")));
-  model.options.forEach((o, p) => {
-    const b = el("button", "interact-opt" + (o.selected ? " selected" : ""));
-    if (model.multi) b.appendChild(el("span", "interact-check" + (o.checked ? " on" : ""), o.checked ? "✓" : ""));
-    const copy = el("span", "interact-opt-copy");
-    const lbl = el("span", "interact-opt-label");
-    lbl.textContent = o.label;
-    copy.appendChild(lbl);
-    if (o.description) {
-      const description = el("span", "interact-opt-description");
-      description.textContent = o.description;
-      copy.appendChild(description);
-    }
-    b.appendChild(copy);
-    b.onclick = () => clickInteractOption(p);
-    opts.appendChild(b);
-  });
-
-  const preview = $("interact-preview");
   preview.classList.toggle("hidden", !hasPreview);
-  $("interact-preview-title").textContent = hasPreview ? model.preview.title : "";
-  const previewContent = $("interact-preview-content");
-  previewContent.innerHTML = "";
+  setInteractText($("interact-preview-title"), hasPreview ? model.preview.title : "");
+
+  const content = $("interact-preview-content");
+  const signature = hasPreview ? JSON.stringify(model.preview.lines) : "";
+  if (content.dataset.signature === signature) return;
+  content.dataset.signature = signature;
+  const rows = [];
   if (hasPreview) {
     for (const values of model.preview.lines) {
       const row = el("div", "interact-preview-line");
@@ -1544,57 +1711,50 @@ function renderInteractPane(model) {
         if (modifiers.includes("bold")) valueSpan.style.fontWeight = "700";
         if (modifiers.includes("dim")) valueSpan.style.opacity = "0.62";
         if (modifiers.includes("italic")) valueSpan.style.fontStyle = "italic";
-        if (modifiers.includes("strike") || modifiers.includes("crossed_out")) {
-          valueSpan.style.textDecoration = "line-through";
-        }
+        if (modifiers.includes("strike") || modifiers.includes("crossed_out")) valueSpan.style.textDecoration = "line-through";
         row.appendChild(valueSpan);
       }
-      previewContent.appendChild(row);
+      rows.push(row);
     }
   }
-  if (model.scrollBelow) opts.appendChild(moreRow("↓ " + model.scrollBelow + " more", K("PageDown")));
-
-  if (model.custom) {
-    const b = el("button", "interact-opt interact-custom" + (model.custom.selected ? " selected" : ""));
-    const lbl = el("span", "interact-opt-label");
-    lbl.textContent = model.custom.value ? model.custom.value : "Type a custom answer…";
-    if (!model.custom.value) lbl.classList.add("placeholder");
-    b.appendChild(lbl);
-    if (model.custom.selected) b.appendChild(el("span", "interact-caret"));
-    b.onclick = clickInteractCustom;
-    opts.appendChild(b);
-  }
-  if (model.text) {
-    const t = el("div", "interact-text");
-    if (model.text.value) t.textContent = model.text.value;
-    else { t.textContent = "Type your answer…"; t.classList.add("placeholder"); }
-    t.appendChild(el("span", "interact-caret"));
-    opts.appendChild(t);
-  }
-
-  // Submit is always explicit (Enter commits the highlighted option / checked
-  // set / typed answer); a click never auto-submits.
-  const foot = $("interact-foot");
-  foot.innerHTML = "";
-  const cancel = el("button", "btn interact-cancel", "Cancel");
-  cancel.onclick = cancelInteract;
-  foot.appendChild(cancel);
-  const submit = el("button", "btn btn-approve interact-submit", "Submit");
-  submit.onclick = () => enqueueKeys([K("Enter")]);
-  foot.appendChild(submit);
-
-  $("interact-hint").textContent = model.hint || "";
+  content.replaceChildren(...rows);
 }
-function moreRow(label, key) {
-  const d = el("div", "interact-more");
-  d.textContent = label;
-  d.onclick = () => enqueueKeys([key]);
-  return d;
+
+function renderInteractPane(model) {
+  const identity = JSON.stringify([model.title, model.question, model.multi, !!model.text]);
+  if (interactState.identity !== identity) {
+    interactState.identity = identity;
+    interactState.optionCache.clear();
+  }
+  for (const option of interactState.optionCache.values()) option.selected = false;
+  model.options.forEach((option, position) => {
+    const index = model.scrollAbove + position;
+    interactState.optionCache.set(index, { ...interactState.optionCache.get(index), ...option });
+  });
+
+  interactState.active = true;
+  interactState.multi = model.multi;
+  interactState.model = model;
+  interactState.total = model.scrollAbove + model.options.length + model.scrollBelow;
+  interactState.hasCustom = !!model.custom;
+
+  const pane = $("interact");
+  pane.classList.remove("hidden");
+  setInteractText($("interact-kicker"), model.title || "Question");
+  setInteractText($("interact-q"), model.question || "Choose an option");
+  const notice = $("interact-notice");
+  setInteractText(notice, model.notice || "");
+  notice.classList.toggle("hidden", !model.notice);
+  patchInteractOptions(model);
+  patchInteractPreview(model);
+  setInteractText($("interact-hint"), "Arrow keys move · Enter submits · Esc cancels");
 }
 function closeInteract() {
   interactState.active = false;
   interactState.queue = [];
   interactState.model = null;
+  interactState.identity = "";
+  interactState.optionCache.clear();
   $("interact").classList.add("hidden");
 }
 function cancelInteract() {
@@ -1621,12 +1781,12 @@ function interactMoveKeys(from, to) {
   for (let i = 0; i < n; i++) keys.push(K(code));
   return keys;
 }
-function clickInteractOption(p) {
+function clickInteractOption(index) {
   const model = interactState.model;
   if (!model) return;
   // A click only moves the cursor (multi also toggles the checkbox in place).
   // Committing is always an explicit Enter / Submit — never on selection.
-  const keys = interactMoveKeys(interactSelectedIndex(model), model.scrollAbove + p);
+  const keys = interactMoveKeys(interactSelectedIndex(model), index);
   if (model.multi) keys.push(K("Char", " "));
   enqueueKeys(keys);
 }
@@ -1647,13 +1807,18 @@ function showWorkElapsed() {
 
 function onFinished() {
   hideThinking();
-  if (state.asstEl) {
-    state.asstEl.innerHTML = renderMarkdown(state.asstRaw);
-    enhanceContent(state.asstEl);
-  }
+  flushAssistantMarkdown(true);
   finalizeTurn();
 }
-function onFailed(ev) { hideThinking(); closeInteract(); markRunning(state.conversationId, false); systemLine(ev.message || "turn failed", true); finalizeTurn(); setRunning(false); }
+function onFailed(ev) {
+  hideThinking();
+  closeInteract();
+  markRunning(state.conversationId, false);
+  if (state.asstRaw) flushAssistantMarkdown(true);
+  systemLine(ev.message || "turn failed", true);
+  finalizeTurn();
+  setRunning(false);
+}
 function onTurnComplete() {
   hideThinking();
   showWorkElapsed();
@@ -1681,7 +1846,15 @@ function reloadActiveFromDb() {
   state.awaitingLoad = { mode: "load", id, from: id };
   send({ load_conversation: { id } });
 }
-function finalizeTurn() { state.asstEl = null; state.asstRaw = ""; state.reasonEl = null; state.reasonDetails = null; state.tools.clear(); state.toolInfo.clear(); }
+function finalizeTurn() {
+  cancelAssistantFrame();
+  state.asstEl = null;
+  state.asstRaw = "";
+  state.reasonEl = null;
+  state.reasonDetails = null;
+  state.tools.clear();
+  state.toolInfo.clear();
+}
 
 function clearArtifacts() {
   artifacts.clear();
@@ -1690,6 +1863,13 @@ function clearArtifacts() {
   closeCanvas();
   $("canvas-toggle").classList.add("hidden");
   renderTabs();
+}
+
+function onConversationLoadFailed(ev) {
+  const token = state.awaitingLoad;
+  if (!token || token.mode !== "load" || token.id !== ev.id) return;
+  recoverNavigation(token);
+  systemLine(ev.message || `Failed to load conversation ${ev.id}`, true);
 }
 
 function onConversationLoaded(ev) {
@@ -1702,9 +1882,8 @@ function onConversationLoaded(ev) {
   $("thread").innerHTML = "";
   bgAgentRows = []; // rows live in the DOM we just discarded
   finalizeTurn();
-  // Conversation routing is independent: leaving a running chat must not keep
-  // this tab's composer disabled while another chat continues in its actor.
-  setRunning(false);
+  // Conversation routing is independent: the loaded actor's authoritative busy
+  // state decides whether this tab's composer is available.
   clearArtifacts();
   // The DB stores each LLM round as its own assistant message, but a single
   // turn often spans several tool-call rounds. Group consecutive assistant
@@ -1717,6 +1896,12 @@ function onConversationLoaded(ev) {
     rendered++;
   }
   if (ev.snapshot) onSnapshot(ev.snapshot);
+  const loadedId = ev.snapshot?.conversation_id ?? state.conversationId;
+  const loadedRunning = typeof ev.busy === "boolean"
+    ? ev.busy
+    : state.runningConvs.has(loadedId);
+  state.runningConvs.delete(loadedId);
+  setRunning(loadedRunning);
   restoreDraft();
   // Restore this conversation's task list from the per-chat cache (the actor
   // won't re-emit it on attach). Uses the id from the snapshot we just applied.
@@ -1964,33 +2149,47 @@ async function archiveConversation(conversation) {
   loadChats();
 }
 async function openChat(id) {
-  if (id === state.conversationId) return;
+  const previousPending = state.awaitingLoad;
+  const generation = ++state.navigationGeneration;
+  if (id === state.conversationId && !previousPending) return;
   saveDraft();
   const leaving = state.conversationId;
-  const leavingRunning = state.running;
-  denyPending();
+  let leavingRunning = state.running || state.sending;
+  const token = { mode: "load", id, from: leaving, draftChat: state.draftChat, generation };
+  state.awaitingLoad = token;
+  // A prompt POST and a navigation POST share the primary daemon link. Make sure
+  // the prompt is written to the actor it came from before that link is repinned.
+  if (state.sending && pendingSubmitRequest) {
+    const delivered = await pendingSubmitRequest;
+    if (generation !== state.navigationGeneration) return;
+    if (!delivered && !state.running) leavingRunning = false;
+  }
   // Stash the chat we're leaving so its task list is there when we come back,
   // then ask the daemon to switch. Strays from the old actor are gated out
   // until the target's `conversation_loaded` lands (see `awaitingLoad`).
-  cacheTasks(state.conversationId);
-  state.awaitingLoad = { mode: "load", id, from: leaving };
+  cacheTasks(leaving);
   // Start the old chat's watch before repinning the primary link. Issuing these
   // requests in this order closes the hand-off gap where neither socket would
   // be subscribed to the actor's broadcast.
   if (leavingRunning && leaving != null && leaving !== id) {
     state.runningConvs.add(leaving); // its dot/timer keep going while off-screen
     if (!await watchConversation(leaving)) {
-      state.runningConvs.delete(leaving);
-      state.awaitingLoad = null;
+      if (generation !== state.navigationGeneration) return;
+      recoverNavigation(token);
       toast("Could not keep this running chat attached");
-      updateRunningIndicators();
       return;
     }
   }
+  if (generation !== state.navigationGeneration) return;
+  denyPending();
+  if (!await routeConversation(generation, { load_conversation: { id } })) {
+    if (generation === state.navigationGeneration) recoverNavigation(token);
+    return;
+  }
+  if (generation !== state.navigationGeneration || token.failed) return;
   state.runningConvs.delete(id);
   unwatchConversation(id);
-  send({ load_conversation: { id } });
-  state.conversationId = id;
+  if (state.awaitingLoad === token) state.conversationId = id;
   desiredConversationId = id;
   sessionStorage.setItem("bone-active-conversation", String(id));
   // Leaving the fresh chat unused — drop its placeholder hint.
@@ -2015,34 +2214,47 @@ function relTime(iso) {
   return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 async function newChat() {
+  const generation = ++state.navigationGeneration;
   saveDraft();
   const leaving = state.conversationId;
-  const leavingRunning = state.running;
-  denyPending();
-  cacheTasks(state.conversationId);
-  clearTaskList();
-  state.awaitingLoad = { mode: "new", from: state.conversationId };
+  let leavingRunning = state.running || state.sending;
+  const token = { mode: "new", from: leaving, draftChat: state.draftChat, generation };
+  state.awaitingLoad = token;
+  if (state.sending && pendingSubmitRequest) {
+    const delivered = await pendingSubmitRequest;
+    if (generation !== state.navigationGeneration) return;
+    if (!delivered && !state.running) leavingRunning = false;
+  }
+  cacheTasks(leaving);
   // Keep the chat we're leaving live in the background if it's still mid-turn.
   if (leavingRunning && leaving != null) {
     state.runningConvs.add(leaving);
     if (!await watchConversation(leaving)) {
-      state.runningConvs.delete(leaving);
-      state.awaitingLoad = null;
+      if (generation !== state.navigationGeneration) return;
+      recoverNavigation(token);
       toast("Could not keep this running chat attached");
-      updateRunningIndicators();
       return;
     }
   }
-  send("new_conversation");
+  if (generation !== state.navigationGeneration) return;
+  denyPending();
+  if (!await routeConversation(generation, "new_conversation")) {
+    if (generation === state.navigationGeneration) recoverNavigation(token);
+    return;
+  }
+  if (generation !== state.navigationGeneration || token.failed) return;
+  clearTaskList();
   $("thread").innerHTML = "";
   bgAgentRows = [];
   $("thread").appendChild(buildWelcome());
   finalizeTurn();
   setRunning(false);
   clearArtifacts();
-  state.conversationId = null;
-  desiredConversationId = null;
-  sessionStorage.removeItem("bone-active-conversation");
+  if (state.awaitingLoad === token) {
+    state.conversationId = null;
+    desiredConversationId = null;
+    sessionStorage.removeItem("bone-active-conversation");
+  }
   // Surface the ephemeral placeholder row for the fresh chat.
   state.draftChat = true;
   restoreDraft();
@@ -3021,7 +3233,10 @@ async function submit(textOverride) {
   $("app-status").textContent = "Sending message";
   const sentAttachments = attachments;
   attachments = []; renderAttachments();
-  const ok = await send({ submit_prompt: submission });
+  const request = send({ submit_prompt: submission });
+  pendingSubmitRequest = request;
+  const ok = await request;
+  if (pendingSubmitRequest === request) pendingSubmitRequest = null;
   if (!ok) {
     state.sending = false;
     if (state.lastBubble) { state.lastBubble.remove(); state.lastBubble = null; }
@@ -3578,6 +3793,8 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("keydown", trapDialogFocus);
 $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
 window.addEventListener("keydown", captureKey, true);
+$("interact-cancel").addEventListener("click", cancelInteract);
+$("interact-submit").addEventListener("click", () => enqueueKeys([K("Enter")]));
 
 applyPrefs();
 autosize();

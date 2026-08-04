@@ -28,6 +28,7 @@ use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult
 
 const COMPACTION_CHECKPOINT_PREFIX: &str =
     "Conversation checkpoint (synthetic; earlier messages compacted):\n\n";
+const COMPACTION_CONTINUATION: &str = "\n\nContinuation requirement: Resume the current user request from this checkpoint and the retained messages. The active task is not complete merely because compaction occurred. Continue with the next needed actions instead of only acknowledging or summarizing the checkpoint.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum CompactionCycleResult {
@@ -126,6 +127,9 @@ fn compaction_prompt(instruction: &str, trailing_messages: usize, repair: bool) 
         "{repair_text}Create a 3,000–3,200-token plain-text conversation checkpoint. \
          The final {trailing_messages} transcript messages will remain verbatim after the checkpoint, \
          so preserve the important context from the earlier conversation without repeating that suffix. \
+         Preserve the active task's status, unfinished work, and next actions, and make clear that the \
+         assistant must immediately continue the current user request after compaction rather than stop \
+         at an acknowledgement or summary. \
          Follow this instruction:\n\n{instruction}\n\nOutput only the checkpoint text. Do not call tools."
     )
 }
@@ -133,7 +137,10 @@ fn compaction_prompt(instruction: &str, trailing_messages: usize, repair: bool) 
 fn checkpoint_message(text: &str) -> ChatMessage {
     ChatMessage::new(
         ChatRole::User,
-        format!("{COMPACTION_CHECKPOINT_PREFIX}{}", text.trim()),
+        format!(
+            "{COMPACTION_CHECKPOINT_PREFIX}{}{COMPACTION_CONTINUATION}",
+            text.trim()
+        ),
     )
 }
 

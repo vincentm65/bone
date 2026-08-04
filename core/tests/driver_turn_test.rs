@@ -2032,6 +2032,12 @@ end)
             .iter()
             .any(|message| message.content.contains("TRANSIENT-MARKER"))
     );
+    assert!(
+        normal.messages.iter().any(|message| message
+            .content
+            .contains("Resume the current user request from this checkpoint")),
+        "the resumed request must explicitly tell the agent to continue"
+    );
     assert!(!private.tools.is_empty());
     assert!(normal.tools.is_empty());
     assert_eq!(private.context.conversation_id, Some(42));

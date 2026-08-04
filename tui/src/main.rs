@@ -268,6 +268,8 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         let sync_session = boot.session.clone();
         let sync_provider = boot.provider.clone();
         let sync_manager = boot.manager.clone();
+        let (hub, commands_rx) = bone::rpc::Hub::new_grouped(hub_group.clone());
+        let initial_hub = hub.clone();
         let initial = std::sync::Arc::new(move || {
             let session = sync_session.lock().unwrap();
             let snapshot = session.snapshot(sync_provider.id(), sync_provider.model());
@@ -281,10 +283,10 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
                 bone::runtime::RuntimeEvent::ConversationLoaded {
                     messages: session.display_transcript(),
                     snapshot,
+                    busy: initial_hub.is_busy(),
                 },
             ]
         });
-        let (hub, commands_rx) = bone::rpc::Hub::new_grouped(hub_group.clone());
         let config = factory_config.clone();
         config.attach_extensions(boot.manager.clone());
         let task = Box::pin(bone::rpc::run_daemon(

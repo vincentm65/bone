@@ -137,6 +137,8 @@ fn compaction_prompt_and_checkpoint_are_stable_plain_user_content() {
     let initial = compaction_prompt("preserve decisions", 4, false);
     assert!(initial.contains("final 4 transcript messages"));
     assert!(initial.contains("preserve decisions"));
+    assert!(initial.contains("unfinished work, and next actions"));
+    assert!(initial.contains("immediately continue the current user request"));
     assert!(!initial.contains("previous checkpoint was invalid"));
 
     let repair = compaction_prompt("preserve decisions", 4, true);
@@ -147,6 +149,12 @@ fn compaction_prompt_and_checkpoint_are_stable_plain_user_content() {
     assert_eq!(checkpoint.role, ChatRole::User);
     assert_eq!(
         checkpoint.content,
-        format!("{COMPACTION_CHECKPOINT_PREFIX}concise state")
+        format!("{COMPACTION_CHECKPOINT_PREFIX}concise state{COMPACTION_CONTINUATION}")
+    );
+    assert!(checkpoint.content.contains("active task is not complete"));
+    assert!(
+        checkpoint
+            .content
+            .contains("Continue with the next needed actions")
     );
 }

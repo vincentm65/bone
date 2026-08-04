@@ -165,6 +165,9 @@ pub enum RuntimeEvent {
     ConversationLoaded {
         messages: Vec<ChatMessage>,
         snapshot: SessionSnapshot,
+        /// Whether this conversation's actor currently has an active turn.
+        #[serde(default)]
+        busy: bool,
     },
     /// Correlated failure response for `LoadConversation`; lets a waiting
     /// frontend return to input instead of hanging after a database error.

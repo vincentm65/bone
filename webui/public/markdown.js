@@ -3,18 +3,11 @@ export function escapeHtml(s) {
 }
 
 const ALLOWED_TAGS = [
-  "a", "abbr", "address", "article", "b", "bdi", "bdo", "blockquote", "br",
-  "caption", "cite", "code", "col", "colgroup", "data", "dd", "del", "details",
-  "dfn", "div", "dl", "dt", "em", "figcaption", "figure", "footer", "h1", "h2",
-  "h3", "h4", "h5", "h6", "header", "hr", "i", "img", "kbd", "li", "main",
-  "mark", "ol", "p", "pre", "q", "rp", "rt", "ruby", "s", "samp", "section",
-  "small", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td",
-  "tfoot", "th", "thead", "time", "tr", "u", "ul", "var",
+  "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4",
+  "h5", "h6", "hr", "img", "li", "ol", "p", "pre", "span", "strong", "table",
+  "tbody", "td", "th", "thead", "tr", "ul",
 ];
-const ALLOWED_ATTR = [
-  "alt", "class", "colspan", "datetime", "href", "open", "reversed", "rowspan",
-  "scope", "src", "start", "title", "value",
-];
+const ALLOWED_ATTR = ["alt", "class", "href", "src", "title"];
 const SAFE_CLASS = /^(?:code-block|task-item|task-check|checked|language-[\w-]+|tok-(?:comment|keyword|number|string))$/;
 const hookedPurifiers = new WeakSet();
 
@@ -82,49 +75,12 @@ export function sanitizeRenderedHtml(html, purifier = globalThis.DOMPurify) {
   });
 }
 
-function stashHtmlTags(source, stash) {
-  let result = "";
-  for (let i = 0; i < source.length;) {
-    if (source.startsWith("<!--", i)) {
-      const end = source.indexOf("-->", i + 4);
-      const stop = end < 0 ? source.length : end + 3;
-      stash.push(source.slice(i, stop));
-      result += `\u0000H${stash.length - 1}\u0000`;
-      i = stop;
-      continue;
-    }
-    if (source[i] !== "<" || !/^<\/?[A-Za-z][\w:-]*(?:\s|\/?>)|^<![A-Za-z]/.test(source.slice(i))) {
-      result += source[i++];
-      continue;
-    }
-    let quote = null;
-    let end = i + 1;
-    for (; end < source.length; end++) {
-      const char = source[end];
-      if (quote) {
-        if (char === quote) quote = null;
-      } else if (char === '"' || char === "'") quote = char;
-      else if (char === ">") break;
-    }
-    if (end === source.length) {
-      result += source[i++];
-      continue;
-    }
-    stash.push(source.slice(i, end + 1));
-    result += `\u0000H${stash.length - 1}\u0000`;
-    i = end + 1;
-  }
-  return result;
-}
-
 function inlineMd(source) {
   const code = [];
-  const html = [];
-  let raw = source.replace(/`([^`]+)`/g, (_, value) => {
+  const raw = source.replace(/`([^`]+)`/g, (_, value) => {
     code.push(`<code>${escapeHtml(value)}</code>`);
     return `\u0000C${code.length - 1}\u0000`;
   });
-  raw = stashHtmlTags(raw, html);
   let rendered = escapeHtml(raw);
   rendered = rendered
     .replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+(?:&quot;|&#39;)(.*?)(?:&quot;|&#39;))?\)/g,
@@ -136,9 +92,7 @@ function inlineMd(source) {
     .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
     .replace(/(^|[^_])_([^_]+)_/g, "$1<em>$2</em>");
-  return rendered
-    .replace(/\u0000C(\d+)\u0000/g, (_, index) => code[Number(index)])
-    .replace(/\u0000H(\d+)\u0000/g, (_, index) => html[Number(index)]);
+  return rendered.replace(/\u0000C(\d+)\u0000/g, (_, index) => code[Number(index)]);
 }
 
 const CODE_WORDS = new Set(("as async await break case catch class const continue crate def default delete do else enum export extends false finally fn for from function if impl import in interface let match mod move mut new None null of pub raise return self Some static struct super switch this throw trait true try type typeof undefined use var void while with yield").split(" "));
@@ -151,40 +105,8 @@ export function highlightCode(source) {
     .replace(/\u0000T(\d+)\u0000/g, (_, i) => stash[Number(i)]);
 }
 
-const HTML_BLOCK_TAGS = new Set([
-  "address", "article", "aside", "base", "blockquote", "body", "caption", "center", "col",
-  "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption",
-  "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6",
-  "head", "header", "hr", "html", "iframe", "legend", "li", "link", "main", "menu", "menuitem",
-  "meta", "nav", "noframes", "ol", "optgroup", "option", "p", "param", "script", "search",
-  "section", "source", "style", "summary", "table", "tbody", "td", "tfoot", "th", "thead",
-  "title", "tr", "track", "ul", "svg", "math", "object", "template", "textarea",
-]);
-const VOID_TAGS = new Set(["base", "col", "frame", "hr", "img", "input", "link", "meta", "param", "source", "track"]);
-
-function htmlBlockAt(lines, start) {
-  const first = lines[start].trimStart();
-  if (first.startsWith("<!--")) {
-    let end = start;
-    while (end + 1 < lines.length && !lines[end].includes("-->")) end++;
-    return { html: lines.slice(start, end + 1).join("\n"), next: end + 1 };
-  }
-  if (/^<![A-Za-z]/.test(first)) return { html: lines[start], next: start + 1 };
-  const match = first.match(/^<(\/)?([A-Za-z][\w:-]*)(?:\s|\/?>)/);
-  if (!match || !HTML_BLOCK_TAGS.has(match[2].toLowerCase())) return null;
-  const tag = match[2].toLowerCase();
-  if (match[1] || VOID_TAGS.has(tag) || first.includes(`</${tag}>`) || /\/>\s*$/.test(first)) {
-    return { html: lines[start], next: start + 1 };
-  }
-  let end = start;
-  const close = new RegExp(`</${tag}\\s*>`, "i");
-  while (end + 1 < lines.length && lines[end].trim() && !close.test(lines[end])) end++;
-  return { html: lines.slice(start, end + 1).join("\n"), next: end + 1 };
-}
-
 function startsMarkdownBlock(lines, index) {
-  const line = lines[index];
-  return /^\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>|```)/.test(line) || htmlBlockAt(lines, index) != null;
+  return /^\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>|```)/.test(lines[index]);
 }
 
 export function renderMarkdown(src, purifier = globalThis.DOMPurify) {
@@ -195,8 +117,6 @@ export function renderMarkdown(src, purifier = globalThis.DOMPurify) {
     const line = lines[i], fence = line.match(/^\s*```(\w*)/);
     if (fence) { closeList(); const buf = [], lang = fence[1].toLowerCase(); i++; while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]); if (i < lines.length) i++; html += `<pre class="code-block" data-language="${escapeHtml(lang)}"><code class="language-${escapeHtml(lang)}">${highlightCode(buf.join("\n"))}</code></pre>`; continue; }
     if (/^\s*$/.test(line)) { closeList(); i++; continue; }
-    const htmlBlock = htmlBlockAt(lines, i);
-    if (htmlBlock) { closeList(); html += htmlBlock.html; i = htmlBlock.next; continue; }
     const h = line.match(/^(#{1,6})\s+(.*)/); if (h) { closeList(); html += `<h${h[1].length}>${inlineMd(h[2])}</h${h[1].length}>`; i++; continue; }
     const ul = line.match(/^\s*[-*+]\s+(.*)/); if (ul) { if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; } const task = ul[1].match(/^\[([ xX])\]\s+(.*)/); html += task ? `<li class="task-item"><span class="task-check${task[1] !== " " ? " checked" : ""}">${task[1] === " " ? "□" : "✓"}</span><span>${inlineMd(task[2])}</span></li>` : `<li>${inlineMd(ul[1])}</li>`; i++; continue; }
     const ol = line.match(/^\s*\d+\.\s+(.*)/); if (ol) { if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; } html += `<li>${inlineMd(ol[1])}</li>`; i++; continue; }

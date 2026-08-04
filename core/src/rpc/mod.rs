@@ -165,7 +165,8 @@ impl Hub {
         self.events_tx.receiver_count()
     }
 
-    fn is_busy(&self) -> bool {
+    /// Whether this conversation actor currently has an active turn.
+    pub fn is_busy(&self) -> bool {
         self.busy.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -1343,8 +1344,11 @@ impl DaemonCtx {
                 s.snapshot(self.llm.id(), self.llm.model())
             };
             self.reset_host_tool_state();
-            self.hub
-                .publish(RuntimeEvent::ConversationLoaded { messages, snapshot });
+            self.hub.publish(RuntimeEvent::ConversationLoaded {
+                messages,
+                snapshot,
+                busy: false,
+            });
         } else {
             self.hub.publish(RuntimeEvent::ConversationLoadFailed {
                 id,

@@ -203,6 +203,20 @@ test("ask_user interact pane renders and maps keys to the runtime", () => {
   assert.match(css, /\.interact-card \{/);
 });
 
+test("ask_user updates stable controls instead of rebuilding the picker", () => {
+  const renderSource = js.slice(js.indexOf("function setInteractText"), js.indexOf("function closeInteract"));
+  assert.match(html, /id="interact-notice"/);
+  assert.match(html, /id="interact-cancel"/);
+  assert.match(html, /id="interact-submit"/);
+  assert.match(renderSource, /const existing = new Map/);
+  assert.match(renderSource, /interactState\.optionCache\.set/);
+  assert.match(renderSource, /for \(let index = 0; index < interactState\.total;\)/);
+  assert.match(renderSource, /opts\.children\[index\] !== node/);
+  assert.match(renderSource, /content\.dataset\.signature === signature/);
+  assert.doesNotMatch(renderSource, /opts\.innerHTML\s*=/);
+  assert.doesNotMatch(css, /\.interact-opt[^\n{]*\{[^}]*animation:/);
+});
+
 test("ask_user parses option descriptions without consuming notices", () => {
   const source = js.slice(js.indexOf("function splitInteractLine"),
     js.indexOf("function renderInteractPane"));
@@ -225,7 +239,7 @@ test("ask_user parses option descriptions without consuming notices", () => {
   assert.equal(model.options[0].description, "First description");
   assert.equal(model.options[1].description, "Second description");
   assert.equal(model.notice, "Select at least one option.");
-  assert.match(js, /\$\("interact-kicker"\)\.textContent = model\.title \|\| "Question"/);
+  assert.match(js, /setInteractText\(\$\("interact-kicker"\), model\.title \|\| "Question"\)/);
   assert.match(js, /el\("span", "interact-opt-description"\)/);
   assert.match(css, /\.interact-opt-description \{/);
   assert.match(css, /\.interact-opt-copy \{/);
@@ -276,16 +290,14 @@ test("streaming conversations expose reading and recovery controls", () => {
   assert.match(css, /\.approval \{ position: sticky/);
 });
 
-test("chat rendering supports Markdown, inline HTML, and block HTML", async (t) => {
+test("chat rendering supports Markdown and escapes raw HTML", async (t) => {
   assert.match(html, /dompurify-3\.4\.12\.min\.js[^]*type="module" src="\/app\.js"/);
   assert.match(css, /\.tok-keyword/);
-  assert.match(css, /\.prose details/);
-  assert.match(css, /\.prose kbd/);
 
-  const [rendered, rawHtml, malformed] = await renderMarkdownInBrowser([
+  const [rendered, inlineHtml, blockHtml] = await renderMarkdownInBrowser([
     "- [x] done\n\n~~old~~ and [safe](https://example.com)\n\n```js\nconst n = 42; // note\n```",
-    "Inline <kbd>Ctrl</kbd> and <mark>safe</mark>.\n\n<section><h4>Title</h4><p>Body</p></section>\n\n<details open><summary>More</summary><p>Extra</p></details>",
-    "<div><strong>open",
+    "Inline <kbd>Ctrl</kbd> and <mark>text</mark>.",
+    "<section><h4>Title</h4><p>Body</p></section>",
   ], t) || [];
   if (!rendered) return;
   assert.match(rendered, /class="task-item"/);
@@ -297,13 +309,11 @@ test("chat rendering supports Markdown, inline HTML, and block HTML", async (t) 
   assert.match(rendered, /href="https:\/\/example\.com"/);
   assert.match(rendered, /target="_blank"/);
   assert.match(rendered, /rel="noopener noreferrer"/);
-  assert.match(rawHtml, /<p>Inline <kbd>Ctrl<\/kbd> and <mark>safe<\/mark>\.<\/p>/);
-  assert.match(rawHtml, /<section><h4>Title<\/h4><p>Body<\/p><\/section>/);
-  assert.match(rawHtml, /<details open=""><summary>More<\/summary><p>Extra<\/p><\/details>/);
-  assert.equal(malformed, "<div><strong>open</strong></div>");
+  assert.equal(inlineHtml, "<p>Inline &lt;kbd&gt;Ctrl&lt;/kbd&gt; and &lt;mark&gt;text&lt;/mark&gt;.</p>");
+  assert.equal(blockHtml, "<p>&lt;section&gt;&lt;h4&gt;Title&lt;/h4&gt;&lt;p&gt;Body&lt;/p&gt;&lt;/section&gt;</p>");
 });
 
-test("rendered HTML rejects active content and normalizes safe resources", async (t) => {
+test("Markdown resources reject unsafe URLs", async (t) => {
   assert.equal(isSafeLinkUrl("javascript:alert(1)"), false);
   assert.equal(isSafeLinkUrl("java\nscript:alert(1)"), false);
   assert.equal(isSafeLinkUrl("//evil.example/path"), false);
@@ -313,30 +323,26 @@ test("rendered HTML rejects active content and normalizes safe resources", async
   assert.equal(isSafeImageUrl("data:image/png;base64,AAAA"), false);
   assert.equal(isSafeImageUrl("https://example.com/image.png"), true);
 
-  const hostile = `<script>alert(1)</script>
-    <a href="javascript:alert(2)" onclick="alert(3)" target="_self" rel="opener">bad</a>
-    <a href="https://example.com/ok" onclick="alert(4)" target="_self" rel="opener">good</a>
-    <p data-language="evil" data-owner="model">metadata</p>
-    <img src="data:image/svg+xml,<svg onload=alert(5)>" onerror="alert(6)">
-    <img src="http://example.com/insecure.png"><img src="https://example.com/safe.png" onload="alert(7)">
-    <form action="https://evil.example"><input autofocus><button>submit</button><textarea>x</textarea></form>
-    <iframe srcdoc="<script>alert(8)</script>"></iframe><meta http-equiv="refresh" content="0;url=https://evil.example">
-    <svg><script>alert(9)</script><a xlink:href="javascript:alert(10)">svg</a></svg>
-    <math><mi xlink:href="data:x">math</mi></math><style>body{display:none}</style>`;
-  const [rendered] = await renderMarkdownInBrowser([hostile], t) || [];
+  const [rendered] = await renderMarkdownInBrowser([
+    `[bad](javascript:alert) [good](https://example.com/ok)\n\n![bad](http://example.com/insecure.png) ![good](https://example.com/safe.png)`,
+  ], t) || [];
   if (!rendered) return;
-  assert.doesNotMatch(rendered, /<(?:script|style|form|input|button|textarea|iframe|meta|svg|math)\b/i);
-  assert.doesNotMatch(rendered, /\s(?:on\w+|style|srcdoc|srcset|id|name|data-[\w-]+)=/i);
-  assert.doesNotMatch(rendered, /javascript:|data:image|http:\/\/example\.com\/insecure/i);
-  assert.match(rendered, /<p>metadata<\/p>/);
   assert.match(rendered, /<a>bad<\/a>/);
   assert.match(rendered, /<a href="https:\/\/example\.com\/ok" target="_blank" rel="noopener noreferrer">good<\/a>/);
-  assert.match(rendered, /<img src="https:\/\/example\.com\/safe\.png" loading="lazy" decoding="async" referrerpolicy="no-referrer">/);
+  assert.doesNotMatch(rendered, /http:\/\/example\.com\/insecure/);
+  assert.match(rendered, /<img src="https:\/\/example\.com\/safe\.png" alt="good" loading="lazy" decoding="async" referrerpolicy="no-referrer">/);
 });
 
-test("streaming, final, and replay paths share the sanitized renderer", async (t) => {
-  assert.match(js, /state\.asstEl\.innerHTML = renderMarkdown\(state\.asstRaw\) \+ '<span class="caret"><\/span>'/);
-  assert.match(js, /function onFinished\(\)[^]*state\.asstEl\.innerHTML = renderMarkdown\(state\.asstRaw\)/);
+test("streaming is frame-buffered text before final sanitized rendering", async (t) => {
+  const appendSource = js.slice(js.indexOf("function appendText"), js.indexOf("function appendReasoning"));
+  assert.match(appendSource, /requestAnimationFrame/);
+  assert.match(appendSource, /replaceChildren\(document\.createTextNode\(state\.asstRaw\), caret\)/);
+  assert.doesNotMatch(appendSource, /renderMarkdown|innerHTML/);
+  assert.match(js, /function flushAssistantMarkdown\(enhance = false\)[^]*state\.asstEl\.innerHTML = renderMarkdown\(state\.asstRaw\)/);
+  assert.match(js, /function cancelAssistantFrame\(\)[^]*cancelAnimationFrame\(state\.asstFrame\)/);
+  assert.match(js, /function onFinished\(\)[^]*flushAssistantMarkdown\(true\)/);
+  assert.match(js, /function onToolCall\(ev\)[^]*flushAssistantMarkdown\(\)/);
+  assert.match(css, /\.prose\.streaming \{[^}]*white-space: pre-wrap/);
   assert.match(js, /renderStoredMessage[^]*el\("div", "prose", renderMarkdown\(m\.content\)\)/);
   const outputs = await renderMarkdownInBrowser([
     "<scr",
@@ -344,9 +350,58 @@ test("streaming, final, and replay paths share the sanitized renderer", async (t
     "<script>alert(1)</script><p>safe</p>",
   ], t);
   if (!outputs) return;
-  assert.doesNotMatch(outputs[0], /<script/i);
-  assert.doesNotMatch(outputs[1], /<script|alert/i);
-  assert.equal(outputs[2], "<p>safe</p>");
+  assert.equal(outputs[0], "<p>&lt;scr</p>");
+  assert.equal(outputs[1], "<p>&lt;script&gt;alert(1)</p>");
+  assert.equal(outputs[2], "<p>&lt;script&gt;alert(1)&lt;/script&gt;&lt;p&gt;safe&lt;/p&gt;</p>");
+});
+
+test("streaming batches deltas and cancels stale frames on flush", () => {
+  const source = js.slice(js.indexOf("function cancelAssistantFrame"), js.indexOf("function appendReasoning"));
+  const frames = new Map();
+  const classes = new Set();
+  let nextFrame = 0;
+  let enhanced = 0;
+  const parent = { appendChild() {} };
+  const asstEl = {
+    classList: { add: (name) => classes.add(name), remove: (name) => classes.delete(name) },
+    parentElement: parent,
+    replaceChildren(...children) { this.children = children; },
+    innerHTML: "",
+  };
+  const context = {
+    state: { asstEl, asstRaw: "", asstFrame: null, reasonDetails: null, reasonEl: null },
+    requestAnimationFrame(callback) {
+      const id = ++nextFrame;
+      frames.set(id, () => { frames.delete(id); callback(); });
+      return id;
+    },
+    cancelAnimationFrame(id) { frames.delete(id); },
+    document: { createTextNode: (text) => ({ text }) },
+    el: (tag, cls) => ({ tag, className: cls }),
+    hideThinking() {},
+    ensureAssistant() {},
+    scrollDown() {},
+    renderMarkdown: (text) => `<p>${text}</p>`,
+    enhanceContent: () => { enhanced++; },
+  };
+  vm.runInNewContext(`${source};globalThis.append = appendText;globalThis.flush = flushAssistantMarkdown`, context);
+
+  context.append("<di");
+  context.append("v>");
+  assert.equal(frames.size, 1);
+  assert.equal(asstEl.children, undefined);
+  frames.get(context.state.asstFrame)();
+  assert.equal(asstEl.children[0].text, "<div>");
+  assert.equal(asstEl.children[1].className, "caret");
+  assert.equal(classes.has("streaming"), true);
+
+  context.append("tail");
+  assert.equal(frames.size, 1);
+  context.flush(true);
+  assert.equal(frames.size, 0);
+  assert.equal(asstEl.innerHTML, "<p><div>tail</p>");
+  assert.equal(classes.has("streaming"), false);
+  assert.equal(enhanced, 1);
 });
 
 test("thinking states are simple, animated, and motion-safe", () => {
@@ -370,6 +425,189 @@ test("multiplexed chats retain and replay each in-flight turn", () => {
   assert.match(bridge, /kind: "watch", conversation_id: convId/);
   assert.match(bridge, /snapshot\.conversation_id === convId/);
   assert.match(js, /await watchConversation\(leaving\)/);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function navigationHarness() {
+  const route = js.slice(js.indexOf("function routeConversation"), js.indexOf("function recoverNavigation"));
+  const open = js.slice(js.indexOf("async function openChat"), js.indexOf("function highlightActiveChat"));
+  const fresh = js.slice(js.indexOf("async function newChat"), js.indexOf("// ── providers"));
+  const commands = [];
+  const watches = [];
+  const storage = new Map();
+  const state = {
+    awaitingLoad: null,
+    conversationId: 1,
+    draftChat: false,
+    navigationGeneration: 0,
+    running: true,
+    sending: false,
+    runningConvs: new Set(),
+  };
+  const context = {
+    state,
+    Promise,
+    bgAgentRows: [],
+    sessionStorage: {
+      setItem: (key, value) => storage.set(key, value),
+      removeItem: (key) => storage.delete(key),
+    },
+    send: async (command) => { commands.push(command); return true; },
+    watchConversation: () => { const wait = deferred(); watches.push(wait); return wait.promise; },
+    unwatchConversation() {},
+    saveDraft() {},
+    denyPending() {},
+    cacheTasks() {},
+    recoverNavigation(token) { if (state.awaitingLoad === token) state.awaitingLoad = null; },
+    toast() {},
+    renderChats() {},
+    updateRunningIndicators() {},
+    closeMobileSidebar() {},
+    clearTaskList() {},
+    buildWelcome: () => ({}),
+    finalizeTurn() {},
+    setRunning() {},
+    clearArtifacts() {},
+    restoreDraft() {},
+    $: () => ({ innerHTML: "", appendChild() {} }),
+  };
+  vm.runInNewContext(`let routingQueue = Promise.resolve(); let pendingSubmitRequest = null; let desiredConversationId = 1; ${route}${open}${fresh};globalThis.open = openChat;globalThis.fresh = newChat;globalThis.setPendingSubmit = (request) => { pendingSubmitRequest = request; }`, context);
+  return { context, state, commands, watches };
+}
+
+test("rapid chat navigation cannot route an older load after the newer intent", async () => {
+  const { context, state, commands, watches } = navigationHarness();
+  const first = context.open(2);
+  const second = context.open(3);
+  assert.equal(watches.length, 2);
+
+  watches[1].resolve(true);
+  await second;
+  watches[0].resolve(true);
+  await first;
+
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].load_conversation.id, 3);
+  assert.equal(state.conversationId, 3);
+  assert.equal(state.awaitingLoad.id, 3);
+});
+
+test("switching immediately after send delivers the prompt before repinning", async () => {
+  const { context, state, commands, watches } = navigationHarness();
+  const delivery = deferred();
+  state.running = false;
+  state.sending = true;
+  context.setPendingSubmit(delivery.promise);
+
+  const navigation = context.open(2);
+  assert.equal(commands.length, 0);
+  assert.equal(watches.length, 0);
+
+  delivery.resolve(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(watches.length, 1);
+  watches[0].resolve(true);
+  await navigation;
+
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].load_conversation.id, 2);
+  assert.equal(state.runningConvs.has(1), true);
+});
+
+test("new chat racing with open chat preserves the later open intent", async () => {
+  const { context, state, commands, watches } = navigationHarness();
+  const first = context.fresh();
+  const second = context.open(9);
+
+  watches[1].resolve(true);
+  await second;
+  watches[0].resolve(true);
+  await first;
+
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].load_conversation.id, 9);
+  assert.equal(state.conversationId, 9);
+  assert.equal(state.draftChat, false);
+});
+
+test("duplicate watch requests share readiness and both observe failure", async () => {
+  const source = js.slice(js.indexOf("async function watchConversation"), js.indexOf("// Events from a background"));
+  const response = deferred();
+  let fetches = 0;
+  const context = {
+    state: { session: "session-1", watched: new Set() },
+    fetch: () => { fetches++; return response.promise; },
+  };
+  vm.runInNewContext(`const watchRequests = new Map(); ${source};globalThis.watch = watchConversation`, context);
+
+  const first = context.watch(7);
+  const second = context.watch(7);
+  assert.equal(fetches, 1);
+  response.resolve({ ok: false, text: async () => "attach failed" });
+
+  assert.equal(await first, false);
+  assert.equal(await second, false);
+  assert.equal(context.state.watched.has(7), false);
+});
+
+test("reattaching to a busy conversation restores its active running state", () => {
+  const source = js.slice(js.indexOf("function onConversationLoaded"), js.indexOf("function renderStoredMessage"));
+  const state = { awaitingLoad: null, conversationId: 4, runningConvs: new Set([8]) };
+  let running = false;
+  const thread = { innerHTML: "", appendChild() {} };
+  const context = {
+    state,
+    switchSatisfiedBy: () => true,
+    $: () => thread,
+    finalizeTurn() {},
+    clearArtifacts() {},
+    onSnapshot: (snapshot) => { state.conversationId = snapshot.conversation_id; },
+    setRunning: (value) => { running = value; },
+    restoreDraft() {},
+    restoreTasks() {},
+    buildWelcome: () => ({}),
+    replayLiveTail() {},
+    scrollToBottom() {},
+  };
+  vm.runInNewContext(`let bgAgentRows = []; ${source};globalThis.loaded = onConversationLoaded`, context);
+
+  context.loaded({ messages: [], snapshot: { conversation_id: 8 }, busy: true });
+
+  assert.equal(state.conversationId, 8);
+  assert.equal(state.runningConvs.has(8), false);
+  assert.equal(running, true);
+});
+
+test("conversation load failure only clears and restores its correlated navigation", () => {
+  const recover = js.slice(js.indexOf("function recoverNavigation"), js.indexOf("const LIVE_EVENT_TYPES"));
+  const failed = js.slice(js.indexOf("function onConversationLoadFailed"), js.indexOf("function onConversationLoaded"));
+  const token = { mode: "load", id: 8, from: 4, draftChat: true };
+  const state = { awaitingLoad: token, conversationId: 8, draftChat: false, runningConvs: new Set([4]) };
+  const errors = [];
+  const context = {
+    state,
+    sessionStorage: { setItem() {}, removeItem() {} },
+    unwatchConversation() {},
+    renderChats() {},
+    updateRunningIndicators() {},
+    systemLine: (message, isError) => errors.push({ message, isError }),
+  };
+  vm.runInNewContext(`let desiredConversationId = 8; ${recover}${failed};globalThis.fail = onConversationLoadFailed`, context);
+
+  context.fail({ id: 7, message: "wrong failure" });
+  assert.equal(state.awaitingLoad, token);
+  assert.equal(state.conversationId, 8);
+
+  context.fail({ id: 8, message: "database unavailable" });
+  assert.equal(state.awaitingLoad, null);
+  assert.equal(state.conversationId, 4);
+  assert.equal(state.draftChat, true);
+  assert.deepEqual(errors, [{ message: "database unavailable", isError: true }]);
 });
 
 test("conversation management preserves transcript content", () => {

@@ -289,6 +289,7 @@ body.hide-meter .meter { display: none; }
 .msg-user .role-tag { display: none; }
 .msg-user .bubble { max-width: min(86%, 650px); background: color-mix(in srgb, var(--surface-2) 82%, var(--accent-soft)); border: none; border-radius: 16px 16px 5px 16px; padding: 11px 15px; white-space: pre-wrap; word-break: break-word; box-shadow: none; }
 .msg-assistant .prose { color: var(--text); margin: 10px 0; line-height: 1.72; }
+.prose.streaming { white-space: pre-wrap; overflow-wrap: anywhere; }
 .prose > *:first-child { margin-top: 0; }
 .prose > *:last-child { margin-bottom: 0; }
 .prose p { margin: 0 0 12px; }
@@ -305,24 +306,8 @@ body.hide-meter .meter { display: none; }
 .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-line); }
 .prose a:hover { background: var(--accent-soft); border-radius: 3px; }
 .prose img { display: block; max-width: 100%; max-height: 520px; margin: 14px 0; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
-.prose figure { margin: 16px 0; }
-.prose figure > img { margin-bottom: 7px; }
-.prose figcaption, .prose caption { color: var(--text-faint); font-size: .84em; text-align: left; }
 .prose blockquote { margin: 0 0 14px; padding: 8px 14px; border-left: 3px solid var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 45%, transparent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; color: var(--text-dim); }
 .prose hr { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
-.prose details { margin: 0 0 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--surface) 75%, transparent); }
-.prose summary { padding: 8px 11px; color: var(--text-dim); font-weight: 600; cursor: pointer; }
-.prose details[open] > summary { border-bottom: 1px solid var(--border); }
-.prose details > :not(summary) { margin-left: 12px; margin-right: 12px; }
-.prose dl { margin: 0 0 14px; }
-.prose dt { margin-top: 8px; font-weight: 650; }
-.prose dd { margin-left: 20px; color: var(--text-dim); }
-.prose kbd, .prose samp { font-family: var(--mono); font-size: .84em; }
-.prose kbd { padding: 1px 5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface-2); }
-.prose mark { padding: 0 2px; border-radius: 2px; background: color-mix(in srgb, var(--amber) 30%, transparent); color: var(--text); }
-.prose abbr[title], .prose dfn[title] { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
-.prose address, .prose cite, .prose figcaption { font-style: italic; }
-.prose small { color: var(--text-faint); }
 .prose code { font-family: var(--mono); font-size: 0.88em; background: var(--surface-2); border: 1px solid var(--border); color: color-mix(in srgb, var(--text) 88%, var(--accent)); padding: 1px 6px; border-radius: 6px; }
 .prose pre { position: relative; background: #0b0d12; border: 1px solid var(--border-strong); border-radius: 11px; padding: 39px 17px 16px; overflow-x: auto; margin: 16px 0 18px; box-shadow: 0 14px 32px -26px #000; }
 .prose pre::before { content: ""; position: absolute; inset: 0 0 auto; height: 29px; background: rgba(255,255,255,.025); border-bottom: 1px solid var(--border); }
@@ -425,63 +410,57 @@ body.hide-meter .meter { display: none; }
 .system-line.error { color: var(--red); }
 .system-line.command-result { white-space: pre-wrap; text-align: left; color: var(--text-dim); }
 
-/* ── Interactive question (ask_user / source="interact" pane) ───────────────
-   Lives in the composer wrapper, directly above the input and sharing its
-   width, so it reads as growing out of the chat box. The Lua tool drives it
-   purely by keystrokes; these controls translate clicks into those same keys. */
-.interact { pointer-events: auto; max-width: 740px; margin: 0 auto 10px; }
+/* ── Interactive question (ask_user / source="interact" pane) ─────────────── */
+.interact { pointer-events: auto; max-width: 740px; margin: 0 auto 8px; }
 .interact.has-preview { max-width: min(1040px, calc(100vw - 44px)); }
 .interact-card {
-  width: 100%;
-  background: var(--bg-elev); border: 1px solid var(--accent-line); border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg); padding: 16px 16px 13px;
-  transform-origin: bottom center;
-  animation: interact-grow 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+  width: 100%; overflow: hidden; background: color-mix(in srgb, var(--bg-elev) 96%, var(--accent) 4%);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+  animation: interact-open 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
-/* Rise + fade + a whisper of scale, anchored at the bottom edge so it appears
-   to unfold upward from the composer. */
-@keyframes interact-grow {
-  from { opacity: 0; transform: translateY(14px) scale(0.97); }
-  to   { opacity: 1; transform: none; }
-}
-/* Ease the option rows in just after the card so the list feels alive. */
-.interact-opt, .interact-text { animation: interact-row 0.28s ease both; }
-@keyframes interact-row { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.interact-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
-.interact-kicker { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); font-weight: 600; }
-.interact-q { font-size: 15px; font-weight: 550; color: var(--text); line-height: 1.4; margin-bottom: 12px; white-space: pre-wrap; }
-.interact-body.previewing { display: grid; grid-template-columns: minmax(180px, 0.36fr) minmax(0, 0.64fr); gap: 14px; align-items: stretch; }
+@keyframes interact-open { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
+.interact-head { display: flex; align-items: center; padding: 13px 15px 5px; }
+.interact-kicker { color: var(--text-faint); font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+.interact-q { padding: 0 15px 12px; color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.4; white-space: pre-wrap; }
+.interact-notice { margin: -4px 16px 12px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--amber) 42%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--amber) 10%, transparent); color: var(--amber); font-size: 12px; }
+.interact-body { padding: 0 10px; }
+.interact-body.previewing { display: grid; grid-template-columns: minmax(240px, 0.4fr) minmax(0, 0.6fr); gap: 10px; align-items: stretch; }
 .interact-body.previewing .interact-options { max-height: 52vh; }
-.interact-preview { min-width: 0; max-height: 52vh; overflow: auto; padding: 11px 13px; border-left: 1px solid var(--border-strong); background: var(--surface); }
-.interact-preview-title { margin-bottom: 9px; color: var(--text); font-size: 12px; font-weight: 650; }
-.interact-preview-content { min-width: max-content; color: var(--text-dim); font-family: var(--mono); font-size: 12px; line-height: 1.45; }
-.interact-preview-line { min-height: 1.45em; white-space: pre; }
-.interact-options { display: flex; flex-direction: column; gap: 5px; max-height: 46vh; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
+.interact-options { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 4px; scrollbar-gutter: stable; }
 .interact-options::-webkit-scrollbar { width: 8px; }
-.interact-options::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 99px; border: 2px solid var(--bg-elev); }
+.interact-options::-webkit-scrollbar-thumb { background: var(--surface-2); border: 2px solid transparent; border-radius: 99px; background-clip: padding-box; }
 .interact-opt {
-  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-  padding: 10px 13px; border-radius: var(--radius-sm); border: 1px solid var(--border);
-  background: var(--surface); color: var(--text); font-family: var(--sans); font-size: 13.5px;
-  cursor: pointer; transition: border-color 0.13s, background 0.13s;
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 8px 10px;
+  border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--text);
+  font-family: var(--sans); font-size: 13.5px; text-align: left; cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s, box-shadow 0.12s;
 }
-.interact-opt:hover { border-color: var(--border-strong); background: var(--surface-2); }
-.interact-opt.selected { border-color: var(--accent-line); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent-line) inset; }
-.interact-opt-label { color: var(--text); word-break: break-word; }
-.interact-opt-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.interact-opt-description { color: var(--text-faint); font-size: 11.5px; line-height: 1.35; word-break: break-word; }
-.interact-opt-label.placeholder { color: var(--text-faint); font-style: italic; }
-.interact-custom .interact-opt-label { flex: 1; min-width: 0; }
-.interact-check { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; border: 1px solid var(--border-strong); color: var(--on-accent); font-size: 12px; }
-.interact-check.on { background: var(--accent); border-color: var(--accent); }
-.interact-custom { border-style: dashed; }
-.interact-text { padding: 10px 13px; border-radius: var(--radius-sm); border: 1px solid var(--accent-line); background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 13px; word-break: break-word; }
-.interact-caret { display: inline-block; width: 7px; height: 1.05em; vertical-align: text-bottom; background: var(--accent); border-radius: 2px; margin-left: 3px; animation: blink 1s steps(2) infinite; }
-.interact-more { padding: 4px 13px; font-size: 11px; color: var(--text-faint); font-family: var(--mono); cursor: pointer; text-align: center; }
-.interact-more:hover { color: var(--text); }
-.interact-foot { display: flex; justify-content: flex-end; gap: 9px; margin-top: 12px; }
-.interact-hint { margin-top: 9px; font-size: 11px; color: var(--text-faint); font-family: var(--mono); text-align: center; }
-.interact-hint:empty { display: none; }
+.interact-opt:hover { background: var(--surface-2); border-color: var(--border); }
+.interact-opt.selected { background: var(--accent-soft); border-color: var(--accent-line); }
+.interact-opt:focus-visible, .interact-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.interact-choice { flex: none; display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--on-accent); font-size: 10px; font-weight: 700; }
+.interact-opt.selected:not(.multi) .interact-choice { border: 4px solid var(--accent); background: var(--bg-elev); }
+.interact-opt.multi .interact-choice { border-radius: 5px; }
+.interact-opt.multi .interact-choice.checked { border-color: var(--accent); background: var(--accent); }
+.interact-custom { margin-top: 3px; border-top-color: var(--border); border-radius: 0 0 10px 10px; }
+.interact-custom .custom-choice { border-style: dashed; border-radius: 5px; color: var(--text-dim); font-size: 15px; font-weight: 400; }
+.interact-custom.selected .custom-choice { border: 1px dashed var(--accent); background: transparent; color: var(--accent); }
+.interact-opt-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.interact-opt-label { color: var(--text); line-height: 1.35; overflow-wrap: anywhere; }
+.interact-opt-label.placeholder, .interact-text-value.placeholder { color: var(--text-faint); font-style: italic; }
+.interact-opt-description { color: var(--text-faint); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; }
+.interact-text { min-height: 54px; padding: 14px; border: 1px solid var(--accent-line); border-radius: 10px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.interact-caret { display: inline-block; width: 2px; height: 1.05em; margin-left: 2px; vertical-align: text-bottom; border-radius: 1px; background: var(--accent); animation: blink 1s steps(2) infinite; }
+.interact-more { flex: none; width: 100%; padding: 5px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; cursor: pointer; }
+.interact-more:hover { background: var(--surface); color: var(--text-dim); }
+.interact-preview { min-width: 0; max-height: 52vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.interact-preview-title { position: sticky; top: -12px; z-index: 1; margin: -12px -14px 10px; padding: 10px 14px 8px; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 11px; font-weight: 700; letter-spacing: 0.4px; }
+.interact-preview-content { min-width: max-content; color: var(--text-dim); font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+.interact-preview-line { min-height: 1.5em; white-space: pre; }
+.interact-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; padding: 9px 12px 10px; border-top: 1px solid var(--border); }
+.interact-hint { min-width: 0; color: var(--text-faint); font-family: var(--sans); font-size: 10.5px; line-height: 1.4; }
+.interact-actions { display: flex; flex: none; gap: 8px; }
+.interact-actions .btn { padding: 7px 14px; }
 
 /* welcome */
 .welcome { max-width: 600px; margin: 7vh auto 0; text-align: center; animation: rise 0.5s ease both; }
@@ -898,6 +877,9 @@ body.hide-meter .composer-tokens { display: none; }
   .interact.has-preview { max-width: 100%; }
   .interact-body.previewing { display: block; }
   .interact-preview { max-height: 30vh; margin-top: 10px; border-top: 1px solid var(--border-strong); border-left: 0; }
+  .interact-foot { align-items: stretch; flex-direction: column; gap: 8px; }
+  .interact-hint { order: 2; text-align: center; }
+  .interact-actions .btn { flex: 1; }
   .composer-bar { gap: 6px; flex-wrap: wrap; }
   .model-pill { max-width: 100%; flex: 1 1 100%; justify-content: flex-start; }
   #mode-toggle { flex: 0 1 auto; }
