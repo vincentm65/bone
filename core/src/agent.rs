@@ -502,7 +502,7 @@ mod resolve_provider_tests {
 
     /// Run `f` with `BONE_DIR` pointed at a fresh tempdir, restoring the prior
     /// value (or removing the variable) on drop.
-    fn with_bone_dir(f: impl FnOnce(tempfile::TempDir) -> ()) {
+    fn with_bone_dir(f: impl FnOnce(tempfile::TempDir)) {
         let _guard = crate::util::test_env_lock();
         let previous = std::env::var_os("BONE_DIR");
         let dir = tempfile::tempdir().unwrap();

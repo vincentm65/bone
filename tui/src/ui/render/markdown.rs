@@ -844,7 +844,11 @@ pub fn render_markdown(content: &str, width: u16, theme: &Theme) -> Vec<Line<'st
                 if renderer.in_code {
                     renderer.push_code_text("\n");
                 } else {
-                    renderer.push_text(" ");
+                    // Preserve source newlines in terminal output. Collapsing a
+                    // soft break to a space turns pasted logs and command output
+                    // into one unreadable paragraph.
+                    renderer.finish_line();
+                    renderer.begin_block();
                 }
             }
             Event::HardBreak => {

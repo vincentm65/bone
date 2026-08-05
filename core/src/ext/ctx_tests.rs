@@ -1748,6 +1748,7 @@ impl LlmProvider for PrivateTestProvider {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn private_llm_test_config(
     provider: Arc<PrivateTestProvider>,
     cancelled: Option<Arc<AtomicBool>>,

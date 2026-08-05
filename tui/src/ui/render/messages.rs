@@ -66,6 +66,7 @@ fn render_tool_with_hint(
     let indent = "    ";
     let prefix_width = 4;
     let label_width = options.width.saturating_sub(prefix_width).max(1);
+    let shell_label = tool.label == "shell" || tool.label.starts_with("shell ");
 
     if !tool.label.is_empty() {
         let wrapped = wrap_tool_label(&tool.label, label_width);
@@ -77,7 +78,7 @@ fn render_tool_with_hint(
             let in_heredoc_body = heredoc_delim.is_some();
             let visuals = wrap_label_line(raw_line, label_width);
             let is_first_logical = visual_idx == 0;
-            let styled_visuals = if tool.is_shell {
+            let styled_visuals = if shell_label {
                 if in_heredoc_body {
                     visuals
                         .iter()

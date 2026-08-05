@@ -147,3 +147,29 @@ fn logical_lines_row_count_uses_wrap_width() {
     assert_eq!(logical_lines_row_count(std::slice::from_ref(&line), 100), 1);
     assert_eq!(logical_lines_row_count(&[line], 99), 2);
 }
+
+#[test]
+fn assistant_markdown_preserves_soft_line_breaks_for_terminal_output() {
+    let content = "exit code: 0\nstdout:\n\nrunning 2 tests\ntest first ... ok\ntest second ... ok";
+    let rendered = markdown::render_markdown(content, 80, &Theme::default())
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "exit code: 0",
+            "stdout:",
+            "",
+            "running 2 tests",
+            "test first ... ok",
+            "test second ... ok",
+        ]
+    );
+}

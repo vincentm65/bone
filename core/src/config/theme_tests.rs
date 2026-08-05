@@ -29,14 +29,3 @@ fn registry_is_complete_unique_and_excludes_removed_role() {
     assert!(!role("fg").unwrap().runtime);
     assert!(role("bg").unwrap().runtime);
 }
-
-#[test]
-fn checked_in_role_documentation_is_current() {
-    let docs = include_str!("../../defaults/docs/configuration.md");
-    let documented = docs
-        .split("<!-- BEGIN GENERATED THEME ROLES -->\n")
-        .nth(1)
-        .and_then(|tail| tail.split("<!-- END GENERATED THEME ROLES -->").next())
-        .expect("generated theme role section");
-    assert_eq!(documented.trim(), role_docs_markdown().trim());
-}

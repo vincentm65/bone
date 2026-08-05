@@ -91,8 +91,10 @@ fn empty_navigation_is_unhandled() {
 fn agent_navigation_continues_through_input_history_in_both_directions() {
     let ids = vec!["agent-top".into(), "agent-bottom".into()];
     let mut selected = Some("agent-top".into());
-    let mut input = InputState::default();
-    input.buffer = "oldest input".into();
+    let mut input = InputState {
+        buffer: "oldest input".into(),
+        ..Default::default()
+    };
     input.reset();
     input.buffer = "newest input".into();
     input.reset();

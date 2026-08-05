@@ -152,14 +152,6 @@ const DEFAULT_COMMAND_POLICY: &str = include_str!("../../default-command-policy.
 const DEFAULT_AGENTS_MD: &str = include_str!("../../defaults/AGENTS.md");
 const DEFAULT_CORE_DOCS: &[(&str, &str)] = &[
     (
-        "architecture.md",
-        include_str!("../../defaults/docs/architecture.md"),
-    ),
-    (
-        "configuration.md",
-        include_str!("../../defaults/docs/configuration.md"),
-    ),
-    (
         "extension-api.md",
         include_str!("../../defaults/docs/extension-api.md"),
     ),

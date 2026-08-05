@@ -549,8 +549,11 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
     assert_eq!(effective, replacement);
     drop(session);
 
+    let usage = std::iter::from_fn(|| events.try_recv().ok())
+        .find(|event| matches!(event, RuntimeEvent::TokenUsage { .. }))
+        .expect("private completion did not publish token usage");
     assert!(matches!(
-        events.try_recv().unwrap(),
+        usage,
         RuntimeEvent::TokenUsage {
             sent: 9,
             received: 2,

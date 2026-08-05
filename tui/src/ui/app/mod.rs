@@ -2376,7 +2376,7 @@ impl App {
         if has_running {
             let visible_selection = self
                 .agent_list_focused
-                .then(|| self.selected_job_id.as_deref())
+                .then_some(self.selected_job_id.as_deref())
                 .flatten();
             if let Some(page) = crate::ui::jobs_pane::render_selected(
                 &self.renderer.theme,
