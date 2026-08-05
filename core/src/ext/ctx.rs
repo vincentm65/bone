@@ -2000,10 +2000,17 @@ fn build_usage_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     Ok(usage_table)
 }
 
-/// Build the `ctx.conversation` table: `current()` and `history()` over the
-/// in-memory turn history. Both return nil when no history is attached.
+/// Build the `ctx.conversation` table: the effective base `system_prompt()` and
+/// `current()`/`history()` over the in-memory turn history. The history methods
+/// return nil when no history is attached.
 fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let conversation_table = lua.create_table()?;
+    let system_prompt = cfg
+        .system_prompt_override
+        .clone()
+        .unwrap_or_else(crate::llm::prompts::system_prompt);
+    let system_prompt_fn = lua.create_function(move |_, ()| Ok(system_prompt.clone()))?;
+    conversation_table.set("system_prompt", system_prompt_fn)?;
 
     // Use the same estimator as RuntimeCommand::ReplaceConversation and the
     // driver's post-before_turn replacement path.  Compaction can therefore
