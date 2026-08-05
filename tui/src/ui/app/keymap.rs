@@ -19,8 +19,8 @@ impl App {
             }
         }
 
-        // Hard-coded fallback: paste image on Ctrl+V / Alt+V (mimics the
-        // default insert binding users expect without explicit configuration).
+        // Hard-coded fallback: paste images on Ctrl+V / Alt+V. Ctrl+Shift+V
+        // is reserved for the terminal's standard text-paste shortcut.
         if is_image_paste_key(code, modifiers) {
             return Some("paste_image".to_string());
         }
@@ -135,9 +135,7 @@ impl App {
 
 pub(super) fn is_image_paste_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
     matches!(code, KeyCode::Char('v' | 'V'))
-        && (modifiers == KeyModifiers::CONTROL
-            || modifiers == KeyModifiers::ALT
-            || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT))
+        && matches!(modifiers, KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 pub(super) fn clipboard_image() -> Result<crate::llm::ImageData, String> {
