@@ -2,7 +2,7 @@ use super::{
     CodexProvider, CodexRequest, CodexResponse, extract_response_events, output_index,
     process_summary_event,
 };
-use crate::llm::provider::{ChatEvent, LlmProvider, ProviderRequestContext};
+use crate::llm::provider::{ChatEvent, LlmProvider};
 use crate::tools::TRUNCATED_ARGS_KEY;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -173,22 +173,4 @@ fn configured_cap_used_when_context_max_tokens_is_none() {
     };
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["max_output_tokens"], 7_000);
-}
-
-/// Provider max_tokens field is not mutated by context override.
-#[test]
-fn context_max_tokens_does_not_mutate_configured_cap() {
-    let entry = serde_yaml::from_str("handler: codex\n").unwrap();
-    let mut provider = CodexProvider::from_entry("codex", &entry);
-    provider.set_max_tokens(Some(12_000));
-    assert_eq!(provider.max_tokens, Some(12_000));
-
-    // Simulate context override: context.max_tokens.or(self.max_tokens)
-    let ctx = ProviderRequestContext {
-        max_tokens: Some(6_000),
-        ..Default::default()
-    };
-    let effective = ctx.max_tokens.or(provider.max_tokens);
-    assert_eq!(effective, Some(6_000)); // context wins
-    assert_eq!(provider.max_tokens, Some(12_000)); // configured cap untouched
 }

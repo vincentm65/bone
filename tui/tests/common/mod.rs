@@ -49,15 +49,6 @@ pub fn temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("bone-{label}-{suffix}"))
 }
 
-#[allow(dead_code)]
-pub fn temp_path(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("bone-{label}-{nanos}"))
-}
-
 /// Copy the in-repo catalog tools/commands into `config_dir/lua/{tools,commands}`,
 /// simulating items the user installed from the catalog. These optional tools
 /// no longer ship in the binary, so tests that need them seed them this way.

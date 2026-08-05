@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A simple-English architecture and design guide for Bone.">
+  <title>Bone Architecture — Design Guide</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --panel: #111821;
+      --panel-2: #151f2b;
+      --line: #293746;
+      --text: #e6edf3;
+      --muted: #9ba9b7;
+      --accent: #7dd3a7;
+      --accent-2: #74b9ff;
+      --warn: #f5c26b;
+      --danger: #ff8585;
+      --code: #081018;
+      --max: 1160px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 78% 4%, rgba(116, 185, 255, .09), transparent 28rem),
+        radial-gradient(circle at 15% 24%, rgba(125, 211, 167, .07), transparent 25rem),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a { color: var(--accent-2); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    code {
+      padding: .12rem .35rem;
+      border: 1px solid rgba(116, 185, 255, .18);
+      border-radius: .35rem;
+      background: var(--code);
+      color: #c9e2ff;
+      font-size: .9em;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      max-width: var(--max);
+      margin: 0 auto;
+      min-height: 100vh;
+    }
+
+    nav {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 2rem 1.25rem;
+      border-right: 1px solid var(--line);
+    }
+    nav .brand { display: block; margin-bottom: 1.6rem; color: var(--text); }
+    nav .brand strong { display: block; font-size: 1.1rem; letter-spacing: .04em; }
+    nav .brand span { color: var(--muted); font-size: .8rem; }
+    nav ol { margin: 0; padding: 0; list-style: none; }
+    nav li { margin: .2rem 0; }
+    nav a {
+      display: block;
+      padding: .42rem .6rem;
+      border-radius: .4rem;
+      color: var(--muted);
+      font-size: .88rem;
+    }
+    nav a:hover { background: var(--panel); color: var(--text); text-decoration: none; }
+
+    main { min-width: 0; padding: 4.5rem 3.5rem 6rem; }
+    section { scroll-margin-top: 2rem; margin: 0 0 5rem; }
+    h1, h2, h3 { line-height: 1.2; letter-spacing: -.025em; }
+    h1 { max-width: 780px; margin: 0; font-size: clamp(2.5rem, 7vw, 5.4rem); }
+    h2 { margin: 0 0 1.35rem; font-size: clamp(1.8rem, 4vw, 2.65rem); }
+    h3 { margin: 1.8rem 0 .65rem; font-size: 1.12rem; }
+    p { max-width: 780px; }
+    .eyebrow {
+      margin-bottom: .7rem;
+      color: var(--accent);
+      font: 700 .75rem/1.2 ui-monospace, monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .lede { max-width: 760px; color: #c2ced8; font-size: 1.2rem; }
+    .quiet { color: var(--muted); }
+
+    .hero { padding-top: 2rem; }
+    .hero-note {
+      max-width: 780px;
+      margin-top: 2rem;
+      padding: 1rem 1.2rem;
+      border-left: 3px solid var(--accent);
+      background: linear-gradient(90deg, rgba(125, 211, 167, .09), transparent);
+    }
+
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      padding: 1.2rem;
+      border: 1px solid var(--line);
+      border-radius: .7rem;
+      background: linear-gradient(150deg, rgba(21, 31, 43, .96), rgba(14, 21, 29, .96));
+    }
+    .card h3 { margin-top: 0; }
+    .card p:last-child, .card ul:last-child { margin-bottom: 0; }
+    .number {
+      display: inline-grid;
+      place-items: center;
+      width: 1.9rem;
+      height: 1.9rem;
+      margin-bottom: .75rem;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--accent);
+      font: 700 .8rem/1 ui-monospace, monospace;
+    }
+
+    .diagram {
+      overflow-x: auto;
+      margin: 1.5rem 0;
+      padding: 1.35rem;
+      border: 1px solid var(--line);
+      border-radius: .7rem;
+      background: var(--code);
+    }
+    .diagram pre { width: max-content; min-width: 100%; margin: 0; color: #b9c7d3; line-height: 1.55; }
+    .diagram .hot { color: var(--accent); }
+    .diagram .blue { color: var(--accent-2); }
+
+    table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: .94rem; }
+    th, td { padding: .8rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font: 700 .74rem/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+    td:first-child { white-space: nowrap; color: var(--accent); font-weight: 650; }
+
+    .callout {
+      margin: 1.25rem 0;
+      padding: 1rem 1.15rem;
+      border: 1px solid rgba(245, 194, 107, .35);
+      border-radius: .6rem;
+      background: rgba(245, 194, 107, .06);
+    }
+    .callout strong { color: var(--warn); }
+    .rule {
+      display: grid;
+      grid-template-columns: 9rem 1fr;
+      gap: 1rem;
+      padding: 1rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .rule b { color: var(--accent); }
+    .pill {
+      display: inline-block;
+      margin: .15rem .2rem .15rem 0;
+      padding: .2rem .55rem;
+      border: 1px solid var(--line);
+      border-radius: 99px;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+    .decision {
+      padding: 1rem 0 1rem 1rem;
+      border-left: 2px solid var(--line);
+    }
+    .decision + .decision { margin-top: .4rem; }
+    .decision strong { display: block; color: var(--text); }
+    ul, ol { padding-left: 1.35rem; }
+    li { margin: .35rem 0; }
+    footer { padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .85rem; }
+
+    @media (max-width: 840px) {
+      .shell { display: block; }
+      nav {
+        position: relative;
+        width: auto;
+        height: auto;
+        padding: 1.2rem;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      nav .brand { margin-bottom: .6rem; }
+      nav ol { display: flex; gap: .2rem; overflow-x: auto; }
+      nav li { flex: 0 0 auto; }
+      main { padding: 3rem 1.25rem 5rem; }
+      .grid, .grid.three { grid-template-columns: 1fr; }
+      .rule { grid-template-columns: 1fr; gap: .2rem; }
+    }
+
+    @media print {
+      :root { color-scheme: light; --bg: white; --panel: #f7f8fa; --panel-2: white; --line: #ccd2d8; --text: #15202b; --muted: #53606c; --code: #f4f6f8; }
+      body { background: white; }
+      .shell { display: block; max-width: none; }
+      nav { display: none; }
+      main { padding: 0; }
+      section { break-inside: avoid; margin-bottom: 2.2rem; }
+      a { color: inherit; }
+      code { color: inherit; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav aria-label="Document sections">
+      <a class="brand" href="#top"><strong>BONE / DESIGN</strong><span>Architecture in simple English</span></a>
+      <ol>
+        <li><a href="#mental-model">01 Mental model</a></li>
+        <li><a href="#parts">02 Main parts</a></li>
+        <li><a href="#turn">03 One turn</a></li>
+        <li><a href="#state">04 State &amp; config</a></li>
+        <li><a href="#extensions">05 Extensions</a></li>
+        <li><a href="#delegation">06 Delegation</a></li>
+        <li><a href="#frontends">07 Frontends</a></li>
+        <li><a href="#decisions">08 Decision guide</a></li>
+        <li><a href="#risks">09 Risks</a></li>
+        <li><a href="#source-map">10 Source map</a></li>
+      </ol>
+    </nav>
+
+    <main id="top">
+      <section class="hero">
+        <div class="eyebrow">Bone 2.4.5 · Architecture design guide</div>
+        <h1>One brain.<br>Many ways in.</h1>
+        <p class="lede">Bone is a coding assistant whose core runtime makes the decisions. The terminal, browser, remote client, and headless command are different windows onto that same runtime.</p>
+        <div class="hero-note"><strong>The shortest useful summary:</strong> keep intelligence and shared state in <code>core</code>, shared messages in <code>protocol</code>, and display concerns in the frontends.</div>
+      </section>
+
+      <section id="mental-model">
+        <div class="eyebrow">01 · Mental model</div>
+        <h2>Think of Bone as a small server with several remote controls.</h2>
+        <p>The server is the daemon inside <code>core</code>. It owns conversations, asks language models for answers, runs tools, requests approvals, loads extensions, and saves durable data. A frontend sends commands and renders the events it receives.</p>
+        <div class="diagram" role="img" aria-label="High-level Bone architecture">
+<pre>  <span class="blue">TUI</span>          <span class="blue">Browser</span>       <span class="blue">Remote TUI</span>      <span class="blue">Headless run</span>
+   │              │               │                 │
+   └──────────────┴──── commands / events ──────────┘
+                          │
+                    <span class="hot">PROTOCOL CONTRACT</span>
+                          │
+                   ┌──────▼──────┐
+                   │ CORE DAEMON │  ← the authority
+                   └──────┬──────┘
+             ┌────────────┼─────────────┐
+             ▼            ▼             ▼
+         Providers      Tools        Lua extensions
+             │            │             │
+             └────────────┴──────┬──────┘
+                                 ▼
+                           SQLite + YAML</pre>
+        </div>
+        <div class="grid three">
+          <article class="card"><h3>One authority</h3><p>There is one implementation of the agent loop: the core <code>Driver</code>. Frontends must not create their own version.</p></article>
+          <article class="card"><h3>Explicit border</h3><p>Anything crossing between daemon and client is represented by a type in <code>protocol</code>.</p></article>
+          <article class="card"><h3>Replaceable edges</h3><p>Providers, tools, Lua behavior, and UIs can vary while the central runtime rules stay consistent.</p></article>
+        </div>
+      </section>
+
+      <section id="parts">
+        <div class="eyebrow">02 · Main parts</div>
+        <h2>Each part has one clear job.</h2>
+        <table>
+          <thead><tr><th>Part</th><th>Owns</th><th>Must not own</th></tr></thead>
+          <tbody>
+            <tr><td><code>core</code></td><td>Agent loop, model providers, tools, approvals, configuration, Lua, sessions, jobs, cancellation, persistence.</td><td>Terminal layout or browser rendering.</td></tr>
+            <tr><td><code>protocol</code></td><td>Serializable commands, events, session/config snapshots, messages, tool types, and view updates.</td><td>Business logic or visual layout.</td></tr>
+            <tr><td><code>tui</code></td><td>CLI entry point, terminal input, layout, wrapping, cursor behavior, and colors.</td><td>Authoritative transcript, tool policy, or agent-loop decisions.</td></tr>
+            <tr><td><code>webui</code></td><td>Browser UI plus an HTTP/SSE-to-runtime bridge; web-only title/archive metadata.</td><td>Core messages, transcript authority, or a second agent runtime.</td></tr>
+          </tbody>
+        </table>
+        <div class="callout"><strong>Dependency direction:</strong> frontends depend on the contracts and capabilities below them. Core should never need to know how a terminal cell or browser element is drawn.</div>
+      </section>
+
+      <section id="turn">
+        <div class="eyebrow">03 · One user turn</div>
+        <h2>A message becomes a controlled loop.</h2>
+        <p>A “turn” begins when a client submits a prompt and ends when the runtime produces a final outcome. One turn may call the model several times because tool results are fed back to it.</p>
+        <div class="grid">
+          <article class="card"><div class="number">1</div><h3>Command arrives</h3><p>The client sends a <code>RuntimeCommand</code> over an in-process or newline-JSON connection.</p></article>
+          <article class="card"><div class="number">2</div><h3>Conversation actor routes it</h3><p>The daemon finds the correct conversation. Work, approvals, and cancellation stay scoped to this conversation.</p></article>
+          <article class="card"><div class="number">3</div><h3>Session builds a Driver</h3><p><code>RuntimeSession</code> supplies transcript, tools, token totals, database identity, and cancellation state for this turn.</p></article>
+          <article class="card"><div class="number">4</div><h3>Hooks shape the request</h3><p>Lua <code>before_turn</code> hooks may append instructions, replace effective history, or limit tools without becoming the runtime authority.</p></article>
+          <article class="card"><div class="number">5</div><h3>Model and tools loop</h3><p>The Driver streams a provider response. Tool calls go through the registry and approval gate, then their results can trigger another provider request.</p></article>
+          <article class="card"><div class="number">6</div><h3>Outcome is folded back</h3><p>The session updates durable messages and usage. All attached clients receive authoritative events needed to render the result.</p></article>
+        </div>
+        <h3>Why separate Session and Driver?</h3>
+        <p><code>RuntimeSession</code> is the long-lived truth for a conversation. A <code>Driver</code> is assembled for one turn and owns active execution. This makes turn logic reusable in TUI, daemon, and headless modes without giving any frontend ownership of the conversation.</p>
+        <div class="callout"><strong>Concurrency rule:</strong> pair tool and shell events by protocol ID, not by arrival order. Different conversations and tool calls may run at the same time.</div>
+      </section>
+
+      <section id="state">
+        <div class="eyebrow">04 · State &amp; configuration</div>
+        <h2>Know which kind of truth you are changing.</h2>
+        <div class="grid">
+          <article class="card">
+            <h3>Durable conversation state</h3>
+            <p>SQLite is the source of truth for conversations, messages, usage, and runtime records. Complete display history remains available even if the model-facing history is compacted.</p>
+            <span class="pill">core-owned</span><span class="pill">saved</span><span class="pill">conversation-scoped</span>
+          </article>
+          <article class="card">
+            <h3>Live execution state</h3>
+            <p>Active Driver data, pending events, status text, cancellation flags, and live view components are temporary. Do not treat them as persisted settings.</p>
+            <span class="pill">in memory</span><span class="pill">ephemeral</span>
+          </article>
+          <article class="card">
+            <h3>Canonical configuration</h3>
+            <p>YAML stores selected values. The daemon's <code>ConfigStore</code> validates all domains and publishes one revisioned snapshot to clients.</p>
+            <span class="pill">daemon-owned</span><span class="pill">revisioned</span>
+          </article>
+          <article class="card">
+            <h3>Web-only metadata</h3>
+            <p>The bridge may save browser-specific title and archive fields in <code>webui_conversations</code>. It must not rewrite core transcript data.</p>
+            <span class="pill">bridge-owned</span><span class="pill">narrow scope</span>
+          </article>
+        </div>
+
+        <h3>Configuration domains</h3>
+        <table>
+          <tbody>
+            <tr><td><code>config.yaml</code></td><td>General behavior, approval, UI, themes, keymaps, and tool enablement.</td></tr>
+            <tr><td><code>providers.yaml</code></td><td>Providers, models, endpoints, and credentials.</td></tr>
+            <tr><td><code>subagents.yaml</code></td><td>Named delegated-agent definitions and prompts.</td></tr>
+            <tr><td><code>extensions.yaml</code></td><td>Validated values under each extension's namespace.</td></tr>
+            <tr><td><code>command-policy.yaml</code></td><td>Shell safety classifications.</td></tr>
+            <tr><td><code>init.lua</code></td><td>Startup wiring and extension loading, not a second settings database.</td></tr>
+          </tbody>
+        </table>
+        <p class="quiet">Default config resolution: <code>BONE_DIR</code>, then <code>$XDG_CONFIG_HOME/bone-rust</code>, then <code>~/.bone-rust</code>. Prefer daemon mutation APIs or <code>/config</code>; direct YAML edits are read at startup.</p>
+      </section>
+
+      <section id="extensions">
+        <div class="eyebrow">05 · Extensions</div>
+        <h2>Rust supplies the platform. Lua supplies customizable behavior.</h2>
+        <p>Bone embeds Lua 5.4. Lua can register tools, slash commands, hooks, themes, settings, keymaps, plugins, and declarative UI. If Lua startup fails, core warns and keeps running.</p>
+        <div class="diagram">
+<pre>Rust guarantees                    Lua chooses
+────────────────────────────────   ────────────────────────────────
+tool registry + approval gate      custom tool behavior
+protocol + view primitives         panes, commands, status content
+validated config storage           extension schemas and values
+provider request primitive         compaction policy and prompts
+session + cancellation ownership   request-shaping hooks</pre>
+        </div>
+        <div class="rule"><b>No bypass</b><span>Lua file writes and shell calls still pass through native approval and command policy.</span></div>
+        <div class="rule"><b>Protected core</b><span>Native tools and core slash commands cannot be overridden.</span></div>
+        <div class="rule"><b>Declarative UI</b><span>Lua emits <code>ViewDiff</code> updates; each frontend decides how to render them.</span></div>
+        <div class="rule"><b>Thin init</b><span>Keep <code>init.lua</code> as wiring. Put implementations in purpose-specific files under <code>lua/</code>.</span></div>
+        <div class="rule"><b>Policy in Lua</b><span>Compaction is deliberately implemented as catalog Lua. Core only applies a validated <code>conversation.replace</code> action.</span></div>
+      </section>
+
+      <section id="delegation">
+        <div class="eyebrow">06 · Delegated agents</div>
+        <h2>Subagents are bounded workers, not new authorities.</h2>
+        <p>The main agent owns the user-facing turn at depth 0. A delegated agent receives a self-contained task, separate prompt/transcript, tool allow-list, approval mode, timeout, and optional provider override.</p>
+        <div class="grid three">
+          <article class="card"><h3>Isolation</h3><p>A child returns a result to its caller. It does not own or directly become the parent conversation.</p></article>
+          <article class="card"><h3>Limits</h3><p>Subagents cannot create nested subagents. Output, inactivity, wall time, tools, and provider concurrency can be bounded.</p></article>
+          <article class="card"><h3>Ownership</h3><p>The daemon owns job records, cancellation, approval behavior, and result delivery. Job IDs are conversation-scoped.</p></article>
+        </div>
+        <h3>Foreground versus background</h3>
+        <p><code>run</code> waits for a result. <code>spawn</code> starts a background job. The interactive TUI can inject an unconsumed completed result when idle; headless callers wait because there is no idle UI loop. Cancellation is cooperative and explicit job cancellation is different from cancelling a wait.</p>
+      </section>
+
+      <section id="frontends">
+        <div class="eyebrow">07 · Frontends</div>
+        <h2>Different screens, one contract.</h2>
+        <table>
+          <thead><tr><th>Mode</th><th>Connection</th><th>Special concern</th></tr></thead>
+          <tbody>
+            <tr><td>Local TUI</td><td>Client beside an in-process daemon.</td><td>Terminal layout, input, live approvals, panes.</td></tr>
+            <tr><td><code>bone serve</code></td><td>Newline-JSON over a socket.</td><td>No authentication; bind to loopback unless the network is trusted.</td></tr>
+            <tr><td>Remote TUI</td><td><code>bone --connect</code> to a daemon.</td><td>Reconnect from daemon snapshots, not guessed local state.</td></tr>
+            <tr><td>Web</td><td>Browser HTTP/SSE → Node bridge → runtime protocol.</td><td>Sanitize model Markdown; keep web metadata separate.</td></tr>
+            <tr><td>Headless</td><td><code>bone run</code> uses core directly.</td><td>No interactive approval pane or live terminal view.</td></tr>
+          </tbody>
+        </table>
+        <p>A client should behave like a reducer: send a command, then update its local visual state from <code>RuntimeEvent</code> and snapshots. A click is only a request. The daemon's response confirms whether the mutation happened.</p>
+        <div class="callout"><strong>Browser safety:</strong> model text is hostile input. Raw HTML is shown as text and rendered Markdown is sanitized before DOM insertion.</div>
+      </section>
+
+      <section id="decisions">
+        <div class="eyebrow">08 · Decision guide</div>
+        <h2>Where should a new change live?</h2>
+        <div class="decision"><strong>Does it change agent behavior, approvals, tools, shared state, or persistence?</strong><span>Put the authority in <code>core</code>. If a client must trigger or observe it, add protocol types too.</span></div>
+        <div class="decision"><strong>Does data cross the daemon/frontend boundary?</strong><span>Define it in <code>protocol</code> first. Update every client and contract test.</span></div>
+        <div class="decision"><strong>Is it only terminal layout, wrapping, cursor, or key handling?</strong><span>Put it in <code>tui</code>. Do not teach core about terminal cells.</span></div>
+        <div class="decision"><strong>Is it only browser presentation or browser metadata?</strong><span>Put it in <code>webui</code>. Keep shared behavior out of the bridge.</span></div>
+        <div class="decision"><strong>Is it optional policy or user customization?</strong><span>Prefer a purpose-specific Lua extension using the existing APIs. Store values in namespaced canonical config.</span></div>
+        <div class="decision"><strong>Must it survive restart?</strong><span>Choose the right durable owner: core SQLite for conversation/runtime data, YAML for configuration, or the narrow web metadata table.</span></div>
+
+        <h3>Feature recipe</h3>
+        <ol>
+          <li>Write down who owns the truth and its lifetime.</li>
+          <li>Add or update the shared protocol contract if the boundary changes.</li>
+          <li>Implement daemon routing and core behavior.</li>
+          <li>Make frontends render the same resulting event or snapshot.</li>
+          <li>Test approval, cancellation, reconnect, and multiple clients where relevant.</li>
+          <li>Exercise at least one real frontend workflow, not only unit tests.</li>
+        </ol>
+      </section>
+
+      <section id="risks">
+        <div class="eyebrow">09 · Risks &amp; tradeoffs</div>
+        <h2>The architecture protects consistency, but asks for discipline.</h2>
+        <div class="grid">
+          <article class="card"><h3>Frontend drift</h3><p><strong>Risk:</strong> TUI and web behave differently. <strong>Defense:</strong> put semantics in core and share protocol events; keep only presentation local.</p></article>
+          <article class="card"><h3>Split-brain state</h3><p><strong>Risk:</strong> a client assumes a mutation succeeded. <strong>Defense:</strong> wait for the daemon's event or revisioned snapshot.</p></article>
+          <article class="card"><h3>Extension power</h3><p><strong>Risk:</strong> flexible Lua can become a parallel platform. <strong>Defense:</strong> preserve native approvals, schemas, protected names, and bounded APIs.</p></article>
+          <article class="card"><h3>Concurrent event order</h3><p><strong>Risk:</strong> interleaved output is attached to the wrong work. <strong>Defense:</strong> use conversation, turn, call, and job IDs.</p></article>
+          <article class="card"><h3>Remote exposure</h3><p><strong>Risk:</strong> <code>bone serve</code> has no authentication. <strong>Defense:</strong> default to loopback and use only trusted transport when remote.</p></article>
+          <article class="card"><h3>Durability confusion</h3><p><strong>Risk:</strong> ephemeral view or Driver state is treated as saved. <strong>Defense:</strong> make persistence explicit through core session/config paths.</p></article>
+        </div>
+      </section>
+
+      <section id="source-map">
+        <div class="eyebrow">10 · Source map</div>
+        <h2>Start reading here.</h2>
+        <table>
+          <thead><tr><th>Question</th><th>Primary source</th></tr></thead>
+          <tbody>
+            <tr><td>Workspace shape</td><td><code>Cargo.toml</code></td></tr>
+            <tr><td>Cross-boundary types</td><td><code>protocol/src/lib.rs</code>, <code>protocol/src/event.rs</code>, <code>protocol/src/view.rs</code></td></tr>
+            <tr><td>Turn execution</td><td><code>core/src/runtime/driver.rs</code></td></tr>
+            <tr><td>Conversation lifetime</td><td><code>core/src/runtime/session.rs</code></td></tr>
+            <tr><td>Daemon and connections</td><td><code>core/src/rpc/</code></td></tr>
+            <tr><td>Providers</td><td><code>core/src/llm/</code></td></tr>
+            <tr><td>Tools and approval path</td><td><code>core/src/tools/</code></td></tr>
+            <tr><td>Lua platform</td><td><code>core/src/ext/</code></td></tr>
+            <tr><td>Persistence</td><td><code>core/src/session_db.rs</code></td></tr>
+            <tr><td>Configuration</td><td><code>core/src/config/</code></td></tr>
+            <tr><td>CLI and daemon boot</td><td><code>tui/src/main.rs</code></td></tr>
+            <tr><td>Terminal application</td><td><code>tui/src/ui/</code></td></tr>
+            <tr><td>Browser and bridge</td><td><code>webui/</code></td></tr>
+            <tr><td>Canonical design references</td><td><code>core/defaults/docs/</code> (materialized into the resolved config directory at startup)</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Core vocabulary</h3>
+        <div class="rule"><b>Daemon</b><span>The process-level authority that owns sessions, configuration, jobs, and client connections.</span></div>
+        <div class="rule"><b>RuntimeSession</b><span>The long-lived truth for one conversation across turns.</span></div>
+        <div class="rule"><b>Driver</b><span>The execution engine for one turn: provider/tool loop, approvals, events, and cancellation.</span></div>
+        <div class="rule"><b>Protocol</b><span>The shared language spoken across frontend and daemon boundaries.</span></div>
+        <div class="rule"><b>ViewDiff</b><span>A declarative UI update that any frontend can render in its own way.</span></div>
+        <div class="rule"><b>Conversation actor</b><span>The daemon-side unit that serializes and scopes work for one conversation.</span></div>
+      </section>
+
+      <footer>
+        <p>This document summarizes the architecture currently described by Bone's generated core references and source layout. When behavior changes, the canonical topic documents under <code>core/defaults/docs/</code> should change with it.</p>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
