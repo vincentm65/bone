@@ -19,10 +19,12 @@ core behavior changes.
 | Change TUI, web, daemon connections, events, or rendering | `docs/ui.md` |
 | Build, test, validate, or update bundled documentation | `docs/development.md` |
 
-These files are materialized under the resolved config directory at startup.
-The bundled core reference documents platform contracts only. Optional installed
-extensions own their feature behavior and documentation; do not describe them as
-built-in core behavior.
+These files are bundled from `core/defaults/docs/`, included in new Bone
+builds, and materialized under the resolved config directory at startup. Bone
+refreshes them to match the running version, so edit the bundled source rather
+than the generated `.bone-rust/docs/` copy. The bundled core reference documents
+platform contracts only. Optional installed extensions own their feature behavior
+and documentation; do not describe them as built-in core behavior.
 
 ## Universal operating rules
 

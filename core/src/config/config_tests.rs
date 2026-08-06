@@ -1,5 +1,5 @@
 use super::{
-    DEFAULT_CORE_DOCS, InitChoice, SetupSelection, apply_onboarding, domains,
+    DEFAULT_AGENTS_MD, DEFAULT_CORE_DOCS, InitChoice, SetupSelection, apply_onboarding, domains,
     migrate_memory_to_catalog, migrate_memory_to_catalog_with_hash, seed_base,
     settings::SubagentSettings, sync_bundled_file,
 };
@@ -237,6 +237,20 @@ fn core_docs_are_synced_during_base_seed() {
             );
         }
     });
+}
+
+#[test]
+fn bundled_doc_index_only_references_synced_docs() {
+    let synced = DEFAULT_CORE_DOCS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<std::collections::BTreeSet<_>>();
+    let indexed = DEFAULT_AGENTS_MD
+        .split('`')
+        .filter_map(|value| value.strip_prefix("docs/"))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(indexed, synced);
 }
 
 #[test]
