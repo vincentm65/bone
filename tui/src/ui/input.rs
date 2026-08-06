@@ -540,17 +540,4 @@ impl InputState {
         self.buffer.clear();
         self.cursor_pos = 0;
     }
-
-    /// Select the oldest submitted input, or clear the live input if none exists.
-    pub fn select_oldest_history(&mut self) {
-        if let Some(first) = self.history.front() {
-            self.history_index = Some(0);
-            self.buffer = first.clone();
-            self.cursor_pos = self.buffer.chars().count();
-        } else {
-            self.history_index = None;
-            self.buffer.clear();
-            self.cursor_pos = 0;
-        }
-    }
 }

@@ -53,8 +53,8 @@ pub(crate) fn apply_nav_key(
 }
 
 /// Treat submitted inputs and agent rows as one vertical navigation sequence.
-/// The input sits below the pane: Up walks history before entering the pane at
-/// its bottom row; Down leaves the bottom row through history back to live input.
+/// The pane sits below the input: Down walks history back to live input before
+/// entering the pane at its top row; Up leaves the top row for live input.
 pub(crate) fn apply_agent_nav_key(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -72,13 +72,6 @@ pub(crate) fn apply_agent_nav_key(
         KeyCode::Up if !*pane_focused => {
             if input.history_up() {
                 SelectablePaneAction::InputChanged
-            } else if input.history_index.is_none() && !input.buffer.is_empty() {
-                SelectablePaneAction::Unhandled
-            } else if let Some(last) = active_ids.last() {
-                input.select_live_input();
-                *pane_focused = true;
-                *selected_id = Some(last.clone());
-                SelectablePaneAction::SelectionChanged
             } else {
                 SelectablePaneAction::Unhandled
             }
@@ -86,21 +79,28 @@ pub(crate) fn apply_agent_nav_key(
         KeyCode::Down if !*pane_focused => {
             if input.history_down() {
                 SelectablePaneAction::InputChanged
+            } else if input.history_index.is_none()
+                && input.buffer.is_empty()
+                && let Some(first) = active_ids.first()
+            {
+                *pane_focused = true;
+                *selected_id = Some(first.clone());
+                SelectablePaneAction::SelectionChanged
             } else {
                 SelectablePaneAction::Unhandled
             }
         }
-        KeyCode::Down if !active_ids.is_empty() => {
+        KeyCode::Up if !active_ids.is_empty() => {
             let current = selected_id
                 .as_deref()
                 .and_then(|id| active_ids.iter().position(|active| active == id))
-                .unwrap_or(active_ids.len() - 1);
-            if current + 1 < active_ids.len() {
-                *selected_id = Some(active_ids[current + 1].clone());
+                .unwrap_or(0);
+            if current > 0 {
+                *selected_id = Some(active_ids[current - 1].clone());
                 SelectablePaneAction::SelectionChanged
             } else {
                 *pane_focused = false;
-                input.select_oldest_history();
+                input.select_live_input();
                 SelectablePaneAction::InputChanged
             }
         }
