@@ -145,6 +145,7 @@ fn test_daemon_ctx(
             forward_view_diffs: false,
             config,
             processes_seen: None,
+            jobs_seen: None,
         },
         hub,
         commands,
@@ -1190,6 +1191,7 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
             forward_view_diffs: false,
             config,
             processes_seen: None,
+            jobs_seen: None,
         }
     }
 
@@ -1397,6 +1399,7 @@ async fn resetting_approval_updates_live_mode() {
         forward_view_diffs: false,
         config,
         processes_seen: None,
+        jobs_seen: None,
     };
 
     let _ = ctx
@@ -1454,6 +1457,7 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         forward_view_diffs: false,
         config,
         processes_seen: None,
+        jobs_seen: None,
     };
 
     let _ = ctx
@@ -2346,6 +2350,7 @@ async fn process_commands_are_conversation_scoped() {
         forward_view_diffs: false,
         config,
         processes_seen: None,
+        jobs_seen: None,
     };
 
     ctx.handle_idle_command(RuntimeCommand::GetProcesses, &mut commands)
@@ -2474,12 +2479,13 @@ fn incognito_transitions_cancel_jobs_in_the_departing_scope() {
     let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
     ctx.session.lock().unwrap().session_db = Some(db);
     let incognito_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let incognito_scope = ctx.session.lock().unwrap().background_scope();
     let incognito_job = registry.create(crate::ext::jobs::NewJob {
         agent: "test".into(),
         task: "incognito scope".into(),
         title: "incognito scope".into(),
         provider: "test".into(),
-        scope: None,
+        scope: Some(incognito_scope),
         cancel_flag: incognito_flag.clone(),
     });
     assert!(registry.start(&incognito_job));
@@ -2497,4 +2503,221 @@ fn incognito_transitions_cancel_jobs_in_the_departing_scope() {
 
     registry.complete(&persisted_job, Err("cancelled".into()));
     registry.complete(&incognito_job, Err("cancelled".into()));
+}
+
+#[test]
+fn incognito_actors_have_distinct_background_scopes() {
+    let _guard = crate::util::test_env_lock();
+    let extensions_a = crate::ext::ExtensionManager::unloaded();
+    let extensions_b = crate::ext::ExtensionManager::unloaded();
+    let mut session_a = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    let mut session_b = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session_a.conversation_id = Some(-81_001);
+    session_b.conversation_id = Some(-81_002);
+    let (mut actor_a, hub_a, _commands_a) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions_a, session_a);
+    let (mut actor_b, hub_b, _commands_b) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions_b, session_b);
+
+    actor_a.set_incognito(true);
+    actor_b.set_incognito(true);
+    let scope_a = actor_a.session.lock().unwrap().background_scope();
+    let scope_b = actor_b.session.lock().unwrap().background_scope();
+    assert_ne!(scope_a, scope_b);
+    assert_ne!(
+        crate::processes::conversation_scope(Some(scope_a)),
+        crate::processes::conversation_scope(Some(scope_b))
+    );
+
+    let registry = crate::ext::jobs::registry();
+    let cancel_a = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_b = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let job_a = registry.create(crate::ext::jobs::NewJob {
+        agent: "actor-a".into(),
+        task: "actor A private task".into(),
+        title: "A".into(),
+        provider: "test".into(),
+        scope: Some(scope_a),
+        cancel_flag: cancel_a.clone(),
+    });
+    let job_b = registry.create(crate::ext::jobs::NewJob {
+        agent: "actor-b".into(),
+        task: "actor B private task".into(),
+        title: "B".into(),
+        provider: "test".into(),
+        scope: Some(scope_b),
+        cancel_flag: cancel_b.clone(),
+    });
+    let mut events_a = hub_a.subscribe();
+    let mut events_b = hub_b.subscribe();
+
+    actor_a.publish_jobs(true);
+    let RuntimeEvent::JobsSnapshot { jobs, .. } = events_a.try_recv().unwrap() else {
+        panic!("expected actor A jobs snapshot");
+    };
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, job_a);
+
+    actor_b.publish_jobs(true);
+    let RuntimeEvent::JobsSnapshot { jobs, .. } = events_b.try_recv().unwrap() else {
+        panic!("expected actor B jobs snapshot");
+    };
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, job_b);
+
+    actor_a.cancel_job(&job_b);
+    assert!(!cancel_b.load(std::sync::atomic::Ordering::Relaxed));
+    actor_a.cancel_job(&job_a);
+    assert!(cancel_a.load(std::sync::atomic::Ordering::Relaxed));
+
+    registry.complete(&job_a, Err("cancelled".into()));
+    registry.complete(&job_b, Err("cleaned up".into()));
+}
+
+#[test]
+fn jobs_snapshots_are_scoped_filtered_and_refreshed_after_cancellation() {
+    let _guard = crate::util::test_env_lock();
+    let scope = -((std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % (i64::MAX as u128 - 1)) as i64
+        + 1);
+    let foreign_scope = scope - 1;
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.conversation_id = Some(scope);
+    let (mut ctx, hub, _commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut events = hub.subscribe();
+    let registry = crate::ext::jobs::registry();
+
+    let queued = registry.create(crate::ext::jobs::NewJob {
+        agent: "queued-agent".into(),
+        task: "queued task".into(),
+        title: "Queued".into(),
+        provider: "queued-provider".into(),
+        scope: Some(scope),
+        cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let running = registry.create(crate::ext::jobs::NewJob {
+        agent: "running-agent".into(),
+        task: "running task".into(),
+        title: "Running".into(),
+        provider: "running-provider".into(),
+        scope: Some(scope),
+        cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    assert!(registry.start(&running));
+    registry.note_event(
+        &running,
+        RuntimeEvent::ToolOutput {
+            call_id: "call-1".into(),
+            content: "incremental".into(),
+            stderr: false,
+        },
+        None,
+    );
+    registry.note_event(
+        &running,
+        RuntimeEvent::ToolCall {
+            id: "call-1".into(),
+            name: "edit_file".into(),
+            summary: "editing".into(),
+            arguments: serde_json::json!({ "path": "file" }),
+        },
+        Some("diff".into()),
+    );
+    let foreign = registry.create(crate::ext::jobs::NewJob {
+        agent: "foreign-agent".into(),
+        task: "foreign task".into(),
+        title: "Foreign".into(),
+        provider: "foreign-provider".into(),
+        scope: Some(foreign_scope),
+        cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+
+    ctx.publish_jobs(true);
+    let RuntimeEvent::JobsSnapshot { jobs, .. } = events.try_recv().unwrap() else {
+        panic!("expected jobs snapshot");
+    };
+    assert_eq!(jobs.len(), 2);
+    assert!(
+        jobs.iter()
+            .any(|job| { job.id == queued && job.status == bone_protocol::JobStatus::Queued })
+    );
+    let running_snapshot = jobs.iter().find(|job| job.id == running).unwrap();
+    assert_eq!(running_snapshot.status, bone_protocol::JobStatus::Running);
+    assert_eq!(running_snapshot.provider, "running-provider");
+    assert!(matches!(
+        running_snapshot.events.as_slice(),
+        [bone_protocol::JobEventSnapshot::ToolCall {
+            id,
+            name,
+            edit_preview: Some(preview),
+            ..
+        }] if id == "call-1" && name == "edit_file" && preview == "diff"
+    ));
+    assert!(jobs.iter().all(|job| job.id != foreign));
+
+    ctx.cancel_background_work();
+    let cancelled_snapshot = loop {
+        match events.try_recv().unwrap() {
+            RuntimeEvent::JobsSnapshot { jobs, .. } => break jobs,
+            RuntimeEvent::Status { .. } => {}
+            other => panic!("unexpected event after cancellation: {other:?}"),
+        }
+    };
+    assert!(cancelled_snapshot.is_empty());
+
+    registry.complete(&queued, Err("cancelled".into()));
+    registry.complete(&running, Err("cancelled".into()));
+    registry.complete(&foreign, Err("cleaned up".into()));
+}
+
+#[test]
+fn oversized_jobs_snapshot_drops_oldest_events_to_fit() {
+    let snapshot = bone_protocol::JobSnapshot {
+        id: "job".into(),
+        agent: "agent".into(),
+        task: "task".into(),
+        title: "title".into(),
+        status: bone_protocol::JobStatus::Running,
+        started_at: 0,
+        token_sent: 0,
+        token_received: 0,
+        provider: "provider".into(),
+        activity: None,
+        events: ["old", "middle", "new"]
+            .into_iter()
+            .map(|prefix| bone_protocol::JobEventSnapshot::TextDelta {
+                text: format!("{prefix}:{}", "\\\"".repeat(256)),
+            })
+            .collect(),
+    };
+    let mut newest_only = snapshot.clone();
+    newest_only.events.drain(..2);
+    let max_bytes = serde_json::to_vec(&RuntimeEvent::JobsSnapshot {
+        version: 7,
+        jobs: vec![newest_only],
+    })
+    .unwrap()
+    .len();
+
+    let event = super::bounded_jobs_snapshot(7, vec![snapshot], max_bytes);
+    let encoded = serde_json::to_vec(&event).unwrap();
+    assert!(encoded.len() <= max_bytes);
+    let RuntimeEvent::JobsSnapshot { jobs, .. } = event else {
+        unreachable!()
+    };
+    assert!(matches!(
+        jobs[0].events.as_slice(),
+        [bone_protocol::JobEventSnapshot::TextDelta { text }] if text.starts_with("new:")
+    ));
 }

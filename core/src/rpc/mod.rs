@@ -757,6 +757,115 @@ struct DaemonCtx {
     config: crate::config::store::ConfigStore,
     /// Last process registry version published for the attached conversation.
     processes_seen: Option<(String, u64)>,
+    /// Last job registry version published for the attached conversation.
+    jobs_seen: Option<(i64, u64)>,
+}
+
+fn job_snapshot(job: crate::ext::jobs::Job) -> Option<bone_protocol::JobSnapshot> {
+    if job.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let status = match job.status {
+        crate::ext::jobs::JobStatus::Queued => bone_protocol::JobStatus::Queued,
+        crate::ext::jobs::JobStatus::Running => bone_protocol::JobStatus::Running,
+        crate::ext::jobs::JobStatus::Done | crate::ext::jobs::JobStatus::Error => return None,
+    };
+    let events = job
+        .events
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            RuntimeEvent::TextDelta { text } => {
+                Some(bone_protocol::JobEventSnapshot::TextDelta { text })
+            }
+            RuntimeEvent::ReasoningDelta { text } => {
+                Some(bone_protocol::JobEventSnapshot::ReasoningDelta { text })
+            }
+            RuntimeEvent::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => Some(bone_protocol::JobEventSnapshot::ToolCall {
+                id,
+                name,
+                arguments,
+                edit_preview: entry.edit_preview,
+            }),
+            RuntimeEvent::ToolResult {
+                name,
+                call_id,
+                is_error,
+                content,
+            } => Some(bone_protocol::JobEventSnapshot::ToolResult {
+                name,
+                call_id,
+                is_error,
+                content,
+            }),
+            RuntimeEvent::Failed { message } => {
+                Some(bone_protocol::JobEventSnapshot::Failed { message })
+            }
+            _ => None,
+        })
+        .collect();
+    Some(bone_protocol::JobSnapshot {
+        id: job.id,
+        agent: job.agent,
+        task: job.task,
+        title: job.title,
+        status,
+        started_at: job.started_at,
+        token_sent: job.token_sent,
+        token_received: job.token_received,
+        provider: job.provider,
+        activity: job.activity,
+        events,
+    })
+}
+
+fn bounded_jobs_snapshot(
+    version: u64,
+    mut jobs: Vec<bone_protocol::JobSnapshot>,
+    max_bytes: usize,
+) -> RuntimeEvent {
+    loop {
+        let event = RuntimeEvent::JobsSnapshot { version, jobs };
+        let encoded_len = serde_json::to_vec(&event)
+            .expect("job snapshots are serializable")
+            .len();
+        if encoded_len <= max_bytes {
+            return event;
+        }
+        let RuntimeEvent::JobsSnapshot {
+            jobs: remaining_jobs,
+            ..
+        } = event
+        else {
+            unreachable!()
+        };
+        jobs = remaining_jobs;
+
+        let excess = encoded_len - max_bytes;
+        let mut removed_bytes = 0;
+        while removed_bytes < excess {
+            let Some((index, _)) = jobs
+                .iter()
+                .enumerate()
+                .filter(|(_, job)| !job.events.is_empty())
+                .max_by_key(|(_, job)| job.events.len())
+            else {
+                break;
+            };
+            let removed = jobs[index].events.remove(0);
+            removed_bytes += serde_json::to_vec(&removed)
+                .expect("job events are serializable")
+                .len()
+                + 1;
+        }
+        if removed_bytes == 0 && jobs.pop().is_none() {
+            return RuntimeEvent::JobsSnapshot { version, jobs };
+        }
+    }
 }
 
 impl DaemonCtx {
@@ -927,8 +1036,9 @@ impl DaemonCtx {
     }
 
     fn publish_processes(&mut self, force: bool) {
-        let scope =
-            crate::processes::conversation_scope(self.session.lock().unwrap().conversation_id);
+        let scope = crate::processes::conversation_scope(Some(
+            self.session.lock().unwrap().background_scope(),
+        ));
         let registry = crate::processes::registry();
         let version = registry.version();
         if !force && self.processes_seen.as_ref() == Some(&(scope.clone(), version)) {
@@ -954,9 +1064,30 @@ impl DaemonCtx {
             .publish(RuntimeEvent::ProcessesSnapshot { version, processes });
     }
 
+    fn publish_jobs(&mut self, force: bool) {
+        let scope = self.session.lock().unwrap().background_scope();
+        let registry = crate::ext::jobs::registry();
+        let version = registry.version();
+        if !force && self.jobs_seen == Some((scope, version)) {
+            return;
+        }
+        let jobs = registry
+            .running_jobs_scoped(Some(scope))
+            .into_iter()
+            .filter_map(job_snapshot)
+            .collect();
+        self.jobs_seen = Some((scope, version));
+        self.hub.publish(bounded_jobs_snapshot(
+            version,
+            jobs,
+            crate::rpc::codec::MAX_LINE_BYTES,
+        ));
+    }
+
     fn cancel_process(&mut self, id: &str) {
-        let scope =
-            crate::processes::conversation_scope(self.session.lock().unwrap().conversation_id);
+        let scope = crate::processes::conversation_scope(Some(
+            self.session.lock().unwrap().background_scope(),
+        ));
         crate::processes::registry().kill_scoped(&scope, id);
         self.publish_processes(true);
     }
@@ -1111,18 +1242,19 @@ impl DaemonCtx {
     /// Terminate every running background sub-agent and managed shell process
     /// for this session, surfacing notices when anything was cancelled. Called
     /// on turn cancel (Ctrl+C) and on conversation reset (`/new`, `/clear`).
-    fn cancel_background_work(&self) {
+    fn cancel_background_work(&mut self) {
         // Scope to this session's conversation so a process hosting several
         // conversations (`bone serve`) doesn't kill another one's work.
-        let session_id = self.session.lock().unwrap().conversation_id;
-        let cancelled_jobs = crate::ext::jobs::registry().cancel_all_scoped(session_id);
+        let scope = self.session.lock().unwrap().background_scope();
+        let cancelled_jobs = crate::ext::jobs::registry().cancel_all_scoped(Some(scope));
         if cancelled_jobs > 0 {
             self.hub.publish(RuntimeEvent::Status {
                 message: format!("cancelled {cancelled_jobs} background sub-agent job(s)"),
             });
+            self.publish_jobs(true);
         }
 
-        let process_scope = crate::processes::conversation_scope(session_id);
+        let process_scope = crate::processes::conversation_scope(Some(scope));
         let cancelled_processes = crate::processes::registry().kill_all_scoped(&process_scope);
         if cancelled_processes > 0 {
             self.hub.publish(RuntimeEvent::Status {
@@ -1131,9 +1263,10 @@ impl DaemonCtx {
         }
     }
 
-    fn cancel_job(&self, id: &str) {
-        let scope = self.session.lock().unwrap().conversation_id;
-        crate::ext::jobs::registry().cancel_scoped(id, scope);
+    fn cancel_job(&mut self, id: &str) {
+        let scope = self.session.lock().unwrap().background_scope();
+        crate::ext::jobs::registry().cancel_scoped(id, Some(scope));
+        self.publish_jobs(true);
     }
 
     /// Next queued background prompt to inject as a turn when the daemon is idle,
@@ -1147,13 +1280,13 @@ impl DaemonCtx {
         if let Some(text) = self.submit_inbox.pop() {
             return Some((text, None));
         }
-        let scope = self.session.lock().unwrap().conversation_id;
+        let scope = self.session.lock().unwrap().background_scope();
         let registry = crate::ext::jobs::registry();
-        let finished = registry.peek_finished_unconsumed_scoped(scope);
+        let finished = registry.peek_finished_unconsumed_scoped(Some(scope));
         if finished.is_empty() {
             return None;
         }
-        let running = registry.running_jobs_scoped(scope);
+        let running = registry.running_jobs_scoped(Some(scope));
         let (turn_text, display) =
             crate::ext::jobs::format_results_for_injection(&finished, &running)?;
         let ids: Vec<String> = finished.iter().map(|j| j.id.clone()).collect();
@@ -1207,7 +1340,7 @@ impl DaemonCtx {
                 s.session_db.as_ref(),
                 s.conversation_id,
             );
-            crate::ext::ctx::AppCtxState::new(
+            let mut state = crate::ext::ctx::AppCtxState::new(
                 &s.tools,
                 &s.token_stats,
                 &self.mode.get(),
@@ -1221,7 +1354,9 @@ impl DaemonCtx {
                 self.config.clone(),
                 config_schema.clone(),
                 s.turn_nudge.lock().unwrap().clone(),
-            )
+            );
+            state.background_scope = Some(s.background_scope());
+            state
         };
 
         let lua = self.extensions.lua_handle();
@@ -1321,6 +1456,7 @@ impl DaemonCtx {
                 }
                 _ = diff_timer.tick() => {
                     self.publish_processes(false);
+                    self.publish_jobs(false);
                     self.drain_diffs();
                 }
                 cmd = commands.recv() => match cmd {
@@ -1340,6 +1476,7 @@ impl DaemonCtx {
                         let _ = Box::pin(self.handle_idle_command(cmd, commands)).await;
                     }
                     Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
+                    Some(RuntimeCommand::GetJobs) => self.publish_jobs(true),
                     Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
                     Some(RuntimeCommand::Cancel) => {
                         // Ctrl+C cancels all work owned by this conversation,
@@ -1412,6 +1549,10 @@ impl DaemonCtx {
             })
         };
         if let Some((rows, effective, provider_model)) = loaded {
+            let changing_conversation = self.session.lock().unwrap().conversation_id != Some(id);
+            if changing_conversation {
+                self.cancel_background_work();
+            }
             if let Some((provider_id, model)) = provider_model {
                 self.restore_provider(&provider_id, &model);
             }
@@ -2082,6 +2223,10 @@ impl DaemonCtx {
                 self.publish_processes(true);
                 Flow::Continue
             }
+            RuntimeCommand::GetJobs => {
+                self.publish_jobs(true);
+                Flow::Continue
+            }
             RuntimeCommand::Synchronize {
                 request_id,
                 include_messages,
@@ -2189,6 +2334,7 @@ impl DaemonCtx {
                 },
                 _ = diff_timer.tick() => {
                     self.publish_processes(false);
+                    self.publish_jobs(false);
                     if self.forward_view_diffs {
                         self.drain_diffs();
                     }
@@ -2213,6 +2359,7 @@ impl DaemonCtx {
                     }
                     Some(RuntimeCommand::CancelJob { id }) => self.cancel_job(&id),
                     Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
+                    Some(RuntimeCommand::GetJobs) => self.publish_jobs(true),
                     Some(RuntimeCommand::Synchronize {
                         request_id,
                         include_messages,
@@ -2346,6 +2493,7 @@ pub async fn run_daemon(
         forward_view_diffs,
         config,
         processes_seen: None,
+        jobs_seen: None,
     };
     ctx.publish_config();
 
@@ -2382,6 +2530,7 @@ pub async fn run_daemon(
                 },
                 _ = inject_timer.tick() => {
                     ctx.publish_processes(false);
+                    ctx.publish_jobs(false);
                     match ctx.next_background_prompt() {
                         // Route through the same `SubmitPrompt` handling as a typed
                         // prompt (transcript push, DB persist, `message` hook), then

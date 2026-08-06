@@ -19,6 +19,7 @@ fn nested_request(session_sink: Option<Arc<dyn SessionSink>>) -> AgentRequest {
         activity: None,
         llm: None,
         session_sink,
+        background_scope: None,
         tool_allowlist: None,
         max_tokens: None,
         approval_gate: None,

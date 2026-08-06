@@ -7,20 +7,12 @@ fn job(id: &str, agent: &str, status: JobStatus) -> Job {
         task: "do something".to_string(),
         title: String::new(),
         status,
-        result: None,
         started_at: current_unix_seconds(),
-        finished_at: None,
-        consumed: false,
         token_sent: 0,
         token_received: 0,
-        result_file: None,
         provider: "test-provider".into(),
         activity: None,
-        trace: Vec::new(),
         events: Vec::new(),
-        transcript: None,
-        scope: None,
-        cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
 
@@ -68,9 +60,16 @@ fn render_lists_all_agents() {
 }
 
 #[test]
-fn render_returns_none_when_jobs_done() {
-    let jobs = vec![job("job-10", "researcher", JobStatus::Done)];
-    assert!(render(&theme(), &jobs).is_none());
+fn render_shows_queued_status() {
+    let jobs = vec![job("job-10", "researcher", JobStatus::Queued)];
+    let pane = render(&theme(), &jobs).unwrap();
+    let line: String = pane.content[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(line.contains("⧗"), "expected queued icon: {line}");
+    assert!(line.contains("queued"));
 }
 
 #[test]

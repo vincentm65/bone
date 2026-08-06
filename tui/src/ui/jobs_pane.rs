@@ -1,15 +1,16 @@
 //! Rust-side renderer for the background-jobs live pane.
 //!
-//! Renders directly from the job registry snapshot — no Lua involved — so
+//! Renders directly from the protocol job snapshot — no Lua involved — so
 //! the pane stays live even while a Lua tool blocks the VM (e.g. a long
 //! `ctx.agent.wait`). Any tool that dispatches background jobs via
 //! `ctx.agent.spawn` (sub-agents, shotgun, …) surfaces here; the pane has no
 //! knowledge of which tool produced a job beyond the `agent` label it carries.
 
+use bone_protocol::{JobSnapshot as Job, JobStatus};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ext::jobs::{Job, JobStatus, current_unix_seconds};
 use crate::ui::theme::Theme;
 
 use super::pane_page::PanePage;
@@ -17,9 +18,7 @@ use super::pane_page::PanePage;
 /// Pane source identifier (stable key for upsert/remove).
 pub const PANE_SOURCE: &str = "jobs";
 
-/// Render the jobs pane from the registry snapshot, grouping by `agent` label.
-/// Only shows agents with at least one running job (a completed job stays
-/// visible while a sibling in the same group is still running).
+/// Render the jobs pane from a protocol snapshot, grouping by `agent` label.
 /// Returns `None` when no jobs are active.
 pub fn render(theme: &Theme, jobs: &[Job]) -> Option<PanePage> {
     let agents = pane_agents(jobs);
@@ -32,38 +31,22 @@ pub fn render(theme: &Theme, jobs: &[Job]) -> Option<PanePage> {
     let mut active_agent_count = 0usize;
 
     for agent in &agents {
-        let agent_jobs: Vec<&Job> = jobs.iter().filter(|j| j.agent == *agent).collect();
-        let active: Vec<&Job> = agent_jobs
-            .iter()
-            .filter(|j| !j.is_finished())
-            .copied()
-            .collect();
+        let active: Vec<&Job> = jobs.iter().filter(|j| j.agent == *agent).collect();
 
         if active.is_empty() {
             continue;
         }
         active_agent_count += 1;
 
-        let visible_jobs: Vec<&Job> = agent_jobs
-            .iter()
-            .filter(|j| !j.is_finished() || !j.consumed)
-            .copied()
-            .collect();
-
-        if visible_jobs.len() > 1 {
+        if active.len() > 1 {
             // Multi-job template header.
             lines.push(Line::from(Span::styled(
-                format!(
-                    " ◑ {} ({} active, {} done)",
-                    agent,
-                    active.len(),
-                    visible_jobs.iter().filter(|j| j.is_finished()).count()
-                ),
+                format!(" ◑ {} ({} active)", agent, active.len(),),
                 Style::default()
                     .fg(theme.palette.fg)
                     .add_modifier(Modifier::BOLD),
             )));
-            for job in &visible_jobs {
+            for job in &active {
                 let mut task = job_label(job).replace(['\n', '\r'], " ");
                 if task.chars().count() > 36 {
                     task = format!("{}...", task.chars().take(33).collect::<String>());
@@ -138,13 +121,12 @@ pub fn render(theme: &Theme, jobs: &[Job]) -> Option<PanePage> {
 /// Keep this view flat so the selected job can be highlighted and scrolled
 /// into view reliably.
 pub fn render_selected(theme: &Theme, jobs: &[Job], selected_id: Option<&str>) -> Option<PanePage> {
-    let active: Vec<&Job> = jobs.iter().filter(|job| !job.is_finished()).collect();
-    if active.is_empty() {
+    if jobs.is_empty() {
         return None;
     }
 
     let now = current_unix_seconds();
-    let rows = active
+    let rows = jobs
         .iter()
         .map(|job| {
             let selected = Some(job.id.as_str()) == selected_id;
@@ -163,7 +145,7 @@ pub fn render_selected(theme: &Theme, jobs: &[Job], selected_id: Option<&str>) -
             (selected, line)
         })
         .collect();
-    let agent_count = active
+    let agent_count = jobs
         .iter()
         .fold(Vec::<&str>::new(), |mut names, job| {
             if !names.contains(&job.agent.as_str()) {
@@ -206,25 +188,17 @@ fn icon_fg(theme: &Theme, job: &Job) -> Color {
     match job.status {
         JobStatus::Running => theme.palette.accent,
         JobStatus::Queued => theme.palette.warn,
-        JobStatus::Done => theme.palette.good,
-        JobStatus::Error => theme.palette.error,
     }
 }
 
-fn name_fg(theme: &Theme, job: &Job) -> Color {
-    if !job.is_finished() {
-        theme.palette.fg
-    } else {
-        theme.palette.muted
-    }
+fn name_fg(theme: &Theme, _job: &Job) -> Color {
+    theme.palette.fg
 }
 
 fn job_status_icon(job: &Job) -> &'static str {
     match job.status {
         JobStatus::Running => "◑",
         JobStatus::Queued => "⧗",
-        JobStatus::Done => "✓",
-        JobStatus::Error => "✗",
     }
 }
 
@@ -252,21 +226,13 @@ fn job_status(job: &Job, now: u64) -> (&'static str, String) {
                 ),
             )
         }
-        JobStatus::Done => {
-            if job.token_sent > 0 || job.token_received > 0 {
-                (
-                    "○",
-                    format!(
-                        "idle ({} total)",
-                        format_tokens(job.token_sent + job.token_received)
-                    ),
-                )
-            } else {
-                ("○", "idle".to_string())
-            }
-        }
-        JobStatus::Error => ("✗", "error".to_string()),
     }
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn format_tokens(n: u64) -> String {

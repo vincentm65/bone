@@ -92,11 +92,12 @@ impl LlmProvider for PendingProvider {
 
 /// Spawn a daemon owning a fresh persistent session backed by `provider`, plus a
 /// TCP listener serving every client against the hub. Returns the bound address.
-async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, Hub) {
+async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, Hub, i64) {
     let (hub, commands_rx) = Hub::new();
     let session = std::sync::Arc::new(std::sync::Mutex::new(RuntimeSession::new(
         ToolHandler::new(builtin_tools()),
     )));
+    let background_scope = session.lock().unwrap().background_scope();
     tokio::spawn(run_daemon(
         hub.publisher(),
         commands_rx,
@@ -120,7 +121,7 @@ async fn spawn_daemon(provider: Arc<dyn LlmProvider>) -> (std::net::SocketAddr, 
             });
         }
     });
-    (addr, hub)
+    (addr, hub, background_scope)
 }
 
 async fn wait_for_clients(hub: &Hub, count: usize) {
@@ -173,7 +174,7 @@ async fn daemon_stops_when_last_command_sender_is_dropped() {
 #[tokio::test]
 async fn busy_turn_services_config_commands() {
     let provider: Arc<dyn LlmProvider> = Arc::new(PendingProvider);
-    let (_addr, hub) = spawn_daemon(provider).await;
+    let (_addr, hub, _scope) = spawn_daemon(provider).await;
     let mut events = hub.subscribe();
     let commands = hub.command_sender();
 
@@ -283,10 +284,10 @@ async fn prompt_received_during_turn_is_queued_and_appended_after_completion() {
 #[tokio::test]
 async fn cancel_stops_managed_shell_processes_while_idle_and_mid_turn() {
     let provider: Arc<dyn LlmProvider> = Arc::new(PendingProvider);
-    let (_addr, hub) = spawn_daemon(provider).await;
+    let (_addr, hub, background_scope) = spawn_daemon(provider).await;
     let mut events = hub.subscribe();
     let commands = hub.command_sender();
-    let scope = bone_core::processes::conversation_scope(None);
+    let scope = bone_core::processes::conversation_scope(Some(background_scope));
 
     async fn wait_until_stopped(id: &str) {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -392,7 +393,7 @@ async fn client_submits_prompt_over_socket_and_receives_turn() {
         ChatEvent::TextDelta("daemon ".into()),
         ChatEvent::TextDelta("ok".into()),
     ]));
-    let (addr, _hub) = spawn_daemon(provider).await;
+    let (addr, _hub, _scope) = spawn_daemon(provider).await;
 
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (read_half, mut write_half) = tokio::io::split(stream);
@@ -449,7 +450,7 @@ async fn client_approves_tool_call_over_socket() {
             arguments: serde_json::json!({ "path": path.to_string_lossy() }),
         })]]),
     });
-    let (addr, _hub) = spawn_daemon(provider).await;
+    let (addr, _hub, _scope) = spawn_daemon(provider).await;
 
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (read_half, mut write_half) = tokio::io::split(stream);
@@ -510,7 +511,7 @@ async fn two_clients_both_see_the_turn() {
         Arc::new(MockProvider::single(vec![ChatEvent::TextDelta(
             "shared".into(),
         )]));
-    let (addr, hub) = spawn_daemon(provider).await;
+    let (addr, hub, _scope) = spawn_daemon(provider).await;
 
     // Client A submits; both A and B (attached first) should see Finished.
     let a = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -653,7 +654,7 @@ async fn remote_client_bridges_commands_and_events() {
         Arc::new(MockProvider::single(vec![ChatEvent::TextDelta(
             "bridged".into(),
         )]));
-    let (addr, _hub) = spawn_daemon(provider).await;
+    let (addr, _hub, _scope) = spawn_daemon(provider).await;
 
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (read_half, write_half) = tokio::io::split(stream);
@@ -691,7 +692,7 @@ async fn remote_client_bridges_commands_and_events() {
 #[tokio::test]
 async fn failed_provider_switch_still_publishes_snapshot() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
-    let (addr, _hub) = spawn_daemon(provider).await;
+    let (addr, _hub, _scope) = spawn_daemon(provider).await;
 
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (read_half, mut write_half) = tokio::io::split(stream);

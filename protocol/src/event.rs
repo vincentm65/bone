@@ -116,6 +116,11 @@ pub enum RuntimeEvent {
         version: u64,
         processes: Vec<ProcessSnapshot>,
     },
+    /// Conversation-scoped snapshots of active daemon-owned background jobs.
+    JobsSnapshot {
+        version: u64,
+        jobs: Vec<JobSnapshot>,
+    },
     /// Boot-time resolved display state (settings, renderer presets, banner, and
     /// command list) owned by the daemon, so a frontend can render the user's
     /// customizations without running Lua itself. Sent on connect and re-sent
@@ -219,6 +224,61 @@ pub struct ProcessSnapshot {
     pub error: Option<String>,
 }
 
+/// State of an active daemon-owned background job.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    /// Waiting for a provider concurrency slot.
+    Queued,
+    Running,
+}
+
+/// Display-safe event retained for inspecting an active background job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobEventSnapshot {
+    TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edit_preview: Option<String>,
+    },
+    ToolResult {
+        name: String,
+        call_id: String,
+        is_error: bool,
+        #[serde(default)]
+        content: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+/// Serializable active background-job state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobSnapshot {
+    pub id: String,
+    pub agent: String,
+    pub task: String,
+    pub title: String,
+    pub status: JobStatus,
+    pub started_at: u64,
+    pub token_sent: u64,
+    pub token_received: u64,
+    pub provider: String,
+    pub activity: Option<String>,
+    pub events: Vec<JobEventSnapshot>,
+}
+
 /// A frontend-coupled action an interactive command's Lua handler asked for.
 ///
 /// These cannot be applied daemon-side because they read the frontend's local
@@ -314,6 +374,8 @@ pub enum RuntimeCommand {
     },
     /// Request the current conversation's daemon-owned process snapshots.
     GetProcesses,
+    /// Request the current conversation's active background-job snapshots.
+    GetJobs,
     /// Request a correlated authoritative state snapshot, usually after
     /// [`RuntimeEvent::StreamLagged`] indicates dropped broadcast events.
     Synchronize {

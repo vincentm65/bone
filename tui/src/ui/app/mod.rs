@@ -31,8 +31,12 @@ fn should_open_agent_log(input: &InputState) -> bool {
     input.buffer.trim().is_empty()
 }
 
-pub(crate) fn active_job_ids() -> Vec<String> {
-    crate::ext::jobs::registry().running_ids()
+fn job_quit_confirmation_required(is_remote: bool, active_jobs: usize) -> bool {
+    !is_remote && active_jobs > 0
+}
+
+pub(crate) fn active_job_ids(jobs: &[bone_protocol::JobSnapshot]) -> Vec<String> {
+    jobs.iter().map(|job| job.id.clone()).collect()
 }
 
 pub(crate) fn active_process_ids(processes: &[bone_protocol::ProcessSnapshot]) -> Vec<String> {
@@ -641,7 +645,11 @@ pub struct App {
     /// Shell calls waiting for a display threshold before promotion to
     /// `running_shells`, so sub-second commands don't flash the strip.
     pending_shells: Vec<(String, String, std::time::Instant)>,
-    /// Last-seen job-registry version (forces first-tick render).
+    /// Latest daemon-owned active jobs for the attached conversation.
+    jobs: Vec<bone_protocol::JobSnapshot>,
+    /// Version attached to `jobs`.
+    jobs_version: u64,
+    /// Last job snapshot version rendered in the pane.
     jobs_seen_version: u64,
     /// Latest daemon-owned process snapshots for the attached conversation.
     processes: Vec<bone_protocol::ProcessSnapshot>,
@@ -657,8 +665,8 @@ pub struct App {
     agent_list_focused: bool,
     /// Process selected in the native Processes pane.
     selected_process_id: Option<String>,
-    /// Set after the user was warned that quitting kills running sub-agent
-    /// jobs; the next quit request goes through.
+    /// Set after the user was warned that quitting a local runtime kills
+    /// running sub-agent jobs; the next quit request goes through.
     quit_despite_jobs: bool,
     /// True after OSC 11 changed the emulator background; reset on TUI handoff/exit.
     terminal_bg_set: bool,
@@ -711,6 +719,7 @@ impl App {
 
         let _ = command_tx.send(crate::runtime::RuntimeCommand::GetConfig);
         let _ = command_tx.send(crate::runtime::RuntimeCommand::GetProcesses);
+        let _ = command_tx.send(crate::runtime::RuntimeCommand::GetJobs);
         // Probe protocol capabilities before any user request. FIFO command
         // ordering guarantees a current daemon answers this before processing a
         // later prompt/command; an older daemon simply ignores the new variant.
@@ -774,6 +783,8 @@ impl App {
             shown_tool_rows: std::collections::HashSet::new(),
             running_shells: Vec::new(),
             pending_shells: Vec::new(),
+            jobs: Vec::new(),
+            jobs_version: 0,
             jobs_seen_version: u64::MAX,
             processes: Vec::new(),
             processes_version: 0,
@@ -849,6 +860,7 @@ impl App {
             RuntimeEvent::ProcessesSnapshot { version, processes } => {
                 self.apply_processes_snapshot(version, processes)
             }
+            RuntimeEvent::JobsSnapshot { version, jobs } => self.apply_jobs_snapshot(version, jobs),
             RuntimeEvent::ConversationLoaded {
                 messages,
                 snapshot,
@@ -860,6 +872,9 @@ impl App {
                 let _ = self
                     .command_tx
                     .send(crate::runtime::RuntimeCommand::GetProcesses);
+                let _ = self
+                    .command_tx
+                    .send(crate::runtime::RuntimeCommand::GetJobs);
                 self.replace_transcript(messages);
             }
             RuntimeEvent::Status { message }
@@ -1349,6 +1364,9 @@ impl App {
                     let _ = self
                         .command_tx
                         .send(crate::runtime::RuntimeCommand::GetProcesses);
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::GetJobs);
                     include_messages = true;
                     self.request_synchronization(request_id, include_messages);
                 }
@@ -1361,6 +1379,9 @@ impl App {
                     let _ = self
                         .command_tx
                         .send(crate::runtime::RuntimeCommand::GetProcesses);
+                    let _ = self
+                        .command_tx
+                        .send(crate::runtime::RuntimeCommand::GetJobs);
                     include_messages = true;
                     self.request_synchronization(request_id, include_messages);
                     continue;
@@ -1426,7 +1447,7 @@ impl App {
         cmd: crate::runtime::RuntimeCommand,
         term: Option<&mut BoneTerminal>,
     ) {
-        let refresh_processes = matches!(
+        let refresh_background_work = matches!(
             &cmd,
             crate::runtime::RuntimeCommand::NewConversation
                 | crate::runtime::RuntimeCommand::ClearConversation
@@ -1440,10 +1461,13 @@ impl App {
             self.request_synchronization(request_id, false);
             self.await_state_synchronization(request_id, term).await;
         }
-        if refresh_processes {
+        if refresh_background_work {
             let _ = self
                 .command_tx
                 .send(crate::runtime::RuntimeCommand::GetProcesses);
+            let _ = self
+                .command_tx
+                .send(crate::runtime::RuntimeCommand::GetJobs);
         }
     }
 
@@ -1638,6 +1662,8 @@ impl App {
         self.cancel_streaming = true;
         self.pages.clear();
         self.active_page = 0;
+        self.jobs.clear();
+        self.jobs_version = 0;
         self.jobs_seen_version = u64::MAX;
         self.processes.clear();
         self.processes_version = 0;
@@ -2235,6 +2261,18 @@ impl App {
         Ok(())
     }
 
+    fn apply_jobs_snapshot(&mut self, version: u64, jobs: Vec<bone_protocol::JobSnapshot>) {
+        let had_jobs = !self.jobs.is_empty();
+        self.jobs_version = version;
+        self.jobs = jobs;
+        if !had_jobs && !self.jobs.is_empty() {
+            self.panes_visible = true;
+        }
+        self.refresh_jobs_pane();
+        self.jobs_seen_version = version;
+        self.jobs_last_refresh = std::time::Instant::now();
+    }
+
     fn apply_processes_snapshot(
         &mut self,
         version: u64,
@@ -2256,29 +2294,30 @@ impl App {
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::GetProcesses);
+        let _ = self
+            .command_tx
+            .send(crate::runtime::RuntimeCommand::GetJobs);
         self.request_full_synchronization()
     }
 
-    /// Refresh background panes when either registry version changes or, while
-    /// agent jobs are running, at least once per second so elapsed time and token
-    /// counters stay live. Returns `true` when the panes were refreshed.
+    /// Refresh background panes after snapshot changes or, while agent jobs are
+    /// active, at least once per second so elapsed time stays live.
     pub(crate) fn maybe_refresh_jobs_pane(&mut self) -> bool {
-        let jobs = crate::ext::jobs::registry();
-        let jobs_version = jobs.version();
+        let jobs_changed = self.jobs_version != self.jobs_seen_version;
         let processes_changed = self.processes_version != self.processes_seen_version;
         let agent_jobs_tick_due = self.jobs_last_refresh.elapsed()
             >= std::time::Duration::from_secs(1)
-            && !jobs.running_ids().is_empty();
-        let refresh = background_pane_needs_refresh(processes_changed, agent_jobs_tick_due);
-        if jobs_version == self.jobs_seen_version && !refresh {
+            && !self.jobs.is_empty();
+        let refresh =
+            jobs_changed || background_pane_needs_refresh(processes_changed, agent_jobs_tick_due);
+        if !refresh {
             return false;
         }
-        // Unhide the pane when a new agent job starts while hidden.
-        if jobs_version != self.jobs_seen_version && !jobs.running_ids().is_empty() {
+        if jobs_changed && !self.jobs.is_empty() {
             self.panes_visible = true;
         }
         self.refresh_jobs_pane();
-        self.jobs_seen_version = jobs_version;
+        self.jobs_seen_version = self.jobs_version;
         self.processes_seen_version = self.processes_version;
         self.jobs_last_refresh = std::time::Instant::now();
         true
@@ -2355,32 +2394,18 @@ impl App {
         }
     }
 
-    /// Refresh the background-jobs live-pane from the job registry.
-    ///
-    /// Rendered natively in Rust (no Lua) so the pane stays live even while
-    /// a Lua tool blocks the VM (e.g. a long `ctx.agent.wait`). The pane is
-    /// driven entirely by the generic job registry — it has no knowledge of
-    /// which tool (sub-agent, shotgun, …) dispatched a given job.
-    /// Only shows when there are running jobs; hides when all are idle.
+    /// Refresh the native background work panes from protocol snapshots.
     fn refresh_jobs_pane(&mut self) {
-        let jobs = crate::ext::jobs::registry().all_jobs();
-        let has_running = jobs
-            .iter()
-            .any(|j| j.status == crate::ext::jobs::JobStatus::Running);
-        let active_ids: Vec<_> = jobs
-            .iter()
-            .filter(|job| !job.is_finished())
-            .map(|job| job.id.clone())
-            .collect();
+        let active_ids = active_job_ids(&self.jobs);
         crate::ui::selectable_pane::reconcile_selection(&mut self.selected_job_id, &active_ids);
-        if has_running {
+        if !self.jobs.is_empty() {
             let visible_selection = self
                 .agent_list_focused
                 .then_some(self.selected_job_id.as_deref())
                 .flatten();
             if let Some(page) = crate::ui::jobs_pane::render_selected(
                 &self.renderer.theme,
-                &jobs,
+                &self.jobs,
                 visible_selection,
             ) {
                 let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
@@ -2388,7 +2413,6 @@ impl App {
                 self.panes_visible = true;
             }
         } else {
-            // No running jobs — hide the pane and release its navigation focus.
             self.agent_list_focused = false;
             self.active_page = PanePage::remove(
                 &mut self.pages,
@@ -2436,22 +2460,22 @@ fn orphaned_tool_result_row(name: String, is_error: bool) -> Option<Message> {
 }
 
 /// Render a point-in-time view of a running job from its bounded runtime-event log.
-fn job_snapshot_messages(job: &crate::ext::jobs::Job, wire_tools: &WireTools) -> Vec<Message> {
+fn job_snapshot_messages(job: &bone_protocol::JobSnapshot, wire_tools: &WireTools) -> Vec<Message> {
     let mut rows = vec![Message::user(job.task.clone())];
     let mut answer = String::new();
     let mut calls = std::collections::HashMap::new();
     let mut shown_edit_previews = std::collections::HashSet::new();
-    for job_event in &job.events {
-        match &job_event.event {
-            crate::runtime::RuntimeEvent::TextDelta { text } => answer.push_str(text),
-            crate::runtime::RuntimeEvent::ReasoningDelta { text } if !text.is_empty() => {
+    for event in &job.events {
+        match event {
+            bone_protocol::JobEventSnapshot::TextDelta { text } => answer.push_str(text),
+            bone_protocol::JobEventSnapshot::ReasoningDelta { text } if !text.is_empty() => {
                 rows.push(Message::system(format!("thinking: {text}")));
             }
-            crate::runtime::RuntimeEvent::ToolCall {
+            bone_protocol::JobEventSnapshot::ToolCall {
                 id,
                 name,
                 arguments,
-                ..
+                edit_preview,
             } => {
                 if !answer.trim().is_empty() {
                     rows.push(Message::assistant(std::mem::take(&mut answer)));
@@ -2464,13 +2488,12 @@ fn job_snapshot_messages(job: &crate::ext::jobs::Job, wire_tools: &WireTools) ->
                         arguments: arguments.clone(),
                     },
                 );
-                if let Some(diff) = &job_event.edit_preview {
+                if let Some(diff) = edit_preview {
                     rows.push(Message::system(diff.clone()));
                     shown_edit_previews.insert(id.clone());
                 }
             }
-            crate::runtime::RuntimeEvent::ToolOutput { .. } => {}
-            crate::runtime::RuntimeEvent::ToolResult {
+            bone_protocol::JobEventSnapshot::ToolResult {
                 name,
                 call_id,
                 content,
@@ -2501,10 +2524,10 @@ fn job_snapshot_messages(job: &crate::ext::jobs::Job, wire_tools: &WireTools) ->
                 };
                 rows.push(row);
             }
-            crate::runtime::RuntimeEvent::Failed { message } => {
+            bone_protocol::JobEventSnapshot::Failed { message } => {
                 rows.push(Message::system(format!("failed: {message}")))
             }
-            _ => {}
+            bone_protocol::JobEventSnapshot::ReasoningDelta { .. } => {}
         }
     }
     if !answer.trim().is_empty() {
@@ -2760,18 +2783,10 @@ impl App {
     }
 
     fn open_job(&mut self, id: &str, term: &mut BoneTerminal) -> io::Result<()> {
-        let Some(job) = crate::ext::jobs::registry()
-            .all_jobs()
-            .into_iter()
-            .find(|job| job.id == id)
-        else {
+        let Some(job) = self.jobs.iter().find(|job| job.id == id) else {
             return Ok(());
         };
-        let messages = if let Some(transcript) = &job.transcript {
-            self.rebuild_scrollback_from_transcript(transcript)
-        } else {
-            job_snapshot_messages(&job, &self.wire_tools)
-        };
+        let messages = job_snapshot_messages(job, &self.wire_tools);
         let result = crate::ui::transcript_view::run_collapsed(&messages, &self.renderer.theme);
         self.force_redraw(term)?;
         result
@@ -2847,7 +2862,7 @@ impl App {
         }
 
         if self.agents_pane_active() {
-            let active_ids = active_job_ids();
+            let active_ids = active_job_ids(&self.jobs);
             let allow_open = should_open_agent_log(&self.input);
             let was_agent_list_focused = self.agent_list_focused;
             let action =
@@ -3036,20 +3051,22 @@ impl App {
         Ok(true)
     }
 
-    /// Request app exit. When sub-agent jobs are still running, the first
-    /// request is blocked and returns a warning notice; a repeated request
-    /// quits anyway (jobs are detached tasks and die with the process).
+    /// Request app exit. Locally owned sub-agent jobs require confirmation
+    /// because they die with the process. Jobs owned by a remote daemon keep
+    /// running when this client disconnects and do not block exit.
     fn request_quit(&mut self) -> Option<String> {
-        let running = crate::ext::jobs::registry().running_jobs();
-        if !running.is_empty() && !self.quit_despite_jobs {
+        if job_quit_confirmation_required(self._remote_client.is_some(), self.jobs.len())
+            && !self.quit_despite_jobs
+        {
             self.quit_despite_jobs = true;
-            let names: Vec<String> = running
+            let names: Vec<String> = self
+                .jobs
                 .iter()
-                .map(|j| format!("{} ({})", j.agent, j.id))
+                .map(|job| format!("{} ({})", job.agent, job.id))
                 .collect();
             return Some(format!(
-                "{} sub-agent job(s) still running: {}. Quit again to exit anyway (they will be terminated).",
-                running.len(),
+                "{} sub-agent job(s) still active: {}. Quit again to exit anyway (they will be terminated).",
+                self.jobs.len(),
                 names.join(", ")
             ));
         }

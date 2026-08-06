@@ -799,11 +799,11 @@ impl Tool for ShellTool {
         // Esc mid-command kills the process tree and returns promptly instead
         // of blocking until the wall-clock timeout.
         let args = parse_shell_args(arguments)?;
-        let scope = crate::processes::conversation_scope(
-            context
-                .app_state
-                .as_ref()
-                .and_then(|state| state.session_id),
+        let scope = context.app_state.as_ref().map_or_else(
+            || crate::processes::conversation_scope(None),
+            |state| {
+                crate::processes::conversation_scope(state.background_scope.or(state.session_id))
+            },
         );
         if args.action != "run" {
             return crate::processes::execute_action(

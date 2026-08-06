@@ -12,6 +12,54 @@ fn test_ctx_config() -> CtxConfig {
 }
 
 #[test]
+fn delegated_agent_inherits_incognito_background_scope_without_persistence() {
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+        .expect("seed test provider");
+    let inherited = InheritedCtx {
+        approval: crate::tools::ApprovalMode::Safe,
+        provider: Some("local".into()),
+        model: None,
+        agent_depth: 0,
+        approval_gate: None,
+        cwd: std::path::PathBuf::from("/tmp"),
+        session_id: None,
+        background_scope: Some(-17),
+    };
+
+    let built = build_agent_request(
+        "delegated task".into(),
+        &None,
+        &inherited,
+        store,
+        RUN_OPT_KEYS,
+        None,
+        None,
+    )
+    .expect("build delegated request");
+
+    assert_eq!(built.request.background_scope, Some(-17));
+    assert_eq!(
+        built
+            .request
+            .session_sink
+            .as_ref()
+            .and_then(|sink| sink.conv_id()),
+        None
+    );
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
 fn canonical_config_pages_and_mutations_use_the_daemon_store() {
     let _guard = crate::util::test_env_lock();
     let old_bone = std::env::var_os("BONE_DIR");

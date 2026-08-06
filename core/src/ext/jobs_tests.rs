@@ -172,6 +172,37 @@ fn scoped_cancel_and_peek_isolate_conversations() {
 }
 
 #[test]
+fn scoped_queries_and_wait_never_expose_or_consume_foreign_jobs() {
+    let reg = fresh_registry();
+    let own_scope = Some(-10);
+    let foreign_scope = Some(-11);
+    let own = reg.create(NewJob {
+        scope: own_scope,
+        ..new_job("own", "private task")
+    });
+    let foreign = reg.create(NewJob {
+        scope: foreign_scope,
+        ..new_job("foreign", "foreign private task")
+    });
+
+    assert_eq!(reg.running_ids_scoped(own_scope), vec![own.clone()]);
+    let snapshot = reg.snapshot_scoped(own_scope);
+    assert_eq!(snapshot.as_array().unwrap().len(), 1);
+    assert_eq!(snapshot[0]["id"], own);
+
+    reg.complete(&foreign, Ok("foreign private result".into()));
+    let outcome = reg.wait_for_scoped(
+        std::slice::from_ref(&foreign),
+        Duration::from_secs(1),
+        None,
+        own_scope,
+    );
+    assert!(outcome.finished.is_empty());
+    assert!(outcome.pending.is_empty());
+    assert_eq!(reg.peek_finished_unconsumed_scoped(foreign_scope).len(), 1);
+}
+
+#[test]
 fn transcript_of_respects_scope() {
     let reg = fresh_registry();
     let id = reg.create(NewJob {

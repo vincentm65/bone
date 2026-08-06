@@ -209,6 +209,10 @@ pub struct AgentRequest {
     /// one, top-level runs persist to SQLite while delegated runs stay within
     /// their parent conversation and use a no-op sink.
     pub session_sink: Option<Arc<dyn SessionSink>>,
+    /// Owner for jobs and managed processes. Delegated agents inherit this
+    /// independently of `session_sink`, because incognito actors have an
+    /// isolated background scope but no durable conversation id.
+    pub background_scope: Option<i64>,
     /// Optional tool allowlist. When set, the agent only sees tools whose
     /// names appear in this list. When `None` (the default), all tools are
     /// available.
@@ -344,6 +348,7 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::StateSynchronized { .. }
         | crate::runtime::RuntimeEvent::StreamLagged { .. }
         | crate::runtime::RuntimeEvent::ProcessesSnapshot { .. }
+        | crate::runtime::RuntimeEvent::JobsSnapshot { .. }
         | crate::runtime::RuntimeEvent::FrontendState { .. }
         | crate::runtime::RuntimeEvent::ConfigSnapshot { .. }
         | crate::runtime::RuntimeEvent::ConfigChanged { .. }
@@ -481,6 +486,7 @@ mod resolve_provider_tests {
             activity: None,
             llm: Some(llm),
             session_sink: None,
+            background_scope: None,
             tool_allowlist: None,
             max_tokens: None,
             approval_gate: None,
@@ -728,6 +734,9 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         token_stats,
         system_prompt_override,
         conversation_id: session_report.conv_id(),
+        background_scope: request
+            .background_scope
+            .or_else(|| session_report.conv_id()),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 

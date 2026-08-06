@@ -119,6 +119,9 @@ pub struct Driver {
     /// `conv_id` is `None`), so the id is threaded in directly — it drives the
     /// provider cache key (`prompt_cache_key`) and the `ctx` conversation id.
     pub conversation_id: Option<i64>,
+    /// Owner for jobs and managed processes. Unlike `conversation_id`, this is
+    /// still present for an incognito actor.
+    pub background_scope: Option<i64>,
     /// Shared steer nudge. `LocalConn::send(Steer)` sets it; the driver
     /// loop checks and consumes it at the top of each iteration.
     pub turn_nudge: Arc<Mutex<Option<String>>>,
@@ -252,6 +255,7 @@ impl Driver {
             mut token_stats,
             system_prompt_override,
             conversation_id,
+            background_scope,
             turn_nudge,
         } = self;
         let tool_names = tools
@@ -457,7 +461,7 @@ impl Driver {
                 token_stats.context_length = token_stats.anchored_context_estimate(
                     estimate_context_chars(&history, tool_defs_json_chars),
                 );
-                let state = crate::ext::ctx::AppCtxState::new(
+                let mut state = crate::ext::ctx::AppCtxState::new(
                     &tools,
                     &token_stats,
                     &approval_mode.get(),
@@ -472,6 +476,7 @@ impl Driver {
                     config_schema.clone(),
                     nudge.clone(),
                 );
+                state.background_scope = background_scope;
                 let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
                 // Give before_turn handlers a live status channel so they can
                 // surface progress to the attached frontend.
@@ -931,7 +936,7 @@ impl Driver {
             // and slash commands. Drop the previous snapshot first so cloning
             // the handler into AppCtxState cannot build a recursive chain.
             tools.app_state = None;
-            tools.app_state = Some(crate::ext::ctx::AppCtxState::new(
+            let mut app_state = crate::ext::ctx::AppCtxState::new(
                 &tools,
                 &token_stats,
                 &approval_mode.get(),
@@ -945,7 +950,9 @@ impl Driver {
                 config_store.clone(),
                 config_schema.clone(),
                 nudge.clone(),
-            ));
+            );
+            app_state.background_scope = background_scope;
+            tools.app_state = Some(app_state);
             // Re-read each round so a mid-turn Safe/Danger toggle takes effect
             // on the very next tool batch.
             let results = execute_tool_calls(

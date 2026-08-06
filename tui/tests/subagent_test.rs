@@ -632,47 +632,31 @@ fn rust_jobs_pane_returns_valid_panepage() {
     // Local jobs only — avoid the process-global registry so parallel tests
     // cannot pollute the pane contents. Labels come from the jobs themselves.
     let jobs = vec![
-        bone::ext::jobs::Job {
+        bone_protocol::JobSnapshot {
             id: "render-1".into(),
             agent: "render-researcher".into(),
             task: "search query".into(),
             title: String::new(),
-            status: bone::ext::jobs::JobStatus::Done,
-            result: Some("found 3 relevant papers".into()),
-            started_at: bone::ext::jobs::current_unix_seconds(),
-            finished_at: Some(bone::ext::jobs::current_unix_seconds()),
-            consumed: false,
+            status: bone_protocol::JobStatus::Queued,
+            started_at: 0,
             token_sent: 0,
             token_received: 0,
-            result_file: None,
             provider: "test-provider".into(),
             activity: None,
-            trace: Vec::new(),
             events: Vec::new(),
-            transcript: None,
-            scope: None,
-            cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
-        bone::ext::jobs::Job {
+        bone_protocol::JobSnapshot {
             id: "render-2".into(),
             agent: "render-coder".into(),
             task: "fix bug in module".into(),
             title: String::new(),
-            status: bone::ext::jobs::JobStatus::Running,
-            result: None,
-            started_at: bone::ext::jobs::current_unix_seconds(),
-            finished_at: None,
-            consumed: false,
+            status: bone_protocol::JobStatus::Running,
+            started_at: 0,
             token_sent: 0,
             token_received: 0,
-            result_file: None,
             provider: "test-provider".into(),
             activity: None,
-            trace: Vec::new(),
             events: Vec::new(),
-            transcript: None,
-            scope: None,
-            cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     ];
 
@@ -696,8 +680,8 @@ fn rust_jobs_pane_returns_valid_panepage() {
         "running job label missing: {text}"
     );
     assert!(
-        !text.contains("render-researcher"),
-        "completed job should not be listed: {text}"
+        text.contains("render-researcher"),
+        "queued job label missing: {text}"
     );
 }
 

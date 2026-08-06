@@ -71,11 +71,9 @@ pub struct Job {
     /// `ctx.agent.followup` can resume this agent with its context intact.
     #[serde(skip)]
     pub transcript: Option<Vec<crate::llm::ChatMessage>>,
-    /// Conversation the job belongs to (the `conversation_id` active when it was
-    /// spawned). The daemon scopes cancellation and auto-injection by this so a
-    /// process hosting several conversations (`bone serve`) can never cancel or
-    /// inject another conversation's jobs. `None` = unscoped (single-conversation
-    /// callers, and the global query methods, treat every job as in scope).
+    /// Runtime background scope the job belongs to. Durable conversations use
+    /// their database id; incognito sessions use an actor-unique identity.
+    /// `None` is reserved for standalone callers that have no runtime owner.
     #[serde(skip)]
     pub scope: Option<i64>,
     /// Per-job cancellation flag, settable by [`JobRegistry::cancel`].
@@ -102,8 +100,7 @@ pub struct NewJob {
     pub title: String,
     /// Provider used by this delegated run.
     pub provider: String,
-    /// Conversation the job belongs to (used to scope cancel/inject); `None`
-    /// for single-conversation callers.
+    /// Runtime owner used to scope queries, cancellation, and result injection.
     pub scope: Option<i64>,
     /// Per-job cancellation flag, shared with the running task.
     pub cancel_flag: Arc<AtomicBool>,
@@ -374,6 +371,15 @@ impl JobRegistry {
             .collect()
     }
 
+    /// IDs of active jobs owned by exactly `scope`.
+    pub fn running_ids_scoped(&self, scope: Option<i64>) -> Vec<String> {
+        let jobs = self.lock_jobs();
+        jobs.iter()
+            .filter(|j| !j.is_finished() && j.scope == scope)
+            .map(|j| j.id.clone())
+            .collect()
+    }
+
     /// Clones of all active (running or queued) jobs.
     pub fn running_jobs(&self) -> Vec<Job> {
         let jobs = self.lock_jobs();
@@ -402,12 +408,38 @@ impl JobRegistry {
         timeout: Duration,
         cancelled: Option<&AtomicBool>,
     ) -> WaitOutcome {
+        self.wait_for_matching(ids, timeout, cancelled, None)
+    }
+
+    /// Scoped form of [`wait_for`](Self::wait_for). Unknown or foreign job ids
+    /// are ignored and can never be consumed by another actor.
+    pub fn wait_for_scoped(
+        &self,
+        ids: &[String],
+        timeout: Duration,
+        cancelled: Option<&AtomicBool>,
+        scope: Option<i64>,
+    ) -> WaitOutcome {
+        self.wait_for_matching(ids, timeout, cancelled, Some(scope))
+    }
+
+    fn wait_for_matching(
+        &self,
+        ids: &[String],
+        timeout: Duration,
+        cancelled: Option<&AtomicBool>,
+        required_scope: Option<Option<i64>>,
+    ) -> WaitOutcome {
         let deadline = Instant::now() + timeout;
         let mut jobs = self.lock_jobs();
         loop {
             let pending: Vec<String> = jobs
                 .iter()
-                .filter(|j| !j.is_finished() && ids.contains(&j.id))
+                .filter(|j| {
+                    !j.is_finished()
+                        && ids.contains(&j.id)
+                        && required_scope.is_none_or(|scope| j.scope == scope)
+                })
                 .map(|j| j.id.clone())
                 .collect();
             let was_cancelled = cancelled
@@ -419,7 +451,11 @@ impl JobRegistry {
                 let mut any_consumed = false;
                 let mut finished: Vec<Job> = jobs
                     .iter_mut()
-                    .filter(|j| j.is_finished() && ids.contains(&j.id))
+                    .filter(|j| {
+                        j.is_finished()
+                            && ids.contains(&j.id)
+                            && required_scope.is_none_or(|scope| j.scope == scope)
+                    })
                     .map(|j| {
                         if !j.consumed {
                             j.consumed = true;
@@ -455,6 +491,17 @@ impl JobRegistry {
     pub fn snapshot(&self) -> serde_json::Value {
         let jobs = self.lock_jobs();
         let array: Vec<_> = jobs.iter().cloned().collect();
+        serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
+    }
+
+    /// Snapshot of jobs owned by exactly `scope`.
+    pub fn snapshot_scoped(&self, scope: Option<i64>) -> serde_json::Value {
+        let jobs = self.lock_jobs();
+        let array: Vec<_> = jobs
+            .iter()
+            .filter(|job| job.scope == scope)
+            .cloned()
+            .collect();
         serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
     }
 

@@ -286,6 +286,7 @@ fn driver_with_gate(
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -318,6 +319,7 @@ fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -462,6 +464,7 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: Some(parent_id),
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -730,6 +733,7 @@ async fn driver_key_reply_completes_turn() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -885,6 +889,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -1161,6 +1166,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: Some(42),
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1306,6 +1312,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: Some(42),
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1381,6 +1388,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: Some(base.clone()),
         conversation_id: None,
+        background_scope: None,
         config_store: config,
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1476,6 +1484,7 @@ async fn driver_keeps_only_latest_ephemeral_image_in_request_history() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1589,6 +1598,7 @@ bone.tool.register({
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: Some(77),
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -1682,6 +1692,7 @@ bone.tool.register({
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -1747,6 +1758,7 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -1842,6 +1854,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -1947,6 +1960,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -2047,6 +2061,7 @@ end)
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -2293,6 +2308,7 @@ async fn repeated_identical_failing_tool_call_aborts() {
         token_stats: TokenStats::new(),
         system_prompt_override: None,
         conversation_id: None,
+        background_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };

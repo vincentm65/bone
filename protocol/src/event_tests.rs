@@ -93,6 +93,27 @@ fn every_runtime_event_variant_round_trips() {
                 error: None,
             }],
         },
+        RuntimeEvent::JobsSnapshot {
+            version: 5,
+            jobs: vec![JobSnapshot {
+                id: "job-1".into(),
+                agent: "reviewer".into(),
+                task: "review it".into(),
+                title: "Review changes".into(),
+                status: JobStatus::Running,
+                started_at: 123,
+                token_sent: 10,
+                token_received: 2,
+                provider: "openai".into(),
+                activity: Some("reading files".into()),
+                events: vec![JobEventSnapshot::ToolCall {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({ "path": "src/lib.rs" }),
+                    edit_preview: None,
+                }],
+            }],
+        },
         RuntimeEvent::StateSnapshot {
             snapshot: SessionSnapshot {
                 sent: 100,
@@ -226,6 +247,7 @@ fn every_runtime_command_variant_round_trips() {
         RuntimeCommand::Cancel,
         RuntimeCommand::CancelJob { id: "job-1".into() },
         RuntimeCommand::GetProcesses,
+        RuntimeCommand::GetJobs,
         RuntimeCommand::Synchronize {
             request_id: 17,
             include_messages: true,

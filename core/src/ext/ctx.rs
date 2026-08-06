@@ -504,6 +504,9 @@ pub struct CtxConfig {
     pub approval_gate: Option<crate::tools::SharedGate>,
     pub tool_call_depth: usize,
     pub session_id: Option<i64>,
+    /// Background-work owner, distinct from the durable conversation id so an
+    /// incognito actor remains isolated while `session_id` is `None`.
+    pub background_scope: Option<i64>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub context_window_tokens: Option<u64>,
@@ -549,6 +552,7 @@ impl CtxConfig {
             approval_gate: None,
             tool_call_depth: 0,
             session_id: None,
+            background_scope: None,
             provider: None,
             model: None,
             context_window_tokens: None,
@@ -576,6 +580,7 @@ impl CtxConfig {
 #[derive(Clone, Debug)]
 pub struct AppCtxState {
     pub session_id: Option<i64>,
+    pub background_scope: Option<i64>,
     pub provider: String,
     pub model: String,
     pub context_window_tokens: Option<u64>,
@@ -615,6 +620,7 @@ impl AppCtxState {
         let est = estimate_prompt_tokens(tools, system_prompt_override.as_deref());
         Self {
             session_id,
+            background_scope: session_id,
             provider: provider.to_string(),
             model: model.to_string(),
             context_window_tokens,
@@ -633,6 +639,7 @@ impl AppCtxState {
     /// that knows the field mapping; every entry point routes through it.
     pub fn apply_to(&self, cfg: &mut CtxConfig) {
         cfg.session_id = self.session_id;
+        cfg.background_scope = self.background_scope;
         cfg.provider = Some(self.provider.clone());
         cfg.model = Some(self.model.clone());
         cfg.context_window_tokens = self.context_window_tokens;
@@ -1016,7 +1023,8 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     let approval_mode = cfg.approval_mode;
     let approval_gate = cfg.approval_gate.clone();
     let process_cwd = std::path::PathBuf::from(&cfg.cwd);
-    let process_scope = crate::processes::conversation_scope(cfg.session_id);
+    let process_scope =
+        crate::processes::conversation_scope(cfg.background_scope.or(cfg.session_id));
     let spawn_scope = process_scope.clone();
     let spawn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
         require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
@@ -2848,6 +2856,9 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
         // Parent conversation id — nested agents attribute usage here so
         // `/stats` includes subagent tokens without creating a separate chat.
         session_id: cfg.session_id,
+        // Background ownership remains present for incognito actors even
+        // though they deliberately have no durable `session_id`.
+        background_scope: cfg.background_scope,
     };
     let cancelled_flag = cfg.cancelled.clone();
 
@@ -2994,7 +3005,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     let store_spawn = store.clone();
     // Scope spawned jobs to the current conversation so the daemon only cancels
     // / auto-injects results into the conversation that dispatched them.
-    let spawn_scope = cfg.session_id;
+    let spawn_scope = cfg.background_scope;
     let spawn_fn = lua.create_function(move |lua, (prompt, opts): (String, Option<Table>)| {
         // Sub-agents (depth > 0) cannot spawn background jobs — their results
         // would inject into the wrong conversation. They can still use blocking
@@ -3047,7 +3058,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // Continue a completed job with its saved conversation transcript.
     let inherited_followup = inherited.clone();
     let store_followup = store;
-    let followup_scope = cfg.session_id;
+    let followup_scope = cfg.background_scope;
     let followup_fn = lua.create_function(
         move |lua, (prior_id, prompt, opts): (String, String, Option<Table>)| {
             if inherited_followup.agent_depth > 0 {
@@ -3096,8 +3107,9 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
 
     // --- ctx.agent.jobs() ---
     // Return a JSON array of all jobs (snapshot).
-    let jobs_fn = lua.create_function(|lua, _: ()| {
-        let snap = crate::ext::jobs::registry().snapshot();
+    let jobs_scope = cfg.background_scope;
+    let jobs_fn = lua.create_function(move |lua, _: ()| {
+        let snap = crate::ext::jobs::registry().snapshot_scoped(jobs_scope);
         lua.to_value(&snap)
     })?;
     agent_table.set("jobs", jobs_fn)?;
@@ -3109,6 +3121,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // the jobs themselves keep running and auto-inject later.
     let agent_depth_w = cfg.agent_depth;
     let cancelled_flag_w = cfg.cancelled.clone();
+    let wait_scope = cfg.background_scope;
     let wait_fn = lua.create_function(
         move |lua, (ids, opts): (Option<Vec<String>>, Option<Table>)| {
             // Background jobs belong to the main conversation; sub-agents
@@ -3126,7 +3139,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             let registry = crate::ext::jobs::registry();
             let ids = match ids {
                 Some(v) if !v.is_empty() => v,
-                _ => registry.running_ids(),
+                _ => registry.running_ids_scoped(wait_scope),
             };
 
             let result = lua.create_table()?;
@@ -3142,10 +3155,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             // Blocking is safe here: top-level Lua tools run on a
             // spawn_blocking thread, and background jobs run on the tokio
             // runtime with their own Lua VMs (no lock shared with this one).
-            let outcome = registry.wait_for(
+            let outcome = registry.wait_for_scoped(
                 &ids,
                 std::time::Duration::from_millis(timeout_ms),
                 cancelled_flag_w.as_deref(),
+                wait_scope,
             );
 
             let finished_json =
@@ -3162,7 +3176,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
     // --- ctx.agent.cancel(id) ---
     // Cancel and consume a running job owned by this conversation.
     let agent_depth_c = cfg.agent_depth;
-    let cancel_scope = cfg.session_id;
+    let cancel_scope = cfg.background_scope;
     let cancel_fn = lua.create_function(move |lua, id: String| {
         if agent_depth_c > 0 {
             return agent_err(lua, "sub-agents cannot cancel jobs");
@@ -3193,6 +3207,9 @@ struct InheritedCtx {
     /// Parent conversation id for nested usage attribution (`None` when the
     /// parent has no open DB conversation — nested usage is then discarded).
     session_id: Option<i64>,
+    /// Parent owner for jobs and managed processes. This is independent of
+    /// `session_id` so incognito actors remain isolated.
+    background_scope: Option<i64>,
 }
 
 /// A ready-to-run `AgentRequest` plus the handles the dispatch loops need: the
@@ -3400,6 +3417,7 @@ fn build_agent_request(
         // (`UsageOnlySessionSink` no-ops append/end). `None` when the parent
         // has no conversation (headless without a session) → NullSessionSink.
         session_sink: crate::session_sink::UsageOnlySessionSink::for_parent(inherited.session_id),
+        background_scope: inherited.background_scope,
         tool_allowlist,
         max_tokens,
         approval_gate,
@@ -3755,6 +3773,7 @@ fn dispatch_event(
         | RuntimeEvent::StateSynchronized { .. }
         | RuntimeEvent::StreamLagged { .. }
         | RuntimeEvent::ProcessesSnapshot { .. }
+        | RuntimeEvent::JobsSnapshot { .. }
         | RuntimeEvent::FrontendState { .. }
         | RuntimeEvent::ConfigSnapshot { .. }
         | RuntimeEvent::ConfigChanged { .. }

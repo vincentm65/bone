@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -76,6 +76,12 @@ impl From<StartupDbError> for SessionInitError {
     }
 }
 
+// SQLite-generated conversation ids are positive. Negative process-local ids
+// therefore give actors without a durable conversation (notably incognito
+// `bone serve` actors) distinct registry scopes without inventing a second
+// public scope type.
+static NEXT_ACTOR_SCOPE: AtomicI64 = AtomicI64::new(-1);
+
 /// Owns the agent turn-truth for one conversation.
 pub struct RuntimeSession {
     /// Tool handler; its `state_map` carries cross-round stateful-tool state.
@@ -100,6 +106,8 @@ pub struct RuntimeSession {
     /// stays open; toggling off mints a fresh conversation and persists the
     /// whole in-memory transcript into it.
     pub incognito: bool,
+    /// Stable fallback identity while no durable conversation is attached.
+    actor_scope: i64,
 }
 
 impl RuntimeSession {
@@ -114,7 +122,13 @@ impl RuntimeSession {
             session_seq: 0,
             incognito: false,
             turn_nudge: Arc::new(Mutex::new(None)),
+            actor_scope: NEXT_ACTOR_SCOPE.fetch_sub(1, Ordering::Relaxed),
         }
+    }
+
+    /// Scope used for jobs and managed processes owned by this actor.
+    pub fn background_scope(&self) -> i64 {
+        self.conversation_id.unwrap_or(self.actor_scope)
     }
 
     /// Complete durable history for frontend scrollback. Falls back to the
@@ -416,6 +430,7 @@ impl RuntimeSession {
             token_stats: self.token_stats.clone(),
             system_prompt_override: Some(system_prompt),
             conversation_id: self.conversation_id,
+            background_scope: Some(self.background_scope()),
             turn_nudge: self.turn_nudge.clone(),
         }
     }

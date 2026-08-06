@@ -479,6 +479,7 @@ impl App {
                     &mut self.agent_list_focused,
                     &mut self.selected_process_id,
                     &self.processes,
+                    &self.jobs,
                     &mut self.queue_selected,
                     &mut self.queue_editing,
                     &mut pending_key,
@@ -767,6 +768,7 @@ impl App {
                     &mut self.agent_list_focused,
                     &mut self.selected_process_id,
                     &self.processes,
+                    &self.jobs,
                     &mut self.queue_selected,
                     &mut self.queue_editing,
                     &mut pending_key,
@@ -918,6 +920,9 @@ impl App {
                     }
                     Ok(RuntimeEvent::ProcessesSnapshot { version, processes }) => {
                         self.apply_processes_snapshot(version, processes);
+                    }
+                    Ok(RuntimeEvent::JobsSnapshot { version, jobs }) => {
+                        self.apply_jobs_snapshot(version, jobs);
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -1187,6 +1192,9 @@ impl App {
                 processes,
             } => {
                 self.apply_processes_snapshot(version, processes);
+            }
+            RuntimeEvent::JobsSnapshot { version, jobs } => {
+                self.apply_jobs_snapshot(version, jobs);
             }
             RuntimeEvent::ToolCall {
                 id,
@@ -1583,6 +1591,7 @@ impl App {
         agent_list_focused: &mut bool,
         selected_process_id: &mut Option<String>,
         processes: &[bone_protocol::ProcessSnapshot],
+        jobs: &[bone_protocol::JobSnapshot],
         queue_selected: &mut usize,
         queue_editing: &mut Option<(usize, String)>,
         pending_key: &mut KeySink,
@@ -1731,7 +1740,7 @@ impl App {
                             .get(*active_page)
                             .is_some_and(|p| p.source == crate::ui::jobs_pane::PANE_SOURCE);
                     if agents_active {
-                        let active_ids = active_job_ids();
+                        let active_ids = active_job_ids(jobs);
                         let allow_open = should_open_agent_log(input);
                         let was_agent_list_focused = *agent_list_focused;
                         match apply_agent_nav_key(

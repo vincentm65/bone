@@ -2,11 +2,11 @@ use super::stream::{StreamAttempt, discard_stream_attempt};
 use super::{
     App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
     approval_already_pending, background_pane_needs_refresh, config_rejection_message,
-    configured_input_style, edit_diff_message, idle_state_needs_redraw, job_snapshot_messages,
-    lua_config_available, orphaned_tool_result_row, parse_config_value, prepare_streaming_replay,
-    render_config_page, run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
-    take_pending_config, take_terminal_width_change, terminal_background_transition,
-    terminal_dimensions_changed,
+    configured_input_style, edit_diff_message, idle_state_needs_redraw,
+    job_quit_confirmation_required, job_snapshot_messages, lua_config_available,
+    orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, render_config_page,
+    run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status, take_pending_config,
+    take_terminal_width_change, terminal_background_transition, terminal_dimensions_changed,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
@@ -23,6 +23,13 @@ fn only_actual_retry_statuses_are_persisted() {
     assert!(!is_retry_status(
         "running shell: grep -R 'stream error, will retry' core/src"
     ));
+}
+
+#[test]
+fn remote_jobs_do_not_require_local_termination_confirmation() {
+    assert!(job_quit_confirmation_required(false, 1));
+    assert!(!job_quit_confirmation_required(true, 1));
+    assert!(!job_quit_confirmation_required(false, 0));
 }
 
 #[test]
@@ -465,27 +472,19 @@ fn queue_navigation_still_works_with_input() {
     assert_eq!(selected, 1);
 }
 
-fn job_with_events(events: Vec<crate::ext::jobs::JobEvent>) -> crate::ext::jobs::Job {
-    crate::ext::jobs::Job {
+fn job_with_events(events: Vec<bone_protocol::JobEventSnapshot>) -> bone_protocol::JobSnapshot {
+    bone_protocol::JobSnapshot {
         id: "job-1".into(),
         agent: "worker".into(),
         task: "do work".into(),
         title: "Work".into(),
-        status: crate::ext::jobs::JobStatus::Running,
-        result: None,
+        status: bone_protocol::JobStatus::Running,
         started_at: 0,
-        finished_at: None,
-        consumed: false,
         token_sent: 0,
         token_received: 0,
-        result_file: None,
         provider: "test-provider".into(),
         activity: None,
-        trace: Vec::new(),
         events,
-        transcript: None,
-        scope: None,
-        cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
 
@@ -500,33 +499,19 @@ fn orphaned_successful_tool_results_are_hidden_but_errors_remain_visible() {
 }
 
 #[test]
-fn job_snapshot_correlates_shell_result_and_ignores_incremental_output() {
+fn job_snapshot_correlates_shell_result() {
     let events = vec![
-        crate::ext::jobs::JobEvent {
-            event: crate::runtime::RuntimeEvent::ToolCall {
-                id: "call-1".into(),
-                name: "shell".into(),
-                summary: "shell: echo hi".into(),
-                arguments: serde_json::json!({ "command": "echo hi" }),
-            },
+        bone_protocol::JobEventSnapshot::ToolCall {
+            id: "call-1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({ "command": "echo hi" }),
             edit_preview: None,
         },
-        crate::ext::jobs::JobEvent {
-            event: crate::runtime::RuntimeEvent::ToolOutput {
-                call_id: "call-1".into(),
-                content: "h".into(),
-                stderr: false,
-            },
-            edit_preview: None,
-        },
-        crate::ext::jobs::JobEvent {
-            event: crate::runtime::RuntimeEvent::ToolResult {
-                name: "shell".into(),
-                call_id: "call-1".into(),
-                is_error: false,
-                content: "hi\n".into(),
-            },
-            edit_preview: None,
+        bone_protocol::JobEventSnapshot::ToolResult {
+            name: "shell".into(),
+            call_id: "call-1".into(),
+            is_error: false,
+            content: "hi\n".into(),
         },
     ];
 
@@ -541,27 +526,21 @@ fn job_snapshot_correlates_shell_result_and_ignores_incremental_output() {
 fn job_snapshot_renders_captured_edit_preview_once() {
     let diff = "\n--- a/file\n+++ b/file\n";
     let events = vec![
-        crate::ext::jobs::JobEvent {
-            event: crate::runtime::RuntimeEvent::ToolCall {
-                id: "call-1".into(),
-                name: "edit_file".into(),
-                summary: "edit_file: file".into(),
-                arguments: serde_json::json!({
-                    "path": "file",
-                    "old_text": "old",
-                    "new_text": "new"
-                }),
-            },
+        bone_protocol::JobEventSnapshot::ToolCall {
+            id: "call-1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({
+                "path": "file",
+                "old_text": "old",
+                "new_text": "new"
+            }),
             edit_preview: Some(diff.into()),
         },
-        crate::ext::jobs::JobEvent {
-            event: crate::runtime::RuntimeEvent::ToolResult {
-                name: "edit_file".into(),
-                call_id: "call-1".into(),
-                is_error: false,
-                content: format!("Edited: file{diff}"),
-            },
-            edit_preview: None,
+        bone_protocol::JobEventSnapshot::ToolResult {
+            name: "edit_file".into(),
+            call_id: "call-1".into(),
+            is_error: false,
+            content: format!("Edited: file{diff}"),
         },
     ];
 
@@ -769,6 +748,10 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         command_rx.try_recv().unwrap(),
         crate::runtime::RuntimeCommand::GetProcesses
     ));
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        crate::runtime::RuntimeCommand::GetJobs
+    ));
     let probe_id = match command_rx.try_recv().unwrap() {
         crate::runtime::RuntimeCommand::Synchronize {
             request_id,
@@ -788,6 +771,10 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
     assert!(matches!(
         command_rx.try_recv().unwrap(),
         crate::runtime::RuntimeCommand::GetProcesses
+    ));
+    assert!(matches!(
+        command_rx.try_recv().unwrap(),
+        crate::runtime::RuntimeCommand::GetJobs
     ));
     assert!(matches!(
         command_rx.try_recv().unwrap(),
@@ -842,6 +829,37 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
             .iter()
             .any(|page| page.source == crate::ui::processes_pane::PANE_SOURCE)
     );
+
+    app.apply_idle_event(crate::runtime::RuntimeEvent::JobsSnapshot {
+        version: 10,
+        jobs: vec![bone_protocol::JobSnapshot {
+            id: "job-remote".into(),
+            agent: "worker".into(),
+            task: "remote work".into(),
+            title: "Remote work".into(),
+            status: bone_protocol::JobStatus::Queued,
+            started_at: 1,
+            token_sent: 2,
+            token_received: 3,
+            provider: "remote-provider".into(),
+            activity: None,
+            events: Vec::new(),
+        }],
+    });
+    assert_eq!(app.jobs_version, 10);
+    assert_eq!(app.jobs_seen_version, 10);
+    assert_eq!(app.jobs[0].id, "job-remote");
+    assert_eq!(app.selected_job_id.as_deref(), Some("job-remote"));
+    assert!(
+        app.pages
+            .iter()
+            .any(|page| page.source == crate::ui::jobs_pane::PANE_SOURCE)
+    );
+    let quit_notice = app
+        .request_quit()
+        .expect("active job should block first quit");
+    assert!(quit_notice.contains("worker (job-remote)"));
+    assert!(!app.should_quit);
 
     app.config_view = config_view();
     app.config_view.snapshot.as_mut().unwrap().values =
