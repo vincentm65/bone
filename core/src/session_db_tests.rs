@@ -1,7 +1,8 @@
 use super::{
-    SCHEMA_VERSION, SessionDb, StartupDbOperation, civil_from_days, db_path_with_legacy,
-    iso_from_unix_secs, migrate_legacy_db_if_needed, retry_startup_sqlite_with_deadline,
+    SCHEMA_VERSION, SessionDb, StartupDbOperation, db_path_with_legacy,
+    migrate_legacy_db_if_needed, retry_startup_sqlite_with_deadline,
 };
+use crate::util::{civil_from_days, utc_from_unix_secs as iso_from_unix_secs};
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -348,6 +349,7 @@ fn complete_message_roundtrip_preserves_codex_provider_order() {
         arguments: serde_json::json!({"path": "b"}),
     };
     let mut message = ChatMessage::new(ChatRole::Assistant, "text between calls");
+    message.created_at = Some("2026-07-17T12:00:00Z".into());
     message.name = Some("assistant-name".into());
     message.tool_call_id = Some("provider-metadata".into());
     message.is_error = true;

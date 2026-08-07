@@ -115,6 +115,7 @@ pub(crate) struct StoredMessage {
     pub is_error: bool,
     /// Complete model-facing message payload for rows written by schema v10+.
     payload_json: Option<String>,
+    pub created_at: String,
 }
 
 const PERSISTED_MESSAGE_VERSION: u8 = 2;
@@ -206,7 +207,10 @@ fn deserialize_messages(json: &str) -> Option<Vec<ChatMessage>> {
 pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMessage {
     use crate::llm::{ChatMessage, ChatRole};
 
-    if let Some(message) = msg.payload_json.as_deref().and_then(deserialize_message) {
+    if let Some(mut message) = msg.payload_json.as_deref().and_then(deserialize_message) {
+        if message.created_at.is_none() {
+            message.created_at = Some(msg.created_at);
+        }
         return message;
     }
 
@@ -236,6 +240,7 @@ pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMess
         is_error: msg.is_error,
         reasoning: None,
         reasoning_items: Vec::new(),
+        created_at: Some(msg.created_at),
         output_sequence: Vec::new(),
     }
 }
@@ -1172,7 +1177,14 @@ impl SessionDb {
             |row| row.get(0),
         )?;
         let allocated_seq = seq.max(db_seq.saturating_add(1));
-        Self::insert_chat_message_row(&tx, conversation_id, message, allocated_seq, &now_iso())?;
+        let fallback = now_iso();
+        Self::insert_chat_message_row(
+            &tx,
+            conversation_id,
+            message,
+            allocated_seq,
+            message.created_at.as_deref().unwrap_or(&fallback),
+        )?;
         tx.commit()?;
         Ok(allocated_seq)
     }
@@ -1275,7 +1287,13 @@ impl SessionDb {
         let now = now_iso();
         for message in messages {
             seq += 1;
-            Self::insert_chat_message_row(&tx, conversation_id, message, seq, &now)?;
+            Self::insert_chat_message_row(
+                &tx,
+                conversation_id,
+                message,
+                seq,
+                message.created_at.as_deref().unwrap_or(&now),
+            )?;
         }
         for u in usage {
             tx.execute(
@@ -1892,6 +1910,7 @@ impl SessionDb {
             images: row.get(6)?,
             is_error: row.get::<_, i64>(7)? != 0,
             payload_json: row.get(8)?,
+            created_at: row.get(9)?,
         })
     }
 
@@ -1902,7 +1921,7 @@ impl SessionDb {
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, role, content, tool_name, tool_call_id, tool_calls,
-                    images, is_error, payload_json
+                    images, is_error, payload_json, created_at
              FROM messages WHERE conversation_id = ?1 AND seq > ?2
              ORDER BY seq ASC, id ASC",
         )?;
@@ -1920,7 +1939,7 @@ impl SessionDb {
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, role, content, tool_name, tool_call_id, tool_calls,
-                    images, is_error, payload_json \
+                    images, is_error, payload_json, created_at \
              FROM messages WHERE conversation_id = ?1 \
              ORDER BY seq ASC, id ASC LIMIT ?2",
         )?;
@@ -1934,42 +1953,7 @@ impl SessionDb {
 }
 
 fn now_iso() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    iso_from_unix_secs(secs)
-}
-
-fn iso_from_unix_secs(secs: u64) -> String {
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let (y, m, d) = civil_from_days(days as i64);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y,
-        m,
-        d,
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60
-    )
-}
-
-/// Convert days since 1970-01-01 to (year, month, day) using
-/// Howard Hinnant's civil-from-days algorithm.
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097); // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    crate::util::utc_now()
 }
 
 #[cfg(test)]

@@ -146,6 +146,9 @@ pub struct ChatMessage {
     pub reasoning: Option<Reasoning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_items: Vec<ReasoningItem>,
+    /// UTC time when this message was produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
     #[serde(skip)]
     pub output_sequence: Vec<OutputItem>,
 }
@@ -162,6 +165,7 @@ impl ChatMessage {
             is_error: false,
             reasoning: None,
             reasoning_items: Vec::new(),
+            created_at: None,
             output_sequence: Vec::new(),
         }
     }
@@ -191,6 +195,7 @@ impl ChatMessage {
             is_error: result.is_error,
             reasoning: None,
             reasoning_items: Vec::new(),
+            created_at: None,
             output_sequence: Vec::new(),
         }
     }

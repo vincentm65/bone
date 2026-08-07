@@ -17,7 +17,7 @@ use crate::agent::{
     AgentResponse, AgentRunEvent, emit_event, estimate_context_chars, estimate_tokens,
     summarize_call_args, touch_activity,
 };
-use crate::chat::build_chat_history;
+use crate::chat::{build_chat_history, model_facing_message};
 use crate::ext::ExtensionManager;
 use crate::llm::provider::{LlmProvider, ProviderRequestContext};
 use crate::llm::{ChatEvent, ChatMessage, ChatRole, LlmErrorKind, TokenStats};
@@ -323,18 +323,26 @@ impl Driver {
             .last()
             .is_some_and(|m| m.role == crate::llm::ChatRole::User && m.content == prompt);
         if !prompt_already_last {
-            let message = ChatMessage::new(crate::llm::ChatRole::User, prompt);
+            let mut message = ChatMessage::new(crate::llm::ChatRole::User, prompt);
+            message.created_at = Some(crate::util::utc_now());
             session.append_chat_message(&message, session_seq);
-            history.push(message.clone());
+            history.push(model_facing_message(&message, None));
             transcript.push(message.clone());
             persist_messages.push(message);
         } else {
-            session.append_chat_message(
-                transcript
-                    .last()
-                    .expect("prompt_already_last requires a final message"),
-                session_seq,
-            );
+            let message = transcript
+                .last_mut()
+                .expect("prompt_already_last requires a final message");
+            if message.created_at.is_none() {
+                message.created_at = Some(crate::util::utc_now());
+            }
+            session.append_chat_message(message, session_seq);
+            if let Some(history_message) = history.last_mut()
+                && history_message.role == ChatRole::User
+                && history_message.content == prompt
+            {
+                *history_message = model_facing_message(message, None);
+            }
         }
 
         // Rich frontend event stream (best-effort; ignored if no consumer).
@@ -883,6 +891,7 @@ impl Driver {
             // history needs it).
             if tool_calls.is_empty() {
                 let mut assistant = ChatMessage::assistant_with_tools(&assistant_text, Vec::new());
+                assistant.created_at = Some(crate::util::utc_now());
                 if !reasoning_text.is_empty() {
                     assistant.reasoning = Some(crate::llm::Reasoning {
                         text: std::mem::take(&mut reasoning_text),
@@ -905,6 +914,7 @@ impl Driver {
             // progress, making it re-derive context every round.
             let mut assistant =
                 ChatMessage::assistant_with_tools(&assistant_text, tool_calls.clone());
+            assistant.created_at = Some(crate::util::utc_now());
             if !reasoning_text.is_empty() {
                 assistant.reasoning = Some(crate::llm::Reasoning {
                     text: std::mem::take(&mut reasoning_text),
@@ -915,10 +925,12 @@ impl Driver {
                 assistant.reasoning_items = std::mem::take(&mut reasoning_items);
             }
             assistant.output_sequence = std::mem::take(&mut output_sequence);
+            let requested_at = assistant.created_at.clone();
+            let provider_assistant = model_facing_message(&assistant, None);
             session_seq += 1;
             session.append_chat_message(&assistant, session_seq);
-            history.push(assistant.clone());
-            request_history.push(assistant.clone());
+            history.push(provider_assistant.clone());
+            request_history.push(provider_assistant);
             transcript.push(assistant.clone());
             persist_messages.push(assistant);
 
@@ -998,12 +1010,14 @@ impl Driver {
                 emit_event(events, event_sender.as_ref(), &event);
                 session_seq += 1;
                 let mut message = ChatMessage::tool(result.clone());
+                message.created_at = Some(crate::util::utc_now());
                 if result.ephemeral_images {
                     message.images.clear();
                 }
                 session.append_chat_message(&message, session_seq);
-                history.push(message.clone());
-                request_history.push(message.clone());
+                let provider_message = model_facing_message(&message, requested_at.as_deref());
+                history.push(provider_message.clone());
+                request_history.push(provider_message);
                 transcript.push(message.clone());
                 persist_messages.push(message);
 
@@ -1014,19 +1028,21 @@ impl Driver {
                 // screenshot from this assistant turn.
                 if !result.images.is_empty() {
                     let note = format!("Image output from {}:", result.name);
-                    let relay = ChatMessage::user_with_images(note, result.images.clone());
+                    let mut relay = ChatMessage::user_with_images(note, result.images.clone());
+                    relay.created_at = Some(crate::util::utc_now());
+                    let provider_relay = model_facing_message(&relay, None);
                     if result.ephemeral_images {
                         if let Some((index, _)) = ephemeral_image_relay.take() {
                             request_history.remove(index);
                         }
                         let index = request_history.len();
-                        request_history.push(relay.clone());
-                        ephemeral_image_relay = Some((index, relay));
+                        request_history.push(provider_relay.clone());
+                        ephemeral_image_relay = Some((index, provider_relay));
                     } else {
                         session_seq += 1;
                         session.append_chat_message(&relay, session_seq);
-                        history.push(relay.clone());
-                        request_history.push(relay.clone());
+                        history.push(provider_relay.clone());
+                        request_history.push(provider_relay);
                         transcript.push(relay.clone());
                         persist_messages.push(relay);
                     }

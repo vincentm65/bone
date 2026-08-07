@@ -1772,12 +1772,26 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
         2,
         "tool call should trigger a second request"
     );
+    let first_user = captured[0]
+        .iter()
+        .find(|m| m.role == ChatRole::User)
+        .expect("first request includes user prompt");
+    assert!(first_user.content.contains("<timing>Message timestamp:"));
+
     let assistant = captured[1]
         .iter()
         .find(|m| m.role == ChatRole::Assistant && !m.tool_calls.is_empty())
         .expect("second request includes assistant tool-call message");
-    assert_eq!(assistant.content, "I'll run read_file now.");
+    assert!(assistant.content.starts_with("I'll run read_file now."));
+    assert!(assistant.content.contains("<timing>Message timestamp:"));
     assert_eq!(assistant.tool_calls[0].name, "read_file");
+
+    let tool = captured[1]
+        .iter()
+        .find(|m| m.role == ChatRole::Tool)
+        .expect("second request includes tool result");
+    assert!(tool.content.contains("<timing>Tool timing: requested at"));
+    assert!(tool.content.contains("; completed at"));
 }
 
 // A `before_turn` hook can return `turn_message`: transient guidance retained in

@@ -17,8 +17,75 @@ pub fn build_chat_history(
         None => prompts::system_prompt(),
     };
     out.push(ChatMessage::new(ChatRole::System, system_content));
-    out.extend(messages.iter().cloned());
+    let mut requested_at = None;
+    for message in messages {
+        out.push(model_facing_message(message, requested_at.as_deref()));
+        if message.role == ChatRole::Assistant && !message.tool_calls.is_empty() {
+            requested_at = message.created_at.clone();
+        }
+    }
     out
+}
+
+/// Clone a transcript message and add timing context only to the provider copy.
+pub(crate) fn model_facing_message(
+    message: &ChatMessage,
+    requested_at: Option<&str>,
+) -> ChatMessage {
+    let mut message = message.clone();
+    let timing = if message.role == ChatRole::Tool {
+        match (requested_at, message.created_at.as_deref()) {
+            (Some(requested_at), Some(completed_at)) => {
+                format!("Tool timing: requested at {requested_at}; completed at {completed_at}.")
+            }
+            (Some(requested_at), None) => format!("Tool timing: requested at {requested_at}."),
+            (None, Some(completed_at)) => format!("Tool timing: completed at {completed_at}."),
+            (None, None) => return message,
+        }
+    } else {
+        let Some(created_at) = message.created_at.as_deref() else {
+            return message;
+        };
+        format!("Message timestamp: {created_at}.")
+    };
+    let timing_block = format!("<timing>{timing}</timing>");
+    append_timing_block(&mut message.content, &timing_block);
+    if message.role == ChatRole::Assistant && !message.output_sequence.is_empty() {
+        append_timing_to_output_sequence(&mut message.output_sequence, &timing_block);
+    }
+    message
+}
+
+fn append_timing_block(content: &mut String, timing_block: &str) {
+    if !content.is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str(timing_block);
+}
+
+/// Codex replays `output_sequence` instead of `content`. Keep timing on an
+/// existing text item when possible; tool-only responses receive a text item
+/// immediately before their first call so the original reasoning/call order is
+/// otherwise unchanged.
+fn append_timing_to_output_sequence(
+    sequence: &mut Vec<crate::llm::OutputItem>,
+    timing_block: &str,
+) {
+    if let Some(text) = sequence.iter_mut().rev().find_map(|item| match item {
+        crate::llm::OutputItem::Text(text) => Some(text),
+        _ => None,
+    }) {
+        append_timing_block(text, timing_block);
+        return;
+    }
+    let insert_at = sequence
+        .iter()
+        .position(|item| matches!(item, crate::llm::OutputItem::ToolCall(_)))
+        .unwrap_or(sequence.len());
+    sequence.insert(
+        insert_at,
+        crate::llm::OutputItem::Text(timing_block.to_string()),
+    );
 }
 
 // ── Message ─────────────────────────────────────────────────────────────────
@@ -94,5 +161,65 @@ impl Message {
             }),
             image_count: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ToolCall;
+
+    #[test]
+    fn provider_history_adds_tool_timing_without_mutating_transcript() {
+        let mut assistant = ChatMessage::new(ChatRole::Assistant, "checking");
+        assistant.created_at = Some("2026-07-17T12:00:00Z".into());
+        assistant.tool_calls.push(ToolCall {
+            id: "call-1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "sleep 5"}),
+        });
+        let mut tool = ChatMessage::new(ChatRole::Tool, "done");
+        tool.tool_call_id = Some("call-1".into());
+        tool.name = Some("shell".into());
+        tool.created_at = Some("2026-07-17T12:00:05Z".into());
+        let transcript = vec![assistant, tool];
+
+        let history = build_chat_history(&transcript, Some("system"));
+
+        assert_eq!(transcript[0].content, "checking");
+        assert_eq!(transcript[1].content, "done");
+        assert!(
+            history[1]
+                .content
+                .contains("Message timestamp: 2026-07-17T12:00:00Z.")
+        );
+        assert!(history[2].content.contains(
+            "Tool timing: requested at 2026-07-17T12:00:00Z; completed at 2026-07-17T12:00:05Z."
+        ));
+    }
+
+    #[test]
+    fn provider_history_adds_assistant_timing_to_codex_output_sequence() {
+        let mut assistant = ChatMessage::new(ChatRole::Assistant, "");
+        assistant.created_at = Some("2026-07-17T12:00:00Z".into());
+        assistant.output_sequence = vec![crate::llm::OutputItem::ToolCall(ToolCall {
+            id: "call-1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "true"}),
+        })];
+
+        let history = build_chat_history(&[assistant], Some("system"));
+
+        assert!(matches!(
+            &history[1].output_sequence[..],
+            [crate::llm::OutputItem::Text(text), crate::llm::OutputItem::ToolCall(_)]
+                if text.contains("Message timestamp: 2026-07-17T12:00:00Z.")
+        ));
+        let codex_items = crate::llm::providers::codex::build_codex_messages(history);
+        assert!(
+            serde_json::to_string(&codex_items)
+                .unwrap()
+                .contains("Message timestamp: 2026-07-17T12:00:00Z.")
+        );
     }
 }
