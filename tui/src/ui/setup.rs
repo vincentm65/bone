@@ -181,6 +181,7 @@ impl State {
                 max_concurrency: entry.max_concurrency,
                 reasoning_effort: entry.reasoning_effort.clone(),
                 fast_mode: Some(entry.fast_mode),
+                supports_prompt_cache_key: Some(entry.supports_prompt_cache_key),
                 api_key: Some(key.to_string()),
             };
             if self.config.upsert_provider(update, revision).is_ok()

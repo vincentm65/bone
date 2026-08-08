@@ -482,8 +482,41 @@ fn resolve_event_type<'a>(raw: &'a Value, sse_event: &'a str) -> &'a str {
     sse_event
 }
 
-fn prompt_cache_key(context: &ProviderRequestContext) -> Option<String> {
-    context.conversation_id.map(codex_session_id)
+fn codex_request_identity(context: &ProviderRequestContext) -> Option<String> {
+    context
+        .conversation_id
+        .map(codex_session_id)
+        .or_else(|| context.cache_scope.as_deref().map(codex_scope_id))
+}
+
+/// Deterministically map an opaque provider cache scope to the UUID shape the
+/// Codex routing proxy expects.
+fn codex_scope_id(scope: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(scope.as_bytes());
+    let mut bytes: [u8; 16] = digest[..16].try_into().expect("SHA-256 has 16 bytes");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
 }
 
 /// Stable per-conversation session/thread id for the Codex routing headers, in
@@ -672,7 +705,7 @@ impl LlmProvider for CodexProvider {
     ) -> Result<ResponseStream, LlmError> {
         let instructions = build_instructions(&messages);
         let input_items = build_codex_messages(messages);
-        let prompt_cache_key = prompt_cache_key(&context);
+        let request_identity = codex_request_identity(&context);
         let codex_tools = codex_tools(tools);
         let tools = if codex_tools.is_empty() {
             None
@@ -696,7 +729,7 @@ impl LlmProvider for CodexProvider {
             service_tier: self.service_tier(),
             tools,
             tool_choice,
-            prompt_cache_key,
+            prompt_cache_key: request_identity.clone(),
             include: Some(vec!["reasoning.encrypted_content"]),
         };
 
@@ -720,8 +753,7 @@ impl LlmProvider for CodexProvider {
         // so the growing conversation prefix gets re-billed at the fresh-input
         // rate on most turns (the oscillating per-turn cache miss we measured).
         req = req.header("originator", "codex_cli_rs");
-        if let Some(conv_id) = context.conversation_id {
-            let session_id = codex_session_id(conv_id);
+        if let Some(session_id) = request_identity {
             req = req
                 .header("session-id", &session_id)
                 .header("thread-id", &session_id)

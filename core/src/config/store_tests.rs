@@ -115,21 +115,22 @@ fn provider_mutation_accepts_custom_reasoning_effort() {
         max_concurrency: None,
         reasoning_effort: "ultra".into(),
         fast_mode: None,
+        supports_prompt_cache_key: Some(true),
         api_key: None,
     };
 
     store.upsert_provider(update, before.revision).unwrap();
     let after = store.snapshot();
     assert_eq!(after.revision, before.revision + 1);
-    assert_eq!(
-        after
-            .providers
-            .iter()
-            .find(|provider| provider.id == "test")
-            .unwrap()
-            .reasoning_effort,
-        "ultra"
-    );
+    let provider = after
+        .providers
+        .iter()
+        .find(|provider| provider.id == "test")
+        .unwrap();
+    assert_eq!(provider.reasoning_effort, "ultra");
+    assert!(provider.supports_prompt_cache_key);
+    let persisted = super::super::domains::load_providers().unwrap().unwrap();
+    assert!(persisted.providers["test"].supports_prompt_cache_key);
 
     unsafe {
         match previous {
@@ -173,6 +174,7 @@ fn provider_mutation_rejects_invalid_completed_candidates() {
             max_concurrency,
             reasoning_effort: String::new(),
             fast_mode,
+            supports_prompt_cache_key: None,
             api_key: None,
         };
 
@@ -404,6 +406,7 @@ fn reload_settings_does_not_adopt_peer_documents() {
             max_concurrency: None,
             reasoning_effort: String::new(),
             fast_mode: false,
+            supports_prompt_cache_key: false,
         },
     );
     super::super::domains::persist_providers(&providers).unwrap();

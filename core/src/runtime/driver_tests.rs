@@ -42,23 +42,25 @@ fn turn_messages_after_user_append_trailing_user_message() {
 }
 
 #[test]
-fn history_rebuild_restores_ephemeral_image_relay() {
-    let image = crate::llm::ImageData {
+fn history_rebuild_restores_ephemeral_image_relays_in_order() {
+    let image = |data: &str| crate::llm::ImageData {
         media_type: "image/png".to_string(),
-        data: "png-data".to_string(),
+        data: data.to_string(),
         width: Some(1920),
         height: Some(1080),
         sha256: Some("abc123def456".into()),
     };
-    let relay = ChatMessage::user_with_images("screenshot", vec![image]);
+    let relays = vec![
+        ChatMessage::user_with_images("first", vec![image("png-data-1")]),
+        ChatMessage::user_with_images("second", vec![image("png-data-2")]),
+    ];
     let mut request_history = vec![ChatMessage::new(ChatRole::User, "rebuilt")];
-    let mut ephemeral_relay = Some((99, relay));
 
-    restore_ephemeral_image_relay(&mut request_history, &mut ephemeral_relay);
+    restore_ephemeral_image_relays(&mut request_history, &relays);
 
-    assert_eq!(ephemeral_relay.as_ref().map(|(index, _)| *index), Some(1));
-    assert_eq!(request_history.len(), 2);
-    assert_eq!(request_history[1].images[0].data, "png-data");
+    assert_eq!(request_history.len(), 3);
+    assert_eq!(request_history[1].images[0].data, "png-data-1");
+    assert_eq!(request_history[2].images[0].data, "png-data-2");
     assert_eq!(request_history[1].images[0].width, Some(1920));
     assert_eq!(request_history[1].images[0].height, Some(1080));
     assert_eq!(

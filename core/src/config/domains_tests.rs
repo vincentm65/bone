@@ -35,6 +35,7 @@ fn invalid_provider_updates_preserve_existing_document() {
                     max_concurrency,
                     reasoning_effort: "ultra".into(),
                     fast_mode,
+                    supports_prompt_cache_key: false,
                 },
             );
 

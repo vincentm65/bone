@@ -129,6 +129,7 @@ impl GrokBuildProvider {
             max_concurrency: None,
             reasoning_effort: self.reasoning_effort.clone(),
             fast_mode: false,
+            supports_prompt_cache_key: false,
         }
     }
 }

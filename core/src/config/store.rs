@@ -203,6 +203,12 @@ impl ConfigStore {
                 .get(&update.id)
                 .is_some_and(|entry| entry.fast_mode)
         });
+        let supports_prompt_cache_key = update.supports_prompt_cache_key.unwrap_or_else(|| {
+            config
+                .providers
+                .get(&update.id)
+                .is_some_and(|entry| entry.supports_prompt_cache_key)
+        });
         let api_key = update.api_key.clone().map(Into::into).unwrap_or_else(|| {
             config
                 .providers
@@ -223,6 +229,7 @@ impl ConfigStore {
                 max_concurrency: update.max_concurrency,
                 reasoning_effort: update.reasoning_effort.clone(),
                 fast_mode,
+                supports_prompt_cache_key,
             },
         );
         super::domains::validate_providers(&config).map_err(|error| (inner.revision, error))?;
@@ -583,6 +590,7 @@ impl ConfigStore {
                 max_concurrency: provider.max_concurrency,
                 reasoning_effort: provider.reasoning_effort.clone(),
                 fast_mode: provider.fast_mode,
+                supports_prompt_cache_key: provider.supports_prompt_cache_key,
                 api_key_configured: !provider.api_key.is_empty(),
             })
             .collect();
@@ -728,6 +736,13 @@ impl ConfigStore {
                     .get(&update.id)
                     .is_some_and(|entry| entry.fast_mode)
             });
+            let supports_prompt_cache_key = update.supports_prompt_cache_key.unwrap_or_else(|| {
+                inner
+                    .providers
+                    .providers
+                    .get(&update.id)
+                    .is_some_and(|entry| entry.supports_prompt_cache_key)
+            });
             let api_key = update.api_key.map(Into::into).unwrap_or_else(|| {
                 inner
                     .providers
@@ -747,6 +762,7 @@ impl ConfigStore {
                 max_concurrency: update.max_concurrency,
                 reasoning_effort: update.reasoning_effort,
                 fast_mode,
+                supports_prompt_cache_key,
             };
             let mut candidate = inner.providers.clone();
             candidate.providers.insert(update.id.clone(), entry);

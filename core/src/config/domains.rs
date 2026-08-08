@@ -109,6 +109,7 @@ pub fn load_or_seed_providers() -> Result<super::ProvidersConfig, String> {
                 max_concurrency: None,
                 reasoning_effort: String::new(),
                 fast_mode: false,
+                supports_prompt_cache_key: id == "openai",
             },
         );
     }

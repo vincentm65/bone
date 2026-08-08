@@ -206,9 +206,17 @@ fn build_request_parts(messages: Vec<ChatMessage>) -> (Vec<SystemBlock>, Vec<Ant
         }
     }
 
-    // Cache the whole stable prefix (tools + system) at the last system block.
+    // Cache tools + system at the last system block, then cache the growing
+    // conversation prefix at the final emitted content block.
     if let Some(last) = system.last_mut() {
         last.cache_control = Some(CacheControl::ephemeral());
+    }
+    if let Some(block) = out
+        .last_mut()
+        .and_then(|message| message.content.last_mut())
+        && let Some(object) = block.as_object_mut()
+    {
+        object.insert("cache_control".into(), json!({ "type": "ephemeral" }));
     }
 
     (system, out)

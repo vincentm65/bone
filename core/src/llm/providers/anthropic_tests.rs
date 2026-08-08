@@ -17,6 +17,42 @@ fn system_messages_become_cached_system_blocks() {
     assert_eq!(json["text"], "you are bone");
     assert_eq!(json["cache_control"]["type"], "ephemeral");
     assert_eq!(msgs.len(), 1);
+    let message = serde_json::to_value(&msgs[0]).unwrap();
+    assert_eq!(message["content"][0]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn only_final_conversation_block_gets_cache_breakpoint() {
+    let (_system, msgs) = build_request_parts(vec![
+        ChatMessage::new(ChatRole::User, "first"),
+        ChatMessage::new(ChatRole::Assistant, "middle"),
+        ChatMessage::new(ChatRole::User, "last"),
+    ]);
+    let json = serde_json::to_value(&msgs).unwrap();
+
+    assert!(json[0]["content"][0].get("cache_control").is_none());
+    assert!(json[1]["content"][0].get("cache_control").is_none());
+    assert_eq!(json[2]["content"][0]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn final_tool_result_block_gets_cache_breakpoint() {
+    let mut msg = ChatMessage::new(ChatRole::Tool, "42");
+    msg.tool_call_id = Some("call_1".to_string());
+    let (_system, msgs) = build_request_parts(vec![msg]);
+    let json = serde_json::to_value(&msgs[0]).unwrap();
+
+    assert_eq!(json["content"][0]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn empty_conversation_has_only_system_cache_breakpoint() {
+    let (system, msgs) =
+        build_request_parts(vec![ChatMessage::new(ChatRole::System, "you are bone")]);
+
+    assert!(msgs.is_empty());
+    let json = serde_json::to_value(&system[0]).unwrap();
+    assert_eq!(json["cache_control"]["type"], "ephemeral");
 }
 
 #[test]

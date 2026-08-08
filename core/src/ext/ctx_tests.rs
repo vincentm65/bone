@@ -1813,6 +1813,7 @@ fn private_llm_test_config(
         provider,
         request_context: ProviderRequestContext {
             conversation_id: Some(42),
+            cache_scope: Some("conversation-42".into()),
             turn_state: Some(Arc::clone(&turn_state)),
             max_tokens: None,
         },

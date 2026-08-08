@@ -70,6 +70,8 @@ pub struct ProviderConfig {
     pub reasoning_effort: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fast_mode: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_prompt_cache_key: bool,
     pub api_key_configured: bool,
 }
 
@@ -90,6 +92,9 @@ pub struct ProviderUpdate {
     /// Omitted updates preserve the provider's current value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_mode: Option<bool>,
+    /// Omitted updates preserve the provider's current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_prompt_cache_key: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }

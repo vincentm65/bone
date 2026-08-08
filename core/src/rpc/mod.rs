@@ -1369,6 +1369,7 @@ impl DaemonCtx {
         let private_provider_id = self.llm.id().to_string();
         let private_provider_model = self.llm.model().to_string();
         let private_conversation_id = app_state.session_id;
+        let private_cache_scope = crate::llm::provider::new_cache_scope(private_conversation_id);
         let private_turn_state = Arc::new(std::sync::OnceLock::new());
         let (live_tx, mut live_rx) = mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
@@ -1405,6 +1406,7 @@ impl DaemonCtx {
                 provider: private_provider,
                 request_context: crate::llm::provider::ProviderRequestContext {
                     conversation_id: private_conversation_id,
+                    cache_scope: Some(private_cache_scope),
                     turn_state: Some(private_turn_state),
                     max_tokens: None,
                 },

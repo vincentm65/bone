@@ -42,6 +42,15 @@ the environment.
 `init.lua` is for lightweight startup wiring. Put substantial implementations in
 purpose-specific Lua files and do not define a second settings table there.
 
+## Provider prompt cache keys
+
+OpenAI-compatible Chat Completions providers can set
+`supports_prompt_cache_key: true` in `providers.yaml` to send a stable
+`prompt_cache_key` with each request. This capability defaults to `false` so
+strict compatible APIs do not receive an unsupported field. Enable it only when
+the endpoint documentation confirms support. Bone enables it for the seeded
+official OpenAI provider.
+
 ## Main-agent system prompt
 
 `general.system_prompt` is a nullable daemon-owned string that replaces Bone's

@@ -10,7 +10,10 @@ use std::{
     error::Error,
     fmt,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crate::tools::{TRUNCATED_ARGS_KEY, ToolDefinition};
@@ -155,9 +158,26 @@ pub fn http_error(status: reqwest::StatusCode, url: &str, body: &str) -> LlmErro
     LlmError::new_with_kind(http_status_to_error_kind(status), msg)
 }
 
+static NEXT_CACHE_SCOPE: AtomicU64 = AtomicU64::new(1);
+
+/// Stable cache namespace for all provider requests in one run. Durable
+/// conversations retain a deterministic namespace across process restarts.
+pub fn new_cache_scope(conversation_id: Option<i64>) -> String {
+    conversation_id.map_or_else(
+        || {
+            let sequence = NEXT_CACHE_SCOPE.fetch_add(1, Ordering::Relaxed);
+            format!("run-{}-{sequence}", std::process::id())
+        },
+        |id| format!("conversation-{id}"),
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRequestContext {
     pub conversation_id: Option<i64>,
+    /// Opaque cache identity shared by retries, tool rounds, and private
+    /// requests within one run.
+    pub cache_scope: Option<String>,
     /// Backend routing state scoped to one submitted user turn. Providers may
     /// capture it from the first response and replay it for retries and tool
     /// rounds, but it must not be reused by a later user turn.

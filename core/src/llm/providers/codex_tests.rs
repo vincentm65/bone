@@ -1,11 +1,69 @@
 use super::{
-    CodexProvider, CodexRequest, CodexResponse, extract_response_events, output_index,
-    process_summary_event,
+    CodexProvider, CodexRequest, CodexResponse, codex_request_identity, extract_response_events,
+    output_index, process_summary_event,
 };
-use crate::llm::provider::{ChatEvent, LlmProvider};
+use crate::llm::provider::{ChatEvent, LlmProvider, ProviderRequestContext};
 use crate::tools::TRUNCATED_ARGS_KEY;
 use serde_json::json;
 use std::collections::BTreeSet;
+
+#[test]
+fn conversation_identity_takes_precedence_over_cache_scope() {
+    let context = ProviderRequestContext {
+        conversation_id: Some(42),
+        cache_scope: Some("run-ignored".into()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        codex_request_identity(&context).as_deref(),
+        Some("00000000-0000-4000-8000-00000000002a")
+    );
+}
+
+#[test]
+fn cache_scope_identity_is_stable_and_uuid_shaped() {
+    let context = ProviderRequestContext {
+        cache_scope: Some("delegated-run".into()),
+        ..Default::default()
+    };
+    let identity = codex_request_identity(&context).unwrap();
+
+    assert_eq!(identity, codex_request_identity(&context).unwrap());
+    assert_eq!(identity.len(), 36);
+    assert_eq!(
+        identity
+            .char_indices()
+            .filter_map(|(index, ch)| (ch == '-').then_some(index))
+            .collect::<Vec<_>>(),
+        vec![8, 13, 18, 23]
+    );
+}
+
+#[test]
+fn different_cache_scopes_have_different_identities() {
+    let first = ProviderRequestContext {
+        cache_scope: Some("run-1".into()),
+        ..Default::default()
+    };
+    let second = ProviderRequestContext {
+        cache_scope: Some("run-2".into()),
+        ..Default::default()
+    };
+
+    assert_ne!(
+        codex_request_identity(&first),
+        codex_request_identity(&second)
+    );
+}
+
+#[test]
+fn missing_conversation_and_scope_has_no_identity() {
+    assert_eq!(
+        codex_request_identity(&ProviderRequestContext::default()),
+        None
+    );
+}
 
 #[test]
 fn fast_mode_maps_to_priority_service_tier() {

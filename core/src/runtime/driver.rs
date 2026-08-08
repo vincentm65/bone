@@ -63,14 +63,8 @@ fn append_turn_messages(request_history: &mut Vec<ChatMessage>, turn_messages: &
     }
 }
 
-fn restore_ephemeral_image_relay(
-    request_history: &mut Vec<ChatMessage>,
-    relay: &mut Option<(usize, ChatMessage)>,
-) {
-    if let Some((index, message)) = relay {
-        *index = request_history.len();
-        request_history.push(message.clone());
-    }
+fn restore_ephemeral_image_relays(request_history: &mut Vec<ChatMessage>, relays: &[ChatMessage]) {
+    request_history.extend(relays.iter().cloned());
 }
 
 #[cfg(test)]
@@ -414,15 +408,15 @@ impl Driver {
         // lets each tool round extend the previous provider-cache prefix while
         // still leaving them out of the persisted transcript.
         let mut request_history = history.clone();
-        // Request-only relay for ephemeral tool images. Keep both its current
-        // index and payload so history rebuilds can restore it without ever
-        // adding the screenshot to the persisted transcript.
-        let mut ephemeral_image_relay: Option<(usize, ChatMessage)> = None;
+        // Request-only relays for ephemeral tool images. Preserve every relay
+        // in insertion order while keeping them out of persistence.
+        let mut ephemeral_image_relays: Vec<ChatMessage> = Vec::new();
         let mut last_turn_messages: Vec<String> = Vec::new();
         // The Codex backend returns routing state on the first request of a
         // user turn. Keep it across retries and tool rounds in this run, but
         // create a fresh cell for every later submitted user message/run.
         let turn_state = Arc::new(OnceLock::new());
+        let cache_scope = crate::llm::provider::new_cache_scope(conversation_id);
         let result: Result<String, String> = 'turn: loop {
             if is_cancelled() {
                 break Ok(String::new());
@@ -502,6 +496,7 @@ impl Driver {
                     provider: Arc::clone(&llm),
                     request_context: ProviderRequestContext {
                         conversation_id,
+                        cache_scope: Some(cache_scope.clone()),
                         turn_state: Some(Arc::clone(&turn_state)),
                         max_tokens: None,
                     },
@@ -604,13 +599,13 @@ impl Driver {
                     transcript_replaced = true;
                     history = build_chat_history(&transcript, active_system_prompt.as_deref());
                     request_history = history.clone();
-                    restore_ephemeral_image_relay(&mut request_history, &mut ephemeral_image_relay);
+                    restore_ephemeral_image_relays(&mut request_history, &ephemeral_image_relays);
                     last_turn_messages.clear();
                     token_stats.clear_context_anchor();
                 } else if !sys_appends.is_empty() {
                     history = build_chat_history(&transcript, active_system_prompt.as_deref());
                     request_history = history.clone();
-                    restore_ephemeral_image_relay(&mut request_history, &mut ephemeral_image_relay);
+                    restore_ephemeral_image_relays(&mut request_history, &ephemeral_image_relays);
                     last_turn_messages.clear();
                 }
 
@@ -652,6 +647,7 @@ impl Driver {
                     turn_tool_defs.clone(),
                     ProviderRequestContext {
                         conversation_id,
+                        cache_scope: Some(cache_scope.clone()),
                         turn_state: Some(Arc::clone(&turn_state)),
                         max_tokens: None,
                     },
@@ -1032,12 +1028,8 @@ impl Driver {
                     relay.created_at = Some(crate::util::utc_now());
                     let provider_relay = model_facing_message(&relay, None);
                     if result.ephemeral_images {
-                        if let Some((index, _)) = ephemeral_image_relay.take() {
-                            request_history.remove(index);
-                        }
-                        let index = request_history.len();
                         request_history.push(provider_relay.clone());
-                        ephemeral_image_relay = Some((index, provider_relay));
+                        ephemeral_image_relays.push(provider_relay);
                     } else {
                         session_seq += 1;
                         session.append_chat_message(&relay, session_seq);

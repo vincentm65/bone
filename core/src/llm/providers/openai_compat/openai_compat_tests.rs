@@ -1,7 +1,7 @@
 use super::{
     ChatEvent, ChatRequest, OpenAiCompatProvider, ThinkParser, cached_tokens_from_usage,
-    flush_stream_end, openai_messages, openai_tools, process_sse_chunk, split_reasoning_events,
-    stream_usage_enabled,
+    flush_stream_end, openai_messages, openai_tools, process_sse_chunk, prompt_cache_key,
+    split_reasoning_events, stream_usage_enabled,
 };
 use crate::llm::provider::{LlmProvider, ProviderRequestContext};
 use crate::llm::{ChatMessage, ChatRole, ImageData};
@@ -234,9 +234,11 @@ fn omits_reasoning_effort_when_unset() {
         stream_options: None,
         max_tokens: None,
         reasoning_effort: None,
+        prompt_cache_key: None,
     };
     let json = serde_json::to_value(&request).unwrap();
     assert!(json.get("reasoning_effort").is_none());
+    assert!(json.get("prompt_cache_key").is_none());
 }
 
 #[test]
@@ -249,9 +251,45 @@ fn serializes_reasoning_effort_when_set() {
         stream_options: None,
         max_tokens: None,
         reasoning_effort: Some("high".into()),
+        prompt_cache_key: None,
     };
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["reasoning_effort"], "high");
+}
+
+#[test]
+fn prompt_cache_key_is_capability_gated() {
+    let context = ProviderRequestContext {
+        cache_scope: Some("conversation-42".into()),
+        ..Default::default()
+    };
+
+    assert_eq!(prompt_cache_key(false, &context), None);
+    assert_eq!(
+        prompt_cache_key(true, &context).as_deref(),
+        Some("conversation-42")
+    );
+    assert_eq!(
+        prompt_cache_key(true, &ProviderRequestContext::default()),
+        None
+    );
+}
+
+#[test]
+fn serializes_prompt_cache_key_when_present() {
+    let request = ChatRequest {
+        model: "gpt-4".into(),
+        messages: vec![],
+        stream: true,
+        tools: vec![],
+        stream_options: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        prompt_cache_key: Some("conversation-42".into()),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["prompt_cache_key"], "conversation-42");
 }
 
 #[test]
@@ -268,9 +306,11 @@ fn from_entry_reads_reasoning_effort() {
         max_concurrency: None,
         reasoning_effort: "HIGH".into(),
         fast_mode: false,
+        supports_prompt_cache_key: true,
     };
     let provider = OpenAiCompatProvider::from_entry("grok", &entry);
     assert_eq!(provider.reasoning_effort.as_deref(), Some("high"));
+    assert!(provider.supports_prompt_cache_key);
 
     let empty = ProviderEntry {
         reasoning_effort: "default".into(),
@@ -291,6 +331,7 @@ fn context_max_tokens_overrides_configured_cap_in_chat_request() {
         stream_options: None,
         max_tokens: Some(3_000), // context override value
         reasoning_effort: None,
+        prompt_cache_key: None,
     };
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["max_tokens"], 3_000);
@@ -307,6 +348,7 @@ fn configured_cap_used_when_context_max_tokens_is_none() {
         stream_options: None,
         max_tokens: Some(8_000), // configured cap
         reasoning_effort: None,
+        prompt_cache_key: None,
     };
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["max_tokens"], 8_000);
@@ -327,6 +369,7 @@ fn context_max_tokens_does_not_mutate_configured_cap() {
         max_concurrency: None,
         reasoning_effort: String::new(),
         fast_mode: false,
+        supports_prompt_cache_key: false,
     };
     let mut provider = OpenAiCompatProvider::from_entry("gpt", &entry);
     provider.set_max_tokens(Some(16_000));

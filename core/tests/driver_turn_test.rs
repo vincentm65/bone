@@ -1441,7 +1441,7 @@ impl Tool for EphemeralImageTool {
 }
 
 #[tokio::test]
-async fn driver_keeps_only_latest_ephemeral_image_in_request_history() {
+async fn driver_preserves_ephemeral_images_in_request_history() {
     let prompt = "observe";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
     let history = build_chat_history(&transcript, None);
@@ -1512,13 +1512,22 @@ async fn driver_keeps_only_latest_ephemeral_image_in_request_history() {
     );
     assert_eq!(
         images(&captured[2]),
-        vec![bone_core::llm::ImageData {
-            media_type: "image/jpeg".into(),
-            data: "ephemeral-base64-2".into(),
-            width: Some(102),
-            height: Some(202),
-            sha256: Some("sha256-2".into()),
-        }]
+        vec![
+            bone_core::llm::ImageData {
+                media_type: "image/jpeg".into(),
+                data: "ephemeral-base64-1".into(),
+                width: Some(101),
+                height: Some(201),
+                sha256: Some("sha256-1".into()),
+            },
+            bone_core::llm::ImageData {
+                media_type: "image/jpeg".into(),
+                data: "ephemeral-base64-2".into(),
+                width: Some(102),
+                height: Some(202),
+                sha256: Some("sha256-2".into()),
+            },
+        ]
     );
 
     for message in outcome
@@ -1610,7 +1619,8 @@ bone.tool.register({
         .iter()
         .find(|message| message.role == ChatRole::Tool)
         .expect("second request contains Lua tool result");
-    assert_eq!(tool_result.content, "77:mock:mock-ctx");
+    assert!(tool_result.content.starts_with("77:mock:mock-ctx"));
+    assert!(tool_result.content.contains("<timing>Tool timing:"));
 
     std::fs::remove_dir_all(&config_dir).ok();
 }
@@ -1704,7 +1714,8 @@ bone.tool.register({
         .iter()
         .find(|message| message.role == ChatRole::Tool)
         .expect("second request contains dynamic tool result");
-    assert_eq!(tool_result.content, "dynamic-ok");
+    assert!(tool_result.content.starts_with("dynamic-ok"));
+    assert!(tool_result.content.contains("<timing>Tool timing:"));
     drop(captured);
     let safety: String = lua
         .lock()

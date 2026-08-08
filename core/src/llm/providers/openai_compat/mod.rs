@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
-    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ResponseStream,
-    http_error, parse_tool_arguments, streaming_client,
+    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ProviderRequestContext,
+    ResponseStream, http_error, parse_tool_arguments, streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -34,6 +34,7 @@ pub struct OpenAiCompatProvider {
     /// Optional Chat Completions `reasoning_effort` (xAI / Grok, etc.).
     /// Empty/default means omit and let the model use its own default.
     reasoning_effort: Option<String>,
+    supports_prompt_cache_key: bool,
     context_window_tokens: Option<u64>,
     /// Optional transport overrides used by subscription-backed providers
     /// that speak the same Chat Completions wire format.
@@ -59,6 +60,7 @@ impl OpenAiCompatProvider {
             endpoint: entry.endpoint.clone(),
             max_tokens: None,
             reasoning_effort: entry.reasoning_effort_opt(),
+            supports_prompt_cache_key: entry.supports_prompt_cache_key,
             context_window_tokens: entry.context_window_tokens,
             api_key_override: None,
             extra_headers: Vec::new(),
@@ -98,6 +100,10 @@ fn stream_usage_enabled(base_url: &str) -> bool {
         || base_url.contains("localhost")
 }
 
+fn prompt_cache_key(enabled: bool, context: &ProviderRequestContext) -> Option<String> {
+    enabled.then(|| context.cache_scope.clone()).flatten()
+}
+
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
@@ -113,6 +119,8 @@ struct ChatRequest {
     /// OpenAI-compatible backends are unaffected.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -569,7 +577,7 @@ impl LlmProvider for OpenAiCompatProvider {
         &self,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
-        context: crate::llm::provider::ProviderRequestContext,
+        context: ProviderRequestContext,
     ) -> Result<ResponseStream, LlmError> {
         let stream_options = stream_usage_enabled(&self.base_url).then_some(StreamOptions {
             include_usage: true,
@@ -583,6 +591,7 @@ impl LlmProvider for OpenAiCompatProvider {
             stream_options,
             max_tokens: context.max_tokens.or(self.max_tokens),
             reasoning_effort: self.reasoning_effort.clone(),
+            prompt_cache_key: prompt_cache_key(self.supports_prompt_cache_key, &context),
         };
 
         let mut req = self.client.post(self.chat_url()).json(&request);

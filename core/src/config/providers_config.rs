@@ -127,6 +127,11 @@ pub struct ProviderEntry {
     /// reads it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub fast_mode: bool,
+
+    /// Send OpenAI's `prompt_cache_key` request field. Disabled by default so
+    /// strict OpenAI-compatible APIs do not receive an unsupported field.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_prompt_cache_key: bool,
 }
 
 fn is_false(value: &bool) -> bool {
