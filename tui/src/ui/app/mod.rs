@@ -1603,8 +1603,8 @@ impl App {
                     msg.images.len(),
                 )),
                 ChatRole::Assistant => {
-                    if !msg.content.trim().is_empty() {
-                        rows.push(Message::assistant(msg.content.clone()));
+                    if let Some(message) = assistant_display_message(&msg.content) {
+                        rows.push(message);
                     }
                 }
                 ChatRole::Tool => {
@@ -2445,6 +2445,11 @@ impl App {
     }
 }
 
+fn assistant_display_message(content: &str) -> Option<Message> {
+    let content = crate::ui::timing::strip_timing_blocks(content);
+    (!content.trim().is_empty()).then(|| Message::assistant(content))
+}
+
 fn edit_diff_message(name: &str, is_error: bool, content: &str) -> Option<Message> {
     if name != "edit_file" || is_error || !content.starts_with("Edited: ") {
         return None;
@@ -2463,11 +2468,14 @@ fn orphaned_tool_result_row(name: String, is_error: bool) -> Option<Message> {
 fn job_snapshot_messages(job: &bone_protocol::JobSnapshot, wire_tools: &WireTools) -> Vec<Message> {
     let mut rows = vec![Message::user(job.task.clone())];
     let mut answer = String::new();
+    let mut timing_filter = crate::ui::timing::TimingBlockFilter::default();
     let mut calls = std::collections::HashMap::new();
     let mut shown_edit_previews = std::collections::HashSet::new();
     for event in &job.events {
         match event {
-            bone_protocol::JobEventSnapshot::TextDelta { text } => answer.push_str(text),
+            bone_protocol::JobEventSnapshot::TextDelta { text } => {
+                answer.push_str(&timing_filter.push(text));
+            }
             bone_protocol::JobEventSnapshot::ReasoningDelta { text } if !text.is_empty() => {
                 rows.push(Message::system(format!("thinking: {text}")));
             }
@@ -2477,9 +2485,11 @@ fn job_snapshot_messages(job: &bone_protocol::JobSnapshot, wire_tools: &WireTool
                 arguments,
                 edit_preview,
             } => {
-                if !answer.trim().is_empty() {
-                    rows.push(Message::assistant(std::mem::take(&mut answer)));
+                answer.push_str(&timing_filter.finish());
+                if let Some(message) = assistant_display_message(&answer) {
+                    rows.push(message);
                 }
+                answer.clear();
                 calls.insert(
                     id.clone(),
                     ToolCall {
@@ -2530,8 +2540,9 @@ fn job_snapshot_messages(job: &bone_protocol::JobSnapshot, wire_tools: &WireTool
             bone_protocol::JobEventSnapshot::ReasoningDelta { .. } => {}
         }
     }
-    if !answer.trim().is_empty() {
-        rows.push(Message::assistant(answer));
+    answer.push_str(&timing_filter.finish());
+    if let Some(message) = assistant_display_message(&answer) {
+        rows.push(message);
     }
     if rows.len() == 1 {
         let status = job.activity.as_deref().unwrap_or("starting");
@@ -3673,8 +3684,11 @@ impl App {
         reply: impl Into<String>,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        self.messages.push(Message::assistant(reply.into()));
-        self.flush_new_messages_to_scrollback(term)
+        if let Some(message) = assistant_display_message(&reply.into()) {
+            self.messages.push(message);
+            self.flush_new_messages_to_scrollback(term)?;
+        }
+        Ok(())
     }
 
     /// Launch `<bone-exe> <subcommand>` in a tmux `display-popup` sized

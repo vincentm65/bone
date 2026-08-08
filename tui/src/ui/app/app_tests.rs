@@ -1,8 +1,8 @@
 use super::stream::{StreamAttempt, discard_stream_attempt};
 use super::{
     App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
-    approval_already_pending, background_pane_needs_refresh, config_rejection_message,
-    configured_input_style, edit_diff_message, idle_state_needs_redraw,
+    approval_already_pending, assistant_display_message, background_pane_needs_refresh,
+    config_rejection_message, configured_input_style, edit_diff_message, idle_state_needs_redraw,
     job_quit_confirmation_required, job_snapshot_messages, lua_config_available,
     orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, render_config_page,
     run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status, take_pending_config,
@@ -65,6 +65,30 @@ fn discarded_stream_attempt_removes_only_partial_agent_rows() {
         &mut cur_idx
     ));
     assert_eq!(messages.len(), 3);
+}
+
+#[test]
+fn streamed_timing_only_deltas_stay_hidden_and_retry_resets_filter() {
+    let mut attempt = StreamAttempt::default();
+    assert_eq!(attempt.filter_text("<tim"), "");
+    assert_eq!(attempt.filter_text("ing>metadata</timing>"), "");
+
+    let mut messages = Vec::new();
+    let mut cur_idx = None;
+    assert!(discard_stream_attempt(
+        &mut messages,
+        &mut attempt,
+        &mut cur_idx
+    ));
+    assert!(messages.is_empty());
+    assert_eq!(attempt.filter_text("visible"), "visible");
+}
+
+#[test]
+fn restored_assistant_content_strips_timing_and_omits_timing_only_rows() {
+    let message = assistant_display_message("before<timing>metadata</timing>after").unwrap();
+    assert_eq!(message.content, "beforeafter");
+    assert!(assistant_display_message("<timing>metadata</timing>").is_none());
 }
 
 #[test]
@@ -496,6 +520,22 @@ fn orphaned_successful_tool_results_are_hidden_but_errors_remain_visible() {
     let tool = error.tool.unwrap();
     assert_eq!(tool.label, "subagent");
     assert!(tool.is_error);
+}
+
+#[test]
+fn job_snapshot_strips_timing_split_across_deltas() {
+    let events = vec![
+        bone_protocol::JobEventSnapshot::TextDelta {
+            text: "before<tim".into(),
+        },
+        bone_protocol::JobEventSnapshot::TextDelta {
+            text: "ing>metadata</timing>after".into(),
+        },
+    ];
+
+    let rows = job_snapshot_messages(&job_with_events(events), &WireTools::default());
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].content, "beforeafter");
 }
 
 #[test]

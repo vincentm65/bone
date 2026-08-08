@@ -19,5 +19,6 @@ pub(crate) mod selectable_pane;
 pub mod setup;
 pub mod stats;
 pub mod theme;
+pub(crate) mod timing;
 pub mod tool_display;
 pub mod transcript_view;

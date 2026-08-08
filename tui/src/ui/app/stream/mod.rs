@@ -8,6 +8,7 @@ use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
 use crate::ui::selectable_pane::{SelectablePaneAction, apply_agent_nav_key, apply_nav_key};
+use crate::ui::timing::TimingBlockFilter;
 use crate::ui::tool_display::{build_tool_row, format_shell_call_label};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::{HashSet, VecDeque};
@@ -242,11 +243,17 @@ fn is_stream_retry_status(message: &str) -> bool {
 pub(super) struct StreamAttempt {
     active: bool,
     message_indices: Vec<usize>,
+    timing_filter: TimingBlockFilter,
 }
 
 impl StreamAttempt {
     fn begin(&mut self) {
         self.active = true;
+    }
+
+    pub(super) fn filter_text(&mut self, text: &str) -> String {
+        self.begin();
+        self.timing_filter.push(text)
     }
 
     pub(super) fn track_message(&mut self, index: usize) {
@@ -256,9 +263,10 @@ impl StreamAttempt {
         }
     }
 
-    fn commit(&mut self) {
+    fn commit(&mut self) -> String {
         self.active = false;
         self.message_indices.clear();
+        self.timing_filter.finish()
     }
 }
 
@@ -282,6 +290,7 @@ pub(super) fn discard_stream_attempt(
         }
     }
     attempt.active = false;
+    attempt.timing_filter.reset();
     *cur_idx = None;
     true
 }
@@ -647,6 +656,12 @@ impl App {
 
         // The daemon applied the outcome; resync the frontend view from the
         // shared session so status bar reads reflect the post-turn truth.
+
+        let trailing_text = stream_attempt.commit();
+        if !trailing_text.is_empty() {
+            let idx = self.pump_ensure_assistant(&mut cur_idx);
+            self.messages[idx].content.push_str(&trailing_text);
+        }
 
         // Use `cancel_sent`, not `self.cancel_streaming`: the in-loop branch
         // above resets `cancel_streaming` to false every iteration (so a late
@@ -1031,14 +1046,17 @@ impl App {
         use crate::runtime::RuntimeEvent;
         match ev {
             RuntimeEvent::TextDelta { text } => {
-                // The answer is starting — fade out the live thinking pane,
-                // honoring its minimum on-screen retention.
-                self.fade_thinking_pane();
-                let idx = self.pump_ensure_assistant(cur_idx);
-                stream_attempt.track_message(idx);
                 self.bump_estimated_received(text.len());
-                self.messages[idx].content.push_str(&text);
-                self.flush_streaming_to_scrollback(idx, term)?;
+                let text = stream_attempt.filter_text(&text);
+                if !text.is_empty() {
+                    // The visible answer is starting — fade out the live thinking
+                    // pane, honoring its minimum on-screen retention.
+                    self.fade_thinking_pane();
+                    let idx = self.pump_ensure_assistant(cur_idx);
+                    stream_attempt.track_message(idx);
+                    self.messages[idx].content.push_str(&text);
+                    self.flush_streaming_to_scrollback(idx, term)?;
+                }
             }
             RuntimeEvent::ReasoningDelta { text } => {
                 stream_attempt.begin();
@@ -1249,7 +1267,11 @@ impl App {
                 // Receiving a result proves the provider attempt that produced
                 // this call completed successfully. Its streamed rows are now
                 // committed and must not be removed by a later attempt's retry.
-                stream_attempt.commit();
+                let trailing_text = stream_attempt.commit();
+                if !trailing_text.is_empty() {
+                    let idx = self.pump_ensure_assistant(cur_idx);
+                    self.messages[idx].content.push_str(&trailing_text);
+                }
                 // The tool finished, so it won't re-arm a key request — release
                 // input ownership latched by any `ctx.ui.key()` call, otherwise
                 // every later keystroke this turn buffers instead of reaching

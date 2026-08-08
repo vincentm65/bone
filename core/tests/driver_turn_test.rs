@@ -1793,8 +1793,8 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
         .iter()
         .find(|m| m.role == ChatRole::Assistant && !m.tool_calls.is_empty())
         .expect("second request includes assistant tool-call message");
-    assert!(assistant.content.starts_with("I'll run read_file now."));
-    assert!(assistant.content.contains("<timing>Message timestamp:"));
+    assert_eq!(assistant.content, "I'll run read_file now.");
+    assert!(!assistant.content.contains("<timing>"));
     assert_eq!(assistant.tool_calls[0].name, "read_file");
 
     let tool = captured[1]
