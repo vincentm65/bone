@@ -352,20 +352,22 @@ impl ToolHandler {
         &self.dynamic_display
     }
 
-    pub fn all_definitions(&self) -> Vec<ToolDefinition> {
+    fn definitions_filtered(&self, enabled_only: bool) -> Vec<ToolDefinition> {
         self.registry
             .definitions()
             .into_iter()
-            .filter(|tool| !tool.name.starts_with('/'))
+            .filter(|tool| {
+                !tool.name.starts_with('/') && (!enabled_only || self.is_enabled(&tool.name))
+            })
             .collect()
     }
 
+    pub fn all_definitions(&self) -> Vec<ToolDefinition> {
+        self.definitions_filtered(false)
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.registry
-            .definitions()
-            .into_iter()
-            .filter(|tool| self.is_enabled(&tool.name) && !tool.name.starts_with('/'))
-            .collect()
+        self.definitions_filtered(true)
     }
 
     pub fn safety_for_call(&self, call: &ToolCall) -> CommandSafety {

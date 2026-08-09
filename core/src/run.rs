@@ -95,8 +95,9 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
     let config_dir = crate::config::bone_dir();
     let config = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())?;
 
-    // Try Lua command expansion first.
-    if let Some(prompt) = expand_lua_command(
+    // Try Lua command expansion first, then construct one agent request with
+    // whichever prompt was effective.
+    let prompt = expand_lua_command(
         &request.prompt,
         &config_dir,
         request.approval_mode,
@@ -105,32 +106,8 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         config.clone(),
     )
     .await
-    {
-        return agent::run_agent(AgentRequest {
-            prompt,
-            approval_mode: request.approval_mode,
-            provider: request.provider,
-            model: request.model,
-            system_prompt: request.system_prompt,
-            events: request.events,
-            event_sender: None,
-            agent_depth: 0,
-            on_token_usage: None,
-            activity: None,
-            llm: None,
-            session_sink: None,
-            background_scope: None,
-            tool_allowlist: None,
-            max_tokens: None,
-            approval_gate: None,
-            transcript: None,
-            config_store: Some(config),
-            cancel: None,
-        })
-        .await;
-    }
+    .unwrap_or(request.prompt);
 
-    let prompt = request.prompt.clone();
     agent::run_agent(AgentRequest {
         prompt,
         approval_mode: request.approval_mode,

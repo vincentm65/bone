@@ -685,12 +685,8 @@ impl PendingInteractions {
         self.events.insert(id, event.clone());
     }
 
-    fn remove_approval(&mut self, id: u64) {
-        self.events.remove(&InteractionId::Approval(id));
-    }
-
-    fn remove_key(&mut self, id: u64) {
-        self.events.remove(&InteractionId::Key(id));
+    fn remove(&mut self, id: InteractionId) {
+        self.events.remove(&id);
     }
 
     fn replay(&self, hub: &HubPublisher) {
@@ -1464,11 +1460,12 @@ impl DaemonCtx {
                 cmd = commands.recv() => match cmd {
                     Some(RuntimeCommand::ApprovalReply { id, outcome }) => {
                         self.approval_registry.resolve(id, outcome);
-                        self.pending_interactions.remove_approval(id);
+                        self.pending_interactions
+                            .remove(InteractionId::Approval(id));
                     }
                     Some(RuntimeCommand::KeyReply { id, key }) => {
                         self.key_registry.resolve(id, key);
-                        self.pending_interactions.remove_key(id);
+                        self.pending_interactions.remove(InteractionId::Key(id));
                     }
                     Some(RuntimeCommand::Synchronize {
                         request_id,
@@ -2352,11 +2349,12 @@ impl DaemonCtx {
                         conn.send(cmd);
                     }
                     Some(cmd @ RuntimeCommand::ApprovalReply { id, .. }) => {
-                        self.pending_interactions.remove_approval(id);
+                        self.pending_interactions
+                            .remove(InteractionId::Approval(id));
                         conn.send(cmd);
                     }
                     Some(cmd @ RuntimeCommand::KeyReply { id, .. }) => {
-                        self.pending_interactions.remove_key(id);
+                        self.pending_interactions.remove(InteractionId::Key(id));
                         conn.send(cmd);
                     }
                     Some(RuntimeCommand::CancelJob { id }) => self.cancel_job(&id),

@@ -806,43 +806,28 @@ fn open_headless_session(provider: &str, model: &str) -> SessionWriter {
 }
 
 pub(crate) fn summarize_call_args(call: &crate::tools::ToolCall) -> String {
-    match call.name.as_str() {
-        "shell" => call
+    if let Some(key) = match call.name.as_str() {
+        "shell" => Some("command"),
+        "create_file" | "edit_file" | "read_file" => Some("path"),
+        _ => None,
+    } {
+        return call
             .arguments
-            .get("command")
-            .and_then(|v| v.as_str())
+            .get(key)
+            .and_then(|value| value.as_str())
             .unwrap_or("")
-            .to_string(),
-        "create_file" => call
-            .arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "edit_file" => call
-            .arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "read_file" => call
-            .arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        _ => {
-            let json = serde_json::to_string(&call.arguments).unwrap_or_default();
-            if json.len() > 80 {
-                let mut end = 77;
-                while !json.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...", &json[..end])
-            } else {
-                json
-            }
+            .to_string();
+    }
+
+    let json = serde_json::to_string(&call.arguments).unwrap_or_default();
+    if json.len() > 80 {
+        let mut end = 77;
+        while !json.is_char_boundary(end) {
+            end -= 1;
         }
+        format!("{}...", &json[..end])
+    } else {
+        json
     }
 }
 

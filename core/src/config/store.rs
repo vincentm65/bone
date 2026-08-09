@@ -34,6 +34,37 @@ struct Inner {
     disabled_commands: Vec<String>,
 }
 
+fn merge_provider_update(
+    update: &ProviderUpdate,
+    existing: Option<&super::ProviderEntry>,
+) -> super::ProviderEntry {
+    let fast_mode = update
+        .fast_mode
+        .unwrap_or_else(|| existing.is_some_and(|entry| entry.fast_mode));
+    let supports_prompt_cache_key = update
+        .supports_prompt_cache_key
+        .unwrap_or_else(|| existing.is_some_and(|entry| entry.supports_prompt_cache_key));
+    let api_key = update.api_key.clone().map(Into::into).unwrap_or_else(|| {
+        existing
+            .map(|entry| entry.api_key.clone())
+            .unwrap_or_default()
+    });
+
+    super::ProviderEntry {
+        label: update.label.clone(),
+        base_url: update.base_url.clone(),
+        model: update.model.clone(),
+        api_key,
+        endpoint: update.endpoint.clone(),
+        handler: update.handler.clone(),
+        context_window_tokens: update.context_window_tokens,
+        max_concurrency: update.max_concurrency,
+        reasoning_effort: update.reasoning_effort.clone(),
+        fast_mode,
+        supports_prompt_cache_key,
+    }
+}
+
 impl ConfigStore {
     #[doc(hidden)]
     pub fn for_test() -> Self {
@@ -197,41 +228,8 @@ impl ConfigStore {
             ));
         }
         let mut config = inner.providers.clone();
-        let fast_mode = update.fast_mode.unwrap_or_else(|| {
-            config
-                .providers
-                .get(&update.id)
-                .is_some_and(|entry| entry.fast_mode)
-        });
-        let supports_prompt_cache_key = update.supports_prompt_cache_key.unwrap_or_else(|| {
-            config
-                .providers
-                .get(&update.id)
-                .is_some_and(|entry| entry.supports_prompt_cache_key)
-        });
-        let api_key = update.api_key.clone().map(Into::into).unwrap_or_else(|| {
-            config
-                .providers
-                .get(&update.id)
-                .map(|entry| entry.api_key.clone())
-                .unwrap_or_default()
-        });
-        config.providers.insert(
-            update.id.clone(),
-            super::ProviderEntry {
-                label: update.label.clone(),
-                base_url: update.base_url.clone(),
-                model: update.model.clone(),
-                api_key,
-                endpoint: update.endpoint.clone(),
-                handler: update.handler.clone(),
-                context_window_tokens: update.context_window_tokens,
-                max_concurrency: update.max_concurrency,
-                reasoning_effort: update.reasoning_effort.clone(),
-                fast_mode,
-                supports_prompt_cache_key,
-            },
-        );
+        let entry = merge_provider_update(update, config.providers.get(&update.id));
+        config.providers.insert(update.id.clone(), entry);
         super::domains::validate_providers(&config).map_err(|error| (inner.revision, error))?;
         Ok(config)
     }
@@ -729,42 +727,8 @@ impl ConfigStore {
         expected: u64,
     ) -> Result<(), (u64, String)> {
         self.mutate(expected, |inner| {
-            let fast_mode = update.fast_mode.unwrap_or_else(|| {
-                inner
-                    .providers
-                    .providers
-                    .get(&update.id)
-                    .is_some_and(|entry| entry.fast_mode)
-            });
-            let supports_prompt_cache_key = update.supports_prompt_cache_key.unwrap_or_else(|| {
-                inner
-                    .providers
-                    .providers
-                    .get(&update.id)
-                    .is_some_and(|entry| entry.supports_prompt_cache_key)
-            });
-            let api_key = update.api_key.map(Into::into).unwrap_or_else(|| {
-                inner
-                    .providers
-                    .providers
-                    .get(&update.id)
-                    .map(|entry| entry.api_key.clone())
-                    .unwrap_or_default()
-            });
-            let entry = super::ProviderEntry {
-                label: update.label,
-                base_url: update.base_url,
-                model: update.model,
-                api_key,
-                endpoint: update.endpoint,
-                handler: update.handler,
-                context_window_tokens: update.context_window_tokens,
-                max_concurrency: update.max_concurrency,
-                reasoning_effort: update.reasoning_effort,
-                fast_mode,
-                supports_prompt_cache_key,
-            };
             let mut candidate = inner.providers.clone();
+            let entry = merge_provider_update(&update, candidate.providers.get(&update.id));
             candidate.providers.insert(update.id.clone(), entry);
             super::domains::validate_providers(&candidate)?;
             super::domains::persist_providers(&candidate)?;

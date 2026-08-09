@@ -293,25 +293,15 @@ impl JobRegistry {
         scope: Option<i64>,
     ) -> Option<Vec<crate::llm::ChatMessage>> {
         let jobs = self.lock_jobs();
-        let job = jobs.iter().find(|j| j.id == id && j.scope == scope)?;
+        let job = jobs
+            .iter()
+            .find(|j| j.id == id && scope_matches(j.scope, Some(scope)))?;
         job.transcript.clone()
     }
 
     /// Mark a job as finished (Ok or Error).
     pub fn complete(&self, id: &str, result: Result<String, String>) {
-        let now = current_unix_seconds();
-        let status = if result.is_ok() {
-            JobStatus::Done
-        } else {
-            JobStatus::Error
-        };
-        let result = result.unwrap_or_else(|e| e);
-        let result_file = spill_result(id, &result);
-        let mut jobs = self.lock_jobs();
-        finish_job(&mut jobs, id, result, result_file, status, now, 0, 0, None);
-        self.completed.notify_all();
-        drop(jobs);
-        self.version.fetch_add(1, Ordering::Relaxed);
+        self.complete_with_tokens(id, result, 0, 0, None);
     }
 
     /// Update token counts for a running job.
@@ -366,7 +356,7 @@ impl JobRegistry {
     pub fn running_ids(&self) -> Vec<String> {
         let jobs = self.lock_jobs();
         jobs.iter()
-            .filter(|j| !j.is_finished())
+            .filter(|j| !j.is_finished() && scope_matches(j.scope, None))
             .map(|j| j.id.clone())
             .collect()
     }
@@ -375,7 +365,7 @@ impl JobRegistry {
     pub fn running_ids_scoped(&self, scope: Option<i64>) -> Vec<String> {
         let jobs = self.lock_jobs();
         jobs.iter()
-            .filter(|j| !j.is_finished() && j.scope == scope)
+            .filter(|j| !j.is_finished() && scope_matches(j.scope, Some(scope)))
             .map(|j| j.id.clone())
             .collect()
     }
@@ -383,14 +373,17 @@ impl JobRegistry {
     /// Clones of all active (running or queued) jobs.
     pub fn running_jobs(&self) -> Vec<Job> {
         let jobs = self.lock_jobs();
-        jobs.iter().filter(|j| !j.is_finished()).cloned().collect()
+        jobs.iter()
+            .filter(|j| !j.is_finished() && scope_matches(j.scope, None))
+            .cloned()
+            .collect()
     }
 
     /// Clones of active jobs in `scope` (see [`Job::scope`]).
     pub fn running_jobs_scoped(&self, scope: Option<i64>) -> Vec<Job> {
         let jobs = self.lock_jobs();
         jobs.iter()
-            .filter(|j| !j.is_finished() && j.scope == scope)
+            .filter(|j| !j.is_finished() && scope_matches(j.scope, Some(scope)))
             .cloned()
             .collect()
     }
@@ -438,7 +431,7 @@ impl JobRegistry {
                 .filter(|j| {
                     !j.is_finished()
                         && ids.contains(&j.id)
-                        && required_scope.is_none_or(|scope| j.scope == scope)
+                        && scope_matches(j.scope, required_scope)
                 })
                 .map(|j| j.id.clone())
                 .collect();
@@ -454,7 +447,7 @@ impl JobRegistry {
                     .filter(|j| {
                         j.is_finished()
                             && ids.contains(&j.id)
-                            && required_scope.is_none_or(|scope| j.scope == scope)
+                            && scope_matches(j.scope, required_scope)
                     })
                     .map(|j| {
                         if !j.consumed {
@@ -490,7 +483,11 @@ impl JobRegistry {
     /// Snapshot of all jobs as a JSON array.
     pub fn snapshot(&self) -> serde_json::Value {
         let jobs = self.lock_jobs();
-        let array: Vec<_> = jobs.iter().cloned().collect();
+        let array: Vec<_> = jobs
+            .iter()
+            .filter(|job| scope_matches(job.scope, None))
+            .cloned()
+            .collect();
         serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
     }
 
@@ -499,7 +496,7 @@ impl JobRegistry {
         let jobs = self.lock_jobs();
         let array: Vec<_> = jobs
             .iter()
-            .filter(|job| job.scope == scope)
+            .filter(|job| scope_matches(job.scope, Some(scope)))
             .cloned()
             .collect();
         serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
@@ -518,7 +515,9 @@ impl JobRegistry {
         let mut finished: Vec<Job> = jobs
             .iter()
             .filter(|j| {
-                (j.status == JobStatus::Done || j.status == JobStatus::Error) && !j.consumed
+                (j.status == JobStatus::Done || j.status == JobStatus::Error)
+                    && !j.consumed
+                    && scope_matches(j.scope, None)
             })
             .cloned()
             .collect();
@@ -534,7 +533,7 @@ impl JobRegistry {
         let mut finished: Vec<Job> = jobs
             .iter()
             .filter(|j| {
-                j.scope == scope
+                scope_matches(j.scope, Some(scope))
                     && (j.status == JobStatus::Done || j.status == JobStatus::Error)
                     && !j.consumed
             })
@@ -565,7 +564,7 @@ impl JobRegistry {
         let mut jobs = self.lock_jobs();
         let Some(job) = jobs
             .iter_mut()
-            .find(|job| job.id == id && required_scope.is_none_or(|scope| job.scope == scope))
+            .find(|job| job.id == id && scope_matches(job.scope, required_scope))
         else {
             return false;
         };
@@ -589,7 +588,7 @@ impl JobRegistry {
         let mut jobs = self.lock_jobs();
         let mut cancelled = 0;
         for job in jobs.iter_mut() {
-            if !job.is_finished() && job.scope == scope {
+            if !job.is_finished() && scope_matches(job.scope, Some(scope)) {
                 job.cancel_flag.store(true, Ordering::Relaxed);
                 job.activity = Some("cancelling…".to_string());
                 job.consumed = true;
@@ -627,6 +626,13 @@ pub fn registry() -> &'static JobRegistry {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Return whether a job's scope matches an optional scope restriction.
+/// `None` means unscoped callers may see every job; `Some(scope)` requires an
+/// exact match, including `Some(None)` for jobs with no scope.
+fn scope_matches(job_scope: Option<i64>, required_scope: Option<Option<i64>>) -> bool {
+    required_scope.is_none_or(|scope| job_scope == scope)
+}
 
 /// Apply finished-job state under the lock: update status/result/tokens.
 #[allow(clippy::too_many_arguments)]
