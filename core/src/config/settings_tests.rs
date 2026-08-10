@@ -69,16 +69,30 @@ fn atomically_persists_and_loads_values_only_yaml() {
     assert_eq!(loaded.inner.ui.input.preset.as_deref(), Some("box"));
     let raw = fs::read_to_string(&path).unwrap();
     assert!(raw.contains("version: 2"));
+    assert!(raw.contains("system_prompt:"));
+    assert!(raw.contains(shipped_system_prompt().lines().next().unwrap()));
     assert!(!raw.contains("subagents:"));
-    assert!(!raw.contains("Report file and line references."));
     assert!(!raw.contains("label:"));
     assert!(!raw.contains("null"));
     assert!(!raw.contains("show_reasoning"));
     assert!(!raw.contains("theme:"));
-    assert!(
-        raw.lines().count() < 10,
-        "config should stay sparse:\n{raw}"
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn unchanged_load_does_not_create_write_lock() {
+    let path = temp_path("lock-free-load");
+    let yaml = serde_yaml::to_string(Settings::defaults().resolved()).unwrap();
+    fs::write(&path, yaml).unwrap();
+    let lock_path = lock_path_for(&path);
+
+    let loaded = Settings::load_path(&path).unwrap().unwrap();
+
+    assert_eq!(
+        loaded.inner.general.system_prompt.as_deref(),
+        Some(shipped_system_prompt())
     );
+    assert!(!lock_path.exists());
     let _ = fs::remove_file(path);
 }
 
@@ -91,7 +105,8 @@ fn verbose_input_round_trips_to_sparse_output() {
     original.inner.ui.status_show_timer = false;
     let verbose = serde_yaml::to_string(original.resolved()).unwrap();
     assert!(verbose.contains("show_reasoning: false"));
-    assert!(verbose.contains("system_prompt: null"));
+    assert!(verbose.contains("system_prompt:"));
+    assert!(verbose.contains(shipped_system_prompt().lines().next().unwrap()));
     assert!(verbose.contains("theme:"));
     fs::write(&path, verbose).unwrap();
 
@@ -107,6 +122,43 @@ fn verbose_input_round_trips_to_sparse_output() {
     assert!(sparse.contains("approval: danger"));
     assert!(sparse.contains("status_show_timer: false"));
 
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(lock_path_for(&path));
+}
+
+#[test]
+fn missing_and_null_prompts_hydrate_and_persist_while_empty_is_preserved() {
+    for (name, yaml) in [
+        ("missing-prompt", "version: 2\n"),
+        (
+            "null-prompt",
+            "version: 2\ngeneral:\n  system_prompt: null\n",
+        ),
+    ] {
+        let path = temp_path(name);
+        fs::write(&path, yaml).unwrap();
+
+        let loaded = Settings::load_path(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded.inner.general.system_prompt.as_deref(),
+            Some(shipped_system_prompt())
+        );
+        let persisted = fs::read_to_string(&path).unwrap();
+        assert!(persisted.contains("system_prompt:"));
+        assert!(persisted.contains(shipped_system_prompt().lines().next().unwrap()));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
+    }
+
+    let path = temp_path("empty-prompt");
+    fs::write(&path, "version: 2\ngeneral:\n  system_prompt: ''\n").unwrap();
+    let loaded = Settings::load_path(&path).unwrap().unwrap();
+    assert_eq!(loaded.inner.general.system_prompt.as_deref(), Some(""));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "version: 2\ngeneral:\n  system_prompt: ''\n"
+    );
     let _ = fs::remove_file(&path);
     let _ = fs::remove_file(lock_path_for(&path));
 }

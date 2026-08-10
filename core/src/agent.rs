@@ -634,10 +634,20 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         Some(crate::llm::prompts::headless_agent_system_prompt(
             request.system_prompt.as_deref(),
         ))
+    } else if let Some(prompt) = request.system_prompt.clone() {
+        Some(prompt)
     } else {
-        request.system_prompt.clone()
+        let settings = config.runtime_settings_snapshot();
+        Some(crate::llm::prompts::system_prompt(
+            settings.resolved().general.system_prompt(),
+        ))
     };
-    let history = build_chat_history(&transcript, system_prompt_override.as_deref());
+    let history = build_chat_history(
+        &transcript,
+        system_prompt_override
+            .as_deref()
+            .expect("agent setup must resolve a system prompt"),
+    );
 
     let session = session_sink_for_request(request, llm.id(), llm.model());
 

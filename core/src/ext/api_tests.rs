@@ -347,7 +347,16 @@ fn settings_get_set_reset_persist_and_validate() {
     .unwrap();
 
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(raw, "version: 2\n");
+    assert!(raw.starts_with("version: 2\n"));
+    assert!(raw.contains("system_prompt:"));
+    assert!(
+        raw.contains(
+            crate::config::settings::shipped_system_prompt()
+                .lines()
+                .next()
+                .unwrap()
+        )
+    );
     assert_eq!(settings.lock().unwrap().resolved().general.approval, "safe");
     let _ = std::fs::remove_file(path);
 }

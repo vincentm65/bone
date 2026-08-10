@@ -7,6 +7,7 @@ fn system_prompt_schema_mutation_reset_and_persistence() {
     let dir = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("BONE_DIR", dir.path()) };
 
+    let shipped = super::super::settings::shipped_system_prompt();
     let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
     let schema = store.schema();
     let field = schema
@@ -20,15 +21,13 @@ fn system_prompt_schema_mutation_reset_and_persistence() {
         })
         .expect("general.system_prompt schema field");
     assert_eq!(field.value_type, "string");
-    assert_eq!(field.default, serde_json::Value::Null);
+    assert_eq!(field.default, serde_json::Value::from(shipped));
 
-    let assert_value = |expected: Option<&str>| {
+    let assert_value = |expected: &str| {
         let snapshot = store.snapshot();
         assert_eq!(
             snapshot.values["general"]["system_prompt"],
-            expected
-                .map(serde_json::Value::from)
-                .unwrap_or(serde_json::Value::Null)
+            serde_json::Value::from(expected)
         );
         assert_eq!(
             store
@@ -37,7 +36,7 @@ fn system_prompt_schema_mutation_reset_and_persistence() {
                 .general
                 .system_prompt
                 .as_deref(),
-            expected
+            Some(expected)
         );
         assert_eq!(
             Settings::load()
@@ -47,15 +46,16 @@ fn system_prompt_schema_mutation_reset_and_persistence() {
                 .general
                 .system_prompt
                 .as_deref(),
-            expected
+            Some(expected)
         );
-        assert_eq!(
+        assert!(
             std::fs::read_to_string(super::super::settings::settings_path())
                 .unwrap()
-                .contains("system_prompt:"),
-            expected.is_some()
+                .contains("system_prompt:")
         );
     };
+
+    assert_value(shipped);
 
     store
         .set_value(
@@ -64,7 +64,7 @@ fn system_prompt_schema_mutation_reset_and_persistence() {
             store.snapshot().revision,
         )
         .unwrap();
-    assert_value(Some("Configured base prompt"));
+    assert_value("Configured base prompt");
 
     store
         .set_value(
@@ -73,7 +73,7 @@ fn system_prompt_schema_mutation_reset_and_persistence() {
             store.snapshot().revision,
         )
         .unwrap();
-    assert_value(None);
+    assert_value(shipped);
 
     store
         .set_value(
@@ -85,7 +85,7 @@ fn system_prompt_schema_mutation_reset_and_persistence() {
     store
         .reset_value("general.system_prompt", store.snapshot().revision)
         .unwrap();
-    assert_value(None);
+    assert_value(shipped);
 
     unsafe {
         match previous {

@@ -1327,9 +1327,8 @@ impl DaemonCtx {
         // way the TUI's `app_ctx_state` does.
         let config_schema = self.config_schema();
         let settings = self.config.runtime_settings_snapshot();
-        let system_prompt = crate::llm::prompts::system_prompt_with_base(
-            settings.resolved().general.system_prompt.as_deref(),
-        );
+        let system_prompt =
+            crate::llm::prompts::system_prompt(settings.resolved().general.system_prompt());
         let app_state = {
             let s = self.session.lock().unwrap();
             let by_provider = crate::ext::ctx::usage_by_provider_context(
@@ -1559,6 +1558,13 @@ impl DaemonCtx {
                 .into_iter()
                 .map(crate::session_db::stored_to_chat_message)
                 .collect::<Vec<_>>();
+            let system_prompt = crate::llm::prompts::system_prompt(
+                self.config
+                    .runtime_settings_snapshot()
+                    .resolved()
+                    .general
+                    .system_prompt(),
+            );
             let snapshot = {
                 let mut s = self.session.lock().unwrap();
                 if let Some(db) = s.session_db.as_ref() {
@@ -1576,7 +1582,7 @@ impl DaemonCtx {
                     .and_then(|db| db.max_message_seq(id).ok())
                     .unwrap_or(0);
                 s.transcript = effective;
-                s.restore_usage_and_context();
+                s.restore_usage_and_context(&system_prompt);
                 s.snapshot(self.llm.id(), self.llm.model())
             };
             self.reset_host_tool_state();
@@ -1719,13 +1725,16 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::ReplaceConversation { messages } => {
+                let settings = self.config.runtime_settings_snapshot();
+                let system_prompt =
+                    crate::llm::prompts::system_prompt(settings.resolved().general.system_prompt());
                 {
                     let mut s = self.session.lock().unwrap();
                     s.transcript = messages;
                     if let (Some(db), Some(conv_id)) = (s.session_db.as_ref(), s.conversation_id) {
                         let _ = db.save_context_checkpoint(conv_id, s.session_seq, &s.transcript);
                     }
-                    let history = crate::chat::build_chat_history(&s.transcript, None);
+                    let history = crate::chat::build_chat_history(&s.transcript, &system_prompt);
                     let tool_defs_json_chars = serde_json::to_value(s.tools.definitions())
                         .map(|v| v.to_string().chars().count())
                         .unwrap_or(0);

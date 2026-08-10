@@ -1,16 +1,17 @@
 use super::*;
 
 #[test]
-fn default_prompt_includes_builtin_base_and_runtime_context() {
-    let prompt = system_prompt();
-    assert!(prompt.starts_with(SYSTEM_PROMPT));
+fn shipped_prompt_includes_configured_base_and_runtime_context() {
+    let base = crate::config::settings::shipped_system_prompt();
+    let prompt = system_prompt(base);
+    assert!(prompt.starts_with(base));
     assert!(prompt.contains("Resolved config directory: "));
     assert!(prompt.contains("Current working directory: "));
 }
 
 #[test]
-fn configured_prompt_replaces_only_the_builtin_base() {
-    let prompt = system_prompt_with_base(Some("Custom main-agent instructions."));
+fn configured_prompt_gets_only_runtime_context_appended() {
+    let prompt = system_prompt("Custom main-agent instructions.");
     assert!(prompt.starts_with("Custom main-agent instructions.\n\n"));
     assert!(!prompt.contains("You are bone, a coding assistant"));
     assert!(prompt.contains("Resolved config directory: "));

@@ -153,6 +153,22 @@ impl Default for BoneSettings {
     }
 }
 
+fn shipped_settings() -> &'static BoneSettings {
+    static SETTINGS: OnceLock<BoneSettings> = OnceLock::new();
+    SETTINGS.get_or_init(|| {
+        serde_yaml::from_str(include_str!("../../defaults/config.yaml"))
+            .expect("bundled default config.yaml must be valid")
+    })
+}
+
+pub fn shipped_system_prompt() -> &'static str {
+    shipped_settings()
+        .general
+        .system_prompt
+        .as_deref()
+        .expect("bundled default config.yaml must define general.system_prompt")
+}
+
 // ── General ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,12 +186,20 @@ fn default_approval() -> String {
     "safe".to_string()
 }
 
+impl GeneralSettings {
+    pub fn system_prompt(&self) -> &str {
+        self.system_prompt
+            .as_deref()
+            .expect("general.system_prompt must be hydrated when settings load")
+    }
+}
+
 impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
             approval: default_approval(),
             show_reasoning: false,
-            system_prompt: None,
+            system_prompt: Some(shipped_system_prompt().to_owned()),
         }
     }
 }
@@ -492,11 +516,16 @@ fn sparse_settings_value(settings: &BoneSettings) -> Result<serde_yaml::Value, S
         serde_yaml::to_value(settings).map_err(|error| SettingsError::Parse(error.to_string()))?;
     let defaults = serde_yaml::to_value(BoneSettings::default())
         .map_err(|error| SettingsError::Parse(error.to_string()))?;
-    prune_defaults(&mut value, &defaults, true);
+    prune_defaults(&mut value, &defaults, true, false);
     Ok(value)
 }
 
-fn prune_defaults(value: &mut serde_yaml::Value, defaults: &serde_yaml::Value, root: bool) {
+fn prune_defaults(
+    value: &mut serde_yaml::Value,
+    defaults: &serde_yaml::Value,
+    root: bool,
+    general: bool,
+) {
     let (serde_yaml::Value::Mapping(values), serde_yaml::Value::Mapping(default_values)) =
         (value, defaults)
     else {
@@ -505,7 +534,9 @@ fn prune_defaults(value: &mut serde_yaml::Value, defaults: &serde_yaml::Value, r
 
     let keys: Vec<_> = values.keys().cloned().collect();
     for key in keys {
-        if root && key.as_str() == Some("version") {
+        if (root && key.as_str() == Some("version"))
+            || (general && key.as_str() == Some("system_prompt"))
+        {
             continue;
         }
         let Some(default) = default_values.get(&key) else {
@@ -514,9 +545,15 @@ fn prune_defaults(value: &mut serde_yaml::Value, defaults: &serde_yaml::Value, r
         let Some(current) = values.get_mut(&key) else {
             continue;
         };
-        prune_defaults(current, default, false);
+        prune_defaults(
+            current,
+            default,
+            false,
+            root && key.as_str() == Some("general"),
+        );
         let empty_mapping = matches!(current, serde_yaml::Value::Mapping(map) if map.is_empty());
-        if current == default || empty_mapping {
+        let preserved_container = root && key.as_str() == Some("general");
+        if (!preserved_container && current == default) || empty_mapping {
             values.remove(&key);
         }
     }
@@ -579,30 +616,56 @@ impl Settings {
     }
 
     fn load_path(path: &std::path::Path) -> Result<Option<Self>, SettingsError> {
+        let (settings, hydrated) = Self::load_path_unlocked(path)?;
+        if !hydrated {
+            return Ok(settings);
+        }
+
+        let _guard = acquire_settings_write_lock(path)?;
+        let (settings, hydrated) = Self::load_path_unlocked(path)?;
+        if hydrated && let Some(settings) = settings.as_ref() {
+            settings.write_path(path)?;
+        }
+        Ok(settings)
+    }
+
+    fn load_path_unlocked(path: &std::path::Path) -> Result<(Option<Self>, bool), SettingsError> {
         if !path.exists() {
-            return Ok(None);
+            return Ok((None, false));
         }
 
         let raw = fs::read_to_string(path)?;
         let raw = raw.trim_start_matches('\u{feff}');
-
-        let inner: BoneSettings =
+        let value: serde_yaml::Value =
             serde_yaml::from_str(raw).map_err(|e| SettingsError::Parse(e.to_string()))?;
+        let hydrated = value
+            .get("general")
+            .and_then(|general| general.get("system_prompt"))
+            .is_none_or(serde_yaml::Value::is_null);
+        let mut inner: BoneSettings =
+            serde_yaml::from_value(value).map_err(|e| SettingsError::Parse(e.to_string()))?;
 
         if inner.version != 2 {
             return Err(SettingsError::BadVersion(inner.version));
+        }
+
+        if hydrated {
+            inner.general.system_prompt = Some(shipped_system_prompt().to_owned());
         }
 
         validate_general(&inner.general)?;
         validate_theme(&inner.theme)?;
         validate_keymaps(&inner.keymaps)?;
 
-        Ok(Some(Self {
-            inner,
-            revision: 0,
-            subagents: BTreeMap::new(),
-            extensions: BTreeMap::new(),
-        }))
+        Ok((
+            Some(Self {
+                inner,
+                revision: 0,
+                subagents: BTreeMap::new(),
+                extensions: BTreeMap::new(),
+            }),
+            hydrated,
+        ))
     }
 
     /// Atomically write to `config.yaml` via a same-directory temporary file.
@@ -643,7 +706,9 @@ impl Settings {
         F: FnOnce(&mut Self) -> Result<(), SettingsError>,
     {
         let _guard = acquire_settings_write_lock(path)?;
-        let mut candidate = Self::load_path(path)?.unwrap_or_else(|| self.clone());
+        let mut candidate = Self::load_path_unlocked(path)?
+            .0
+            .unwrap_or_else(|| self.clone());
         candidate.subagents = self.subagents.clone();
         candidate.extensions = self.extensions.clone();
         mutate(&mut candidate)?;
@@ -813,6 +878,9 @@ impl Settings {
             *slot = value;
             candidate.inner = serde_json::from_value(document)
                 .map_err(|e| SettingsError::Validation(format!("{path}: {e}")))?;
+            if candidate.inner.general.system_prompt.is_none() {
+                candidate.inner.general.system_prompt = Some(shipped_system_prompt().to_owned());
+            }
             Ok(())
         })
     }

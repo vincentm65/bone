@@ -137,10 +137,15 @@ fn boot_runtime_host_for(
         settings,
     );
     let mut session = bone::runtime::RuntimeSession::new(booted.tools);
+    let runtime_settings = config.runtime_settings_snapshot();
+    let system_prompt =
+        bone::llm::prompts::system_prompt(runtime_settings.resolved().general.system_prompt());
     match target {
-        bone::rpc::SessionTarget::Latest => session.init_db(&*provider),
+        bone::rpc::SessionTarget::Latest => session.init_db(&*provider, &system_prompt),
         bone::rpc::SessionTarget::New => session.init_db_new(&*provider),
-        bone::rpc::SessionTarget::Conversation(id) => session.init_db_conversation(&*provider, id),
+        bone::rpc::SessionTarget::Conversation(id) => {
+            session.init_db_conversation(&*provider, id, &system_prompt)
+        }
     }
     .map_err(|error| std::io::Error::other(format!("fatal: {error}")))?;
     Ok(RuntimeHostBoot {

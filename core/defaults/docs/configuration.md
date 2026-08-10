@@ -20,10 +20,11 @@ The resolved config directory is provided in the system prompt. Its default is
 | `init.lua` | Optional runtime wiring; not a competing settings store |
 | `AGENTS.md` and `docs/` | Bone-owned bundled reference documents |
 
-Built-in schemas, labels, defaults, types, and option lists live in Rust.
-Canonical YAML stores user-selected values. Extension schemas are registered
-through Lua and their values are stored under their namespace in
-`extensions.yaml`.
+Built-in schemas, labels, types, and option lists live in Rust. The shipped
+main-agent prompt is the exception: its canonical prose lives in Bone's bundled
+`config.yaml` default. Canonical YAML stores user-selected values. Extension
+schemas are registered through Lua and their values are stored under their
+namespace in `extensions.yaml`.
 
 ## Mutation and restart rules
 
@@ -53,16 +54,18 @@ official OpenAI provider.
 
 ## Main-agent system prompt
 
-`general.system_prompt` is a nullable daemon-owned string that replaces Bone's
-built-in base prompt for normal main-agent turns. Bone still appends the generated
-configuration-directory and current-working-directory context, and Lua
-`before_turn.system_prompt_append` hooks remain additive.
+`general.system_prompt` is the daemon-owned main-agent base prompt and is stored
+canonically in `config.yaml`. New configurations contain the shipped prompt.
+When an existing version-2 configuration omits the field or sets it to `null`,
+Bone restores the shipped prompt and persists it. User-provided strings are
+preserved exactly; an empty string intentionally omits all base prose.
 
-Changes made through a frontend or the daemon configuration API apply when the
-next main-agent turn is built. Unsetting or resetting the value to `null` restores
-the built-in base prompt without removing the generated runtime context. Explicit
-`bone run --system-prompt` values and delegated or subagent prompt overrides are
-separate and are not replaced by this setting.
+Bone appends the generated configuration-directory and current-working-directory
+context to the configured base, and Lua `before_turn.system_prompt_append` hooks
+remain additive. Changes made through a frontend or the daemon configuration API
+apply when the next main-agent turn is built. Reset restores the shipped
+YAML-owned prompt. Explicit `bone run --system-prompt` values and delegated or
+subagent prompt overrides are separate and are not replaced by this setting.
 
 ## Theme values
 

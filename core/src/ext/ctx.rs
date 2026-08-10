@@ -2008,15 +2008,15 @@ fn build_usage_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     Ok(usage_table)
 }
 
-/// Build the `ctx.conversation` table: the effective base `system_prompt()` and
+/// Build the `ctx.conversation` table: the effective system prompt and
 /// `current()`/`history()` over the in-memory turn history. The history methods
 /// return nil when no history is attached.
 fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let conversation_table = lua.create_table()?;
-    let system_prompt = cfg
-        .system_prompt_override
-        .clone()
-        .unwrap_or_else(crate::llm::prompts::system_prompt);
+    let system_prompt = cfg.system_prompt_override.clone().unwrap_or_else(|| {
+        crate::llm::prompts::system_prompt(crate::config::settings::shipped_system_prompt())
+    });
+    let context_system_prompt = system_prompt.clone();
     let system_prompt_fn = lua.create_function(move |_, ()| Ok(system_prompt.clone()))?;
     conversation_table.set("system_prompt", system_prompt_fn)?;
 
@@ -2028,11 +2028,9 @@ fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::E
         let tool_defs_json_chars = serde_json::to_string(&tools.definitions())
             .map(|json| json.chars().count())
             .unwrap_or(0);
-        let system_prompt_override = cfg.system_prompt_override.clone();
         let context_tokens_fn = lua.create_function(move |_, messages: Table| {
             let messages = super::types::parse_messages_table(&messages);
-            let history =
-                crate::chat::build_chat_history(&messages, system_prompt_override.as_deref());
+            let history = crate::chat::build_chat_history(&messages, &context_system_prompt);
             let prompt_chars = crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
             Ok((prompt_chars as f64 / crate::llm::token_tracker::CHARS_PER_TOKEN).ceil() as u64)
         })?;
@@ -3844,9 +3842,7 @@ pub(crate) fn estimate_prompt_tokens(
 ) -> PromptTokenEstimate {
     let defs = tools.definitions();
     let schema_chars = serde_json::to_string(&defs).unwrap_or_default().len() as u64;
-    let sys_chars = system_prompt_override
-        .map(str::len)
-        .unwrap_or_else(|| crate::llm::prompts::system_prompt().len()) as u64;
+    let sys_chars = system_prompt_override.unwrap_or_default().len() as u64;
     PromptTokenEstimate {
         tool_count: defs.len() as u64,
         schema_chars,

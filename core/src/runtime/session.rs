@@ -155,7 +155,11 @@ impl RuntimeSession {
     /// recycled, and only a truly empty database mints a new row. This is what
     /// makes the conversation survive a runtime restart — the data was always
     /// persisted, it just wasn't being reattached.
-    pub fn init_db(&mut self, llm: &dyn LlmProvider) -> Result<(), SessionInitError> {
+    pub fn init_db(
+        &mut self,
+        llm: &dyn LlmProvider,
+        system_prompt: &str,
+    ) -> Result<(), SessionInitError> {
         if self.session_db.is_some() {
             return Ok(());
         }
@@ -177,7 +181,7 @@ impl RuntimeSession {
                 self.session_seq = db.max_message_seq(conv_id).unwrap_or(0);
                 self.conversation_id = Some(conv_id);
                 self.session_db = Some(db);
-                self.restore_usage_and_context();
+                self.restore_usage_and_context(system_prompt);
                 Ok(())
             }
             // Empty database: mint the first conversation.
@@ -217,6 +221,7 @@ impl RuntimeSession {
         &mut self,
         _llm: &dyn LlmProvider,
         conversation_id: i64,
+        system_prompt: &str,
     ) -> Result<(), SessionInitError> {
         if self.session_db.is_some() {
             return Ok(());
@@ -249,13 +254,13 @@ impl RuntimeSession {
         self.session_seq = db.max_message_seq(conversation_id).unwrap_or(0);
         self.conversation_id = Some(conversation_id);
         self.session_db = Some(db);
-        self.restore_usage_and_context();
+        self.restore_usage_and_context(system_prompt);
         Ok(())
     }
 
     /// Restore cumulative persisted usage and recompute the current context
     /// estimate after loading a durable conversation.
-    pub(crate) fn restore_usage_and_context(&mut self) {
+    pub(crate) fn restore_usage_and_context(&mut self, system_prompt: &str) {
         self.token_stats.reset();
         if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id)
             && let Ok(usage) = db.conversation_usage(conv_id)
@@ -266,14 +271,14 @@ impl RuntimeSession {
             self.token_stats.cost = usage.cost.max(0.0);
             self.token_stats.request_count = usage.request_count.max(0) as u64;
         }
-        self.recompute_context_estimate();
+        self.recompute_context_estimate(system_prompt);
     }
 
     /// Re-estimate the prompt context size from the current transcript + tool
     /// definitions so the token meter reflects a resumed conversation before the
     /// next turn refreshes it. Cheap; no-op-safe on an empty transcript.
-    fn recompute_context_estimate(&mut self) {
-        let history = build_chat_history(&self.transcript, None);
+    fn recompute_context_estimate(&mut self, system_prompt: &str) {
+        let history = build_chat_history(&self.transcript, system_prompt);
         let tool_defs_json_chars = serde_json::to_value(self.tools.definitions())
             .map(|v| v.to_string().chars().count())
             .unwrap_or(0);
@@ -405,10 +410,9 @@ impl RuntimeSession {
         session_sink: Arc<dyn SessionSink>,
     ) -> Driver {
         let settings = config_store.runtime_settings_snapshot();
-        let system_prompt = crate::llm::prompts::system_prompt_with_base(
-            settings.resolved().general.system_prompt.as_deref(),
-        );
-        let history = build_chat_history(&self.transcript, Some(&system_prompt));
+        let system_prompt =
+            crate::llm::prompts::system_prompt(settings.resolved().general.system_prompt());
+        let history = build_chat_history(&self.transcript, &system_prompt);
         Driver {
             llm,
             extensions,

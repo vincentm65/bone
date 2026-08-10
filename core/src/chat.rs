@@ -1,22 +1,13 @@
 //! Conversation model: on-disk message representation and provider chat-history assembly.
 
-use crate::llm::prompts;
 use crate::llm::{ChatMessage, ChatRole};
 
 // ── History ─────────────────────────────────────────────────────────────────
 
 /// Build provider history without truncating conversation or tool chains.
-/// If `custom_system_prompt` is provided, it replaces the default bone system prompt.
-pub fn build_chat_history(
-    messages: &[ChatMessage],
-    custom_system_prompt: Option<&str>,
-) -> Vec<ChatMessage> {
+pub fn build_chat_history(messages: &[ChatMessage], system_prompt: &str) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
-    let system_content = match custom_system_prompt {
-        Some(s) => s.to_string(),
-        None => prompts::system_prompt(),
-    };
-    out.push(ChatMessage::new(ChatRole::System, system_content));
+    out.push(ChatMessage::new(ChatRole::System, system_prompt));
     let mut requested_at = None;
     for message in messages {
         out.push(model_facing_message(message, requested_at.as_deref()));
@@ -157,7 +148,7 @@ mod tests {
         tool.created_at = Some("2026-07-17T12:00:05Z".into());
         let transcript = vec![assistant, tool];
 
-        let history = build_chat_history(&transcript, Some("system"));
+        let history = build_chat_history(&transcript, "system");
 
         assert_eq!(transcript[0].content, "checking");
         assert_eq!(transcript[1].content, "done");
@@ -178,7 +169,7 @@ mod tests {
             arguments: serde_json::json!({"command": "true"}),
         })];
 
-        let history = build_chat_history(&[assistant.clone()], Some("system"));
+        let history = build_chat_history(&[assistant.clone()], "system");
 
         assert_eq!(history[1].content, "");
         assert_eq!(history[1].output_sequence, assistant.output_sequence);

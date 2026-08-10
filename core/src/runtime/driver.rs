@@ -584,26 +584,27 @@ impl Driver {
 
                 // Finalize the active system prompt only after every hook has
                 // run. A replacement uses the same history rebuild path.
+                let base_system_prompt = system_prompt_override
+                    .clone()
+                    .or_else(|| history.first().map(|message| message.content.clone()))
+                    .expect("driver history must contain an effective system prompt");
                 let active_system_prompt = if sys_appends.is_empty() {
-                    system_prompt_override.clone()
+                    base_system_prompt
                 } else {
-                    let base = system_prompt_override
-                        .clone()
-                        .unwrap_or_else(crate::llm::prompts::system_prompt);
-                    Some(format!("{base}\n\n{}", sys_appends.join("\n\n")))
+                    format!("{base_system_prompt}\n\n{}", sys_appends.join("\n\n"))
                 };
                 let had_replacement = replacement.is_some();
                 let history_rebuilt = had_replacement || !sys_appends.is_empty();
                 if let Some(new_messages) = replacement {
                     transcript = new_messages;
                     transcript_replaced = true;
-                    history = build_chat_history(&transcript, active_system_prompt.as_deref());
+                    history = build_chat_history(&transcript, &active_system_prompt);
                     request_history = history.clone();
                     restore_ephemeral_image_relays(&mut request_history, &ephemeral_image_relays);
                     last_turn_messages.clear();
                     token_stats.clear_context_anchor();
                 } else if !sys_appends.is_empty() {
-                    history = build_chat_history(&transcript, active_system_prompt.as_deref());
+                    history = build_chat_history(&transcript, &active_system_prompt);
                     request_history = history.clone();
                     restore_ephemeral_image_relays(&mut request_history, &ephemeral_image_relays);
                     last_turn_messages.clear();

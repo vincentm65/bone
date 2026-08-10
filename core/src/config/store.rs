@@ -394,7 +394,9 @@ impl ConfigStore {
                             "System prompt",
                             "string",
                             &[],
-                            serde_json::Value::Null,
+                            Settings::defaults()
+                                .get_path("general.system_prompt")
+                                .expect("default system prompt must exist"),
                         ),
                         field(
                             "ui.input.preset",

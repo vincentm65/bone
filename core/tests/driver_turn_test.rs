@@ -265,7 +265,7 @@ fn driver_with_gate(
 ) -> (Driver, &'static str) {
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let driver = Driver {
         llm: Arc::new(MockProvider::new("mock-1", script)),
         extensions: ExtensionManager::unloaded(),
@@ -298,7 +298,7 @@ fn driver_with_gate(
 fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &'static str) {
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let driver = Driver {
         llm: Arc::new(MockProvider::new_raw("mock-1", attempts)),
         extensions: ExtensionManager::unloaded(),
@@ -432,7 +432,7 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
 
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let driver = Driver {
         llm: Arc::new(MockProvider::new(
             "sub-model",
@@ -705,7 +705,7 @@ async fn driver_key_reply_completes_turn() {
     let registry = bone_core::runtime::KeyReplyRegistry::new();
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let driver = Driver {
         llm: Arc::new(MockProvider::new(
             "mock-1",
@@ -863,7 +863,7 @@ end)
 
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
 
     let driver = Driver {
@@ -1161,7 +1161,7 @@ end)
         runtime_events: Some(runtime_tx),
         key_reply_registry: None,
         cancel: None,
-        history: build_chat_history(&transcript, None),
+        history: build_chat_history(&transcript, "test system prompt"),
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
@@ -1307,7 +1307,7 @@ end)
         runtime_events: None,
         key_reply_registry: None,
         cancel: Some(cancel),
-        history: build_chat_history(&transcript, None),
+        history: build_chat_history(&transcript, "test system prompt"),
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
@@ -1362,7 +1362,7 @@ end)
     );
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let base = bone_core::llm::prompts::system_prompt_with_base(Some("Configured base"));
+    let base = bone_core::llm::prompts::system_prompt("Configured base");
     let llm = Arc::new(CapturingProvider {
         model: "mock-1".into(),
         script: Mutex::new(vec![vec![ChatEvent::TextDelta("done".into())]]),
@@ -1383,7 +1383,7 @@ end)
         runtime_events: None,
         key_reply_registry: None,
         cancel: None,
-        history: build_chat_history(&transcript, Some(&base)),
+        history: build_chat_history(&transcript, &base),
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: Some(base.clone()),
@@ -1444,7 +1444,7 @@ impl Tool for EphemeralImageTool {
 async fn driver_preserves_ephemeral_images_in_request_history() {
     let prompt = "observe";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let llm = Arc::new(CapturingProvider {
         model: "mock-vision".into(),
         script: Mutex::new(vec![
@@ -1574,7 +1574,7 @@ bone.tool.register({
     );
     let prompt = "inspect";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let llm = Arc::new(CapturingProvider {
         model: "mock-ctx".into(),
         script: Mutex::new(vec![
@@ -1669,7 +1669,7 @@ bone.tool.register({
     let lua = booted.manager.lua_arc();
     let prompt = "inspect";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let llm = Arc::new(CapturingProvider {
         model: "mock-dynamic".into(),
         script: Mutex::new(vec![
@@ -1732,7 +1732,7 @@ bone.tool.register({
 async fn driver_keeps_tool_preamble_as_assistant_content() {
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let llm = Arc::new(CapturingProvider {
         model: "mock-1".into(),
         script: Mutex::new(vec![
@@ -1842,7 +1842,7 @@ end)
 
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
 
     // Round 1 requests a tool call, round 2 finishes — two provider requests.
@@ -1980,7 +1980,7 @@ end)
         runtime_events: None,
         key_reply_registry: None,
         cancel: None,
-        history: build_chat_history(&transcript, None),
+        history: build_chat_history(&transcript, "test system prompt"),
         transcript,
         token_stats: TokenStats::new(),
         system_prompt_override: None,
@@ -2056,7 +2056,7 @@ end)
 
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
 
     let driver = Driver {
@@ -2301,7 +2301,7 @@ impl LlmProvider for RepeatProvider {
 async fn repeated_identical_failing_tool_call_aborts() {
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
-    let history = build_chat_history(&transcript, None);
+    let history = build_chat_history(&transcript, "test system prompt");
     let llm = Arc::new(RepeatProvider {
         model: "repeat-1".into(),
         // A read is auto-allowed in Safe mode, and a missing file fails with a
