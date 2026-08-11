@@ -3776,12 +3776,14 @@ fn dispatch_event(
         | RuntimeEvent::StateSnapshot { .. }
         | RuntimeEvent::StateSynchronized { .. }
         | RuntimeEvent::StreamLagged { .. }
+        | RuntimeEvent::ViewSnapshot { .. }
         | RuntimeEvent::ProcessesSnapshot { .. }
         | RuntimeEvent::JobsSnapshot { .. }
         | RuntimeEvent::FrontendState { .. }
         | RuntimeEvent::ConfigSnapshot { .. }
         | RuntimeEvent::ConfigChanged { .. }
         | RuntimeEvent::ConfigMutationRejected { .. }
+        | RuntimeEvent::HostResponse { .. }
         | RuntimeEvent::ConversationLoaded { .. }
         | RuntimeEvent::ConversationLoadFailed { .. }
         | RuntimeEvent::ViewDiff { .. }

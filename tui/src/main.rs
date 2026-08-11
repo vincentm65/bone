@@ -103,6 +103,57 @@ fn configured_theme() -> bone::ui::theme::Theme {
     })
 }
 
+fn standalone_host_service() -> std::io::Result<bone::host::HostService> {
+    let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded())
+        .map_err(std::io::Error::other)?;
+    Ok(bone::host::HostService::new(config))
+}
+
+fn run_standalone_setup(theme: &bone::ui::theme::Theme, fresh: bool) -> std::io::Result<bool> {
+    let host = standalone_host_service()?;
+    let snapshot =
+        bone::ui::host::setup_snapshot(Ok(host.execute(bone_protocol::HostRequest::Setup)))
+            .map_err(std::io::Error::other)?;
+    let Some(plan) = bone::ui::setup::run(theme, fresh, snapshot)? else {
+        return Ok(false);
+    };
+    let result =
+        bone::ui::host::setup_applied(Ok(host.execute(bone::ui::host::setup_apply_request(plan))))
+            .map_err(std::io::Error::other)?;
+    println!("{}", result.message);
+    Ok(true)
+}
+
+fn catalog_snapshot(
+    host: &bone::host::HostService,
+) -> std::io::Result<bone_protocol::CatalogSnapshot> {
+    bone::ui::host::catalog_snapshot(Ok(
+        host.execute(bone_protocol::HostRequest::Catalog { refresh: true })
+    ))
+    .map_err(std::io::Error::other)
+}
+
+fn catalog_named(
+    host: &bone::host::HostService,
+    action: bone_protocol::CatalogActionKind,
+    name: &str,
+) -> std::io::Result<(bool, String)> {
+    let snapshot = catalog_snapshot(host)?;
+    let result =
+        bone::ui::host::catalog_applied(Ok(host.execute(bone::ui::host::catalog_apply_request(
+            snapshot.revision,
+            vec![bone_protocol::CatalogAction {
+                name: name.to_string(),
+                action,
+            }],
+        ))))
+        .map_err(std::io::Error::other)?;
+    Ok((
+        result.changed,
+        bone::ui::host::catalog_action_message(action, name, &result),
+    ))
+}
+
 /// Fully booted runtime host: provider, Lua extension manager, and session.
 struct RuntimeHostBoot {
     provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
@@ -185,6 +236,7 @@ fn actor_provider_config(
 /// Trust model: local-first, optional TCP. There is no auth; bind to loopback
 /// (the default) unless you intentionally expose the daemon on a trusted network.
 async fn run_serve(args: &[String]) -> std::io::Result<()> {
+    bone::ext::catalog::refresh_in_background();
     let addr = parse_listen_addr(args);
     let shutdown_on_eof = has_flag(args, "--shutdown-on-stdin-eof");
     let (cli_provider, cli_model) = parse_provider_model(args);
@@ -229,7 +281,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         let provider = std::sync::Arc::from(provider);
         let settings_snapshot = factory_config.runtime_settings_snapshot();
         let approval_mode = approval_mode(&settings_snapshot.resolved().general.approval);
-        let settings = std::sync::Arc::new(std::sync::Mutex::new(settings_snapshot));
+        let settings = factory_config.runtime_settings_handle();
         let mut boot = boot_runtime_host_for(provider, &factory_config, target, settings)
             .map_err(|err| err.to_string())?;
         let conversation_id = boot
@@ -270,31 +322,15 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
                 }
             }
         }
-        let sync_session = boot.session.clone();
-        let sync_provider = boot.provider.clone();
-        let sync_manager = boot.manager.clone();
         let (hub, commands_rx) = bone::rpc::Hub::new_grouped(hub_group.clone());
-        let initial_hub = hub.clone();
-        let initial = std::sync::Arc::new(move || {
-            let session = sync_session.lock().unwrap();
-            let snapshot = session.snapshot(sync_provider.id(), sync_provider.model());
-            vec![
-                bone::rpc::frontend_state(&sync_manager, &session.tools),
-                bone::runtime::RuntimeEvent::StateSnapshot {
-                    snapshot: snapshot.clone(),
-                },
-                // Always send this, including for an empty new conversation,
-                // so switching actors clears stale frontend scrollback.
-                bone::runtime::RuntimeEvent::ConversationLoaded {
-                    messages: session.display_transcript(),
-                    snapshot,
-                    busy: initial_hub.is_busy(),
-                },
-            ]
-        });
+        let projection = bone::rpc::RuntimeProjection::new(
+            boot.session.clone(),
+            boot.provider.clone(),
+            boot.manager.clone(),
+        );
         let config = factory_config.clone();
-        config.attach_extensions(boot.manager.clone());
-        let task = Box::pin(bone::rpc::run_daemon(
+        let daemon_projection = projection.clone();
+        let task = Box::pin(bone::rpc::run_daemon_with_projection(
             hub.publisher(),
             commands_rx,
             boot.provider,
@@ -304,11 +340,12 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             approval_mode,
             None,
             true, // forward view diffs
+            daemon_projection,
         ));
         Ok(bone::rpc::ManagedRuntime {
             conversation_id,
             hub,
-            initial,
+            projection,
             task,
         })
     };
@@ -501,6 +538,31 @@ async fn main() -> std::io::Result<()> {
         println!("{}", render_version_report(verbose, status.as_ref()));
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("connect") {
+        return run_connect(&args[1..]).await;
+    }
+
+    let tui_cli_options = if args.first().is_none_or(|arg| arg.starts_with('-')) {
+        Some(parse_cli_options(&args).map_err(std::io::Error::other)?)
+    } else {
+        None
+    };
+    if let Some(addr) = tui_cli_options
+        .as_ref()
+        .and_then(|options| options.connect.clone())
+    {
+        bone::update_check::check_in_background();
+        let stream = tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("failed to connect to daemon at {addr}: {error}"))
+            })?;
+        let (read_half, write_half) = tokio::io::split(stream);
+        let client = bone::rpc::RemoteClient::connect(read_half, write_half);
+        let mut app = App::with_daemon(UserConfig::default(), client)?;
+        app.run().await?;
+        return Ok(());
+    }
 
     // Shared bootstrap for all entry points
     ensure_deps();
@@ -511,7 +573,7 @@ async fn main() -> std::io::Result<()> {
         let theme = configured_theme();
         // Exit 2 on cancel so a parent (e.g. the tmux `/setup` popup) can tell
         // a cancelled wizard from an applied one.
-        let applied = bone::ui::setup::run(&theme, false)?;
+        let applied = run_standalone_setup(&theme, false)?;
         std::process::exit(if applied { 0 } else { 2 });
     }
 
@@ -519,17 +581,31 @@ async fn main() -> std::io::Result<()> {
     // both directly and by the `/catalog` tmux popup.
     if matches!(args.first().map(String::as_str), Some("catalog")) {
         bone::config::seed_base().map_err(std::io::Error::other)?;
+        let host = standalone_host_service()?;
         if args.len() > 1 {
             let [action, name] = &args[1..] else {
                 eprintln!("Usage: bone catalog install|remove NAME");
                 std::process::exit(1);
             };
-            let outcome = bone::ui::catalog::apply_named(action, name);
-            println!("{}", outcome.message);
-            std::process::exit(if outcome.changed { 0 } else { 2 });
+            let action = match action.as_str() {
+                "install" => bone_protocol::CatalogActionKind::Install,
+                "remove" => bone_protocol::CatalogActionKind::Remove,
+                _ => {
+                    eprintln!("Usage: bone catalog install|remove NAME");
+                    std::process::exit(1);
+                }
+            };
+            let (changed, message) = catalog_named(&host, action, name)?;
+            println!("{message}");
+            std::process::exit(if changed { 0 } else { 2 });
         }
         let theme = configured_theme();
-        let outcome = bone::ui::catalog::run(&theme)?;
+        let snapshot = catalog_snapshot(&host)?;
+        let outcome = bone::ui::catalog::run(&theme, snapshot, |revision, actions| {
+            bone::ui::host::catalog_applied(Ok(
+                host.execute(bone::ui::host::catalog_apply_request(revision, actions))
+            ))
+        })?;
         std::process::exit(if outcome.changed { 0 } else { 2 });
     }
 
@@ -551,6 +627,9 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // Release checks are terminal-local.
+    bone::update_check::check_in_background();
+
     // Headless / non-interactive entry points must never block on the wizard;
     // they seed everything (or honor a prior selection) and proceed.
     let interactive = !matches!(
@@ -568,7 +647,7 @@ async fn main() -> std::io::Result<()> {
         // its libs, then run onboarding (writes the selection + init.lua).
         bone::config::seed_base().map_err(std::io::Error::other)?;
         let theme = configured_theme();
-        bone::ui::setup::run(&theme, true)?;
+        let _ = run_standalone_setup(&theme, true)?;
     }
     // Seed tools (and base) filtered by whatever selection is now persisted;
     // None ⇒ seed everything (default / upgrade behavior).
@@ -588,20 +667,14 @@ async fn main() -> std::io::Result<()> {
     if args.first().map(String::as_str) == Some("serve") {
         return run_serve(&args[1..]).await;
     }
-    if args.first().map(String::as_str) == Some("connect") {
-        return run_connect(&args[1..]).await;
-    }
     if args.first().map(String::as_str) == Some("stats-popup") {
-        let db = bone::session_db::SessionDb::open(&bone::session_db::db_path())
-            .map_err(std::io::Error::other)?;
+        let host = standalone_host_service()?;
         let theme = configured_theme();
-        bone::ui::stats::run(&theme, |range| match range {
-            None => db
-                .usage_stats_snapshot()
-                .map_err(|err| std::io::Error::other(err.to_string())),
-            Some(r) => db
-                .usage_stats_range(&r.start, &r.end)
-                .map_err(|err| std::io::Error::other(err.to_string())),
+        bone::ui::stats::run(&theme, |range| {
+            bone::ui::host::stats(Ok(host.execute(bone_protocol::HostRequest::Stats {
+                range: range.clone(),
+            })))
+            .map_err(std::io::Error::other)
         })?;
         return Ok(());
     }
@@ -615,15 +688,8 @@ async fn main() -> std::io::Result<()> {
         return run_web(&args[1..]).await;
     }
 
-    // Throttled, non-blocking catalog refresh: pulls the latest index on a
-    // background thread so update flags / the startup hint stay current.
-    // Installs nothing — updates are applied only via `/catalog`.
-    bone::ext::catalog::refresh_in_background();
-    // Throttled, non-blocking self-update check: fetches the latest release
-    // for this install source; the banner surfaces it next launch if newer.
-    bone::update_check::check_in_background();
-
     // Normal TUI mode
+    bone::ext::catalog::refresh_in_background();
     let config = bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded())
         .map_err(std::io::Error::other)?;
     let settings_snapshot = config.runtime_settings_snapshot();
@@ -632,7 +698,10 @@ async fn main() -> std::io::Result<()> {
     let cfg = UserConfig::default();
     let mut providers_config = config.providers_config();
 
-    let cli_options = parse_cli_options(&args).map_err(std::io::Error::other)?;
+    let cli_options = match tui_cli_options {
+        Some(options) => options,
+        None => parse_cli_options(&args).map_err(std::io::Error::other)?,
+    };
     let provider_id = cli_options.provider.clone().unwrap_or_else(|| {
         if providers_config.last_provider.is_empty() {
             "local".to_string()
@@ -661,21 +730,6 @@ async fn main() -> std::io::Result<()> {
     let provider = providers::create_provider_with_config(&provider_id, &providers_config)
         .map_err(std::io::Error::other)?;
 
-    // Remote mode: attach the full TUI to a separate `bone serve` daemon. The
-    // daemon owns the session and runs turns; the local provider is constructed
-    // only for initial display strings (the daemon's StateSnapshot corrects
-    // them), so its credentials aren't validated here.
-    if let Some(addr) = cli_options.connect {
-        let stream = tokio::net::TcpStream::connect(&addr).await.map_err(|e| {
-            std::io::Error::other(format!("failed to connect to daemon at {addr}: {e}"))
-        })?;
-        let (read_half, write_half) = tokio::io::split(stream);
-        let client = bone::rpc::RemoteClient::connect(read_half, write_half);
-        let mut app = App::with_daemon(provider, cfg, client)?;
-        app.run().await?;
-        return Ok(());
-    }
-
     // Fail fast on bad credentials before booting Lua or the TUI.
     provider.validate().await.map_err(std::io::Error::other)?;
 
@@ -687,7 +741,7 @@ async fn main() -> std::io::Result<()> {
     // The interactive TUI starts a fresh conversation each launch (clean slate);
     // past chats remain in the DB and are reachable via /history. Only the
     // multi-chat `bone serve` / web UI resumes the latest conversation on attach.
-    let settings = std::sync::Arc::new(std::sync::Mutex::new(settings_snapshot));
+    let settings = config.runtime_settings_handle();
     let boot = boot_runtime_host_for(provider, &config, bone::rpc::SessionTarget::New, settings)?;
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
@@ -703,6 +757,7 @@ async fn main() -> std::io::Result<()> {
         hub.publish(bone::runtime::RuntimeEvent::StateSnapshot {
             snapshot: s.snapshot(boot.provider.id(), boot.provider.model()),
         });
+        hub.publish(bone::rpc::view_snapshot(&boot.manager));
     }
 
     let mut app =
@@ -713,7 +768,6 @@ async fn main() -> std::io::Result<()> {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            config.attach_extensions(boot.manager.clone());
             let daemon = tokio::task::spawn_local(bone::rpc::run_daemon(
                 hub.publisher(),
                 commands_rx,

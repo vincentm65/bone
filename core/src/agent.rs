@@ -347,12 +347,14 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::StateSnapshot { .. }
         | crate::runtime::RuntimeEvent::StateSynchronized { .. }
         | crate::runtime::RuntimeEvent::StreamLagged { .. }
+        | crate::runtime::RuntimeEvent::ViewSnapshot { .. }
         | crate::runtime::RuntimeEvent::ProcessesSnapshot { .. }
         | crate::runtime::RuntimeEvent::JobsSnapshot { .. }
         | crate::runtime::RuntimeEvent::FrontendState { .. }
         | crate::runtime::RuntimeEvent::ConfigSnapshot { .. }
         | crate::runtime::RuntimeEvent::ConfigChanged { .. }
         | crate::runtime::RuntimeEvent::ConfigMutationRejected { .. }
+        | crate::runtime::RuntimeEvent::HostResponse { .. }
         | crate::runtime::RuntimeEvent::ConversationLoaded { .. }
         | crate::runtime::RuntimeEvent::ConversationLoadFailed { .. }
         | crate::runtime::RuntimeEvent::ViewDiff { .. }
@@ -615,9 +617,8 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         },
         &model,
         &provider,
-        std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot())),
+        config.runtime_settings_handle(),
     );
-    config.attach_extensions(booted.manager.clone());
     let extensions = booted.manager;
     let tools = booted.tools;
 

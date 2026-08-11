@@ -175,7 +175,7 @@ fn separate_subagents_config_registers_tool_before_runtime_sync() {
 
     let config =
         bone::config::store::ConfigStore::new(bone::ext::ExtensionManager::unloaded()).unwrap();
-    let settings = std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot()));
+    let settings = config.runtime_settings_handle();
     let booted = bone::ext::boot_with_tools_shared(
         &config_dir,
         &config_dir,

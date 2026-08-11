@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod event;
+pub mod host;
 pub mod input;
 pub mod message;
 pub mod session;
@@ -20,6 +21,12 @@ pub use event::{
     CommandAction, ConfigAction, ConversationLoad, JobEventSnapshot, JobSnapshot, JobStatus,
     KeymapDispatchKind, ProcessSnapshot, RuntimeCommand, RuntimeEvent,
 };
+pub use host::{
+    CatalogAction, CatalogActionKind, CatalogApplyResult, CatalogItem, CatalogItemOutcome,
+    CatalogItemResult, CatalogSnapshot, DateRange, HOST_API_VERSION, HostErrorCode, HostRequest,
+    HostResponse, HourUsage, InitChoice, ProviderChoice, ProviderUsage, SetupApplyResult,
+    SetupSnapshot, UsageBucket, UsageStatsSnapshot, UsageSummary,
+};
 pub use input::KeyEvent;
 pub use message::{
     ChatMessage, ChatRole, ImageData, OutputItem, Reasoning, ReasoningItem, ToolCall, ToolResult,
@@ -29,5 +36,5 @@ pub use tokens::{CHARS_PER_TOKEN, TokenStats, format_tokens};
 pub use tools::{CallOutcome, ToolDefinition, ToolOutput};
 pub use view::{
     Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec, PaneSpanSpec, StatusSegment,
-    ViewDiff, view_diff_from_pane_content,
+    ViewDiff, ViewModel, view_diff_from_pane_content,
 };

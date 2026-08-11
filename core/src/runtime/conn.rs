@@ -180,6 +180,7 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::UpsertSubagent { .. }
             | RuntimeCommand::DeleteSubagent { .. }
             | RuntimeCommand::SetSubagentEnabled { .. }
+            | RuntimeCommand::HostRequest { .. }
             | RuntimeCommand::ReloadExtensions => {}
         }
     }

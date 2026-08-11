@@ -6,6 +6,7 @@ pub mod chat;
 pub mod commands;
 pub mod config;
 pub mod ext;
+pub mod host;
 pub mod llm;
 pub mod pane_content;
 pub mod processes;

@@ -122,7 +122,6 @@ bone.command.register("cfgapply", {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider);
     let (hub, commands_rx) = Hub::new();
     let publisher = hub.publisher();
-    config.attach_extensions(extensions.clone());
     tokio::spawn(run_daemon(
         publisher,
         commands_rx,

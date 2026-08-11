@@ -32,6 +32,329 @@ fn remote_jobs_do_not_require_local_termination_confirmation() {
     assert!(!job_quit_confirmation_required(false, 0));
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn app_never_opens_host_storage_and_session_end_stays_local() {
+    let _guard = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os("BONE_DIR");
+    let root = std::env::temp_dir().join(format!(
+        "bone-remote-client-authority-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    unsafe { std::env::set_var("BONE_DIR", &root) };
+
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (read_half, write_half) = tokio::io::split(client_stream);
+    let remote_client = crate::rpc::RemoteClient::connect(read_half, write_half);
+    let app = App::with_daemon(crate::config::UserConfig::default(), remote_client).unwrap();
+
+    assert!(app.remote_client.is_some());
+    assert_eq!(app.view, crate::runtime::SessionSnapshot::default());
+    assert!(
+        !root.exists(),
+        "constructing a remote client must not create client-local host state"
+    );
+
+    drop(app);
+
+    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+        .expect("seed local configuration");
+    let provider =
+        crate::llm::providers::create_provider_with_config("local", &store.providers_config())
+            .unwrap();
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (events_tx, events_rx) = tokio::sync::broadcast::channel(8);
+    let mut app = App::with_runtime_client(
+        std::sync::Arc::from(provider),
+        crate::config::UserConfig::default(),
+        command_tx,
+        events_rx,
+        None,
+    )
+    .unwrap();
+
+    assert!(app.remote_client.is_none());
+    assert!(
+        !root.join("data/conversations.db").exists(),
+        "constructing a local client must leave daemon-host storage to the runtime"
+    );
+    while command_rx.try_recv().is_ok() {}
+
+    // Keep this focused on the dispatched mutation by using the legacy reply
+    // path and pre-queueing its acknowledgement.
+    app.synchronization_supported = Some(false);
+    events_tx
+        .send(crate::runtime::RuntimeEvent::StateSnapshot {
+            snapshot: app.view.clone(),
+        })
+        .unwrap();
+    app.dispatch_session_end().await;
+    assert!(matches!(
+        command_rx.try_recv(),
+        Ok(crate::runtime::RuntimeCommand::DispatchHook { name, payload })
+            if name == "session_end" && payload == serde_json::json!({})
+    ));
+
+    drop(app);
+    std::fs::remove_dir_all(root).ok();
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn host_request_is_correlated_and_applies_unrelated_events() {
+    let _guard = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os("BONE_DIR");
+    let root = std::env::temp_dir().join(format!(
+        "bone-host-request-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    unsafe { std::env::set_var("BONE_DIR", &root) };
+
+    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+        .expect("seed configuration");
+    let provider =
+        crate::llm::providers::create_provider_with_config("local", &store.providers_config())
+            .unwrap();
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (events_tx, events_rx) = tokio::sync::broadcast::channel(8);
+    let mut app = App::with_runtime_client(
+        std::sync::Arc::from(provider),
+        crate::config::UserConfig::default(),
+        command_tx,
+        events_rx,
+        None,
+    )
+    .unwrap();
+    while command_rx.try_recv().is_ok() {}
+
+    let unsupported = app
+        .request_host(bone_protocol::HostRequest::Stats { range: None })
+        .await
+        .unwrap_err();
+    assert!(unsupported.contains("update the daemon"));
+    assert!(command_rx.try_recv().is_err());
+
+    app.host_api_version = bone_protocol::HOST_API_VERSION;
+
+    let expected_id = app.next_request_id;
+    let mut snapshot = app.view.clone();
+    snapshot.sent = 42;
+    events_tx
+        .send(crate::runtime::RuntimeEvent::StateSnapshot { snapshot })
+        .unwrap();
+    events_tx
+        .send(crate::runtime::RuntimeEvent::HostResponse {
+            request_id: expected_id,
+            response: bone_protocol::HostResponse::Error {
+                code: bone_protocol::HostErrorCode::Unavailable,
+                message: "fixture".into(),
+            },
+        })
+        .unwrap();
+
+    let response = app
+        .request_host(bone_protocol::HostRequest::Stats { range: None })
+        .await
+        .unwrap();
+    assert!(matches!(
+        response,
+        bone_protocol::HostResponse::Error { message, .. } if message == "fixture"
+    ));
+    assert_eq!(app.view.sent, 42);
+    assert!(matches!(
+        command_rx.try_recv(),
+        Ok(crate::runtime::RuntimeCommand::HostRequest {
+            request_id,
+            request: bone_protocol::HostRequest::Stats { range: None },
+        }) if request_id == expected_id
+    ));
+
+    drop(app);
+    std::fs::remove_dir_all(root).ok();
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn view_snapshot_replaces_only_daemon_owned_components_and_highlights() {
+    let _guard = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os("BONE_DIR");
+    let root = std::env::temp_dir().join(format!(
+        "bone-view-snapshot-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    unsafe { std::env::set_var("BONE_DIR", &root) };
+
+    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+        .expect("seed configuration");
+    let provider =
+        crate::llm::providers::create_provider_with_config("local", &store.providers_config())
+            .unwrap();
+    let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_, events_rx) = tokio::sync::broadcast::channel(8);
+    let mut app = App::with_runtime_client(
+        std::sync::Arc::from(provider),
+        crate::config::UserConfig::default(),
+        command_tx,
+        events_rx,
+        None,
+    )
+    .unwrap();
+    app.pages.push(crate::ui::pane_page::PanePage {
+        source: "native-pane".into(),
+        title: "Native".into(),
+        content: vec![ratatui::text::Line::from("local")],
+        visible_rows: 1,
+        scroll: 0,
+    });
+    let configured_thinking = app.renderer.theme.thinking;
+    let configured_input_border = app.renderer.theme.input_border;
+
+    app.apply_idle_event(crate::runtime::RuntimeEvent::ViewSnapshot {
+        view: bone_protocol::ViewModel {
+            components: vec![
+                bone_protocol::Component::StatusLine {
+                    id: "shared-shape".into(),
+                    segments: vec![bone_protocol::StatusSegment {
+                        text: "old status".into(),
+                        fg: None,
+                        align: bone_protocol::Align::Left,
+                    }],
+                },
+                bone_protocol::Component::Float {
+                    id: "stale-pane".into(),
+                    title: "Stale".into(),
+                    lines: vec![bone_protocol::PaneLineSpec::Plain("old pane".into())],
+                    rect: bone_protocol::FloatRect {
+                        anchor: bone_protocol::Anchor::Center,
+                        width: 0,
+                        height: 2,
+                        col: 0,
+                        row: 0,
+                    },
+                    z: 0,
+                    border: false,
+                    scroll: 0,
+                },
+            ],
+            highlights: std::collections::HashMap::from([("thinking".into(), "#010203".into())]),
+        },
+    });
+    assert!(app.lua_status.iter().any(|(id, _)| id == "shared-shape"));
+    assert!(app.pages.iter().any(|page| page.source == "stale-pane"));
+    assert_eq!(
+        app.renderer.theme.thinking,
+        ratatui::style::Color::Rgb(1, 2, 3)
+    );
+
+    app.apply_idle_event(crate::runtime::RuntimeEvent::ViewSnapshot {
+        view: bone_protocol::ViewModel {
+            components: vec![bone_protocol::Component::Float {
+                id: "shared-shape".into(),
+                title: "Replacement".into(),
+                lines: vec![bone_protocol::PaneLineSpec::Plain("new pane".into())],
+                rect: bone_protocol::FloatRect {
+                    anchor: bone_protocol::Anchor::Center,
+                    width: 0,
+                    height: 2,
+                    col: 0,
+                    row: 0,
+                },
+                z: 0,
+                border: false,
+                scroll: 0,
+            }],
+            highlights: std::collections::HashMap::from([(
+                "input_border".into(),
+                "#040506".into(),
+            )]),
+        },
+    });
+
+    assert!(!app.lua_status.iter().any(|(id, _)| id == "shared-shape"));
+    assert!(!app.pages.iter().any(|page| page.source == "stale-pane"));
+    assert!(app.pages.iter().any(|page| page.source == "shared-shape"));
+    assert!(app.pages.iter().any(|page| page.source == "native-pane"));
+    assert_eq!(app.renderer.theme.thinking, configured_thinking);
+    assert_eq!(
+        app.renderer.theme.input_border,
+        ratatui::style::Color::Rgb(4, 5, 6)
+    );
+    assert_eq!(
+        app.wire_view_ownership.components,
+        std::collections::HashSet::from(["shared-shape".into()])
+    );
+    assert_eq!(
+        app.wire_view_ownership.highlights,
+        std::collections::HashSet::from(["input_border".into()])
+    );
+
+    app.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
+        messages: Vec::new(),
+        snapshot: app.view.clone(),
+        busy: false,
+    });
+    assert!(app.lua_status.is_empty());
+    assert!(app.pages.is_empty());
+    assert!(app.wire_view_ownership.components.is_empty());
+    assert!(app.wire_view_ownership.highlights.is_empty());
+    assert_eq!(app.renderer.theme.input_border, configured_input_border);
+
+    // Managed attach sends ConversationLoaded before the canonical view. The
+    // following snapshot must survive that conversation reset.
+    app.apply_idle_event(crate::runtime::RuntimeEvent::ViewSnapshot {
+        view: bone_protocol::ViewModel {
+            components: vec![bone_protocol::Component::StatusLine {
+                id: "post-load".into(),
+                segments: vec![bone_protocol::StatusSegment {
+                    text: "attached".into(),
+                    fg: None,
+                    align: bone_protocol::Align::Left,
+                }],
+            }],
+            highlights: Default::default(),
+        },
+    });
+    assert!(app.lua_status.iter().any(|(id, _)| id == "post-load"));
+
+    drop(app);
+    std::fs::remove_dir_all(root).ok();
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
 #[test]
 fn discarded_stream_attempt_removes_only_partial_agent_rows() {
     let mut messages = vec![
@@ -803,6 +1126,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         request_id: probe_id,
         busy: false,
         snapshot: app.view.clone(),
+        view: None,
         messages: None,
     });
     assert_eq!(app.synchronization_supported, Some(true));
@@ -830,6 +1154,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         request_id: request_id.wrapping_add(1),
         busy: false,
         snapshot: foreign_snapshot,
+        view: None,
         messages: None,
     });
     assert_eq!(app.view.provider_id, original_provider);
@@ -841,6 +1166,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         request_id,
         busy: false,
         snapshot: requested_snapshot,
+        view: None,
         messages: None,
     });
     assert_eq!(app.view.provider_id, "synchronized");

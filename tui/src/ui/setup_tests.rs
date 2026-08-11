@@ -30,36 +30,26 @@ fn setup_options_and_summary_use_semantic_palette_roles() {
 }
 
 #[test]
-fn seeded_provider_can_be_activated_without_api_key() {
-    let _guard = crate::ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let previous = std::env::var_os("BONE_DIR");
-    let root = std::env::temp_dir().join(format!(
-        "bone-setup-provider-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    unsafe { std::env::set_var("BONE_DIR", &root) };
+fn seeded_provider_is_submitted_without_an_api_key() {
+    let snapshot = SetupSnapshot {
+        config_revision: 4,
+        providers: vec![bone_protocol::ProviderChoice {
+            id: "local".into(),
+            label: "Local".into(),
+            api_key_configured: false,
+        }],
+        active_provider: "local".into(),
+        init_exists: false,
+        needs_onboarding: true,
+        catalog: bone_protocol::CatalogSnapshot {
+            revision: "catalog-1".into(),
+            items: Vec::new(),
+        },
+    };
+    let state = State::new(true, snapshot, &Theme::default());
+    let plan = plan(&state);
 
-    let store = config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
-        .expect("seed fresh configuration");
-    assert!(
-        store.providers_config().providers["local"]
-            .api_key
-            .is_empty()
-    );
-    assert!(activate_provider(&store, "local"));
-    assert_eq!(store.providers_config().last_provider, "local");
-
-    std::fs::remove_dir_all(root).ok();
-    unsafe {
-        match previous {
-            Some(value) => std::env::set_var("BONE_DIR", value),
-            None => std::env::remove_var("BONE_DIR"),
-        }
-    }
+    assert_eq!(plan.provider_id.as_deref(), Some("local"));
+    assert_eq!(plan.api_key, None);
+    assert_eq!(plan.expected_config_revision, 4);
 }

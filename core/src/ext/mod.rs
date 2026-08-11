@@ -174,7 +174,15 @@ pub fn boot_with_tools(
     model: &str,
     provider: &str,
 ) -> BootedTools {
-    boot_with_tools_inner(config_dir, cwd, config, opts, model, provider)
+    boot_with_tools_inner(
+        config_dir,
+        cwd,
+        config,
+        opts,
+        model,
+        provider,
+        config.runtime_settings_handle(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -186,9 +194,9 @@ pub fn boot_with_tools_shared(
     opts: BootOptions,
     model: &str,
     provider: &str,
-    _settings: std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>,
+    settings: std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>,
 ) -> BootedTools {
-    boot_with_tools_inner(config_dir, cwd, config, opts, model, provider)
+    boot_with_tools_inner(config_dir, cwd, config, opts, model, provider, settings)
 }
 
 fn configured_tool_names(
@@ -209,20 +217,17 @@ fn boot_with_tools_inner(
     opts: BootOptions,
     model: &str,
     provider: &str,
+    settings: std::sync::Arc<std::sync::Mutex<super::config::settings::Settings>>,
 ) -> BootedTools {
     let tool_allowlist = opts.tool_allowlist.clone();
     let BootResult {
         manager: extensions,
         tools: lua_tools,
         shared_state,
-    } = boot_shared(
-        config_dir,
-        cwd,
-        opts,
-        model,
-        provider,
-        std::sync::Arc::new(std::sync::Mutex::new(config.runtime_settings_snapshot())),
-    );
+    } = boot_shared(config_dir, cwd, opts, model, provider, settings);
+    if extensions.is_available() {
+        config.initialize_extension_catalog(extensions.extension_catalog());
+    }
 
     let mut loaded = super::tools::load_tools();
     super::tools::register_lua_tools(&mut loaded, lua_tools);

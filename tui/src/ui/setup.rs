@@ -4,8 +4,8 @@
 //! new user through: picking a provider + API key (skippable), choosing optional
 //! tools/commands from the catalog (auto-downloaded), and whether `init.lua`
 //! is auto-populated or blank. The populated choice stores its starter agent in
-//! canonical `subagents.yaml`. Choices are persisted via
-//! `config::apply_onboarding`, which doubles as the "already onboarded" marker.
+//! canonical `subagents.yaml`. The daemon supplies the snapshot and persists
+//! the returned plan; this module owns only interaction and rendering.
 
 use std::io;
 
@@ -15,12 +15,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::config::{self, InitChoice, SetupSelection};
-use crate::ext::catalog::{self, CatalogEntry};
 use crate::ui::catalog as catalog_ui;
 use crate::ui::fullscreen::{self, FullscreenTerminal};
 use crate::ui::picker::{self, Item};
 use crate::ui::theme::Theme;
+use bone_protocol::{CatalogAction, CatalogItem, InitChoice, SetupSnapshot};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -35,53 +34,45 @@ const STEP_COUNT: usize = 5;
 
 struct State {
     step: Step,
-    /// Daemon configuration authority used during pre-runtime onboarding.
-    config: config::store::ConfigStore,
+    config_revision: u64,
+    catalog_revision: String,
     /// Available providers as `(id, label)`.
     providers: Vec<(String, String)>,
     provider_cursor: usize,
     /// In-progress API key text for the focused provider.
     api_key: String,
-    /// Provider id whose key we saved, for the confirm summary.
-    provider_saved: Option<String>,
     /// Catalog entries and the matching checklist rows.
-    cat_entries: Vec<CatalogEntry>,
+    cat_entries: Vec<CatalogItem>,
     cat_items: Vec<Item>,
     cat_cursor: usize,
     init_options: Vec<(&'static str, &'static str, InitChoice)>,
     init_cursor: usize,
-    completed: bool,
     /// True on a genuine first-launch onboarding; only affects skip/cancel copy.
     fresh: bool,
 }
 
 impl State {
-    fn new(fresh: bool, theme: &Theme) -> Result<Self, String> {
-        let config = config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())?;
-        let mut providers: Vec<(String, String)> = config
-            .providers_config()
+    fn new(fresh: bool, snapshot: SetupSnapshot, theme: &Theme) -> Self {
+        let mut providers: Vec<(String, String)> = snapshot
             .providers
             .into_iter()
-            .map(|(id, entry)| {
+            .map(|entry| {
                 let label = if entry.label.is_empty() {
-                    id.clone()
+                    entry.id.clone()
                 } else {
                     entry.label
                 };
-                (id, label)
+                (entry.id, label)
             })
             .collect();
         providers.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Fetch the catalog index (blocking, cached fallback) so the picker is
-        // populated; offline simply yields an empty list.
-        let cat_entries = catalog::sync_quiet();
+        let provider_cursor = providers
+            .iter()
+            .position(|(id, _)| id == &snapshot.active_provider)
+            .unwrap_or(0);
+        let catalog_revision = snapshot.catalog.revision.clone();
+        let cat_entries = snapshot.catalog.items;
         let cat_items = catalog_ui::build_items(&cat_entries, theme);
-
-        let init_exists = config::setup_selection_path()
-            .parent()
-            .map(|d| d.join("init.lua").exists())
-            .unwrap_or(false);
         let mut init_options = vec![
             (
                 "Auto-populated",
@@ -94,7 +85,7 @@ impl State {
                 InitChoice::Blank,
             ),
         ];
-        if init_exists {
+        if snapshot.init_exists {
             init_options.push((
                 "Keep current",
                 "Leave my existing init.lua untouched.",
@@ -102,39 +93,24 @@ impl State {
             ));
         }
 
-        Ok(Self {
+        Self {
             step: Step::Welcome,
-            config,
+            config_revision: snapshot.config_revision,
+            catalog_revision,
             providers,
-            provider_cursor: 0,
+            provider_cursor,
             api_key: String::new(),
-            provider_saved: None,
             cat_entries,
             cat_items,
             cat_cursor: 0,
             init_options,
             init_cursor: 0,
-            completed: false,
             fresh,
-        })
+        }
     }
 
     fn init_choice(&self) -> InitChoice {
         self.init_options[self.init_cursor].2
-    }
-
-    /// Onboarding seeds no Lua tools (all optional ones live in the catalog)
-    /// and all bundled core commands. The selection file doubles as the
-    /// onboarding-complete marker.
-    fn selection(&self) -> SetupSelection {
-        let commands = crate::ext::default_command_catalog()
-            .into_iter()
-            .map(|(name, _)| name.to_string())
-            .collect();
-        SetupSelection {
-            tools: Vec::new(),
-            commands,
-        }
     }
 
     fn next_step(&mut self) {
@@ -156,68 +132,43 @@ impl State {
             Step::Confirm => Step::Init,
         };
     }
-
-    /// Persist the focused provider with the typed key. No-op if the key is
-    /// blank (the step is skippable) or the provider entry can't be found.
-    fn save_provider(&mut self) {
-        let key = self.api_key.trim();
-        if key.is_empty() {
-            return;
-        }
-        let Some((id, _)) = self.providers.get(self.provider_cursor).cloned() else {
-            return;
-        };
-        let config = self.config.providers_config();
-        if let Some(entry) = config.providers.get(&id) {
-            let revision = self.config.snapshot().revision;
-            let update = bone_protocol::ProviderUpdate {
-                id: id.clone(),
-                label: entry.label.clone(),
-                base_url: entry.base_url.clone(),
-                model: entry.model.clone(),
-                endpoint: entry.endpoint.clone(),
-                handler: entry.handler.clone(),
-                context_window_tokens: entry.context_window_tokens,
-                max_concurrency: entry.max_concurrency,
-                reasoning_effort: entry.reasoning_effort.clone(),
-                fast_mode: Some(entry.fast_mode),
-                supports_prompt_cache_key: Some(entry.supports_prompt_cache_key),
-                api_key: Some(key.to_string()),
-            };
-            if self.config.upsert_provider(update, revision).is_ok()
-                && self
-                    .config
-                    .set_active_provider(&id, revision.saturating_add(1))
-                    .is_ok()
-            {
-                self.provider_saved = Some(id);
-            }
-        }
-    }
 }
 
-/// Run the onboarding wizard fullscreen. Returns `Ok(true)` if the user
-/// completed it (choices applied), `Ok(false)` if they cancelled.
-pub fn run(theme: &Theme, fresh: bool) -> io::Result<bool> {
-    fullscreen::run(|term| run_loop(term, fresh, theme))
+/// Complete setup mutation collected by the frontend and applied by the daemon.
+pub struct Plan {
+    pub expected_config_revision: u64,
+    pub expected_catalog_revision: String,
+    pub provider_id: Option<String>,
+    pub api_key: Option<String>,
+    pub catalog: Vec<CatalogAction>,
+    pub init: InitChoice,
 }
 
-fn run_loop(term: &mut FullscreenTerminal, fresh: bool, theme: &Theme) -> io::Result<bool> {
-    let mut state = State::new(fresh, theme).map_err(io::Error::other)?;
+/// Run the onboarding wizard and return its mutation plan, or `None` on cancel.
+pub fn run(theme: &Theme, fresh: bool, snapshot: SetupSnapshot) -> io::Result<Option<Plan>> {
+    fullscreen::run(|term| run_loop(term, fresh, snapshot, theme))
+}
+
+fn run_loop(
+    term: &mut FullscreenTerminal,
+    fresh: bool,
+    snapshot: SetupSnapshot,
+    theme: &Theme,
+) -> io::Result<Option<Plan>> {
+    let mut state = State::new(fresh, snapshot, theme);
     term.draw(|frame| draw(frame, &state, theme))?;
 
     loop {
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Esc => return Ok(false),
+                KeyCode::Esc => return Ok(None),
                 KeyCode::Up => move_cursor(&mut state, -1),
                 KeyCode::Down => move_cursor(&mut state, 1),
                 KeyCode::Left => state.prev_step(),
                 KeyCode::Right => advance(&mut state),
                 KeyCode::Enter => match state.step {
                     Step::Confirm => {
-                        apply(&mut state)?;
-                        return Ok(state.completed);
+                        return Ok(Some(plan(&state)));
                     }
                     _ => advance(&mut state),
                 },
@@ -282,35 +233,22 @@ fn set_all_catalog(state: &mut State, checked: bool) {
     }
 }
 
-fn activate_provider(config: &config::store::ConfigStore, id: &str) -> bool {
-    let revision = config.snapshot().revision;
-    config.set_active_provider(id, revision).is_ok()
-}
-
 fn advance(state: &mut State) {
-    // Persist the provider choice as we leave the Provider step.
-    if state.step == Step::Provider {
-        state.save_provider();
-        // Even without an API key, set the selected provider as active so
-        // `last_provider` points to an existing entry and Bone can launch
-        // without falling back to the undefined "local" default.
-        if state.provider_saved.is_none()
-            && !state.providers.is_empty()
-            && let Some((id, _)) = state.providers.get(state.provider_cursor).cloned()
-            && activate_provider(&state.config, &id)
-        {
-            state.provider_saved = Some(id);
-        }
-    }
     state.next_step();
 }
 
-fn apply(state: &mut State) -> io::Result<()> {
-    config::apply_onboarding(&state.selection(), state.init_choice())?;
-    // Install the catalog picks (best-effort; failures don't abort onboarding).
-    let _ = catalog_ui::apply(&state.cat_entries, &state.cat_items, false);
-    state.completed = true;
-    Ok(())
+fn plan(state: &State) -> Plan {
+    Plan {
+        expected_config_revision: state.config_revision,
+        expected_catalog_revision: state.catalog_revision.clone(),
+        provider_id: state
+            .providers
+            .get(state.provider_cursor)
+            .map(|(id, _)| id.clone()),
+        api_key: (!state.api_key.trim().is_empty()).then(|| state.api_key.trim().to_string()),
+        catalog: catalog_ui::actions(&state.cat_entries, &state.cat_items, false),
+        init: state.init_choice(),
+    }
 }
 
 // ---- rendering ----------------------------------------------------------
@@ -440,10 +378,7 @@ fn draw_welcome(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            format!(
-                "This quick setup seeds your {} config. You'll set:",
-                config::bone_dir().display()
-            ),
+            "This quick setup configures the daemon host. You'll set:",
             Style::default().fg(p.muted),
         )),
         Line::from(""),
@@ -652,8 +587,9 @@ fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &T
     let n_cat = state.cat_items.iter().filter(|i| i.checked).count();
     let init_label = state.init_options[state.init_cursor].0;
     let provider = state
-        .provider_saved
-        .clone()
+        .providers
+        .get(state.provider_cursor)
+        .map(|(id, _)| id.clone())
         .unwrap_or_else(|| "skipped".to_string());
 
     let lines = vec![
@@ -667,10 +603,7 @@ fn draw_confirm(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &T
         summary("init.lua", init_label.to_string(), theme),
         Line::from(""),
         Line::from(Span::styled(
-            format!(
-                "Press Enter to write these into {}.",
-                config::bone_dir().display()
-            ),
+            "Press Enter to apply these on the daemon host.",
             Style::default().fg(p.good),
         )),
         Line::from(Span::styled(

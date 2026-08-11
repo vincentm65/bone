@@ -1,6 +1,7 @@
 //! View model types: components, diffs, and pane content for the wire protocol.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -186,6 +187,19 @@ impl Component {
             Component::StatusLine { .. } => None,
         }
     }
+}
+
+/// Complete daemon-owned UI projection used to initialize or repair a client.
+///
+/// Live updates normally travel as [`ViewDiff`]s. A full model is sent on
+/// attach and synchronization so a client can also discard components or
+/// highlights whose removal it missed while disconnected or lagging.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ViewModel {
+    #[serde(default)]
+    pub components: Vec<Component>,
+    #[serde(default)]
+    pub highlights: HashMap<String, String>,
 }
 
 // ── Diffs ──────────────────────────────────────────────────────────────────

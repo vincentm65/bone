@@ -1,4 +1,5 @@
 use super::*;
+use crate::HostErrorCode;
 use crate::message::ChatRole;
 use serde_json::json;
 
@@ -134,9 +135,13 @@ fn every_runtime_event_variant_round_trips() {
             request_id: 17,
             busy: true,
             snapshot: SessionSnapshot::default(),
+            view: Some(crate::ViewModel::default()),
             messages: Some(vec![ChatMessage::new(ChatRole::User, "repair")]),
         },
         RuntimeEvent::StreamLagged { skipped: 23 },
+        RuntimeEvent::ViewSnapshot {
+            view: crate::ViewModel::default(),
+        },
         RuntimeEvent::FrontendState {
             banner: "bone".into(),
             settings: json!({
@@ -150,6 +155,15 @@ fn every_runtime_event_variant_round_trips() {
             tool_defs: vec![],
             tool_display: json!({}),
             subagents: vec![],
+            host_api_version: crate::HOST_API_VERSION,
+            catalog_updates: 2,
+        },
+        RuntimeEvent::HostResponse {
+            request_id: 18,
+            response: HostResponse::Error {
+                code: HostErrorCode::Busy,
+                message: "runtime busy".into(),
+            },
         },
         RuntimeEvent::ConversationLoaded {
             messages: vec![ChatMessage::new(ChatRole::User, "hi")],
@@ -251,6 +265,10 @@ fn every_runtime_command_variant_round_trips() {
         RuntimeCommand::Synchronize {
             request_id: 17,
             include_messages: true,
+        },
+        RuntimeCommand::HostRequest {
+            request_id: 18,
+            request: HostRequest::Catalog { refresh: true },
         },
         RuntimeCommand::CancelProcess {
             id: "process-1".into(),
@@ -375,6 +393,7 @@ fn synchronize_defaults_to_snapshot_only() {
         RuntimeEvent::StateSynchronized {
             request_id: 9,
             busy: false,
+            view: None,
             messages: None,
             ..
         }

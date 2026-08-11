@@ -59,6 +59,24 @@ impl SettingsRegistry {
         self.pages.values().cloned().collect()
     }
 
+    /// Resolve frontend pages from this VM-independent registry snapshot.
+    pub fn resolved_pages(&self, settings: &Settings) -> Vec<SettingsPage> {
+        let mut pages = self.pages();
+        let disabled = &settings.resolved().commands.disabled;
+        pages.retain(|page| {
+            page.command
+                .as_ref()
+                .is_none_or(|command| !disabled.contains(command))
+        });
+        for page in &mut pages {
+            for field in &mut page.fields {
+                let path = format!("{}.{}", page.namespace, field.key);
+                field.value = self.resolve(settings, &path).ok();
+            }
+        }
+        pages
+    }
+
     pub fn register(&mut self, mut page: SettingsPage) -> Result<(), String> {
         validate_name("namespace", &page.namespace)?;
         if page.command.is_none() {

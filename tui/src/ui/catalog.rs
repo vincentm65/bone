@@ -4,9 +4,8 @@
 //! labeled; applying only acts on items the user explicitly toggled, so
 //! already-installed items are preserved unless the user unchecks them.
 //!
-//! The list/detail rendering is shared with the onboarding wizard via
-//! [`crate::ui::picker`]; the onboarding "catalog" step reuses
-//! [`build_items`] and [`apply`] so both paths behave identically.
+//! The daemon supplies snapshots and applies mutations; this module owns only
+//! picker state and rendering. The onboarding wizard reuses [`build_items`].
 
 use std::io;
 
@@ -16,10 +15,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::ext::catalog::{self, CatalogEntry};
 use crate::ui::fullscreen::{self, FullscreenTerminal};
 use crate::ui::picker::{self, Item};
 use crate::ui::theme::Theme;
+use bone_protocol::{
+    CatalogAction, CatalogActionKind, CatalogApplyResult, CatalogItem, CatalogItemOutcome,
+    CatalogItemResult, CatalogSnapshot,
+};
 
 /// Result of running the popup.
 pub struct Outcome {
@@ -35,27 +37,19 @@ pub struct Outcome {
 ///
 /// Items whose on-disk content differs from the catalog are tagged "update" and
 /// pre-checked (so a plain Enter pulls every pending update at once).
-pub fn build_items(entries: &[CatalogEntry], theme: &Theme) -> Vec<Item> {
+pub fn build_items(entries: &[CatalogItem], theme: &Theme) -> Vec<Item> {
     entries
         .iter()
-        .map(|entry| {
-            let installed = catalog::is_installed(entry);
-            build_item(
-                entry,
-                installed,
-                installed && catalog::needs_update(entry),
-                theme,
-            )
-        })
+        .map(|entry| build_item(entry, theme))
         .collect()
 }
 
-fn grouped_catalog(entries: Vec<CatalogEntry>, theme: &Theme) -> (Vec<CatalogEntry>, Vec<Item>) {
+fn grouped_catalog(entries: Vec<CatalogItem>, theme: &Theme) -> (Vec<CatalogItem>, Vec<Item>) {
     let items = build_items(&entries, theme);
     group_rows(entries, items)
 }
 
-fn group_rows(entries: Vec<CatalogEntry>, items: Vec<Item>) -> (Vec<CatalogEntry>, Vec<Item>) {
+fn group_rows(entries: Vec<CatalogItem>, items: Vec<Item>) -> (Vec<CatalogItem>, Vec<Item>) {
     let mut rows: Vec<_> = entries.into_iter().zip(items).collect();
     rows.sort_by(|(left_entry, left_item), (right_entry, right_item)| {
         status_rank(left_item)
@@ -100,9 +94,13 @@ fn status_rank(item: &Item) -> usize {
     }
 }
 
-fn build_item(entry: &CatalogEntry, installed: bool, update: bool, theme: &Theme) -> Item {
+fn build_item(entry: &CatalogItem, theme: &Theme) -> Item {
     let p = &theme.palette;
-    let mut item = Item::new(entry.name.clone(), entry.description.clone(), installed);
+    let mut item = Item::new(
+        entry.name.clone(),
+        entry.description.clone(),
+        entry.installed,
+    );
     item.category = match entry.kind.as_str() {
         "command" => "command",
         "theme" => "theme",
@@ -130,11 +128,11 @@ fn build_item(entry: &CatalogEntry, installed: bool, update: bool, theme: &Theme
         .long_description
         .clone()
         .filter(|value| !value.is_empty());
-    if update {
+    if entry.update_available {
         item.tag = Some("update".to_string());
         item.tag_color = Some(p.accent);
         item.user_touched = true;
-    } else if installed {
+    } else if entry.installed {
         item.tag = Some("installed".to_string());
         item.tag_color = Some(p.good);
     }
@@ -147,142 +145,29 @@ fn add_detail(item: &mut Item, label: &str, value: Option<&str>) {
     }
 }
 
-/// Per-row outcome of an apply pass, aligned 1:1 with the items slice.
-#[derive(Clone)]
-pub enum ItemResult {
-    /// No action taken (untouched, or already in the desired state).
-    Unchanged,
-    Installed,
-    Removed,
-    Failed(String),
-}
-
-/// Apply a checklist against the catalog, returning a per-row [`ItemResult`]
-/// aligned 1:1 with `items`.
-///
-/// When `touched_only` is true (catalog UI), only items the user explicitly
-/// toggled are acted on — untouched items keep their current install state.
-/// When false (onboarding), all items are applied as-is.
-pub fn apply_results(
-    entries: &[CatalogEntry],
-    items: &[Item],
-    touched_only: bool,
-) -> Vec<ItemResult> {
+/// Turn the changed picker rows into daemon-host actions.
+pub fn actions(entries: &[CatalogItem], items: &[Item], touched_only: bool) -> Vec<CatalogAction> {
     entries
         .iter()
         .zip(items.iter())
-        .map(|(entry, item)| {
-            let on_disk = catalog::is_installed(entry);
-            let act = if touched_only {
-                item.user_touched
+        .filter(|(entry, item)| {
+            (!touched_only || item.user_touched)
+                && (item.checked != entry.installed || item.checked && entry.update_available)
+        })
+        .map(|(entry, item)| CatalogAction {
+            name: entry.name.clone(),
+            action: if item.checked {
+                CatalogActionKind::Install
             } else {
-                true
-            };
-            if !act {
-                return ItemResult::Unchanged;
-            }
-            if item.checked {
-                if !on_disk || catalog::needs_update(entry) {
-                    match catalog::install(entry) {
-                        Ok(()) => ItemResult::Installed,
-                        Err(e) => ItemResult::Failed(e),
-                    }
-                } else {
-                    ItemResult::Unchanged
-                }
-            } else if on_disk {
-                match catalog::remove(entry) {
-                    Ok(()) => ItemResult::Removed,
-                    Err(e) => ItemResult::Failed(e),
-                }
-            } else {
-                ItemResult::Unchanged
-            }
+                CatalogActionKind::Remove
+            },
         })
         .collect()
 }
 
-/// Apply a checklist against the catalog, returning `(installed, removed,
-/// errors)` counts. Thin wrapper over [`apply_results`] for callers (onboarding)
-/// that only need totals.
-pub fn apply(
-    entries: &[CatalogEntry],
-    items: &[Item],
-    touched_only: bool,
-) -> (usize, usize, Vec<String>) {
-    let mut installed = 0;
-    let mut removed = 0;
-    let mut errors = Vec::new();
-    for r in apply_results(entries, items, touched_only) {
-        match r {
-            ItemResult::Installed => installed += 1,
-            ItemResult::Removed => removed += 1,
-            ItemResult::Failed(e) => errors.push(e),
-            ItemResult::Unchanged => {}
-        }
-    }
-    (installed, removed, errors)
-}
-
-/// Install or remove one catalog item by its display name (`weather`) or file
-/// name (`weather.lua`).
-pub fn apply_named(action: &str, name: &str) -> Outcome {
-    let entries = catalog::sync_quiet();
-    let requested = name.strip_suffix(".lua").unwrap_or(name);
-    let Some(entry) = entries
-        .iter()
-        .find(|entry| entry.name.strip_suffix(".lua") == Some(requested))
-    else {
-        return Outcome {
-            changed: false,
-            message: format!("Catalog item not found: {name}"),
-        };
-    };
-
-    let result = match action {
-        "install" if catalog::is_installed(entry) && !catalog::needs_update(entry) => {
-            return Outcome {
-                changed: false,
-                message: format!("Catalog item already installed: {requested}"),
-            };
-        }
-        "install" => catalog::install(entry),
-        "remove" if !catalog::has_installed_files(entry) => {
-            return Outcome {
-                changed: false,
-                message: format!("Catalog item is not installed: {requested}"),
-            };
-        }
-        "remove" => catalog::remove(entry),
-        _ => {
-            return Outcome {
-                changed: false,
-                message: "Usage: /catalog install|remove NAME".to_string(),
-            };
-        }
-    };
-
-    match result {
-        Ok(()) => Outcome {
-            changed: true,
-            message: format!(
-                "Catalog item {}: {requested}",
-                if action == "install" {
-                    "installed"
-                } else {
-                    "removed"
-                }
-            ),
-        },
-        Err(err) => Outcome {
-            changed: false,
-            message: format!("Catalog {action} failed for {requested}: {err}"),
-        },
-    }
-}
-
 struct State {
-    entries: Vec<CatalogEntry>,
+    revision: String,
+    entries: Vec<CatalogItem>,
     items: Vec<Item>,
     cursor: usize,
     outcome: Outcome,
@@ -292,10 +177,10 @@ struct State {
 }
 
 impl State {
-    fn new(theme: &Theme) -> Self {
-        let entries = catalog::sync_quiet();
-        let (entries, items) = grouped_catalog(entries, theme);
+    fn new(snapshot: CatalogSnapshot, theme: &Theme) -> Self {
+        let (entries, items) = grouped_catalog(snapshot.items, theme);
         Self {
+            revision: snapshot.revision,
             entries,
             items,
             cursor: 0,
@@ -308,14 +193,24 @@ impl State {
     }
 }
 
-/// Run the catalog popup fullscreen. Returns the outcome (whether anything
-/// changed + a summary message).
-pub fn run(theme: &Theme) -> io::Result<Outcome> {
-    fullscreen::run(|term| run_loop(term, theme))
+/// Run the catalog popup against a daemon-host apply callback.
+pub fn run<F>(theme: &Theme, snapshot: CatalogSnapshot, apply: F) -> io::Result<Outcome>
+where
+    F: FnMut(String, Vec<CatalogAction>) -> Result<CatalogApplyResult, String>,
+{
+    fullscreen::run(|term| run_loop(term, theme, snapshot, apply))
 }
 
-fn run_loop(term: &mut FullscreenTerminal, theme: &Theme) -> io::Result<Outcome> {
-    let mut state = State::new(theme);
+fn run_loop<F>(
+    term: &mut FullscreenTerminal,
+    theme: &Theme,
+    snapshot: CatalogSnapshot,
+    mut apply: F,
+) -> io::Result<Outcome>
+where
+    F: FnMut(String, Vec<CatalogAction>) -> Result<CatalogApplyResult, String>,
+{
+    let mut state = State::new(snapshot, theme);
     term.draw(|frame| draw(frame, &state, theme))?;
 
     loop {
@@ -338,7 +233,7 @@ fn run_loop(term: &mut FullscreenTerminal, theme: &Theme) -> io::Result<Outcome>
                 KeyCode::Char('a') => set_all(&mut state, true),
                 KeyCode::Char('n') => set_all(&mut state, false),
                 // Apply, then stay open showing the result until the user closes.
-                KeyCode::Enter => apply_state(&mut state, theme),
+                KeyCode::Enter => apply_state(&mut state, theme, &mut apply),
                 _ => {}
             },
             Event::Resize(_, _) => {}
@@ -370,20 +265,31 @@ fn set_all(state: &mut State, checked: bool) {
     }
 }
 
-fn apply_state(state: &mut State, theme: &Theme) {
-    let results = apply_results(&state.entries, &state.items, true);
+fn apply_state<F>(state: &mut State, theme: &Theme, apply: &mut F)
+where
+    F: FnMut(String, Vec<CatalogAction>) -> Result<CatalogApplyResult, String>,
+{
+    let requested = actions(&state.entries, &state.items, true);
+    let applied = match apply(state.revision.clone(), requested) {
+        Ok(applied) => applied,
+        Err(error) => {
+            state.outcome.message = format!("Catalog failed: {error}");
+            state.result = Some(format!("✗ {error}"));
+            return;
+        }
+    };
     let mut installed = 0;
     let mut removed = 0;
     let mut failed = 0;
-    for r in &results {
-        match r {
-            ItemResult::Installed => installed += 1,
-            ItemResult::Removed => removed += 1,
-            ItemResult::Failed(_) => failed += 1,
-            ItemResult::Unchanged => {}
+    for result in &applied.results {
+        match &result.outcome {
+            CatalogItemOutcome::Installed => installed += 1,
+            CatalogItemOutcome::Removed => removed += 1,
+            CatalogItemOutcome::Failed { .. } => failed += 1,
+            CatalogItemOutcome::Unchanged => {}
         }
     }
-    state.outcome.changed = installed > 0 || removed > 0;
+    state.outcome.changed |= applied.changed;
 
     // Chat-transcript summary (used by the host once the popup closes).
     let mut parts = Vec::new();
@@ -417,18 +323,9 @@ fn apply_state(state: &mut State, theme: &Theme) {
         b
     };
 
-    // Rebuild rows from the same catalog entries used for this apply pass.
-    // A fresh fetch here can overwrite the cache with a newer index than the
-    // files just installed, making the next startup banner report an update
-    // immediately after a successful apply.
-    let name_results: Vec<(String, ItemResult)> = state
-        .entries
-        .iter()
-        .map(|e| e.name.clone())
-        .zip(results)
-        .collect();
-    let (entries, mut items) = grouped_catalog(std::mem::take(&mut state.entries), theme);
-    overlay_results(&mut items, &name_results, theme);
+    state.revision = applied.snapshot.revision;
+    let (entries, mut items) = grouped_catalog(applied.snapshot.items, theme);
+    overlay_results(&mut items, &applied.results, theme);
     state.entries = entries;
     state.items = items;
     state.cursor = state.cursor.min(state.items.len().saturating_sub(1));
@@ -436,27 +333,27 @@ fn apply_state(state: &mut State, theme: &Theme) {
 }
 
 /// Overlay per-item status tags onto freshly rebuilt rows, matched by name.
-fn overlay_results(items: &mut [Item], name_results: &[(String, ItemResult)], theme: &Theme) {
+fn overlay_results(items: &mut [Item], results: &[CatalogItemResult], theme: &Theme) {
     let p = &theme.palette;
     for item in items.iter_mut() {
-        let Some((_, result)) = name_results.iter().find(|(name, _)| *name == item.name) else {
+        let Some(result) = results.iter().find(|result| result.name == item.name) else {
             continue;
         };
-        match result {
-            ItemResult::Installed => {
+        match &result.outcome {
+            CatalogItemOutcome::Installed => {
                 item.tag = Some("installed".to_string());
                 item.tag_color = Some(p.good);
             }
-            ItemResult::Removed => {
+            CatalogItemOutcome::Removed => {
                 item.tag = Some("removed".to_string());
                 item.tag_color = Some(p.good);
             }
-            ItemResult::Failed(err) => {
+            CatalogItemOutcome::Failed { message } => {
                 item.tag = Some("✗ failed".to_string());
                 item.tag_color = Some(p.error);
-                item.desc = format!("Failed: {err}");
+                item.desc = format!("Failed: {message}");
             }
-            ItemResult::Unchanged => {}
+            CatalogItemOutcome::Unchanged => {}
         }
     }
 }

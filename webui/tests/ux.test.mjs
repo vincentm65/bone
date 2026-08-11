@@ -118,10 +118,193 @@ test("web config resolves recursive canonical paths with snapshot precedence", (
   assert.doesNotMatch(js, /["']approval_mode["']|["']show_thinking["']|toolsDisabled|set_setting/);
 });
 
+test("bridge uses one launch workspace, honors BONE_DIR, and only exposes loopback", () => {
+  assert.match(bridge, /const LAUNCH_WORKSPACE = process\.cwd\(\)/);
+  assert.match(bridge, /process\.env\.BONE_DIR[^\n]+resolve\(LAUNCH_WORKSPACE, process\.env\.BONE_DIR\)/);
+  assert.doesNotMatch(bridge, /\/tmp\/\.bone-rust/);
+  assert.match(bridge, /neither BONE_DIR, XDG_CONFIG_HOME, HOME nor USERPROFILE is set/);
+  assert.match(bridge, /spawn\(cmd, args, \{ cwd: LAUNCH_WORKSPACE,/);
+  assert.match(bridge, /const root = LAUNCH_WORKSPACE/);
+  assert.match(bridge, /server\.listen\(PORT, "127\.0\.0\.1"/);
+  assert.match(bridge, /--manifest-path[^\n]+join\(REPO, "Cargo\.toml"\)/);
+});
+
+test("config snapshots render approval mode without issuing a user mutation", () => {
+  const syncSource = js.slice(js.indexOf("function syncConfigState"), js.indexOf("async function writeConfig"));
+  const renderSource = js.slice(js.indexOf("function renderMode(d)"), js.indexOf("function setMode(d)"));
+  const userSource = js.slice(js.indexOf("function setMode(d)"), js.indexOf("// ── display prefs"));
+  assert.match(syncSource, /renderMode\(/);
+  assert.doesNotMatch(syncSource, /setMode\(|send\(/);
+  assert.doesNotMatch(renderSource, /send\(/);
+  assert.match(userSource, /send\(\{ set_approval_mode:/);
+});
+
+test("subagent mutations are revisioned and await the authoritative config response", () => {
+  const writer = js.slice(js.indexOf("async function mutateConfig"), js.indexOf("function setRow"));
+  const agents = js.slice(js.indexOf("function renderAgentEditor"), js.indexOf("function renderTools"));
+  assert.match(writer, /buildRevisionedCommand\(kind, payload, configCache\.snapshot\.revision\)/);
+  assert.match(writer, /mutateConfig\("\/api\/config-command"/);
+  assert.match(writer, /await requestJson\(url/);
+  assert.match(writer, /adoptConfig\(result\.schema, result\.snapshot\)/);
+  assert.match(bridge, /CONFIG_COMMANDS = new Set\([\s\S]*"upsert_subagent"[\s\S]*"delete_subagent"[\s\S]*"set_subagent_enabled"/);
+  assert.match(bridge, /await daemonConfigCommand\(command\)/);
+  assert.doesNotMatch(agents, /send\(\{ (?:upsert_subagent|delete_subagent|set_subagent_enabled):/);
+});
+
+test("providers share the canonical revisioned config path", () => {
+  const providers = js.slice(js.indexOf("const PROVIDER_FIELDS"), js.indexOf("// ── settings:"));
+  const config = js.slice(js.indexOf("let configCache"), js.indexOf("function setRow"));
+  assert.match(config, /snapshot\.providers/);
+  assert.match(providers, /writeRevisionedCommand\("upsert_provider"/);
+  assert.match(providers, /writeRevisionedCommand\("delete_provider"/);
+  assert.match(bridge, /CONFIG_COMMANDS = new Set\([\s\S]*"upsert_provider"[\s\S]*"delete_provider"/);
+  assert.doesNotMatch(bridge, /\/api\/providers|handleProvider(?:Patch|Post|Delete)|function providerUpdate/);
+  assert.doesNotMatch(js, /function loadProviders|requestJson\(`?\/api\/providers/);
+});
+
+test("stream lag requests and applies a correlated authoritative synchronization", () => {
+  const request = js.slice(js.indexOf("async function requestSynchronization"), js.indexOf("function onStreamLagged"));
+  const response = js.slice(js.indexOf("function onStateSynchronized"), js.indexOf("// ── background watches"));
+  const retry = js.slice(js.indexOf("function resetRepairRequest"), js.indexOf("async function requestSynchronization"));
+  assert.match(js, /case "stream_lagged": return onStreamLagged\(ev\)/);
+  assert.match(js, /case "state_synchronized": return onStateSynchronized\(ev\)/);
+  assert.match(request, /buildSynchronizationCommand\(requestId, true\)/);
+  assert.match(request, /repair\.id !== requestId/);
+  assert.match(retry, /repair\.timer = setTimeout/);
+  assert.match(response, /ev\.request_id !== repair\.id/);
+  assert.match(response, /onSnapshot\(ev\.snapshot\)/);
+  assert.match(response, /onConversationLoaded\(\{ messages: ev\.messages, snapshot: ev\.snapshot, busy: false \}\)/);
+  assert.match(response, /if \(ev\.view\) onViewSnapshot\(ev\.view\)/);
+  assert.ok(
+    response.lastIndexOf("onViewSnapshot(ev.view)") > response.indexOf("onConversationLoaded("),
+    "idle synchronization must apply the canonical view after rebuilding the conversation",
+  );
+});
+
+test("busy attachments repair the missed stream and deduplicate approval replays", () => {
+  const loaded = js.slice(js.indexOf("function onConversationLoaded"), js.indexOf("function renderStoredMessage"));
+  const approval = js.slice(js.indexOf("async function sendInteraction"), js.indexOf("// Daemon status lines"));
+  const keys = js.slice(js.indexOf("function onKeyRequest"), js.indexOf("// ── interact pane"));
+  assert.match(loaded, /repair\.active \|\| loadedRunning/);
+  assert.match(loaded, /requestSynchronization\(\)/);
+  assert.match(approval, /state\.approvals\.has\(ev\.id\) \|\| state\.answeredApprovals\.has\(ev\.id\)/);
+  assert.match(approval, /answered\.has\(id\) \|\| replying\.has\(id\)/);
+  assert.match(approval, /answered\.add\(id\)/);
+  assert.match(approval, /state\.conversationId !== conversationId\) return null/);
+  assert.match(approval, /if \(!sent\) return false/);
+  assert.match(keys, /state\.keyId === ev\.id \|\| state\.answeredKeys\.has\(ev\.id\)/);
+  assert.match(keys, /sendInteraction\("key_reply", id, \{ key \}\)/);
+  assert.match(keys, /sent === false && state\.keyId == null/);
+});
+
+test("interaction replies deduplicate in flight and remain retryable after transport failure", async () => {
+  const source = js.slice(js.indexOf("async function sendInteraction"), js.indexOf("function onApproval"));
+  const pending = deferred();
+  let sends = 0;
+  const state = {
+    conversationId: 4,
+    answeredApprovals: new Set(), replyingApprovals: new Set(),
+    answeredKeys: new Set(), replyingKeys: new Set(),
+  };
+  const context = {
+    state,
+    send: () => { sends++; return pending.promise; },
+  };
+  vm.runInNewContext(`${source};globalThis.reply = sendInteraction`, context);
+
+  const first = context.reply("key_reply", 7, { key: { code: "Enter" } });
+  assert.equal(await context.reply("key_reply", 7, { key: { code: "Enter" } }), null);
+  assert.equal(sends, 1);
+  pending.resolve(false);
+  assert.equal(await first, false);
+  assert.equal(state.replyingKeys.has(7), false);
+  assert.equal(state.answeredKeys.has(7), false);
+
+  context.send = async () => true;
+  assert.equal(await context.reply("key_reply", 7, { key: { code: "Enter" } }), true);
+  assert.equal(state.answeredKeys.has(7), true);
+  assert.equal(await context.reply("key_reply", 7, { key: { code: "Enter" } }), null);
+});
+
+test("unload queues denials for every pending approval synchronously", () => {
+  const source = js.slice(js.indexOf("async function sendInteraction"), js.indexOf("// Daemon status lines"));
+  const beacons = [];
+  const state = {
+    session: "session-1", conversationId: 4,
+    approvals: new Map([[1, null], [2, null], [3, null]]),
+    answeredApprovals: new Set(), replyingApprovals: new Set(),
+    answeredKeys: new Set(), replyingKeys: new Set(),
+  };
+  const context = {
+    state,
+    navigator: {
+      sendBeacon: (url, body) => { beacons.push([url, JSON.parse(body)]); return true; },
+    },
+  };
+  vm.runInNewContext(`${source};globalThis.deny = denyPending`, context);
+
+  context.deny(true);
+
+  assert.deepEqual(beacons.map(([, body]) => body.approval_reply.id), [1, 2, 3]);
+  assert.equal(state.answeredApprovals.size, 3);
+});
+
+test("correlated config rejection broadcasts are left to their requesting connection", () => {
+  assert.match(js, /case "config_mutation_rejected":[\s\S]*?if \(ev\.request_id\) return;/);
+});
+
+test("full view snapshots replace stale browser view state before incremental diffs", () => {
+  const view = js.slice(js.indexOf("function applyViewHighlight"), js.indexOf("// Parse a pane's styled lines"));
+  const loaded = js.slice(js.indexOf("function onConversationLoaded"), js.indexOf("function renderStoredMessage"));
+  assert.match(js, /case "view_snapshot": return onViewSnapshot\(ev\.view\)/);
+  assert.match(view, /taskState\.active = false/);
+  assert.match(view, /if \(!sameInteract\) closeInteract\(\)/);
+  assert.match(view, /Object\.entries\(view\.highlights \|\| \{\}\)/);
+  assert.match(view, /view\.components \|\| \[\]/);
+  assert.match(view, /function onViewDiff\(diff\) \{\s*renderViewDiff\(diff\)/);
+  assert.doesNotMatch(loaded, /onViewSnapshot\(/);
+  assert.doesNotMatch(js, /taskCache|liveEventCache/);
+});
+
+test("repair snapshots preserve the active interaction queue", () => {
+  const source = js.slice(js.indexOf("function onViewSnapshot"), js.indexOf("function onViewDiff"));
+  const interactState = {
+    active: true,
+    identity: "same",
+    queue: ["Down", "Enter"],
+    optionCache: new Map([[0, { label: "One" }]]),
+  };
+  let closes = 0;
+  const context = {
+    interactState,
+    taskState: {},
+    renderTaskList() {},
+    closeInteract() {
+      closes++;
+      interactState.queue = [];
+      interactState.optionCache.clear();
+    },
+    interactIdentity: (model) => model.identity,
+    parseInteractPane: (component) => component.model,
+    prefs: { theme: "dark" },
+    applyViewHighlight() {},
+    renderViewDiff() {},
+  };
+  vm.runInNewContext(`${source};globalThis.snapshot = onViewSnapshot`, context);
+
+  context.snapshot({ components: [{ id: "interact", lines: ["question"], model: { identity: "same" } }] });
+  assert.equal(closes, 0);
+  assert.deepEqual(interactState.queue, ["Down", "Enter"]);
+  assert.equal(interactState.optionCache.size, 1);
+
+  context.snapshot({ components: [{ id: "interact", lines: ["new question"], model: { identity: "different" } }] });
+  assert.equal(closes, 1);
+});
+
 test("concurrent config mutations resolve only their correlated response", async () => {
   const source = bridge.slice(
-    bridge.indexOf("async function daemonConfigCommand"),
-    bridge.indexOf("async function daemonConfigSnapshot"),
+    bridge.indexOf("function daemonRequest"),
+    bridge.indexOf("async function getConfigFromDaemon"),
   );
   const links = [];
   let nextId = 0;
@@ -146,13 +329,15 @@ test("concurrent config mutations resolve only their correlated response", async
   vm.runInNewContext(`${source};globalThis.send = daemonConfigCommand`, context);
 
   let firstSettled = false;
-  const first = context.send({ set_tool_enabled: { name: "shell", enabled: false } })
+  const first = context.send({ set_tool_enabled: { name: "shell", enabled: false, expected_revision: 11 } })
     .finally(() => { firstSettled = true; });
-  const second = context.send({ set_tool_enabled: { name: "shell", enabled: true } });
+  const second = context.send({ set_tool_enabled: { name: "shell", enabled: true, expected_revision: 12 } });
   await new Promise(queueMicrotask);
 
   const firstId = links[0].command.set_tool_enabled.request_id;
   const secondId = links[1].command.set_tool_enabled.request_id;
+  assert.equal(links[0].command.set_tool_enabled.expected_revision, 11);
+  assert.equal(links[1].command.set_tool_enabled.expected_revision, 12);
   assert.notEqual(firstId, secondId);
   links[0].emit({ config_changed: { request_id: secondId, revision: 2 } });
   await new Promise(queueMicrotask);
@@ -164,6 +349,60 @@ test("concurrent config mutations resolve only their correlated response", async
   assert.equal((await first).request_id, firstId);
   assert.equal(links[0].closed, true);
   assert.equal(links[1].closed, true);
+});
+
+test("stats use one correlated daemon host request and preserve the snapshot shape", async () => {
+  const source = bridge.slice(
+    bridge.indexOf("function daemonRequest"),
+    bridge.indexOf("async function getConfigFromDaemon"),
+  );
+  const links = [];
+  const context = {
+    Date: { now: () => 17 },
+    Error,
+    clearTimeout,
+    setTimeout,
+    createDaemonLink(onLine, onStatus) {
+      const link = {
+        command: null,
+        writes: 0,
+        closed: false,
+        close() { this.closed = true; },
+        write(command) { this.command = command; this.writes++; return true; },
+        emit(event) { onLine(JSON.stringify(event)); },
+      };
+      links.push(link);
+      queueMicrotask(() => onStatus("connected"));
+      return link;
+    },
+  };
+  vm.runInNewContext(`${source};globalThis.load = loadStatsSnapshot`, context);
+
+  const snapshot = {
+    started_at: "2026-08-10 14:00:00",
+    ended_at: "2026-08-10 14:01:00",
+    total: { prompt_tokens: 10, completion_tokens: 3, cached_tokens: 2, cost: 0.25, request_count: 1 },
+    by_model_today: [], by_model_7d: [], by_model_4w: [], by_model_all: [],
+    daily: [], weekly: [], monthly: [], all_time: [], yearly: [],
+    hourly_today: [], hourly_7d: [], hourly_4w: [], hourly_all: [], daily_activity: [],
+  };
+  let settled = false;
+  const result = context.load().finally(() => { settled = true; });
+  await new Promise(queueMicrotask);
+
+  assert.equal(links.length, 1);
+  assert.equal(links[0].writes, 1);
+  assert.equal(JSON.stringify(links[0].command), JSON.stringify({
+    host_request: { request_id: 18, request: { stats: { range: null } } },
+  }));
+  links[0].emit({ host_response: { request_id: 19, response: { stats: { stale: true } } } });
+  await new Promise(queueMicrotask);
+  assert.equal(settled, false, "an unrelated broadcast must not settle the request");
+
+  links[0].emit({ host_response: { request_id: 18, response: { stats: snapshot } } });
+  assert.equal(JSON.stringify(await result), JSON.stringify(snapshot));
+  assert.equal(links[0].closed, true);
+  assert.doesNotMatch(bridge, /usage_events|openStatsDb|usageByModel|usageRecentDays/);
 });
 
 test("dialogs expose modal semantics and managed focus", () => {
@@ -415,16 +654,13 @@ test("thinking states are simple, animated, and motion-safe", () => {
   assert.match(css, /\.reasoning-preview/);
 });
 
-test("multiplexed chats retain and replay each in-flight turn", () => {
-  assert.match(js, /const liveEventCache = new Map\(\)/);
-  assert.match(js, /cacheLiveEvent\(convId, ev\)/);
-  assert.match(js, /cacheLiveEvent\(state\.awaitingLoad\.from, ev\)/);
-  assert.match(js, /replayLiveTail\(state\.conversationId\)/);
-  assert.match(js, /liveEventCache\.delete\(convId\)/);
-  assert.doesNotMatch(js, /its text\/tools are deliberately ignored/);
+test("multiplexed chats watch background turns and repair authoritatively on return", () => {
+  assert.doesNotMatch(js, /taskCache|liveEventCache|replayLiveTail/);
   assert.match(bridge, /kind: "watch", conversation_id: convId/);
   assert.match(bridge, /snapshot\.conversation_id === convId/);
   assert.match(js, /await watchConversation\(leaving\)/);
+  assert.match(js, /repair\.active \|\| loadedRunning/);
+  assert.match(js, /case "view_snapshot": return onViewSnapshot\(ev\.view\)/);
 });
 
 function deferred() {
@@ -462,7 +698,6 @@ function navigationHarness() {
     unwatchConversation() {},
     saveDraft() {},
     denyPending() {},
-    cacheTasks() {},
     recoverNavigation(token) { if (state.awaitingLoad === token) state.awaitingLoad = null; },
     toast() {},
     renderChats() {},
@@ -555,10 +790,21 @@ test("duplicate watch requests share readiness and both observe failure", async 
   assert.equal(context.state.watched.has(7), false);
 });
 
-test("reattaching to a busy conversation restores its active running state", () => {
+test("reattaching to a busy conversation restores running state and requests repair", () => {
   const source = js.slice(js.indexOf("function onConversationLoaded"), js.indexOf("function renderStoredMessage"));
-  const state = { awaitingLoad: null, conversationId: 4, runningConvs: new Set([8]) };
+  const state = {
+    awaitingLoad: null,
+    conversationId: 4,
+    runningConvs: new Set([8]),
+    approvals: new Map(),
+    answeredApprovals: new Set(),
+    replyingApprovals: new Set(),
+    keyId: null,
+    answeredKeys: new Set(),
+    replyingKeys: new Set(),
+  };
   let running = false;
+  let synchronized = false;
   const thread = { innerHTML: "", appendChild() {} };
   const context = {
     state,
@@ -569,22 +815,24 @@ test("reattaching to a busy conversation restores its active running state", () 
     onSnapshot: (snapshot) => { state.conversationId = snapshot.conversation_id; },
     setRunning: (value) => { running = value; },
     restoreDraft() {},
-    restoreTasks() {},
+    clearTaskList() {},
     buildWelcome: () => ({}),
-    replayLiveTail() {},
     scrollToBottom() {},
+    requestSynchronization: () => { synchronized = true; },
   };
-  vm.runInNewContext(`let bgAgentRows = []; ${source};globalThis.loaded = onConversationLoaded`, context);
+  vm.runInNewContext(`let bgAgentRows = []; const repair = { active: false, id: null }; ${source};globalThis.loaded = onConversationLoaded;globalThis.repairState = repair`, context);
 
   context.loaded({ messages: [], snapshot: { conversation_id: 8 }, busy: true });
 
   assert.equal(state.conversationId, 8);
   assert.equal(state.runningConvs.has(8), false);
   assert.equal(running, true);
+  assert.equal(context.repairState.active, true);
+  assert.equal(synchronized, true);
 });
 
 test("conversation load failure only clears and restores its correlated navigation", () => {
-  const recover = js.slice(js.indexOf("function recoverNavigation"), js.indexOf("const LIVE_EVENT_TYPES"));
+  const recover = js.slice(js.indexOf("function recoverNavigation"), js.indexOf("// ── connection"));
   const failed = js.slice(js.indexOf("function onConversationLoadFailed"), js.indexOf("function onConversationLoaded"));
   const token = { mode: "load", id: 8, from: 4, draftChat: true };
   const state = { awaitingLoad: token, conversationId: 8, draftChat: false, runningConvs: new Set([4]) };
@@ -595,9 +843,10 @@ test("conversation load failure only clears and restores its correlated navigati
     unwatchConversation() {},
     renderChats() {},
     updateRunningIndicators() {},
+    requestSynchronization() {},
     systemLine: (message, isError) => errors.push({ message, isError }),
   };
-  vm.runInNewContext(`let desiredConversationId = 8; ${recover}${failed};globalThis.fail = onConversationLoadFailed`, context);
+  vm.runInNewContext(`let desiredConversationId = 8; const repair = { active: false }; ${recover}${failed};globalThis.fail = onConversationLoadFailed`, context);
 
   context.fail({ id: 7, message: "wrong failure" });
   assert.equal(state.awaitingLoad, token);
@@ -629,7 +878,22 @@ test("provider editor supports optional max concurrency", () => {
   const providerEditor = js.slice(js.indexOf("const PROVIDER_FIELDS"), js.indexOf("// Inline add-provider form"));
   assert.match(providerEditor, /key: "max_concurrency"/);
   assert.match(providerEditor, /Max concurrency must be blank or a positive integer/);
-  assert.match(bridge, /max_concurrency: merged\.max_concurrency \?\? null/);
+  assert.match(providerEditor, /max_concurrency: merged\.max_concurrency \?\? null/);
+});
+
+test("provider updates preserve hidden credentials unless the key is edited", () => {
+  const source = js.slice(js.indexOf("function providerUpdate"), js.indexOf("let _provExpanded"));
+  const context = { Object };
+  vm.runInNewContext(`${source};globalThis.update = providerUpdate`, context);
+  const provider = {
+    label: "Primary", base_url: "https://example.test", model: "old",
+    endpoint: "/chat", handler: "codex", fast_mode: true,
+  };
+  const ordinary = context.update("primary", provider, { model: "new" });
+  assert.equal(ordinary.model, "new");
+  assert.equal(ordinary.fast_mode, true);
+  assert.equal(Object.hasOwn(ordinary, "api_key"), false);
+  assert.equal(context.update("primary", provider, { api_key: "secret" }).api_key, "secret");
 });
 
 test("provider editor supports custom effort and Codex-only fast mode", () => {
@@ -638,7 +902,7 @@ test("provider editor supports custom effort and Codex-only fast mode", () => {
   assert.match(providerEditor, /\["XHigh", "xhigh"\]/);
   assert.match(providerEditor, /Custom value \(for example ultra\)/);
   assert.match(providerEditor, /key: "fast_mode"[^\n]+handlers: \["codex"\]/);
-  assert.match(bridge, /fast_mode: merged\.handler === "codex"/);
+  assert.match(providerEditor, /fast_mode: merged\.handler === "codex"/);
 });
 
 test("subagent calls render as agent cards with live per-task status", () => {
@@ -648,7 +912,7 @@ test("subagent calls render as agent cards with live per-task status", () => {
   assert.match(js, /function applySubagentResult/);
   // Background dispatches resolve when the daemon injects the results turn.
   assert.match(js, /function resolveBackgroundAgents/);
-  assert.match(js, /!state\.sending && !replayingLiveEvents/);
+  assert.match(js, /if \(!state\.sending\) resolveBackgroundAgents\(\)/);
   // Persisted injected results replay as a compact card, not a "You" bubble.
   assert.match(js, /BG_RESULTS_PREFIX/);
   assert.match(js, /function jobResultsCard/);

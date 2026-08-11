@@ -449,7 +449,7 @@ fn reload_settings_does_not_adopt_peer_documents() {
 }
 
 #[test]
-fn successful_mutation_refreshes_attached_runtime_settings() {
+fn successful_mutation_updates_every_runtime_sharing_the_canonical_handle() {
     let _guard = crate::util::test_env_lock();
     let old_bone = std::env::var_os("BONE_DIR");
     let dir = std::env::temp_dir().join(format!(
@@ -464,8 +464,25 @@ fn successful_mutation_refreshes_attached_runtime_settings() {
 
     let initial = crate::ext::ExtensionManager::unloaded();
     let store = ConfigStore::new(initial.clone()).unwrap();
-    let attached = crate::ext::ExtensionManager::unloaded();
-    store.attach_extensions(attached.clone());
+    assert!(Arc::ptr_eq(
+        &initial.settings_handle(),
+        &store.runtime_settings_handle()
+    ));
+    let attached = crate::ext::boot_with_tools_shared(
+        &dir,
+        &dir,
+        &store,
+        true,
+        crate::ext::BootOptions::default(),
+        "test-model",
+        "test-provider",
+        store.runtime_settings_handle(),
+    )
+    .manager;
+    assert!(Arc::ptr_eq(
+        &attached.settings_handle(),
+        &store.runtime_settings_handle()
+    ));
     let revision = store.snapshot().revision;
     store
         .set_value("general.show_reasoning", true.into(), revision)
@@ -488,6 +505,73 @@ fn successful_mutation_refreshes_attached_runtime_settings() {
             None => std::env::remove_var("BONE_DIR"),
         }
     }
+}
+
+#[test]
+fn config_store_does_not_retain_the_constructor_lua_vm() {
+    let manager = crate::ext::ExtensionManager::unloaded();
+    let lua = manager.lua_arc();
+    let weak = Arc::downgrade(&lua);
+    drop(lua);
+
+    let _store = ConfigStore::for_test_with_extensions(manager);
+    assert!(
+        weak.upgrade().is_none(),
+        "configuration authority must retain only settings and catalog data"
+    );
+}
+
+#[test]
+fn extension_catalog_initialization_is_first_wins_and_reload_is_explicit() {
+    use crate::config::settings::ExtensionValue;
+    use crate::ext::settings_registry::{
+        SettingsField, SettingsFieldType, SettingsPage, SettingsRegistry,
+    };
+
+    fn catalog(namespace: &str) -> SettingsRegistry {
+        let mut registry = SettingsRegistry::default();
+        registry
+            .register(SettingsPage {
+                namespace: namespace.into(),
+                title: namespace.into(),
+                owner: format!("{namespace}.lua"),
+                command: None,
+                fields: vec![SettingsField {
+                    key: "enabled".into(),
+                    label: "Enabled".into(),
+                    field_type: SettingsFieldType::Bool,
+                    options: Vec::new(),
+                    default: ExtensionValue::Bool(true),
+                    value: None,
+                    integer: None,
+                    min: None,
+                    max: None,
+                }],
+            })
+            .unwrap();
+        registry
+    }
+
+    fn extension_names(store: &ConfigStore) -> Vec<String> {
+        store
+            .schema()
+            .pages
+            .into_iter()
+            .find(|page| page.namespace == "extensions")
+            .unwrap()
+            .pages
+            .into_iter()
+            .map(|page| page.namespace)
+            .collect()
+    }
+
+    let store = ConfigStore::for_test();
+    assert!(store.initialize_extension_catalog(catalog("alpha")));
+    assert!(!store.initialize_extension_catalog(catalog("attach_order_noise")));
+    assert_eq!(extension_names(&store), ["alpha"]);
+
+    store.replace_extension_catalog(catalog("beta"));
+    assert_eq!(extension_names(&store), ["beta"]);
 }
 
 fn test_subagent(name: &str) -> bone_protocol::SubagentDefinition {

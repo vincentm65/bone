@@ -84,6 +84,14 @@ hooks still run inside the authoritative Driver and may use private completion.
 6. Every attached client receives the same authoritative state/events needed to
    render its view.
 
+Managed conversation actors retain a live attachment projection rather than a
+copy of their boot values. A newly attached client therefore receives the
+actor's current provider/model, extension frontend state, transcript/session
+snapshot, and complete `ViewSnapshot`. After `StreamLagged`, a client sends
+`Synchronize`; the actor includes the complete view inside the correlated
+`StateSynchronized` response so a second lag cannot retain the completion while
+dropping the pane/status/highlight repair.
+
 Conversation actors may run independently, while clients attached to one
 conversation observe its shared actor and event stream. Cancellation and
 approvals are conversation-scoped.
@@ -101,6 +109,13 @@ persisted configuration.
 Configuration has a separate authority: the daemon's `ConfigStore` loads and
 validates the canonical YAML domains, produces one revisioned snapshot, and
 broadcasts it to clients. See [Configuration](configuration.md).
+
+Daemon-global storage operations use one `HostService`: usage statistics,
+catalog reads/mutations, and setup are correlated `HostRequest`/`HostResponse`
+operations. The service is shared by conversation actors, while each actor
+keeps an isolated Lua VM. A catalog change reloads every cached actor without
+letting `ConfigStore` retain those VMs. Frontends keep the fullscreen workflow
+and rendering, but never substitute their own database or config directory.
 
 ## Invariants
 

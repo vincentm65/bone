@@ -38,9 +38,60 @@ pub struct Hub {
     busy: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Event fan-out shared by all conversation hubs in one daemon.
-#[derive(Clone, Default)]
-pub struct HubGroup(Arc<Mutex<Vec<std::sync::Weak<broadcast::Sender<RuntimeEvent>>>>>);
+/// Event fan-out and host-control plane shared by all conversation actors in
+/// one daemon. Conversation commands stay on each [`Hub`]; only explicitly
+/// host-scoped operations use this group.
+#[derive(Clone)]
+pub struct HubGroup(Arc<HubGroupInner>);
+
+struct HubGroupInner {
+    events: Mutex<Vec<std::sync::Weak<broadcast::Sender<RuntimeEvent>>>>,
+    extension_reloads: tokio::sync::watch::Sender<ExtensionReloadRequest>,
+    host: std::sync::OnceLock<crate::host::HostService>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ExtensionReloadRequest {
+    authority_conversation_id: i64,
+    skip_conversation_id: Option<i64>,
+}
+
+impl Default for HubGroup {
+    fn default() -> Self {
+        let (extension_reloads, _) = tokio::sync::watch::channel(Default::default());
+        Self(Arc::new(HubGroupInner {
+            events: Mutex::new(Vec::new()),
+            extension_reloads,
+            host: std::sync::OnceLock::new(),
+        }))
+    }
+}
+
+impl HubGroup {
+    fn request_extension_reload(
+        &self,
+        authority_conversation_id: i64,
+        skip_conversation_id: Option<i64>,
+    ) {
+        self.0
+            .extension_reloads
+            .send_replace(ExtensionReloadRequest {
+                authority_conversation_id,
+                skip_conversation_id,
+            });
+    }
+
+    fn subscribe_extension_reloads(&self) -> tokio::sync::watch::Receiver<ExtensionReloadRequest> {
+        self.0.extension_reloads.subscribe()
+    }
+
+    fn host_service(&self, config: crate::config::store::ConfigStore) -> crate::host::HostService {
+        self.0
+            .host
+            .get_or_init(|| crate::host::HostService::new(config))
+            .clone()
+    }
+}
 
 /// Runtime-side half of a [`Hub`]. It can publish events but deliberately does
 /// not retain a command sender, so dropping every client closes the command
@@ -76,6 +127,7 @@ impl HubPublisher {
         if let Some(group) = &self.group {
             group
                 .0
+                .events
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .retain(|sender| {
@@ -118,6 +170,7 @@ impl Hub {
         if let Some(group) = &group {
             group
                 .0
+                .events
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(Arc::downgrade(&events_tx));
@@ -185,30 +238,109 @@ pub enum SessionTarget {
 /// One independently-running conversation created by a session-manager factory.
 ///
 /// The manager retains `hub`, so the actor stays alive when its last browser
-/// disconnects. `initial` is evaluated for every attachment, allowing a new
-/// client to receive the actor's current transcript/snapshot rather than only
-/// its boot-time state.
+/// disconnects. The typed projection is evaluated for every attachment, so a
+/// new client receives live actor state rather than caller-captured boot data.
 pub struct ManagedRuntime {
     pub conversation_id: i64,
     pub hub: Hub,
-    pub initial: Arc<dyn Fn() -> Vec<RuntimeEvent> + Send + Sync>,
+    pub projection: RuntimeProjection,
     pub task: LocalBoxFuture<'static, ()>,
+}
+
+/// Shared live projection used by a managed actor's per-attachment replay.
+///
+/// The session remains authoritative; the mutable runtime slot follows provider
+/// and extension replacement so late attachments never replay boot-time data.
+#[derive(Clone)]
+pub struct RuntimeProjection {
+    session: Arc<Mutex<crate::runtime::RuntimeSession>>,
+    runtime: Arc<Mutex<RuntimeProjectionState>>,
+}
+
+struct RuntimeProjectionState {
+    llm: Arc<dyn crate::llm::provider::LlmProvider>,
+    extensions: crate::ext::ExtensionManager,
+}
+
+impl RuntimeProjection {
+    pub fn new(
+        session: Arc<Mutex<crate::runtime::RuntimeSession>>,
+        llm: Arc<dyn crate::llm::provider::LlmProvider>,
+        extensions: crate::ext::ExtensionManager,
+    ) -> Self {
+        Self {
+            session,
+            runtime: Arc::new(Mutex::new(RuntimeProjectionState { llm, extensions })),
+        }
+    }
+
+    /// Build the authoritative replay for one newly attached client.
+    pub fn initial_events(&self, busy: bool) -> Vec<RuntimeEvent> {
+        let (llm, extensions) = {
+            let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            (runtime.llm.clone(), runtime.extensions.clone())
+        };
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let snapshot = session.snapshot(llm.id(), llm.model());
+        vec![
+            frontend_state(&extensions, &session.tools),
+            RuntimeEvent::StateSnapshot {
+                snapshot: snapshot.clone(),
+            },
+            // Always send this, including for an empty new conversation, so
+            // switching actors clears stale frontend scrollback.
+            RuntimeEvent::ConversationLoaded {
+                messages: session.display_transcript(),
+                snapshot,
+                busy,
+            },
+            // Apply the full view after ConversationLoaded resets transient
+            // client state; otherwise the reset can immediately discard panes
+            // from this authoritative projection.
+            view_snapshot(&extensions),
+        ]
+    }
+
+    fn replace_runtime(
+        &self,
+        llm: Arc<dyn crate::llm::provider::LlmProvider>,
+        extensions: crate::ext::ExtensionManager,
+    ) {
+        let mut runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        runtime.llm = llm;
+        runtime.extensions = extensions;
+    }
 }
 
 struct ManagedEntry {
     hub: Hub,
-    initial: Arc<dyn Fn() -> Vec<RuntimeEvent> + Send + Sync>,
+    projection: RuntimeProjection,
     abort: AbortHandle,
     generation: u64,
     last_used: u64,
 }
 
+impl ManagedEntry {
+    fn attach(&mut self, conversation_id: i64, clock: u64) -> SessionAttachment {
+        self.last_used = clock;
+        SessionAttachment {
+            conversation_id,
+            commands: self.hub.command_sender(),
+            events: self.hub.subscribe(),
+            initial: self.projection.initial_events(self.hub.is_busy()),
+            group: self.hub.group.clone(),
+        }
+    }
+}
+
 const MAX_CACHED_ACTORS: usize = 16;
 
 struct SessionAttachment {
+    conversation_id: i64,
     commands: mpsc::UnboundedSender<RuntimeCommand>,
     events: broadcast::Receiver<RuntimeEvent>,
     initial: Vec<RuntimeEvent>,
+    group: Option<HubGroup>,
 }
 
 enum SessionRequest {
@@ -281,12 +413,7 @@ where
                 if let Some(id) = requested_id
                     && let Some(entry) = sessions.get_mut(&id)
                 {
-                    entry.last_used = clock;
-                    let _ = reply.send(Ok(SessionAttachment {
-                        commands: entry.hub.command_sender(),
-                        events: entry.hub.subscribe(),
-                        initial: (entry.initial)(),
-                    }));
+                    let _ = reply.send(Ok(entry.attach(id, clock)));
                     latest_id = Some(id);
                     continue;
                 }
@@ -342,7 +469,7 @@ where
                             }));
                             entry.insert(ManagedEntry {
                                 hub: runtime.hub,
-                                initial: runtime.initial,
+                                projection: runtime.projection,
                                 abort,
                                 generation: actor_generation,
                                 last_used: clock,
@@ -350,12 +477,7 @@ where
                         }
                         latest_id = Some(id);
                         let entry = sessions.get_mut(&id).expect("managed session inserted");
-                        entry.last_used = clock;
-                        let _ = reply.send(Ok(SessionAttachment {
-                            commands: entry.hub.command_sender(),
-                            events: entry.hub.subscribe(),
-                            initial: (entry.initial)(),
-                        }));
+                        let _ = reply.send(Ok(entry.attach(id, clock)));
                     }
                     Err(err) => { let _ = reply.send(Err(err)); }
                 }
@@ -369,6 +491,21 @@ where
             }
         }
     }
+}
+
+async fn attach_with_initial<W: AsyncWrite + Unpin>(
+    manager: &SessionManager,
+    target: SessionTarget,
+    writer: &mut W,
+) -> std::io::Result<Result<SessionAttachment, String>> {
+    let mut attachment = match manager.attach(target).await {
+        Ok(attachment) => attachment,
+        Err(error) => return Ok(Err(error)),
+    };
+    for event in attachment.initial.drain(..) {
+        codec::write_message(writer, &event).await?;
+    }
+    Ok(Ok(attachment))
 }
 
 /// Serve a TCP client whose active event/command channels follow the durable
@@ -385,26 +522,20 @@ where
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = codec::MessageReader::new(read_half);
-    let mut attachment = manager
-        .attach(initial_target)
-        .await
+    let mut attachment = attach_with_initial(&manager, initial_target, &mut write_half)
+        .await?
         .map_err(std::io::Error::other)?;
-
-    for event in attachment.initial.drain(..) {
-        codec::write_message(&mut write_half, &event).await?;
-    }
 
     loop {
         tokio::select! {
             incoming = reader.read::<RuntimeCommand>() => match incoming {
                 Some(Ok(RuntimeCommand::LoadConversation { id })) => {
-                    match manager.attach(SessionTarget::Conversation(id)).await {
-                        Ok(mut next) => {
-                            for event in next.initial.drain(..) {
-                                codec::write_message(&mut write_half, &event).await?;
-                            }
-                            attachment = next;
-                        }
+                    match attach_with_initial(
+                        &manager,
+                        SessionTarget::Conversation(id),
+                        &mut write_half,
+                    ).await? {
+                        Ok(next) => attachment = next,
                         Err(message) => codec::write_message(
                             &mut write_half,
                             &RuntimeEvent::ConversationLoadFailed { id, message },
@@ -412,18 +543,24 @@ where
                     }
                 }
                 Some(Ok(RuntimeCommand::NewConversation)) => {
-                    match manager.attach(SessionTarget::New).await {
-                        Ok(mut next) => {
-                            for event in next.initial.drain(..) {
-                                codec::write_message(&mut write_half, &event).await?;
-                            }
-                            attachment = next;
-                        }
+                    match attach_with_initial(
+                        &manager,
+                        SessionTarget::New,
+                        &mut write_half,
+                    ).await? {
+                        Ok(next) => attachment = next,
                         Err(message) => codec::write_message(
                             &mut write_half,
                             &RuntimeEvent::Status { message },
                         ).await?,
                     }
+                }
+                Some(Ok(RuntimeCommand::ReloadExtensions)) if attachment.group.is_some() => {
+                    attachment
+                        .group
+                        .as_ref()
+                        .expect("guarded above")
+                        .request_extension_reload(attachment.conversation_id, None);
                 }
                 Some(Ok(command)) => {
                     if attachment.commands.send(command).is_err() {
@@ -574,7 +711,15 @@ pub fn frontend_state(
         tool_defs: tools.definitions(),
         tool_display: serde_json::to_value(tools.display_map()).unwrap_or_default(),
         subagents: extensions.subagents(),
+        host_api_version: bone_protocol::HOST_API_VERSION,
+        catalog_updates: crate::ext::catalog::updates_available(),
     }
+}
+
+/// Build the full canonical UI projection for attach and lag recovery.
+pub fn view_snapshot(extensions: &crate::ext::ExtensionManager) -> RuntimeEvent {
+    let view = crate::ext::api_ui::snapshot(&extensions.ui_handle());
+    RuntimeEvent::ViewSnapshot { view: view.into() }
 }
 
 /// Serve one client connection against `hub`.
@@ -716,6 +861,14 @@ fn is_config_command(command: &RuntimeCommand) -> bool {
             | RuntimeCommand::UpsertSubagent { .. }
             | RuntimeCommand::DeleteSubagent { .. }
             | RuntimeCommand::SetSubagentEnabled { .. }
+            | RuntimeCommand::HostRequest { .. }
+    )
+}
+
+fn starts_turn(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
     )
 }
 
@@ -732,6 +885,9 @@ struct DaemonCtx {
     /// Steering prompts owned by this conversation actor's Lua runtime.
     submit_inbox: crate::ext::inbox::SubmitInbox,
     session: Arc<Mutex<crate::runtime::RuntimeSession>>,
+    /// Immutable manager key for host-scoped routing. Unlike the session's
+    /// persisted conversation id, this survives incognito transitions.
+    actor_id: Option<i64>,
     mode: crate::tools::SharedApprovalMode,
     approval_registry: crate::runtime::ApprovalReplyRegistry,
     key_registry: crate::runtime::KeyReplyRegistry,
@@ -739,22 +895,20 @@ struct DaemonCtx {
     /// Commands received while a turn or interactive command owns the runtime.
     /// They are serviced in arrival order as soon as the runtime is idle.
     pending_commands: std::collections::VecDeque<RuntimeCommand>,
-    // In-process hand-off for `ReloadExtensions`. When a frontend shares the
-    // Lua VM with the daemon (the in-process TUI), it boots the extensions
-    // once and drops the cloned result here, letting the daemon adopt it
-    // instead of re-reading disk and booting a second VM. `None` (e.g. `bone
-    // serve`) falls back to booting from disk.
+    /// Optional single-boot reload handoff from an in-process frontend.
     reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
-    // Forward Lua `ViewDiff`s (pane/UI updates) as `RuntimeEvent::ViewDiff`.
-    // Pure-client frontends (in-process TUI and remote) pass `true` so the
-    // daemon is the sole drain of the VM's `UiState`.
+    /// Whether this actor forwards Lua view diffs to clients.
     forward_view_diffs: bool,
     /// Sole live configuration authority for this daemon runtime.
     config: crate::config::store::ConfigStore,
+    /// Blocking daemon-global storage and setup authority.
+    host: crate::host::HostService,
     /// Last process registry version published for the attached conversation.
     processes_seen: Option<(String, u64)>,
     /// Last job registry version published for the attached conversation.
     jobs_seen: Option<(i64, u64)>,
+    /// Live runtime metadata read by managed late-attachment replays.
+    projection: Option<RuntimeProjection>,
 }
 
 fn job_snapshot(job: crate::ext::jobs::Job) -> Option<bone_protocol::JobSnapshot> {
@@ -999,7 +1153,10 @@ impl DaemonCtx {
         }
         let providers_config = self.config.providers_config();
         match crate::llm::providers::build_provider(provider_id, model, &providers_config) {
-            Ok(new_provider) => self.llm = Arc::from(new_provider),
+            Ok(new_provider) => {
+                self.llm = Arc::from(new_provider);
+                self.refresh_projection();
+            }
             Err(err) => self.hub.publish(RuntimeEvent::Status {
                 message: format!("failed to restore provider `{provider_id}`: {err}"),
             }),
@@ -1007,6 +1164,7 @@ impl DaemonCtx {
     }
 
     fn publish_snapshot(&self) {
+        self.refresh_projection();
         self.hub.publish(RuntimeEvent::StateSnapshot {
             snapshot: {
                 let s = self.session.lock().unwrap();
@@ -1022,13 +1180,23 @@ impl DaemonCtx {
             let messages = include_messages.then(|| session.display_transcript());
             (snapshot, messages)
         };
-        self.pending_interactions.replay(&self.hub);
         self.hub.publish(RuntimeEvent::StateSynchronized {
             request_id,
             busy,
             snapshot,
+            view: Some(crate::ext::api_ui::snapshot(&self.extensions.ui_handle()).into()),
             messages,
         });
+        // The correlated completion atomically replaces stale session + view
+        // state. Replay live gates afterwards so applying that full view cannot
+        // immediately erase a recovered approval/key prompt.
+        self.pending_interactions.replay(&self.hub);
+    }
+
+    fn refresh_projection(&self) {
+        if let Some(projection) = &self.projection {
+            projection.replace_runtime(self.llm.clone(), self.extensions.clone());
+        }
     }
 
     fn publish_processes(&mut self, force: bool) {
@@ -1591,12 +1759,142 @@ impl DaemonCtx {
                 snapshot,
                 busy: false,
             });
+            // ConversationLoaded resets client-owned transient UI state. Reapply
+            // the canonical extension view afterwards so surviving status lines,
+            // highlights, and non-conversation panes remain visible.
+            self.hub.publish(view_snapshot(&self.extensions));
         } else {
             self.hub.publish(RuntimeEvent::ConversationLoadFailed {
                 id,
                 message: format!("failed to load conversation {id}"),
             });
         }
+    }
+
+    /// Rebuild this actor's Lua/tool runtime while preserving its
+    /// conversation-scoped host state. `catalog_authority` is true for the one
+    /// actor selected by a host-scoped reload (or for an ungrouped in-process
+    /// runtime); peers reload their isolated VM without racing to redefine the
+    /// daemon's schema authority.
+    fn reload_extensions(&mut self, catalog_authority: bool) -> bool {
+        // Prefer an in-process handoff; managed actors otherwise boot isolated VMs.
+        let (mut booted, disk_boot) = match self
+            .reload_inbox
+            .as_ref()
+            .and_then(|inbox| inbox.lock().unwrap().take())
+        {
+            Some(booted) => (booted, false),
+            None => {
+                let config_dir = crate::config::bone_dir();
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let model = self.llm.model().to_string();
+                let provider = format!("{} ({})", self.llm.name(), self.llm.id());
+                (
+                    crate::ext::boot_with_tools_shared(
+                        &config_dir,
+                        &cwd,
+                        &self.config,
+                        true,
+                        crate::ext::BootOptions {
+                            headless: true,
+                            ..Default::default()
+                        },
+                        &model,
+                        &provider,
+                        self.config.runtime_settings_handle(),
+                    ),
+                    true,
+                )
+            }
+        };
+        if disk_boot && !booted.manager.is_available() {
+            self.hub.publish(RuntimeEvent::Status {
+                message: "Lua extension reload failed; previous extensions remain active".into(),
+            });
+            return false;
+        }
+
+        booted.manager.use_submit_inbox(self.submit_inbox.clone());
+        self.extensions = booted.manager;
+        if catalog_authority {
+            self.config
+                .replace_extension_catalog(self.extensions.extension_catalog());
+        }
+        {
+            let mut session = self.session.lock().unwrap();
+            // Definitions come from the fresh boot. Everything below is owned
+            // by this conversation and must survive replacement.
+            let mut tools = booted.tools;
+            tools.adopt_session_state_from(&session.tools);
+            session.tools = tools;
+        }
+        let count = self.session.lock().unwrap().tools.definitions().len();
+        self.hub.publish(RuntimeEvent::Status {
+            message: format!("Tools and Lua extensions reloaded. {count} tools enabled."),
+        });
+        self.hub.publish(frontend_state(
+            &self.extensions,
+            &self.session.lock().unwrap().tools,
+        ));
+        self.hub.publish(view_snapshot(&self.extensions));
+        self.publish_snapshot();
+        true
+    }
+
+    fn apply_extension_reload(&mut self, reload: ExtensionReloadRequest) {
+        if self.actor_id != reload.skip_conversation_id {
+            self.reload_extensions(self.actor_id == Some(reload.authority_conversation_id));
+        }
+    }
+
+    async fn handle_host_request(
+        &mut self,
+        request_id: u64,
+        request: bone_protocol::HostRequest,
+    ) -> Flow {
+        let host = self.host.clone();
+        let mut response = match tokio::task::spawn_blocking(move || host.execute(request)).await {
+            Ok(response) => response,
+            Err(error) => bone_protocol::HostResponse::Error {
+                code: bone_protocol::HostErrorCode::Internal,
+                message: format!("host request failed: {error}"),
+            },
+        };
+
+        let (reload_needed, setup_applied) = match &response {
+            bone_protocol::HostResponse::CatalogApplied(result) => (result.changed, false),
+            bone_protocol::HostResponse::SetupApplied(_) => (true, true),
+            _ => (false, false),
+        };
+        let busy = self.hub.busy.load(std::sync::atomic::Ordering::SeqCst);
+        let reloaded = reload_needed && !busy && self.reload_extensions(true);
+        if reload_needed && (reloaded || busy) {
+            if let Some(group) = &self.hub.group
+                && let Some(actor_id) = self.actor_id
+            {
+                group.request_extension_reload(actor_id, reloaded.then_some(actor_id));
+            } else if busy {
+                self.pending_commands
+                    .push_back(RuntimeCommand::ReloadExtensions);
+            }
+        }
+        if reloaded {
+            let result = match &mut response {
+                bone_protocol::HostResponse::CatalogApplied(result) => result,
+                bone_protocol::HostResponse::SetupApplied(result) => &mut result.catalog,
+                _ => unreachable!("only successful applies request reloads"),
+            };
+            result.extensions_reloaded = true;
+        }
+
+        self.hub.publish(RuntimeEvent::HostResponse {
+            request_id,
+            response,
+        });
+        if setup_applied {
+            self.publish_config();
+        }
+        Flow::Continue
     }
 
     /// Handle one command received while the runtime is idle. Returns [`Flow`]:
@@ -2017,74 +2315,13 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::ReloadExtensions => {
-                // An in-process frontend boots the extensions itself and leaves
-                // the cloned result in the inbox; adopt it (shared Lua VM, no
-                // disk read). Otherwise boot from disk.
-                let (mut booted, disk_boot) = match self
-                    .reload_inbox
-                    .as_ref()
-                    .and_then(|m| m.lock().unwrap().take())
-                {
-                    Some(booted) => (booted, false),
-                    None => {
-                        let config_dir = crate::config::bone_dir();
-                        let cwd = std::env::current_dir().unwrap_or_default();
-                        let model = self.llm.model().to_string();
-                        let provider = format!("{} ({})", self.llm.name(), self.llm.id());
-                        (
-                            crate::ext::boot_with_tools_shared(
-                                &config_dir,
-                                &cwd,
-                                &self.config,
-                                true,
-                                crate::ext::BootOptions {
-                                    agent_depth: 0,
-                                    headless: true,
-                                    tool_allowlist: None,
-                                },
-                                &model,
-                                &provider,
-                                self.extensions.settings_handle(),
-                            ),
-                            true,
-                        )
-                    }
-                };
-                if disk_boot && !booted.manager.is_available() {
-                    self.hub.publish(RuntimeEvent::Status {
-                        message: "Lua extension reload failed; previous extensions remain active"
-                            .into(),
-                    });
-                    return Flow::Continue;
-                }
-                booted.manager.use_submit_inbox(self.submit_inbox.clone());
-                let old_extensions = std::mem::replace(&mut self.extensions, booted.manager);
-                self.config
-                    .replace_extensions(&old_extensions, self.extensions.clone());
-                {
-                    let mut s = self.session.lock().unwrap();
-                    // Reloading extensions must not wipe conversation-scoped
-                    // tool state. The new registry has fresh definitions, but
-                    // snapshots, host state (task_list, …), gates, and cancel
-                    // tokens belong to the session and must survive the swap.
-                    let mut tools = booted.tools;
-                    tools.adopt_session_state_from(&s.tools);
-                    s.tools = tools;
-                }
-                let count = self.session.lock().unwrap().tools.definitions().len();
-                self.hub.publish(RuntimeEvent::Status {
-                    message: format!("Tools and Lua extensions reloaded. {count} tools enabled."),
-                });
-                // Re-ship display state: a reload can change theme/keymap/banner/
-                // commands/tools, and a VM-less frontend has no other way to
-                // learn them.
-                self.hub.publish(frontend_state(
-                    &self.extensions,
-                    &self.session.lock().unwrap().tools,
-                ));
-                self.publish_snapshot();
+                self.reload_extensions(true);
                 Flow::Continue
             }
+            RuntimeCommand::HostRequest {
+                request_id,
+                request,
+            } => self.handle_host_request(request_id, request).await,
             RuntimeCommand::RunCommand {
                 request_id,
                 name,
@@ -2469,30 +2706,115 @@ impl DaemonCtx {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_daemon(
     hub: impl Into<HubPublisher>,
+    commands: mpsc::UnboundedReceiver<RuntimeCommand>,
+    llm: Arc<dyn crate::llm::provider::LlmProvider>,
+    extensions: crate::ext::ExtensionManager,
+    config: crate::config::store::ConfigStore,
+    session: Arc<Mutex<crate::runtime::RuntimeSession>>,
+    approval_mode: crate::tools::ApprovalMode,
+    // Optional single-boot handoff from an in-process frontend.
+    reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
+    // Whether the daemon forwards Lua view diffs to clients.
+    forward_view_diffs: bool,
+) {
+    run_daemon_inner(
+        hub.into(),
+        commands,
+        llm,
+        extensions,
+        config,
+        session,
+        approval_mode,
+        reload_inbox,
+        forward_view_diffs,
+        None,
+    )
+    .await;
+}
+
+/// Run a daemon actor whose live provider/extension projection is also used by
+/// a [`ManagedRuntime`] attachment replay.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_daemon_with_projection(
+    hub: impl Into<HubPublisher>,
+    commands: mpsc::UnboundedReceiver<RuntimeCommand>,
+    llm: Arc<dyn crate::llm::provider::LlmProvider>,
+    extensions: crate::ext::ExtensionManager,
+    config: crate::config::store::ConfigStore,
+    session: Arc<Mutex<crate::runtime::RuntimeSession>>,
+    approval_mode: crate::tools::ApprovalMode,
+    reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
+    forward_view_diffs: bool,
+    projection: RuntimeProjection,
+) {
+    run_daemon_inner(
+        hub.into(),
+        commands,
+        llm,
+        extensions,
+        config,
+        session,
+        approval_mode,
+        reload_inbox,
+        forward_view_diffs,
+        Some(projection),
+    )
+    .await;
+}
+
+async fn next_extension_reload(
+    receiver: &mut Option<tokio::sync::watch::Receiver<ExtensionReloadRequest>>,
+) -> Option<ExtensionReloadRequest> {
+    let receiver = receiver.as_mut()?;
+    receiver.changed().await.ok()?;
+    Some(*receiver.borrow_and_update())
+}
+
+fn take_pending_extension_reload(
+    receiver: &mut Option<tokio::sync::watch::Receiver<ExtensionReloadRequest>>,
+) -> Option<ExtensionReloadRequest> {
+    let receiver = receiver.as_mut()?;
+    receiver
+        .has_changed()
+        .ok()
+        .filter(|changed| *changed)
+        .map(|_| *receiver.borrow_and_update())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_daemon_inner(
+    hub: HubPublisher,
     mut commands: mpsc::UnboundedReceiver<RuntimeCommand>,
     llm: Arc<dyn crate::llm::provider::LlmProvider>,
     extensions: crate::ext::ExtensionManager,
     config: crate::config::store::ConfigStore,
     session: Arc<Mutex<crate::runtime::RuntimeSession>>,
     approval_mode: crate::tools::ApprovalMode,
-    // In-process hand-off for `ReloadExtensions`. When a frontend shares the
-    // Lua VM with the daemon (the in-process TUI), it boots the extensions
-    // once and drops the cloned result here, letting the daemon adopt it
-    // instead of re-reading disk and booting a second VM. `None` (e.g. `bone
-    // serve`) falls back to booting from disk.
     reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
-    // Forward Lua `ViewDiff`s (pane/UI updates) as `RuntimeEvent::ViewDiff`.
-    // Both in-process and remote pure-client frontends pass `true` so the
-    // daemon is the sole drain of the VM's `UiState`.
     forward_view_diffs: bool,
+    projection: Option<RuntimeProjection>,
 ) {
+    let mut extension_reloads = hub
+        .group
+        .as_ref()
+        .map(HubGroup::subscribe_extension_reloads);
+    let host = hub
+        .group
+        .as_ref()
+        .map(|group| group.host_service(config.clone()))
+        .unwrap_or_else(|| crate::host::HostService::new(config.clone()));
     let submit_inbox = extensions.submit_inbox();
+    let actor_id = session
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .conversation_id;
     let mut ctx = DaemonCtx {
-        hub: hub.into(),
+        hub,
         llm,
         extensions,
         submit_inbox,
         session,
+        actor_id,
         mode: crate::tools::SharedApprovalMode::new(approval_mode),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
@@ -2501,9 +2823,12 @@ pub async fn run_daemon(
         reload_inbox,
         forward_view_diffs,
         config,
+        host,
         processes_seen: None,
         jobs_seen: None,
+        projection,
     };
+    ctx.refresh_projection();
     ctx.publish_config();
 
     // Each command is serviced by `handle_idle_command`; commands that start a
@@ -2514,25 +2839,30 @@ pub async fn run_daemon(
     let mut inject_timer = tokio::time::interval(std::time::Duration::from_millis(200));
     loop {
         let mut turn_guard = None;
-        let flow = if let Some(cmd) = ctx.pending_commands.pop_front() {
-            if matches!(
-                &cmd,
-                RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
-            ) {
-                turn_guard = Some(ctx.hub.begin_turn());
-            }
+        let flow = if let Some(reload) = take_pending_extension_reload(&mut extension_reloads) {
+            ctx.apply_extension_reload(reload);
+            Flow::Continue
+        } else if let Some(cmd) = ctx.pending_commands.pop_front() {
+            turn_guard = starts_turn(&cmd).then(|| ctx.hub.begin_turn());
             ctx.handle_idle_command(cmd, &mut commands).await
         } else {
             tokio::select! {
                 biased;
+                reload = next_extension_reload(&mut extension_reloads), if extension_reloads.is_some() => {
+                    match reload {
+                        Some(reload) => {
+                            ctx.apply_extension_reload(reload);
+                            Flow::Continue
+                        }
+                        None => {
+                            extension_reloads = None;
+                            Flow::Continue
+                        }
+                    }
+                },
                 cmd = commands.recv() => match cmd {
                     Some(cmd) => {
-                        if matches!(
-                            &cmd,
-                            RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
-                        ) {
-                            turn_guard = Some(ctx.hub.begin_turn());
-                        }
+                        turn_guard = starts_turn(&cmd).then(|| ctx.hub.begin_turn());
                         ctx.handle_idle_command(cmd, &mut commands).await
                     }
                     None => break,

@@ -45,14 +45,14 @@ fn grouped_hubs_do_not_retain_dropped_actor_channels() {
     let group = HubGroup::default();
     let (dropped, _commands) = Hub::new_grouped(group.clone());
     drop(dropped);
-    assert_eq!(group.0.lock().unwrap().len(), 1);
+    assert_eq!(group.0.events.lock().unwrap().len(), 1);
 
     let (live, _commands) = Hub::new_grouped(group.clone());
     live.publisher().publish_global(RuntimeEvent::Status {
         message: "cleanup".into(),
     });
 
-    let senders = group.0.lock().unwrap();
+    let senders = group.0.events.lock().unwrap();
     assert_eq!(senders.len(), 1);
     assert!(senders[0].upgrade().is_some());
 }
@@ -116,6 +116,36 @@ impl crate::llm::provider::LlmProvider for BlockingTestProvider {
     }
 }
 
+struct NamedTestProvider {
+    id: &'static str,
+    model: &'static str,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::provider::LlmProvider for NamedTestProvider {
+    fn id(&self) -> &str {
+        self.id
+    }
+
+    fn name(&self) -> &str {
+        self.id
+    }
+
+    fn model(&self) -> &str {
+        self.model
+    }
+
+    fn set_model(&mut self, _: String) {}
+
+    async fn chat_stream(
+        &self,
+        _: Vec<crate::llm::ChatMessage>,
+        _: Vec<crate::tools::ToolDefinition>,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        unreachable!()
+    }
+}
+
 fn test_daemon_ctx(
     llm: Arc<dyn crate::llm::provider::LlmProvider>,
     extensions: crate::ext::ExtensionManager,
@@ -127,8 +157,8 @@ fn test_daemon_ctx(
 ) {
     let submit_inbox = extensions.submit_inbox();
     let config = crate::config::store::ConfigStore::for_test();
-    config.attach_extensions(extensions.clone());
     let (hub, commands) = Hub::new();
+    let actor_id = session.conversation_id;
     (
         DaemonCtx {
             hub: hub.publisher(),
@@ -136,6 +166,7 @@ fn test_daemon_ctx(
             extensions,
             submit_inbox,
             session: Arc::new(Mutex::new(session)),
+            actor_id,
             mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
             approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
             key_registry: crate::runtime::KeyReplyRegistry::new(),
@@ -143,9 +174,11 @@ fn test_daemon_ctx(
             pending_commands: std::collections::VecDeque::new(),
             reload_inbox: None,
             forward_view_diffs: false,
+            host: crate::host::HostService::new(config.clone()),
             config,
             processes_seen: None,
             jobs_seen: None,
+            projection: None,
         },
         hub,
         commands,
@@ -161,6 +194,14 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
         release: release.clone(),
     });
     let extensions = crate::ext::ExtensionManager::unloaded();
+    crate::ext::api_ui::lock_shared(&extensions.ui_handle()).apply(
+        crate::runtime::ViewDiff::Upsert {
+            component: crate::runtime::Component::StatusLine {
+                id: "lag-recovery-status".into(),
+                segments: Vec::new(),
+            },
+        },
+    );
     let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
         crate::tools::builtin_tools(),
     ));
@@ -177,15 +218,18 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
         )
         .await;
     assert!(matches!(flow, Flow::Continue));
-    assert!(matches!(
-        events.recv().await.unwrap(),
-        RuntimeEvent::StateSynchronized {
-            request_id: 41,
-            busy: false,
-            messages: None,
-            ..
-        }
-    ));
+    let RuntimeEvent::StateSynchronized {
+        request_id: 41,
+        busy: false,
+        view: Some(view),
+        messages: None,
+        ..
+    } = events.recv().await.unwrap()
+    else {
+        panic!("synchronize did not publish an atomic session + view repair");
+    };
+    assert_eq!(view.components.len(), 1);
+    assert_eq!(view.components[0].id(), "lag-recovery-status");
 
     let Flow::StartTurn {
         request_id,
@@ -219,10 +263,11 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
                 request_id,
                 busy,
                 snapshot,
+                view,
                 messages,
             } = events.recv().await.unwrap()
             {
-                break (request_id, busy, snapshot, messages);
+                break (request_id, busy, snapshot, view, messages);
             }
         }
     });
@@ -233,14 +278,350 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
         release.notify_one();
         result
     };
-    let (_, (request_id, busy, snapshot, messages)) = tokio::join!(turn, synchronized);
+    let (_, (request_id, busy, snapshot, view, messages)) = tokio::join!(turn, synchronized);
 
     assert_eq!(request_id, 42);
     assert!(busy);
     assert_eq!(snapshot.transcript_len, 1);
+    assert!(view.is_some(), "synchronize omitted its full UI projection");
     let messages = messages.expect("requested transcript was omitted");
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].content, "repair this state");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn host_requests_are_correlated_when_idle_and_during_a_turn() {
+    let database_dir = tempfile::tempdir().unwrap();
+    let database = database_dir.path().join("host-stats.db");
+    crate::session_db::SessionDb::open(&database).unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(BlockingTestProvider {
+        release: release.clone(),
+    });
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(provider, crate::ext::ExtensionManager::unloaded(), session);
+    ctx.host = crate::host::HostService::with_db_path(ctx.config.clone(), database);
+    let mut events = hub.subscribe();
+
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::HostRequest {
+                request_id: 61,
+                request: bone_protocol::HostRequest::Stats { range: None },
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::HostResponse {
+            request_id: 61,
+            response: bone_protocol::HostResponse::Stats(_),
+        }
+    ));
+
+    let Flow::StartTurn {
+        request_id,
+        text,
+        display,
+    } = ctx
+        .handle_idle_command(
+            RuntimeCommand::SubmitPrompt {
+                request_id: None,
+                text: "keep streaming while host work runs".into(),
+                images: Vec::new(),
+            },
+            &mut commands,
+        )
+        .await
+    else {
+        panic!("prompt did not start a turn");
+    };
+
+    let command_tx = hub.command_sender();
+    let observer = tokio::spawn(async move {
+        while !matches!(events.recv().await.unwrap(), RuntimeEvent::Started { .. }) {}
+        command_tx
+            .send(RuntimeCommand::HostRequest {
+                request_id: 62,
+                request: bone_protocol::HostRequest::Stats { range: None },
+            })
+            .unwrap();
+        loop {
+            if let RuntimeEvent::HostResponse {
+                request_id,
+                response,
+            } = events.recv().await.unwrap()
+            {
+                break (request_id, response);
+            }
+        }
+    });
+
+    let turn = ctx.run_turn(request_id, text, display, &mut commands);
+    let host_response = async {
+        let response = observer.await.unwrap();
+        release.notify_one();
+        response
+    };
+    let (_, (request_id, response)) = tokio::join!(turn, host_response);
+    assert_eq!(request_id, 62);
+    assert!(matches!(response, bone_protocol::HostResponse::Stats(_)));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn setup_apply_reloads_locally_routes_to_peers_and_republishes_config() {
+    let _guard = crate::util::test_env_lock();
+    let bone = tempfile::tempdir().unwrap();
+    let catalog = tempfile::tempdir().unwrap();
+    std::fs::write(catalog.path().join("catalog.json"), "[]").unwrap();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let old_catalog = std::env::var_os("BONE_CATALOG_URL");
+    unsafe {
+        std::env::set_var("BONE_DIR", bone.path());
+        std::env::set_var("BONE_CATALOG_URL", catalog.path());
+    }
+
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let submit_inbox = extensions.submit_inbox();
+    let config = crate::config::store::ConfigStore::new(extensions.clone()).unwrap();
+    let host = crate::host::HostService::new(config.clone());
+    let bone_protocol::HostResponse::Setup(setup) = host.execute(bone_protocol::HostRequest::Setup)
+    else {
+        panic!("host setup snapshot failed");
+    };
+    let group = HubGroup::default();
+    let mut peer_reload = group.subscribe_extension_reloads();
+    let (hub, mut commands) = Hub::new_grouped(group);
+    let mut events = hub.subscribe();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.conversation_id = Some(77);
+    let mut ctx = DaemonCtx {
+        hub: hub.publisher(),
+        llm: Arc::new(ConfigTestProvider),
+        extensions,
+        submit_inbox,
+        session: Arc::new(Mutex::new(session)),
+        actor_id: Some(77),
+        mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
+        approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
+        key_registry: crate::runtime::KeyReplyRegistry::new(),
+        pending_interactions: PendingInteractions::default(),
+        pending_commands: std::collections::VecDeque::new(),
+        reload_inbox: Some(Arc::new(Mutex::new(Some(crate::ext::BootedTools {
+            manager: crate::ext::ExtensionManager::unloaded(),
+            tools: crate::tools::registry::ToolHandler::new(
+                crate::tools::registry::ToolRegistry::new(),
+            ),
+        })))),
+        forward_view_diffs: false,
+        host,
+        config,
+        processes_seen: None,
+        jobs_seen: None,
+        projection: None,
+    };
+    ctx.set_incognito(true);
+    assert_eq!(ctx.actor_id, Some(77));
+    assert_eq!(ctx.session.lock().unwrap().conversation_id, None);
+
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::HostRequest {
+                request_id: 71,
+                request: bone_protocol::HostRequest::SetupApply {
+                    expected_config_revision: setup.config_revision,
+                    expected_catalog_revision: setup.catalog.revision,
+                    provider_id: None,
+                    api_key: None,
+                    catalog: Vec::new(),
+                    init: bone_protocol::InitChoice::Blank,
+                },
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), peer_reload.changed())
+        .await
+        .expect("incognito actor did not route the host reload")
+        .unwrap();
+    let reload = *peer_reload.borrow_and_update();
+    assert_eq!(reload.authority_conversation_id, 77);
+    assert_eq!(reload.skip_conversation_id, Some(77));
+
+    loop {
+        if let RuntimeEvent::HostResponse {
+            request_id: 71,
+            response: bone_protocol::HostResponse::SetupApplied(result),
+        } = events.recv().await.unwrap()
+        {
+            assert!(result.catalog.extensions_reloaded);
+            break;
+        }
+    }
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::ConfigSnapshot { .. }
+    ));
+    assert!(bone.path().join("init.lua").exists());
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+        match old_catalog {
+            Some(value) => std::env::set_var("BONE_CATALOG_URL", value),
+            None => std::env::remove_var("BONE_CATALOG_URL"),
+        }
+    }
+}
+
+#[test]
+fn incognito_actor_applies_unskipped_host_reload() {
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.conversation_id = Some(88);
+    let (mut ctx, hub, _commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    let mut events = hub.subscribe();
+    let reload_inbox = Arc::new(Mutex::new(Some(crate::ext::BootedTools {
+        manager: crate::ext::ExtensionManager::unloaded(),
+        tools: crate::tools::registry::ToolHandler::new(crate::tools::registry::ToolRegistry::new()),
+    })));
+    ctx.reload_inbox = Some(reload_inbox.clone());
+
+    ctx.set_incognito(true);
+    ctx.apply_extension_reload(ExtensionReloadRequest {
+        authority_conversation_id: 88,
+        skip_conversation_id: None,
+    });
+
+    assert!(reload_inbox.lock().unwrap().is_none());
+    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(
+        |event| matches!(event, RuntimeEvent::Status { message } if message.contains("reloaded"))
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_reload_waits_for_turn_end_and_preserves_conversation_state() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let provider = Arc::new(BlockingTestProvider {
+                release: release.clone(),
+            });
+            let group = HubGroup::default();
+            let (hub, commands) = Hub::new_grouped(group.clone());
+            let mut events = hub.subscribe();
+
+            let mut tools = crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools());
+            tools.state_map.set("task_list", "default", "kept".into());
+            let shared_state = tools.shared_state.clone();
+            let mut runtime_session = crate::runtime::RuntimeSession::new(tools);
+            runtime_session.conversation_id = Some(41);
+            let session = Arc::new(Mutex::new(runtime_session));
+            let reload_inbox = Arc::new(Mutex::new(Some(crate::ext::BootedTools {
+                manager: crate::ext::ExtensionManager::unloaded(),
+                tools: crate::tools::registry::ToolHandler::new(
+                    crate::tools::registry::ToolRegistry::new(),
+                ),
+            })));
+            let daemon = tokio::task::spawn_local(run_daemon(
+                hub.publisher(),
+                commands,
+                provider,
+                crate::ext::ExtensionManager::unloaded(),
+                crate::config::store::ConfigStore::for_test(),
+                session.clone(),
+                crate::tools::ApprovalMode::Safe,
+                Some(reload_inbox),
+                false,
+            ));
+
+            hub.command_sender()
+                .send(RuntimeCommand::SubmitPrompt {
+                    request_id: None,
+                    text: "block the actor".into(),
+                    images: Vec::new(),
+                })
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !matches!(events.recv().await, Ok(RuntimeEvent::Started { .. })) {}
+            })
+            .await
+            .expect("turn did not start");
+
+            group.request_extension_reload(41, None);
+            let premature = tokio::time::timeout(std::time::Duration::from_millis(75), async {
+                loop {
+                    if matches!(
+                        events.recv().await,
+                        Ok(RuntimeEvent::Status { message }) if message.contains("reloaded")
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(
+                premature.is_err(),
+                "extensions reloaded while a turn owned the actor"
+            );
+
+            hub.command_sender()
+                .send(RuntimeCommand::SubmitPrompt {
+                    request_id: None,
+                    text: "queued turn".into(),
+                    images: Vec::new(),
+                })
+                .unwrap();
+
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    match events.recv().await {
+                        Ok(RuntimeEvent::Status { message }) if message.contains("reloaded") => {
+                            break;
+                        }
+                        Ok(RuntimeEvent::Started { .. }) => {
+                            panic!("queued turn started before the deferred host reload");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("deferred host reload did not run after the turn");
+
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !matches!(events.recv().await, Ok(RuntimeEvent::Finished { .. })) {}
+            })
+            .await
+            .expect("queued turn did not finish");
+
+            let tools = &session.lock().unwrap().tools;
+            assert_eq!(tools.state_map.get("task_list", "default"), Some("kept"));
+            assert!(Arc::ptr_eq(&tools.shared_state, &shared_state));
+            daemon.abort();
+        })
+        .await;
 }
 
 fn interactive_test_extensions() -> crate::ext::ExtensionManager {
@@ -290,6 +671,119 @@ fn interactive_test_extensions() -> crate::ext::ExtensionManager {
         Arc::new(std::sync::RwLock::new(Default::default())),
         crate::ext::api_ui::new_shared(),
     )
+}
+
+#[test]
+fn managed_projection_late_attach_uses_actor_runtime_replacements() {
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, _hub, _commands) = test_daemon_ctx(
+        Arc::new(NamedTestProvider {
+            id: "boot-provider",
+            model: "boot-model",
+        }),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    let projection =
+        RuntimeProjection::new(ctx.session.clone(), ctx.llm.clone(), ctx.extensions.clone());
+    ctx.projection = Some(projection.clone());
+
+    let replacement_extensions = interactive_test_extensions();
+    crate::ext::api_ui::lock_shared(&replacement_extensions.ui_handle()).apply(
+        crate::runtime::ViewDiff::Upsert {
+            component: crate::runtime::Component::StatusLine {
+                id: "replacement-status".into(),
+                segments: Vec::new(),
+            },
+        },
+    );
+    ctx.llm = Arc::new(NamedTestProvider {
+        id: "replacement-provider",
+        model: "replacement-model",
+    });
+    ctx.extensions = replacement_extensions;
+    // Every actor state publication refreshes the projection read by a later
+    // ManagedRuntime attachment.
+    ctx.publish_snapshot();
+
+    let initial = projection.initial_events(false);
+    assert!(matches!(
+        initial.get(2),
+        Some(RuntimeEvent::ConversationLoaded { .. })
+    ));
+    assert!(matches!(
+        initial.get(3),
+        Some(RuntimeEvent::ViewSnapshot { .. })
+    ));
+    let frontend = initial
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::FrontendState { commands, .. } => Some(commands),
+            _ => None,
+        })
+        .expect("frontend projection missing");
+    assert!(frontend.iter().any(|(name, _)| name == "wait_for_key"));
+
+    let snapshot = initial
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::StateSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("session projection missing");
+    assert_eq!(snapshot.provider_id, "replacement-provider");
+    assert_eq!(snapshot.provider_model, "replacement-model");
+
+    let view = initial
+        .iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ViewSnapshot { view } => Some(view),
+            _ => None,
+        })
+        .expect("view projection missing");
+    assert_eq!(view.components.len(), 1);
+    assert_eq!(view.components[0].id(), "replacement-status");
+}
+
+#[test]
+fn conversation_load_replays_canonical_view_after_reset_event() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let previous_id = db.create_conversation("mock", "mock-1").unwrap();
+    let loaded_id = db.create_conversation("mock", "mock-1").unwrap();
+
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    crate::ext::api_ui::lock_shared(&extensions.ui_handle()).apply(
+        crate::runtime::ViewDiff::Upsert {
+            component: crate::runtime::Component::StatusLine {
+                id: "survives-conversation-load".into(),
+                segments: Vec::new(),
+            },
+        },
+    );
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    session.conversation_id = Some(previous_id);
+    let (mut ctx, hub, _commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut events = hub.subscribe();
+
+    ctx.load_conversation(loaded_id);
+
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        RuntimeEvent::ConversationLoaded { snapshot, .. }
+            if snapshot.conversation_id == Some(loaded_id)
+    ));
+    let RuntimeEvent::ViewSnapshot { view } = events.try_recv().unwrap() else {
+        panic!("conversation load did not replay the canonical view after reset");
+    };
+    assert_eq!(view.components.len(), 1);
+    assert_eq!(view.components[0].id(), "survives-conversation-load");
 }
 
 fn private_command_extensions() -> crate::ext::ExtensionManager {
@@ -721,22 +1215,29 @@ async fn synchronize_replays_and_routes_pending_command_approval() {
             })
             .unwrap();
 
-        let mut replayed = false;
+        let mut saw_synchronized = false;
         loop {
             match events.recv().await.unwrap() {
-                RuntimeEvent::ApprovalRequest { id, .. } if id == approval_id => replayed = true,
                 RuntimeEvent::StateSynchronized {
                     request_id: 74,
                     busy,
+                    view,
                     ..
                 } => {
                     assert!(busy);
+                    assert!(view.is_some(), "synchronize omitted its full UI projection");
+                    saw_synchronized = true;
+                }
+                RuntimeEvent::ApprovalRequest { id, .. } if id == approval_id => {
+                    assert!(
+                        saw_synchronized,
+                        "synchronize replayed the pending approval before completing state repair"
+                    );
                     break;
                 }
                 _ => {}
             }
         }
-        assert!(replayed, "synchronize did not replay the pending approval");
 
         command_tx
             .send(RuntimeCommand::ApprovalReply {
@@ -1170,7 +1671,6 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
     fn actor(extensions: crate::ext::ExtensionManager, conversation_id: i64) -> DaemonCtx {
         let submit_inbox = extensions.submit_inbox();
         let config = crate::config::store::ConfigStore::for_test();
-        config.attach_extensions(extensions.clone());
         let (hub, _commands) = Hub::new();
         let mut session = crate::runtime::RuntimeSession::new(
             crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
@@ -1182,6 +1682,7 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
             extensions,
             submit_inbox,
             session: Arc::new(Mutex::new(session)),
+            actor_id: Some(conversation_id),
             mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
             approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
             key_registry: crate::runtime::KeyReplyRegistry::new(),
@@ -1189,9 +1690,11 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
             pending_commands: std::collections::VecDeque::new(),
             reload_inbox: None,
             forward_view_diffs: false,
+            host: crate::host::HostService::new(config.clone()),
             config,
             processes_seen: None,
             jobs_seen: None,
+            projection: None,
         }
     }
 
@@ -1392,6 +1895,7 @@ async fn resetting_approval_updates_live_mode() {
         session: Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
             crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
         ))),
+        actor_id: None,
         mode: mode.clone(),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
@@ -1399,9 +1903,11 @@ async fn resetting_approval_updates_live_mode() {
         pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
         forward_view_diffs: false,
+        host: crate::host::HostService::new(config.clone()),
         config,
         processes_seen: None,
         jobs_seen: None,
+        projection: None,
     };
 
     let _ = ctx
@@ -1450,6 +1956,7 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         session: Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
             crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
         ))),
+        actor_id: None,
         mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
@@ -1457,9 +1964,11 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
         forward_view_diffs: false,
+        host: crate::host::HostService::new(config.clone()),
         config,
         processes_seen: None,
         jobs_seen: None,
+        projection: None,
     };
 
     let _ = ctx
@@ -1643,7 +2152,7 @@ async fn managed_socket_bridge_reports_broadcast_lag() {
                 Ok(ManagedRuntime {
                     conversation_id: 1,
                     hub,
-                    initial: Arc::new(Vec::new),
+                    projection: fake_managed_projection(1),
                     task: Box::pin(async move {
                         if commands.recv().await.is_some() {
                             publisher.publish(RuntimeEvent::Status {
@@ -1669,11 +2178,12 @@ async fn managed_socket_bridge_reports_broadcast_lag() {
                 SessionTarget::Latest,
             ));
             let (read, mut write) = tokio::io::split(client);
+            let mut reader = codec::MessageReader::new(read);
+            assert_eq!(read_managed_initial(&mut reader).await, (Some(1), false));
             codec::write_message(&mut write, &RuntimeCommand::GetProcesses)
                 .await
                 .unwrap();
 
-            let mut reader = codec::MessageReader::new(read);
             assert!(matches!(
                 reader.read::<RuntimeEvent>().await.unwrap().unwrap(),
                 RuntimeEvent::Status { .. }
@@ -1711,6 +2221,35 @@ async fn malformed_frame_is_skipped_not_fatal() {
     assert!(matches!(cmd, RuntimeCommand::Cancel));
 }
 
+fn fake_managed_projection(id: i64) -> RuntimeProjection {
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.conversation_id = Some(id);
+    RuntimeProjection::new(
+        Arc::new(Mutex::new(session)),
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+    )
+}
+
+async fn read_managed_initial<R: AsyncRead + Unpin>(
+    reader: &mut codec::MessageReader<R>,
+) -> (Option<i64>, bool) {
+    let mut loaded = None;
+    loop {
+        match reader.read::<RuntimeEvent>().await.unwrap().unwrap() {
+            RuntimeEvent::ConversationLoaded { snapshot, busy, .. } => {
+                loaded = Some((snapshot.conversation_id, busy));
+            }
+            RuntimeEvent::ViewSnapshot { .. } => {
+                return loaded.expect("managed projection omitted ConversationLoaded");
+            }
+            _ => {}
+        }
+    }
+}
+
 fn fake_managed_runtime(
     id: i64,
     active: Arc<std::sync::atomic::AtomicUsize>,
@@ -1720,18 +2259,7 @@ fn fake_managed_runtime(
 
     let (hub, mut commands) = Hub::new();
     let publisher = hub.publisher();
-    let initial_hub = hub.clone();
-    let initial = Arc::new(move || {
-        let snapshot = bone_protocol::SessionSnapshot {
-            conversation_id: Some(id),
-            ..Default::default()
-        };
-        vec![RuntimeEvent::ConversationLoaded {
-            messages: Vec::new(),
-            snapshot,
-            busy: initial_hub.is_busy(),
-        }]
-    });
+    let projection = fake_managed_projection(id);
     let task = Box::pin(async move {
         while let Some(command) = commands.recv().await {
             if let RuntimeCommand::SubmitPrompt { text, .. } = command {
@@ -1757,7 +2285,7 @@ fn fake_managed_runtime(
     ManagedRuntime {
         conversation_id: id,
         hub,
-        initial,
+        projection,
         task,
     }
 }
@@ -1803,17 +2331,12 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             let mut read_b = codec::MessageReader::new(read_b);
 
             // Both initially attach to actor 1. Move only B to actor 2.
-            let _: RuntimeEvent = read_a.read().await.unwrap().unwrap();
-            let _: RuntimeEvent = read_b.read().await.unwrap().unwrap();
+            assert_eq!(read_managed_initial(&mut read_a).await, (Some(1), false));
+            assert_eq!(read_managed_initial(&mut read_b).await, (Some(1), false));
             codec::write_message(&mut write_b, &RuntimeCommand::LoadConversation { id: 2 })
                 .await
                 .unwrap();
-            let switched: RuntimeEvent = read_b.read().await.unwrap().unwrap();
-            assert!(matches!(
-                switched,
-                RuntimeEvent::ConversationLoaded { snapshot, .. }
-                    if snapshot.conversation_id == Some(2)
-            ));
+            assert_eq!(read_managed_initial(&mut read_b).await, (Some(2), false));
 
             codec::write_message(
                 &mut write_a,
@@ -1849,15 +2372,7 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             ));
             let (read_c, _) = tokio::io::split(client_c);
             let mut read_c = codec::MessageReader::new(read_c);
-            let attached: RuntimeEvent = read_c.read().await.unwrap().unwrap();
-            assert!(matches!(
-                attached,
-                RuntimeEvent::ConversationLoaded {
-                    busy: true,
-                    snapshot,
-                    ..
-                } if snapshot.conversation_id == Some(1)
-            ));
+            assert_eq!(read_managed_initial(&mut read_c).await, (Some(1), true));
 
             async fn finished<R: AsyncRead + Unpin>(
                 reader: &mut codec::MessageReader<R>,
@@ -1881,6 +2396,96 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             serve_a.abort();
             serve_b.abort();
             serve_c.abort();
+            runner.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_reload_is_host_scoped_while_ordinary_commands_remain_actor_local() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let group = HubGroup::default();
+            let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+            let (manager, receiver) = SessionManager::new();
+            let factory_group = group.clone();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                let SessionTarget::Conversation(id) = target else {
+                    return Err("explicit conversation required".into());
+                };
+                let (hub, mut commands) = Hub::new_grouped(factory_group.clone());
+                let mut reloads = factory_group.subscribe_extension_reloads();
+                let observed = observed_tx.clone();
+                Ok(ManagedRuntime {
+                    conversation_id: id,
+                    hub,
+                    projection: fake_managed_projection(id),
+                    task: Box::pin(async move {
+                        loop {
+                            tokio::select! {
+                                command = commands.recv() => match command {
+                                    Some(RuntimeCommand::Cancel) => {
+                                        let _ = observed.send(("command", id, 0));
+                                    }
+                                    Some(_) => {}
+                                    None => break,
+                                },
+                                changed = reloads.changed() => {
+                                    if changed.is_err() {
+                                        break;
+                                    }
+                                    let request = *reloads.borrow_and_update();
+                                    let _ = observed.send((
+                                        "reload",
+                                        id,
+                                        request.authority_conversation_id,
+                                    ));
+                                }
+                            }
+                        }
+                    }),
+                })
+            }));
+
+            // Populate two cached actors, then connect to actor 1.
+            drop(
+                manager
+                    .attach(SessionTarget::Conversation(2))
+                    .await
+                    .unwrap(),
+            );
+            let (client, server) = tokio::io::duplex(4096);
+            let bridge = tokio::task::spawn_local(serve_managed_connection(
+                server,
+                manager,
+                SessionTarget::Conversation(1),
+            ));
+            let (read, mut write) = tokio::io::split(client);
+            let mut read = codec::MessageReader::new(read);
+            assert_eq!(read_managed_initial(&mut read).await, (Some(1), false));
+            codec::write_message(&mut write, &RuntimeCommand::Cancel)
+                .await
+                .unwrap();
+            codec::write_message(&mut write, &RuntimeCommand::ReloadExtensions)
+                .await
+                .unwrap();
+
+            let mut observed = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while observed.len() < 3 {
+                    observed.push(observed_rx.recv().await.unwrap());
+                }
+            })
+            .await
+            .expect("managed commands were not routed");
+
+            assert!(observed.contains(&("command", 1, 0)));
+            assert!(!observed.contains(&("command", 2, 0)));
+            assert!(observed.contains(&("reload", 1, 1)));
+            assert!(observed.contains(&("reload", 2, 1)));
+
+            bridge.abort();
             runner.abort();
         })
         .await;
@@ -1912,7 +2517,7 @@ async fn managed_load_failure_is_correlated() {
             ));
             let (read, mut write) = tokio::io::split(client);
             let mut read = codec::MessageReader::new(read);
-            let _: RuntimeEvent = read.read().await.unwrap().unwrap();
+            assert_eq!(read_managed_initial(&mut read).await, (Some(1), false));
 
             codec::write_message(&mut write, &RuntimeCommand::LoadConversation { id: 404 })
                 .await
@@ -2013,7 +2618,7 @@ async fn managed_actor_panic_does_not_stop_other_sessions() {
                     Ok(ManagedRuntime {
                         conversation_id: id,
                         hub,
-                        initial: Arc::new(Vec::new),
+                        projection: fake_managed_projection(id),
                         task: Box::pin(async { panic!("actor boom") }),
                     })
                 } else {
@@ -2075,7 +2680,7 @@ async fn managed_event_channel_closure_writes_one_status_then_eof() {
                 Ok(ManagedRuntime {
                     conversation_id: 1,
                     hub,
-                    initial: Arc::new(Vec::new),
+                    projection: fake_managed_projection(1),
                     task: Box::pin(async {}),
                 })
             }));
@@ -2086,6 +2691,7 @@ async fn managed_event_channel_closure_writes_one_status_then_eof() {
                 SessionTarget::Latest,
             ));
             let mut reader = codec::MessageReader::new(client);
+            assert_eq!(read_managed_initial(&mut reader).await, (Some(1), false));
 
             let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
                 .await
@@ -2204,6 +2810,65 @@ async fn managed_sessions_evict_the_oldest_disconnected_actor() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn evicting_a_cached_actor_releases_its_lua_vm() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let oldest_lua = Arc::new(Mutex::new(None));
+            let factory_oldest_lua = oldest_lua.clone();
+            let (manager, receiver) = SessionManager::new();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                let SessionTarget::Conversation(id) = target else {
+                    return Err("explicit conversation required".into());
+                };
+                let extensions = crate::ext::ExtensionManager::unloaded();
+                if id == 1 {
+                    let lua = extensions.lua_arc();
+                    *factory_oldest_lua.lock().unwrap() = Some(Arc::downgrade(&lua));
+                }
+                let (hub, _commands) = Hub::new();
+                Ok(ManagedRuntime {
+                    conversation_id: id,
+                    hub,
+                    projection: fake_managed_projection(id),
+                    task: Box::pin(async move {
+                        let _extensions = extensions;
+                        std::future::pending::<()>().await;
+                    }),
+                })
+            }));
+
+            for id in 1..=MAX_CACHED_ACTORS as i64 + 1 {
+                drop(
+                    manager
+                        .attach(SessionTarget::Conversation(id))
+                        .await
+                        .unwrap(),
+                );
+            }
+
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    let released = oldest_lua
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|lua| lua.upgrade().is_none());
+                    if released {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("evicted actor's Lua VM was retained");
+
+            runner.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn managed_sessions_do_not_evict_disconnected_running_actor() {
     struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
     impl Drop for DropFlag {
@@ -2230,7 +2895,7 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
                     return Ok(ManagedRuntime {
                         conversation_id: id,
                         hub,
-                        initial: Arc::new(Vec::new),
+                        projection: fake_managed_projection(id),
                         task: Box::pin(std::future::pending()),
                     });
                 }
@@ -2240,7 +2905,7 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
                 Ok(ManagedRuntime {
                     conversation_id: id,
                     hub,
-                    initial: Arc::new(Vec::new),
+                    projection: fake_managed_projection(id),
                     task: Box::pin(async move {
                         if matches!(
                             commands.recv().await,
@@ -2343,6 +3008,7 @@ async fn process_commands_are_conversation_scoped() {
         extensions,
         submit_inbox,
         session: Arc::new(Mutex::new(session)),
+        actor_id: Some(conversation_id),
         mode: crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Safe),
         approval_registry: crate::runtime::ApprovalReplyRegistry::new(),
         key_registry: crate::runtime::KeyReplyRegistry::new(),
@@ -2350,9 +3016,11 @@ async fn process_commands_are_conversation_scoped() {
         pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
         forward_view_diffs: false,
+        host: crate::host::HostService::new(config.clone()),
         config,
         processes_seen: None,
         jobs_seen: None,
+        projection: None,
     };
 
     ctx.handle_idle_command(RuntimeCommand::GetProcesses, &mut commands)

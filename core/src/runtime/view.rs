@@ -1,8 +1,8 @@
 //! The ViewModel — UI as data.
 //!
-//! Wire-format types are re-exported from `bone-protocol`; only
-//! [`ViewModel`] (which has a `HashMap` of in-memory components) stays
-//! core-local.
+//! Wire-format types are re-exported from `bone-protocol`. The core-local
+//! [`ViewModel`] adds validated diff application while converting losslessly to
+//! the protocol's full-view snapshot type.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -73,6 +73,15 @@ impl ViewModel {
     /// Find a component by id.
     pub fn get(&self, id: &str) -> Option<&Component> {
         self.components.iter().find(|c| c.id() == id)
+    }
+}
+
+impl From<ViewModel> for bone_protocol::ViewModel {
+    fn from(view: ViewModel) -> Self {
+        Self {
+            components: view.components,
+            highlights: view.highlights,
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-import { DraftStore, MAX_ATTACHMENTS, buildSubmission, downloadText, fileToAttachment, requestJson } from "./ui-core.js";
+import { DraftStore, MAX_ATTACHMENTS, buildRevisionedCommand, buildSubmission, buildSynchronizationCommand, downloadText, fileToAttachment, requestJson } from "./ui-core.js";
 import { escapeHtml, highlightCode, renderMarkdown } from "./markdown.js";
 import { artifactText, parseDiff } from "./canvas-core.js";
 
@@ -7,7 +7,8 @@ import { artifactText, parseDiff } from "./canvas-core.js";
 // Daemon → us over SSE (RuntimeEvent), us → daemon over POST (RuntimeCommand).
 // Externally-tagged serde: unit events arrive as the bare string "turn_complete",
 // data events as { tool_call: {...} }. normalize() flattens both to { type, ... }.
-// Chat list / providers / config come from the bridge's local-data endpoints.
+// Chat metadata is bridge-local; providers and settings come from the daemon's
+// canonical config snapshot.
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, html) => {
@@ -36,6 +37,11 @@ const state = {
   reasonDetails: null,
   tools: new Map(),
   approvals: new Map(),
+  answeredApprovals: new Set(),
+  replyingApprovals: new Set(),
+  keyId: null,
+  answeredKeys: new Set(),
+  replyingKeys: new Set(),
   connected: false,
   conversationId: null,
   providers: [],
@@ -79,6 +85,8 @@ const state = {
   // messages (becomes a real listed conversation) or the user opens another chat.
   draftChat: false,
 };
+let nextSyncRequestId = Date.now();
+const repair = { id: null, timer: null, active: false };
 
 // Does this snapshot/conversation_loaded satisfy the pending switch? With nothing
 // pending, everything passes. A specific load resolves only on its own id. A
@@ -96,17 +104,6 @@ function switchSatisfiedBy(snapshot) {
   return cid !== w.from || !(snapshot.transcript_len > 0);
 }
 
-// Per-conversation task lists, keyed by conversation id. The daemon emits a
-// conversation's task pane as live `view_diff`s during its turn and never
-// replays them on re-attach, so switching away would lose the list. We cache
-// each conversation's latest list here and restore it on switch/return.
-const taskCache = new Map();
-// In-flight runtime events are not persisted until a turn completes. Keep the
-// complete live tail per conversation so navigating away and back can rebuild
-// the transcript from: DB replay + this tail. Completed turns drop their tail;
-// the next load then comes entirely from the authoritative database.
-const liveEventCache = new Map();
-let replayingLiveEvents = false;
 let conversations = [];
 let routingQueue = Promise.resolve();
 let pendingSubmitRequest = null;
@@ -137,38 +134,8 @@ function recoverNavigation(token) {
   }
   renderChats();
   updateRunningIndicators();
+  if (repair.active) requestSynchronization();
   return true;
-}
-
-const LIVE_EVENT_TYPES = new Set([
-  "started", "notice", "reasoning_delta", "text_delta", "tool_call",
-  "tool_result", "tool_output", "token_usage", "approval_request", "key_request",
-  "finished", "failed", "work_elapsed", "view_diff",
-]);
-
-function cacheLiveEvent(convId, ev) {
-  if (replayingLiveEvents || convId == null || !LIVE_EVENT_TYPES.has(ev.type)) return;
-  if (ev.type === "started") liveEventCache.set(convId, []);
-  const events = liveEventCache.get(convId) || [];
-  events.push(ev);
-  liveEventCache.set(convId, events);
-}
-
-function replayLiveTail(convId) {
-  const events = liveEventCache.get(convId);
-  if (!events || !events.length) return;
-  state.sawStarted = false;
-  replayingLiveEvents = true;
-  try { for (const ev of events) dispatchEvent(ev); }
-  finally { replayingLiveEvents = false; }
-}
-
-function dropCachedApproval(convId, approvalId) {
-  const events = liveEventCache.get(convId);
-  if (!events) return;
-  liveEventCache.set(convId, events.filter(
-    (ev) => ev.type !== "approval_request" || ev.id !== approvalId,
-  ));
 }
 
 // ── connection ──────────────────────────────────────────────────────────────
@@ -201,8 +168,13 @@ function onBridge(msg) {
     state.watched.clear();
     for (const id of state.runningConvs)
       if (id !== state.conversationId) watchConversation(id);
+    if (repair.active && desiredConversationId == null) requestSynchronization();
   }
-  if (msg.status === "disconnected") { setConnectionState("reconnecting"); toast("Daemon disconnected — reconnecting…"); }
+  if (msg.status === "disconnected") {
+    resetRepairRequest();
+    setConnectionState("reconnecting");
+    toast("Daemon disconnected — reconnecting…");
+  }
 }
 
 function setConnectionState(status) {
@@ -237,6 +209,51 @@ async function send(command) {
     toast(error.message || "Command failed");
     return false;
   }
+}
+
+function resetRepairRequest() {
+  if (repair.timer != null) clearTimeout(repair.timer);
+  repair.id = repair.timer = null;
+}
+
+function retryRepair(delay) {
+  if (repair.timer != null) clearTimeout(repair.timer);
+  repair.timer = setTimeout(() => {
+    repair.id = repair.timer = null;
+    requestSynchronization();
+  }, delay);
+}
+
+async function requestSynchronization() {
+  if (repair.id != null || !state.connected || state.awaitingLoad) return false;
+  const requestId = ++nextSyncRequestId;
+  repair.id = requestId;
+  const ok = await send(buildSynchronizationCommand(requestId, true));
+  if (repair.id !== requestId) return ok;
+  if (!ok) repair.id = null;
+  if (repair.active) retryRepair(ok ? 1500 : 1000);
+  return ok;
+}
+
+function onStreamLagged(ev) {
+  if (!repair.active) toast(`Event stream fell behind${ev.skipped ? ` (${ev.skipped} skipped)` : ""} — resynchronizing…`);
+  repair.active = true;
+  requestSynchronization();
+}
+
+function onStateSynchronized(ev) {
+  if (ev.request_id !== repair.id) return;
+  resetRepairRequest();
+  if (state.awaitingLoad && !switchSatisfiedBy(ev.snapshot)) return;
+  if (!ev.busy) repair.active = false;
+  if (!ev.busy && Array.isArray(ev.messages)) {
+    onConversationLoaded({ messages: ev.messages, snapshot: ev.snapshot, busy: false });
+  } else {
+    onSnapshot(ev.snapshot);
+    setRunning(ev.busy);
+  }
+  if (ev.view) onViewSnapshot(ev.view);
+  if (ev.busy) retryRepair(500);
 }
 
 // ── background watches ────────────────────────────────────────────────────────
@@ -287,7 +304,6 @@ async function unwatchConversation(id) {
 // tail. They never mutate the visible thread until that conversation is opened.
 function onWatchEvent(convId, ev) {
   if (convId == null || (convId === state.conversationId && !state.awaitingLoad)) return;
-  cacheLiveEvent(convId, ev);
   switch (ev.type) {
     case "conversation_loaded":
       if (ev.busy) {
@@ -308,7 +324,6 @@ function onWatchEvent(convId, ev) {
       state.runningConvs.delete(convId);
       markRunning(convId, false);
       unwatchConversation(convId);
-      liveEventCache.delete(convId);
       updateRunningIndicators();
       loadChats();
       return;
@@ -319,23 +334,8 @@ function onWatchEvent(convId, ev) {
       updateRunningIndicators();
       loadChats();
       return;
-    case "view_diff":
-      cacheWatchDiff(convId, ev.diff);
-      return;
     default:
       return;
-  }
-}
-
-// Fold a background conversation's task-pane diff straight into taskCache so
-// restoreTasks() shows the up-to-date list the moment we switch back to it.
-function cacheWatchDiff(convId, diff) {
-  if (!diff) return;
-  const up = diff.upsert && diff.upsert.component;
-  if (up && up.id === "task_list" && up.lines) {
-    taskCache.set(convId, { title: up.title || "Tasks", items: parseTaskLines(up.lines) });
-  } else if (diff.remove && diff.remove.id === "task_list") {
-    taskCache.delete(convId);
   }
 }
 
@@ -384,33 +384,45 @@ setInterval(tickRunningTimers, 1000);
 // strays from the conversation we just left — drop them until the target is
 // established. Routing/identity events pass through so the switch can resolve:
 // `state_snapshot` and `conversation_loaded` carry the conversation id we match
-// against, `status` lets a failed switch recover, and `frontend_state` is global.
+// against, `status` lets a failed switch recover, and stream/config/frontend
+// events are connection-global.
 function onEvent(ev) {
   const routing = ev.type === "conversation_loaded" || ev.type === "conversation_load_failed" ||
                   ev.type === "state_snapshot" || ev.type === "status" ||
-                  ev.type === "frontend_state";
+                  ev.type === "state_synchronized" || ev.type === "stream_lagged" ||
+                  ev.type === "config_snapshot" || ev.type === "config_changed" ||
+                  ev.type === "config_mutation_rejected" || ev.type === "frontend_state";
   if (state.awaitingLoad && !routing) {
-    // Frames already queued by the actor we just left still belong to its live
-    // tail. Preserve them instead of either bleeding them into the target or
-    // losing them during the hand-off to its watch connection.
-    cacheLiveEvent(state.awaitingLoad.from, ev);
+    // Frames queued by the actor we just left must not bleed into the target.
+    // The daemon replays authoritative transcript/view/gates after attachment.
     return;
   }
-  if (!routing) cacheLiveEvent(state.conversationId, ev);
   return dispatchEvent(ev);
 }
 
 function dispatchEvent(ev) {
   switch (ev.type) {
     case "frontend_state": return onFrontendState(ev);
+    case "config_snapshot": return adoptConfig(ev.schema, ev.snapshot);
+    case "config_changed": return adoptConfig(ev.schema, ev.snapshot);
+    // Correlated browser mutations use a dedicated bridge connection that
+    // reports their own failure. Ignore that same broadcast on the primary
+    // stream so another tab/request cannot produce a misleading toast here.
+    case "config_mutation_rejected":
+      if (ev.request_id) return;
+      toast(ev.error || "Configuration changed elsewhere");
+      return loadConfig();
     case "state_snapshot": return onSnapshot(ev.snapshot);
+    case "state_synchronized": return onStateSynchronized(ev);
+    case "stream_lagged": return onStreamLagged(ev);
+    case "view_snapshot": return onViewSnapshot(ev.view);
     case "conversation_loaded": return onConversationLoaded(ev);
     case "conversation_load_failed": return onConversationLoadFailed(ev);
     case "started":
       state.sawStarted = true;
       // A turn we didn't submit ourselves is a daemon-injected one — typically
       // background sub-agent results being handed to the model.
-      if (!state.sending && !replayingLiveEvents) resolveBackgroundAgents();
+      if (!state.sending) resolveBackgroundAgents();
       markRunning(state.conversationId, true); setRunning(true); showThinking(); return;
     case "status": return onStatus(ev.message);
     case "notice": return systemLine(ev.message);
@@ -1231,48 +1243,40 @@ function clearTaskList() {
   renderTaskList();
 }
 
-// Persist the live task list under a conversation id so it survives a switch.
-// A conversation's actor emits its task pane only as live diffs and never
-// replays them on re-attach, so without this cache the list vanishes the moment
-// you look at another chat.
-function cacheTasks(convId) {
-  if (convId == null) return;
-  if (taskState.active && taskState.items.length) {
-    taskCache.set(convId, { title: taskState.title, items: taskState.items.map((t) => ({ ...t })) });
-  } else {
-    taskCache.delete(convId);
-  }
-}
-
-// Restore (or clear) the sidebar task list for the conversation now in view.
-function restoreTasks(convId) {
-  const cached = convId != null ? taskCache.get(convId) : null;
-  if (cached) {
-    taskState.active = true;
-    taskState.title = cached.title;
-    taskState.items = cached.items.map((t) => ({ ...t }));
-  } else {
-    taskState.active = false;
-    taskState.items = [];
-  }
-  taskState.expanded = false;
-  $("task-popup-expanded").classList.add("hidden");
-  $("task-popup-wrap").classList.remove("expanded");
-  renderTaskList();
-}
-
 $("task-popup-toggle").addEventListener("click", (e) => { e.stopPropagation(); toggleTaskPopup(); });
 $("task-popup-collapsed").addEventListener("click", () => toggleTaskPopup());
 
 // ── inline approvals ────────────────────────────────────────────────────────
 
+async function sendInteraction(kind, id, payload, beacon = false) {
+  const approval = kind === "approval_reply";
+  const answered = state[approval ? "answeredApprovals" : "answeredKeys"];
+  const replying = state[approval ? "replyingApprovals" : "replyingKeys"];
+  if (answered.has(id) || replying.has(id)) return null;
+  const conversationId = state.conversationId;
+  const command = { [kind]: { id, ...payload } };
+  replying.add(id);
+  const sent = beacon && navigator.sendBeacon
+    ? navigator.sendBeacon(`/api/command?session=${state.session}`, JSON.stringify(command))
+    : await send(command);
+  replying.delete(id);
+  if (state.conversationId !== conversationId) return null;
+  if (!sent) return false;
+  answered.add(id);
+  return true;
+}
+
 function onApproval(ev) {
+  // Synchronization can replay a still-live gate, and the conversation hub is
+  // shared by every attached tab. Keep one card/reply per approval id.
+  if (state.approvals.has(ev.id) || state.answeredApprovals.has(ev.id) ||
+      state.replyingApprovals.has(ev.id)) return;
   // Danger mode (and policy-allowed calls) arrive pre-approved: the daemon's
   // gate marks `auto_allows` and leaves the decision to the client, exactly as
   // the TUI does. Approve immediately and skip the prompt — the tool call still
   // renders via its own tool events.
   if (ev.auto_allows) {
-    send({ approval_reply: { id: ev.id, outcome: "approve" } });
+    sendInteraction("approval_reply", ev.id, { outcome: "approve" });
     return;
   }
   hideThinking();
@@ -1323,27 +1327,31 @@ function onApproval(ev) {
   scrollDown();
 }
 
-function resolveApproval(id, outcome, card, label) {
-  send({ approval_reply: { id, outcome } });
-  dropCachedApproval(state.conversationId, id);
+async function resolveApproval(id, outcome, card, label) {
+  if (!await sendInteraction("approval_reply", id, { outcome })) return;
   state.approvals.delete(id);
-  const ok = outcome === "approve";
+  const approved = outcome === "approve";
   const guided = typeof outcome === "object";
-  card.innerHTML = `<div class="approval-resolved ${ok ? "ok" : "no"}">
-    <span>${ok ? "✓" : guided ? "✎" : "✗"}</span><span>${label}</span></div>`;
+  card.innerHTML = `<div class="approval-resolved ${approved ? "ok" : "no"}">
+    <span>${approved ? "✓" : guided ? "✎" : "✗"}</span><span>${label}</span></div>`;
 }
 
 // Auto-deny every approval still awaiting a reply. Leaving one unanswered wedges
 // the daemon's turn loop forever (the approval gate blocks on the reply), so we
 // resolve them whenever the user abandons the turn (new chat, switch chat, stop,
 // tab close). `beacon` uses sendBeacon so it still fires during page unload.
-function denyPending(beacon) {
+async function denyPending(beacon = false) {
+  // beforeunload cannot wait for promises. sendInteraction's beacon path runs
+  // synchronously, so start every reply before yielding to the event loop.
+  if (beacon) {
+    for (const id of [...state.approvals.keys()]) {
+      sendInteraction("approval_reply", id, { outcome: "denied" }, true);
+    }
+    return;
+  }
   for (const id of [...state.approvals.keys()]) {
     const card = state.approvals.get(id);
-    const body = JSON.stringify({ approval_reply: { id, outcome: "denied" } });
-    if (beacon && navigator.sendBeacon) navigator.sendBeacon(`/api/command?session=${state.session}`, body);
-    else send({ approval_reply: { id, outcome: "denied" } });
-    dropCachedApproval(state.conversationId, id);
+    if (!await sendInteraction("approval_reply", id, { outcome: "denied" })) continue;
     if (card) card.innerHTML = `<div class="approval-resolved no"><span>✗</span><span>Dismissed</span></div>`;
     state.approvals.delete(id);
   }
@@ -1450,6 +1458,8 @@ function keyEvent(code, char, e) {
 const K = (code, char = null) => ({ code, char, ctrl: false, alt: false, shift: false });
 
 function onKeyRequest(ev) {
+  if (state.keyId === ev.id || state.answeredKeys.has(ev.id) ||
+      state.replyingKeys.has(ev.id)) return;
   state.keyId = ev.id;
   if (interactState.queue.length) return pumpKeyQueue();
   if (!interactState.active) toast("press any key…");
@@ -1460,7 +1470,7 @@ function pumpKeyQueue() {
   const key = interactState.queue.shift();
   const id = state.keyId;
   state.keyId = null;
-  send({ key_reply: { id, key } });
+  replyKey(id, key);
 }
 function enqueueKeys(keys) {
   if (!keys || !keys.length) return;
@@ -1477,7 +1487,11 @@ function captureKey(e) {
   e.preventDefault();
   const id = state.keyId;
   state.keyId = null;
-  send({ key_reply: { id, key } });
+  replyKey(id, key);
+}
+async function replyKey(id, key) {
+  const sent = await sendInteraction("key_reply", id, { key });
+  if (sent === false && state.keyId == null) state.keyId = id;
 }
 
 // ── interact pane (ask_user) rendering ───────────────────────────────────────
@@ -1720,8 +1734,12 @@ function patchInteractPreview(model) {
   content.replaceChildren(...rows);
 }
 
+function interactIdentity(model) {
+  return JSON.stringify([model.title, model.question, model.multi, !!model.text]);
+}
+
 function renderInteractPane(model) {
-  const identity = JSON.stringify([model.title, model.question, model.multi, !!model.text]);
+  const identity = interactIdentity(model);
   if (interactState.identity !== identity) {
     interactState.identity = identity;
     interactState.optionCache.clear();
@@ -1830,7 +1848,6 @@ function onTurnComplete() {
   // so reload the conversation from the DB to render the authoritative transcript.
   const joinedMidTurn = !state.sawStarted;
   state.sawStarted = false;
-  liveEventCache.delete(state.conversationId);
   if (joinedMidTurn && state.conversationId != null && !state.awaitingLoad) {
     reloadActiveFromDb();
   }
@@ -1879,6 +1896,13 @@ function onConversationLoaded(ev) {
   if (state.awaitingLoad && !switchSatisfiedBy(ev.snapshot)) return;
   // The target conversation's view is now authoritative — stop dropping events.
   state.awaitingLoad = null;
+  state.approvals.clear();
+  state.answeredApprovals.clear();
+  state.replyingApprovals.clear();
+  state.keyId = null;
+  state.answeredKeys.clear();
+  state.replyingKeys.clear();
+  state.sawStarted = false;
   $("thread").innerHTML = "";
   bgAgentRows = []; // rows live in the DOM we just discarded
   finalizeTurn();
@@ -1903,16 +1927,18 @@ function onConversationLoaded(ev) {
   state.runningConvs.delete(loadedId);
   setRunning(loadedRunning);
   restoreDraft();
-  // Restore this conversation's task list from the per-chat cache (the actor
-  // won't re-emit it on attach). Uses the id from the snapshot we just applied.
-  restoreTasks(state.conversationId);
+  clearTaskList();
   // An empty conversation (fresh chat) shows the welcome rather than a blank pane.
   if (!rendered) { $("thread").appendChild(buildWelcome()); }
-  // A running turn's assistant/tool output is absent from the DB replay until
-  // commit. Re-apply the cached live tail after the persisted transcript.
-  replayLiveTail(state.conversationId);
   // Open on the latest exchange, not the first message.
   scrollToBottom();
+  if (repair.active || loadedRunning) {
+    // A late attachment missed the live stream head and may also have missed an
+    // outstanding approval/key gate. Synchronize immediately and poll until the
+    // actor is idle, just like explicit stream-lag recovery.
+    repair.active = true;
+    requestSynchronization();
+  }
 }
 
 function renderStoredMessage(m, asstTurn) {
@@ -1959,11 +1985,33 @@ function renderStoredMessage(m, asstTurn) {
 
 // The runtime may push an accent colour, but an explicit theme choice wins;
 // only "auto" defers to the runtime.
+function applyViewHighlight(name, fg) {
+  if (prefs.theme !== "auto" || name !== "accent") return;
+  if (fg) document.documentElement.style.setProperty("--accent", fg);
+  else document.documentElement.style.removeProperty("--accent");
+}
+
+function onViewSnapshot(view = {}) {
+  const components = view.components || [];
+  const interact = components.find((component) => component.id === "interact" && component.lines);
+  const sameInteract = interactState.active && interact &&
+    interactIdentity(parseInteractPane(interact)) === interactState.identity;
+  taskState.active = false;
+  taskState.items = [];
+  renderTaskList();
+  if (!sameInteract) closeInteract();
+  if (prefs.theme === "auto") document.documentElement.style.removeProperty("--accent");
+  for (const [name, fg] of Object.entries(view.highlights || {})) applyViewHighlight(name, fg);
+  for (const component of components) renderViewDiff({ upsert: { component } });
+}
+
 function onViewDiff(diff) {
+  renderViewDiff(diff);
+}
+
+function renderViewDiff(diff) {
   // Runtime-pushed accent colour: only honoured when the theme defers to it.
-  if (prefs.theme === "auto" && diff && diff.set_highlight &&
-      diff.set_highlight.name === "accent" && diff.set_highlight.fg)
-    document.documentElement.style.setProperty("--accent", diff.set_highlight.fg);
+  if (diff?.set_highlight) applyViewHighlight(diff.set_highlight.name, diff.set_highlight.fg);
 
   // Task list pane (source="task_list") — render in sidebar. Theme-independent.
   if (diff && diff.upsert && diff.upsert.component) {
@@ -1972,7 +2020,6 @@ function onViewDiff(diff) {
       taskState.active = true;
       taskState.title = comp.title || "Tasks";
       taskState.items = parseTaskLines(comp.lines);
-      cacheTasks(state.conversationId);
       renderTaskList();
       return;
     }
@@ -1986,7 +2033,6 @@ function onViewDiff(diff) {
   if (diff && diff.remove && diff.remove.id === "task_list") {
     taskState.active = false;
     taskState.items = [];
-    cacheTasks(state.conversationId);
     renderTaskList();
   }
   // Interact pane cleared (menu.clear / answered / cancelled → Remove diff).
@@ -2164,10 +2210,6 @@ async function openChat(id) {
     if (generation !== state.navigationGeneration) return;
     if (!delivered && !state.running) leavingRunning = false;
   }
-  // Stash the chat we're leaving so its task list is there when we come back,
-  // then ask the daemon to switch. Strays from the old actor are gated out
-  // until the target's `conversation_loaded` lands (see `awaitingLoad`).
-  cacheTasks(leaving);
   // Start the old chat's watch before repinning the primary link. Issuing these
   // requests in this order closes the hand-off gap where neither socket would
   // be subscribed to the actor's broadcast.
@@ -2181,7 +2223,7 @@ async function openChat(id) {
     }
   }
   if (generation !== state.navigationGeneration) return;
-  denyPending();
+  await denyPending();
   if (!await routeConversation(generation, { load_conversation: { id } })) {
     if (generation === state.navigationGeneration) recoverNavigation(token);
     return;
@@ -2225,7 +2267,6 @@ async function newChat() {
     if (generation !== state.navigationGeneration) return;
     if (!delivered && !state.running) leavingRunning = false;
   }
-  cacheTasks(leaving);
   // Keep the chat we're leaving live in the background if it's still mid-turn.
   if (leavingRunning && leaving != null) {
     state.runningConvs.add(leaving);
@@ -2237,7 +2278,7 @@ async function newChat() {
     }
   }
   if (generation !== state.navigationGeneration) return;
-  denyPending();
+  await denyPending();
   if (!await routeConversation(generation, "new_conversation")) {
     if (generation === state.navigationGeneration) recoverNavigation(token);
     return;
@@ -2277,22 +2318,25 @@ const PROVIDER_FIELDS = [
   { key: "fast_mode", label: "Fast mode", type: "checkbox", handlers: ["codex"] },
 ];
 
+function providerUpdate(id, provider, fields = {}) {
+  const merged = { ...provider, ...fields };
+  return {
+    id,
+    label: merged.label || id,
+    base_url: merged.base_url ?? "",
+    model: merged.model ?? "",
+    endpoint: merged.endpoint ?? "",
+    handler: merged.handler ?? "",
+    context_window_tokens: merged.context_window_tokens ?? null,
+    max_concurrency: merged.max_concurrency ?? null,
+    reasoning_effort: merged.reasoning_effort ?? "",
+    fast_mode: merged.handler === "codex" && (merged.fast_mode ?? false),
+    ...(Object.hasOwn(fields, "api_key") ? { api_key: fields.api_key } : {}),
+  };
+}
+
 let _provExpanded = null;   // key of expanded card (null = collapsed)
 let _provShowKey = null;    // key whose API key is revealed
-
-async function loadProviders() {
-  clearError();
-  try { state.providers = await requestJson("/api/providers"); }
-  catch (error) { state.providers = []; reportError("Could not load providers", error, loadProviders); }
-  // Restore last-selected provider if it still exists in the provider list.
-  if (prefs.providerId && state.providers.some((p) => p.key === prefs.providerId)) {
-    state.providerId = prefs.providerId;
-    const p = state.providers.find((x) => x.key === prefs.providerId);
-    if (p && p.model) state.model = p.model;
-  }
-  renderModelLabel();
-  renderProviderPicker();
-}
 
 function renderProviderPicker() {
   const list = $("provider-list");
@@ -2517,22 +2561,24 @@ async function saveProviderField(providerKey, fieldKey, value) {
   renderModelLabel();
   renderProviderPicker();
   if (!$("model-pop").classList.contains("hidden")) positionModelPop();
-  try { await requestJson(`/api/providers/${providerKey}`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ fields }),
-  }); toast("Saved"); } catch (error) {
+  try {
+    await writeRevisionedCommand("upsert_provider", {
+      provider: providerUpdate(providerKey, prov, fields),
+    });
+    toast("Saved");
+  } catch (error) {
     prov[fieldKey] = oldVal;
     prov.fast_mode = oldFastMode;
     toast(`Save failed: ${error.message}`);
     renderProviderPicker();
+    await loadConfig();
   }
 }
 
 async function deleteProvider(key) {
   if (!confirm(`Delete provider "${key}"?`)) return;
   try {
-    await requestJson(`/api/providers/${key}`, { method: "DELETE" });
+    await writeRevisionedCommand("delete_provider", { id: key });
     state.providers = state.providers.filter((p) => p.key !== key);
     if (_provExpanded === key) _provExpanded = null;
     renderProviderPicker();
@@ -2540,6 +2586,7 @@ async function deleteProvider(key) {
     toast("provider deleted");
   } catch (e) {
     toast("failed to delete: " + e.message);
+    await loadConfig();
   }
 }
 
@@ -2581,19 +2628,17 @@ async function submitAddProvider() {
   const model = modelInput.value.trim();
   const base_url = urlInput.value.trim();
   try {
-    await requestJson("/api/providers", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key, label, model, base_url }),
+    await writeRevisionedCommand("upsert_provider", {
+      provider: providerUpdate(key, {}, { label, model, base_url }),
     });
     keyInput.value = "";
     labelInput.value = "";
     modelInput.value = "";
     urlInput.value = "";
-    await loadProviders();
     toast(`added "${label}"`);
   } catch (e) {
     toast("failed to add: " + e.message);
+    await loadConfig();
   }
 }
 
@@ -2655,16 +2700,42 @@ function positionModelPop() {
 
 let configCache = { schema: { pages: [] }, snapshot: { revision: 0, values: {}, disabled_tools: [] } };
 
-async function loadConfig() {
-  clearError();
-  try { configCache = await requestJson("/api/config"); }
-  catch (error) {
-    configCache = { schema: { pages: [] }, snapshot: { revision: 0, values: {}, disabled_tools: [] } };
-    reportError("Could not load settings", error, loadConfig);
+function adoptConfig(schema, snapshot) {
+  if (!schema || !snapshot) return;
+  configCache = { schema, snapshot };
+  const providers = (snapshot.providers || []).map((provider) => ({
+    key: provider.id,
+    ...provider,
+    api_key: "",
+  }));
+  const providersChanged = JSON.stringify(providers) !== JSON.stringify(state.providers);
+  state.providers = providers;
+  if (providersChanged) {
+    if (prefs.providerId && providers.some((provider) => provider.key === prefs.providerId)) {
+      state.providerId = prefs.providerId;
+      state.model = providers.find((provider) => provider.key === prefs.providerId).model || state.model;
+    }
+    renderModelLabel();
+    renderProviderPicker();
   }
   syncConfigState();
   renderBehavior();
   renderTools();
+}
+
+async function loadConfig() {
+  clearError();
+  try {
+    const result = await requestJson("/api/config");
+    adoptConfig(result.schema, result.snapshot);
+  }
+  catch (error) {
+    adoptConfig(
+      { pages: [] },
+      { revision: 0, values: {}, disabled_tools: [] },
+    );
+    reportError("Could not load settings", error, loadConfig);
+  }
 }
 
 function* schemaFields(pages = configCache.schema?.pages || []) {
@@ -2692,25 +2763,44 @@ function configValue(field) {
 
 function syncConfigState() {
   const approval = findField("general.approval");
-  if (approval) setMode(configValue(approval) === "danger");
+  if (approval) renderMode(configValue(approval) === "danger");
   const reasoning = findField("general.show_reasoning");
   if (reasoning) document.body.classList.toggle("hide-thinking", !configValue(reasoning));
 }
 
 async function writeConfig(change) {
   try {
-    const result = await requestJson("/api/config", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...change, expected_revision: configCache.snapshot.revision }),
-    });
-    configCache = { schema: result.schema, snapshot: result.snapshot };
-    syncConfigState();
-    renderBehavior();
-    renderTools();
+    const result = await mutateConfig("/api/config", { ...change, expected_revision: configCache.snapshot.revision });
     toast(result.restart_required ? "Saved — restart required" : "Saved");
   } catch (error) {
     toast(`Save failed: ${error.message}`);
     await loadConfig();
+  }
+}
+
+async function mutateConfig(url, body) {
+  const result = await requestJson(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  adoptConfig(result.schema, result.snapshot);
+  return result;
+}
+
+function writeRevisionedCommand(kind, payload) {
+  return mutateConfig("/api/config-command", buildRevisionedCommand(kind, payload, configCache.snapshot.revision));
+}
+
+async function mutateSubagent(kind, payload, success, failure, rerender = false) {
+  try {
+    await writeRevisionedCommand(kind, payload);
+    await send("reload_extensions");
+    if (success) toast(success);
+  } catch (error) {
+    toast(`${failure} failed: ${error.message}`);
+    await loadConfig();
+    if (rerender) renderAgents();
   }
 }
 
@@ -2742,7 +2832,7 @@ function switchEl(checked, onChange) {
 function configControl(field) {
   const value = configValue(field);
   const save = (next) => {
-    if (field.path === "general.approval") setMode(next === "danger");
+    if (field.path === "general.approval") renderMode(next === "danger");
     writeConfig({ path: field.path, value: next });
   };
   if (field.type === "bool") return switchEl(Boolean(value), save);
@@ -2910,10 +3000,7 @@ function renderAgentEditor(agent = null) {
       enabled: fields.enabled.querySelector("input").checked,
       source: "config",
     };
-    if (await send({ upsert_subagent: { agent: definition } })) {
-      await send("reload_extensions");
-      toast(`saved ${name}`);
-    }
+    await mutateSubagent("upsert_subagent", { agent: definition }, `saved ${name}`, "Save");
   };
   actions.append(cancel, save);
   wrap.appendChild(actions);
@@ -2940,15 +3027,14 @@ function renderAgents() {
       const remove = el("button", "ghost-btn", "Delete");
       remove.onclick = async () => {
         if (!confirm(`Delete sub-agent “${agent.name}”?`)) return;
-        if (await send({ delete_subagent: { name: agent.name } })) await send("reload_extensions");
+        await mutateSubagent("delete_subagent", { name: agent.name }, null, "Delete");
       };
       control.appendChild(remove);
     } else {
       control.appendChild(el("span", "agent-chip", "Lua"));
     }
-    const toggle = switchEl(agent.enabled !== false, async (enabled) => {
-      if (await send({ set_subagent_enabled: { name: agent.name, enabled } })) await send("reload_extensions");
-    });
+    const toggle = switchEl(agent.enabled !== false, (enabled) =>
+      mutateSubagent("set_subagent_enabled", { name: agent.name, enabled }, null, "Update", true));
     control.appendChild(toggle);
     wrap.appendChild(setRow(agent.name, agent.description, control));
   }
@@ -2999,15 +3085,19 @@ function renderSettingsStats() {
 // ── approval mode (composer pill + behavior seg) ─────────────────────────────
 
 let danger = false;
-function setMode(d) {
+function renderMode(d) {
   danger = d;
   const btn = $("mode-toggle");
   btn.classList.toggle("mode-safe", !danger);
   btn.classList.toggle("mode-danger", danger);
   $("mode-label").textContent = danger ? "Danger" : "Safe";
-  send({ set_approval_mode: { mode: danger ? "danger" : "safe" } });
   const seg = $("behavior-approval-seg");
   if (seg) for (const b of seg.children) b.classList.toggle("active", b.dataset.mode === (danger ? "danger" : "safe"));
+}
+
+function setMode(d) {
+  renderMode(d);
+  return send({ set_approval_mode: { mode: danger ? "danger" : "safe" } });
 }
 
 // ── display prefs ─────────────────────────────────────────────────────────────
@@ -3397,7 +3487,7 @@ for (const type of ["dragleave", "drop"]) $("composer").addEventListener(type, (
 $("composer").addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
 $("send").onclick = submit;
 $("stop").onclick = async () => {
-  denyPending();
+  await denyPending();
   $("stop").disabled = true;
   announce("Canceling response");
   await send("cancel");
@@ -3800,6 +3890,5 @@ applyPrefs();
 autosize();
 connect();
 loadChats();
-loadProviders();
 loadConfig();
 setTimeout(() => send({ set_terminal_width: { width: 100 } }), 400);

@@ -1,11 +1,11 @@
 use super::*;
 
-fn entry(kind: &str) -> CatalogEntry {
-    CatalogEntry {
+fn entry(kind: &str) -> CatalogItem {
+    CatalogItem {
         name: "demo.lua".to_string(),
         kind: kind.to_string(),
         description: "Demo extension".to_string(),
-        ..CatalogEntry::default()
+        ..CatalogItem::default()
     }
 }
 
@@ -15,6 +15,7 @@ fn make_theme() -> Theme {
 
 fn result_state(banner: &str) -> State {
     State {
+        revision: String::new(),
         entries: Vec::new(),
         items: vec![Item::new("demo.lua".into(), "Demo".into(), false)],
         cursor: 0,
@@ -39,10 +40,24 @@ fn result_overlays_use_good_and_error_roles() {
     ];
     items[3].tag = Some("keep".into());
     let results = vec![
-        ("installed".into(), ItemResult::Installed),
-        ("removed".into(), ItemResult::Removed),
-        ("failed".into(), ItemResult::Failed("network".into())),
-        ("unchanged".into(), ItemResult::Unchanged),
+        CatalogItemResult {
+            name: "installed".into(),
+            outcome: CatalogItemOutcome::Installed,
+        },
+        CatalogItemResult {
+            name: "removed".into(),
+            outcome: CatalogItemOutcome::Removed,
+        },
+        CatalogItemResult {
+            name: "failed".into(),
+            outcome: CatalogItemOutcome::Failed {
+                message: "network".into(),
+            },
+        },
+        CatalogItemResult {
+            name: "unchanged".into(),
+            outcome: CatalogItemOutcome::Unchanged,
+        },
     ];
 
     overlay_results(&mut items, &results, &theme);
@@ -81,7 +96,7 @@ fn result_banners_render_with_success_and_error_roles() {
 #[test]
 fn available_item_is_unchecked_without_status() {
     let theme = make_theme();
-    let item = build_item(&entry("tool"), false, false, &theme);
+    let item = build_item(&entry("tool"), &theme);
 
     assert!(!item.checked);
     assert!(!item.user_touched);
@@ -92,7 +107,9 @@ fn available_item_is_unchecked_without_status() {
 #[test]
 fn installed_item_is_checked_and_labeled() {
     let theme = make_theme();
-    let item = build_item(&entry("command"), true, false, &theme);
+    let mut entry = entry("command");
+    entry.installed = true;
+    let item = build_item(&entry, &theme);
 
     assert!(item.checked);
     assert!(!item.user_touched);
@@ -104,7 +121,7 @@ fn installed_item_is_checked_and_labeled() {
 #[test]
 fn theme_item_has_distinct_category() {
     let theme = make_theme();
-    let item = build_item(&entry("theme"), false, false, &theme);
+    let item = build_item(&entry("theme"), &theme);
 
     assert_eq!(item.category, "theme");
 }
@@ -112,7 +129,10 @@ fn theme_item_has_distinct_category() {
 #[test]
 fn pending_update_takes_precedence_and_is_applied_by_default() {
     let theme = make_theme();
-    let item = build_item(&entry("tool"), true, true, &theme);
+    let mut entry = entry("tool");
+    entry.installed = true;
+    entry.update_available = true;
+    let item = build_item(&entry, &theme);
 
     assert!(item.checked);
     assert!(item.user_touched);
@@ -134,7 +154,7 @@ fn metadata_is_added_to_the_detail_pane() {
     entry.long_description = Some("A longer explanation.".to_string());
 
     let theme = make_theme();
-    let item = build_item(&entry, false, false, &theme);
+    let item = build_item(&entry, &theme);
 
     assert_eq!(item.details.len(), 8);
     assert_eq!(
@@ -149,24 +169,26 @@ fn metadata_is_added_to_the_detail_pane() {
 fn rows_are_grouped_as_updates_installed_and_available() {
     let theme = make_theme();
     let entries = vec![
-        CatalogEntry {
+        CatalogItem {
             name: "available.lua".to_string(),
             ..entry("tool")
         },
-        CatalogEntry {
+        CatalogItem {
             name: "update.lua".to_string(),
+            installed: true,
+            update_available: true,
             ..entry("tool")
         },
-        CatalogEntry {
+        CatalogItem {
             name: "installed.lua".to_string(),
+            installed: true,
             ..entry("command")
         },
     ];
-    let items = vec![
-        build_item(&entries[0], false, false, &theme),
-        build_item(&entries[1], true, true, &theme),
-        build_item(&entries[2], true, false, &theme),
-    ];
+    let items = entries
+        .iter()
+        .map(|entry| build_item(entry, &theme))
+        .collect();
 
     let (entries, items) = group_rows(entries, items);
 
@@ -221,7 +243,9 @@ fn rows_are_grouped_as_updates_installed_and_available() {
 #[test]
 fn theme_render_assertion() {
     let theme = Theme::default();
-    let item = build_item(&entry("tool"), true, false, &theme);
+    let mut entry = entry("tool");
+    entry.installed = true;
+    let item = build_item(&entry, &theme);
     assert_eq!(item.tag.as_deref(), Some("installed"));
     assert_eq!(item.tag_color, Some(theme.palette.good));
 }

@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::host::{HostRequest, HostResponse};
 use crate::input::KeyEvent;
 use crate::message::{ChatMessage, ImageData};
 use crate::session::SessionSnapshot;
 use crate::tools::CallOutcome;
-use crate::view::ViewDiff;
+use crate::view::{ViewDiff, ViewModel};
 
 /// Daemon → frontend event stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +102,10 @@ pub enum RuntimeEvent {
         /// Whether a model turn or interactive Lua command is still running.
         busy: bool,
         snapshot: SessionSnapshot,
+        /// Complete UI projection correlated with this repair response.
+        /// `None` only when talking to a daemon that predates atomic view repair.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewModel>,
         /// Complete display transcript, included only when explicitly requested.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         messages: Option<Vec<ChatMessage>>,
@@ -110,6 +115,15 @@ pub enum RuntimeEvent {
     /// Clients should issue [`RuntimeCommand::Synchronize`] to repair state.
     StreamLagged {
         skipped: u64,
+    },
+    /// Complete daemon-owned UI projection.
+    ///
+    /// Sent on attach, conversation load, and extension reload. Synchronization
+    /// carries the same full model atomically inside
+    /// [`StateSynchronized`](Self::StateSynchronized). Clients should replace
+    /// their local component/highlight model rather than merge this as a diff.
+    ViewSnapshot {
+        view: ViewModel,
     },
     /// Conversation-scoped snapshots of daemon-owned background processes.
     ProcessesSnapshot {
@@ -145,6 +159,13 @@ pub enum RuntimeEvent {
         /// canonical config when changed through a frontend.
         #[serde(default)]
         subagents: Vec<crate::session::SubagentDefinition>,
+        /// Host-service capability level. Zero means the daemon predates
+        /// correlated stats/catalog/setup requests.
+        #[serde(default)]
+        host_api_version: u16,
+        /// Daemon-host catalog updates available from its cached index.
+        #[serde(default)]
+        catalog_updates: usize,
     },
     /// Daemon-owned schema and redacted resolved configuration.
     ConfigSnapshot {
@@ -166,6 +187,11 @@ pub enum RuntimeEvent {
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+    },
+    /// Correlated result of a daemon-host stats, catalog, or setup operation.
+    HostResponse {
+        request_id: u64,
+        response: HostResponse,
     },
     ConversationLoaded {
         messages: Vec<ChatMessage>,
@@ -338,6 +364,7 @@ pub enum ConfigAction {
 /// | `Cancel` / `Steer` | both | turn control |
 /// | `CancelJob` | both | cancel one background sub-agent by id |
 /// | `Synchronize` | both | repair frontend state after event-stream lag |
+/// | `HostRequest` | both | correlated daemon-host stats, catalog, and setup |
 /// | `RunCommand` | both | slash commands on the daemon VM |
 /// | `NewConversation` / `LoadConversation` / `ClearConversation` | both | durable chat lifecycle |
 /// | `ReplaceConversation` | both | bulk transcript replace (e.g. compact) |
@@ -382,6 +409,11 @@ pub enum RuntimeCommand {
         request_id: u64,
         #[serde(default)]
         include_messages: bool,
+    },
+    /// Request data or a mutation whose authority lives beside the daemon.
+    HostRequest {
+        request_id: u64,
+        request: HostRequest,
     },
     /// Cancel one daemon-owned process in the current conversation.
     CancelProcess {

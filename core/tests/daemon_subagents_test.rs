@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bone_core::config::settings::Settings;
 use bone_core::ext::{self, BootOptions};
 use bone_core::llm::provider::LlmProvider;
 use bone_core::llm::{ChatEvent, ChatMessage, LlmError, ResponseStream};
@@ -80,7 +79,7 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
     unsafe { std::env::set_var("BONE_DIR", &config_dir) };
 
     let config = common::config_store_in(&config_dir);
-    let settings = Arc::new(Mutex::new(Settings::load().unwrap().unwrap()));
+    let settings = config.runtime_settings_handle();
     let booted = ext::boot_with_tools_shared(
         &config_dir,
         &config_dir,
@@ -94,7 +93,6 @@ async fn daemon_subagent_crud_persists_and_updates_frontend_state() {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let (hub, commands) = Hub::new();
     let mut events = hub.subscribe();
-    config.attach_extensions(booted.manager.clone());
     let initial_revision = config.snapshot().revision;
     let daemon = tokio::spawn(run_daemon(
         hub.publisher(),

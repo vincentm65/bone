@@ -241,10 +241,6 @@ pub(crate) fn collect_subagents(
 }
 
 impl ExtensionManager {
-    pub(crate) fn same_runtime(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.lua, &other.lua)
-    }
-
     /// Wrap a pre-created `Arc<Mutex<Lua>>`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_arc(
@@ -345,6 +341,14 @@ impl ExtensionManager {
         Arc::clone(&self.settings)
     }
 
+    /// Clone the declarative settings catalog without retaining this runtime.
+    pub fn extension_catalog(&self) -> super::settings_registry::SettingsRegistry {
+        self.settings_registry
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     /// Clone the standalone shared UI-state handle.
     pub fn ui_handle(&self) -> super::api_ui::SharedUi {
         self.ui.clone()
@@ -409,24 +413,7 @@ impl ExtensionManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let registry = self
-            .settings_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut pages = registry.pages();
-        let disabled = &settings.resolved().commands.disabled;
-        pages.retain(|page| {
-            page.command
-                .as_ref()
-                .is_none_or(|command| !disabled.contains(command))
-        });
-        for page in &mut pages {
-            for field in &mut page.fields {
-                let path = format!("{}.{}", page.namespace, field.key);
-                field.value = registry.resolve(&settings, &path).ok();
-            }
-        }
-        pages
+        self.extension_catalog().resolved_pages(&settings)
     }
 
     /// Get the daemon-owned resolved settings, including dynamic UI highlights
@@ -481,10 +468,7 @@ impl ExtensionManager {
         path: &str,
         value: &crate::config::settings::ExtensionValue,
     ) -> Result<(), String> {
-        self.settings_registry
-            .read()
-            .map_err(|e| format!("settings registry lock poisoned: {e}"))?
-            .validate(path, value)
+        self.extension_catalog().validate(path, value)
     }
 
     /// Replace the runtime mirror after the configuration store commits.

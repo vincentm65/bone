@@ -567,6 +567,15 @@ async fn two_clients_both_see_the_turn() {
 async fn reload_extensions_adopts_inbox_without_disk_boot() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
+    let old_extensions = ExtensionManager::unloaded();
+    bone_core::ext::api_ui::lock_shared(&old_extensions.ui_handle()).apply(
+        bone_core::runtime::ViewDiff::Upsert {
+            component: bone_core::runtime::Component::StatusLine {
+                id: "removed-by-reload".into(),
+                segments: Vec::new(),
+            },
+        },
+    );
     // Session starts with the full builtin tool set (non-empty).
     let mut initial = ToolHandler::new(builtin_tools());
     // Seed session-scoped state that must survive the registry swap.
@@ -592,7 +601,7 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
         hub.publisher(),
         commands_rx,
         provider,
-        ExtensionManager::unloaded(),
+        old_extensions,
         common::config_store(),
         session.clone(),
         ApprovalMode::Safe,
@@ -620,6 +629,23 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
         status.contains("0 tools enabled"),
         "adopted the inbox's empty tool set, got: {status}",
     );
+
+    // Reload is a state replacement, not just a stream of new diffs. The new
+    // VM's empty view must be published after its FrontendState and before the
+    // session snapshot so clients remove `removed-by-reload`.
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::FrontendState { .. }
+    ));
+    let RuntimeEvent::ViewSnapshot { view } = events.recv().await.unwrap() else {
+        panic!("reload did not publish its full replacement view");
+    };
+    assert!(view.components.is_empty());
+    assert!(view.highlights.is_empty());
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::StateSnapshot { .. }
+    ));
 
     // Inbox drained (taken), and the session swapped to the adopted handler.
     assert!(inbox.lock().unwrap().is_none(), "inbox should be consumed");
@@ -902,7 +928,6 @@ bone.command.register("preview", {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
-    config.attach_extensions(extensions.clone());
     tokio::spawn(run_daemon(
         hub.publisher(),
         commands_rx,
@@ -1056,7 +1081,6 @@ bone.command.register("noop", {
     let session = Arc::new(Mutex::new(RuntimeSession::new(booted.tools)));
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::single(Vec::new()));
     let (hub, commands_rx) = Hub::new();
-    config.attach_extensions(extensions.clone());
     tokio::spawn(run_daemon(
         hub.publisher(),
         commands_rx,

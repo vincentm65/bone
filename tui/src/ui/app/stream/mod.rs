@@ -431,6 +431,12 @@ impl App {
         self.run_event_pump(request_id, term).await
     }
 
+    /// Join an already-active turn, then repair its missed head by synchronization.
+    pub(super) async fn join_daemon_turn(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        self.begin_streaming();
+        self.run_event_pump_inner(None, term, true).await
+    }
+
     /// Pump the daemon's `RuntimeEvent` stream for the in-flight turn until
     /// `TurnComplete`, rendering text/tool/approval/key events and forwarding
     /// interactive replies. Assumes the streaming flags + timers were already
@@ -441,6 +447,16 @@ impl App {
         &mut self,
         turn_request_id: Option<u64>,
         term: &mut BoneTerminal,
+    ) -> io::Result<()> {
+        self.run_event_pump_inner(turn_request_id, term, false)
+            .await
+    }
+
+    async fn run_event_pump_inner(
+        &mut self,
+        turn_request_id: Option<u64>,
+        term: &mut BoneTerminal,
+        joined_existing: bool,
     ) -> io::Result<()> {
         use crate::runtime::RuntimeEvent;
 
@@ -453,9 +469,11 @@ impl App {
             std::collections::HashMap::new();
         let mut pending_key = KeySink::new();
         let mut cancel_sent = false;
-        let mut recovering_from_lag = false;
+        // A late join has necessarily missed the head of the live stream. Use
+        // the same correlated repair loop as an explicit lag notification.
+        let mut recovering_from_lag = joined_existing;
         let mut legacy_uncorrelated_turn = false;
-        let mut sync_pending = None;
+        let mut sync_pending = joined_existing.then(|| self.request_full_synchronization());
         let mut sync_retry_at = Instant::now();
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -541,6 +559,15 @@ impl App {
                         self.mark_legacy_runtime();
                         legacy_uncorrelated_turn = true;
                     }
+                    // A late join accepts either completion and repairs its transcript.
+                    Ok(RuntimeEvent::TurnCompleted { .. } | RuntimeEvent::TurnComplete)
+                        if joined_existing =>
+                    {
+                        if sync_pending.is_none() {
+                            let _ = self.request_full_synchronization();
+                        }
+                        break;
+                    }
                     // Correlated completions cannot be confused with a stale
                     // completion broadcast from another attached frontend.
                     Ok(RuntimeEvent::TurnCompleted { request_id })
@@ -574,11 +601,10 @@ impl App {
                         request_id,
                         busy,
                         snapshot,
+                        view,
                         messages,
                     }) if sync_pending == Some(request_id) => {
-                        self.synchronization_supported = Some(true);
-                        self.pending_synchronizations.remove(&request_id);
-                        self.apply_snapshot(snapshot);
+                        self.apply_synchronized_projection(request_id, snapshot, view);
                         if busy {
                             sync_pending = None;
                             sync_retry_at = Instant::now() + Duration::from_millis(500);
@@ -835,6 +861,9 @@ impl App {
                         live_sources.track(&diff);
                         self.apply_view_diff(diff);
                     }
+                    Ok(RuntimeEvent::ViewSnapshot { view }) => {
+                        self.apply_view_snapshot(view);
+                    }
                     Ok(RuntimeEvent::KeyRequest { id }) => {
                         pending_key.set_daemon(id, self.command_tx.clone());
                     }
@@ -897,11 +926,10 @@ impl App {
                         request_id,
                         busy,
                         snapshot,
+                        view,
                         ..
                     }) if sync_pending == Some(request_id) => {
-                        self.synchronization_supported = Some(true);
-                        self.pending_synchronizations.remove(&request_id);
-                        self.apply_snapshot(snapshot);
+                        self.apply_synchronized_projection(request_id, snapshot, view);
                         if busy {
                             sync_pending = None;
                             sync_retry_at = Instant::now() + Duration::from_millis(500);
@@ -916,10 +944,10 @@ impl App {
                     Ok(RuntimeEvent::StateSynchronized {
                         request_id,
                         snapshot,
+                        view,
                         ..
-                    }) if self.pending_synchronizations.remove(&request_id) => {
-                        self.synchronization_supported = Some(true);
-                        self.apply_snapshot(snapshot);
+                    }) => {
+                        self.apply_synchronized_projection(request_id, snapshot, view);
                     }
                     Ok(RuntimeEvent::StreamLagged { .. }) => {
                         recovering_from_lag = true;
@@ -1144,6 +1172,7 @@ impl App {
             | RuntimeEvent::FrontendState { .. }
             | RuntimeEvent::ConversationLoaded { .. }
             | RuntimeEvent::StreamLagged { .. }
+            | RuntimeEvent::HostResponse { .. }
             | RuntimeEvent::TurnComplete
             | RuntimeEvent::TurnCompleted { .. } => {}
             RuntimeEvent::ConfigSnapshot { schema, snapshot } => {
@@ -1189,6 +1218,9 @@ impl App {
             RuntimeEvent::ViewDiff { diff } => {
                 self.apply_view_diff(diff);
             }
+            RuntimeEvent::ViewSnapshot { view } => {
+                self.apply_view_snapshot(view);
+            }
             // State sync: update the view-model from the daemon's authoritative
             // snapshot. Mid-turn this is redundant (TokenUsage already keeps
             // the view in sync); post-turn / on attach it's the primary source.
@@ -1198,12 +1230,10 @@ impl App {
             RuntimeEvent::StateSynchronized {
                 request_id,
                 snapshot,
+                view,
                 ..
             } => {
-                if self.pending_synchronizations.remove(&request_id) {
-                    self.synchronization_supported = Some(true);
-                    self.apply_snapshot(snapshot);
-                }
+                self.apply_synchronized_projection(request_id, snapshot, view);
             }
             RuntimeEvent::ProcessesSnapshot {
                 version,

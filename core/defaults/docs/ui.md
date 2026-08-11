@@ -48,6 +48,29 @@ upsert or remove a component, set a highlight, or update the theme. Pane content
 uses stable source ids, titles, lines, spans, visibility, and scroll state.
 Repeated updates for one source replace it; empty content removes it.
 
+On attach, core sends a complete `ViewSnapshot` in addition to the normal
+session snapshot. A client replaces its local component and highlight model
+with that full view; it must not merge it like a diff. When repairing a lagged
+event stream, the correlated `StateSynchronized` event contains the full view
+itself, making the view and completion one atomic frame. Older clients may skip
+the additive snapshot field and continue consuming the unchanged session data.
+
+An attachment replay sends `ConversationLoaded` before `ViewSnapshot`, so the
+conversation reset clears old transient state before the full daemon view is
+installed. A synchronization repair applies the full view from its correlated
+`StateSynchronized` frame, then core replays pending approval/key interactions.
+This both makes repair atomic and preserves a recovered prompt after the reset.
+In-process conversation loads use the same reset-then-view ordering, and an
+extension reload sends its new full view after `FrontendState`; an empty view
+explicitly removes UI owned by the replaced extension runtime.
+
+When an attachment's `ConversationLoaded` snapshot is already busy, clients
+join the existing turn without adding another user message and immediately
+start correlated synchronization. They keep repairing until the actor is idle,
+which restores any stream head missed before attachment and replays an
+outstanding approval/key gate. Replayed interaction ids are idempotent in the
+clients, so one lagging attachment cannot create duplicate prompts elsewhere.
+
 The TUI owns terminal layout, wrapping, cursor/input behavior, and color
 rendering. The web client maps the same semantic events to browser components and
 its document/diff canvas. Neither frontend should duplicate agent-loop,
@@ -78,6 +101,10 @@ attributes.
 The daemon distributes one revisioned configuration schema and resolved values.
 The TUI and web settings views submit typed mutations and render the returned
 snapshot. Provider credentials are redacted in frontend snapshots.
+
+Stats, catalog, and setup share the correlated daemon-host API. Local and remote
+clients render the same data and submit the same plans; SQLite queries, catalog
+downloads, credentials, and setup files remain on the daemon host.
 
 The daemon owns core conversation history and active transcript state. A client may
 request list/load/new actions and render the resulting snapshot, but clients must not

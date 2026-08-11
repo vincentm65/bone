@@ -1,7 +1,7 @@
 //! Daemon-owned aggregate configuration service.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use bone_protocol::{
     ConfigPage, ConfigSchema, ConfigSnapshot, ProviderConfig, ProviderUpdate, SettingDefinition,
@@ -12,7 +12,14 @@ use super::settings::{ExtensionValue, Settings, SubagentSettings};
 #[derive(Clone)]
 pub struct ConfigStore {
     inner: Arc<Mutex<Inner>>,
-    extensions: Arc<Mutex<Vec<crate::ext::ExtensionManager>>>,
+    runtime_settings: Arc<Mutex<Settings>>,
+    extension_catalog: Arc<RwLock<ExtensionCatalogAuthority>>,
+}
+
+#[derive(Default)]
+struct ExtensionCatalogAuthority {
+    initialized: bool,
+    catalog: crate::ext::settings_registry::SettingsRegistry,
 }
 
 impl std::fmt::Debug for ConfigStore {
@@ -73,8 +80,8 @@ impl ConfigStore {
 
     #[doc(hidden)]
     pub fn for_test_with_extensions(extensions: crate::ext::ExtensionManager) -> Self {
-        let core = extensions
-            .settings_handle()
+        let runtime_settings = extensions.settings_handle();
+        let core = runtime_settings
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
@@ -92,7 +99,11 @@ impl ConfigStore {
                 disabled_tools,
                 disabled_commands,
             })),
-            extensions: Arc::new(Mutex::new(vec![extensions])),
+            runtime_settings,
+            extension_catalog: Arc::new(RwLock::new(ExtensionCatalogAuthority {
+                initialized: extensions.is_available(),
+                catalog: extensions.extension_catalog(),
+            })),
         }
     }
 
@@ -118,8 +129,12 @@ impl ConfigStore {
         let disabled_commands = core.resolved().commands.disabled.clone();
         let mut runtime_settings = core.clone();
         runtime_settings.replace_domains(subagents.clone(), extension_values.clone());
-        extensions.replace_settings(runtime_settings);
+        let settings_handle = extensions.settings_handle();
+        *settings_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = runtime_settings;
         let revision = core.revision();
+        let catalog_initialized = extensions.is_available();
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 revision,
@@ -130,50 +145,50 @@ impl ConfigStore {
                 disabled_tools,
                 disabled_commands,
             })),
-            extensions: Arc::new(Mutex::new(vec![extensions])),
+            runtime_settings: settings_handle,
+            extension_catalog: Arc::new(RwLock::new(ExtensionCatalogAuthority {
+                initialized: catalog_initialized,
+                catalog: extensions.extension_catalog(),
+            })),
         })
     }
 
-    /// Attach an extension runtime and keep it synchronized with future mutations.
-    pub fn attach_extensions(&self, extensions: crate::ext::ExtensionManager) {
-        self.sync_extension(&extensions);
-        let mut managers = self
-            .extensions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if !managers
-            .iter()
-            .any(|manager| manager.same_runtime(&extensions))
-        {
-            managers.push(extensions);
-        }
-    }
-
-    /// Replace one actor's runtime after an extension reload.
-    pub fn replace_extensions(
+    /// Install the first actor-independent schema snapshot. Returns whether it
+    /// became authoritative.
+    pub fn initialize_extension_catalog(
         &self,
-        old: &crate::ext::ExtensionManager,
-        new: crate::ext::ExtensionManager,
-    ) {
-        self.sync_extension(&new);
-        let mut managers = self
-            .extensions
-            .lock()
+        catalog: crate::ext::settings_registry::SettingsRegistry,
+    ) -> bool {
+        let mut authority = self
+            .extension_catalog
+            .write()
             .unwrap_or_else(|error| error.into_inner());
-        managers.retain(|manager| !manager.same_runtime(old));
-        if !managers.iter().any(|manager| manager.same_runtime(&new)) {
-            managers.push(new);
+        if authority.initialized {
+            return false;
         }
+        authority.catalog = catalog;
+        authority.initialized = true;
+        true
     }
 
-    fn sync_extension(&self, extensions: &crate::ext::ExtensionManager) {
-        extensions.replace_settings(self.runtime_settings_snapshot());
+    /// Explicitly replace schema authority after a host extension reload.
+    pub fn replace_extension_catalog(
+        &self,
+        catalog: crate::ext::settings_registry::SettingsRegistry,
+    ) {
+        let mut authority = self
+            .extension_catalog
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        authority.catalog = catalog;
+        authority.initialized = true;
     }
 
-    fn sync_extensions(&self, settings: Settings) {
-        for extensions in self.extension_managers() {
-            extensions.replace_settings(settings.clone());
-        }
+    fn sync_runtime_settings(&self, settings: Settings) {
+        *self
+            .runtime_settings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = settings;
     }
 
     fn runtime_settings(inner: &Inner) -> Settings {
@@ -184,24 +199,15 @@ impl ConfigStore {
 
     /// Settings snapshot with separately persisted configuration domains merged in.
     pub fn runtime_settings_snapshot(&self) -> Settings {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        Self::runtime_settings(&inner)
-    }
-
-    fn extension_manager(&self) -> crate::ext::ExtensionManager {
-        self.extensions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .last()
-            .expect("config store always has an extension manager")
-            .clone()
-    }
-
-    fn extension_managers(&self) -> Vec<crate::ext::ExtensionManager> {
-        self.extensions
+        self.runtime_settings
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+    }
+
+    /// Canonical settings handle shared by every actor-local extension VM.
+    pub fn runtime_settings_handle(&self) -> Arc<Mutex<Settings>> {
+        Arc::clone(&self.runtime_settings)
     }
 
     pub fn providers_config(&self) -> super::ProvidersConfig {
@@ -263,8 +269,27 @@ impl ConfigStore {
         inner.revision = inner.revision.saturating_add(1);
         let settings = Self::runtime_settings(&inner);
         drop(inner);
-        self.sync_extensions(settings);
+        self.sync_runtime_settings(settings);
         Ok(())
+    }
+
+    /// Run populated onboarding and adopt its sub-agent configuration atomically
+    /// with respect to revisioned configuration mutations.
+    pub fn apply_populated_onboarding(
+        &self,
+        selection: &super::SetupSelection,
+        expected: u64,
+    ) -> Result<(), (u64, String)> {
+        let path = super::domains::subagents_path();
+        self.mutate(expected, |inner| {
+            super::apply_onboarding(selection, super::InitChoice::Populated)
+                .map_err(|error| error.to_string())?;
+            let loaded = super::domains::load_subagents()?.ok_or_else(|| {
+                super::error::ConfigError::load(&path, "file does not exist").to_string()
+            })?;
+            inner.subagents = loaded.subagents;
+            Ok(())
+        })
     }
 
     pub fn schema(&self) -> ConfigSchema {
@@ -296,8 +321,11 @@ impl ConfigStore {
         }
 
         let extension_pages = self
-            .extension_manager()
-            .extension_settings_pages()
+            .extension_catalog
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .catalog
+            .resolved_pages(&self.runtime_settings_snapshot())
             .into_iter()
             .map(|page| ConfigPage {
                 namespace: page.namespace.clone(),
@@ -636,7 +664,7 @@ impl ConfigStore {
                 inner.revision = inner.revision.saturating_add(1);
                 let settings = Self::runtime_settings(&inner);
                 drop(inner);
-                self.sync_extensions(settings);
+                self.sync_runtime_settings(settings);
                 Ok(value)
             }
             Err(error) => Err((inner.revision, error)),
@@ -658,8 +686,11 @@ impl ConfigStore {
                         .at_setting(path)
                         .to_string()
                 })?;
-                self.extension_manager()
-                    .validate_extension_setting(extension_path, &value)
+                self.extension_catalog
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .catalog
+                    .validate(extension_path, &value)
                     .map_err(|error| {
                         super::error::ConfigError::persist(&file, error)
                             .at_setting(path)

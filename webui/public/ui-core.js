@@ -45,6 +45,31 @@ export function buildSubmission(text, attachments) {
   };
 }
 
+export function buildRevisionedCommand(kind, payload, expectedRevision) {
+  if (!kind || typeof kind !== "string") throw new Error("command kind is required");
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw new Error("expected revision must be a non-negative integer");
+  }
+  return {
+    [kind]: {
+      ...payload,
+      expected_revision: expectedRevision,
+    },
+  };
+}
+
+export function buildSynchronizationCommand(requestId, includeMessages = true) {
+  if (!Number.isSafeInteger(requestId) || requestId < 0) {
+    throw new Error("request id must be a non-negative safe integer");
+  }
+  return {
+    synchronize: {
+      request_id: requestId,
+      include_messages: Boolean(includeMessages),
+    },
+  };
+}
+
 export async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   if (!response.ok) {

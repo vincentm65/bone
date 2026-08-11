@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod color;
 pub mod commands;
 pub mod fullscreen;
+pub mod host;
 pub mod input;
 pub mod jobs_pane;
 pub mod pane_page;

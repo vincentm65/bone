@@ -21,6 +21,7 @@ use tokio::time::Duration;
 
 use super::autocomplete::AutocompleteState;
 use super::commands;
+use super::host;
 use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
@@ -33,6 +34,22 @@ fn should_open_agent_log(input: &InputState) -> bool {
 
 fn job_quit_confirmation_required(is_remote: bool, active_jobs: usize) -> bool {
     !is_remote && active_jobs > 0
+}
+
+const HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+type HostResult = Result<bone_protocol::HostResponse, String>;
+type HostUiCall = (
+    bone_protocol::HostRequest,
+    std::sync::mpsc::SyncSender<HostResult>,
+);
+type HostUiRequest<'a> = dyn FnMut(bone_protocol::HostRequest) -> HostResult + 'a;
+
+/// Daemon-owned IDs replaced by a full wire snapshot; native panes are excluded.
+#[derive(Debug, Default)]
+struct WireViewOwnership {
+    components: HashSet<String>,
+    highlights: HashSet<String>,
 }
 
 pub(crate) fn active_job_ids(jobs: &[bone_protocol::JobSnapshot]) -> Vec<String> {
@@ -546,10 +563,7 @@ pub struct App {
     pub events_rx: tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
     /// Keeps the socket bridge to the daemon alive for the App's lifetime. Its
     /// `Drop` terminates the bridge's forwarding/writer tasks.
-    _remote_client: Option<crate::rpc::RemoteClient>,
-    /// Read-only session DB handle for stats queries (the daemon owns the
-    /// authoritative connection through its own RuntimeSession).
-    pub session_db: Option<crate::session_db::SessionDb>,
+    remote_client: Option<crate::rpc::RemoteClient>,
     pub input: InputState,
     pub streaming: bool,
     /// A live slash command is running through `run_remote_command`. This needs
@@ -637,8 +651,16 @@ pub struct App {
     /// registration order. Each id's segments are appended to the native
     /// status bar; re-setting the same id updates it in place.
     lua_status: Vec<(String, Vec<crate::runtime::view::StatusSegment>)>,
+    /// Daemon-owned component/highlight IDs used for full-snapshot replacement.
+    wire_view_ownership: WireViewOwnership,
     /// Call IDs whose edit preview already represents the tool result.
     shown_tool_rows: std::collections::HashSet<String>,
+    /// Daemon-advertised host-control capability and catalog metadata.
+    host_api_version: u16,
+    catalog_updates: usize,
+    /// A turn began while a fullscreen host UI owned the terminal. Rejoin on
+    /// return so consumed live events are repaired from the full transcript.
+    host_turn_needs_join: bool,
     /// In-flight shell commands (call_id, formatted label, start time), shown as
     /// a transient strip above the input while running.
     running_shells: Vec<(String, String, std::time::Instant)>,
@@ -675,12 +697,8 @@ pub struct App {
 }
 
 impl App {
-    /// Construct the TUI as a pure client attached to a runtime over in-process
-    /// channels. The runtime (daemon) owns the Lua VM, tools, and session; the
-    /// TUI pushes [`RuntimeCommand`]s and renders [`RuntimeEvent`]s. For a remote
-    /// daemon, pass `daemon_client` to keep the socket bridge alive; the in-process
-    /// path passes `None`. `provider` seeds the initial `SessionSnapshot` display
-    /// strings.
+    /// Attach the TUI to in-process runtime channels, seeding display metadata
+    /// from `provider`. `daemon_client` keeps an optional socket bridge alive.
     pub fn with_runtime_client(
         provider: std::sync::Arc<dyn LlmProvider>,
         user_config: UserConfig,
@@ -688,34 +706,26 @@ impl App {
         events_rx: tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
         daemon_client: Option<crate::rpc::RemoteClient>,
     ) -> io::Result<Self> {
-        let model = provider.model().to_string();
-        let approval_mode = user_config.approval_mode;
+        let view = crate::runtime::SessionSnapshot {
+            provider_id: provider.id().to_string(),
+            provider_model: provider.model().to_string(),
+            ..Default::default()
+        };
+        Self::with_runtime_view(view, user_config, command_tx, events_rx, daemon_client)
+    }
 
+    fn with_runtime_view(
+        view: crate::runtime::SessionSnapshot,
+        user_config: UserConfig,
+        command_tx: tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeCommand>,
+        events_rx: tokio::sync::broadcast::Receiver<crate::runtime::RuntimeEvent>,
+        daemon_client: Option<crate::rpc::RemoteClient>,
+    ) -> io::Result<Self> {
+        let approval_mode = user_config.approval_mode;
         // Renderer starts on the default theme; the daemon's `FrontendState`
         // applies the user's theme over the wire on attach.
         let renderer = Renderer::new();
-        let mut messages = Vec::new();
-
-        // Read-only DB handle for the App's stats queries (sqlite WAL supports
-        // concurrent readers); the daemon owns the authoritative connection.
-        let session_db = match crate::session_db::SessionDb::open(&crate::session_db::db_path()) {
-            Ok(db) => Some(db),
-            Err(err) => {
-                messages.push(Message::system(format!(
-                    "warning: failed to open session database: {err}"
-                )));
-                None
-            }
-        };
-
-        // Seed the frontend view from the active provider; the daemon's
-        // `StateSnapshot` fills in the conversation id and token totals.
-        let view = crate::runtime::SessionSnapshot {
-            provider_id: provider.id().to_string(),
-            provider_model: model.clone(),
-            conversation_id: None,
-            ..Default::default()
-        };
+        let messages = Vec::new();
 
         let _ = command_tx.send(crate::runtime::RuntimeCommand::GetConfig);
         let _ = command_tx.send(crate::runtime::RuntimeCommand::GetProcesses);
@@ -738,8 +748,7 @@ impl App {
             messages,
             command_tx,
             events_rx,
-            _remote_client: daemon_client,
-            session_db,
+            remote_client: daemon_client,
             input: InputState::default(),
             streaming: false,
             live_command: false,
@@ -780,7 +789,11 @@ impl App {
             wire_tools: WireTools::default(),
             banner_shown: false,
             lua_status: Vec::new(),
+            wire_view_ownership: WireViewOwnership::default(),
             shown_tool_rows: std::collections::HashSet::new(),
+            host_api_version: 0,
+            catalog_updates: 0,
+            host_turn_needs_join: false,
             running_shells: Vec::new(),
             pending_shells: Vec::new(),
             jobs: Vec::new(),
@@ -799,36 +812,37 @@ impl App {
         })
     }
 
-    /// Construct the TUI as a pure client of a `bone serve` daemon reached over
-    /// `client`. The daemon is the sole Lua-VM owner; the TUI boots no VM and
-    /// renders the daemon's state from the wire. Delegates to
-    /// [`with_runtime_client`] after extracting the in-process channel handles
-    /// from the remote client.
+    /// Attach to `bone serve` with a blank view until authoritative state arrives;
+    /// no client-local provider or configuration is consulted.
     pub fn with_daemon(
-        llm: Box<dyn LlmProvider>,
         user_config: UserConfig,
         client: crate::rpc::RemoteClient,
     ) -> io::Result<Self> {
-        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(llm);
         // Subscribe before any `.await` so the on-connect `FrontendState` /
         // `StateSnapshot` aren't missed.
         let command_tx = client.command_sender();
         let events_rx = client.subscribe();
-        Self::with_runtime_client(provider, user_config, command_tx, events_rx, Some(client))
+        Self::with_runtime_view(
+            crate::runtime::SessionSnapshot::default(),
+            user_config,
+            command_tx,
+            events_rx,
+            Some(client),
+        )
     }
 
-    /// Client-side banner hints (release + catalog update notices) appended below
-    /// the daemon's `bone.banner()` text. These are local cached reads, not Lua.
-    fn banner_client_hints() -> Vec<String> {
+    /// Client-side release hint plus daemon-advertised catalog metadata appended
+    /// below `bone.banner()`. No client-local catalog filesystem is consulted.
+    fn banner_client_hints(&self) -> Vec<String> {
         let mut lines = Vec::new();
         if let Some(notice) = crate::update_check::notice() {
             lines.push(notice);
         }
-        let updates = crate::ext::catalog::updates_available();
-        if updates > 0 {
+        if self.catalog_updates > 0 {
             lines.push(format!(
-                "{updates} catalog update{} available — run /catalog",
-                if updates == 1 { "" } else { "s" }
+                "{} catalog update{} available — run /catalog",
+                self.catalog_updates,
+                if self.catalog_updates == 1 { "" } else { "s" }
             ));
         }
         lines
@@ -846,11 +860,13 @@ impl App {
                 request_id,
                 busy,
                 snapshot,
+                view,
                 messages,
-            } if self.pending_synchronizations.remove(&request_id) => {
-                self.synchronization_supported = Some(true);
-                self.apply_snapshot(snapshot);
-                if !busy && let Some(messages) = messages {
+            } => {
+                if self.apply_synchronized_projection(request_id, snapshot, view)
+                    && !busy
+                    && let Some(messages) = messages
+                {
                     self.replace_transcript(messages);
                 }
             }
@@ -891,8 +907,18 @@ impl App {
                 tool_defs,
                 tool_display,
                 subagents: _,
+                host_api_version,
+                catalog_updates,
             } => {
-                self.apply_frontend_state(banner, settings, commands, tool_defs, tool_display);
+                self.apply_frontend_state(
+                    banner,
+                    settings,
+                    commands,
+                    tool_defs,
+                    tool_display,
+                    host_api_version,
+                    catalog_updates,
+                );
             }
             RuntimeEvent::ConfigSnapshot { schema, snapshot } => {
                 self.apply_config_snapshot(schema, snapshot);
@@ -924,6 +950,9 @@ impl App {
                 self.messages
                     .push(Message::system(config_rejection_message(path, &error)));
             }
+            RuntimeEvent::ViewSnapshot { view } => {
+                self.apply_view_snapshot(view);
+            }
             // Pane/UI diff from the daemon (e.g. a command's pane between turns).
             // Both in-process and remote clients receive these via the event bus
             // when `forward_view_diffs` is enabled.
@@ -933,6 +962,23 @@ impl App {
             // All other events are turn-scoped and ignored in idle.
             _ => {}
         }
+    }
+
+    fn apply_synchronized_projection(
+        &mut self,
+        request_id: u64,
+        snapshot: crate::runtime::SessionSnapshot,
+        view: Option<bone_protocol::ViewModel>,
+    ) -> bool {
+        if !self.pending_synchronizations.remove(&request_id) {
+            return false;
+        }
+        self.synchronization_supported = Some(true);
+        if let Some(view) = view {
+            self.apply_view_snapshot(view);
+        }
+        self.apply_snapshot(snapshot);
+        true
     }
 
     fn apply_config_snapshot(
@@ -1010,6 +1056,115 @@ impl App {
         request_id
     }
 
+    /// Await one correlated host response while applying unrelated events.
+    async fn request_host(&mut self, request: bone_protocol::HostRequest) -> HostResult {
+        if self.host_api_version == 0 {
+            return Err(
+                "this daemon does not support remote stats, catalog, or setup; update the daemon"
+                    .into(),
+            );
+        }
+        let request_id = self.next_request();
+        self.command_tx
+            .send(crate::runtime::RuntimeCommand::HostRequest {
+                request_id,
+                request,
+            })
+            .map_err(|_| "runtime command channel closed".to_string())?;
+        let deadline = tokio::time::Instant::now() + HOST_REQUEST_TIMEOUT;
+        loop {
+            let event = match tokio::time::timeout_at(deadline, self.events_rx.recv()).await {
+                Ok(event) => event,
+                Err(_) => break Err(
+                    "daemon did not answer the host request; it may not support this client version"
+                        .to_string(),
+                ),
+            };
+            match event {
+                Ok(crate::runtime::RuntimeEvent::HostResponse {
+                    request_id: response_id,
+                    response,
+                }) if response_id == request_id => break Ok(response),
+                Ok(other) => {
+                    self.host_turn_needs_join |= host_event_requires_rejoin(&other);
+                    self.apply_idle_event(other);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.host_turn_needs_join = true;
+                    self.recover_from_event_lag();
+                    break Err(
+                        "runtime events were lost while waiting for the host response".into(),
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break Err("runtime disconnected while waiting for the host response".into());
+                }
+            }
+        }
+    }
+
+    /// Run a synchronous fullscreen UI without blocking the local daemon. Its
+    /// callback forwards host requests while unrelated events keep flowing.
+    async fn run_host_ui<T, F>(&mut self, term: &mut BoneTerminal, run: F) -> io::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&crate::ui::theme::Theme, &mut HostUiRequest<'_>) -> io::Result<T>
+            + Send
+            + 'static,
+    {
+        let theme = self.renderer.theme.clone();
+        let (calls_tx, mut calls) = tokio::sync::mpsc::unbounded_channel::<HostUiCall>();
+        let mut task = tokio::task::spawn_blocking(move || {
+            let mut request = |request| {
+                let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+                calls_tx
+                    .send((request, reply_tx))
+                    .map_err(|_| "host request bridge closed".to_string())?;
+                reply_rx
+                    .recv()
+                    .map_err(|_| "host request bridge closed before replying".to_string())?
+            };
+            run(&theme, &mut request)
+        });
+        let mut events_open = true;
+        let result = loop {
+            tokio::select! {
+                joined = &mut task => {
+                    break joined.map_err(io::Error::other).and_then(|result| result);
+                }
+                call = calls.recv() => {
+                    let Some((request, reply)) = call else {
+                        break task.await.map_err(io::Error::other).and_then(|result| result);
+                    };
+                    let _ = reply.send(self.request_host(request).await);
+                }
+                event = self.events_rx.recv(), if events_open => match event {
+                    Ok(event) => {
+                        self.host_turn_needs_join |= host_event_requires_rejoin(&event);
+                        self.apply_idle_event(event);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        self.host_turn_needs_join = true;
+                        self.recover_from_event_lag();
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        events_open = false;
+                    }
+                }
+            }
+        };
+        self.restore_after_takeover(term)?;
+        self.rejoin_host_turn_if_needed(term).await?;
+        result
+    }
+
+    async fn rejoin_host_turn_if_needed(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if std::mem::take(&mut self.host_turn_needs_join) {
+            self.join_daemon_turn(term).await?;
+        }
+        Ok(())
+    }
+
     fn begin_config_change(&mut self, path: impl Into<String>) -> String {
         let request_id = format!("tui-{:016x}", self.next_request());
         self.pending_config.insert(request_id.clone(), path.into());
@@ -1074,6 +1229,7 @@ impl App {
     /// Adopt the daemon-owned resolved settings and display metadata from a
     /// `FrontendState` event. Invalid settings leave the current frontend state
     /// untouched while command/tool metadata is still refreshed.
+    #[allow(clippy::too_many_arguments)] // Mirrors the protocol event payload.
     fn apply_frontend_state(
         &mut self,
         banner: String,
@@ -1081,8 +1237,12 @@ impl App {
         commands: Vec<(String, String)>,
         tool_defs: Vec<crate::tools::ToolDefinition>,
         tool_display: serde_json::Value,
+        host_api_version: u16,
+        catalog_updates: usize,
     ) {
         let mut theme_changed = false;
+        self.host_api_version = host_api_version;
+        self.catalog_updates = catalog_updates;
         // First receipt carries the boot banner — the daemon's `bone.banner()`
         // text plus client-side update/catalog hints — followed by the greeting.
         // (The VM-less client can't build the banner itself; it arrives here.)
@@ -1092,7 +1252,7 @@ impl App {
             if !banner.is_empty() {
                 lines.push(banner.clone());
             }
-            lines.extend(Self::banner_client_hints());
+            lines.extend(self.banner_client_hints());
             if !lines.is_empty() {
                 self.messages.push(Message::system(lines.join("\n")));
             }
@@ -1152,6 +1312,12 @@ impl App {
     /// Dispatch a hook on the daemon and wait briefly for its acknowledgement.
     /// For `session_end`, the daemon also closes the authoritative DB conversation.
     pub async fn dispatch_session_end(&mut self) {
+        // A remote daemon may still have web/TUI clients attached to this same
+        // conversation. Disconnecting one frontend must not end their shared
+        // authoritative conversation; the daemon actor owns that lifecycle.
+        if self.remote_client.is_some() {
+            return;
+        }
         let command = crate::runtime::RuntimeCommand::DispatchHook {
             name: "session_end".into(),
             payload: serde_json::json!({}),
@@ -1324,11 +1490,10 @@ impl App {
                     request_id: response_id,
                     busy,
                     snapshot,
+                    view,
                     messages,
                 }) if response_id == request_id => {
-                    self.synchronization_supported = Some(true);
-                    self.pending_synchronizations.remove(&response_id);
-                    self.apply_snapshot(snapshot);
+                    self.apply_synchronized_projection(response_id, snapshot, view);
                     if busy {
                         include_messages = true;
                         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1505,6 +1670,9 @@ impl App {
                     Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
                     self.renderer.reset_scrollback_state();
                     self.flush_new_messages_to_scrollback(term)?;
+                    if busy {
+                        self.join_daemon_turn(term).await?;
+                    }
                     return Ok(());
                 }
                 Ok(crate::runtime::RuntimeEvent::StateSynchronized {
@@ -1512,10 +1680,14 @@ impl App {
                     busy,
                     messages,
                     snapshot,
+                    view,
                 }) if recovery_request == Some(request_id) => {
                     self.synchronization_supported = Some(true);
                     self.pending_synchronizations.remove(&request_id);
                     if busy {
+                        if let Some(view) = view {
+                            self.apply_view_snapshot(view);
+                        }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         recovery_request = Some(self.request_full_synchronization());
                     } else if snapshot.conversation_id == Some(id) {
@@ -1531,6 +1703,9 @@ impl App {
                             snapshot,
                             busy: false,
                         });
+                        if let Some(view) = view {
+                            self.apply_view_snapshot(view);
+                        }
                         Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
                         self.renderer.reset_scrollback_state();
                         self.flush_new_messages_to_scrollback(term)?;
@@ -1660,6 +1835,10 @@ impl App {
     /// (e.g. `msg1`, `/clear`, `msg2`). Explicit queue wipe remains Ctrl+D.
     fn reset_transient_ui_state(&mut self, clear_queue: bool) {
         self.cancel_streaming = true;
+        // Conversation-scoped wire UI must not leak into the next actor. Clear
+        // status lines and runtime highlights as well as panes so a legacy
+        // daemon that has no full snapshot still leaves a clean projection.
+        self.clear_wire_view_projection();
         self.pages.clear();
         self.active_page = 0;
         self.jobs.clear();
@@ -1853,6 +2032,20 @@ impl App {
                     _ => false,
                 };
                 match ev {
+                    crate::runtime::RuntimeEvent::ConversationLoaded {
+                        messages,
+                        snapshot,
+                        busy,
+                    } => {
+                        self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
+                            messages,
+                            snapshot,
+                            busy,
+                        });
+                        if busy {
+                            self.join_daemon_turn(&mut terminal).await?;
+                        }
+                    }
                     crate::runtime::RuntimeEvent::Started {
                         request_id,
                         task,
@@ -2323,10 +2516,39 @@ impl App {
         true
     }
 
-    /// Apply a single `ViewDiff` to the app state. Shared by the render-tick
-    /// drain of the standalone `UiState` handle (both `bone.api.ui.*` and
-    /// `ctx.ui.pane` push into it). Returns `true` when the diff caused a
-    /// visible change.
+    /// Replace the complete daemon-owned UI projection while preserving native
+    /// TUI panes. Removing every previously owned component before rebuilding
+    /// also handles a component changing between status-line and pane shapes.
+    pub(crate) fn apply_view_snapshot(&mut self, view: bone_protocol::ViewModel) -> bool {
+        let mut changed = self.clear_wire_view_projection();
+
+        for component in view.components {
+            changed |= self.apply_view_diff(crate::runtime::view::ViewDiff::Upsert { component });
+        }
+        for (name, color) in view.highlights {
+            changed |= self.apply_view_diff(crate::runtime::view::ViewDiff::SetHighlight {
+                name,
+                fg: Some(color),
+            });
+        }
+        changed
+    }
+
+    fn clear_wire_view_projection(&mut self) -> bool {
+        let previous = std::mem::take(&mut self.wire_view_ownership);
+        let mut changed = false;
+        for id in previous.components {
+            changed |= self.apply_view_diff(crate::runtime::view::ViewDiff::Remove { id });
+        }
+        for name in previous.highlights {
+            changed |= self
+                .apply_view_diff(crate::runtime::view::ViewDiff::SetHighlight { name, fg: None });
+        }
+        changed
+    }
+
+    /// Apply a single daemon-owned `ViewDiff` to the app state. Returns `true`
+    /// when the diff caused a visible change.
     pub(crate) fn apply_view_diff(&mut self, diff: crate::runtime::view::ViewDiff) -> bool {
         use crate::runtime::view::{Component, ViewDiff};
         match diff {
@@ -2334,6 +2556,7 @@ impl App {
             ViewDiff::Upsert {
                 component: Component::StatusLine { id, segments },
             } => {
+                self.wire_view_ownership.components.insert(id.clone());
                 match self.lua_status.iter_mut().find(|(i, _)| *i == id) {
                     Some(slot) => slot.1 = segments,
                     None => self.lua_status.push((id, segments)),
@@ -2341,6 +2564,9 @@ impl App {
                 true
             }
             ViewDiff::Upsert { component } => {
+                self.wire_view_ownership
+                    .components
+                    .insert(component.id().to_string());
                 if let Some(pc) = component.as_pane_content() {
                     if pc.is_empty() {
                         self.active_page =
@@ -2358,14 +2584,17 @@ impl App {
                 }
             }
             ViewDiff::Remove { id } => {
-                let before = self.lua_status.len();
+                self.wire_view_ownership.components.remove(&id);
                 self.lua_status.retain(|(i, _)| i != &id);
-                if self.lua_status.len() == before {
-                    self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
-                }
+                self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
                 true
             }
             ViewDiff::SetHighlight { name, fg } => {
+                if fg.is_some() {
+                    self.wire_view_ownership.highlights.insert(name.clone());
+                } else {
+                    self.wire_view_ownership.highlights.remove(&name);
+                }
                 let changed = self.renderer.theme.set_highlight(&name, fg.as_deref());
                 if changed && name == "bg" {
                     self.apply_terminal_background();
@@ -3066,7 +3295,7 @@ impl App {
     /// because they die with the process. Jobs owned by a remote daemon keep
     /// running when this client disconnects and do not block exit.
     fn request_quit(&mut self) -> Option<String> {
-        if job_quit_confirmation_required(self._remote_client.is_some(), self.jobs.len())
+        if job_quit_confirmation_required(self.remote_client.is_some(), self.jobs.len())
             && !self.quit_despite_jobs
         {
             self.quit_despite_jobs = true;
@@ -3488,16 +3717,16 @@ impl App {
             return self.clear_chat(term).await;
         }
         if cmd == "stats" {
-            return self.open_stats_dashboard(term);
+            return self.open_stats_dashboard(term).await;
         }
         if cmd == "setup" {
-            return self.open_setup_wizard(term);
+            return self.open_setup_wizard(term).await;
         }
         if cmd == "catalog" {
             if arg.is_empty() {
-                return self.open_catalog(term);
+                return self.open_catalog(term).await;
             }
-            return self.apply_catalog_action(&arg, term);
+            return self.apply_catalog_action(&arg, term).await;
         }
         if cmd == "update" {
             return self.open_update(term);
@@ -3691,11 +3920,7 @@ impl App {
         Ok(())
     }
 
-    /// Launch `<bone-exe> <subcommand>` in a tmux `display-popup` sized
-    /// `width`×`height`, redrawing afterward. Returns the popup's exit status,
-    /// or `None` when not in a responsive tmux or the popup failed to launch (so
-    /// the caller falls back to its inline fullscreen path). Shared by the stats
-    /// dashboard and setup wizard, the two popup-capable fullscreen entries.
+    /// Try a tmux popup and redraw afterward; `None` selects the inline fallback.
     fn try_tmux_popup(
         &mut self,
         subcommand: &str,
@@ -3723,43 +3948,33 @@ impl App {
         Ok(result.ok())
     }
 
-    fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        // Reads the local session DB — the same file the local daemon writes.
-        // (A truly remote `--connect` host would reflect the local DB instead;
-        // acceptable, and no worse than the previous "unavailable" block.)
-        if let Some(status) = self.try_tmux_popup("stats-popup", "96%", "92%", term)?
+    async fn open_stats_dashboard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        // A local popup talks to the same host service in a child process. A
+        // remote TUI must stay inline so it never substitutes client-local DB.
+        if self.remote_client.is_none()
+            && let Some(status) = self.try_tmux_popup("stats-popup", "96%", "92%", term)?
             && status.success()
         {
             return Ok(());
         }
 
-        if self.session_db.is_none() {
-            return self.show_reply("Stats database is not available.".to_string(), term);
-        }
-        let result = {
-            let db = self.session_db.as_ref().unwrap();
-            crate::ui::stats::run(&self.renderer.theme, |range| match range {
-                None => db
-                    .usage_stats_snapshot()
-                    .map_err(|err| io::Error::other(err.to_string())),
-                Some(r) => db
-                    .usage_stats_range(&r.start, &r.end)
-                    .map_err(|err| io::Error::other(err.to_string())),
+        let result = self
+            .run_host_ui(term, |theme, request| {
+                crate::ui::stats::run(theme, |range| {
+                    host::stats(request(bone_protocol::HostRequest::Stats {
+                        range: range.clone(),
+                    }))
+                    .map_err(io::Error::other)
+                })
             })
-        };
-
-        self.restore_after_takeover(term)?;
+            .await;
         if let Err(err) = result {
             return self.show_reply(format!("Stats dashboard failed: {err}"), term);
         }
         Ok(())
     }
 
-    /// Ask the daemon to rebuild its Lua VM and tool registry from disk (the
-    /// `/tools reload` and post-`/catalog` hot-reload path). The daemon disk-boots
-    /// and broadcasts a fresh `FrontendState` (new theme/keymap/commands/tools)
-    /// plus a `Status` summary, which the event loop applies. Frontend state is
-    /// driven entirely by the daemon's `FrontendState`.
+    /// Ask the daemon to rebuild extensions and broadcast fresh frontend state.
     fn reload_extensions(&mut self) -> String {
         let _ = self
             .command_tx
@@ -3767,10 +3982,10 @@ impl App {
         "Reloading tools and Lua extensions…".to_string()
     }
 
-    fn apply_catalog_action(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
+    async fn apply_catalog_action(&mut self, arg: &str, term: &mut BoneTerminal) -> io::Result<()> {
         let mut parts = arg.split_whitespace();
         let Some(action) = parts.next() else {
-            return self.open_catalog(term);
+            return self.open_catalog(term).await;
         };
         let Some(name) = parts.next() else {
             return self.show_reply("Usage: /catalog install|remove NAME".to_string(), term);
@@ -3779,20 +3994,44 @@ impl App {
             return self.show_reply("Usage: /catalog install|remove NAME".to_string(), term);
         }
 
-        let outcome = crate::ui::catalog::apply_named(action, name);
-        let message = if outcome.changed {
-            format!("{} {}", outcome.message, self.reload_extensions())
+        let action = if action == "install" {
+            bone_protocol::CatalogActionKind::Install
         } else {
-            outcome.message
+            bone_protocol::CatalogActionKind::Remove
         };
-        self.show_reply(message, term)
+        let snapshot_response = self
+            .request_host(bone_protocol::HostRequest::Catalog { refresh: true })
+            .await;
+        self.rejoin_host_turn_if_needed(term).await?;
+        let snapshot = match host::catalog_snapshot(snapshot_response) {
+            Ok(snapshot) => snapshot,
+            Err(message) => {
+                return self.show_reply(format!("Catalog failed: {message}"), term);
+            }
+        };
+        let response = self
+            .request_host(host::catalog_apply_request(
+                snapshot.revision,
+                vec![bone_protocol::CatalogAction {
+                    name: name.to_string(),
+                    action,
+                }],
+            ))
+            .await;
+        self.rejoin_host_turn_if_needed(term).await?;
+        match host::catalog_applied(response) {
+            Ok(result) => {
+                self.show_reply(host::catalog_action_message(action, name, &result), term)
+            }
+            Err(message) => self.show_reply(format!("Catalog failed: {message}"), term),
+        }
     }
 
-    fn open_catalog(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        // Prefer a tmux popup (same as /setup); fall back to an inline takeover.
-        // `bone catalog` exits 0 when something changed, 2 when nothing did —
-        // both are completed runs, so only a failed launch falls through.
-        if let Some(status) = self.try_tmux_popup("catalog", "96%", "92%", term)? {
+    async fn open_catalog(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        // A local popup reports changed=0 and unchanged=2; otherwise run inline.
+        if self.remote_client.is_none()
+            && let Some(status) = self.try_tmux_popup("catalog", "96%", "92%", term)?
+        {
             match status.code() {
                 Some(0) => {
                     // Files were written by the subprocess; hot-reload them here
@@ -3805,18 +4044,25 @@ impl App {
             }
         }
 
-        let result = crate::ui::catalog::run(&self.renderer.theme);
-        self.restore_after_takeover(term)?;
-        match result {
-            Ok(outcome) => {
-                let msg = if outcome.changed {
-                    let reloaded = self.reload_extensions();
-                    format!("{} {reloaded}", outcome.message)
-                } else {
-                    outcome.message
-                };
-                self.show_reply(msg, term)
+        let snapshot_response = self
+            .request_host(bone_protocol::HostRequest::Catalog { refresh: true })
+            .await;
+        self.rejoin_host_turn_if_needed(term).await?;
+        let snapshot = match host::catalog_snapshot(snapshot_response) {
+            Ok(snapshot) => snapshot,
+            Err(message) => {
+                return self.show_reply(format!("Catalog failed: {message}"), term);
             }
+        };
+        let result = self
+            .run_host_ui(term, move |theme, request| {
+                crate::ui::catalog::run(theme, snapshot, |revision, actions| {
+                    host::catalog_applied(request(host::catalog_apply_request(revision, actions)))
+                })
+            })
+            .await;
+        match result {
+            Ok(outcome) => self.show_reply(outcome.message, term),
             Err(err) => self.show_reply(format!("Catalog failed: {err}"), term),
         }
     }
@@ -3839,11 +4085,18 @@ impl App {
         )
     }
 
-    fn open_setup_wizard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
-        let mut ran = false;
-        if let Some(status) = self.try_tmux_popup("setup", "96%", "92%", term)? {
+    async fn open_setup_wizard(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if self.remote_client.is_none()
+            && let Some(status) = self.try_tmux_popup("setup", "96%", "92%", term)?
+        {
             match status {
-                s if s.success() => ran = true,
+                s if s.success() => {
+                    return self.show_reply(
+                        "Setup saved. Restart bone to load the new provider, tools, and commands."
+                            .to_string(),
+                        term,
+                    );
+                }
                 // `bone setup` exits 2 when the user cancels the wizard.
                 s if s.code() == Some(2) => {
                     return self.show_reply("Setup cancelled.".to_string(), term);
@@ -3853,26 +4106,50 @@ impl App {
             }
         }
 
-        if !ran {
-            let result = crate::ui::setup::run(&self.renderer.theme, false);
-            self.restore_after_takeover(term)?;
-            match result {
-                Ok(true) => {}
-                Ok(false) => return self.show_reply("Setup cancelled.".to_string(), term),
-                Err(err) => {
-                    return self.show_reply(format!("Setup wizard failed: {err}"), term);
-                }
+        let snapshot_response = self.request_host(bone_protocol::HostRequest::Setup).await;
+        self.rejoin_host_turn_if_needed(term).await?;
+        let snapshot = match host::setup_snapshot(snapshot_response) {
+            Ok(snapshot) => snapshot,
+            Err(message) => {
+                return self.show_reply(format!("Setup wizard failed: {message}"), term);
             }
-        }
+        };
+        let plan = self
+            .run_host_ui(term, move |theme, _| {
+                crate::ui::setup::run(theme, false, snapshot)
+            })
+            .await;
+        let plan = match plan {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return self.show_reply("Setup cancelled.".to_string(), term),
+            Err(err) => {
+                return self.show_reply(format!("Setup wizard failed: {err}"), term);
+            }
+        };
+        let response = self.request_host(host::setup_apply_request(plan)).await;
+        self.rejoin_host_turn_if_needed(term).await?;
 
-        self.show_reply(
-            format!(
-                "Setup saved to {}. Restart bone to load the new tools and commands.",
-                crate::config::bone_dir().display()
-            ),
-            term,
-        )
+        match host::setup_applied(response) {
+            Ok(result) => {
+                let suffix = if result.restart_required {
+                    " Restart bone to load the new provider, tools, and commands."
+                } else {
+                    ""
+                };
+                self.show_reply(format!("{}{suffix}", result.message), term)
+            }
+            Err(message) => self.show_reply(format!("Setup wizard failed: {message}"), term),
+        }
     }
+}
+
+fn host_event_requires_rejoin(event: &crate::runtime::RuntimeEvent) -> bool {
+    matches!(
+        event,
+        crate::runtime::RuntimeEvent::Started { .. }
+            | crate::runtime::RuntimeEvent::StreamLagged { .. }
+            | crate::runtime::RuntimeEvent::ConversationLoaded { busy: true, .. }
+    )
 }
 
 fn shell_quote(s: &str) -> String {

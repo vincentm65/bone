@@ -245,78 +245,9 @@ pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMess
     }
 }
 
-/// Aggregated usage for one conversation.
-#[derive(Clone, Debug)]
-pub struct UsageSummary {
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    pub cached_tokens: i64,
-    pub cost: f64,
-    pub request_count: i64,
-}
-
-/// Usage broken down by provider/model.
-#[derive(Clone, Debug)]
-pub struct ProviderUsage {
-    pub provider: String,
-    pub model: String,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    pub cached_tokens: i64,
-    pub cost: f64,
-    pub request_count: i64,
-}
-
-/// One time-bucket row for historical usage charts.
-#[derive(Clone, Debug)]
-pub struct UsageBucket {
-    pub label: String,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    pub cached_tokens: i64,
-    pub cost: f64,
-    pub request_count: i64,
-}
-
-/// One hour-of-day aggregate row.
-#[derive(Clone, Debug)]
-pub struct HourUsage {
-    pub hour: i64,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    pub cached_tokens: i64,
-    pub request_count: i64,
-}
-
-/// A custom `[start, end]` date range (inclusive, `YYYY-MM-DD`, local time).
-/// Used by the stats dashboard to query an arbitrary window on demand.
-#[derive(Clone, Debug)]
-pub struct DateRange {
-    pub start: String,
-    pub end: String,
-}
-
-/// Full historical usage snapshot for the stats dashboard.
-#[derive(Clone, Debug)]
-pub struct UsageStatsSnapshot {
-    pub started_at: Option<String>,
-    pub ended_at: Option<String>,
-    pub total: UsageSummary,
-    pub by_model_today: Vec<ProviderUsage>,
-    pub by_model_7d: Vec<ProviderUsage>,
-    pub by_model_4w: Vec<ProviderUsage>,
-    pub by_model_all: Vec<ProviderUsage>,
-    pub daily: Vec<UsageBucket>,
-    pub weekly: Vec<UsageBucket>,
-    pub monthly: Vec<UsageBucket>,
-    pub all_time: Vec<UsageBucket>,
-    pub yearly: Vec<UsageBucket>,
-    pub hourly_today: Vec<HourUsage>,
-    pub hourly_7d: Vec<HourUsage>,
-    pub hourly_4w: Vec<HourUsage>,
-    pub hourly_all: Vec<HourUsage>,
-    pub daily_activity: Vec<UsageBucket>,
-}
+pub use bone_protocol::{
+    DateRange, HourUsage, ProviderUsage, UsageBucket, UsageStatsSnapshot, UsageSummary,
+};
 
 /// Time range selector shared between session_db and stats UI.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -372,55 +303,9 @@ impl ViewMode {
     }
 }
 
-impl UsageStatsSnapshot {
-    /// Select the usage buckets for a given view mode.
-    pub fn buckets(&self, mode: ViewMode) -> &[UsageBucket] {
-        match mode {
-            ViewMode::Today => &self.daily,
-            ViewMode::SevenDays => &self.weekly,
-            ViewMode::FourWeeks => &self.monthly,
-            ViewMode::Yearly => &self.yearly,
-            ViewMode::Months => &self.all_time,
-        }
-    }
-
-    /// Select hourly data for a given view mode.
-    pub fn hourly(&self, mode: ViewMode) -> &[HourUsage] {
-        match mode {
-            ViewMode::Today => &self.hourly_today,
-            ViewMode::SevenDays => &self.hourly_7d,
-            ViewMode::FourWeeks => &self.hourly_4w,
-            ViewMode::Yearly | ViewMode::Months => &self.hourly_all,
-        }
-    }
-
-    /// Compute a summary for the given time range by aggregating buckets.
-    pub fn range_summary(&self, mode: ViewMode) -> UsageSummary {
-        let buckets: &[UsageBucket] = self.buckets(mode);
-        let mut s = UsageSummary {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cost: 0.0,
-            request_count: 0,
-        };
-        for b in buckets {
-            s.prompt_tokens += b.prompt_tokens;
-            s.completion_tokens += b.completion_tokens;
-            s.cached_tokens += b.cached_tokens;
-            s.cost += b.cost;
-            s.request_count += b.request_count;
-        }
-        s
-    }
-
-    pub fn range_models(&self, mode: ViewMode) -> &[ProviderUsage] {
-        match mode {
-            ViewMode::Today => &self.by_model_today,
-            ViewMode::SevenDays => &self.by_model_7d,
-            ViewMode::FourWeeks => &self.by_model_4w,
-            ViewMode::Yearly | ViewMode::Months => &self.by_model_all,
-        }
+impl From<ViewMode> for usize {
+    fn from(mode: ViewMode) -> Self {
+        mode.index()
     }
 }
 

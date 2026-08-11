@@ -72,7 +72,7 @@ the daemon's revisioned configuration protocol via bridge endpoints.
 | Rich tool cards (icon/verb/args)| `tool_call` / `tool_result`                            |
 | **Inline** approval cards       | `approval_request` → `approval_reply`                  |
 | Chat sidebar + open             | `GET /api/conversations` → `load_conversation`         |
-| Model picker / switch           | `GET /api/providers` → `switch_provider`               |
+| Model picker / switch           | `GET /api/config` provider snapshot → `switch_provider`|
 | Settings → Behavior, Tools      | `GET/POST /api/config` (+ `reload_extensions`)         |
 | Settings → Display (client)     | `localStorage` (thinking / expand tools / meter)       |
 | Safe / Danger toggle            | `set_approval_mode`                                    |
@@ -89,5 +89,5 @@ the daemon's revisioned configuration protocol via bridge endpoints.
 | `GET /api/events`      | SSE stream of `RuntimeEvent`s                        |
 | `POST /api/command`    | one `RuntimeCommand` to the daemon                   |
 | `GET /api/conversations` | recent chats from `conversations.db`               |
-| `GET /api/providers`   | redacted provider snapshot from the daemon            |
-| `GET/POST /api/config` | canonical daemon schema/snapshot and typed mutations   |
+| `GET/POST /api/config` | canonical daemon schema/snapshot and path/tool mutations |
+| `POST /api/config-command` | revisioned provider and subagent mutations         |

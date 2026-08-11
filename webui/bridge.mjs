@@ -32,295 +32,24 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 
-// ── usage stats ─────────────────────────────────────────────────────────────
-//
-// Reads `conversations.db` directly so the web UI can show the same stats
-// dashboard as the TUI without going through the daemon. The SQL mirrors the
-// queries in `core/src/session_db.rs` (porting the CTE-based bucket queries).
-
-function openStatsDb() {
-  if (!existsSync(DB_PATH)) return null;
-  try {
-    return new DatabaseSync(DB_PATH, { readOnly: true });
-  } catch {
-    return null;
-  }
-}
-
-function readSummaryRow(row) {
-  const v = Object.values(row);
-  return {
-    prompt_tokens: Number(v[0]),
-    completion_tokens: Number(v[1]),
-    cached_tokens: Number(v[2]),
-    cost: Number(v[3]),
-    request_count: Number(v[4]),
-  };
-}
-
-function readProviderRow(row) {
-  const v = Object.values(row);
-  return {
-    provider: v[0],
-    model: v[1],
-    prompt_tokens: Number(v[2]),
-    completion_tokens: Number(v[3]),
-    cached_tokens: Number(v[4]),
-    cost: Number(v[5]),
-    request_count: Number(v[6]),
-  };
-}
-
-function readBucketRow(row) {
-  const v = Object.values(row);
-  return {
-    label: v[0],
-    prompt_tokens: Number(v[1]),
-    completion_tokens: Number(v[2]),
-    cached_tokens: Number(v[3]),
-    cost: Number(v[4]),
-    request_count: Number(v[5]),
-  };
-}
-
-function readHourRow(row) {
-  const v = Object.values(row);
-  return {
-    hour: Number(v[0]),
-    prompt_tokens: Number(v[1]),
-    completion_tokens: Number(v[2]),
-    cached_tokens: Number(v[3]),
-    request_count: Number(v[4]),
-  };
-}
-
-const SUM_COLS = "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cost),0.0), COUNT(*)";
-const BUCKET_AGG_COLS = "COALESCE(SUM(prompt_tokens),0) AS prompt, COALESCE(SUM(completion_tokens),0) AS completion, COALESCE(SUM(cached_tokens),0) AS cached, COALESCE(SUM(cost),0.0) AS cost, COUNT(*) AS requests";
-const BUCKET_PROJECTION = "COALESCE(usage.prompt,0), COALESCE(usage.completion,0), COALESCE(usage.cached,0), COALESCE(usage.cost,0.0), COALESCE(usage.requests,0)";
-
-function timeWindowClause(window) {
-  switch (window) {
-    case "today":
-      return { where: " WHERE date(created_at, 'localtime') = date('now', 'localtime')", params: [] };
-    case "7d":
-      return { where: " WHERE date(created_at, 'localtime') >= date('now', 'localtime', '-6 days')", params: [] };
-    case "4w":
-      return { where: " WHERE date(created_at, 'localtime') >= date('now', 'localtime', '-27 days')", params: [] };
-    case "all":
-    default:
-      return { where: "", params: [] };
-  }
-}
-
-function usageByModel(db, window) {
-  const { where, params } = timeWindowClause(window);
-  const sql = `SELECT provider, model, ${SUM_COLS} FROM usage_events${where} GROUP BY provider, model ORDER BY (COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)) DESC`;
-  try {
-    return db.prepare(sql).all(...params).map(readProviderRow);
-  } catch {
-    return [];
-  }
-}
-
-function usageTodayByHour(db) {
-  const sql = `WITH RECURSIVE hours(hour) AS (
-    VALUES(0) UNION ALL SELECT hour + 1 FROM hours WHERE hour < 23
-  ), usage AS (
-    SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER) AS hour, ${BUCKET_AGG_COLS}
-    FROM usage_events
-    WHERE date(created_at, 'localtime') = date('now', 'localtime')
-    GROUP BY hour
-  )
-  SELECT printf('%02d:00', hours.hour), ${BUCKET_PROJECTION}
-  FROM hours LEFT JOIN usage ON usage.hour = hours.hour
-  ORDER BY hours.hour ASC`;
-  try {
-    return db.prepare(sql).all().map(readBucketRow);
-  } catch {
-    return [];
-  }
-}
-
-function usageRecentDays(db, days) {
-  const modifier = `-${days - 1} days`;
-  const sql = `WITH RECURSIVE series(n, day) AS (
-    VALUES(0, date('now', 'localtime', '${modifier}'))
-    UNION ALL SELECT n + 1, date(day, '+1 day') FROM series WHERE n + 1 < ${days}
-  ), usage AS (
-    SELECT date(created_at, 'localtime') AS day, ${BUCKET_AGG_COLS}
-    FROM usage_events
-    WHERE date(created_at, 'localtime') >= date('now', 'localtime', '${modifier}')
-    GROUP BY day
-  )
-  SELECT series.day, ${BUCKET_PROJECTION}
-  FROM series LEFT JOIN usage ON usage.day = series.day
-  ORDER BY series.day ASC`;
-  try {
-    return db.prepare(sql).all().map(readBucketRow);
-  } catch {
-    return [];
-  }
-}
-
-function usageRecentWeeks(db, weeks) {
-  const firstLabelModifier = `-${(weeks - 1) * 7} days`;
-  const usageModifier = `-${(weeks * 7 - 1)} days`;
-  const sql = `WITH RECURSIVE series(n, week) AS (
-    VALUES(0, strftime('%Y-W%W', date('now', 'localtime', '${firstLabelModifier}')))
-    UNION ALL
-    SELECT n + 1, strftime('%Y-W%W', date('now', 'localtime', printf('-%d days', (${weeks} - n - 2) * 7)))
-    FROM series WHERE n + 1 < ${weeks}
-  ), usage AS (
-    SELECT strftime('%Y-W%W', created_at, 'localtime') AS week, ${BUCKET_AGG_COLS}
-    FROM usage_events
-    WHERE date(created_at, 'localtime') >= date('now', 'localtime', '${usageModifier}')
-    GROUP BY week
-  )
-  SELECT series.week, ${BUCKET_PROJECTION}
-  FROM series LEFT JOIN usage ON usage.week = series.week
-  ORDER BY series.n ASC`;
-  try {
-    return db.prepare(sql).all().map(readBucketRow);
-  } catch {
-    return [];
-  }
-}
-
-function usageAllMonths(db) {
-  const sql = `WITH RECURSIVE bounds(first_month, current_month) AS (
-    SELECT COALESCE(strftime('%Y-%m', MIN(created_at), 'localtime'),
-                    strftime('%Y-%m', 'now', 'localtime')),
-           strftime('%Y-%m', 'now', 'localtime')
-    FROM usage_events
-  ), series(month) AS (
-    SELECT first_month FROM bounds
-    UNION ALL
-    SELECT strftime('%Y-%m', date(month || '-01', '+1 month'))
-    FROM series, bounds WHERE month < current_month
-  ), usage AS (
-    SELECT strftime('%Y-%m', created_at, 'localtime') AS month, ${BUCKET_AGG_COLS}
-    FROM usage_events
-    GROUP BY month
-  )
-  SELECT series.month, ${BUCKET_PROJECTION}
-  FROM series LEFT JOIN usage ON usage.month = series.month
-  ORDER BY series.month ASC`;
-  try {
-    return db.prepare(sql).all().map(readBucketRow);
-  } catch {
-    return [];
-  }
-}
-
-function usageByYear(db) {
-  const sql = `SELECT strftime('%Y', created_at, 'localtime') AS year, ${SUM_COLS} FROM usage_events GROUP BY year ORDER BY year ASC`;
-  try {
-    return db.prepare(sql).all().map(readBucketRow);
-  } catch {
-    return [];
-  }
-}
-
-function usageByHourSince(db, whereClause) {
-  // Simplified: just get prompt/completion/cached without cost for hourly
-  const sql2 = `SELECT CAST(strftime('%H', created_at, 'localtime') AS INTEGER), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0), COUNT(*) FROM usage_events${whereClause} GROUP BY 1 ORDER BY 1`;
-  try {
-    return db.prepare(sql2).all().map(readHourRow);
-  } catch {
-    return [];
-  }
-}
-
-function loadStatsSnapshot() {
-  const db = openStatsDb();
-  if (!db) {
-    return {
-      started_at: null,
-      ended_at: null,
-      total: { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, cost: 0, request_count: 0 },
-      by_model_today: [],
-      by_model_7d: [],
-      by_model_4w: [],
-      by_model_all: [],
-      daily: [],
-      weekly: [],
-      monthly: [],
-      all_time: [],
-      yearly: [],
-      hourly_today: [],
-      hourly_7d: [],
-      hourly_4w: [],
-      hourly_all: [],
-      daily_activity: [],
-    };
-  }
-  try {
-    const vals = db.prepare(
-      "SELECT datetime(MIN(created_at), 'localtime'), datetime(MAX(created_at), 'localtime') FROM usage_events"
-    ).get();
-    const started_at = vals ? Object.values(vals)[0] : null;
-    const ended_at = vals ? Object.values(vals)[1] : null;
-
-    const total = db.prepare(`SELECT ${SUM_COLS} FROM usage_events`).get();
-    const totalParsed = total ? readSummaryRow(total) : { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, cost: 0, request_count: 0 };
-
-    return {
-      started_at,
-      ended_at,
-      total: totalParsed,
-      by_model_today: usageByModel(db, "today"),
-      by_model_7d: usageByModel(db, "7d"),
-      by_model_4w: usageByModel(db, "4w"),
-      by_model_all: usageByModel(db, "all"),
-      daily: usageTodayByHour(db),
-      weekly: usageRecentDays(db, 7),
-      monthly: usageRecentWeeks(db, 4),
-      all_time: usageAllMonths(db),
-      yearly: usageByYear(db),
-      hourly_today: usageByHourSince(db, " WHERE date(created_at, 'localtime') = date('now', 'localtime')"),
-      hourly_7d: usageByHourSince(db, " WHERE date(created_at, 'localtime') >= date('now', 'localtime', '-6 days')"),
-      hourly_4w: usageByHourSince(db, " WHERE date(created_at, 'localtime') >= date('now', 'localtime', '-27 days')"),
-      hourly_all: usageByHourSince(db, ""),
-      daily_activity: usageRecentDays(db, 730),
-    };
-  } catch (e) {
-    console.error("stats query failed:", e.message);
-    return {
-      started_at: null,
-      ended_at: null,
-      total: { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, cost: 0, request_count: 0 },
-      by_model_today: [],
-      by_model_7d: [],
-      by_model_4w: [],
-      by_model_all: [],
-      daily: [],
-      weekly: [],
-      monthly: [],
-      all_time: [],
-      yearly: [],
-      hourly_today: [],
-      hourly_7d: [],
-      hourly_4w: [],
-      hourly_all: [],
-      daily_activity: [],
-    };
-  } finally {
-    db.close();
-  }
-}
-
+// ── paths ──────────────────────────────────────────────────────────────────
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, "public");
 const REPO = dirname(HERE);
+// Keep the workspace the user launched `bone web` from distinct from REPO,
+// which is the installed package/repository containing bridge.mjs.
+const LAUNCH_WORKSPACE = process.cwd();
 
 const PORT = Number(process.env.PORT || 4577);
 const [DAEMON_HOST, DAEMON_PORT] = (process.env.BONE_ADDR || "127.0.0.1:7878").split(":");
 
 // bone's data lives under bone_dir() — mirror core/src/config::bone_dir().
 function boneDir() {
+  if (process.env.BONE_DIR) return resolve(LAUNCH_WORKSPACE, process.env.BONE_DIR);
   if (process.env.XDG_CONFIG_HOME) return join(process.env.XDG_CONFIG_HOME, "bone-rust");
   const home = process.env.HOME || process.env.USERPROFILE;
-  return home ? join(home, ".bone-rust") : "/tmp/.bone-rust";
+  if (home) return join(home, ".bone-rust");
+  throw new Error("bone: neither BONE_DIR, XDG_CONFIG_HOME, HOME nor USERPROFILE is set");
 }
 const DB_PATH = join(boneDir(), "data", "conversations.db");
 
@@ -346,7 +75,10 @@ function findBoneBinary() {
   if (existsSync(packaged)) return { cmd: packaged, args: ["serve"] };
   if (existsSync(release)) return { cmd: release, args: ["serve"] };
   if (existsSync(debug)) return { cmd: debug, args: ["serve"] };
-  return { cmd: "cargo", args: ["run", "-q", "-p", "bone", "--", "serve"] };
+  return {
+    cmd: "cargo",
+    args: ["run", "-q", "--manifest-path", join(REPO, "Cargo.toml"), "-p", "bone", "--", "serve"],
+  };
 }
 
 let daemonProc = null;
@@ -354,7 +86,7 @@ function ensureDaemon() {
   if (daemonProc) return;
   const { cmd, args } = findBoneBinary();
   log(`daemon not reachable — spawning: ${cmd} ${args.join(" ")}`);
-  daemonProc = spawn(cmd, args, { cwd: REPO, stdio: ["ignore", "inherit", "inherit"] });
+  daemonProc = spawn(cmd, args, { cwd: LAUNCH_WORKSPACE, stdio: ["ignore", "inherit", "inherit"] });
   daemonProc.on("error", (err) => {
     log(`failed to spawn daemon: ${err.message}`);
     daemonProc = null;
@@ -535,52 +267,70 @@ function handleConversationWrite(req, res, id) {
   });
 }
 
+function daemonRequest(command, match, label) {
+  return new Promise((resolve, reject) => {
+    let sent = false;
+    let settled = false;
+    let timer;
+    let link;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      link.close();
+      if (result instanceof Error) reject(result);
+      else resolve(result);
+    };
+    link = createDaemonLink(
+      (line) => {
+        let event;
+        try { event = JSON.parse(line); } catch { return; }
+        const result = match(event);
+        if (result !== undefined) finish(result);
+      },
+      (status) => {
+        if (status === "connected" && !sent) {
+          sent = true;
+          if (!link.write(command)) finish(new Error("daemon disconnected"));
+        }
+      },
+    );
+    timer = setTimeout(() => finish(new Error(`${label} request timed out`)), 5000);
+  });
+}
+
 async function daemonConfigCommand(command) {
   const requestId = typeof command === "object" ? randomUUID() : null;
   if (requestId) {
     const kind = Object.keys(command)[0];
     command = { [kind]: { ...command[kind], request_id: requestId } };
   }
-  return new Promise((resolve, reject) => {
-    let sent = false;
-    let timer;
-    let link;
-    const finish = (callback, value) => {
-      clearTimeout(timer);
-      link.close();
-      callback(value);
-    };
-    link = createDaemonLink(
-      (line) => {
-        let event;
-        try { event = JSON.parse(line); } catch { return; }
-        if (!requestId && event.config_snapshot) finish(resolve, event.config_snapshot);
-        else if (!requestId && event.config_changed) finish(resolve, event.config_changed);
-        else if (event.config_changed?.request_id === requestId) finish(resolve, event.config_changed);
-        else if (event.config_mutation_rejected?.request_id === requestId)
-          finish(reject, new Error(event.config_mutation_rejected.error));
-      },
-      (status) => {
-        if (status === "connected" && !sent) {
-          sent = true;
-          if (!link.write(command)) finish(reject, new Error("daemon disconnected"));
-        }
-      },
-    );
-    timer = setTimeout(() => finish(reject, new Error("configuration request timed out")), 5000);
-  });
+  return daemonRequest(command, (event) => {
+    if (!requestId) return event.config_snapshot ?? event.config_changed;
+    if (event.config_changed?.request_id === requestId) return event.config_changed;
+    if (event.config_mutation_rejected?.request_id === requestId)
+      return new Error(event.config_mutation_rejected.error);
+  }, "configuration");
 }
 
-async function daemonConfigSnapshot() {
-  return (await daemonConfigCommand("get_config")).snapshot;
+let nextHostRequestId = Date.now();
+async function daemonHostRequest(request) {
+  const requestId = ++nextHostRequestId;
+  const response = await daemonRequest(
+    { host_request: { request_id: requestId, request } },
+    (event) => event.host_response?.request_id === requestId
+      ? event.host_response.response
+      : undefined,
+    "host",
+  );
+  if (response.error) throw new Error(`${response.error.code}: ${response.error.message}`);
+  return response;
 }
 
-async function readProvidersFromDaemon() {
-  return (await daemonConfigSnapshot()).providers.map((provider) => ({
-    key: provider.id,
-    ...provider,
-    api_key: "",
-  }));
+async function loadStatsSnapshot() {
+  const response = await daemonHostRequest({ stats: { range: null } });
+  if (!response.stats) throw new Error("daemon returned an invalid stats response");
+  return response.stats;
 }
 
 async function getConfigFromDaemon() {
@@ -609,16 +359,11 @@ const server = http.createServer(async (req, res) => {
   const conversationMatch = url.pathname.match(/^\/api\/conversations\/(\d+)$/);
   if (conversationMatch && (req.method === "PATCH" || req.method === "DELETE"))
     return handleConversationWrite(req, res, Number(conversationMatch[1]));
-  if (url.pathname === "/api/providers" && req.method === "GET") return sendJson(res, readProvidersFromDaemon);
-  const providerMatch = url.pathname.match(/^\/api\/providers\/([^/]+)$/);
-  if (providerMatch && req.method === "PATCH") return handleProviderPatch(req, res, providerMatch[1]);
-  if (providerMatch && req.method === "DELETE") return handleProviderDelete(req, res, providerMatch[1]);
-  if (url.pathname === "/api/providers" && req.method === "POST") return handleProviderPost(req, res);
   if (url.pathname === "/api/stats") return sendJson(res, loadStatsSnapshot);
   if (url.pathname === "/api/file" && req.method === "GET") return sendJson(res, async () => {
     const requested = url.searchParams.get("path");
     if (!requested) throw new Error("path is required");
-    const root = process.cwd();
+    const root = LAUNCH_WORKSPACE;
     const file = resolve(root, requested);
     const rel = relative(root, file);
     if (rel.startsWith("..") || rel === "") throw new Error("path must be a workspace file");
@@ -626,6 +371,7 @@ const server = http.createServer(async (req, res) => {
   });
   if (url.pathname === "/api/config" && req.method === "GET") return sendJson(res, getConfigFromDaemon);
   if (url.pathname === "/api/config" && req.method === "POST") return handleConfigWrite(req, res);
+  if (url.pathname === "/api/config-command" && req.method === "POST") return handleConfigWrite(req, res, true);
   if (url.pathname === "/api/restart-daemon" && req.method === "POST") {
     if (restartDaemon()) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
     res.writeHead(503, { "content-type": "application/json" }).end(JSON.stringify({ error: "daemon not managed by this bridge; restart manually" }));
@@ -652,97 +398,31 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// POST /api/config — revision-checked daemon configuration mutation.
-function handleConfigWrite(req, res) {
+// Revision-checked daemon configuration mutations. The direct form is narrowly
+// allow-listed for commands that do not fit the path/tool convenience payload.
+const CONFIG_COMMANDS = new Set([
+  "upsert_provider", "delete_provider",
+  "upsert_subagent", "delete_subagent", "set_subagent_enabled",
+]);
+function handleConfigWrite(req, res, direct = false) {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", async () => {
     try {
-      const { path, value, tool, enabled, expected_revision } = JSON.parse(body);
-      let command;
-      if (tool) {
-        command = { set_tool_enabled: { name: tool, enabled, expected_revision } };
-      } else if (path) {
-        command = { set_config_value: { path, value, expected_revision } };
+      const input = JSON.parse(body);
+      let command = input;
+      if (direct) {
+        const kinds = input && typeof input === "object" ? Object.keys(input) : [];
+        if (kinds.length !== 1 || !CONFIG_COMMANDS.has(kinds[0])) throw new Error("unsupported configuration command");
       } else {
-        throw new Error("path or tool is required");
+        const { path, value, tool, enabled, expected_revision } = input;
+        if (tool) command = { set_tool_enabled: { name: tool, enabled, expected_revision } };
+        else if (path) command = { set_config_value: { path, value, expected_revision } };
+        else throw new Error("path or tool is required");
       }
       const event = await daemonConfigCommand(command);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(event));
-    } catch (e) {
-      res.writeHead(400, { "content-type": "text/plain" });
-      res.end(String(e));
-    }
-  });
-}
-
-// ── provider endpoints ──────────────────────────────────────────────────────
-
-function providerUpdate(id, provider, fields = {}) {
-  const merged = { ...provider, ...fields };
-  return {
-    id,
-    label: merged.label || id,
-    base_url: merged.base_url ?? "",
-    model: merged.model ?? "",
-    endpoint: merged.endpoint ?? "",
-    handler: merged.handler ?? "",
-    context_window_tokens: merged.context_window_tokens ?? null,
-    max_concurrency: merged.max_concurrency ?? null,
-    reasoning_effort: merged.reasoning_effort ?? "",
-    fast_mode: merged.handler === "codex" && (merged.fast_mode ?? false),
-    ...(Object.hasOwn(fields, "api_key") ? { api_key: fields.api_key } : {}),
-  };
-}
-
-// PATCH /api/providers/:key — body { field, value } or { fields: { ... } }
-function handleProviderPatch(req, res, key) {
-  let body = "";
-  req.on("data", (c) => (body += c));
-  req.on("end", async () => {
-    try {
-      const data = JSON.parse(body);
-      const snapshot = await daemonConfigSnapshot();
-      const provider = snapshot.providers.find((entry) => entry.id === key);
-      if (!provider) throw new Error(`provider "${key}" not found`);
-      const fields = data.fields || { [data.field]: data.value };
-      await daemonConfigCommand({ upsert_provider: {
-        provider: providerUpdate(key, provider, fields),
-        expected_revision: snapshot.revision,
-      } });
-      res.writeHead(204).end();
-    } catch (e) {
-      res.writeHead(400, { "content-type": "text/plain" });
-      res.end(String(e));
-    }
-  });
-}
-
-// DELETE /api/providers/:key
-async function handleProviderDelete(_req, res, key) {
-  try {
-    const snapshot = await daemonConfigSnapshot();
-    await daemonConfigCommand({ delete_provider: { id: key, expected_revision: snapshot.revision } });
-    res.writeHead(204).end();
-  } catch (e) {
-    res.writeHead(400, { "content-type": "text/plain" }).end(String(e));
-  }
-}
-
-// POST /api/providers — body { key, label, ...field values }
-function handleProviderPost(req, res) {
-  let body = "";
-  req.on("data", (c) => (body += c));
-  req.on("end", async () => {
-    try {
-      const data = JSON.parse(body);
-      const snapshot = await daemonConfigSnapshot();
-      await daemonConfigCommand({ upsert_provider: {
-        provider: providerUpdate(data.key, {}, data),
-        expected_revision: snapshot.revision,
-      } });
-      res.writeHead(201).end();
     } catch (e) {
       res.writeHead(400, { "content-type": "text/plain" });
       res.end(String(e));
@@ -883,7 +563,7 @@ function log(msg) {
   console.log(`\x1b[2m[${t}]\x1b[0m ${msg}`);
 }
 
-server.listen(PORT, () => {
+server.listen(PORT, "127.0.0.1", () => {
   console.log(`\n  \x1b[1mbone studio\x1b[0m`);
   console.log(`  ▸ ui      http://localhost:${PORT}`);
   console.log(`  ▸ daemon  ${DAEMON_HOST}:${DAEMON_PORT}\n`);
