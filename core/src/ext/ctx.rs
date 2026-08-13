@@ -2881,6 +2881,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             RUN_OPT_KEYS,
             None,
             tool_allowlist,
+            true,
         ) {
             Ok(b) => b,
             Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -2941,6 +2942,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 RUN_STREAM_OPT_KEYS,
                 Some(tx),
                 tool_allowlist,
+                true,
             ) {
                 Ok(b) => b,
                 Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -3037,6 +3039,7 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             SPAWN_OPT_KEYS,
             None,
             tool_allowlist,
+            true,
         ) {
             Ok(b) => b,
             Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -3086,10 +3089,14 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 SPAWN_OPT_KEYS,
                 None,
                 extract_tool_allowlist(&opts),
+                false,
             ) {
                 Ok(b) => b,
                 Err(e) => return agent_result_to_lua(lua, Err(e)),
             };
+            // The prior job's full transcript takes precedence over any `context`
+            // opt: followup already carries the previous run's history, so a
+            // separately supplied `context` is deliberately ignored here.
             built.request.transcript = Some(transcript);
             let id = launch_background_job(
                 handle,
@@ -3366,6 +3373,7 @@ fn build_agent_request(
     allowed_keys: &[&str],
     event_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentRunEvent>>,
     tool_allowlist: Option<Vec<String>>,
+    parse_context: bool,
 ) -> Result<BuiltAgent, String> {
     if inherited.agent_depth >= MAX_AGENT_DEPTH {
         return Err("max agent depth exceeded".to_string());
@@ -3394,6 +3402,14 @@ fn build_agent_request(
     };
     let wall_timeout_ms =
         opt_u64(opts, "wall_timeout_ms").map(|n| n.clamp(1_000, MAX_AGENT_WALL_TIMEOUT_MS));
+    // Opt-in conversation context shared with the subagent. Injected before the
+    // user prompt in `agent_setup` so the model sees `[system, ...context, task]`.
+    // Followup skips parsing because its saved transcript always takes precedence.
+    let transcript = if parse_context {
+        parse_context_opt(opts)?
+    } else {
+        None
+    };
     let activity = Arc::new(AtomicU64::new(crate::agent::now_epoch_ms()));
     // Inherit the driving conversation's approval gate so delegated agents
     // (blocking `run`/`run_stream` or background `spawn`) escalate would-be-
@@ -3425,7 +3441,7 @@ fn build_agent_request(
         tool_allowlist,
         max_tokens,
         approval_gate,
-        transcript: None,
+        transcript,
         config_store: Some(config_store),
         cancel: None,
     };
@@ -3450,6 +3466,7 @@ const RUN_OPT_KEYS: &[&str] = &[
     "max_tokens",
     "tools",
     "wall_timeout_ms",
+    "context",
 ];
 const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "approval",
@@ -3467,6 +3484,7 @@ const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "on_failed",
     "tools",
     "wall_timeout_ms",
+    "context",
 ];
 const SPAWN_OPT_KEYS: &[&str] = &[
     "approval",
@@ -3478,6 +3496,7 @@ const SPAWN_OPT_KEYS: &[&str] = &[
     "agent",
     "title",
     "tools",
+    "context",
 ];
 
 /// Human-readable inactivity timeout message.
@@ -3633,6 +3652,23 @@ fn extract_tool_allowlist(opts: &Option<Table>) -> Option<Vec<String>> {
     opts.as_ref()
         .and_then(|t| t.get::<Option<Table>>("tools").ok().flatten())
         .map(|t| t.sequence_values::<String>().flatten().collect())
+}
+
+/// Parse the optional `context` array for `ctx.agent.run`/`run_stream`/`spawn`
+/// into the subagent's `AgentRequest.transcript`. Absent → `None`. A present
+/// non-table value is a clear programmer mistake and errors out; malformed
+/// entries within the table are skipped by `parse_messages_table`, matching
+/// `conversation.replace`/`load` semantics (never panic on bad user input).
+fn parse_context_opt(opts: &Option<Table>) -> Result<Option<Vec<crate::llm::ChatMessage>>, String> {
+    let Some(opts) = opts else {
+        return Ok(None);
+    };
+    match opts.raw_get("context") {
+        Ok(mlua::Value::Nil) => Ok(None),
+        Ok(mlua::Value::Table(table)) => Ok(Some(super::types::parse_messages_table(&table))),
+        Ok(_) => Err("`context` must be an array of message tables".to_string()),
+        Err(e) => Err(format!("failed to read `context`: {e}")),
+    }
 }
 
 /// Build the `current()` closure shared by `ctx.conversation.current` and

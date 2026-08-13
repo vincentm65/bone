@@ -38,6 +38,7 @@ fn delegated_agent_inherits_incognito_background_scope_without_persistence() {
         RUN_OPT_KEYS,
         None,
         None,
+        true,
     )
     .expect("build delegated request");
 
@@ -57,6 +58,138 @@ fn delegated_agent_inherits_incognito_background_scope_without_persistence() {
             None => std::env::remove_var("BONE_DIR"),
         }
     }
+}
+
+fn inherited_for_test() -> InheritedCtx {
+    InheritedCtx {
+        approval: crate::tools::ApprovalMode::Safe,
+        provider: Some("local".into()),
+        model: None,
+        agent_depth: 0,
+        approval_gate: None,
+        cwd: std::path::PathBuf::from("/tmp"),
+        session_id: None,
+        background_scope: Some(-17),
+    }
+}
+
+/// Build a delegated `AgentRequest` under an isolated `BONE_DIR`, so `context`
+/// opt parsing is exercised through the real `build_agent_request` path.
+fn build_with_opts(opts: &Option<Table>) -> Result<BuiltAgent, String> {
+    build_with_opts_and_context_parsing(opts, true)
+}
+
+fn build_with_opts_and_context_parsing(
+    opts: &Option<Table>,
+    parse_context: bool,
+) -> Result<BuiltAgent, String> {
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+    let store = crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded())
+        .expect("seed test provider");
+    let inherited = inherited_for_test();
+    let result = build_agent_request(
+        "delegated task".into(),
+        opts,
+        &inherited,
+        store,
+        RUN_OPT_KEYS,
+        None,
+        None,
+        parse_context,
+    );
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+    result
+}
+
+#[test]
+fn context_opt_populates_transcript_in_order() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    let context = lua.create_table().unwrap();
+    let first = lua.create_table().unwrap();
+    first.set("role", "user").unwrap();
+    first.set("content", "first").unwrap();
+    let second = lua.create_table().unwrap();
+    second.set("role", "assistant").unwrap();
+    second.set("content", "second").unwrap();
+    context.set(1, first).unwrap();
+    context.set(2, second).unwrap();
+    opts.set("context", context).unwrap();
+
+    let built = build_with_opts(&Some(opts)).expect("build delegated request");
+    assert_eq!(
+        built.request.transcript,
+        Some(vec![
+            crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "first"),
+            crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "second"),
+        ])
+    );
+}
+
+#[test]
+fn context_opt_absent_leaves_transcript_none() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    let built = build_with_opts(&Some(opts)).expect("build delegated request");
+    assert_eq!(built.request.transcript, None);
+}
+
+#[test]
+fn context_opt_non_table_errors() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    opts.set("context", "not a table").unwrap();
+    match build_with_opts(&Some(opts)) {
+        Ok(_) => panic!("non-table context must error"),
+        Err(err) => assert!(
+            err.contains("`context` must be an array of message tables"),
+            "unexpected error: {err}"
+        ),
+    }
+}
+
+#[test]
+fn followup_context_is_not_parsed() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    opts.set("context", "not a table").unwrap();
+
+    let built = build_with_opts_and_context_parsing(&Some(opts), false)
+        .expect("followup must ignore context regardless of its type");
+    assert_eq!(built.request.transcript, None);
+}
+
+#[test]
+fn context_opt_skips_malformed_and_unknown_role_entries() {
+    let lua = Lua::new();
+    let opts = lua.create_table().unwrap();
+    let context = lua.create_table().unwrap();
+    let keep = lua.create_table().unwrap();
+    keep.set("role", "user").unwrap();
+    keep.set("content", "keep").unwrap();
+    let unknown = lua.create_table().unwrap();
+    unknown.set("role", "bogus").unwrap();
+    unknown.set("content", "drop").unwrap();
+    context.set(1, keep).unwrap();
+    context.set(2, unknown).unwrap();
+    opts.set("context", context).unwrap();
+
+    let built = build_with_opts(&Some(opts)).expect("build delegated request");
+    assert_eq!(
+        built.request.transcript,
+        Some(vec![crate::llm::ChatMessage::new(
+            crate::llm::ChatRole::User,
+            "keep"
+        )])
+    );
 }
 
 #[test]
