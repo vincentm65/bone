@@ -69,6 +69,7 @@ pub fn boot(
                     manager: ExtensionManager::unloaded(),
                     tools: Vec::new(),
                     shared_state: crate::ext::ctx::new_shared_state(),
+                    source_errors: vec![format!("canonical configuration: {error}")],
                 };
             }
         };
@@ -96,6 +97,7 @@ pub fn boot(
                 manager: ExtensionManager::unloaded(),
                 tools: Vec::new(),
                 shared_state: crate::ext::ctx::new_shared_state(),
+                source_errors: vec![format!("Lua engine creation failed: {e}")],
             };
         }
     };
@@ -117,10 +119,12 @@ pub fn boot(
         super::seed_default_lua_libs(&config_dir.join("lua/lib"), None, false);
     }
 
+    let mut source_errors = Vec::new();
     let loaded = match engine::run_init(&lua, config_dir) {
         Ok(loaded) => loaded,
         Err(e) => {
             log_boot_warning(config_dir, format_args!("init.lua failed: {e}"));
+            source_errors.push(e);
             false
         }
     };
@@ -148,26 +152,18 @@ pub fn boot(
     // onboarding selection is enforced here too, not just at seed time: a
     // previously seeded bundled file the user later deselected stays on disk
     // but must not load.
-    let mut fatal_loader_failure = false;
     if let Err(e) =
         super::run_lua_tool_files(&lua, &config_dir.join("lua/tools"), tool_allow.as_ref())
     {
         log_boot_warning(config_dir, format_args!("Lua tools failed: {e}"));
-        fatal_loader_failure = true;
+        source_errors.push(e);
     }
     if !subagent
         && let Err(e) =
             super::run_lua_command_files(&lua, &config_dir.join("lua/commands"), cmd_allow.as_ref())
     {
         log_boot_warning(config_dir, format_args!("Lua commands failed: {e}"));
-        fatal_loader_failure = true;
-    }
-    if fatal_loader_failure {
-        return BootResult {
-            manager: ExtensionManager::unloaded(),
-            tools: Vec::new(),
-            shared_state: crate::ext::ctx::new_shared_state(),
-        };
+        source_errors.push(e);
     }
 
     // Conversation-scoped ctx.state map: one Arc per boot so concurrent session
@@ -195,6 +191,7 @@ pub fn boot(
         manager,
         tools,
         shared_state,
+        source_errors,
     }
 }
 

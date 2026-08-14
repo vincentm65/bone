@@ -118,7 +118,7 @@ Bone keeps its local state in `~/.bone-rust` by default. Set `BONE_DIR` to use a
 
 Core owns these documents and exposes one revisioned configuration schema and resolved snapshot to every client. Use `/config` or the web settings panel for supported generic mutations; providers use dedicated client actions, while themes and keymaps also have dedicated Lua APIs. Built-in schemas live in Rust; extensions declare schemas with `bone.settings.define(namespace, schema)`, while YAML stores only user-selected values. Provider secrets may be plaintext or exact `${ENV_VAR}` references, which resolve from the environment at runtime.
 
-Most changes apply immediately or on the next model turn. Extension settings may request an extension reload. Direct edits are loaded at startup; `command-policy.yaml` is file-edited, daemon-owned, and always requires a restart. Provider entries support the native Anthropic, Codex, and Grok Build handlers as well as OpenAI-compatible endpoints.
+Most changes apply immediately or on the next model turn. Extension settings may request an extension reload. Bone fingerprints `init.lua` and every lowercase `*.lua` file under `lua/`; direct Lua edits reload automatically before the next prompt or slash command. A broken candidate is rejected without replacing the active extensions and is retried only after the Lua sources change again. Use `/tools reload` to force an explicit rescan. `command-policy.yaml` is file-edited, daemon-owned, and always requires a restart. Provider entries support the native Anthropic, Codex, and Grok Build handlers as well as OpenAI-compatible endpoints.
 
 Optional tools and commands can be managed with:
 

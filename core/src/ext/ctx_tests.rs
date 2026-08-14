@@ -594,8 +594,10 @@ fn sample_app_state(system_prompt_override: Option<String>) -> AppCtxState {
         sent: 1234,
         ..Default::default()
     };
+    let mut user = crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "hello");
+    user.created_at = Some("2026-08-14T12:00:00Z".into());
     let history = vec![
-        crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "hello"),
+        user,
         crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "hi there"),
     ];
     let config_store = crate::config::store::ConfigStore::for_test();
@@ -677,6 +679,12 @@ fn app_ctx_state_exposes_app_fields_through_lua_ctx() {
         .unwrap();
     assert_eq!(hist_len, 2);
 
+    let history_created_at: Option<String> = lua
+        .load("return ctx.conversation.history()[1].created_at")
+        .eval()
+        .unwrap();
+    assert_eq!(history_created_at.as_deref(), Some("2026-08-14T12:00:00Z"));
+
     let sent: u64 = lua.load("return ctx.usage.snapshot().sent").eval().unwrap();
     assert_eq!(sent, 1234);
     let capacity: u64 = lua
@@ -684,6 +692,29 @@ fn app_ctx_state_exposes_app_fields_through_lua_ctx() {
         .eval()
         .unwrap();
     assert_eq!(capacity, 131_072);
+}
+
+#[test]
+fn message_table_parser_preserves_created_at() {
+    let lua = Lua::new();
+    let table: Table = lua
+        .load(
+            r#"return {{
+                role = "user",
+                content = "hello",
+                created_at = "2026-08-14T12:00:00Z",
+            }}"#,
+        )
+        .eval()
+        .unwrap();
+
+    let messages = crate::ext::types::parse_messages_table(&table);
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].created_at.as_deref(),
+        Some("2026-08-14T12:00:00Z")
+    );
 }
 
 #[test]
@@ -1939,6 +1970,7 @@ enum PrivateTestResponse {
 struct PrivateTestProvider {
     responses: Mutex<std::collections::VecDeque<PrivateTestResponse>>,
     contexts: Mutex<Vec<ProviderRequestContext>>,
+    messages: Mutex<Vec<Vec<crate::llm::ChatMessage>>>,
 }
 
 impl PrivateTestProvider {
@@ -1946,6 +1978,7 @@ impl PrivateTestProvider {
         Self {
             responses: Mutex::new(responses.into()),
             contexts: Mutex::new(Vec::new()),
+            messages: Mutex::new(Vec::new()),
         }
     }
 
@@ -1985,11 +2018,12 @@ impl LlmProvider for PrivateTestProvider {
 
     async fn chat_stream_with_context(
         &self,
-        _messages: Vec<crate::llm::ChatMessage>,
+        messages: Vec<crate::llm::ChatMessage>,
         _tools: Vec<crate::tools::ToolDefinition>,
         context: ProviderRequestContext,
     ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
         self.contexts.lock().unwrap().push(context);
+        self.messages.lock().unwrap().push(messages);
         self.response().await
     }
 }
@@ -2078,6 +2112,70 @@ async fn private_llm_complete_returns_content_tool_calls_and_reported_usage() {
     let usage = usage_records.lock().unwrap();
     assert_eq!(usage.len(), 1);
     assert_eq!(usage[0].completion_tokens, 20);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_llm_compaction_prefix_matches_normal_provider_history() {
+    let provider = Arc::new(PrivateTestProvider::new(vec![PrivateTestResponse::Events(
+        Vec::new(),
+    )]));
+    let (mut cfg, _, _) = private_llm_test_config(provider.clone(), None);
+    cfg.system_prompt_override = Some("system prompt".into());
+
+    let mut user = crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "run a check");
+    user.created_at = Some("2026-08-14T12:00:00Z".into());
+    let mut assistant = crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "checking");
+    assistant.created_at = Some("2026-08-14T12:00:01Z".into());
+    assistant.tool_calls.push(crate::tools::ToolCall {
+        id: "call-1".into(),
+        name: "shell".into(),
+        arguments: serde_json::json!({"command": "true"}),
+    });
+    let mut tool = crate::llm::ChatMessage::new(crate::llm::ChatRole::Tool, "done");
+    tool.created_at = Some("2026-08-14T12:00:02Z".into());
+    tool.tool_call_id = Some("call-1".into());
+    tool.name = Some("shell".into());
+    let history = vec![user, assistant, tool];
+    cfg.conversation_history = Some(history.clone());
+
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+    let result: serde_json::Value = lua
+        .from_value(
+            lua.load(
+                r#"
+                local messages = {
+                    { role = "system", content = ctx.conversation.system_prompt() }
+                }
+                for _, message in ipairs(ctx.conversation.history()) do
+                    table.insert(messages, message)
+                end
+                table.insert(messages, { role = "user", content = "Summarize the conversation." })
+                return ctx.llm.complete({ messages = messages, tools = {} })
+                "#,
+            )
+            .eval()
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(result["ok"], true);
+
+    let requests = provider.messages.lock().unwrap();
+    let request = &requests[0];
+    let expected_prefix = crate::chat::build_chat_history(&history, "system prompt");
+    assert_eq!(
+        &request[..expected_prefix.len()],
+        expected_prefix.as_slice()
+    );
+    assert_eq!(
+        request.last().unwrap().content,
+        "Summarize the conversation."
+    );
+    assert_eq!(request.last().unwrap().created_at, None);
+    assert_eq!(request[1].content.matches("<timing>").count(), 1);
+    assert_eq!(request[3].content.matches("<timing>").count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

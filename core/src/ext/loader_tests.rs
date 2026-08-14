@@ -35,6 +35,64 @@ fn boot_warnings_are_routed_to_lua_log() {
 }
 
 #[test]
+fn boot_reports_invalid_init_source() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("init.lua"), "this is not valid lua (").unwrap();
+
+    let result = boot(
+        dir.path(),
+        dir.path(),
+        BootOptions {
+            agent_depth: 1,
+            ..Default::default()
+        },
+        "test-model",
+        "test-provider",
+        Some(Arc::new(Mutex::new(Settings::defaults()))),
+    );
+
+    assert!(result.manager.is_available());
+    assert!(
+        result
+            .source_errors
+            .iter()
+            .any(|error| error.contains("init.lua error"))
+    );
+}
+
+#[test]
+fn boot_reports_invalid_tool_source() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("init.lua"), "-- valid").unwrap();
+    std::fs::create_dir_all(dir.path().join("lua/tools")).unwrap();
+    std::fs::write(
+        dir.path().join("lua/tools/broken.lua"),
+        "this is not valid lua (",
+    )
+    .unwrap();
+
+    let result = boot(
+        dir.path(),
+        dir.path(),
+        BootOptions {
+            agent_depth: 1,
+            ..Default::default()
+        },
+        "test-model",
+        "test-provider",
+        Some(Arc::new(Mutex::new(Settings::defaults()))),
+    );
+
+    assert!(result.manager.is_available());
+    assert!(
+        result
+            .source_errors
+            .iter()
+            .any(|error| error.contains("broken.lua"))
+    );
+}
+
+#[test]
 fn boot_loads_config_subagents_before_lua_with_config_precedence() {
     use crate::config::settings::SubagentSettings;
 

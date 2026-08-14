@@ -173,6 +173,7 @@ fn test_daemon_ctx(
             pending_interactions: PendingInteractions::default(),
             pending_commands: std::collections::VecDeque::new(),
             reload_inbox: None,
+            extension_sources: Arc::new(Mutex::new(ExtensionSourceState::default())),
             forward_view_diffs: false,
             host: crate::host::HostService::new(config.clone()),
             config,
@@ -396,9 +397,21 @@ async fn setup_apply_reloads_locally_routes_to_peers_and_republishes_config() {
     else {
         panic!("host setup snapshot failed");
     };
+    let reload_candidate = crate::ext::boot_with_tools_shared(
+        bone.path(),
+        bone.path(),
+        &config,
+        true,
+        crate::ext::BootOptions::default(),
+        "test-model",
+        "test-provider",
+        config.runtime_settings_handle(),
+    );
+    assert!(reload_candidate.manager.is_available());
+    assert!(reload_candidate.source_errors.is_empty());
     let group = HubGroup::default();
     let mut peer_reload = group.subscribe_extension_reloads();
-    let (hub, mut commands) = Hub::new_grouped(group);
+    let (hub, mut commands) = Hub::new_grouped(group.clone());
     let mut events = hub.subscribe();
     let mut session = crate::runtime::RuntimeSession::new(
         crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
@@ -416,12 +429,8 @@ async fn setup_apply_reloads_locally_routes_to_peers_and_republishes_config() {
         key_registry: crate::runtime::KeyReplyRegistry::new(),
         pending_interactions: PendingInteractions::default(),
         pending_commands: std::collections::VecDeque::new(),
-        reload_inbox: Some(Arc::new(Mutex::new(Some(crate::ext::BootedTools {
-            manager: crate::ext::ExtensionManager::unloaded(),
-            tools: crate::tools::registry::ToolHandler::new(
-                crate::tools::registry::ToolRegistry::new(),
-            ),
-        })))),
+        reload_inbox: Some(Arc::new(Mutex::new(Some(reload_candidate)))),
+        extension_sources: group.0.extension_sources.clone(),
         forward_view_diffs: false,
         host,
         config,
@@ -489,6 +498,10 @@ async fn setup_apply_reloads_locally_routes_to_peers_and_republishes_config() {
 
 #[test]
 fn incognito_actor_applies_unskipped_host_reload() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let bone = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", bone.path()) };
     let mut session = crate::runtime::RuntimeSession::new(
         crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
     );
@@ -499,10 +512,19 @@ fn incognito_actor_applies_unskipped_host_reload() {
         session,
     );
     let mut events = hub.subscribe();
-    let reload_inbox = Arc::new(Mutex::new(Some(crate::ext::BootedTools {
-        manager: crate::ext::ExtensionManager::unloaded(),
-        tools: crate::tools::registry::ToolHandler::new(crate::tools::registry::ToolRegistry::new()),
-    })));
+    let candidate = crate::ext::boot_with_tools_shared(
+        bone.path(),
+        bone.path(),
+        &ctx.config,
+        true,
+        crate::ext::BootOptions::default(),
+        "test-model",
+        "test-provider",
+        ctx.config.runtime_settings_handle(),
+    );
+    assert!(candidate.manager.is_available());
+    assert!(candidate.source_errors.is_empty());
+    let reload_inbox = Arc::new(Mutex::new(Some(candidate)));
     ctx.reload_inbox = Some(reload_inbox.clone());
 
     ctx.set_incognito(true);
@@ -515,10 +537,291 @@ fn incognito_actor_applies_unskipped_host_reload() {
     assert!(std::iter::from_fn(|| events.try_recv().ok()).any(
         |event| matches!(event, RuntimeEvent::Status { message } if message.contains("reloaded"))
     ));
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn explicit_tools_reload_skips_automatic_source_check() {
+    assert!(!checks_extension_sources(&RuntimeCommand::RunCommand {
+        request_id: None,
+        name: "config".into(),
+        input: " tools   reload ".into(),
+    }));
+    assert!(checks_extension_sources(&RuntimeCommand::RunCommand {
+        request_id: None,
+        name: "config".into(),
+        input: "tools".into(),
+    }));
+    assert!(checks_extension_sources(&RuntimeCommand::RunCommand {
+        request_id: None,
+        name: "other".into(),
+        input: "tools reload".into(),
+    }));
+    assert!(checks_extension_sources(&RuntimeCommand::SubmitPrompt {
+        request_id: None,
+        text: "test".into(),
+        images: Vec::new(),
+    }));
+}
+
+#[test]
+fn automatic_reload_is_atomic_suppressed_and_bypasses_manual_handoff() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+    crate::config::save_setup_selection(&crate::config::SetupSelection {
+        tools: Vec::new(),
+        commands: Vec::new(),
+    })
+    .unwrap();
+    std::fs::write(
+        dir.path().join("init.lua"),
+        r#"bone.command.register("old", { handler = function() end })"#,
+    )
+    .unwrap();
+
+    let initial = crate::ext::boot_shared(
+        dir.path(),
+        dir.path(),
+        crate::ext::BootOptions::default(),
+        "test-model",
+        "test-provider",
+        Arc::new(Mutex::new(crate::config::settings::Settings::defaults())),
+    );
+    assert!(initial.source_errors.is_empty());
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, _hub, _commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), initial.manager, session);
+    let group = HubGroup::default();
+    let (hub, _group_commands) = Hub::new_grouped(group.clone());
+    let reloads = group.subscribe_extension_reloads();
+    ctx.hub = hub.publisher();
+    ctx.actor_id = Some(1);
+    ctx.extension_sources = group.0.extension_sources.clone();
+    let mut events = hub.subscribe();
+    let bad_handoff = Arc::new(Mutex::new(Some(crate::ext::BootedTools {
+        manager: crate::ext::ExtensionManager::unloaded(),
+        tools: crate::tools::registry::ToolHandler::new(crate::tools::registry::ToolRegistry::new()),
+        source_errors: vec!["broken handoff".into()],
+    })));
+    ctx.reload_inbox = Some(bad_handoff.clone());
+    assert!(!ctx.reload_extensions(true, ReloadReason::Manual));
+    assert!(bad_handoff.lock().unwrap().is_none());
+    assert!(
+        ctx.extensions
+            .commands()
+            .iter()
+            .any(|command| command.name == "old")
+    );
+    while events.try_recv().is_ok() {}
+
+    let stale_handoff = Arc::new(Mutex::new(Some(crate::ext::BootedTools {
+        manager: crate::ext::ExtensionManager::unloaded(),
+        tools: crate::tools::registry::ToolHandler::new(crate::tools::registry::ToolRegistry::new()),
+        source_errors: Vec::new(),
+    })));
+    ctx.reload_inbox = Some(stale_handoff.clone());
+    ctx.initialize_current_sources();
+    let initial_hash = ctx.extension_sources.lock().unwrap().loaded.unwrap();
+
+    std::fs::write(dir.path().join("init.lua"), "-- manual candidate").unwrap();
+    let manual_candidate_hash = crate::ext::source_stamp::stamp(dir.path()).unwrap();
+    std::fs::write(dir.path().join("init.lua"), "-- changed during reload").unwrap();
+    ctx.record_sources_loaded_if_unchanged(Some(manual_candidate_hash));
+    assert_eq!(
+        ctx.extension_sources.lock().unwrap().loaded,
+        Some(initial_hash)
+    );
+
+    std::fs::write(dir.path().join("init.lua"), "this is not valid lua (").unwrap();
+    let failed_hash = crate::ext::source_stamp::stamp(dir.path()).unwrap();
+    ctx.maybe_reload_changed_extensions();
+
+    assert!(stale_handoff.lock().unwrap().is_some());
+    assert!(
+        ctx.extensions
+            .commands()
+            .iter()
+            .any(|command| command.name == "old")
+    );
+    {
+        let state = ctx.extension_sources.lock().unwrap();
+        assert_eq!(state.loaded, Some(initial_hash));
+        assert_eq!(state.attempted, Some(failed_hash));
+        assert!(!state.claiming);
+    }
+    let first_failures = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| {
+            matches!(event, RuntimeEvent::Status { message } if message.contains("reload failed"))
+        })
+        .count();
+    assert_eq!(first_failures, 1);
+    assert!(!reloads.has_changed().unwrap());
+
+    ctx.maybe_reload_changed_extensions();
+    assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+        matches!(event, RuntimeEvent::Status { message } if message.contains("reload failed"))
+    }));
+
+    std::fs::write(
+        dir.path().join("init.lua"),
+        r#"bone.command.register("new", { handler = function() end })"#,
+    )
+    .unwrap();
+    let valid_hash = crate::ext::source_stamp::stamp(dir.path()).unwrap();
+    ctx.maybe_reload_changed_extensions();
+    assert!(
+        ctx.extensions
+            .commands()
+            .iter()
+            .any(|command| command.name == "new")
+    );
+    assert!(reloads.has_changed().unwrap());
+    assert!(
+        !ctx.extensions
+            .commands()
+            .iter()
+            .any(|command| command.name == "old")
+    );
+    assert!(stale_handoff.lock().unwrap().is_some());
+    {
+        let state = ctx.extension_sources.lock().unwrap();
+        assert_eq!(state.loaded, Some(valid_hash));
+        assert_eq!(state.attempted, None);
+    }
+
+    std::fs::write(dir.path().join("init.lua"), "-- manual reload").unwrap();
+    let manual_hash = crate::ext::source_stamp::stamp(dir.path()).unwrap();
+    let manual_candidate = crate::ext::boot_with_tools_shared(
+        dir.path(),
+        dir.path(),
+        &ctx.config,
+        true,
+        crate::ext::BootOptions::default(),
+        "test-model",
+        "test-provider",
+        ctx.config.runtime_settings_handle(),
+    );
+    assert!(manual_candidate.source_errors.is_empty());
+    ctx.reload_inbox = Some(Arc::new(Mutex::new(Some(manual_candidate))));
+    assert!(ctx.reload_extensions(true, ReloadReason::Manual));
+    let state = ctx.extension_sources.lock().unwrap();
+    assert_eq!(state.loaded, Some(manual_hash));
+    assert_eq!(state.attempted, None);
+    drop(state);
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn grouped_automatic_reload_claims_once_and_commits_before_broadcast() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+    crate::config::save_setup_selection(&crate::config::SetupSelection {
+        tools: Vec::new(),
+        commands: Vec::new(),
+    })
+    .unwrap();
+    std::fs::write(dir.path().join("init.lua"), "-- initial").unwrap();
+    let initial = crate::ext::boot_shared(
+        dir.path(),
+        dir.path(),
+        crate::ext::BootOptions::default(),
+        "test-model",
+        "test-provider",
+        Arc::new(Mutex::new(crate::config::settings::Settings::defaults())),
+    );
+    assert!(initial.source_errors.is_empty());
+
+    let group = HubGroup::default();
+    let (actor_one_hub, _actor_one_commands) = Hub::new_grouped(group.clone());
+    let (actor_two_hub, _actor_two_commands) = Hub::new_grouped(group.clone());
+    let mut reloads = group.subscribe_extension_reloads();
+    let session = || {
+        crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+            crate::tools::builtin_tools(),
+        ))
+    };
+    let (mut actor_one, _, _) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), initial.manager, session());
+    let (mut actor_two, _, _) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session(),
+    );
+    actor_one.hub = actor_one_hub.publisher();
+    actor_one.actor_id = Some(1);
+    actor_one.extension_sources = group.0.extension_sources.clone();
+    actor_two.hub = actor_two_hub.publisher();
+    actor_two.actor_id = Some(2);
+    actor_two.extension_sources = group.0.extension_sources.clone();
+    let mut actor_two_events = actor_two_hub.subscribe();
+    actor_one.initialize_current_sources();
+
+    std::fs::write(dir.path().join("init.lua"), "-- first change").unwrap();
+    let first_hash = crate::ext::source_stamp::stamp(dir.path()).unwrap();
+    {
+        let mut state = group.0.extension_sources.lock().unwrap();
+        state.attempted = Some(first_hash);
+        state.claiming = true;
+    }
+    std::fs::write(dir.path().join("init.lua"), "-- changed").unwrap();
+    let changed_hash = crate::ext::source_stamp::stamp(dir.path()).unwrap();
+    actor_two.maybe_reload_changed_extensions();
+    assert!(!actor_two.extensions.is_available());
+    assert!(!reloads.has_changed().unwrap());
+    group.0.extension_sources.lock().unwrap().claiming = false;
+
+    actor_one.maybe_reload_changed_extensions();
+    assert!(reloads.has_changed().unwrap());
+    {
+        let state = group.0.extension_sources.lock().unwrap();
+        assert_eq!(state.loaded, Some(changed_hash));
+        assert_eq!(state.attempted, None);
+        assert!(!state.claiming);
+    }
+    let reload = *reloads.borrow_and_update();
+    assert_eq!(reload.authority_conversation_id, 1);
+    assert_eq!(reload.skip_conversation_id, Some(1));
+
+    actor_two.maybe_reload_changed_extensions();
+    assert!(!actor_two.extensions.is_available());
+    assert!(
+        !std::iter::from_fn(|| actor_two_events.try_recv().ok()).any(|event| {
+            matches!(event, RuntimeEvent::Status { message } if message.contains("reloaded"))
+        })
+    );
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn host_reload_waits_for_turn_end_and_preserves_conversation_state() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let bone = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", bone.path()) };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -536,18 +839,26 @@ async fn host_reload_waits_for_turn_end_and_preserves_conversation_state() {
             let mut runtime_session = crate::runtime::RuntimeSession::new(tools);
             runtime_session.conversation_id = Some(41);
             let session = Arc::new(Mutex::new(runtime_session));
-            let reload_inbox = Arc::new(Mutex::new(Some(crate::ext::BootedTools {
-                manager: crate::ext::ExtensionManager::unloaded(),
-                tools: crate::tools::registry::ToolHandler::new(
-                    crate::tools::registry::ToolRegistry::new(),
-                ),
-            })));
+            let config = crate::config::store::ConfigStore::for_test();
+            let candidate = crate::ext::boot_with_tools_shared(
+                bone.path(),
+                bone.path(),
+                &config,
+                true,
+                crate::ext::BootOptions::default(),
+                "test-model",
+                "test-provider",
+                config.runtime_settings_handle(),
+            );
+            assert!(candidate.manager.is_available());
+            assert!(candidate.source_errors.is_empty());
+            let reload_inbox = Arc::new(Mutex::new(Some(candidate)));
             let daemon = tokio::task::spawn_local(run_daemon(
                 hub.publisher(),
                 commands,
                 provider,
                 crate::ext::ExtensionManager::unloaded(),
-                crate::config::store::ConfigStore::for_test(),
+                config,
                 session.clone(),
                 crate::tools::ApprovalMode::Safe,
                 Some(reload_inbox),
@@ -622,6 +933,12 @@ async fn host_reload_waits_for_turn_end_and_preserves_conversation_state() {
             daemon.abort();
         })
         .await;
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
 }
 
 fn interactive_test_extensions() -> crate::ext::ExtensionManager {
@@ -1689,6 +2006,7 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
             pending_interactions: PendingInteractions::default(),
             pending_commands: std::collections::VecDeque::new(),
             reload_inbox: None,
+            extension_sources: Arc::new(Mutex::new(ExtensionSourceState::default())),
             forward_view_diffs: false,
             host: crate::host::HostService::new(config.clone()),
             config,
@@ -1902,6 +2220,7 @@ async fn resetting_approval_updates_live_mode() {
         pending_interactions: PendingInteractions::default(),
         pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
+        extension_sources: Arc::new(Mutex::new(ExtensionSourceState::default())),
         forward_view_diffs: false,
         host: crate::host::HostService::new(config.clone()),
         config,
@@ -1963,6 +2282,7 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         pending_interactions: PendingInteractions::default(),
         pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
+        extension_sources: Arc::new(Mutex::new(ExtensionSourceState::default())),
         forward_view_diffs: false,
         host: crate::host::HostService::new(config.clone()),
         config,
@@ -3015,6 +3335,7 @@ async fn process_commands_are_conversation_scoped() {
         pending_interactions: PendingInteractions::default(),
         pending_commands: std::collections::VecDeque::new(),
         reload_inbox: None,
+        extension_sources: Arc::new(Mutex::new(ExtensionSourceState::default())),
         forward_view_diffs: false,
         host: crate::host::HostService::new(config.clone()),
         config,

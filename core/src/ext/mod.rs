@@ -20,6 +20,7 @@ pub mod ops_tools;
 pub mod provider_slots;
 pub mod settings_registry;
 pub mod snapshots;
+pub mod source_stamp;
 pub mod types;
 
 pub use engine::{blank_init_lua, populated_init_lua};
@@ -224,6 +225,7 @@ fn boot_with_tools_inner(
         manager: extensions,
         tools: lua_tools,
         shared_state,
+        source_errors,
     } = boot_shared(config_dir, cwd, opts, model, provider, settings);
     if extensions.is_available() {
         config.initialize_extension_catalog(extensions.extension_catalog());
@@ -258,6 +260,7 @@ fn boot_with_tools_inner(
     BootedTools {
         manager: extensions,
         tools,
+        source_errors,
     }
 }
 
@@ -398,6 +401,7 @@ fn run_lua_files_filtered(
         .collect();
     entries.sort();
 
+    let mut errors = Vec::new();
     for path in entries {
         let name = path
             .file_name()
@@ -410,10 +414,9 @@ fn run_lua_files_filtered(
         let source = match std::fs::read_to_string(&path) {
             Ok(source) => source,
             Err(e) => {
-                ctx::runtime_warn(format!(
-                    "bone: warning: failed to read {}: {e}",
-                    path.display()
-                ));
+                let message = format!("failed to read {}: {e}", path.display());
+                ctx::runtime_warn(format!("bone: warning: {message}"));
+                errors.push(message);
                 continue;
             }
         };
@@ -430,10 +433,9 @@ fn run_lua_files_filtered(
             {
                 let _ = rollback.call::<()>(owner);
             }
-            ctx::runtime_warn(format!(
-                "bone: warning: error executing {}: {e}",
-                path.display()
-            ));
+            let message = format!("error executing {}: {e}", path.display());
+            ctx::runtime_warn(format!("bone: warning: {message}"));
+            errors.push(message);
         }
         if let Some(bone) = bone {
             bone.set("_settings_owner", mlua::Value::Nil)
@@ -441,7 +443,11 @@ fn run_lua_files_filtered(
         }
     }
 
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 #[cfg(test)]

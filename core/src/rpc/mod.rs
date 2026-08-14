@@ -47,6 +47,7 @@ pub struct HubGroup(Arc<HubGroupInner>);
 struct HubGroupInner {
     events: Mutex<Vec<std::sync::Weak<broadcast::Sender<RuntimeEvent>>>>,
     extension_reloads: tokio::sync::watch::Sender<ExtensionReloadRequest>,
+    extension_sources: Arc<Mutex<ExtensionSourceState>>,
     host: std::sync::OnceLock<crate::host::HostService>,
 }
 
@@ -56,12 +57,21 @@ struct ExtensionReloadRequest {
     skip_conversation_id: Option<i64>,
 }
 
+#[derive(Debug, Default)]
+struct ExtensionSourceState {
+    loaded: Option<crate::ext::source_stamp::SourceHash>,
+    attempted: Option<crate::ext::source_stamp::SourceHash>,
+    claiming: bool,
+    scan_error: Option<String>,
+}
+
 impl Default for HubGroup {
     fn default() -> Self {
         let (extension_reloads, _) = tokio::sync::watch::channel(Default::default());
         Self(Arc::new(HubGroupInner {
             events: Mutex::new(Vec::new()),
             extension_reloads,
+            extension_sources: Arc::new(Mutex::new(ExtensionSourceState::default())),
             host: std::sync::OnceLock::new(),
         }))
     }
@@ -805,6 +815,13 @@ enum Flow {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReloadReason {
+    Manual,
+    Automatic,
+    Peer,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum InteractionId {
     Approval(u64),
@@ -872,6 +889,18 @@ fn starts_turn(command: &RuntimeCommand) -> bool {
     )
 }
 
+fn checks_extension_sources(command: &RuntimeCommand) -> bool {
+    match command {
+        RuntimeCommand::SubmitPrompt { .. } => true,
+        RuntimeCommand::RunCommand { name, input, .. } => {
+            // The config command turns this into ReloadExtensions. Let that
+            // authoritative manual request perform the one reload.
+            name != "config" || !input.split_whitespace().eq(["tools", "reload"])
+        }
+        _ => false,
+    }
+}
+
 /// The daemon's shared state, threaded through command handling so each
 /// command's behavior lives in exactly one place (instead of being re-coded in
 /// the idle dispatch, the mid-turn select, and the interactive-command loop).
@@ -897,6 +926,8 @@ struct DaemonCtx {
     pending_commands: std::collections::VecDeque<RuntimeCommand>,
     /// Optional single-boot reload handoff from an in-process frontend.
     reload_inbox: Option<Arc<Mutex<Option<crate::ext::BootedTools>>>>,
+    /// Source version shared by grouped actors, or local to this runtime.
+    extension_sources: Arc<Mutex<ExtensionSourceState>>,
     /// Whether this actor forwards Lua view diffs to clients.
     forward_view_diffs: bool,
     /// Sole live configuration authority for this daemon runtime.
@@ -1940,43 +1971,195 @@ impl DaemonCtx {
         }
     }
 
+    fn source_stamp(&self) -> Result<crate::ext::source_stamp::SourceHash, String> {
+        crate::ext::source_stamp::stamp(&crate::config::bone_dir())
+            .map_err(|error| error.to_string())
+    }
+
+    fn report_source_scan_error(&self, error: String) {
+        let changed = {
+            let mut state = self
+                .extension_sources
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.scan_error.as_ref() == Some(&error) {
+                false
+            } else {
+                state.scan_error = Some(error.clone());
+                true
+            }
+        };
+        if changed {
+            self.hub.publish(RuntimeEvent::Status {
+                message: format!("Could not check Lua extension changes: {error}"),
+            });
+        }
+    }
+
+    fn initialize_current_sources(&self) {
+        match self.source_stamp() {
+            Ok(current) => {
+                let mut state = self
+                    .extension_sources
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state.loaded.is_none() {
+                    state.loaded = Some(current);
+                }
+                state.scan_error = None;
+            }
+            Err(error) => self.report_source_scan_error(error),
+        }
+    }
+
+    fn record_sources_loaded_if_unchanged(
+        &self,
+        expected: Option<crate::ext::source_stamp::SourceHash>,
+    ) {
+        let Some(expected) = expected else {
+            return;
+        };
+        match self.source_stamp() {
+            Ok(current) if current == expected => {
+                let mut state = self
+                    .extension_sources
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.loaded = Some(current);
+                state.attempted = None;
+                state.claiming = false;
+                state.scan_error = None;
+            }
+            Ok(_) => {}
+            Err(error) => self.report_source_scan_error(error),
+        }
+    }
+
+    fn maybe_reload_changed_extensions(&mut self) {
+        let current = match self.source_stamp() {
+            Ok(current) => current,
+            Err(error) => {
+                self.report_source_scan_error(error);
+                return;
+            }
+        };
+        let claimed = {
+            let mut state = self
+                .extension_sources
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.scan_error = None;
+            if state.loaded.is_none() {
+                state.loaded = Some(current);
+                false
+            } else if state.loaded == Some(current)
+                || state.attempted == Some(current)
+                || state.claiming
+            {
+                false
+            } else {
+                state.attempted = Some(current);
+                state.claiming = true;
+                true
+            }
+        };
+        if !claimed {
+            return;
+        }
+        if !self.reload_extensions(true, ReloadReason::Automatic) {
+            self.extension_sources
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .claiming = false;
+            return;
+        }
+
+        let unchanged = match self.source_stamp() {
+            Ok(after) if after == current => {
+                let mut state = self
+                    .extension_sources
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.loaded = Some(current);
+                state.attempted = None;
+                state.claiming = false;
+                state.scan_error = None;
+                true
+            }
+            Ok(_) => {
+                self.extension_sources
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .claiming = false;
+                false
+            }
+            Err(error) => {
+                self.extension_sources
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .claiming = false;
+                self.report_source_scan_error(error);
+                false
+            }
+        };
+        if unchanged
+            && let Some(group) = &self.hub.group
+            && let Some(actor_id) = self.actor_id
+        {
+            group.request_extension_reload(actor_id, Some(actor_id));
+        }
+    }
+
     /// Rebuild this actor's Lua/tool runtime while preserving its
     /// conversation-scoped host state. `catalog_authority` is true for the one
     /// actor selected by a host-scoped reload (or for an ungrouped in-process
     /// runtime); peers reload their isolated VM without racing to redefine the
     /// daemon's schema authority.
-    fn reload_extensions(&mut self, catalog_authority: bool) -> bool {
-        // Prefer an in-process handoff; managed actors otherwise boot isolated VMs.
-        let (mut booted, disk_boot) = match self
-            .reload_inbox
-            .as_ref()
-            .and_then(|inbox| inbox.lock().unwrap().take())
-        {
-            Some(booted) => (booted, false),
+    fn reload_extensions(&mut self, catalog_authority: bool, reason: ReloadReason) -> bool {
+        let expected_manual_source = if reason == ReloadReason::Manual {
+            match self.source_stamp() {
+                Ok(source) => Some(source),
+                Err(error) => {
+                    self.report_source_scan_error(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // The in-process handoff is prepared by the frontend for an explicit
+        // reload. Automatic and peer reloads must boot the just-fingerprinted
+        // disk tree instead of consuming a possibly older handoff.
+        let handed_off = (reason == ReloadReason::Manual)
+            .then(|| {
+                self.reload_inbox
+                    .as_ref()
+                    .and_then(|inbox| inbox.lock().unwrap().take())
+            })
+            .flatten();
+        let mut booted = match handed_off {
+            Some(booted) => booted,
             None => {
                 let config_dir = crate::config::bone_dir();
                 let cwd = std::env::current_dir().unwrap_or_default();
                 let model = self.llm.model().to_string();
                 let provider = format!("{} ({})", self.llm.name(), self.llm.id());
-                (
-                    crate::ext::boot_with_tools_shared(
-                        &config_dir,
-                        &cwd,
-                        &self.config,
-                        true,
-                        crate::ext::BootOptions {
-                            headless: true,
-                            ..Default::default()
-                        },
-                        &model,
-                        &provider,
-                        self.config.runtime_settings_handle(),
-                    ),
+                crate::ext::boot_with_tools_shared(
+                    &config_dir,
+                    &cwd,
+                    &self.config,
                     true,
+                    crate::ext::BootOptions {
+                        headless: true,
+                        ..Default::default()
+                    },
+                    &model,
+                    &provider,
+                    self.config.runtime_settings_handle(),
                 )
             }
         };
-        if disk_boot && !booted.manager.is_available() {
+        if !booted.manager.is_available() || !booted.source_errors.is_empty() {
             self.hub.publish(RuntimeEvent::Status {
                 message: "Lua extension reload failed; previous extensions remain active".into(),
             });
@@ -2007,12 +2190,23 @@ impl DaemonCtx {
         ));
         self.hub.publish(view_snapshot(&self.extensions));
         self.publish_snapshot();
+        if reason == ReloadReason::Manual {
+            self.record_sources_loaded_if_unchanged(expected_manual_source);
+        }
         true
     }
 
     fn apply_extension_reload(&mut self, reload: ExtensionReloadRequest) {
         if self.actor_id != reload.skip_conversation_id {
-            self.reload_extensions(self.actor_id == Some(reload.authority_conversation_id));
+            let authority = self.actor_id == Some(reload.authority_conversation_id);
+            self.reload_extensions(
+                authority,
+                if authority {
+                    ReloadReason::Manual
+                } else {
+                    ReloadReason::Peer
+                },
+            );
         }
     }
 
@@ -2036,7 +2230,7 @@ impl DaemonCtx {
             _ => (false, false),
         };
         let busy = self.hub.busy.load(std::sync::atomic::Ordering::SeqCst);
-        let reloaded = reload_needed && !busy && self.reload_extensions(true);
+        let reloaded = reload_needed && !busy && self.reload_extensions(true, ReloadReason::Manual);
         if reload_needed && (reloaded || busy) {
             if let Some(group) = &self.hub.group
                 && let Some(actor_id) = self.actor_id
@@ -2076,6 +2270,9 @@ impl DaemonCtx {
         cmd: RuntimeCommand,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
     ) -> Flow {
+        if checks_extension_sources(&cmd) {
+            self.maybe_reload_changed_extensions();
+        }
         match cmd {
             RuntimeCommand::SubmitPrompt {
                 request_id,
@@ -2483,7 +2680,7 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::ReloadExtensions => {
-                self.reload_extensions(true);
+                self.reload_extensions(true, ReloadReason::Manual);
                 Flow::Continue
             }
             RuntimeCommand::HostRequest {
@@ -2970,6 +3167,11 @@ async fn run_daemon_inner(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .conversation_id;
+    let extension_sources = hub
+        .group
+        .as_ref()
+        .map(|group| group.0.extension_sources.clone())
+        .unwrap_or_else(|| Arc::new(Mutex::new(ExtensionSourceState::default())));
     let mut ctx = DaemonCtx {
         hub,
         llm,
@@ -2983,6 +3185,7 @@ async fn run_daemon_inner(
         pending_interactions: PendingInteractions::default(),
         pending_commands: std::collections::VecDeque::new(),
         reload_inbox,
+        extension_sources,
         forward_view_diffs,
         config,
         host,
@@ -2990,6 +3193,7 @@ async fn run_daemon_inner(
         jobs_seen: None,
         projection,
     };
+    ctx.initialize_current_sources();
     ctx.refresh_projection();
     ctx.publish_config();
 

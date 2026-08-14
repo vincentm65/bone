@@ -310,10 +310,8 @@ impl ExtensionManager {
         }
     }
 
-    /// Returns `true` when the Lua runtime booted and `init.lua` (if present)
-    /// executed without errors.
-    /// Returns `true` when the Lua engine booted successfully
-    /// (regardless of whether `init.lua` exists or ran without errors).
+    /// Returns `true` when the Lua engine booted successfully, regardless of
+    /// whether `init.lua` exists or executed without errors.
     pub fn is_available(&self) -> bool {
         self.engine_ok
     }
@@ -835,6 +833,8 @@ pub struct BootResult {
     /// Conversation-scoped `ctx.state` map shared by the collected Lua tools.
     /// The boot path installs this Arc on the resulting [`crate::tools::registry::ToolHandler`].
     pub shared_state: super::ctx::SharedState,
+    /// Lua source or engine errors encountered while constructing this candidate.
+    pub source_errors: Vec<String>,
 }
 
 /// Fully booted tool system: extension manager + configured tool handler.
@@ -843,6 +843,8 @@ pub struct BootedTools {
     pub manager: ExtensionManager,
     /// The configured tool handler.
     pub tools: crate::tools::registry::ToolHandler,
+    /// Lua source or engine errors encountered while constructing this candidate.
+    pub source_errors: Vec<String>,
 }
 
 /// Normalize a value returned by a Lua command handler.
@@ -1097,6 +1099,7 @@ pub(crate) fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::l
         let name: Option<String> = entry.get::<Option<String>>("name").ok().flatten();
         let tool_call_id: Option<String> =
             entry.get::<Option<String>>("tool_call_id").ok().flatten();
+        let created_at: Option<String> = entry.get::<Option<String>>("created_at").ok().flatten();
         let mut msg = crate::llm::ChatMessage::new(role, content.clone());
         if let Some(calls_table) = entry
             .get::<Option<mlua::Table>>("tool_calls")
@@ -1166,6 +1169,7 @@ pub(crate) fn parse_messages_table(messages_table: &mlua::Table) -> Vec<crate::l
         }
         msg.name = name;
         msg.tool_call_id = tool_call_id;
+        msg.created_at = created_at;
         msg.is_error = entry
             .get::<Option<bool>>("is_error")
             .ok()

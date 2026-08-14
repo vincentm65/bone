@@ -592,9 +592,20 @@ async fn reload_extensions_adopts_inbox_without_disk_boot() {
 
     // The frontend's "single boot" result: an empty tool set, distinguishable
     // from both the builtin set and anything a disk boot would produce.
+    let config_dir = tempfile::tempdir().unwrap();
+    let booted = bone_core::ext::boot(
+        config_dir.path(),
+        config_dir.path(),
+        bone_core::ext::BootOptions::default(),
+        "mock-1",
+        "Mock (mock)",
+    );
+    assert!(booted.manager.is_available());
+    assert!(booted.source_errors.is_empty());
     let inbox = Arc::new(Mutex::new(Some(BootedTools {
-        manager: ExtensionManager::unloaded(),
+        manager: booted.manager,
         tools: ToolHandler::new(ToolRegistry::new()),
+        source_errors: booted.source_errors,
     })));
 
     tokio::spawn(run_daemon(

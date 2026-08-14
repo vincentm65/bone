@@ -8,6 +8,14 @@ use crate::llm::{ChatMessage, ChatRole};
 pub fn build_chat_history(messages: &[ChatMessage], system_prompt: &str) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
     out.push(ChatMessage::new(ChatRole::System, system_prompt));
+    out.extend(provider_facing_messages(messages));
+    out
+}
+
+/// Clone messages and add the same provider-only timing context used by normal
+/// conversation requests.
+pub(crate) fn provider_facing_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(messages.len());
     let mut requested_at = None;
     for message in messages {
         out.push(model_facing_message(message, requested_at.as_deref()));
@@ -43,12 +51,14 @@ pub(crate) fn model_facing_message(
             format!("Message timestamp: {created_at}.")
         }
     };
+    let timing = format!("<timing>{timing}</timing>");
+    if message.content.ends_with(&timing) {
+        return message;
+    }
     if !message.content.is_empty() {
         message.content.push_str("\n\n");
     }
-    message
-        .content
-        .push_str(&format!("<timing>{timing}</timing>"));
+    message.content.push_str(&timing);
     message
 }
 
@@ -157,6 +167,18 @@ mod tests {
         assert!(history[2].content.contains(
             "Tool timing: requested at 2026-07-17T12:00:00Z; completed at 2026-07-17T12:00:05Z."
         ));
+    }
+
+    #[test]
+    fn provider_timing_normalization_is_idempotent() {
+        let mut user = ChatMessage::new(ChatRole::User, "hello");
+        user.created_at = Some("2026-07-17T12:00:00Z".into());
+
+        let once = provider_facing_messages(&[user]);
+        let twice = provider_facing_messages(&once);
+
+        assert_eq!(twice, once);
+        assert_eq!(twice[0].content.matches("<timing>").count(), 1);
     }
 
     #[test]

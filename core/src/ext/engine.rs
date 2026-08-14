@@ -177,12 +177,9 @@ pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
             {
                 let _ = rollback.call::<()>("init.lua");
             }
-            super::ctx::lua_log(
-                &config_dir.to_string_lossy(),
-                "warn",
-                &format!("init.lua error: {e}"),
-            );
-            Ok(false)
+            let message = format!("init.lua error: {e}");
+            super::ctx::lua_log(&config_dir.to_string_lossy(), "warn", &message);
+            Err(message)
         }
     }
 }

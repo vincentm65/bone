@@ -255,7 +255,9 @@ fn lua_loading_continues_after_unreadable_and_invalid_files() {
     std::fs::write(dir.join("c.lua"), "loaded_after_failure = true").unwrap();
 
     let lua = mlua::Lua::new();
-    run_lua_files_filtered(&lua, &dir, |_| true).unwrap();
+    let error = run_lua_files_filtered(&lua, &dir, |_| true).unwrap_err();
+    assert!(error.contains("failed to read"));
+    assert!(error.contains("error executing"));
     assert!(lua.globals().get::<bool>("loaded_after_failure").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -327,7 +329,8 @@ fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
     .unwrap();
     lua.globals().set("bone", bone).unwrap();
 
-    run_lua_files_filtered(&lua, &dir, |_| true).unwrap();
+    let error = run_lua_files_filtered(&lua, &dir, |_| true).unwrap_err();
+    assert!(error.contains("fail after registration"));
 
     let pages = registry.read().unwrap().pages();
     assert_eq!(

@@ -8,6 +8,21 @@ Use the namespaced APIs below. Keep `init.lua` as wiring and put implementations
 in `lua/tools/`, `lua/commands/`, `lua/themes/`, `lua/lib/`, or
 `lua/plugins/<name>/init.lua` as appropriate.
 
+## Reloading
+
+Bone fingerprints `init.lua` plus all lowercase `*.lua` files recursively under
+`lua/`. It checks that fingerprint at interaction boundaries, immediately before
+the next prompt or slash command, rather than polling or watching the filesystem.
+In a multi-conversation daemon, one actor claims the changed fingerprint and
+notifies its peers only after accepting the replacement.
+
+Reload builds a fresh Lua VM and tool registry before replacing the active one.
+If startup, tool, or command source fails, Bone keeps the previous VM and does not
+retry that exact fingerprint; save another Lua change to retry. `/tools reload`
+remains the explicit override: it always attempts a reload even when the
+fingerprint is unchanged, while retaining the previous VM if the candidate is
+broken.
+
 ## Registration
 
 ```lua
@@ -119,11 +134,14 @@ Compaction is implemented in catalog Lua rather than as a dedicated Rust action.
 Lua owns thresholds, history selection, prompts, repair, checkpoint formatting,
 continuation wording, notices, and replacement policy. It supplies explicit messages,
 tools, and an optional positive `max_tokens` to `ctx.llm.complete`, which performs
-exactly one private provider request with no agent/tool loop. Private text is not
-surfaced, and returned tool calls are exposed to Lua without execution. Usage and
-cancellation are accounted by the authoritative Driver turn or daemon command path.
-Transcript mutation occurs only when the validated `conversation.replace` result is
-applied and persisted by the daemon.
+exactly one private provider request with no agent/tool loop. Messages returned by
+`ctx.conversation.history()` include their `created_at` metadata, and private
+requests apply the same provider-only message/tool timing context as normal
+conversation requests. Private text is not surfaced, and returned tool calls are
+exposed to Lua without execution. Usage and cancellation are accounted by the
+authoritative Driver turn or daemon command path. Transcript mutation occurs only
+when the validated `conversation.replace` result is applied and persisted by the
+daemon.
 
 Private completion is intentionally unavailable during `bone run` slash-command
 expansion: that path has no durable conversation or command usage owner. It remains

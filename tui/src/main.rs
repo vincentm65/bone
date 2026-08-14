@@ -161,15 +161,36 @@ struct RuntimeHostBoot {
     session: std::sync::Arc<std::sync::Mutex<bone::runtime::RuntimeSession>>,
 }
 
+fn validate_runtime_extensions(
+    booted: &bone::ext::BootedTools,
+    require_valid_extensions: bool,
+) -> std::io::Result<()> {
+    if !require_valid_extensions
+        || (booted.manager.is_available() && booted.source_errors.is_empty())
+    {
+        return Ok(());
+    }
+    let details = if booted.source_errors.is_empty() {
+        "extension manager is unavailable".to_string()
+    } else {
+        booted.source_errors.join("; ")
+    };
+    Err(std::io::Error::other(format!(
+        "Lua extension boot failed: {details}"
+    )))
+}
+
 /// Boot the runtime host: create tools, init the session DB, and return
 /// the pieces a daemon (in-process or serve) needs. `target` selects which
 /// durable conversation the session attaches to (fresh, latest, or a specific
-/// id).
+/// id). Managed actors require a fully valid extension boot so they cannot
+/// adopt a disk version the actor group has already rejected.
 fn boot_runtime_host_for(
     provider: std::sync::Arc<dyn bone::llm::provider::LlmProvider>,
     config: &bone::config::store::ConfigStore,
     target: bone::rpc::SessionTarget,
     settings: std::sync::Arc<std::sync::Mutex<bone::config::settings::Settings>>,
+    require_valid_extensions: bool,
 ) -> std::io::Result<RuntimeHostBoot> {
     let model = provider.model().to_string();
     let provider_label = format!("{} ({})", provider.name(), provider.id());
@@ -187,6 +208,7 @@ fn boot_runtime_host_for(
         &provider_label,
         settings,
     );
+    validate_runtime_extensions(&booted, require_valid_extensions)?;
     let mut session = bone::runtime::RuntimeSession::new(booted.tools);
     let runtime_settings = config.runtime_settings_snapshot();
     let system_prompt =
@@ -282,7 +304,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         let settings_snapshot = factory_config.runtime_settings_snapshot();
         let approval_mode = approval_mode(&settings_snapshot.resolved().general.approval);
         let settings = factory_config.runtime_settings_handle();
-        let mut boot = boot_runtime_host_for(provider, &factory_config, target, settings)
+        let mut boot = boot_runtime_host_for(provider, &factory_config, target, settings, true)
             .map_err(|err| err.to_string())?;
         let conversation_id = boot
             .session
@@ -742,7 +764,13 @@ async fn main() -> std::io::Result<()> {
     // past chats remain in the DB and are reachable via /history. Only the
     // multi-chat `bone serve` / web UI resumes the latest conversation on attach.
     let settings = config.runtime_settings_handle();
-    let boot = boot_runtime_host_for(provider, &config, bone::rpc::SessionTarget::New, settings)?;
+    let boot = boot_runtime_host_for(
+        provider,
+        &config,
+        bone::rpc::SessionTarget::New,
+        settings,
+        false,
+    )?;
 
     let (hub, commands_rx) = bone::rpc::Hub::new();
     let command_tx = hub.command_sender();

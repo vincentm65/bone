@@ -1,6 +1,7 @@
 use super::cli::{approval_mode, has_flag, parse_provider_model};
 use super::{
     actor_provider_config, configured_theme, render_version_report, resolve_configured_theme,
+    validate_runtime_extensions,
 };
 use bone::config::settings::SettingsError;
 use bone::tools::ApprovalMode;
@@ -144,6 +145,19 @@ fn failed_pre_app_theme_load_warns_and_uses_complete_default() {
             "bone: warning: failed to load configured theme: settings parse error: broken theme; using defaults"
         )
     );
+}
+
+#[test]
+fn managed_actor_rejects_broken_extension_boot() {
+    let booted = bone::ext::BootedTools {
+        manager: bone::ext::ExtensionManager::unloaded(),
+        tools: bone::tools::registry::ToolHandler::new(bone::tools::registry::ToolRegistry::new()),
+        source_errors: vec!["invalid init.lua".into()],
+    };
+
+    assert!(validate_runtime_extensions(&booted, false).is_ok());
+    let error = validate_runtime_extensions(&booted, true).unwrap_err();
+    assert!(error.to_string().contains("invalid init.lua"));
 }
 
 #[test]

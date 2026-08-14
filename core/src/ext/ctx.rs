@@ -1885,6 +1885,7 @@ async fn run_private_completion(
     tools: Vec<crate::tools::ToolDefinition>,
     cancelled: Option<Arc<AtomicBool>>,
 ) -> PrivateLlmCompletion {
+    let messages = crate::chat::provider_facing_messages(&messages);
     let prompt_chars = crate::agent::estimate_context_chars(
         &messages,
         serde_json::to_string(&tools)
@@ -2052,6 +2053,9 @@ fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::E
                 let entry = lua.create_table()?;
                 entry.set("role", msg.role.as_str())?;
                 entry.set("content", msg.content.as_str())?;
+                if let Some(ref created_at) = msg.created_at {
+                    entry.set("created_at", created_at.as_str())?;
+                }
                 if !msg.tool_calls.is_empty() {
                     let calls = lua.create_table()?;
                     for call in &msg.tool_calls {
