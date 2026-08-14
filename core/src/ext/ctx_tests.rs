@@ -35,10 +35,12 @@ fn delegated_agent_inherits_incognito_background_scope_without_persistence() {
         &None,
         &inherited,
         store,
-        RUN_OPT_KEYS,
-        None,
-        None,
-        true,
+        AgentRequestOptions {
+            allowed_keys: RUN_OPT_KEYS,
+            event_sender: None,
+            tool_allowlist: None,
+            parse_context: true,
+        },
     )
     .expect("build delegated request");
 
@@ -95,10 +97,12 @@ fn build_with_opts_and_context_parsing(
         opts,
         &inherited,
         store,
-        RUN_OPT_KEYS,
-        None,
-        None,
-        parse_context,
+        AgentRequestOptions {
+            allowed_keys: RUN_OPT_KEYS,
+            event_sender: None,
+            tool_allowlist: None,
+            parse_context,
+        },
     );
     unsafe {
         match previous {
@@ -1818,6 +1822,67 @@ fn conversation_submit_and_load_queue_generic_operations() {
         vec!["continue this"]
     );
     assert_eq!(rx.try_recv().unwrap(), ConversationOperation::Load(17));
+}
+
+#[test]
+fn conversation_append_queues_valid_messages_and_rejects_empty_input() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut cfg = test_ctx_config();
+    cfg.conversation_operations = Some(tx);
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let (ok, error): (bool, Option<String>) = lua
+        .load(
+            r#"
+            return ctx.conversation.append({
+                { role = "user", content = "remember this" },
+                { role = "invalid", content = "ignored" },
+                { role = "assistant", content = "noted" },
+            })
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(ok);
+    assert!(error.is_none());
+    let ConversationOperation::Append(messages) = rx.try_recv().unwrap() else {
+        panic!("expected append operation");
+    };
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content, "remember this");
+    assert_eq!(messages[1].content, "noted");
+
+    let (ok, error): (bool, Option<String>) = lua
+        .load(r#"return ctx.conversation.append({ { role = "invalid", content = "x" } })"#)
+        .eval()
+        .unwrap();
+    assert!(!ok);
+    assert_eq!(error.as_deref(), Some("no valid messages"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn conversation_operations_are_inert_when_no_authoritative_owner_exists() {
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &test_ctx_config()).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let (load_ok, load_error, append_ok, append_error): (bool, String, bool, String) = lua
+        .load(
+            r#"
+            local load_ok, load_error = ctx.conversation.load(1)
+            local append_ok, append_error = ctx.conversation.append({ { role = "user", content = "x" } })
+            return load_ok, load_error, append_ok, append_error
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(!load_ok);
+    assert!(!append_ok);
+    assert_eq!(load_error, "conversation operation unavailable");
+    assert_eq!(append_error, "conversation operation unavailable");
 }
 
 #[test]

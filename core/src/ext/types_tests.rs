@@ -1,5 +1,45 @@
 use super::*;
 
+fn managed_hook_manager(script: &str) -> ExtensionManager {
+    let lua = Lua::new();
+    let bone = lua.create_table().unwrap();
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+    let registry = Arc::new(std::sync::RwLock::new(Default::default()));
+    let ui = crate::ext::api_ui::new_shared();
+    super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    lua.globals().set("bone", bone.clone()).unwrap();
+    super::super::api::setup_api(
+        &lua,
+        &bone,
+        Arc::clone(&settings),
+        Arc::clone(&registry),
+        std::env::temp_dir().join("bone-managed-hook-settings.yaml"),
+        Arc::clone(&ui),
+    )
+    .unwrap();
+    lua.load(script).exec().unwrap();
+    ExtensionManager::from_arc(
+        Arc::new(Mutex::new(lua)),
+        true,
+        true,
+        Vec::new(),
+        settings,
+        registry,
+        ui,
+    )
+}
+
+fn managed_hook_ctx() -> crate::ext::ctx::CtxConfig {
+    let store = crate::config::store::ConfigStore::for_test();
+    let mut cfg = crate::ext::ctx::CtxConfig::new(
+        std::env::temp_dir().to_string_lossy().to_string(),
+        Arc::new(Mutex::new(Default::default())),
+    );
+    cfg.config_schema = Some(store.schema());
+    cfg.config_store = Some(store);
+    cfg
+}
+
 #[test]
 fn unloaded_manager_exposes_inert_defaults() {
     let manager = ExtensionManager::unloaded();
@@ -234,6 +274,185 @@ fn conversation_load_without_id_is_ignored() {
     action.set("messages", messages).unwrap();
 
     assert!(parse_lua_return_action(&action, false).is_none());
+}
+
+#[test]
+fn managed_hooks_run_in_order_with_full_context_and_collect_operations() {
+    let manager = managed_hook_manager(
+        r#"
+        _G.seen = {}
+        bone.on("custom", function(event, ctx)
+            table.insert(_G.seen, "first:" .. event.value)
+            ctx.state.set("hook", "available")
+            ctx.conversation.append({ { role = "assistant", content = "from hook" } })
+        end)
+        bone.on("custom", function(_, ctx)
+            table.insert(_G.seen, "second:" .. ctx.state.get("hook"))
+        end)
+        "#,
+    );
+
+    let result = manager.dispatch_managed(
+        "custom",
+        serde_json::json!({ "value": "payload" }),
+        managed_hook_ctx(),
+        false,
+    );
+    assert!(result.blocked.is_none());
+    assert_eq!(result.operations.len(), 1);
+    let crate::ext::ctx::ConversationOperation::Append(messages) = &result.operations[0] else {
+        panic!("expected append operation");
+    };
+    assert_eq!(messages[0].content, "from hook");
+
+    let lua = manager.lua_handle();
+    let lua = lua.lock().unwrap();
+    let seen: mlua::Table = lua.globals().get("seen").unwrap();
+    assert_eq!(seen.get::<String>(1).unwrap(), "first:payload");
+    assert_eq!(seen.get::<String>(2).unwrap(), "second:available");
+}
+
+#[test]
+fn managed_hook_timeout_fails_open_and_later_handlers_run() {
+    let manager = managed_hook_manager(
+        r#"
+        _G.after_timeout = false
+        bone.on("tool_call", function()
+            while true do end
+        end, { timeout_ms = 100 })
+        bone.on("tool_call", function()
+            _G.after_timeout = true
+            return { block = true, reason = "blocked second" }
+        end)
+        "#,
+    );
+
+    let started = std::time::Instant::now();
+    let result =
+        manager.dispatch_managed("tool_call", serde_json::json!({}), managed_hook_ctx(), true);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(result.blocked.as_deref(), Some("blocked second"));
+    let lua = manager.lua_handle();
+    assert!(
+        lua.lock()
+            .unwrap()
+            .globals()
+            .get::<bool>("after_timeout")
+            .unwrap()
+    );
+}
+
+#[test]
+fn managed_hook_cancellation_interrupts_lua_and_cleans_up_hook() {
+    let manager = managed_hook_manager(
+        r#"
+        bone.on("custom", function()
+            while true do end
+        end, { timeout_ms = 60000 })
+        "#,
+    );
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut cfg = managed_hook_ctx();
+    cfg.cancelled = Some(cancelled);
+
+    let started = std::time::Instant::now();
+    let result = manager.dispatch_managed("custom", serde_json::json!({}), cfg, false);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(result.operations.is_empty());
+
+    // A completed dispatch must remove the VM hook; unrelated Lua remains usable.
+    let lua = manager.lua_handle();
+    assert_eq!(
+        lua.lock()
+            .unwrap()
+            .load("return 2 + 2")
+            .eval::<i64>()
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
+fn managed_hook_suppresses_lifecycle_emit_but_allows_custom_emit() {
+    let manager = managed_hook_manager(
+        r#"
+        _G.lifecycle_calls = 0
+        _G.custom_calls = 0
+        bone.on("turn_start", function()
+            _G.lifecycle_calls = _G.lifecycle_calls + 1
+            bone.api.emit("turn_start")
+            bone.api.emit("custom")
+        end)
+        bone.on("custom", function()
+            _G.custom_calls = _G.custom_calls + 1
+        end)
+        "#,
+    );
+
+    manager.dispatch_managed(
+        "turn_start",
+        serde_json::json!({}),
+        managed_hook_ctx(),
+        false,
+    );
+
+    let lua = manager.lua_handle();
+    let lua = lua.lock().unwrap();
+    assert_eq!(lua.globals().get::<i64>("lifecycle_calls").unwrap(), 1);
+    assert_eq!(lua.globals().get::<i64>("custom_calls").unwrap(), 1);
+}
+
+#[test]
+fn nested_managed_dispatch_is_suppressed() {
+    let manager = managed_hook_manager(
+        r#"
+        _G.calls = 0
+        bone.on("turn_start", function()
+            _G.calls = _G.calls + 1
+        end)
+        "#,
+    );
+    let lua = manager.lua_handle();
+    let nested = manager.clone();
+    {
+        let lua = lua.lock().unwrap();
+        let callback = lua
+            .create_function(move |_, ()| {
+                nested.dispatch_managed(
+                    "turn_start",
+                    serde_json::json!({}),
+                    managed_hook_ctx(),
+                    false,
+                );
+                Ok(())
+            })
+            .unwrap();
+        lua.globals().set("nested_dispatch", callback).unwrap();
+    }
+    // Replace the registered callback with one that attempts synchronous re-entry.
+    lua.lock()
+        .unwrap()
+        .load(
+            r#"
+            bone._handlers.turn_start[1] = function()
+                _G.calls = _G.calls + 1
+                nested_dispatch()
+            end
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+    manager.dispatch_managed(
+        "turn_start",
+        serde_json::json!({}),
+        managed_hook_ctx(),
+        false,
+    );
+    assert_eq!(
+        lua.lock().unwrap().globals().get::<i64>("calls").unwrap(),
+        1
+    );
 }
 
 #[test]

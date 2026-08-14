@@ -67,6 +67,233 @@ fn restore_ephemeral_image_relays(request_history: &mut Vec<ChatMessage>, relays
     request_history.extend(relays.iter().cloned());
 }
 
+fn record_hook_usage(
+    usage: Vec<crate::ext::ctx::PrivateLlmUsage>,
+    token_stats: &mut TokenStats,
+    session: &dyn SessionSink,
+    usage_records: &mut Vec<UsageRecord>,
+    provider: &str,
+    model: &str,
+) {
+    for usage in usage {
+        token_stats.record_request(
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.cached_tokens,
+            usage.cost,
+        );
+        session.record_usage(
+            provider,
+            model,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.cached_tokens,
+            usage.cost,
+            usage.is_estimated,
+        );
+        usage_records.push(UsageRecord {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            cached_tokens: usage.cached_tokens,
+            cost: usage.cost,
+            is_estimated: usage.is_estimated,
+        });
+    }
+}
+
+fn apply_hook_operations(
+    operations: Vec<crate::ext::ctx::ConversationOperation>,
+    transcript: &mut Vec<ChatMessage>,
+    history: &mut Vec<ChatMessage>,
+    request_history: &mut Vec<ChatMessage>,
+    persist_messages: &mut Vec<ChatMessage>,
+    session: &dyn SessionSink,
+    session_seq: &mut i64,
+) {
+    for operation in operations {
+        match operation {
+            crate::ext::ctx::ConversationOperation::Append(messages) => {
+                for mut message in messages {
+                    if message.created_at.is_none() {
+                        message.created_at = Some(crate::util::utc_now());
+                    }
+                    *session_seq += 1;
+                    session.append_chat_message(&message, *session_seq);
+                    history.push(model_facing_message(&message, None));
+                    request_history.push(model_facing_message(&message, None));
+                    transcript.push(message.clone());
+                    persist_messages.push(message);
+                }
+            }
+            crate::ext::ctx::ConversationOperation::Load(_) => {
+                crate::ext::ctx::runtime_warn(
+                    "bone-lua warn: conversation.load is unavailable during a turn",
+                );
+            }
+        }
+    }
+}
+
+fn forward_key_request(
+    request: crate::pane_content::KeyRequest,
+    key_registry: &crate::runtime::KeyReplyRegistry,
+    events_out: &tokio::sync::mpsc::UnboundedSender<RuntimeEvent>,
+) {
+    let id = key_registry.register(request);
+    if events_out.send(RuntimeEvent::KeyRequest { id }).is_err() {
+        key_registry.remove(id);
+    }
+}
+
+struct DriverHookRuntime<'a> {
+    extensions: &'a ExtensionManager,
+    gate: &'a Arc<dyn ApprovalGate>,
+    cancel: &'a Option<Arc<std::sync::atomic::AtomicBool>>,
+    runtime_events: &'a Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
+    key_reply_registry: &'a Option<crate::runtime::KeyReplyRegistry>,
+    config_store: &'a crate::config::store::ConfigStore,
+    config_schema: &'a bone_protocol::ConfigSchema,
+    llm: &'a Arc<dyn LlmProvider>,
+    system_prompt_override: &'a Option<String>,
+    conversation_id: Option<i64>,
+    background_scope: Option<i64>,
+    agent_depth: usize,
+    cache_scope: &'a str,
+    turn_state: &'a Arc<OnceLock<String>>,
+}
+
+struct DriverHookState<'a> {
+    name: &'a str,
+    payload: serde_json::Value,
+    blockable: bool,
+    tools: &'a ToolHandler,
+    token_stats: &'a mut TokenStats,
+    approval_mode: &'a ApprovalMode,
+    transcript: &'a mut Vec<ChatMessage>,
+    history: &'a mut Vec<ChatMessage>,
+    request_history: &'a mut Vec<ChatMessage>,
+    persist_messages: &'a mut Vec<ChatMessage>,
+    session: &'a dyn SessionSink,
+    session_seq: &'a mut i64,
+    usage_records: &'a mut Vec<UsageRecord>,
+    turn_nudge: Option<String>,
+}
+
+impl DriverHookRuntime<'_> {
+    async fn run(
+        &self,
+        state: DriverHookState<'_>,
+    ) -> (crate::ext::types::ManagedHookResult, bool) {
+        let mut app_state = crate::ext::ctx::AppCtxState::new(
+            state.tools,
+            state.token_stats,
+            state.approval_mode,
+            self.conversation_id,
+            self.llm.id(),
+            self.llm.model(),
+            self.llm.context_window_tokens(),
+            self.system_prompt_override.clone(),
+            Vec::new(),
+            state.transcript.clone(),
+            self.config_store.clone(),
+            self.config_schema.clone(),
+            state.turn_nudge,
+        );
+        app_state.background_scope = self.background_scope;
+        let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&app_state);
+        ctx_cfg.runtime_status = self.runtime_events.clone();
+        ctx_cfg.cancelled = self.cancel.clone();
+        ctx_cfg.approval_gate = Some(crate::tools::SharedGate(self.gate.clone()));
+        ctx_cfg.agent_depth = self.agent_depth;
+        if let Some(handler) = ctx_cfg.tool_handler.as_mut() {
+            handler.approval_gate = ctx_cfg.approval_gate.clone();
+            handler.cancel_token = self.cancel.clone();
+        }
+        let private_usage = Arc::new(Mutex::new(Vec::new()));
+        ctx_cfg.private_llm = Some(crate::ext::ctx::PrivateLlmContext {
+            provider: Arc::clone(self.llm),
+            request_context: ProviderRequestContext {
+                conversation_id: self.conversation_id,
+                cache_scope: Some(self.cache_scope.to_string()),
+                turn_state: Some(Arc::clone(self.turn_state)),
+                max_tokens: None,
+            },
+            usage_records: Arc::clone(&private_usage),
+        });
+        let forwarder = if let (Some(events_out), Some(key_registry)) =
+            (self.runtime_events.clone(), self.key_reply_registry.clone())
+        {
+            let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+            ctx_cfg.key_sender = Some(live_tx);
+            let handle = tokio::spawn(async move {
+                loop {
+                    let request = tokio::select! {
+                        request = live_rx.recv() => request,
+                        _ = &mut stop_rx => {
+                            while let Ok(request) = live_rx.try_recv() {
+                                forward_key_request(request, &key_registry, &events_out);
+                            }
+                            break;
+                        }
+                    };
+                    let Some(request) = request else { break };
+                    forward_key_request(request, &key_registry, &events_out);
+                }
+            });
+            Some((stop_tx, handle))
+        } else {
+            None
+        };
+        let ext = self.extensions.clone();
+        let name = state.name.to_string();
+        let mut hook = tokio::task::spawn_blocking(move || {
+            ext.dispatch_managed(&name, state.payload, ctx_cfg, state.blockable)
+        });
+        let (mut result, cancelled) = if self.cancel.is_some() {
+            tokio::select! {
+                biased;
+                _ = async {
+                    while !self.cancel.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                } => {
+                    let result = tokio::time::timeout(std::time::Duration::from_millis(100), &mut hook)
+                        .await.ok().and_then(Result::ok).unwrap_or_default();
+                    (result, true)
+                }
+                result = &mut hook => (result.unwrap_or_default(), false),
+            }
+        } else {
+            (hook.await.unwrap_or_default(), false)
+        };
+        if let Some((stop, forwarder)) = forwarder {
+            let _ = stop.send(());
+            let _ = forwarder.await;
+        }
+        record_hook_usage(
+            std::mem::take(&mut *private_usage.lock().unwrap_or_else(|p| p.into_inner())),
+            state.token_stats,
+            state.session,
+            state.usage_records,
+            self.llm.id(),
+            self.llm.model(),
+        );
+        apply_hook_operations(
+            std::mem::take(&mut result.operations),
+            state.transcript,
+            state.history,
+            state.request_history,
+            state.persist_messages,
+            state.session,
+            state.session_seq,
+        );
+        (result, cancelled)
+    }
+}
+
 #[cfg(test)]
 #[path = "driver_tests.rs"]
 mod driver_tests;
@@ -304,6 +531,26 @@ impl Driver {
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut persist_messages: Vec<ChatMessage> = Vec::new();
         let mut transcript_replaced = false;
+        // Shared provider routing/cache state for normal requests and private
+        // completions made by any lifecycle hook in this turn.
+        let turn_state = Arc::new(OnceLock::new());
+        let cache_scope = crate::llm::provider::new_cache_scope(conversation_id);
+        let hook_runtime = DriverHookRuntime {
+            extensions: &extensions,
+            gate: &gate,
+            cancel: &cancel,
+            runtime_events: &runtime_events,
+            key_reply_registry: &key_reply_registry,
+            config_store: &config_store,
+            config_schema: &config_schema,
+            llm: &llm,
+            system_prompt_override: &system_prompt_override,
+            conversation_id,
+            background_scope,
+            agent_depth,
+            cache_scope: &cache_scope,
+            turn_state: &turn_state,
+        };
         // The initiating user turn is already present in history/transcript:
         // headless `agent_setup` seeds it, and the TUI pushes it before
         // building the driver. Only insert when it is NOT already the last
@@ -338,6 +585,9 @@ impl Driver {
                 *history_message = model_facing_message(message, None);
             }
         }
+        // Request-only history must be cloned after the initiating user's
+        // timestamp is normalized so provider requests retain that metadata.
+        let mut request_history = history.clone();
 
         // Rich frontend event stream (best-effort; ignored if no consumer).
         let remit = |event: RuntimeEvent| {
@@ -359,14 +609,6 @@ impl Driver {
                 received: token_stats.received,
                 context_length: token_stats.context_length,
             });
-            extensions.dispatch_simple(
-                "token_usage",
-                serde_json::json!({
-                    "sent": token_stats.sent,
-                    "received": token_stats.received,
-                    "context_length": token_stats.context_length,
-                }),
-            );
         };
 
         emit_runtime(RuntimeEvent::Started {
@@ -376,15 +618,107 @@ impl Driver {
             model: llm.model().to_string(),
             display: None,
         });
-        extensions.dispatch_simple("session_start", serde_json::json!({}));
-        extensions.dispatch_simple(
-            "turn_start",
-            serde_json::json!({
-                "task": prompt,
-                "model": llm.model(),
-                "approval": approval_label,
-            }),
-        );
+        let hook_mode = approval_mode.get();
+        let (_, message_hook_cancelled) = hook_runtime
+            .run(DriverHookState {
+                name: "message",
+                payload: serde_json::json!({ "role": "user", "content": prompt }),
+                blockable: false,
+                tools: &tools,
+                token_stats: &mut token_stats,
+                approval_mode: &hook_mode,
+                transcript: &mut transcript,
+                history: &mut history,
+                request_history: &mut request_history,
+                persist_messages: &mut persist_messages,
+                session: session.as_ref(),
+                session_seq: &mut session_seq,
+                usage_records: &mut usage_records,
+                turn_nudge: None,
+            })
+            .await;
+        if message_hook_cancelled {
+            return DriverOutcome {
+                result: Ok(AgentResponse {
+                    content: String::new(),
+                    transcript: transcript.clone(),
+                }),
+                tools,
+                transcript,
+                token_stats,
+                persist_messages,
+                transcript_replaced,
+                usage: usage_records,
+            };
+        }
+        let (_hook, hook_cancelled) = hook_runtime
+            .run(DriverHookState {
+                name: "session_start",
+                payload: serde_json::json!({}),
+                blockable: false,
+                tools: &tools,
+                token_stats: &mut token_stats,
+                approval_mode: &hook_mode,
+                transcript: &mut transcript,
+                history: &mut history,
+                request_history: &mut request_history,
+                persist_messages: &mut persist_messages,
+                session: session.as_ref(),
+                session_seq: &mut session_seq,
+                usage_records: &mut usage_records,
+                turn_nudge: None,
+            })
+            .await;
+        if hook_cancelled {
+            return DriverOutcome {
+                result: Ok(AgentResponse {
+                    content: String::new(),
+                    transcript: transcript.clone(),
+                }),
+                tools,
+                transcript,
+                token_stats,
+                persist_messages,
+                transcript_replaced,
+                usage: usage_records,
+            };
+        }
+        let (_hook, hook_cancelled) = hook_runtime
+            .run(DriverHookState {
+                name: "turn_start",
+                payload: serde_json::json!({
+                    "task": prompt,
+                    "model": llm.model(),
+                    "approval": approval_label,
+                }),
+                blockable: false,
+                tools: &tools,
+                token_stats: &mut token_stats,
+                approval_mode: &hook_mode,
+                transcript: &mut transcript,
+                history: &mut history,
+                request_history: &mut request_history,
+                persist_messages: &mut persist_messages,
+                session: session.as_ref(),
+                session_seq: &mut session_seq,
+                usage_records: &mut usage_records,
+                turn_nudge: None,
+            })
+            .await;
+        if hook_cancelled {
+            return DriverOutcome {
+                result: Ok(AgentResponse {
+                    content: String::new(),
+                    transcript: transcript.clone(),
+                }),
+                tools,
+                transcript,
+                token_stats,
+                persist_messages,
+                transcript_replaced,
+                usage: usage_records,
+            };
+        }
         emit_runtime(RuntimeEvent::Status {
             message: "thinking".to_string(),
         });
@@ -403,20 +737,10 @@ impl Driver {
         let mut error_loop_steer: Option<String> = None;
         const MAX_REPEATED_ERROR_ROUNDS: u32 = 3;
         let mut turns: usize = 0;
-        // Request-only history retains transient reminders at their original
-        // insertion point for the rest of this user turn. Keeping them fixed
-        // lets each tool round extend the previous provider-cache prefix while
-        // still leaving them out of the persisted transcript.
-        let mut request_history = history.clone();
         // Request-only relays for ephemeral tool images. Preserve every relay
         // in insertion order while keeping them out of persistence.
         let mut ephemeral_image_relays: Vec<ChatMessage> = Vec::new();
         let mut last_turn_messages: Vec<String> = Vec::new();
-        // The Codex backend returns routing state on the first request of a
-        // user turn. Keep it across retries and tool rounds in this run, but
-        // create a fresh cell for every later submitted user message/run.
-        let turn_state = Arc::new(OnceLock::new());
-        let cache_scope = crate::llm::provider::new_cache_scope(conversation_id);
         let result: Result<String, String> = 'turn: loop {
             if is_cancelled() {
                 break Ok(String::new());
@@ -486,6 +810,10 @@ impl Driver {
                 // Thread the turn cancel flag through blocking hooks and private
                 // LLM requests.
                 ctx_cfg.cancelled = cancel.clone();
+                ctx_cfg.approval_gate = Some(crate::tools::SharedGate(gate.clone()));
+                if let Some(handler) = ctx_cfg.tool_handler.as_mut() {
+                    handler.approval_gate = ctx_cfg.approval_gate.clone();
+                }
                 // Subagents (depth > 0) run with no runtime_status channel, so
                 // `ctx.ui.status`/`notify` would otherwise fall back to stderr
                 // — corrupting the parent TUI, which owns the terminal in raw
@@ -506,21 +834,27 @@ impl Driver {
                 let mut sys_appends: Vec<String> = Vec::new();
                 let mut tool_filter: Option<Vec<String>> = None;
                 let mut replacement: Option<Vec<ChatMessage>> = None;
+                let mut pending_appends = Vec::new();
                 // Run Lua on a blocking thread so arbitrary handlers cannot
                 // freeze the frontend poll loop. Cloning the manager (shared
                 // `Arc<Mutex<Lua>>`) and awaiting the join keeps this future
                 // yielding while a handler runs.
                 let ext_for_hook = extensions.clone();
                 let mut hook = tokio::task::spawn_blocking(move || {
-                    ext_for_hook.dispatch_before_turn(&ctx_cfg)
+                    ext_for_hook.dispatch_managed(
+                        "before_turn",
+                        serde_json::json!({}),
+                        ctx_cfg,
+                        false,
+                    )
                 });
                 // Private LLM calls cooperatively observe cancellation. Give the
                 // hook a bounded grace period to publish any provider usage it
                 // already received, without letting arbitrary Lua delay cancel.
-                let (actions, hook_cancelled) = tokio::select! {
+                let (hook_result, hook_cancelled) = tokio::select! {
                     biased;
                     _ = await_cancel() => {
-                        let actions = tokio::time::timeout(
+                        let result = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
                             &mut hook,
                         )
@@ -528,7 +862,7 @@ impl Driver {
                         .ok()
                         .and_then(Result::ok)
                         .unwrap_or_default();
-                        (actions, true)
+                        (result, true)
                     }
                     res = &mut hook => (res.unwrap_or_default(), false),
                 };
@@ -567,7 +901,19 @@ impl Driver {
                 if hook_cancelled {
                     break 'turn Ok(String::new());
                 }
-                for action in actions {
+                for operation in hook_result.operations {
+                    match operation {
+                        crate::ext::ctx::ConversationOperation::Append(messages) => {
+                            pending_appends.extend(messages);
+                        }
+                        crate::ext::ctx::ConversationOperation::Load(_) => {
+                            crate::ext::ctx::runtime_warn(
+                                "bone-lua warn: conversation.load is unavailable during a turn",
+                            );
+                        }
+                    }
+                }
+                for action in hook_result.actions {
                     if let Some(new_messages) = action.conversation_replace {
                         replacement = Some(new_messages);
                     }
@@ -596,6 +942,8 @@ impl Driver {
                 let had_replacement = replacement.is_some();
                 let history_rebuilt = had_replacement || !sys_appends.is_empty();
                 if let Some(new_messages) = replacement {
+                    // A replacement wins over appends queued by this dispatch,
+                    // so superseded messages never reach the authoritative sink.
                     transcript = new_messages;
                     transcript_replaced = true;
                     history = build_chat_history(&transcript, &active_system_prompt);
@@ -603,11 +951,29 @@ impl Driver {
                     restore_ephemeral_image_relays(&mut request_history, &ephemeral_image_relays);
                     last_turn_messages.clear();
                     token_stats.clear_context_anchor();
-                } else if !sys_appends.is_empty() {
-                    history = build_chat_history(&transcript, &active_system_prompt);
-                    request_history = history.clone();
-                    restore_ephemeral_image_relays(&mut request_history, &ephemeral_image_relays);
-                    last_turn_messages.clear();
+                } else {
+                    if !pending_appends.is_empty() {
+                        apply_hook_operations(
+                            vec![crate::ext::ctx::ConversationOperation::Append(
+                                pending_appends,
+                            )],
+                            &mut transcript,
+                            &mut history,
+                            &mut request_history,
+                            &mut persist_messages,
+                            session.as_ref(),
+                            &mut session_seq,
+                        );
+                    }
+                    if !sys_appends.is_empty() {
+                        history = build_chat_history(&transcript, &active_system_prompt);
+                        request_history = history.clone();
+                        restore_ephemeral_image_relays(
+                            &mut request_history,
+                            &ephemeral_image_relays,
+                        );
+                        last_turn_messages.clear();
+                    }
                 }
 
                 if history_rebuilt {
@@ -859,6 +1225,32 @@ impl Driver {
                 report_usage(&token_stats);
             }
 
+            if !stream_error {
+                let hook_mode = approval_mode.get();
+                let _ = hook_runtime
+                    .run(DriverHookState {
+                        name: "token_usage",
+                        payload: serde_json::json!({
+                            "sent": token_stats.sent,
+                            "received": token_stats.received,
+                            "context_length": token_stats.context_length,
+                        }),
+                        blockable: false,
+                        tools: &tools,
+                        token_stats: &mut token_stats,
+                        approval_mode: &hook_mode,
+                        transcript: &mut transcript,
+                        history: &mut history,
+                        request_history: &mut request_history,
+                        persist_messages: &mut persist_messages,
+                        session: session.as_ref(),
+                        session_seq: &mut session_seq,
+                        usage_records: &mut usage_records,
+                        turn_nudge: None,
+                    })
+                    .await;
+            }
+
             if stream_error {
                 consecutive_errors += 1;
                 if consecutive_errors >= 5 {
@@ -963,18 +1355,84 @@ impl Driver {
             app_state.background_scope = background_scope;
             tools.app_state = Some(app_state);
             // Re-read each round so a mid-turn Safe/Danger toggle takes effect
-            // on the very next tool batch.
+            // on the very next tool batch. Managed tool_call hooks run before
+            // native approval and preserve the first blocking result per call.
+            let hook_mode = approval_mode.get();
+            let mut hook_blocks = Vec::with_capacity(tool_calls.len());
+            let mut hook_cancelled = false;
+            for call in &tool_calls {
+                let safety = tools.safety_for_call(call);
+                let safety = match safety {
+                    crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
+                    crate::tools::command_policy::CommandSafety::Danger => "danger",
+                };
+                let (hook, cancelled) = hook_runtime
+                    .run(DriverHookState {
+                        name: "tool_call",
+                        payload: serde_json::json!({
+                            "name": call.name,
+                            "call_id": call.id,
+                            "arguments": call.arguments,
+                            "safety": safety,
+                        }),
+                        blockable: true,
+                        tools: &tools,
+                        token_stats: &mut token_stats,
+                        approval_mode: &hook_mode,
+                        transcript: &mut transcript,
+                        history: &mut history,
+                        request_history: &mut request_history,
+                        persist_messages: &mut persist_messages,
+                        session: session.as_ref(),
+                        session_seq: &mut session_seq,
+                        usage_records: &mut usage_records,
+                        turn_nudge: nudge.clone(),
+                    })
+                    .await;
+                hook_blocks.push(hook.blocked);
+                if cancelled {
+                    hook_cancelled = true;
+                    break;
+                }
+            }
+            if hook_cancelled {
+                break 'turn Ok(String::new());
+            }
             let results = execute_tool_calls(
                 &tools,
-                &approval_mode.get(),
+                &hook_mode,
                 gate.as_ref(),
                 tool_calls,
-                &extensions,
+                hook_blocks,
                 agent_depth,
                 runtime_events.clone(),
                 key_reply_registry.clone(),
             )
             .await;
+            for result in &results {
+                let _ = hook_runtime
+                    .run(DriverHookState {
+                        name: "tool_result",
+                        payload: serde_json::json!({
+                            "name": result.name,
+                            "call_id": result.call_id,
+                            "is_error": result.is_error,
+                        }),
+                        blockable: false,
+                        tools: &tools,
+                        token_stats: &mut token_stats,
+                        approval_mode: &hook_mode,
+                        transcript: &mut transcript,
+                        history: &mut history,
+                        request_history: &mut request_history,
+                        persist_messages: &mut persist_messages,
+                        session: session.as_ref(),
+                        session_seq: &mut session_seq,
+                        usage_records: &mut usage_records,
+                        turn_nudge: nudge.clone(),
+                    })
+                    .await;
+            }
             touch_activity(&activity);
 
             // Persist stateful tool state across rounds.
@@ -1112,15 +1570,47 @@ impl Driver {
                 content: content.clone(),
             });
         }
-        extensions.dispatch_simple(
-            "turn_end",
-            match &result {
-                Ok(content) => serde_json::json!({ "ok": true, "content": content }),
-                Err(message) => serde_json::json!({ "ok": false, "error": message }),
-            },
-        );
+        let hook_mode = approval_mode.get();
+        let _ = hook_runtime
+            .run(DriverHookState {
+                name: "turn_end",
+                payload: match &result {
+                    Ok(content) => serde_json::json!({ "ok": true, "content": content }),
+                    Err(message) => serde_json::json!({ "ok": false, "error": message }),
+                },
+                blockable: false,
+                tools: &tools,
+                token_stats: &mut token_stats,
+                approval_mode: &hook_mode,
+                transcript: &mut transcript,
+                history: &mut history,
+                request_history: &mut request_history,
+                persist_messages: &mut persist_messages,
+                session: session.as_ref(),
+                session_seq: &mut session_seq,
+                usage_records: &mut usage_records,
+                turn_nudge: None,
+            })
+            .await;
         session.end();
-        extensions.dispatch_simple("session_end", serde_json::json!({}));
+        let _ = hook_runtime
+            .run(DriverHookState {
+                name: "session_end",
+                payload: serde_json::json!({}),
+                blockable: false,
+                tools: &tools,
+                token_stats: &mut token_stats,
+                approval_mode: &hook_mode,
+                transcript: &mut transcript,
+                history: &mut history,
+                request_history: &mut request_history,
+                persist_messages: &mut persist_messages,
+                session: session.as_ref(),
+                session_seq: &mut session_seq,
+                usage_records: &mut usage_records,
+                turn_nudge: None,
+            })
+            .await;
 
         DriverOutcome {
             result: result.map(|content| AgentResponse {
@@ -1139,17 +1629,18 @@ impl Driver {
 
 /// Execute tool calls respecting the approval gate.
 ///
-/// For each call: ask the extension hooks whether to block, compute the policy
-/// allow-decision from the approval mode, then let the [`ApprovalGate`] resolve
-/// the [`CallOutcome`]. Approved calls are dispatched concurrently via
-/// `ToolHandler::execute_all`; blocked/denied calls get an error result.
+/// For each call: use the already-computed managed hook block result, compute
+/// the policy allow-decision from the approval mode, then let the
+/// [`ApprovalGate`] resolve the [`CallOutcome`]. Approved calls are dispatched
+/// concurrently via `ToolHandler::execute_all`; blocked/denied calls get an error
+/// result.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_tool_calls(
     tools: &ToolHandler,
     mode: &ApprovalMode,
     gate: &dyn ApprovalGate,
     calls: Vec<ToolCall>,
-    extensions: &ExtensionManager,
+    hook_blocks: Vec<Option<String>>,
     agent_depth: usize,
     runtime_events: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
     key_reply_registry: Option<crate::runtime::KeyReplyRegistry>,
@@ -1170,19 +1661,7 @@ pub(crate) async fn execute_tool_calls(
 
     for (i, call) in calls.into_iter().enumerate() {
         let safety = tools.safety_for_call(&call);
-        let safety_str = match safety {
-            crate::tools::command_policy::CommandSafety::ReadOnly => "read_only",
-            crate::tools::command_policy::CommandSafety::Danger => "danger",
-        };
-        let blocked = match extensions.dispatch_tool_call(
-            &call.name,
-            &call.id,
-            &call.arguments,
-            safety_str,
-        ) {
-            crate::ext::EventDispatchResult::Blocked { reason } => Some(reason),
-            crate::ext::EventDispatchResult::Continue => None,
-        };
+        let blocked = hook_blocks.get(i).cloned().flatten();
         let auto_allows = mode.allows_safety(safety);
 
         match gate.decide(blocked, auto_allows, &call).await {
@@ -1247,7 +1726,6 @@ pub(crate) async fn execute_tool_calls(
             tools.execute_all(approved_calls, agent_depth).await
         };
         for ((orig_idx, _call), result) in approved.into_iter().zip(results) {
-            extensions.dispatch_tool_result(&result.name, &result.call_id, result.is_error);
             out.push((orig_idx, result));
         }
     }

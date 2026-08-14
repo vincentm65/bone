@@ -1028,6 +1028,7 @@ struct RecordedUsage {
 #[derive(Default)]
 struct RecordingUsageSink {
     usage: Mutex<Vec<RecordedUsage>>,
+    messages: Mutex<Vec<(i64, ChatMessage)>>,
 }
 
 impl SessionSink for RecordingUsageSink {
@@ -1037,15 +1038,26 @@ impl SessionSink for RecordingUsageSink {
 
     fn append_message(
         &self,
-        _role: &str,
-        _content: &str,
-        _tool_name: Option<&str>,
-        _tool_call_id: Option<&str>,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
         _tool_calls: Option<&str>,
         _images: Option<&str>,
-        _is_error: bool,
-        _seq: i64,
+        is_error: bool,
+        seq: i64,
     ) {
+        let role = match role {
+            "assistant" => ChatRole::Assistant,
+            "tool" => ChatRole::Tool,
+            "system" => ChatRole::System,
+            _ => ChatRole::User,
+        };
+        let mut message = ChatMessage::new(role, content);
+        message.name = tool_name.map(str::to_owned);
+        message.tool_call_id = tool_call_id.map(str::to_owned);
+        message.is_error = is_error;
+        self.messages.lock().unwrap().push((seq, message));
     }
 
     fn record_usage(
@@ -1087,6 +1099,331 @@ fn private_completion_extensions(name: &str, hook: &str) -> (std::path::PathBuf,
         "TestProvider",
     );
     (config_dir, booted.manager)
+}
+
+#[tokio::test]
+async fn managed_driver_lifecycle_runs_once_in_order_and_persists_appends() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-managed-lifecycle",
+        r#"
+_G.lifecycle = {}
+local function record(name, append)
+    bone.on(name, function(_event, ctx)
+        table.insert(_G.lifecycle, name)
+        if append then
+            ctx.conversation.append({ { role = "assistant", content = "hook:" .. name } })
+        end
+    end)
+end
+record("message", true)
+record("session_start", false)
+record("turn_start", false)
+record("token_usage", false)
+record("turn_end", true)
+record("session_end", true)
+"#,
+    );
+    let lua = extensions.lua_handle();
+    let sink = Arc::new(RecordingUsageSink::default());
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "mock-1",
+            vec![
+                ChatEvent::TextDelta("ok".into()),
+                ChatEvent::TokenUsage {
+                    prompt_tokens: 4,
+                    completion_tokens: 1,
+                    cached_tokens: None,
+                    cost: None,
+                },
+            ],
+        )),
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: sink.clone(),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, "test system prompt"),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: Some(42),
+        background_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.as_ref().unwrap().content, "ok");
+    let lifecycle = {
+        let lua = lua.lock().unwrap();
+        let values: mlua::Table = lua.globals().get("lifecycle").unwrap();
+        values
+            .sequence_values::<String>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        lifecycle,
+        [
+            "message",
+            "session_start",
+            "turn_start",
+            "token_usage",
+            "turn_end",
+            "session_end"
+        ]
+    );
+    let appended = outcome
+        .persist_messages
+        .iter()
+        .filter(|message| message.content.starts_with("hook:"))
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        appended,
+        ["hook:message", "hook:turn_end", "hook:session_end"]
+    );
+    let sink_messages = sink.messages.lock().unwrap();
+    for content in appended {
+        assert_eq!(
+            sink_messages
+                .iter()
+                .filter(|(_, message)| message.content == content)
+                .count(),
+            1,
+            "hook append should be written once through the active sink"
+        );
+    }
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[tokio::test]
+async fn managed_driver_hook_finishes_when_lua_retains_ctx() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-managed-retained-ctx",
+        r#"
+bone.on("turn_start", function(_event, ctx)
+    _G.saved_lifecycle_ctx = ctx
+end)
+"#,
+    );
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "mock-1",
+            vec![ChatEvent::TextDelta("ok".into())],
+        )),
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: Some(runtime_tx),
+        key_reply_registry: Some(KeyReplyRegistry::new()),
+        cancel: None,
+        history: build_chat_history(&transcript, "test system prompt"),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        driver.run_to_outcome(prompt),
+    )
+    .await
+    .expect("retained lifecycle ctx must not keep its key forwarder alive");
+    assert_eq!(outcome.result.unwrap().content, "ok");
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[derive(Default)]
+struct RecordingApprovalGate {
+    blocked: Mutex<Vec<Option<String>>>,
+}
+
+#[async_trait]
+impl ApprovalGate for RecordingApprovalGate {
+    async fn decide(
+        &self,
+        blocked: Option<String>,
+        _auto_allows: bool,
+        _call: &ToolCall,
+    ) -> CallOutcome {
+        self.blocked.lock().unwrap().push(blocked.clone());
+        blocked.map_or(CallOutcome::Approve, CallOutcome::Blocked)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_hook_nested_tool_uses_native_approval_without_lifecycle_recursion() {
+    let config_dir = common::temp_dir("driver-managed-nested-tool");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("init.lua"),
+        r#"
+_G.turn_starts = 0
+_G.nested_result = nil
+bone.tool.register({
+    name = "hook_echo",
+    description = "echo from a lifecycle hook",
+    safety = "read_only",
+    parameters = { type = "object", properties = {} },
+    execute = function(_args, _ctx)
+        bone.api.emit("turn_start")
+        return "nested ok"
+    end,
+})
+bone.on("turn_start", function(_event, ctx)
+    _G.turn_starts = _G.turn_starts + 1
+    local result = ctx.tools.call("hook_echo", {}, { approval = "safe" })
+    _G.nested_result = result.content
+end)
+"#,
+    )
+    .unwrap();
+    let config = common::config_store();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &config,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+    let extensions = booted.manager;
+    let tools = booted.tools;
+    let lua = extensions.lua_handle();
+    let gate = Arc::new(RecordingApprovalGate::default());
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "mock-1",
+            vec![ChatEvent::TextDelta("ok".into())],
+        )),
+        extensions,
+        tools,
+        session: Arc::new(NullSessionSink),
+        gate: gate.clone(),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, "test system prompt"),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        driver.run_to_outcome(prompt),
+    )
+    .await
+    .expect("nested lifecycle tool must not deadlock");
+    assert_eq!(outcome.result.unwrap().content, "ok");
+    assert_eq!(gate.blocked.lock().unwrap().as_slice(), [None]);
+    let lua = lua.lock().unwrap();
+    assert_eq!(lua.globals().get::<i64>("turn_starts").unwrap(), 1);
+    assert_eq!(
+        lua.globals().get::<String>("nested_result").unwrap(),
+        "nested ok"
+    );
+    drop(lua);
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+#[tokio::test]
+async fn managed_tool_call_blocks_before_native_approval() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-managed-tool-block",
+        r#"
+bone.on("tool_call", function()
+    return { block = true, reason = "blocked by lifecycle" }
+end)
+"#,
+    );
+    let gate = Arc::new(RecordingApprovalGate::default());
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm: Arc::new(MockProvider::new(
+            "mock-1",
+            vec![ChatEvent::ToolCall(ToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({ "path": "missing" }),
+            })],
+        )),
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink),
+        gate: gate.clone(),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Danger),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, "test system prompt"),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    let blocked = gate.blocked.lock().unwrap();
+    assert_eq!(blocked.as_slice(), [Some("blocked by lifecycle".into())]);
+    assert!(outcome.transcript.iter().any(|message| {
+        message.role == ChatRole::Tool
+            && message.is_error
+            && message.content.contains("blocked by lifecycle")
+    }));
+
+    std::fs::remove_dir_all(&config_dir).ok();
 }
 
 #[tokio::test]
@@ -2241,6 +2578,66 @@ async fn driver_does_not_retry_non_retryable_stream_error() {
 }
 
 // --- Cancellation ---
+
+#[tokio::test]
+async fn cancellation_during_message_hook_stops_before_provider_request() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-message-hook-cancel",
+        r#"
+bone.on("message", function()
+    while true do end
+end, { timeout_ms = 60000 })
+"#,
+    );
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-1".into(),
+        script: Mutex::new(vec![vec![ChatEvent::TextDelta("unexpected".into())]]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_later = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        cancel_later.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: Some(cancel),
+        history: build_chat_history(&transcript, "test system prompt"),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        driver.run_to_outcome(prompt),
+    )
+    .await
+    .expect("message hook cancellation must return promptly");
+    assert_eq!(outcome.result.unwrap().content, "");
+    assert!(llm.captured.lock().unwrap().is_empty());
+
+    std::fs::remove_dir_all(config_dir).ok();
+}
 
 #[tokio::test]
 async fn driver_cancelled_before_turn_returns_empty() {

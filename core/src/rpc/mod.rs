@@ -1018,6 +1018,83 @@ fn bounded_jobs_snapshot(
     }
 }
 
+struct BlockingCtxSetup {
+    app_state: crate::ext::ctx::AppCtxState,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    usage_records: Arc<Mutex<Vec<crate::ext::ctx::PrivateLlmUsage>>>,
+    provider_id: String,
+    provider_model: String,
+    provider: Arc<dyn crate::llm::provider::LlmProvider>,
+    ui: crate::ext::api_ui::SharedUi,
+    key_tx: Option<mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
+    status_tx: Option<mpsc::UnboundedSender<RuntimeEvent>>,
+    key_rx: mpsc::UnboundedReceiver<crate::pane_content::KeyRequest>,
+    status_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
+    approval_gate: crate::tools::SharedGate,
+}
+
+impl BlockingCtxSetup {
+    fn new(daemon: &DaemonCtx) -> Self {
+        let (key_tx, key_rx) = mpsc::unbounded_channel();
+        let (status_tx, status_rx) = mpsc::unbounded_channel();
+        let app_state = daemon.app_ctx_snapshot();
+        let approval_gate =
+            crate::tools::SharedGate(Arc::new(crate::runtime::ChannelApprovalGate::new(
+                status_tx.clone(),
+                daemon.approval_registry.clone(),
+                None,
+                app_state.tool_handler.working_dir.clone(),
+            )));
+        Self {
+            app_state,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            usage_records: Arc::new(Mutex::new(Vec::new())),
+            provider_id: daemon.llm.id().to_string(),
+            provider_model: daemon.llm.model().to_string(),
+            provider: Arc::clone(&daemon.llm),
+            ui: daemon.extensions.ui_handle(),
+            key_tx: Some(key_tx),
+            status_tx: Some(status_tx),
+            key_rx,
+            status_rx,
+            approval_gate,
+        }
+    }
+
+    fn ctx_config(
+        &mut self,
+        conversation_tx: Option<std::sync::mpsc::Sender<crate::ext::ctx::ConversationOperation>>,
+    ) -> crate::ext::ctx::CtxConfig {
+        let mut config = crate::ext::ctx::CtxConfig::new(
+            crate::config::bone_dir().to_string_lossy().to_string(),
+            self.app_state.tool_handler.shared_state.clone(),
+        );
+        self.app_state.apply_to(&mut config);
+        config.key_sender = self.key_tx.take();
+        config.runtime_status = self.status_tx.take();
+        config.approval_gate = Some(self.approval_gate.clone());
+        if let Some(handler) = config.tool_handler.as_mut() {
+            handler.approval_gate = Some(self.approval_gate.clone());
+        }
+        config.ui = Some(self.ui.clone());
+        config.cancelled = Some(self.cancel.clone());
+        config.private_llm = Some(crate::ext::ctx::PrivateLlmContext {
+            provider: Arc::clone(&self.provider),
+            request_context: crate::llm::provider::ProviderRequestContext {
+                conversation_id: self.app_state.session_id,
+                cache_scope: Some(crate::llm::provider::new_cache_scope(
+                    self.app_state.session_id,
+                )),
+                turn_state: Some(Arc::new(std::sync::OnceLock::new())),
+                max_tokens: None,
+            },
+            usage_records: Arc::clone(&self.usage_records),
+        });
+        config.conversation_operations = conversation_tx;
+        config
+    }
+}
+
 impl DaemonCtx {
     fn publish_runtime_event(&mut self, event: RuntimeEvent) {
         self.pending_interactions.track(&event);
@@ -1388,17 +1465,136 @@ impl DaemonCtx {
         ui.terminal_width = width;
     }
 
-    /// Fire a Lua hook and perform any daemon-owned lifecycle side effect.
-    fn dispatch_hook(&self, name: String, payload: serde_json::Value) {
-        self.extensions.dispatch_simple(&name, payload);
-        if name == "session_end" {
-            let session = self.session.lock().unwrap();
-            if let (Some(db), Some(id)) = (session.session_db.as_ref(), session.conversation_id)
-                && let Err(err) = db.end_conversation(id)
-            {
-                self.hub.publish(RuntimeEvent::Status {
-                    message: format!("failed to end conversation: {err}"),
-                });
+    fn finalize_session_end(&self) {
+        let session = self.session.lock().unwrap();
+        if let (Some(db), Some(id)) = (session.session_db.as_ref(), session.conversation_id)
+            && let Err(err) = db.end_conversation(id)
+        {
+            self.hub.publish(RuntimeEvent::Status {
+                message: format!("failed to end conversation: {err}"),
+            });
+        }
+    }
+
+    fn app_ctx_snapshot(&self) -> crate::ext::ctx::AppCtxState {
+        let config_schema = self.config_schema();
+        let settings = self.config.runtime_settings_snapshot();
+        let system_prompt =
+            crate::llm::prompts::system_prompt(settings.resolved().general.system_prompt());
+        let s = self.session.lock().unwrap();
+        let by_provider =
+            crate::ext::ctx::usage_by_provider_context(s.session_db.as_ref(), s.conversation_id);
+        let mut state = crate::ext::ctx::AppCtxState::new(
+            &s.tools,
+            &s.token_stats,
+            &self.mode.get(),
+            s.conversation_id,
+            self.llm.id(),
+            self.llm.model(),
+            self.llm.context_window_tokens(),
+            Some(system_prompt),
+            by_provider,
+            s.transcript.clone(),
+            self.config.clone(),
+            config_schema,
+            s.turn_nudge.lock().unwrap().clone(),
+        );
+        state.background_scope = Some(s.background_scope());
+        state
+    }
+
+    /// Run a lifecycle hook as daemon-owned work. The callback receives the same
+    /// bounded context as an interactive Lua command, while the actor continues
+    /// pumping approvals, key replies, UI diffs, jobs, processes, and cancellation.
+    async fn run_managed_hook(
+        &mut self,
+        commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
+        name: String,
+        payload: serde_json::Value,
+        blockable: bool,
+    ) -> crate::ext::types::ManagedHookResult {
+        use std::sync::atomic::Ordering;
+
+        let mut setup = BlockingCtxSetup::new(self);
+        let ctx_cfg = setup.ctx_config(None);
+        let extensions = self.extensions.clone();
+        let mut handle = tokio::task::spawn_blocking(move || {
+            extensions.dispatch_managed(&name, payload, ctx_cfg, blockable)
+        });
+        let BlockingCtxSetup {
+            cancel,
+            usage_records: private_usage_records,
+            provider_id: private_provider_id,
+            provider_model: private_provider_model,
+            key_rx: mut live_rx,
+            mut status_rx,
+            ..
+        } = setup;
+
+        let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            tokio::select! {
+                result = &mut handle => {
+                    self.drain_diffs();
+                    while let Ok(event) = status_rx.try_recv() {
+                        self.publish_runtime_event(event);
+                    }
+                    self.record_private_llm_usage(
+                        &private_usage_records,
+                        &private_provider_id,
+                        &private_provider_model,
+                    );
+                    self.pending_interactions.clear();
+                    return result.unwrap_or_default();
+                }
+                Some(event) = status_rx.recv() => self.publish_runtime_event(event),
+                Some(request) = live_rx.recv() => {
+                    let id = self.key_registry.register(request);
+                    self.publish_runtime_event(RuntimeEvent::KeyRequest { id });
+                }
+                _ = diff_timer.tick() => {
+                    self.publish_processes(false);
+                    self.publish_jobs(false);
+                    self.drain_diffs();
+                }
+                command = commands.recv() => match command {
+                    Some(RuntimeCommand::ApprovalReply { id, outcome }) => {
+                        self.approval_registry.resolve(id, outcome);
+                        self.pending_interactions.remove(InteractionId::Approval(id));
+                    }
+                    Some(RuntimeCommand::KeyReply { id, key }) => {
+                        self.key_registry.resolve(id, key);
+                        self.pending_interactions.remove(InteractionId::Key(id));
+                    }
+                    Some(RuntimeCommand::Synchronize { request_id, include_messages }) => {
+                        self.publish_synchronized_state(request_id, include_messages, true)
+                    }
+                    Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
+                    Some(RuntimeCommand::GetJobs) => self.publish_jobs(true),
+                    Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
+                    Some(RuntimeCommand::Cancel) | None => {
+                        self.cancel_background_work();
+                        cancel.store(true, Ordering::Relaxed);
+                        self.approval_registry.cancel_all();
+                        self.key_registry.cancel_all();
+                        let result = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            &mut handle,
+                        ).await.ok().and_then(Result::ok).unwrap_or_default();
+                        self.record_private_llm_usage(
+                            &private_usage_records,
+                            &private_provider_id,
+                            &private_provider_model,
+                        );
+                        self.pending_interactions.clear();
+                        self.drain_diffs();
+                        return result;
+                    }
+                    Some(command) if is_config_command(&command) => {
+                        let _ = Box::pin(self.handle_idle_command(command, commands)).await;
+                    }
+                    Some(command) => self.pending_commands.push_back(command),
+                }
             }
         }
     }
@@ -1489,61 +1685,12 @@ impl DaemonCtx {
         if !self.extensions.command_enabled(&name) {
             return None;
         }
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::Ordering;
 
-        // App-derived ctx snapshot, assembled from the session + provider the same
-        // way the TUI's `app_ctx_state` does.
-        let config_schema = self.config_schema();
-        let settings = self.config.runtime_settings_snapshot();
-        let system_prompt =
-            crate::llm::prompts::system_prompt(settings.resolved().general.system_prompt());
-        let app_state = {
-            let s = self.session.lock().unwrap();
-            let by_provider = crate::ext::ctx::usage_by_provider_context(
-                s.session_db.as_ref(),
-                s.conversation_id,
-            );
-            let mut state = crate::ext::ctx::AppCtxState::new(
-                &s.tools,
-                &s.token_stats,
-                &self.mode.get(),
-                s.conversation_id,
-                self.llm.id(),
-                self.llm.model(),
-                self.llm.context_window_tokens(),
-                Some(system_prompt),
-                by_provider,
-                s.transcript.clone(),
-                self.config.clone(),
-                config_schema.clone(),
-                s.turn_nudge.lock().unwrap().clone(),
-            );
-            state.background_scope = Some(s.background_scope());
-            state
-        };
-
-        let lua = self.extensions.lua_handle();
-        let shared_ui = self.extensions.ui_handle();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_for_ctx = cancel.clone();
-        let private_usage_records = Arc::new(Mutex::new(Vec::new()));
-        let private_usage_for_ctx = Arc::clone(&private_usage_records);
-        let private_provider = Arc::clone(&self.llm);
-        let private_provider_id = self.llm.id().to_string();
-        let private_provider_model = self.llm.model().to_string();
-        let private_conversation_id = app_state.session_id;
-        let private_cache_scope = crate::llm::provider::new_cache_scope(private_conversation_id);
-        let private_turn_state = Arc::new(std::sync::OnceLock::new());
-        let (live_tx, mut live_rx) = mpsc::unbounded_channel::<crate::pane_content::KeyRequest>();
-        let (status_tx, mut status_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
+        let mut setup = BlockingCtxSetup::new(self);
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
-        let approval_gate =
-            crate::tools::SharedGate(Arc::new(crate::runtime::ChannelApprovalGate::new(
-                status_tx.clone(),
-                self.approval_registry.clone(),
-                None,
-                app_state.tool_handler.working_dir.clone(),
-            )));
+        let ctx_cfg = setup.ctx_config(Some(conversation_tx));
+        let lua = self.extensions.lua_handle();
 
         // The handler call blocks (Lua + nested tool calls), so run it off the
         // async runtime (spawn_blocking — the handler may nest tool calls).
@@ -1553,29 +1700,6 @@ impl DaemonCtx {
             let lua_guard = lua.lock().unwrap_or_else(|e| e.into_inner());
             // Not found: the only case that should surface as "unknown command".
             let handler = crate::ext::ops_commands::find_handler(&lua_guard, &name)?;
-            let config_dir = crate::config::bone_dir().to_string_lossy().to_string();
-            let shared_state = app_state.tool_handler.shared_state.clone();
-            let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir, shared_state);
-            app_state.apply_to(&mut ctx_cfg);
-            ctx_cfg.key_sender = Some(live_tx);
-            ctx_cfg.runtime_status = Some(status_tx);
-            ctx_cfg.approval_gate = Some(approval_gate.clone());
-            if let Some(handler) = ctx_cfg.tool_handler.as_mut() {
-                handler.approval_gate = Some(approval_gate);
-            }
-            ctx_cfg.ui = Some(shared_ui);
-            ctx_cfg.cancelled = Some(cancel_for_ctx);
-            ctx_cfg.private_llm = Some(crate::ext::ctx::PrivateLlmContext {
-                provider: private_provider,
-                request_context: crate::llm::provider::ProviderRequestContext {
-                    conversation_id: private_conversation_id,
-                    cache_scope: Some(private_cache_scope),
-                    turn_state: Some(private_turn_state),
-                    max_tokens: None,
-                },
-                usage_records: private_usage_for_ctx,
-            });
-            ctx_cfg.conversation_operations = Some(conversation_tx);
             // The handler exists; from here every outcome is `Some(_)` so the daemon
             // never mistakes a ran command for an unknown one.
             let ctx_table = match crate::ext::ctx::create_ctx_table(&lua_guard, &ctx_cfg) {
@@ -1596,6 +1720,15 @@ impl DaemonCtx {
             };
             Some((ret, conversation_rx.try_iter().collect()))
         });
+        let BlockingCtxSetup {
+            cancel,
+            usage_records: private_usage_records,
+            provider_id: private_provider_id,
+            provider_model: private_provider_model,
+            key_rx: mut live_rx,
+            mut status_rx,
+            ..
+        } = setup;
 
         let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
         loop {
@@ -1689,6 +1822,42 @@ impl DaemonCtx {
                     }
                     Some(command) => self.pending_commands.push_back(command),
                 },
+            }
+        }
+    }
+
+    fn apply_conversation_operations(
+        &mut self,
+        operations: Vec<crate::ext::ctx::ConversationOperation>,
+    ) {
+        for operation in operations {
+            match operation {
+                crate::ext::ctx::ConversationOperation::Load(id) => self.load_conversation(id),
+                crate::ext::ctx::ConversationOperation::Append(messages) => {
+                    let settings = self.config.runtime_settings_snapshot();
+                    let system_prompt = crate::llm::prompts::system_prompt(
+                        settings.resolved().general.system_prompt(),
+                    );
+                    let mut session = self.session.lock().unwrap();
+                    for mut message in messages {
+                        if message.created_at.is_none() {
+                            message.created_at = Some(crate::util::utc_now());
+                        }
+                        let role = message.role.as_str().to_string();
+                        let tool_calls = serde_json::to_string(&message.tool_calls).ok();
+                        let images = serde_json::to_string(&message.images).ok();
+                        session.transcript.push(message.clone());
+                        session.append_db_message(
+                            &role,
+                            &message.content,
+                            message.name.as_deref(),
+                            message.tool_call_id.as_deref(),
+                            tool_calls.as_deref(),
+                            images.as_deref(),
+                        );
+                    }
+                    session.recompute_context_estimate(&system_prompt);
+                }
             }
         }
     }
@@ -1934,10 +2103,9 @@ impl DaemonCtx {
                     }
                     s.append_user_to_db(&text, images_json.as_deref());
                 }
-                self.extensions.dispatch_simple(
-                    "message",
-                    serde_json::json!({ "role": "user", "content": text }),
-                );
+                // The Driver dispatches `message` after recognizing this
+                // already-inserted prompt. Keeping lifecycle dispatch there gives
+                // daemon, headless, and delegated turns one ordered path.
                 Flow::StartTurn {
                     request_id,
                     text,
@@ -2359,13 +2527,7 @@ impl DaemonCtx {
                         action: None,
                     });
                     let has_operations = !operations.is_empty();
-                    for operation in operations {
-                        match operation {
-                            crate::ext::ctx::ConversationOperation::Load(id) => {
-                                self.load_conversation(id)
-                            }
-                        }
-                    }
+                    self.apply_conversation_operations(operations);
                     if !has_operations {
                         self.publish_snapshot();
                     }
@@ -2411,28 +2573,18 @@ impl DaemonCtx {
                     action,
                 });
                 if !operations.is_empty() {
-                    for operation in operations {
-                        match operation {
-                            crate::ext::ctx::ConversationOperation::Load(id) => {
-                                self.load_conversation(id)
-                            }
-                        }
-                    }
+                    self.apply_conversation_operations(operations);
                     return Flow::Continue;
                 }
                 if submit && !ret.output.is_empty() {
-                    // Submit the handler's output as the next turn (mirrors the
-                    // SubmitPrompt pre-turn push), then run the turn.
+                    // Submit through the normal turn path. The Driver owns the
+                    // lifecycle `message` hook for command-generated prompts too.
                     {
                         let mut s = self.session.lock().unwrap();
                         s.transcript
                             .push(ChatMessage::new(crate::llm::ChatRole::User, &ret.output));
                         s.append_user_to_db(&ret.output, None);
                     }
-                    self.extensions.dispatch_simple(
-                        "message",
-                        serde_json::json!({ "role": "user", "content": ret.output }),
-                    );
                     Flow::StartTurn {
                         request_id,
                         text: ret.output,
@@ -2451,7 +2603,13 @@ impl DaemonCtx {
             }
             // Lua hook on the daemon's VM; snapshot acknowledges completion.
             RuntimeCommand::DispatchHook { name, payload } => {
-                self.dispatch_hook(name, payload);
+                let result = self
+                    .run_managed_hook(commands, name.clone(), payload, false)
+                    .await;
+                self.apply_conversation_operations(result.operations);
+                if name == "session_end" {
+                    self.finalize_session_end();
+                }
                 self.publish_snapshot();
                 Flow::Continue
             }
@@ -2630,15 +2788,19 @@ impl DaemonCtx {
                     Some(cmd @ RuntimeCommand::SubmitPrompt { .. }) => {
                         self.pending_commands.push_back(cmd)
                     }
-                    // Width updates and ordinary hooks are safe mid-turn. Ending
-                    // the conversation must wait until no turn can still persist.
+                    // Width updates are safe mid-turn. Hooks need the idle
+                    // daemon/session owner so their full context and mutations are
+                    // applied in lifecycle order. Ending the conversation remains
+                    // rejected while the active Driver can still persist.
                     Some(RuntimeCommand::SetTerminalWidth { width }) => self.set_width(width),
                     Some(RuntimeCommand::DispatchHook { name, .. }) if name == "session_end" => {
                         self.hub.publish(RuntimeEvent::Status {
                             message: "busy: cannot end the conversation during a turn".into(),
                         });
                     }
-                    Some(RuntimeCommand::DispatchHook { name, payload }) => self.dispatch_hook(name, payload),
+                    Some(command @ RuntimeCommand::DispatchHook { .. }) => {
+                        self.pending_commands.push_back(command)
+                    }
                     Some(cmd @ RuntimeCommand::Steer { .. }) => conn.send(cmd),
                     Some(cmd) if is_config_command(&cmd) => {
                         let _ = self.handle_idle_command(cmd, commands).await;

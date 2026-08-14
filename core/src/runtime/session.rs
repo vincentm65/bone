@@ -277,7 +277,7 @@ impl RuntimeSession {
     /// Re-estimate the prompt context size from the current transcript + tool
     /// definitions so the token meter reflects a resumed conversation before the
     /// next turn refreshes it. Cheap; no-op-safe on an empty transcript.
-    fn recompute_context_estimate(&mut self, system_prompt: &str) {
+    pub(crate) fn recompute_context_estimate(&mut self, system_prompt: &str) {
         let history = build_chat_history(&self.transcript, system_prompt);
         let tool_defs_json_chars = serde_json::to_value(self.tools.definitions())
             .map(|v| v.to_string().chars().count())

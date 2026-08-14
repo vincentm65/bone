@@ -27,11 +27,18 @@ const EVENT_NAMES: &[&str] = &[
 /// Create the `bone.on` function and the `bone._handlers` storage table.
 pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
     let handlers = lua.create_table().map_err(crate::util::errstr)?;
+    let handler_options = lua.create_table().map_err(crate::util::errstr)?;
     for &name in EVENT_NAMES {
         let array = lua.create_table().map_err(crate::util::errstr)?;
         handlers.set(name, array).map_err(crate::util::errstr)?;
+        let options = lua.create_table().map_err(crate::util::errstr)?;
+        handler_options
+            .set(name, options)
+            .map_err(crate::util::errstr)?;
     }
     bone.set("_handlers", handlers)
+        .map_err(crate::util::errstr)?;
+    bone.set("_handler_options", handler_options)
         .map_err(crate::util::errstr)?;
 
     let on_fn = lua
@@ -47,15 +54,28 @@ pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
                     return Ok(());
                 }
                 let handlers: Table = bone.get("_handlers")?;
+                let handler_options: Table = bone.get("_handler_options")?;
+                let timeout_ms = opts
+                    .as_ref()
+                    .and_then(|opts| opts.get::<Option<u64>>("timeout_ms").ok().flatten())
+                    .unwrap_or(30_000)
+                    .clamp(100, 3_600_000);
+                let stored_opts = lua.create_table()?;
+                stored_opts.set("timeout_ms", timeout_ms)?;
                 match handlers.get::<Option<Table>>(&*event_name)? {
                     Some(event_handlers) => {
                         event_handlers.push(handler)?;
+                        let options: Table = handler_options.get(&*event_name)?;
+                        options.push(stored_opts)?;
                     }
                     None => {
-                        // Unknown event name → create the array on demand (autocmd).
+                        // Unknown event name → create the arrays on demand.
                         let array = lua.create_table()?;
                         array.push(handler)?;
                         handlers.set(&*event_name, array)?;
+                        let options = lua.create_table()?;
+                        options.push(stored_opts)?;
+                        handler_options.set(&*event_name, options)?;
                     }
                 }
                 Ok(())

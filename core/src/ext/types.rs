@@ -35,6 +35,20 @@ pub enum EventDispatchResult {
     Blocked { reason: String },
 }
 
+/// Results produced by a managed full-context lifecycle dispatch.
+#[derive(Debug, Default)]
+pub(crate) struct ManagedHookResult {
+    pub actions: Vec<LuaReturnAction>,
+    pub operations: Vec<crate::ext::ctx::ConversationOperation>,
+    pub blocked: Option<String>,
+}
+
+/// Shared recursion marker for daemon-owned lifecycle dispatch. It is also
+/// installed as Lua app data so compatibility `bone.api.emit` calls made by a
+/// hook cannot recursively re-enter a core lifecycle event.
+#[derive(Default)]
+pub(crate) struct ManagedHookDepth(pub std::sync::atomic::AtomicUsize);
+
 /// Generic action returned by a Lua command or hook.
 #[derive(Debug, Clone, Default)]
 pub struct LuaReturnAction {
@@ -273,9 +287,8 @@ impl ExtensionManager {
     /// This is the injection seam that lets the agent loop be driven and
     /// unit-tested **without** a config directory, a booted Lua VM, or any
     /// `init.lua`. Because every dispatch method early-returns when
-    /// `!self.loaded`, such a manager provably does nothing: no hooks fire,
-    /// `dispatch_tool_call` returns `Continue`, `dispatch_before_turn` returns
-    /// an empty action list.
+    /// `!self.loaded`, such a manager provably does nothing: no hooks fire and
+    /// managed dispatch returns an empty result.
     ///
     /// It is exactly the fallback `boot()` already built internally on engine
     /// failure (`loader.rs`): a fresh `mlua::Lua::new()`, `engine_ok = false`,
@@ -557,80 +570,162 @@ impl ExtensionManager {
         dispatch_event_inner(&lua, "tool_result", payload, false);
     }
 
-    /// Dispatch the `before_turn` event with a full ctx (including conversation
-    /// history). Collects and returns actions from all handlers in registration
-    /// order.
-    pub(crate) fn dispatch_before_turn(
+    /// Dispatch a lifecycle event with the complete bounded context. Handlers run
+    /// sequentially in registration order. The project VM mutex is released
+    /// before callbacks execute so nested Lua tools can safely re-enter the VM.
+    pub(crate) fn dispatch_managed(
         &self,
-        ctx_cfg: &crate::ext::ctx::CtxConfig,
-    ) -> Vec<LuaReturnAction> {
+        name: &str,
+        payload: serde_json::Value,
+        mut ctx_cfg: crate::ext::ctx::CtxConfig,
+        blockable: bool,
+    ) -> ManagedHookResult {
         if !self.loaded {
-            return Vec::new();
+            return ManagedHookResult::default();
         }
+        let (operation_tx, operation_rx) = std::sync::mpsc::channel();
+        ctx_cfg.conversation_operations = Some(operation_tx);
         let lua = match guard_with_bone(&self.lua) {
             Some(g) => g,
-            None => return Vec::new(),
+            None => return ManagedHookResult::default(),
         };
-
-        let bone = match lua.globals().get::<Option<mlua::Table>>("bone") {
-            Ok(Some(t)) => t,
-            _ => return Vec::new(),
+        let bone = match lua.globals().get::<mlua::Table>("bone") {
+            Ok(table) => table,
+            Err(_) => return ManagedHookResult::default(),
         };
-
-        let handlers = match bone.get::<Option<mlua::Table>>("_handlers") {
-            Ok(Some(t)) => t,
-            _ => return Vec::new(),
+        let handlers = match bone
+            .get::<mlua::Table>("_handlers")
+            .and_then(|all| all.get::<Option<mlua::Table>>(name))
+        {
+            Ok(Some(handlers)) => handlers,
+            _ => return ManagedHookResult::default(),
         };
-
-        let event_handlers = match handlers.get::<Option<mlua::Table>>("before_turn") {
-            Ok(Some(t)) => t,
-            _ => return Vec::new(),
+        let options = bone
+            .get::<mlua::Table>("_handler_options")
+            .ok()
+            .and_then(|all| all.get::<Option<mlua::Table>>(name).ok().flatten());
+        let event = match lua.to_value(&payload) {
+            Ok(mlua::Value::Table(table)) => table,
+            _ => return ManagedHookResult::default(),
         };
-
-        let ctx_table = match crate::ext::ctx::create_ctx_table(&lua, ctx_cfg) {
-            Ok(t) => t,
-            Err(e) => {
+        let ctx = match crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg) {
+            Ok(table) => table,
+            Err(error) => {
                 crate::ext::ctx::runtime_warn(format!(
-                    "bone-lua warn: before_turn ctx creation failed: {e}"
+                    "bone-lua warn: {name} ctx creation failed: {error}"
                 ));
-                return Vec::new();
+                return ManagedHookResult::default();
             }
         };
+        let handlers = handlers
+            .sequence_values::<mlua::Function>()
+            .flatten()
+            .collect::<Vec<_>>();
+        let timeouts = options
+            .map(|options| {
+                options
+                    .sequence_values::<mlua::Table>()
+                    .map(|option| {
+                        option
+                            .ok()
+                            .and_then(|option| {
+                                option.get::<Option<u64>>("timeout_ms").ok().flatten()
+                            })
+                            .unwrap_or(30_000)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let lua_handle = self.lua.clone();
+        drop(lua);
 
-        // Event payload: minimal (the handler has ctx for everything).
-        let event_table = match lua.create_table() {
-            Ok(t) => t,
-            Err(e) => {
-                crate::ext::ctx::runtime_warn(format!(
-                    "bone-lua warn: before_turn event table failed: {e}"
-                ));
-                return Vec::new();
+        let mut result = ManagedHookResult::default();
+        for (index, handler) in handlers.into_iter().enumerate() {
+            struct DispatchGuard(Arc<ManagedHookDepth>);
+            impl Drop for DispatchGuard {
+                fn drop(&mut self) {
+                    self.0.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                }
             }
-        };
-
-        let mut actions = Vec::new();
-        for handler in event_handlers.sequence_values::<mlua::Function>() {
-            let handler = match handler {
-                Ok(h) => h,
-                Err(_) => continue,
+            let depth = {
+                let lua = lua_handle.lock().unwrap_or_else(|error| error.into_inner());
+                lua.app_data_ref::<Arc<ManagedHookDepth>>()
+                    .map(|depth| Arc::clone(&depth))
+                    .unwrap_or_else(|| {
+                        let depth = Arc::new(ManagedHookDepth::default());
+                        lua.set_app_data(Arc::clone(&depth));
+                        depth
+                    })
             };
+            if depth.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel) != 0 {
+                depth.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone-lua warn: suppressed recursive lifecycle event '{name}'"
+                ));
+                break;
+            }
+            let _dispatch_guard = DispatchGuard(depth);
 
-            match handler.call::<mlua::Value>((event_table.clone(), ctx_table.clone())) {
-                Ok(mlua::Value::Table(ret)) => {
-                    if let Some(action) = parse_lua_return_action(&ret, true) {
-                        actions.push(action);
+            struct HookGuard(Arc<Mutex<Lua>>);
+            impl Drop for HookGuard {
+                fn drop(&mut self) {
+                    self.0
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove_hook();
+                }
+            }
+
+            let timeout_ms = timeouts.get(index).copied().unwrap_or(30_000);
+            let deadline = std::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(timeout_ms))
+                .unwrap_or_else(std::time::Instant::now);
+            let cancelled = ctx_cfg.cancelled.clone();
+            {
+                let lua = lua_handle.lock().unwrap_or_else(|error| error.into_inner());
+                let _ = lua.set_hook(
+                    mlua::HookTriggers::new().every_nth_instruction(10_000),
+                    move |_, _| {
+                        if cancelled
+                            .as_ref()
+                            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                        {
+                            return Err(mlua::Error::external("hook cancelled"));
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            return Err(mlua::Error::external("hook timed out"));
+                        }
+                        Ok(mlua::VmState::Continue)
+                    },
+                );
+            }
+            let _hook_guard = HookGuard(lua_handle.clone());
+            let returned = handler.call::<mlua::Value>((event.clone(), ctx.clone()));
+            match returned {
+                Ok(mlua::Value::Table(table)) => {
+                    if blockable && table.get::<Option<bool>>("block").ok().flatten() == Some(true)
+                    {
+                        result.blocked = Some(
+                            table
+                                .get::<Option<String>>("reason")
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| "blocked by Lua event handler".into()),
+                        );
+                        break;
+                    }
+                    if let Some(action) = parse_lua_return_action(&table, name == "before_turn") {
+                        result.actions.push(action);
                     }
                 }
                 Ok(_) => {}
-                Err(e) => {
-                    crate::ext::ctx::runtime_warn(format!(
-                        "bone-lua warn: before_turn handler error: {e}"
-                    ));
-                }
+                Err(error) => crate::ext::ctx::runtime_warn(format!(
+                    "bone-lua warn: event handler error for '{name}': {error}"
+                )),
             }
         }
-
-        actions
+        result.operations = operation_rx.try_iter().collect();
+        result
     }
 
     /// Dispatch a keymap rhs: classify the action string (built-in, slash command,

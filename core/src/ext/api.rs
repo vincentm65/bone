@@ -45,6 +45,29 @@ pub fn setup_api(
     // bone.api.emit(event, payload?) — synchronously invoke registered handlers.
     let emit = lua
         .create_function(|lua, (event, payload): (String, Option<Table>)| {
+            let lifecycle_event = matches!(
+                event.as_str(),
+                "session_start"
+                    | "session_end"
+                    | "message"
+                    | "tool_call"
+                    | "tool_result"
+                    | "mode_change"
+                    | "turn_start"
+                    | "token_usage"
+                    | "turn_end"
+                    | "before_turn"
+            );
+            if lifecycle_event
+                && lua
+                    .app_data_ref::<Arc<super::types::ManagedHookDepth>>()
+                    .is_some_and(|depth| depth.0.load(std::sync::atomic::Ordering::Acquire) > 0)
+            {
+                super::ctx::runtime_warn(format!(
+                    "bone-lua warn: suppressed recursive autocmd '{event}'"
+                ));
+                return Ok(());
+            }
             let bone: Table = lua.globals().get("bone")?;
             let handlers: Option<Table> = bone.get::<Option<Table>>("_handlers")?;
             let Some(handlers) = handlers else {

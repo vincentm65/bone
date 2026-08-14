@@ -45,13 +45,21 @@ with the following core groups:
 - daemon-owned settings/configuration access through `ctx.settings.*` and
   `ctx.config.*`.
 
-Event handlers normally receive a minimal context containing notifications and
-configuration metadata. `before_turn` receives the full context. Event handlers
-must not block; this restriction keeps lifecycle callbacks safe in the event
-loop.
+Lifecycle event handlers receive the same complete bounded context. They run as
+managed daemon work rather than inline in a frontend event loop: handlers execute
+sequentially in registration order, may block on bounded APIs and native approval
+requests, observe cancellation, and have a per-registration timeout. The default
+is 30 seconds; override it with `bone.on(name, handler, { timeout_ms = 5000 })`.
+Values are clamped to 100 ms–1 hour. A timeout or handler error fails open and the
+next registration runs, except that the first successful `{ block = true }`
+result still stops a blockable `tool_call`.
 
-All file writes and shell commands still pass through Bone's native approval and
-policy path. The Lua API does not grant an extension a bypass.
+All file writes, shell commands, and nested tool calls still pass through Bone's
+native approval and policy path. This includes `ctx.tools.call` issued by a
+lifecycle handler. The Lua API grants no unrestricted OS access or approval
+bypass. `ctx.ui.key` is available only when the hook has both a live runtime
+event channel and a key-reply registry; headless hooks otherwise retain the
+non-interactive UI APIs.
 
 ## Tools
 
@@ -82,6 +90,12 @@ Commands are invoked as `/name args`. A command can return:
 The `conversation.replace` action replaces the model-facing transcript with
 validated `user`, `assistant`, and `tool` messages. Core recomputes the context
 estimate, persists a checkpoint, and keeps complete SQLite display history.
+`ctx.conversation.append(messages)` validates the same message roles, queues a
+persistent append, and returns `(true, nil)` when an authoritative Driver/session
+owner accepts the request. It returns `(false, reason)` when unavailable or no
+valid messages were supplied. Lua never writes transcript storage directly; the
+Driver or daemon applies each queued append once, updates model-facing state, and
+skips durable writes while the session is incognito.
 Commands and `before_turn` handlers may also return `system_prompt_append`, a
 transient `turn_message`, and a per-turn `tool_filter` allow-list. These fields
 shape the request; they do not mutate the global configuration.
@@ -128,9 +142,17 @@ end)
 Core events are `session_start`, `session_end`, `message`, `tool_call`,
 `tool_result`, `mode_change`, `turn_start`, `token_usage`, `turn_end`, and
 `before_turn`. Handlers run in registration order. The first blocking result
-stops a `tool_call`; handler errors fail open and do not block. Registration in a
-subagent is ignored by default; pass `{ subagents = true }` when that is
-intentional.
+stops a `tool_call`; handler errors fail open and do not block. Ordinary
+lifecycle return actions are ignored; `tool_call` blocking and the documented
+`before_turn` request-shaping values are the exceptions. Hook-originated bounded
+API work is treated as nested work and is not recursively redispatched through
+the same lifecycle chain. Registration in a subagent is ignored by default;
+pass `{ subagents = true }` when that is intentional.
+
+`bone.api.emit(name, payload)` is the synchronous compatibility event path, not
+daemon-managed lifecycle dispatch. Managed callbacks suppress emits of core
+lifecycle names to prevent recursion, while custom compatibility events remain
+emittable.
 
 ## UI API
 

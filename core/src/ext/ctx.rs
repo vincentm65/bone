@@ -468,9 +468,12 @@ pub struct UsageContext {
 }
 
 /// Context for creating the ctx table. These values come from the Rust side.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ConversationOperation {
     Load(i64),
+    /// Append validated messages to the authoritative transcript. The callback
+    /// only queues this request; the owning Driver/session applies and persists it.
+    Append(Vec<crate::llm::ChatMessage>),
 }
 
 #[derive(Clone, Debug)]
@@ -2086,17 +2089,32 @@ fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::E
     conversation_table.set("submit", submit_fn)?;
 
     if let Some(sender) = cfg.conversation_operations.clone() {
+        let load_sender = sender.clone();
         let load_fn = lua.create_function(move |_, id: i64| {
-            sender
+            load_sender
                 .send(ConversationOperation::Load(id))
                 .map_err(|_| mlua::Error::external("conversation operation unavailable"))?;
             Ok(true)
         })?;
         conversation_table.set("load", load_fn)?;
+
+        let append_fn = lua.create_function(move |_, messages: Table| {
+            let messages = super::types::parse_messages_table(&messages);
+            if messages.is_empty() {
+                return Ok((false, Some("no valid messages".to_string())));
+            }
+            sender
+                .send(ConversationOperation::Append(messages))
+                .map_err(|_| mlua::Error::external("conversation operation unavailable"))?;
+            Ok((true, None::<String>))
+        })?;
+        conversation_table.set("append", append_fn)?;
     } else {
-        let load_unavailable_fn =
-            lua.create_function(|_, _: i64| Ok((false, "conversation operation unavailable")))?;
-        conversation_table.set("load", load_unavailable_fn)?;
+        let unavailable_fn = lua.create_function(|_, _: mlua::Value| {
+            Ok((false, "conversation operation unavailable"))
+        })?;
+        conversation_table.set("load", unavailable_fn.clone())?;
+        conversation_table.set("append", unavailable_fn)?;
     }
 
     Ok(conversation_table)
@@ -2174,6 +2192,7 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
         let depth = cfg.tool_call_depth;
         let agent_depth = cfg.agent_depth;
         let inherited_approval = cfg.approval_mode;
+        let approval_gate = cfg.approval_gate.clone();
         // Wire parent cancellation flag so tools stop if user cancels.
         handler.cancel_token = cfg.cancelled.clone();
 
@@ -2215,16 +2234,27 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
                     arguments: args_val,
                 };
 
-                if !handler.allows_call(mode, &call) {
-                    return tool_err(
-                        lua,
-                        name,
-                        call_id,
-                        "Tool not executed. Approval mode does not allow this call.",
-                    );
+                let auto_allows = handler.allows_call(mode, &call);
+                let outcome = match approval_gate.as_ref() {
+                    Some(gate) => block_on(gate.0.decide(None, auto_allows, &call)),
+                    None => crate::tools::approval::decide_call(None, auto_allows),
+                };
+                match outcome {
+                    bone_protocol::CallOutcome::Approve => {}
+                    bone_protocol::CallOutcome::Blocked(reason) => {
+                        return tool_err(lua, name, call_id, reason);
+                    }
+                    bone_protocol::CallOutcome::Denied => {
+                        return tool_err(
+                            lua,
+                            name,
+                            call_id,
+                            "Tool not executed. Approval mode does not allow this call.",
+                        );
+                    }
                 }
 
-                // Execute the tool synchronously.
+                // Execute only after the native gate approves the nested call.
                 let results = block_on(handler.execute_all_live(
                     vec![call],
                     key_sender.clone(),
@@ -2878,10 +2908,12 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             &opts,
             &inherited_run,
             store_run.clone(),
-            RUN_OPT_KEYS,
-            None,
-            tool_allowlist,
-            true,
+            AgentRequestOptions {
+                allowed_keys: RUN_OPT_KEYS,
+                event_sender: None,
+                tool_allowlist,
+                parse_context: true,
+            },
         ) {
             Ok(b) => b,
             Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -2939,10 +2971,12 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 &opts,
                 &inherited_stream,
                 store_stream.clone(),
-                RUN_STREAM_OPT_KEYS,
-                Some(tx),
-                tool_allowlist,
-                true,
+                AgentRequestOptions {
+                    allowed_keys: RUN_STREAM_OPT_KEYS,
+                    event_sender: Some(tx),
+                    tool_allowlist,
+                    parse_context: true,
+                },
             ) {
                 Ok(b) => b,
                 Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -3036,10 +3070,12 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             &opts,
             &inherited_spawn,
             store_spawn.clone(),
-            SPAWN_OPT_KEYS,
-            None,
-            tool_allowlist,
-            true,
+            AgentRequestOptions {
+                allowed_keys: SPAWN_OPT_KEYS,
+                event_sender: None,
+                tool_allowlist,
+                parse_context: true,
+            },
         ) {
             Ok(b) => b,
             Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -3086,10 +3122,12 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
                 &opts,
                 &inherited_followup,
                 store_followup.clone(),
-                SPAWN_OPT_KEYS,
-                None,
-                extract_tool_allowlist(&opts),
-                false,
+                AgentRequestOptions {
+                    allowed_keys: SPAWN_OPT_KEYS,
+                    event_sender: None,
+                    tool_allowlist: extract_tool_allowlist(&opts),
+                    parse_context: false,
+                },
             ) {
                 Ok(b) => b,
                 Err(e) => return agent_result_to_lua(lua, Err(e)),
@@ -3360,21 +3398,30 @@ fn launch_background_job(
     id
 }
 
-/// Shared setup for all three dispatch paths: enforce the depth limit, parse
-/// opts, and assemble the `AgentRequest`. The caller-specific bits —
-/// `event_sender` (streaming) and `tool_allowlist` (spawn) — are passed in;
-/// `on_token_usage` is left `None` for the caller to fill if needed. On a
-/// depth or bad-opts error, returns the message to hand to `agent_result_to_lua`.
+struct AgentRequestOptions<'a> {
+    allowed_keys: &'a [&'a str],
+    event_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentRunEvent>>,
+    tool_allowlist: Option<Vec<String>>,
+    parse_context: bool,
+}
+
+/// Shared setup for all agent dispatch paths: enforce the depth limit, parse
+/// opts, and assemble the `AgentRequest`. `on_token_usage` is left `None` for
+/// the caller to fill if needed. On a depth or bad-opts error, returns the
+/// message to hand to `agent_result_to_lua`.
 fn build_agent_request(
     prompt: String,
     opts: &Option<Table>,
     inherited: &InheritedCtx,
     config_store: ConfigStore,
-    allowed_keys: &[&str],
-    event_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentRunEvent>>,
-    tool_allowlist: Option<Vec<String>>,
-    parse_context: bool,
+    request_options: AgentRequestOptions<'_>,
 ) -> Result<BuiltAgent, String> {
+    let AgentRequestOptions {
+        allowed_keys,
+        event_sender,
+        tool_allowlist,
+        parse_context,
+    } = request_options;
     if inherited.agent_depth >= MAX_AGENT_DEPTH {
         return Err("max agent depth exceeded".to_string());
     }

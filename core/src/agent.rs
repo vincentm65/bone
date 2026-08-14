@@ -624,10 +624,8 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
 
     let mut transcript = request.transcript.clone().unwrap_or_default();
     transcript.push(ChatMessage::new(ChatRole::User, &request.prompt));
-    extensions.dispatch_simple(
-        "message",
-        serde_json::json!({ "role": "user", "content": &request.prompt }),
-    );
+    // Lifecycle `message` dispatch belongs to the Driver, where the complete
+    // managed context and authoritative transcript are available.
     // Any delegated agent (depth > 0) gets the runtime's headless contract
     // wrapped around the caller-supplied persona — independent of which tool or
     // command dispatched it (subagent, compact, memory, shotgun).
