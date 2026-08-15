@@ -956,7 +956,14 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
             let rendered = markdown::render_markdown(&msg.content, width, theme);
             lines.extend(rendered);
         }
-        ChatRole::System | ChatRole::Tool => {
+        ChatRole::System => {
+            // Ambient transcript lines (notices, display-only command replies):
+            // muted markdown, so catalog items can use inline styling (e.g.
+            // /recap's italic summary) while the block reads as secondary.
+            // Diff previews take the earlier branch.
+            lines.extend(markdown::render_markdown_muted(&msg.content, width, theme));
+        }
+        ChatRole::Tool => {
             for raw_line in msg.content.lines() {
                 for visual_line in wrap::wrap_text(raw_line, width as usize) {
                     lines.push(Line::from(Span::styled(

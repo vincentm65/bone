@@ -173,3 +173,81 @@ fn assistant_markdown_preserves_soft_line_breaks_for_terminal_output() {
         ]
     );
 }
+
+#[test]
+fn muted_markdown_colors_plain_text_and_preserves_emphasis() {
+    let theme = Theme::default();
+    let rendered = markdown::render_markdown_muted("plain line\n*Recap: done* line", 80, &theme);
+
+    let text: Vec<String> = rendered
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+                .collect()
+        })
+        .collect();
+    let first = text
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .expect("a non-empty rendered line");
+    assert_eq!(first, "plain line");
+
+    // Every span in a muted render carries an explicit foreground.
+    for line in &rendered {
+        for span in &line.spans {
+            if !span.content.as_ref().is_empty() {
+                assert_eq!(
+                    span.style.fg,
+                    Some(theme.palette.muted),
+                    "span {:?} should carry the muted base color",
+                    span.content.as_ref()
+                );
+            }
+        }
+    }
+
+    // The emphasis span is muted AND italic.
+    let italic_span = rendered
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.as_ref().contains("Recap: done"))
+        .expect("emphasis span rendered");
+    assert_eq!(italic_span.style.fg, Some(theme.palette.muted));
+    assert!(
+        italic_span.style.add_modifier.contains(ratatui::style::Modifier::ITALIC),
+        "emphasis span should be italic"
+    );
+}
+
+#[test]
+fn muted_markdown_keeps_explicit_span_colors() {
+    let theme = Theme::default();
+    // Inline code carries its own fg and must not be repainted muted.
+    let rendered = markdown::render_markdown_muted("text with `code` here", 80, &theme);
+    let code_span = rendered
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.as_ref() == "code")
+        .expect("inline code span rendered");
+    assert_eq!(code_span.style.fg, Some(theme.markdown_inline_code));
+}
+
+#[test]
+fn system_message_renders_as_muted_markdown() {
+    let theme = Theme::default();
+    let msg = crate::chat::Message::system("*Recap: fixed the auth bug*");
+    let lines = super::messages::msg_to_lines(&[msg], &theme, None, 80, true);
+    assert!(!lines.is_empty());
+    let recap_span = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.as_ref().contains("Recap: fixed the auth bug"))
+        .expect("recap span rendered");
+    assert_eq!(recap_span.style.fg, Some(theme.palette.muted));
+    assert!(
+        recap_span.style.add_modifier.contains(ratatui::style::Modifier::ITALIC),
+        "system message emphasis should render italic"
+    );
+}

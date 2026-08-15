@@ -488,7 +488,7 @@ async function onCommandComplete(ev) {
     } else {
       clearWelcome();
       const line = el("div", "system-line command-result");
-      line.textContent = output; $("thread").appendChild(line); scrollDown();
+      line.innerHTML = renderMarkdown(output); $("thread").appendChild(line); scrollDown();
     }
   }
   autosize();
@@ -2077,7 +2077,7 @@ function systemLine(text, isError) {
   if (!isError && /^thinking(?:\.{3}|…)?$/i.test((text || "").trim())) return;
   clearWelcome();
   const line = el("div", "system-line" + (isError ? " error" : ""));
-  line.textContent = text;
+  line.innerHTML = renderMarkdown(text);
   $("thread").appendChild(line);
   scrollDown();
 }

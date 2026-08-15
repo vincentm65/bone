@@ -880,3 +880,21 @@ pub fn render_markdown(content: &str, width: u16, theme: &Theme) -> Vec<Line<'st
 
     renderer.finish()
 }
+
+/// Render markdown with the theme's muted color as the base foreground for
+/// text carrying no explicit color of its own (plain, italic, bold, and
+/// strikethrough spans). Spans with their own color (headings, links, inline
+/// code, code blocks, quote markers) keep it. Used for transcript
+/// system/notice lines so ambient output reads as secondary while still
+/// supporting inline markdown styling.
+pub fn render_markdown_muted(content: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = render_markdown(content, width, theme);
+    for line in &mut lines {
+        for span in &mut line.spans {
+            if span.style.fg.is_none() {
+                span.style.fg = Some(theme.palette.muted);
+            }
+        }
+    }
+    lines
+}

@@ -1,5 +1,6 @@
 //! Extension system types.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, LuaSerdeExt};
@@ -194,6 +195,15 @@ pub struct ExtensionManager {
     /// the TUI can drain diffs even while a tool blocks on `ctx.ui.key()`.
     /// Also cloned into every `ctx.ui.pane` closure.
     ui: super::api_ui::SharedUi,
+    /// Set when this runtime's manager is dropped so off-VM `ctx.time.after`
+    /// timer threads can observe teardown (mlua has no weak `Function`).
+    runtime_stopped: Arc<AtomicBool>,
+}
+
+impl Drop for ExtensionManager {
+    fn drop(&mut self) {
+        self.runtime_stopped.store(true, Ordering::Release);
+    }
 }
 
 pub(crate) fn collect_subagents(
@@ -279,6 +289,7 @@ impl ExtensionManager {
             settings,
             settings_registry,
             ui,
+            runtime_stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -307,7 +318,13 @@ impl ExtensionManager {
             settings: Arc::new(Mutex::new(Settings::defaults())),
             settings_registry: Arc::new(std::sync::RwLock::new(Default::default())),
             ui: super::api_ui::new_shared(),
+            runtime_stopped: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Shared teardown flag consumed by `ctx.time.after` timer threads.
+    pub(crate) fn runtime_stopped(&self) -> Arc<AtomicBool> {
+        self.runtime_stopped.clone()
     }
 
     /// Returns `true` when the Lua engine booted successfully, regardless of
@@ -583,6 +600,7 @@ impl ExtensionManager {
         }
         let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         ctx_cfg.conversation_operations = Some(operation_tx);
+        ctx_cfg.runtime_stopped = Some(self.runtime_stopped());
         let lua = match guard_with_bone(&self.lua) {
             Some(g) => g,
             None => return ManagedHookResult::default(),

@@ -30,6 +30,9 @@ const LUA_PNG_MAX_PIXELS: u64 = 40_000_000;
 const LUA_PNG_MAX_DECODED_BYTES: usize = 160 * 1024 * 1024;
 const LUA_PNG_MAX_ENCODED_BYTES: usize = 192 * 1024 * 1024;
 const LUA_TIMER_MAX_MS: u64 = 60_000;
+/// Upper bound for `ctx.time.after`: a scheduled callback must not outlive a
+/// session by an unbounded margin. Matches the other extension timeouts.
+const LUA_AFTER_MAX_MS: u64 = 3_600_000;
 
 struct DecodedPng {
     width: u32,
@@ -516,6 +519,11 @@ pub struct CtxConfig {
     pub system_prompt_override: Option<String>,
     pub agent_depth: usize,
     pub cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Owning runtime's teardown flag: flipped when the `ExtensionManager` is
+    /// dropped. `ctx.time.after` timers stop early on it so a pending idle-wait
+    /// (e.g. automatic recap) can neither outlive the process nor fire its
+    /// callback — and its LLM call — into a torn-down runtime.
+    pub runtime_stopped: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub usage: Option<UsageContext>,
     /// Request-scoped provider access for one private completion. This is set
     /// only by authoritative runtime paths that can account for provider usage.
@@ -562,6 +570,7 @@ impl CtxConfig {
             system_prompt_override: None,
             agent_depth: 0,
             cancelled: None,
+            runtime_stopped: None,
             usage: None,
             private_llm: None,
             conversation_history: None,
@@ -1015,6 +1024,78 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
                 }
                 std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
             }
+        })?,
+    )?;
+
+    // ctx.time.after(delay_ms, callback) -> { cancel }
+    //
+    // Schedules `callback` to run after `delay_ms` on a dedicated background
+    // thread. Crucially the Lua VM is NOT held while waiting: the thread sleeps
+    // without any VM lock, and only acquires the VM (mlua's internal reentrant
+    // mutex, `send` feature) for the brief moment it runs the callback. This is
+    // what lets an idle-wait (e.g. automatic recap) avoid stalling every other
+    // Lua command, tool, and event handler for the duration of the wait.
+    //
+    // The timer stops early if `handle.cancel()` is called, if the owning
+    // turn's cooperative cancel flag flips, or if the owning runtime is torn
+    // down (`runtime_stopped`, flipped on `ExtensionManager` drop) — so a
+    // pending idle-wait never outlives the process and never fires a stale
+    // callback (and its LLM call) into a dead runtime. The callback runs with
+    // no arguments; a Lua closure closes over the `ctx` it needs.
+    let after_session_cancel = cfg.cancelled.clone();
+    let after_runtime_stopped = cfg.runtime_stopped.clone();
+    time.set(
+        "after",
+        lua.create_function(move |lua, (delay_ms, callback): (u64, mlua::Function)| {
+            let delay = delay_ms.min(LUA_AFTER_MAX_MS);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let cancel_flag = cancelled.clone();
+            let session_cancel = after_session_cancel.clone();
+            let runtime_stopped = after_runtime_stopped.clone();
+            let deadline = Instant::now() + Duration::from_millis(delay);
+            std::thread::spawn(move || {
+                loop {
+                    let stopped = cancelled.load(Ordering::Relaxed)
+                        || session_cancel
+                            .as_ref()
+                            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                        || runtime_stopped
+                            .as_ref()
+                            .is_some_and(|flag| flag.load(Ordering::Relaxed));
+                    if stopped {
+                        return;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    std::thread::sleep((deadline - now).min(Duration::from_millis(100)));
+                }
+                if cancelled.load(Ordering::Relaxed)
+                    || session_cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                    || runtime_stopped
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    return;
+                }
+                if let Err(error) = callback.call::<mlua::Value>(()) {
+                    runtime_warn(format!(
+                        "bone-lua warn: ctx.time.after callback error: {error}"
+                    ));
+                }
+            });
+            let handle = lua.create_table()?;
+            handle.set(
+                "cancel",
+                lua.create_function(move |_, (): ()| {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                    Ok(())
+                })?,
+            )?;
+            Ok(handle)
         })?,
     )?;
     ctx.set("time", time)?;

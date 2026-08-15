@@ -1246,6 +1246,95 @@ fn ctx_time_sleep_honors_cancellation_and_bounds() {
 }
 
 #[test]
+fn ctx_time_after_runs_off_vm_and_can_cancel() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    // (1) after() must be non-blocking to the caller: scheduling a 500 ms timer
+    // and doing 20 ms of other Lua work returns far before the delay elapses.
+    // (The old blocking design would have held the VM for the full 500 ms.)
+    let (scheduled, other_ok, elapsed_ms): (bool, bool, u64) = lua
+        .load(
+            r#"
+            local handle = ctx.time.after(500, function() end)
+            local scheduled = type(handle) == "table" and type(handle.cancel) == "function"
+            local started = ctx.time.monotonic_ms()
+            local other_ok = ctx.time.sleep_ms(20)
+            local elapsed_ms = ctx.time.monotonic_ms() - started
+            handle.cancel()
+            return scheduled, other_ok, elapsed_ms
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(
+        scheduled,
+        "after() must return a handle with a cancel function"
+    );
+    assert!(other_ok, "other Lua work must run while a timer is pending");
+    assert!(
+        elapsed_ms < 300,
+        "after() must not block the caller for the delay; other work took {elapsed_ms}ms"
+    );
+
+    // (2) The callback fires after the delay (it flips a global we poll).
+    lua.load(
+        r#"
+        __after_fired = false
+        ctx.time.after(30, function() __after_fired = true end)
+        "#,
+    )
+    .exec()
+    .unwrap();
+    assert!(
+        wait_for_lua_global(&lua, "__after_fired", 1000),
+        "after() callback did not fire after its delay"
+    );
+
+    // (3) A cancelled timer never fires its callback.
+    lua.load(
+        r#"
+        __after_cancelled_fired = false
+        local h = ctx.time.after(300, function() __after_cancelled_fired = true end)
+        h.cancel()
+        "#,
+    )
+    .exec()
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let cancelled_fired: bool = lua
+        .load("return __after_cancelled_fired == true")
+        .eval()
+        .unwrap();
+    assert!(
+        !cancelled_fired,
+        "cancelled after() must not run its callback"
+    );
+}
+
+/// Poll a Lua global (set from another thread) until it becomes `true` or the
+/// timeout elapses. Each read briefly acquires the VM lock; the writer is the
+/// `ctx.time.after` timer thread, so the two simply serialize.
+fn wait_for_lua_global(lua: &Lua, global: &str, timeout_ms: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let value: bool = lua
+            .load(&format!("return {global} == true"))
+            .eval()
+            .unwrap_or(false);
+        if value {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn ctx_codec_random_hex_is_bounded_and_fresh() {
     let cfg = test_ctx_config();
     let lua = Lua::new();
