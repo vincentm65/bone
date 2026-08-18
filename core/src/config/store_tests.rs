@@ -116,6 +116,7 @@ fn provider_mutation_accepts_custom_reasoning_effort() {
         reasoning_effort: "ultra".into(),
         fast_mode: None,
         supports_prompt_cache_key: Some(true),
+        stream_usage: None,
         api_key: None,
     };
 
@@ -175,6 +176,7 @@ fn provider_mutation_rejects_invalid_completed_candidates() {
             reasoning_effort: String::new(),
             fast_mode,
             supports_prompt_cache_key: None,
+            stream_usage: None,
             api_key: None,
         };
 
@@ -188,6 +190,72 @@ fn provider_mutation_rejects_invalid_completed_candidates() {
     let persisted = super::super::domains::load_providers().unwrap().unwrap();
     assert!(!persisted.providers.contains_key("zero-concurrency"));
     assert!(!persisted.providers.contains_key("non-codex-fast"));
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn provider_mutation_validates_and_normalizes_stream_usage() {
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+
+    // A non-canonical stream_usage is rejected on the write path (matching the
+    // load path), so it can never be persisted and break the next startup.
+    let before = store.snapshot();
+    let invalid = ProviderUpdate {
+        id: "bad".into(),
+        label: "Bad".into(),
+        base_url: "http://localhost".into(),
+        model: "test-model".into(),
+        endpoint: "/chat/completions".into(),
+        handler: "openai".into(),
+        context_window_tokens: None,
+        max_concurrency: None,
+        reasoning_effort: String::new(),
+        fast_mode: None,
+        supports_prompt_cache_key: None,
+        stream_usage: Some("maybe".into()),
+        api_key: None,
+    };
+    let error = store.upsert_provider(invalid, before.revision).unwrap_err();
+    assert!(
+        error.1.contains("stream_usage must be"),
+        "expected a stream_usage domain error, got: {error:?}"
+    );
+    let after = store.snapshot();
+    assert_eq!(after.revision, before.revision);
+    assert!(!after.providers.iter().any(|provider| provider.id == "bad"));
+
+    // A case/whitespace variant is normalized to the canonical lowercase form,
+    // exactly as the YAML load path does, and round-trips cleanly.
+    let before = store.snapshot();
+    let normalized = ProviderUpdate {
+        id: "case".into(),
+        label: "Case".into(),
+        base_url: "http://localhost".into(),
+        model: "test-model".into(),
+        endpoint: "/chat/completions".into(),
+        handler: "openai".into(),
+        context_window_tokens: None,
+        max_concurrency: None,
+        reasoning_effort: String::new(),
+        fast_mode: None,
+        supports_prompt_cache_key: None,
+        stream_usage: Some(" TRUE ".into()),
+        api_key: None,
+    };
+    store.upsert_provider(normalized, before.revision).unwrap();
+    let persisted = super::super::domains::load_providers().unwrap().unwrap();
+    assert_eq!(persisted.providers["case"].stream_usage, "true");
 
     unsafe {
         match previous {
@@ -407,6 +475,7 @@ fn reload_settings_does_not_adopt_peer_documents() {
             reasoning_effort: String::new(),
             fast_mode: false,
             supports_prompt_cache_key: false,
+            stream_usage: "auto".into(),
         },
     );
     super::super::domains::persist_providers(&providers).unwrap();

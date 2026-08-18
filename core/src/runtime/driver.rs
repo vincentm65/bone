@@ -542,7 +542,11 @@ impl Driver {
         // Shared provider routing/cache state for normal requests and private
         // completions made by any lifecycle hook in this turn.
         let turn_state = Arc::new(OnceLock::new());
-        let cache_scope = crate::llm::provider::new_cache_scope(conversation_id);
+        // Durable conversations keep a deterministic cross-turn scope; incognito
+        // runs pin to the stable per-actor fallback so the provider sees the
+        // same cache/routing identity on every turn instead of a fresh one.
+        let cache_scope =
+            crate::llm::provider::new_cache_scope(conversation_id, background_scope);
         let hook_runtime = DriverHookRuntime {
             extensions: &extensions,
             gate: &gate,

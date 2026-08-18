@@ -14,6 +14,7 @@ fn redacted_provider_never_serializes_a_secret_field() {
         reasoning_effort: String::new(),
         fast_mode: false,
         supports_prompt_cache_key: true,
+        stream_usage: "auto".into(),
         api_key_configured: true,
     };
     let json = serde_json::to_value(provider).unwrap();
@@ -37,5 +38,6 @@ fn omitted_provider_key_preserves_update_intent() {
     assert_eq!(update.max_concurrency, None);
     assert_eq!(update.fast_mode, None);
     assert_eq!(update.supports_prompt_cache_key, None);
+    assert_eq!(update.stream_usage, None);
     assert_eq!(update.api_key, None);
 }

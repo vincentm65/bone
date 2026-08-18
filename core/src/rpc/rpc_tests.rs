@@ -2075,6 +2075,7 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
         reasoning_effort: String::new(),
         fast_mode: false,
         supports_prompt_cache_key: false,
+        stream_usage: "auto".into(),
     };
     let mut providers = crate::config::ProvidersConfig::default();
     providers
@@ -2121,6 +2122,7 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
                 reasoning_effort: String::new(),
                 fast_mode: None,
                 supports_prompt_cache_key: None,
+                stream_usage: None,
             },
             expected_revision: revision,
             request_id: Some("upsert".into()),

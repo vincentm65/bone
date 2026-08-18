@@ -18,14 +18,20 @@ fn tool_argument_contract() {
 
 #[test]
 fn conversation_cache_scope_is_deterministic() {
-    assert_eq!(new_cache_scope(Some(42)), "conversation-42");
-    assert_eq!(new_cache_scope(Some(42)), "conversation-42");
+    assert_eq!(new_cache_scope(Some(42), Some(7)), "conversation-42");
+    assert_eq!(new_cache_scope(Some(42), None), "conversation-42");
+}
+
+#[test]
+fn fallback_cache_scope_is_stable_per_actor() {
+    assert_eq!(new_cache_scope(None, Some(7)), "actor-7");
+    assert_eq!(new_cache_scope(None, Some(7)), "actor-7");
 }
 
 #[test]
 fn non_conversation_cache_scopes_are_distinct() {
-    let first = new_cache_scope(None);
-    let second = new_cache_scope(None);
+    let first = new_cache_scope(None, None);
+    let second = new_cache_scope(None, None);
 
     assert!(first.starts_with(&format!("run-{}-", std::process::id())));
     assert_ne!(first, second);

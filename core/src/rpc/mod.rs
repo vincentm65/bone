@@ -1123,6 +1123,7 @@ impl BlockingCtxSetup {
                 conversation_id: self.app_state.session_id,
                 cache_scope: Some(crate::llm::provider::new_cache_scope(
                     self.app_state.session_id,
+                    self.app_state.background_scope,
                 )),
                 turn_state: Some(Arc::new(std::sync::OnceLock::new())),
                 max_tokens: None,

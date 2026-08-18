@@ -162,14 +162,17 @@ static NEXT_CACHE_SCOPE: AtomicU64 = AtomicU64::new(1);
 
 /// Stable cache namespace for all provider requests in one run. Durable
 /// conversations retain a deterministic namespace across process restarts.
-pub fn new_cache_scope(conversation_id: Option<i64>) -> String {
-    conversation_id.map_or_else(
-        || {
+/// Non-durable runs (incognito mode) use the stable per-actor fallback scope
+/// so every turn shares the same namespace instead of churning a fresh
+/// identity that defeats provider-side prefix caching and routing affinity.
+pub fn new_cache_scope(conversation_id: Option<i64>, fallback_scope: Option<i64>) -> String {
+    conversation_id
+        .map(|id| format!("conversation-{id}"))
+        .or_else(|| fallback_scope.map(|id| format!("actor-{id}")))
+        .unwrap_or_else(|| {
             let sequence = NEXT_CACHE_SCOPE.fetch_add(1, Ordering::Relaxed);
             format!("run-{}-{sequence}", std::process::id())
-        },
-        |id| format!("conversation-{id}"),
-    )
+        })
 }
 
 #[derive(Debug, Clone, Default)]

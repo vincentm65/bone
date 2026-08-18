@@ -44,7 +44,7 @@ struct Inner {
 fn merge_provider_update(
     update: &ProviderUpdate,
     existing: Option<&super::ProviderEntry>,
-) -> super::ProviderEntry {
+) -> Result<super::ProviderEntry, String> {
     let fast_mode = update
         .fast_mode
         .unwrap_or_else(|| existing.is_some_and(|entry| entry.fast_mode));
@@ -56,8 +56,16 @@ fn merge_provider_update(
             .map(|entry| entry.api_key.clone())
             .unwrap_or_default()
     });
+    let stream_usage = update.stream_usage.clone().unwrap_or_else(|| {
+        existing
+            .map(|entry| entry.stream_usage.clone())
+            .unwrap_or_else(|| "auto".to_string())
+    });
+    // Enforce the same `stream_usage` domain the YAML load path applies, so a
+    // value written here can always be read back on the next startup.
+    let stream_usage = super::providers_config::normalize_stream_usage(&stream_usage)?;
 
-    super::ProviderEntry {
+    Ok(super::ProviderEntry {
         label: update.label.clone(),
         base_url: update.base_url.clone(),
         model: update.model.clone(),
@@ -69,7 +77,8 @@ fn merge_provider_update(
         reasoning_effort: update.reasoning_effort.clone(),
         fast_mode,
         supports_prompt_cache_key,
-    }
+        stream_usage,
+    })
 }
 
 impl ConfigStore {
@@ -234,7 +243,8 @@ impl ConfigStore {
             ));
         }
         let mut config = inner.providers.clone();
-        let entry = merge_provider_update(update, config.providers.get(&update.id));
+        let entry = merge_provider_update(update, config.providers.get(&update.id))
+            .map_err(|error| (inner.revision, error))?;
         config.providers.insert(update.id.clone(), entry);
         super::domains::validate_providers(&config).map_err(|error| (inner.revision, error))?;
         Ok(config)
@@ -619,6 +629,7 @@ impl ConfigStore {
                 reasoning_effort: provider.reasoning_effort.clone(),
                 fast_mode: provider.fast_mode,
                 supports_prompt_cache_key: provider.supports_prompt_cache_key,
+                stream_usage: provider.stream_usage.clone(),
                 api_key_configured: !provider.api_key.is_empty(),
             })
             .collect();
@@ -761,7 +772,7 @@ impl ConfigStore {
     ) -> Result<(), (u64, String)> {
         self.mutate(expected, |inner| {
             let mut candidate = inner.providers.clone();
-            let entry = merge_provider_update(&update, candidate.providers.get(&update.id));
+            let entry = merge_provider_update(&update, candidate.providers.get(&update.id))?;
             candidate.providers.insert(update.id.clone(), entry);
             super::domains::validate_providers(&candidate)?;
             super::domains::persist_providers(&candidate)?;

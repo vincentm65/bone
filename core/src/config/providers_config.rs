@@ -132,6 +132,16 @@ pub struct ProviderEntry {
     /// strict OpenAI-compatible APIs do not receive an unsupported field.
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_prompt_cache_key: bool,
+
+    /// Request streaming usage (`stream_options.include_usage`). `"auto"`
+    /// (default) keeps the built-in host list; `"true"`/`"false"` force the
+    /// choice for OpenAI-compatible backends that only emit usage when asked.
+    #[serde(
+        default = "default_stream_usage",
+        deserialize_with = "stream_usage_or_default",
+        skip_serializing_if = "is_default_stream_usage"
+    )]
+    pub stream_usage: String,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -210,8 +220,59 @@ fn default_endpoint() -> String {
 fn default_handler() -> String {
     "openai".to_string()
 }
+fn default_stream_usage() -> String {
+    "auto".to_string()
+}
+fn is_default_stream_usage(value: &str) -> bool {
+    value == "auto"
+}
+
+/// `stream_usage` accepts the strings `auto`/`true`/`false` (case-insensitive)
+/// or a plain boolean, normalizing to lowercase. This is the single canonical
+/// domain check shared by the YAML load path and the config write path.
+pub(crate) fn normalize_stream_usage(raw: &str) -> Result<String, String> {
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "auto" | "true" | "false" => Ok(value),
+        other => Err(format!(
+            "stream_usage must be \"auto\", \"true\", or \"false\", got {other:?}"
+        )),
+    }
+}
+
+fn stream_usage_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Text(String),
+    }
+    match Option::<Raw>::deserialize(deserializer)? {
+        None => Ok(default_stream_usage()),
+        Some(Raw::Bool(flag)) => Ok(if flag { "true" } else { "false" }.to_string()),
+        Some(Raw::Text(text)) => normalize_stream_usage(&text).map_err(serde::de::Error::custom),
+    }
+}
 
 impl ProviderEntry {
+    /// Whether the OpenAI-compatible request should ask the backend for a
+    /// streaming usage receipt. `auto` preserves the original host allowlist;
+    /// explicit true/false overrides it for that provider.
+    pub fn stream_usage_enabled(&self) -> bool {
+        match self.stream_usage.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => self.base_url.contains("api.openai.com")
+                || self.base_url.contains("api.deepseek.com")
+                || self.base_url.contains("cli-chat-proxy.grok.com")
+                || self.base_url.contains("127.0.0.1")
+                || self.base_url.contains("localhost"),
+        }
+    }
+
     /// Non-empty reasoning effort for request builders. Empty/`default` → None.
     pub fn reasoning_effort_opt(&self) -> Option<String> {
         let effort = self.reasoning_effort.trim();

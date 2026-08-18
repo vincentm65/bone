@@ -38,6 +38,9 @@ pub struct OpenAiCompatProvider {
     /// Empty/default means omit and let the model use its own default.
     reasoning_effort: Option<String>,
     supports_prompt_cache_key: bool,
+    /// Whether to send `stream_options.include_usage`; derived from the
+    /// per-provider `stream_usage` setting (`auto` keeps the legacy host list).
+    stream_usage: bool,
     context_window_tokens: Option<u64>,
     /// Optional transport overrides used by subscription-backed providers
     /// that speak the same Chat Completions wire format.
@@ -65,6 +68,7 @@ impl OpenAiCompatProvider {
             max_tokens: None,
             reasoning_effort: entry.reasoning_effort_opt(),
             supports_prompt_cache_key: entry.supports_prompt_cache_key,
+            stream_usage: entry.stream_usage_enabled(),
             context_window_tokens: entry.context_window_tokens,
             api_key_override: None,
             extra_headers: Vec::new(),
@@ -93,16 +97,6 @@ impl OpenAiCompatProvider {
     fn chat_url(&self) -> String {
         format!("{}{}", self.base_url, self.endpoint)
     }
-}
-
-/// Providers that send streaming usage only when explicitly requested.
-/// Grok's cache-hit token count is part of that final usage chunk.
-fn stream_usage_enabled(base_url: &str) -> bool {
-    base_url.contains("api.openai.com")
-        || base_url.contains("api.deepseek.com")
-        || base_url.contains("cli-chat-proxy.grok.com")
-        || base_url.contains("127.0.0.1")
-        || base_url.contains("localhost")
 }
 
 fn prompt_cache_key(enabled: bool, context: &ProviderRequestContext) -> Option<String> {
@@ -584,7 +578,7 @@ impl LlmProvider for OpenAiCompatProvider {
         tools: Vec<ToolDefinition>,
         context: ProviderRequestContext,
     ) -> Result<ResponseStream, LlmError> {
-        let stream_options = stream_usage_enabled(&self.base_url).then_some(StreamOptions {
+        let stream_options = self.stream_usage.then_some(StreamOptions {
             include_usage: true,
         });
 

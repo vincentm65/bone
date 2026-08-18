@@ -6,6 +6,14 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn default_stream_usage() -> String {
+    "auto".to_string()
+}
+
+fn is_auto_stream_usage(value: &str) -> bool {
+    value == "auto"
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigSchema {
     pub pages: Vec<ConfigPage>,
@@ -72,6 +80,9 @@ pub struct ProviderConfig {
     pub fast_mode: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_prompt_cache_key: bool,
+    /// `auto` / `true` / `false`; `auto` keeps the built-in host list.
+    #[serde(default = "default_stream_usage", skip_serializing_if = "is_auto_stream_usage")]
+    pub stream_usage: String,
     pub api_key_configured: bool,
 }
 
@@ -95,6 +106,9 @@ pub struct ProviderUpdate {
     /// Omitted updates preserve the provider's current value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_prompt_cache_key: Option<bool>,
+    /// Omitted updates preserve the provider's current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_usage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }

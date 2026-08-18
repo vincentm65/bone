@@ -3803,6 +3803,7 @@ impl App {
                             reasoning_effort: provider.reasoning_effort.clone(),
                             fast_mode: Some(provider.fast_mode),
                             supports_prompt_cache_key: Some(provider.supports_prompt_cache_key),
+                            stream_usage: Some(provider.stream_usage.clone()),
                             api_key: None,
                         };
                         let request_id =

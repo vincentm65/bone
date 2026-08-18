@@ -2850,6 +2850,9 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                 fast_mode: entry.get::<Option<bool>>("fast_mode")?,
                 supports_prompt_cache_key: entry
                     .get::<Option<bool>>("supports_prompt_cache_key")?,
+                stream_usage: entry
+                    .get::<Option<String>>("stream_usage")?
+                    .filter(|value| !value.is_empty()),
                 api_key: entry
                     .get::<Option<String>>("api_key")?
                     .filter(|value| !value.is_empty()),

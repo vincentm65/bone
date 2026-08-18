@@ -1,7 +1,7 @@
 use super::{
     ChatEvent, ChatRequest, OpenAiCompatProvider, ThinkParser, cached_tokens_from_usage,
     flush_stream_end, openai_messages, openai_tools, process_sse_chunk, prompt_cache_key,
-    split_reasoning_events, stream_usage_enabled,
+    split_reasoning_events,
 };
 use crate::llm::provider::{LlmProvider, ProviderRequestContext};
 use crate::llm::{ChatMessage, ChatRole, ImageData};
@@ -61,7 +61,22 @@ fn stream_end_emits_captured_usage_once() {
 
 #[test]
 fn requests_stream_usage_from_grok_proxy() {
-    assert!(stream_usage_enabled("https://cli-chat-proxy.grok.com/v1"));
+    use crate::config::ProviderEntry;
+    let entry = ProviderEntry {
+        label: String::new(),
+        base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+        model: "grok".into(),
+        api_key: Default::default(),
+        endpoint: "/chat/completions".into(),
+        handler: "openai".into(),
+        context_window_tokens: None,
+        max_concurrency: None,
+        reasoning_effort: String::new(),
+        fast_mode: false,
+        supports_prompt_cache_key: false,
+        stream_usage: "auto".into(),
+    };
+    assert!(entry.stream_usage_enabled());
 }
 
 fn reasoning_events(data: serde_json::Value, think: &mut ThinkParser) -> Vec<ChatEvent> {
@@ -307,6 +322,7 @@ fn from_entry_reads_reasoning_effort() {
         reasoning_effort: "HIGH".into(),
         fast_mode: false,
         supports_prompt_cache_key: true,
+        stream_usage: "auto".into(),
     };
     let provider = OpenAiCompatProvider::from_entry("grok", &entry);
     assert_eq!(provider.reasoning_effort.as_deref(), Some("high"));
@@ -370,6 +386,7 @@ fn context_max_tokens_does_not_mutate_configured_cap() {
         reasoning_effort: String::new(),
         fast_mode: false,
         supports_prompt_cache_key: false,
+        stream_usage: "auto".into(),
     };
     let mut provider = OpenAiCompatProvider::from_entry("gpt", &entry);
     provider.set_max_tokens(Some(16_000));

@@ -27,6 +27,7 @@ fn provider_update(id: &str, model: &str) -> ProviderUpdate {
         reasoning_effort: String::new(),
         fast_mode: None,
         supports_prompt_cache_key: None,
+        stream_usage: None,
         api_key: None,
     }
 }
