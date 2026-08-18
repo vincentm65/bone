@@ -2115,7 +2115,7 @@ fn build_usage_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
 /// Build the `ctx.conversation` table: the effective system prompt and
 /// `current()`/`history()` over the in-memory turn history. The history methods
 /// return nil when no history is attached.
-fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
+pub(crate) fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let conversation_table = lua.create_table()?;
     let system_prompt = cfg.system_prompt_override.clone().unwrap_or_else(|| {
         crate::llm::prompts::system_prompt(crate::config::settings::shipped_system_prompt())
@@ -2172,6 +2172,12 @@ fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::E
                 }
                 if let Some(ref tci) = msg.tool_call_id {
                     entry.set("tool_call_id", tci.as_str())?;
+                }
+                if let Some(ref reasoning) = msg.reasoning {
+                    entry.set("reasoning", lua.to_value(reasoning)?)?;
+                }
+                if !msg.reasoning_items.is_empty() {
+                    entry.set("reasoning_items", lua.to_value(&msg.reasoning_items)?)?;
                 }
                 tbl.push(entry)?;
             }

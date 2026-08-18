@@ -336,6 +336,63 @@ fn managed_hooks_run_in_order_with_full_context_and_collect_operations() {
 }
 
 #[test]
+fn before_turn_priority_folds_system_prompt_appends_before_compaction() {
+    let manager = managed_hook_manager(
+        r#"
+        bone.on("before_turn", function(_, ctx)
+            _G.compaction_messages = {
+                { role = "system", content = ctx.conversation.system_prompt() }
+            }
+            for _, message in ipairs(ctx.conversation.history()) do
+                table.insert(_G.compaction_messages, message)
+            end
+            table.insert(_G.compaction_messages, {
+                role = "user",
+                content = "Summarize the conversation.",
+            })
+        end, { priority = -100 })
+        bone.on("before_turn", function()
+            return { system_prompt_append = "hook-provided memory" }
+        end)
+        "#,
+    );
+    let mut cfg = managed_hook_ctx();
+    cfg.system_prompt_override = Some("system prompt".into());
+    cfg.conversation_history = Some(vec![
+        crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "hello"),
+        crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "hi"),
+    ]);
+
+    let result = manager.dispatch_managed("before_turn", serde_json::json!({}), cfg, false);
+
+    assert_eq!(result.actions.len(), 1);
+    assert_eq!(
+        result.actions[0].system_prompt_append.as_deref(),
+        Some("hook-provided memory")
+    );
+    let lua = manager.lua_handle();
+    let lua = lua.lock().unwrap();
+    let messages: mlua::Table = lua.globals().get("compaction_messages").unwrap();
+    assert_eq!(messages.raw_len(), 4);
+    let system: mlua::Table = messages.get(1).unwrap();
+    assert_eq!(system.get::<String>("role").unwrap(), "system");
+    assert_eq!(
+        system.get::<String>("content").unwrap(),
+        "system prompt\n\nhook-provided memory"
+    );
+    let user: mlua::Table = messages.get(2).unwrap();
+    let assistant: mlua::Table = messages.get(3).unwrap();
+    let instruction: mlua::Table = messages.get(4).unwrap();
+    assert_eq!(user.get::<String>("content").unwrap(), "hello");
+    assert_eq!(assistant.get::<String>("content").unwrap(), "hi");
+    assert_eq!(instruction.get::<String>("role").unwrap(), "user");
+    assert_eq!(
+        instruction.get::<String>("content").unwrap(),
+        "Summarize the conversation."
+    );
+}
+
+#[test]
 fn managed_hook_timeout_fails_open_and_later_handlers_run() {
     let manager = managed_hook_manager(
         r#"

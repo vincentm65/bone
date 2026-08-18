@@ -1,14 +1,14 @@
 //! Lua binding for `bone.on` / `bone.api.autocmd` event-handler registration.
 
-/// `bone.on(event_name, handler)` — registers an event handler (autocmd).
+/// `bone.on(event_name, handler, opts?)` — registers an event handler (autocmd).
 ///
 /// The built-in event names below are pre-seeded, but **any** name is accepted:
 /// an unknown name creates its handler array on demand. This makes `bone.on`
 /// (and its alias `bone.api.autocmd`) a general autocmd registry — Lua plugins
 /// can define custom events and fire them with `bone.api.emit(name, payload)`,
 /// or Rust can drive them via `ExtensionManager::dispatch_simple(name, ...)`.
-/// Handlers are stored in `bone._handlers[name]` as an ordered array and called
-/// in registration order.
+/// Handlers are stored in `bone._handlers[name]` as an ordered array. Higher
+/// `opts.priority` values run first; equal priorities retain registration order.
 use mlua::{Lua, Table};
 
 const EVENT_NAMES: &[&str] = &[
@@ -60,13 +60,37 @@ pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
                     .and_then(|opts| opts.get::<Option<u64>>("timeout_ms").ok().flatten())
                     .unwrap_or(30_000)
                     .clamp(100, 3_600_000);
+                let priority = opts
+                    .as_ref()
+                    .and_then(|opts| opts.get::<Option<i64>>("priority").ok().flatten())
+                    .unwrap_or(0);
                 let stored_opts = lua.create_table()?;
                 stored_opts.set("timeout_ms", timeout_ms)?;
+                stored_opts.set("priority", priority)?;
                 match handlers.get::<Option<Table>>(&*event_name)? {
                     Some(event_handlers) => {
-                        event_handlers.push(handler)?;
                         let options: Table = handler_options.get(&*event_name)?;
-                        options.push(stored_opts)?;
+                        let len = event_handlers.raw_len();
+                        let mut insert_at = len + 1;
+                        for index in 1..=len {
+                            let existing_priority = options
+                                .get::<Option<Table>>(index)?
+                                .and_then(|opts| opts.get::<Option<i64>>("priority").ok().flatten())
+                                .unwrap_or(0);
+                            if priority > existing_priority {
+                                insert_at = index;
+                                break;
+                            }
+                        }
+                        for index in (insert_at..=len).rev() {
+                            let existing_handler: mlua::Function = event_handlers.get(index)?;
+                            event_handlers.set(index + 1, existing_handler)?;
+                            if let Some(existing_opts) = options.get::<Option<Table>>(index)? {
+                                options.set(index + 1, existing_opts)?;
+                            }
+                        }
+                        event_handlers.set(insert_at, handler)?;
+                        options.set(insert_at, stored_opts)?;
                     }
                     None => {
                         // Unknown event name → create the arrays on demand.

@@ -1427,6 +1427,90 @@ end)
 }
 
 #[tokio::test]
+async fn driver_private_completion_preserves_normal_request_prefix_after_prior_append() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-private-prefix-after-append",
+        r#"
+bone.on("before_turn", function()
+    return { system_prompt_append = "hook-provided memory" }
+end)
+bone.on("before_turn", function(_event, ctx)
+    local messages = {
+        { role = "system", content = ctx.conversation.system_prompt() },
+    }
+    for _, message in ipairs(ctx.conversation.history()) do
+        table.insert(messages, message)
+    end
+    table.insert(messages, {
+        role = "user",
+        content = "Summarize the conversation.",
+    })
+    ctx.llm.complete({ messages = messages, tools = {} })
+end)
+"#,
+    );
+    let llm = Arc::new(PrivateDriverProvider {
+        model: "private-model".into(),
+        attempts: Mutex::new(vec![
+            PrivateDriverAttempt::Stream(vec![ChatEvent::TextDelta("summary".into())]),
+            PrivateDriverAttempt::Stream(vec![ChatEvent::TextDelta("public answer".into())]),
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let prompt = "original prompt";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let base_system_prompt = "test system prompt";
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, base_system_prompt),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: Some(base_system_prompt.into()),
+        conversation_id: Some(42),
+        background_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(outcome.result.unwrap().content, "public answer");
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2, "one private and one normal request");
+    let private_messages = &captured[0].messages;
+    let normal_messages = &captured[1].messages;
+    assert_eq!(private_messages.len(), normal_messages.len() + 1);
+    assert_eq!(
+        &private_messages[..normal_messages.len()],
+        normal_messages.as_slice(),
+        "private compaction must preserve the complete normal request prefix"
+    );
+    assert_eq!(
+        normal_messages[0].content,
+        "test system prompt\n\nhook-provided memory"
+    );
+    assert_eq!(
+        private_messages.last().unwrap().content,
+        "Summarize the conversation."
+    );
+
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+#[tokio::test]
 async fn driver_private_completion_is_one_shot_replaced_and_fully_accounted() {
     let (config_dir, extensions) = private_completion_extensions(
         "driver-private-completion",

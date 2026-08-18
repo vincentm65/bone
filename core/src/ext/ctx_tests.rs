@@ -2209,12 +2209,23 @@ async fn private_llm_compaction_prefix_matches_normal_provider_history() {
         Vec::new(),
     )]));
     let (mut cfg, _, _) = private_llm_test_config(provider.clone(), None);
-    cfg.system_prompt_override = Some("system prompt".into());
+    let active_system_prompt = "system prompt\n\nhook-provided memory";
+    cfg.system_prompt_override = Some(active_system_prompt.into());
 
     let mut user = crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "run a check");
     user.created_at = Some("2026-08-14T12:00:00Z".into());
     let mut assistant = crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "checking");
     assistant.created_at = Some("2026-08-14T12:00:01Z".into());
+    let reasoning = crate::llm::Reasoning {
+        text: "reasoning to replay".into(),
+        echo_field: Some("reasoning_content".into()),
+    };
+    let reasoning_items = vec![crate::llm::ReasoningItem {
+        id: "reasoning-1".into(),
+        encrypted_content: "encrypted reasoning".into(),
+    }];
+    assistant.reasoning = Some(reasoning.clone());
+    assistant.reasoning_items = reasoning_items.clone();
     assistant.tool_calls.push(crate::tools::ToolCall {
         id: "call-1".into(),
         name: "shell".into(),
@@ -2253,11 +2264,13 @@ async fn private_llm_compaction_prefix_matches_normal_provider_history() {
 
     let requests = provider.messages.lock().unwrap();
     let request = &requests[0];
-    let expected_prefix = crate::chat::build_chat_history(&history, "system prompt");
+    let expected_prefix = crate::chat::build_chat_history(&history, active_system_prompt);
     assert_eq!(
         &request[..expected_prefix.len()],
         expected_prefix.as_slice()
     );
+    assert_eq!(request[2].reasoning.as_ref(), Some(&reasoning));
+    assert_eq!(request[2].reasoning_items, reasoning_items);
     assert_eq!(
         request.last().unwrap().content,
         "Summarize the conversation."

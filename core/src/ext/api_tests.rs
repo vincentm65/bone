@@ -45,6 +45,35 @@ fn autocmd_for_custom_event_fires_on_emit() {
 }
 
 #[test]
+fn autocmd_priority_orders_handlers_and_preserves_registration_ties() {
+    let lua = lua_with_api();
+    lua.load(
+        r#"
+            _G.seen = {}
+            bone.on("ordered", function() table.insert(_G.seen, "normal-first") end)
+            bone.on("ordered", function() table.insert(_G.seen, "late") end,
+                { priority = -100 })
+            bone.on("ordered", function() table.insert(_G.seen, "early-first") end,
+                { priority = 100 })
+            bone.on("ordered", function() table.insert(_G.seen, "normal-second") end)
+            bone.api.emit("ordered")
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    let seen: mlua::Table = lua.globals().get("seen").unwrap();
+    let values = seen
+        .sequence_values::<String>()
+        .collect::<mlua::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        values,
+        ["early-first", "normal-first", "normal-second", "late"]
+    );
+}
+
+#[test]
 fn top_level_keymap_accepts_strings_and_callbacks() {
     let lua = Lua::new();
     let bone = lua.create_table().unwrap();

@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn context_system_prompt_prefers_provider_history() {
+    let history = vec![ChatMessage::new(
+        ChatRole::System,
+        "base prompt\n\nhook append",
+    )];
+
+    assert_eq!(
+        context_system_prompt(&history, &Some("base prompt".into())).as_deref(),
+        Some("base prompt\n\nhook append")
+    );
+}
+
+#[test]
+fn context_system_prompt_falls_back_when_history_has_no_system_message() {
+    let history = vec![ChatMessage::new(ChatRole::User, "hello")];
+
+    assert_eq!(
+        context_system_prompt(&history, &Some("base prompt".into())).as_deref(),
+        Some("base prompt")
+    );
+}
+
+#[test]
 fn empty_turn_messages_leave_request_history_unchanged() {
     let mut request_history = vec![ChatMessage::new(ChatRole::User, "hello")];
     append_turn_messages(&mut request_history, &[]);

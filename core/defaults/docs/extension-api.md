@@ -62,12 +62,15 @@ with the following core groups:
 
 Lifecycle event handlers receive the same complete bounded context. They run as
 managed daemon work rather than inline in a frontend event loop: handlers execute
-sequentially in registration order, may block on bounded APIs and native approval
-requests, observe cancellation, and have a per-registration timeout. The default
-is 30 seconds; override it with `bone.on(name, handler, { timeout_ms = 5000 })`.
-Values are clamped to 100 ms–1 hour. A timeout or handler error fails open and the
-next registration runs, except that the first successful `{ block = true }`
-result still stops a blockable `tool_call`.
+sequentially by descending `priority`, preserving registration order among equal
+priorities. Priority defaults to `0`; set it with
+`bone.on(name, handler, { priority = 100 })`. Handlers may block on bounded APIs
+and native approval requests, observe cancellation, and have a per-registration
+timeout. The default is 30 seconds; override it with
+`bone.on(name, handler, { timeout_ms = 5000 })`. Values are clamped to 100 ms–1
+hour. A timeout or handler error fails open and the next registration runs, except
+that the first successful `{ block = true }` result still stops a blockable
+`tool_call`.
 
 All file writes, shell commands, and nested tool calls still pass through Bone's
 native approval and policy path. This includes `ctx.tools.call` issued by a
@@ -127,17 +130,22 @@ than writing YAML directly.
 - `system_prompt_append` and `turn_message` are transient per-turn values; and
 - `tool_filter` is a per-turn allow-list of tool names.
 
-Handlers run in registration order. Their `system_prompt_append` values accumulate;
-other fields use the normal hook merge rules.
+Handlers run in effective priority order, preserving registration order for equal
+priorities. Their `system_prompt_append` values accumulate; other fields use the
+normal hook merge rules.
 
 Compaction is implemented in catalog Lua rather than as a dedicated Rust action.
 Lua owns thresholds, history selection, prompts, repair, checkpoint formatting,
 continuation wording, notices, and replacement policy. It supplies explicit messages,
 tools, and an optional positive `max_tokens` to `ctx.llm.complete`, which performs
-exactly one private provider request with no agent/tool loop. Messages returned by
-`ctx.conversation.history()` include their `created_at` metadata, and private
-requests apply the same provider-only message/tool timing context as normal
-conversation requests. Private text is not surfaced, and returned tool calls are
+exactly one private provider request with no agent/tool loop. During `before_turn`,
+`ctx.conversation.system_prompt()` starts with the normal request's base system prompt;
+a successful `system_prompt_append` is folded into it before the next registered handler
+runs. Other Driver hooks reflect the system message at the front of current provider
+history, including appends already applied to that history. Messages returned by
+`ctx.conversation.history()` include their `created_at` metadata, and private requests
+apply the same provider-only message/tool timing context as normal requests. Private
+text is not surfaced, and returned tool calls are
 exposed to Lua without execution. Usage and cancellation are accounted by the
 authoritative Driver turn or daemon command path. Transcript mutation occurs only
 when the validated `conversation.replace` result is applied and persisted by the
@@ -159,13 +167,14 @@ end)
 
 Core events are `session_start`, `session_end`, `message`, `tool_call`,
 `tool_result`, `mode_change`, `turn_start`, `token_usage`, `turn_end`, and
-`before_turn`. Handlers run in registration order. The first blocking result
-stops a `tool_call`; handler errors fail open and do not block. Ordinary
-lifecycle return actions are ignored; `tool_call` blocking and the documented
-`before_turn` request-shaping values are the exceptions. Hook-originated bounded
-API work is treated as nested work and is not recursively redispatched through
-the same lifecycle chain. Registration in a subagent is ignored by default;
-pass `{ subagents = true }` when that is intentional.
+`before_turn`. Higher-priority handlers run first; equal priorities retain
+registration order. The first blocking result stops a `tool_call`; handler errors
+fail open and do not block. Ordinary lifecycle return actions are ignored;
+`tool_call` blocking and the documented `before_turn` request-shaping values are
+the exceptions. Hook-originated bounded API work is treated as nested work and is
+not recursively redispatched through the same lifecycle chain. Registration in a
+subagent is ignored by default; pass `{ subagents = true }` when that is
+intentional.
 
 `bone.api.emit(name, payload)` is the synchronous compatibility event path, not
 daemon-managed lifecycle dispatch. Managed callbacks suppress emits of core

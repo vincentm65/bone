@@ -762,6 +762,32 @@ impl ExtensionManager {
                         break;
                     }
                     if let Some(action) = parse_lua_return_action(&table, name == "before_turn") {
+                        if name == "before_turn" {
+                            if let Some(append) = action.system_prompt_append.as_deref() {
+                                let base =
+                                    ctx_cfg.system_prompt_override.clone().unwrap_or_else(|| {
+                                        crate::llm::prompts::system_prompt(
+                                            crate::config::settings::shipped_system_prompt(),
+                                        )
+                                    });
+                                ctx_cfg.system_prompt_override =
+                                    Some(format!("{base}\n\n{append}"));
+                                let lua =
+                                    lua_handle.lock().unwrap_or_else(|error| error.into_inner());
+                                match crate::ext::ctx::build_conversation_table(&lua, &ctx_cfg) {
+                                    Ok(conversation) => {
+                                        if let Err(error) = ctx.set("conversation", conversation) {
+                                            crate::ext::ctx::runtime_warn(format!(
+                                                "bone-lua warn: before_turn ctx update failed: {error}"
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => crate::ext::ctx::runtime_warn(format!(
+                                        "bone-lua warn: before_turn ctx update failed: {error}"
+                                    )),
+                                }
+                            }
+                        }
                         result.actions.push(action);
                     }
                 }

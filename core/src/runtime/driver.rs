@@ -181,6 +181,14 @@ struct DriverHookState<'a> {
     turn_nudge: Option<String>,
 }
 
+fn context_system_prompt(history: &[ChatMessage], configured: &Option<String>) -> Option<String> {
+    history
+        .first()
+        .filter(|message| message.role == ChatRole::System)
+        .map(|message| message.content.clone())
+        .or_else(|| configured.clone())
+}
+
 impl DriverHookRuntime<'_> {
     async fn run(
         &self,
@@ -194,7 +202,7 @@ impl DriverHookRuntime<'_> {
             self.llm.id(),
             self.llm.model(),
             self.llm.context_window_tokens(),
-            self.system_prompt_override.clone(),
+            context_system_prompt(state.history, self.system_prompt_override),
             Vec::new(),
             state.transcript.clone(),
             self.config_store.clone(),
@@ -1345,7 +1353,7 @@ impl Driver {
                 llm.id(),
                 llm.model(),
                 llm.context_window_tokens(),
-                system_prompt_override.clone(),
+                context_system_prompt(&history, &system_prompt_override),
                 Vec::new(),
                 transcript.clone(),
                 config_store.clone(),
