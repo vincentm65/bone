@@ -175,7 +175,11 @@ pub struct LuaCommandReturn {
 /// remaining fields are small snapshots/vecs. Cloning lets callers hand an
 /// owned manager to `spawn_blocking` (e.g. to run `before_turn` off the UI
 /// thread) without giving up their own copy.
-#[derive(Clone)]
+///
+/// Clones are non-owners: only the root manager created by `from_arc` or
+/// `unloaded` flips the shared `runtime_stopped` flag in `Drop`, so a
+/// short-lived clone (per-turn `Driver`, `spawn_blocking` hook) dropping
+/// never cancels pending `ctx.time.after` timers.
 pub struct ExtensionManager {
     /// The Lua state, shared so LuaTool can also hold a reference.
     lua: Arc<Mutex<Lua>>,
@@ -198,11 +202,36 @@ pub struct ExtensionManager {
     /// Set when this runtime's manager is dropped so off-VM `ctx.time.after`
     /// timer threads can observe teardown (mlua has no weak `Function`).
     runtime_stopped: Arc<AtomicBool>,
+    /// `true` only for the root manager created by `from_arc`/`unloaded`.
+    /// Clones share the same `runtime_stopped` flag but are non-owners, so
+    /// dropping a per-turn or per-hook clone must not flip it: otherwise the
+    /// first clone to drop (e.g. a turn's `Driver` at turn end) would cancel
+    /// every pending `ctx.time.after` timer prematurely.
+    runtime_stop_owner: bool,
 }
 
 impl Drop for ExtensionManager {
     fn drop(&mut self) {
-        self.runtime_stopped.store(true, Ordering::Release);
+        if self.runtime_stop_owner {
+            self.runtime_stopped.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl Clone for ExtensionManager {
+    fn clone(&self) -> Self {
+        Self {
+            lua: self.lua.clone(),
+            submit_inbox: self.submit_inbox.clone(),
+            engine_ok: self.engine_ok,
+            loaded: self.loaded,
+            commands: self.commands.clone(),
+            settings: self.settings.clone(),
+            settings_registry: self.settings_registry.clone(),
+            ui: self.ui.clone(),
+            runtime_stopped: self.runtime_stopped.clone(),
+            runtime_stop_owner: false,
+        }
     }
 }
 
@@ -290,6 +319,7 @@ impl ExtensionManager {
             settings_registry,
             ui,
             runtime_stopped: Arc::new(AtomicBool::new(false)),
+            runtime_stop_owner: true,
         }
     }
 
@@ -319,6 +349,7 @@ impl ExtensionManager {
             settings_registry: Arc::new(std::sync::RwLock::new(Default::default())),
             ui: super::api_ui::new_shared(),
             runtime_stopped: Arc::new(AtomicBool::new(false)),
+            runtime_stop_owner: true,
         }
     }
 

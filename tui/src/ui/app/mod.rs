@@ -897,6 +897,11 @@ impl App {
             | RuntimeEvent::ConversationLoadFailed { message, .. } => {
                 self.messages.push(Message::system(message));
             }
+            // Persistent notice from Lua (e.g. an auto-recap after idle): keep
+            // it in scrollback, mirroring the turn pump's Notice handling.
+            RuntimeEvent::Notice { message } => {
+                self.messages.push(Message::system(message));
+            }
             // The daemon's boot-time display state. Adopt it so the frontend
             // renders the daemon's theme/keymap/config/commands. Sent on attach
             // and after a remote `ReloadExtensions`.
@@ -1950,6 +1955,13 @@ impl App {
         self.flush_new_messages_to_scrollback(&mut terminal)?;
 
         while !self.should_quit {
+            // Yield to the tokio runtime so the LocalSet can poll the in-process
+            // daemon between terminal events. The crossterm poll below blocks
+            // this task without awaiting; without a yield the LocalSet never
+            // schedules the daemon's local task while idle, and post-turn
+            // events (e.g. an auto-recap Status/Notice) sit unpublished until
+            // the next turn's pump drains them.
+            tokio::task::yield_now().await;
             if event::poll(std::time::Duration::from_millis(50))? {
                 if self.pending_approval.is_some() {
                     self.drain_approval_keys(&mut terminal)?;

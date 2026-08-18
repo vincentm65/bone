@@ -15,6 +15,9 @@ use crate::llm::provider::{
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
+mod cache_debug;
+use cache_debug::CacheDebug;
+
 type ConversationHeader = (String, fn(i64) -> String);
 
 /// Generic OpenAI-compatible provider for any server with a `/chat/completions`
@@ -41,6 +44,7 @@ pub struct OpenAiCompatProvider {
     api_key_override: Option<String>,
     extra_headers: Vec<(String, String)>,
     conversation_header: Option<ConversationHeader>,
+    cache_debug: Option<CacheDebug>,
 }
 
 impl OpenAiCompatProvider {
@@ -65,6 +69,7 @@ impl OpenAiCompatProvider {
             api_key_override: None,
             extra_headers: Vec::new(),
             conversation_header: None,
+            cache_debug: CacheDebug::from_env(),
         }
     }
 
@@ -594,6 +599,17 @@ impl LlmProvider for OpenAiCompatProvider {
             prompt_cache_key: prompt_cache_key(self.supports_prompt_cache_key, &context),
         };
 
+        let mut debug_request = self.cache_debug.as_ref().map(|debug| {
+            debug.start(
+                &self.id,
+                &request.model,
+                request
+                    .prompt_cache_key
+                    .as_deref()
+                    .or(context.cache_scope.as_deref()),
+                &request,
+            )
+        });
         let mut req = self.client.post(self.chat_url()).json(&request);
 
         let api_key = self.api_key_override.as_deref().unwrap_or(&self.api_key);
@@ -610,10 +626,21 @@ impl LlmProvider for OpenAiCompatProvider {
             req = req.header(header, encode(conversation_id));
         }
 
-        let response = req.send().await?;
+        let response = match req.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(debug) = debug_request.as_mut() {
+                    debug.send_error();
+                }
+                return Err(error.into());
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
+            if let Some(debug) = debug_request.as_mut() {
+                debug.http_error();
+            }
             return Err(http_error(status, &self.chat_url(), &error_body));
         }
 
@@ -671,7 +698,11 @@ impl LlmProvider for OpenAiCompatProvider {
             }
         };
 
-        Ok(Box::pin(stream))
+        Ok(if let Some(debug) = debug_request {
+            debug.stream(Box::pin(stream))
+        } else {
+            Box::pin(stream)
+        })
     }
 }
 

@@ -1042,6 +1042,13 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     // pending idle-wait never outlives the process and never fires a stale
     // callback (and its LLM call) into a dead runtime. The callback runs with
     // no arguments; a Lua closure closes over the `ctx` it needs.
+    // The callback runs on a bare background thread with no Tokio context, but
+    // it may call blocking ctx primitives (`ctx.llm.complete`, `ctx.exec`, ...)
+    // that need `Handle::current()` to work. Capture the scheduling thread's
+    // runtime handle so the timer thread can install that context around the
+    // callback — this is what lets an idle-wait (e.g. automatic recap) make its
+    // LLM call after the turn that scheduled it has ended.
+    let after_runtime_handle = tokio::runtime::Handle::try_current().ok();
     let after_session_cancel = cfg.cancelled.clone();
     let after_runtime_stopped = cfg.runtime_stopped.clone();
     time.set(
@@ -1052,6 +1059,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             let cancel_flag = cancelled.clone();
             let session_cancel = after_session_cancel.clone();
             let runtime_stopped = after_runtime_stopped.clone();
+            let runtime_handle = after_runtime_handle.clone();
             let deadline = Instant::now() + Duration::from_millis(delay);
             std::thread::spawn(move || {
                 loop {
@@ -1081,7 +1089,18 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
                 {
                     return;
                 }
-                if let Err(error) = callback.call::<mlua::Value>(()) {
+                let result = match &runtime_handle {
+                    // The timer thread is a bare std::thread with no Tokio
+                    // context; install the scheduling thread's runtime handle
+                    // so blocking ctx primitives (e.g. `ctx.llm.complete`)
+                    // can resolve `Handle::current()` inside the callback.
+                    Some(handle) => handle.block_on(async { callback.call::<mlua::Value>(()) }),
+                    // No runtime available at scheduling time (e.g. plain
+                    // #[test]): call directly; errors surface via the warn
+                    // path below, as before.
+                    None => callback.call::<mlua::Value>(()),
+                };
+                if let Err(error) = result {
                     runtime_warn(format!(
                         "bone-lua warn: ctx.time.after callback error: {error}"
                     ));

@@ -159,6 +159,7 @@ fn test_daemon_ctx(
     let config = crate::config::store::ConfigStore::for_test();
     let (hub, commands) = Hub::new();
     let actor_id = session.conversation_id;
+    let (background_events_tx, background_events_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
     (
         DaemonCtx {
             hub: hub.publisher(),
@@ -180,6 +181,8 @@ fn test_daemon_ctx(
             processes_seen: None,
             jobs_seen: None,
             projection: None,
+            background_events_tx,
+            background_events_rx,
         },
         hub,
         commands,
@@ -417,6 +420,7 @@ async fn setup_apply_reloads_locally_routes_to_peers_and_republishes_config() {
         crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
     );
     session.conversation_id = Some(77);
+    let (background_events_tx, background_events_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
     let mut ctx = DaemonCtx {
         hub: hub.publisher(),
         llm: Arc::new(ConfigTestProvider),
@@ -437,6 +441,8 @@ async fn setup_apply_reloads_locally_routes_to_peers_and_republishes_config() {
         processes_seen: None,
         jobs_seen: None,
         projection: None,
+        background_events_tx,
+        background_events_rx,
     };
     ctx.set_incognito(true);
     assert_eq!(ctx.actor_id, Some(77));
@@ -1993,6 +1999,8 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
             crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
         );
         session.conversation_id = Some(conversation_id);
+        let (background_events_tx, background_events_rx) =
+            mpsc::unbounded_channel::<RuntimeEvent>();
         DaemonCtx {
             hub: hub.publisher(),
             llm: Arc::new(ConfigTestProvider),
@@ -2013,6 +2021,8 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
             processes_seen: None,
             jobs_seen: None,
             projection: None,
+            background_events_tx,
+            background_events_rx,
         }
     }
 
@@ -2205,6 +2215,7 @@ async fn resetting_approval_updates_live_mode() {
     let revision = config.snapshot().revision;
     let (hub, mut commands) = Hub::new();
     let mode = crate::tools::SharedApprovalMode::new(crate::tools::ApprovalMode::Danger);
+    let (background_events_tx, background_events_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
     let mut ctx = DaemonCtx {
         hub: hub.publisher(),
         llm: Arc::new(ConfigTestProvider),
@@ -2227,6 +2238,8 @@ async fn resetting_approval_updates_live_mode() {
         processes_seen: None,
         jobs_seen: None,
         projection: None,
+        background_events_tx,
+        background_events_rx,
     };
 
     let _ = ctx
@@ -2267,6 +2280,7 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         .unwrap();
     let (hub, mut commands) = Hub::new();
     let mut events = hub.subscribe();
+    let (background_events_tx, background_events_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
     let mut ctx = DaemonCtx {
         hub: hub.publisher(),
         llm: Arc::new(ConfigTestProvider),
@@ -2289,6 +2303,8 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         processes_seen: None,
         jobs_seen: None,
         projection: None,
+        background_events_tx,
+        background_events_rx,
     };
 
     let _ = ctx
@@ -3322,6 +3338,7 @@ async fn process_commands_are_conversation_scoped() {
         crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
     );
     session.conversation_id = Some(conversation_id);
+    let (background_events_tx, background_events_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
     let mut ctx = DaemonCtx {
         hub: hub.publisher(),
         llm: Arc::new(ConfigTestProvider),
@@ -3342,6 +3359,8 @@ async fn process_commands_are_conversation_scoped() {
         processes_seen: None,
         jobs_seen: None,
         projection: None,
+        background_events_tx,
+        background_events_rx,
     };
 
     ctx.handle_idle_command(RuntimeCommand::GetProcesses, &mut commands)

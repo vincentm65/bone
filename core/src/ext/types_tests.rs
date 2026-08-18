@@ -78,6 +78,29 @@ fn rebinding_runtime_inbox_preserves_queued_prompts() {
 }
 
 #[test]
+fn dropping_clone_does_not_stop_runtime_but_root_drop_does() {
+    let root = ExtensionManager::unloaded();
+    let flag = root.runtime_stopped();
+
+    let clone = root.clone();
+    drop(clone);
+    assert!(
+        !flag.load(Ordering::Acquire),
+        "dropping a per-turn/per-hook clone must not cancel pending timers"
+    );
+
+    // A clone-of-a-clone is equally inert.
+    drop(root.clone().clone());
+    assert!(!flag.load(Ordering::Acquire));
+
+    drop(root);
+    assert!(
+        flag.load(Ordering::Acquire),
+        "dropping the root manager must signal runtime teardown"
+    );
+}
+
+#[test]
 fn extension_settings_pages_follow_command_enablement() {
     use super::super::settings_registry::{SettingsField, SettingsFieldType, SettingsPage};
     use crate::config::settings::ExtensionValue;

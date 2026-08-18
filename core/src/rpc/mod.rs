@@ -940,6 +940,14 @@ struct DaemonCtx {
     jobs_seen: Option<(i64, u64)>,
     /// Live runtime metadata read by managed late-attachment replays.
     projection: Option<RuntimeProjection>,
+    /// Persistent frontend event stream. The turn's `Driver` (and approval
+    /// gate) emit here, so events outlive the per-turn `LocalConn` channel:
+    /// off-VM work that finishes after the turn — e.g. an idle `ctx.time.after`
+    /// recap timer — still reaches attached clients. The turn pump drains it
+    /// while a turn runs; the daemon loop's select drains it while idle. The
+    /// sender kept here is a keep-alive, so the receiver never disconnects.
+    background_events_tx: mpsc::UnboundedSender<RuntimeEvent>,
+    background_events_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
 }
 
 fn job_snapshot(job: crate::ext::jobs::Job) -> Option<bone_protocol::JobSnapshot> {
@@ -2871,12 +2879,18 @@ impl DaemonCtx {
         use std::sync::atomic::AtomicBool;
 
         let (rt_tx, rt_rx) = mpsc::unbounded_channel::<RuntimeEvent>();
+        // The daemon's persistent stream carries every turn event (driver, gate,
+        // Lua `ctx.ui`), so events from off-VM work that outlives the turn — an
+        // idle `ctx.time.after` timer, for example — still reach attached
+        // clients. The per-turn channel remains for `LocalConn`'s steer
+        // acknowledgement and turn-end drain.
+        let bg_tx = self.background_events_tx.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let work_timer = crate::runtime::timer::WorkTimer::start();
         self.key_registry.set_timer(Some(work_timer.clone()));
         let working_dir = self.session.lock().unwrap().tools.working_dir.clone();
         let gate = Arc::new(ChannelApprovalGate::new(
-            rt_tx.clone(),
+            bg_tx.clone(),
             self.approval_registry.clone(),
             Some(work_timer.clone()),
             working_dir,
@@ -2889,7 +2903,7 @@ impl DaemonCtx {
                 self.config.clone(),
                 self.mode.clone(),
                 gate,
-                rt_tx.clone(),
+                bg_tx,
                 self.key_registry.clone(),
                 cancel.clone(),
                 Arc::new(crate::session_sink::NullSessionSink),
@@ -2914,11 +2928,17 @@ impl DaemonCtx {
         // replies (and cancel) from any client back into the running turn. When
         // forwarding is on, a timer drains the VM's `UiState` and forwards pane
         // diffs as events (the in-process TUI drains the shared handle itself).
+        //
+        // Turn events arrive on the daemon's persistent stream (see `bg_tx`);
+        // this pump drains it while the turn runs, and the daemon loop's select
+        // drains it afterwards — which is how a recap notice fired by an idle
+        // timer reaches clients that are still attached.
         let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
         loop {
             tokio::select! {
-                ev = conn.next_event() => match ev {
-                    Some(mut ev) => {
+                biased;
+                background_ev = self.background_events_rx.recv() => {
+                    if let Some(mut ev) = background_ev {
                         if let RuntimeEvent::Started {
                             request_id: event_request_id,
                             display: event_display,
@@ -2930,6 +2950,11 @@ impl DaemonCtx {
                         }
                         self.publish_runtime_event(ev);
                     }
+                }
+                ev = conn.next_event() => match ev {
+                    // Steer acknowledgements and the turn-end drain of the
+                    // per-turn channel.
+                    Some(ev) => self.publish_runtime_event(ev),
                     None => break, // turn drained
                 },
                 _ = diff_timer.tick() => {
@@ -3172,6 +3197,7 @@ async fn run_daemon_inner(
         .as_ref()
         .map(|group| group.0.extension_sources.clone())
         .unwrap_or_else(|| Arc::new(Mutex::new(ExtensionSourceState::default())));
+    let background_events = mpsc::unbounded_channel::<RuntimeEvent>();
     let mut ctx = DaemonCtx {
         hub,
         llm,
@@ -3192,6 +3218,8 @@ async fn run_daemon_inner(
         processes_seen: None,
         jobs_seen: None,
         projection,
+        background_events_tx: background_events.0,
+        background_events_rx: background_events.1,
     };
     ctx.initialize_current_sources();
     ctx.refresh_projection();
@@ -3232,6 +3260,15 @@ async fn run_daemon_inner(
                         ctx.handle_idle_command(cmd, &mut commands).await
                     }
                     None => break,
+                },
+                // Drain events that landed after the previous turn ended (e.g. an
+                // idle `ctx.time.after` recap notice). The daemon holds a keep-alive
+                // sender, so this arm never resolves with `None`.
+                background_ev = ctx.background_events_rx.recv() => {
+                    if let Some(ev) = background_ev {
+                        ctx.publish_runtime_event(ev);
+                    }
+                    Flow::Continue
                 },
                 _ = inject_timer.tick() => {
                     ctx.publish_processes(false);
