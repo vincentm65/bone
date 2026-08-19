@@ -239,10 +239,15 @@ impl Renderer {
     }
 
     /// Reset the scrollback render cursor so the next flush re-renders all
-    /// messages from the top. Used by the resize rebuild.
+    /// messages from the top. Used by the resize rebuild. Also clears the
+    /// streaming source offset: after a full rebuild the in-progress assistant
+    /// (if any) is replayed from scratch, and a state-sync transcript replace
+    /// has no live stream at all, so a stale offset would drop the leading
+    /// content of the next flush.
     pub fn reset_scrollback_state(&mut self) {
         self.scrollback_cursor = 0;
         self.scrollback_last_blank = false;
+        self.streaming_source_flushed = 0;
     }
 
     fn replace_terminal(term: &mut BoneTerminal, new_height: u16) -> io::Result<()> {

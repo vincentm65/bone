@@ -178,6 +178,20 @@ fn prepare_streaming_replay(renderer: &mut Renderer) {
     renderer.streaming_source_flushed = 0;
 }
 
+/// Index of the live streaming assistant for a resize rebuild, or `None` when
+/// there is no live streaming assistant to replay:
+/// - not streaming at all;
+/// - streaming but still before the first token (the last message is the user
+///   row, which must be re-rendered as a committed, background-styled row); or
+/// - streaming but the assistant was already finalized (the last message is a
+///   tool/notice row).
+///
+/// A `None` result rebuilds every message as committed; a `Some(idx)` result
+/// replays that assistant through the incremental streaming path.
+fn streaming_rebuild_index(streaming: bool, assistant_idx: Option<usize>) -> Option<usize> {
+    streaming.then_some(assistant_idx).flatten()
+}
+
 fn run_insertion_lifecycle<C>(
     context: &mut C,
     prepare: impl FnOnce(&mut C) -> io::Result<()>,
@@ -566,6 +580,12 @@ pub struct App {
     remote_client: Option<crate::rpc::RemoteClient>,
     pub input: InputState,
     pub streaming: bool,
+    /// Index of the live streaming assistant message while `streaming` is true,
+    /// or `None` before the first token/tool creates it (and again once it is
+    /// finalized). A mid-turn resize rebuild must target this real assistant
+    /// rather than `messages.last()`, which before the first token is still the
+    /// user row and after finalization is a tool/notice row.
+    pub streaming_assistant_idx: Option<usize>,
     /// A live slash command is running through `run_remote_command`. This needs
     /// the same cancellation plumbing as streaming, but it is not a model turn
     /// and should not show the thinking spinner.
@@ -751,6 +771,7 @@ impl App {
             remote_client: daemon_client,
             input: InputState::default(),
             streaming: false,
+            streaming_assistant_idx: None,
             live_command: false,
             should_quit: false,
             renderer,
@@ -1828,6 +1849,7 @@ impl App {
     fn replace_transcript(&mut self, transcript: Vec<ChatMessage>) {
         self.messages = self.rebuild_scrollback_from_transcript(&transcript);
         self.renderer.scrollback_cursor = 0;
+        self.streaming_assistant_idx = None;
     }
 
     /// Reset transient per-turn UI state before switching conversations:
@@ -1840,6 +1862,8 @@ impl App {
     /// (e.g. `msg1`, `/clear`, `msg2`). Explicit queue wipe remains Ctrl+D.
     fn reset_transient_ui_state(&mut self, clear_queue: bool) {
         self.cancel_streaming = true;
+        // No live streaming assistant survives a conversation/`/clear` switch.
+        self.streaming_assistant_idx = None;
         // Conversation-scoped wire UI must not leak into the next actor. Clear
         // status lines and runtime highlights as well as panes so a legacy
         // daemon that has no full snapshot still leaves a clean projection.
@@ -2126,14 +2150,20 @@ impl App {
         // viewport, so the user sees "[cancelled]" and the last partial
         // line in scrollback rather than losing them.
         if self.streaming {
-            if let Some(msg) = self.messages.last_mut()
-                && (msg.content.is_empty() || !msg.content.ends_with("\n[cancelled]"))
+            // Target the real live assistant, not `messages.last()`: before the
+            // first token the last message is the user row (no assistant yet),
+            // and after a tool/notice the last message isn't the assistant.
+            if let Some(idx) = self.streaming_assistant_idx
+                && idx < self.messages.len()
             {
-                msg.content.push_str("\n[cancelled]");
-            }
-            if let Some(idx) = self.messages.len().checked_sub(1) {
+                if self.messages[idx].content.is_empty()
+                    || !self.messages[idx].content.ends_with("\n[cancelled]")
+                {
+                    self.messages[idx].content.push_str("\n[cancelled]");
+                }
                 self.finalize_streaming_to_scrollback(idx, &mut terminal)?;
             }
+            self.streaming_assistant_idx = None;
             self.flush_new_messages_to_scrollback(&mut terminal)?;
         }
 
@@ -2304,10 +2334,12 @@ impl App {
     /// into scrollback at the current terminal width. Used after a physical
     /// resize, where reflowed/duplicated viewport rows can't be erased in place.
     fn rebuild_scrollback_after_resize(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
-        let stream_idx = self
-            .streaming
-            .then(|| self.messages.len().checked_sub(1))
-            .flatten();
+        // Target the real live assistant, not `messages.last()`: before the
+        // first token the last message is the user row, and after finalization
+        // it is a tool/notice row. Replaying either through the streaming path
+        // renders it as assistant markdown and, for a one-line user prompt,
+        // drops it entirely (safe_markdown_prefix_end has no complete line).
+        let stream_idx = streaming_rebuild_index(self.streaming, self.streaming_assistant_idx);
         self.rebuild_scrollback(terminal, stream_idx)
     }
 

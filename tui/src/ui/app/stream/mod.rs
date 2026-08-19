@@ -407,6 +407,8 @@ impl App {
     fn begin_streaming(&mut self) {
         self.streaming = true;
         self.cancel_streaming = false;
+        // No assistant exists until the first token/tool creates one.
+        self.streaming_assistant_idx = None;
         self.shown_tool_rows.clear();
         self.stream_estimated_received = Some(self.view.received);
         self.turn_start = Some(std::time::Instant::now());
@@ -610,6 +612,13 @@ impl App {
                             sync_retry_at = Instant::now() + Duration::from_millis(500);
                         } else {
                             if let Some(messages) = messages {
+                                // The daemon's transcript is now authoritative.
+                                // `replace_transcript` drops the live-assistant
+                                // pointer and `reset_scrollback_state` clears the
+                                // streaming offset; also discard the uncommitted
+                                // stream text so the post-loop `commit()` yields
+                                // nothing and doesn't append a duplicate partial
+                                // assistant (which would then skip transcript[0]).
                                 self.replace_transcript(messages);
                                 crate::ui::render::Renderer::hard_reset_viewport(
                                     term,
@@ -617,6 +626,7 @@ impl App {
                                 )?;
                                 self.renderer.reset_scrollback_state();
                                 cur_idx = None;
+                                stream_attempt.timing_filter.reset();
                                 pending.clear();
                             }
                             break;
@@ -710,6 +720,7 @@ impl App {
         // so clear the live thinking pane here too.
         self.clear_thinking_pane();
         self.streaming = false;
+        self.streaming_assistant_idx = None;
         // Authoritative token_stats are now reabsorbed; drop the live estimate
         // so the status bar shows the real `received` count.
         self.stream_estimated_received = None;
@@ -1042,6 +1053,7 @@ impl App {
             self.input.reset();
             self.flush_new_messages_to_scrollback(term).ok();
             self.streaming = true;
+            self.streaming_assistant_idx = None;
             self.shown_tool_rows.clear();
             self.stream_estimated_received = Some(self.view.received);
             self.turn_start = Some(std::time::Instant::now());
@@ -1311,6 +1323,7 @@ impl App {
                     .retain(|(cid, _, _)| cid != &call_id);
                 self.pending_shells.retain(|(cid, _, _)| cid != &call_id);
                 if let Some(idx) = cur_idx.take() {
+                    self.streaming_assistant_idx = None;
                     self.finalize_streaming_to_scrollback(idx, term)?;
                     // Streamed assistant text has no trailing blank; add one so
                     // the tool row below doesn't touch it (deduped → single).
@@ -1359,6 +1372,9 @@ impl App {
             return Ok(());
         }
 
+        // `discard_stream_attempt` nulled `cur_idx`; drop the live-assistant
+        // pointer too so a later rebuild re-renders these rows as committed.
+        self.streaming_assistant_idx = None;
         pending.clear();
         pending_key.clear_owner();
         self.shown_tool_rows.clear();
@@ -1383,6 +1399,7 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         if let Some(idx) = cur_idx.take() {
+            self.streaming_assistant_idx = None;
             self.finalize_streaming_to_scrollback(idx, term)?;
             self.flush_scrollback_separator(term)?;
         }
@@ -1485,6 +1502,7 @@ impl App {
                 self.renderer.scrollback_cursor += 1;
                 let i = self.messages.len() - 1;
                 *cur_idx = Some(i);
+                self.streaming_assistant_idx = Some(i);
                 i
             }
         }
@@ -1498,6 +1516,7 @@ impl App {
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
         if let Some(idx) = cur_idx.take() {
+            self.streaming_assistant_idx = None;
             self.finalize_streaming_to_scrollback(idx, term)?;
             self.flush_scrollback_separator(term)?;
         }

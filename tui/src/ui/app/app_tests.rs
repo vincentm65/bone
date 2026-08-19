@@ -5,8 +5,9 @@ use super::{
     config_rejection_message, configured_input_style, edit_diff_message, idle_state_needs_redraw,
     job_quit_confirmation_required, job_snapshot_messages, lua_config_available,
     orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, render_config_page,
-    run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status, take_pending_config,
-    take_terminal_width_change, terminal_background_transition, terminal_dimensions_changed,
+    run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
+    streaming_rebuild_index, take_pending_config, take_terminal_width_change,
+    terminal_background_transition, terminal_dimensions_changed,
 };
 use crate::ui::input::InputState;
 use crate::ui::render::InputPreset;
@@ -481,6 +482,32 @@ fn streaming_replay_resets_source_offset_and_accounts_for_message() {
     prepare_streaming_replay(&mut renderer);
 
     assert_eq!(renderer.scrollback_cursor, 3);
+    assert_eq!(renderer.streaming_source_flushed, 0);
+}
+
+#[test]
+fn streaming_rebuild_index_targets_only_the_live_assistant() {
+    // Not streaming: everything rebuilds as committed.
+    assert_eq!(streaming_rebuild_index(false, None), None);
+    assert_eq!(streaming_rebuild_index(false, Some(3)), None);
+    // Streaming before the first token: the last message is the user row, so
+    // there is no assistant to replay — the user row must be re-rendered as a
+    // committed, background-styled row instead of being lost to markdown.
+    assert_eq!(streaming_rebuild_index(true, None), None);
+    // Streaming with a live assistant: replay that index through the
+    // incremental streaming path.
+    assert_eq!(streaming_rebuild_index(true, Some(2)), Some(2));
+}
+
+#[test]
+fn reset_scrollback_state_clears_streaming_source_offset() {
+    let mut renderer = crate::ui::render::Renderer::new();
+    renderer.scrollback_cursor = 7;
+    renderer.streaming_source_flushed = 42;
+
+    renderer.reset_scrollback_state();
+
+    assert_eq!(renderer.scrollback_cursor, 0);
     assert_eq!(renderer.streaming_source_flushed, 0);
 }
 
