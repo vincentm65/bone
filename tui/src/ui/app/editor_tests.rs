@@ -1,16 +1,20 @@
 use super::*;
 
 #[test]
-fn split_editor_command_keeps_args() {
-    assert_eq!(split_editor_command("code -w"), vec!["code", "-w"]);
-}
-
-#[test]
-fn split_editor_command_respects_quotes() {
-    assert_eq!(
-        split_editor_command("\"/opt/Editor With Spaces/editor\" --wait"),
-        vec!["/opt/Editor With Spaces/editor", "--wait"]
-    );
+fn split_editor_command_cases() {
+    for (command, expected) in [
+        ("code -w", vec!["code", "-w"]),
+        (
+            "\"/opt/Editor With Spaces/editor\" --wait",
+            vec!["/opt/Editor With Spaces/editor", "--wait"],
+        ),
+    ] {
+        assert_eq!(
+            split_editor_command(command),
+            expected,
+            "command: {command}"
+        );
+    }
 }
 
 #[test]

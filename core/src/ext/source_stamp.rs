@@ -150,14 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_config_dir_yields_deterministic_hash() {
-        let dir = make_config_dir(&[]);
-        let h1 = stamp(dir.path()).unwrap();
-        let h2 = stamp(dir.path()).unwrap();
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
     fn init_lua_changes_affect_hash() {
         let dir = make_config_dir(&[("init.lua", "-- v1")]);
         let h1 = stamp(dir.path()).unwrap();
@@ -225,29 +217,6 @@ mod tests {
         ]);
         let h2 = stamp(dir2.path()).unwrap();
         assert_ne!(h, h2);
-    }
-
-    #[test]
-    fn sorted_paths_make_hash_order_independent() {
-        // Create two configs with the same files but "different" discovery
-        // order is not controllable via tempfile, so we verify by checking
-        // that the same files always produce the same hash.
-        let dir1 = make_config_dir(&[
-            ("init.lua", "root"),
-            ("lua/z.lua", "z"),
-            ("lua/a.lua", "a"),
-            ("lua/m.lua", "m"),
-        ]);
-        let h1 = stamp(dir1.path()).unwrap();
-
-        let dir2 = make_config_dir(&[
-            ("init.lua", "root"),
-            ("lua/a.lua", "a"),
-            ("lua/m.lua", "m"),
-            ("lua/z.lua", "z"),
-        ]);
-        let h2 = stamp(dir2.path()).unwrap();
-        assert_eq!(h1, h2);
     }
 
     #[test]

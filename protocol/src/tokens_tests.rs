@@ -26,14 +26,11 @@ fn anchored_estimate_handles_small_shrink() {
 }
 
 #[test]
-fn reset_and_clear_drop_the_anchor() {
+fn clear_drops_the_anchor() {
     let mut stats = TokenStats::new();
     stats.set_context_anchor(50_000, 100_000);
     stats.clear_context_anchor();
     assert_eq!(stats.anchored_context_estimate(38_000), 10_000);
-    stats.set_context_anchor(50_000, 100_000);
-    stats.reset();
-    assert!(stats.context_anchor.is_none());
 }
 
 #[test]

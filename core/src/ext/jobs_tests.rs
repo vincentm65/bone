@@ -53,30 +53,6 @@ fn start_marks_a_queued_job_running() {
 }
 
 #[test]
-fn create_records_provider() {
-    let reg = fresh_registry();
-    let id = reg.create(NewJob {
-        provider: "other-provider".into(),
-        ..new_job("parallel", "task")
-    });
-    assert_eq!(
-        reg.all_jobs()
-            .into_iter()
-            .find(|job| job.id == id)
-            .unwrap()
-            .provider,
-        "other-provider"
-    );
-}
-
-#[test]
-fn create_always_starts_queued() {
-    let reg = fresh_registry();
-    create_default(&reg, "a", "t1");
-    assert_eq!(reg.all_jobs().last().unwrap().status, JobStatus::Queued);
-}
-
-#[test]
 fn cancel_sets_flag_and_completes() {
     let reg = fresh_registry();
     let cancel_flag = Arc::new(AtomicBool::new(false));

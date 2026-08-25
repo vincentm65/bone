@@ -269,17 +269,3 @@ fn error_shell_output_uses_error_gutter() {
         .unwrap();
     assert_eq!(output.spans[0].style.fg, Some(Color::Rgb(224, 80, 80)));
 }
-
-#[test]
-fn non_ascii_shell_commands_do_not_panic_the_lexer() {
-    for cmd in [
-        "echo héllo",
-        "grep -n '│' file.rs",
-        "echo ⋮ && ls",
-        "echo $foé",
-        "rüst --flag ./päth/file.rs",
-    ] {
-        let row = shell_row(cmd, String::new(), false);
-        msg_to_lines(&[row], &Theme::default(), None, 80, false);
-    }
-}

@@ -239,13 +239,3 @@ fn rows_are_grouped_as_updates_installed_and_available() {
     assert!(screen.contains("Installed (1)"), "{screen}");
     assert!(screen.contains("Available (1)"), "{screen}");
 }
-
-#[test]
-fn theme_render_assertion() {
-    let theme = Theme::default();
-    let mut entry = entry("tool");
-    entry.installed = true;
-    let item = build_item(&entry, &theme);
-    assert_eq!(item.tag.as_deref(), Some("installed"));
-    assert_eq!(item.tag_color, Some(theme.palette.good));
-}

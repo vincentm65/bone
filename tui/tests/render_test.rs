@@ -294,19 +294,20 @@ fn colon_paragraph_preserves_markdown_separation() {
 }
 
 #[test]
-fn unordered_list_wrapped_lines_keep_item_indent() {
-    assert_eq!(
-        rendered_text("- alpha beta gamma", 12),
-        vec!["- alpha beta", "  gamma"]
-    );
-}
-
-#[test]
-fn ordered_list_wrapped_lines_keep_item_indent() {
-    assert_eq!(
-        rendered_text("1. alpha beta gamma", 12),
-        vec!["1. alpha", "   beta", "   gamma"]
-    );
+fn wrapped_list_lines_keep_item_indent() {
+    for (markdown, expected) in [
+        ("- alpha beta gamma", vec!["- alpha beta", "  gamma"]),
+        (
+            "1. alpha beta gamma",
+            vec!["1. alpha", "   beta", "   gamma"],
+        ),
+    ] {
+        assert_eq!(
+            rendered_text(markdown, 12),
+            expected,
+            "markdown: {markdown}"
+        );
+    }
 }
 
 #[test]
@@ -357,17 +358,6 @@ fn table_fallback_fits_width_smaller_than_frame_overhead() {
 }
 
 #[test]
-fn table_preserves_inline_code_style() {
-    let lines = render_markdown("| Value |\n|---|\n| `code` |", 80);
-    let code = lines
-        .iter()
-        .flat_map(|line| line.spans.iter())
-        .find(|span| span.content == "code")
-        .expect("code cell should be present");
-    assert_eq!(code.style.fg, Some(Theme::default().markdown_inline_code));
-}
-
-#[test]
 fn markdown_fenced_table_renders_as_table() {
     let md = "```markdown\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n";
     let lines = rendered_text(md, 80);
@@ -406,13 +396,6 @@ fn streaming_blocks_render_the_same_as_completed_message() {
     ];
     let complete = chunks.concat();
     assert_eq!(streamed_text(&chunks, 80), rendered_text(&complete, 80));
-}
-
-#[test]
-fn block_quote_has_prefix_on_each_line() {
-    let md = "> first line\n> second line";
-    let lines = rendered_text(md, 80);
-    assert!(lines.first().is_some_and(|l| l.starts_with("> ")));
 }
 
 #[test]

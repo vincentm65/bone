@@ -145,28 +145,20 @@ fn multi_job_shows_header() {
 }
 
 #[test]
-fn format_tokens_small() {
-    assert_eq!(format_tokens(0), "0");
-    assert_eq!(format_tokens(999), "999");
-}
-
-#[test]
-fn format_tokens_thousands() {
-    assert_eq!(format_tokens(1_000), "1,000");
-    assert_eq!(format_tokens(1_992), "1,992");
-    assert_eq!(format_tokens(9_999), "9,999");
-    assert_eq!(format_tokens(10_000), "10.0k");
-}
-
-#[test]
-fn format_tokens_k() {
-    assert_eq!(format_tokens(10_001), "10.0k");
-    assert_eq!(format_tokens(44_400), "44.4k");
-    assert_eq!(format_tokens(999_999), "1000.0k");
-}
-
-#[test]
-fn format_tokens_m() {
-    assert_eq!(format_tokens(1_000_000), "1.00m");
-    assert_eq!(format_tokens(1_234_567), "1.23m");
+fn format_tokens_cases() {
+    for (tokens, expected) in [
+        (0, "0"),
+        (999, "999"),
+        (1_000, "1,000"),
+        (1_992, "1,992"),
+        (9_999, "9,999"),
+        (10_000, "10.0k"),
+        (10_001, "10.0k"),
+        (44_400, "44.4k"),
+        (999_999, "1000.0k"),
+        (1_000_000, "1.00m"),
+        (1_234_567, "1.23m"),
+    ] {
+        assert_eq!(format_tokens(tokens), expected, "tokens: {tokens}");
+    }
 }
