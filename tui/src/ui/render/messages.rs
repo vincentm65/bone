@@ -205,10 +205,31 @@ fn tool_label_spans(
 
 fn wrap_tool_label_spans(spans: Vec<Span<'static>>, visuals: &[String]) -> Vec<Vec<Span<'static>>> {
     let mut out = Vec::with_capacity(visuals.len());
+    let source = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let mut source_offset = 0usize;
     let mut span_idx = 0usize;
     let mut offset = 0usize;
 
     for visual in visuals {
+        // Wrapping trims whitespace at visual line breaks. Skip those omitted
+        // source bytes before transferring styles to the next visual line.
+        let skipped = source[source_offset..].find(visual).unwrap_or_default();
+        let mut advance = skipped;
+        while advance > 0 && span_idx < spans.len() {
+            let content_len = spans[span_idx].content.len();
+            let take = advance.min(content_len - offset);
+            advance -= take;
+            source_offset += take;
+            offset += take;
+            if offset == content_len {
+                span_idx += 1;
+                offset = 0;
+            }
+        }
+
         let mut needed = visual.len();
         let mut line = Vec::new();
         while needed > 0 && span_idx < spans.len() {
@@ -222,6 +243,7 @@ fn wrap_tool_label_spans(spans: Vec<Span<'static>>, visuals: &[String]) -> Vec<V
                 ));
             }
             needed -= take;
+            source_offset += take;
             offset += take;
             if offset == content.len() {
                 span_idx += 1;
@@ -1054,4 +1076,36 @@ pub(crate) fn msg_to_lines_with_shell_hint(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_spans_follow_wrapping_that_omits_break_whitespace() {
+        let raw = " … _ /tmp/tutor-test-courses/test-course.md";
+        let visuals = wrap_label_line(raw, 12);
+        let styled = wrap_tool_label_spans(vec![Span::raw(raw.to_string())], &visuals);
+        let rendered = styled
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, visuals);
+    }
+
+    #[test]
+    fn label_spans_with_multibyte_continuation_do_not_panic() {
+        let raw = " … _ /tmp/tutor-test-courses/test-course.md";
+        for width in 1..raw.len() {
+            let visuals = wrap_label_line(raw, width);
+            let spans = vec![Span::raw(raw.to_string())];
+            wrap_tool_label_spans(spans, &visuals);
+        }
+    }
 }
