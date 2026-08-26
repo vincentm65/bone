@@ -431,6 +431,15 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
             {
                 return Ok(ToolOutput::text(text.to_string()));
             }
+            // A `content` key holding anything but a string is not a
+            // tool-output envelope (e.g. an MCP CallToolResult, where
+            // `content` is an array). Fall back to plain text instead of
+            // silently emptying the result.
+            if let Some(content) = map.get("content")
+                && !content.is_string()
+            {
+                return Ok(ToolOutput::text(text.to_string()));
+            }
             let content = map
                 .get("content")
                 .and_then(|v| v.as_str())

@@ -12,6 +12,19 @@ fn preserves_plain_json_object_as_content() {
 }
 
 #[test]
+fn preserves_non_string_content_key_as_plain_text() {
+    // An MCP CallToolResult always carries `content` as an array. It must
+    // not be misparsed as a tool-output envelope and emptied.
+    let text = r#"{"content":[{"type":"text","text":"5"}]}"#;
+    let output = parse_tool_output(text).unwrap();
+
+    assert_eq!(output.content, text);
+    assert!(output.images.is_empty());
+    assert!(output.pane_page.is_none());
+    assert!(output.state.is_none());
+}
+
+#[test]
 fn still_parses_tool_output_envelopes() {
     let output = parse_tool_output(r#"{"content":"done","state":"saved"}"#).unwrap();
 
