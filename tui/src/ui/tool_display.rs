@@ -12,7 +12,7 @@ pub fn build_tool_row(
 ) -> Message {
     let show_label = display.and_then(|d| d.show).unwrap_or(true);
     let is_shell = call.name == "shell";
-    let show_result = display.and_then(|d| d.show_result).unwrap_or(false);
+    let show_result = display.and_then(|d| d.show_result);
     let label = if show_label {
         tool_label(call, result, display)
     } else {
@@ -20,8 +20,15 @@ pub fn build_tool_row(
     };
     // ShellTool caps stdout/stderr before returning; retained shell content is
     // the full post-cap output used by the expanded transcript viewer.
-    let content = if is_shell || show_result || result.is_error {
+    // The default preview applies only to tools with no custom row rendering
+    // (no display config and no built-in file-tool label customization);
+    // tools with custom rows keep the previous behavior: hidden unless
+    // `show_result = true`, with errors always shown.
+    let plain_tool = display.is_none() && !is_file_tool(&call.name);
+    let content = if is_shell || result.is_error || show_result == Some(true) {
         result.content.clone()
+    } else if plain_tool {
+        preview_result_content(&result.content)
     } else {
         String::new()
     };
@@ -89,6 +96,49 @@ fn truncate_label(s: &str, max: usize) -> String {
     }
     let kept: String = s.chars().take(max.saturating_sub(1)).collect();
     format!("{kept}…")
+}
+
+/// The built-in file tools, which the TUI renders with a custom label
+/// (path styling in `messages.rs` and a line-count summary for reads).
+/// Mirrors the file-tool match in `tool_label_spans`.
+fn is_file_tool(name: &str) -> bool {
+    matches!(name, "read_file" | "create_file" | "edit_file")
+}
+
+/// Default transcript preview for a plain tool result (no display config and
+/// no built-in label customization): the first lines verbatim, with a marker
+/// for any hidden remainder. Capped by both line and character count so a
+/// single long line (e.g. single-line JSON) can't flood the transcript.
+fn preview_result_content(content: &str) -> String {
+    const MAX_PREVIEW_LINES: usize = 5;
+    const MAX_PREVIEW_CHARS: usize = 1000;
+    if content.trim().is_empty() {
+        return String::new();
+    }
+    let mut lines = content.lines();
+    let preview: Vec<&str> = lines.by_ref().take(MAX_PREVIEW_LINES).collect();
+    let hidden_lines = lines.count();
+    let mut out = preview.join("\n");
+    let char_overflow = out.chars().count().saturating_sub(MAX_PREVIEW_CHARS);
+    if char_overflow > 0 {
+        let kept: String = out.chars().take(MAX_PREVIEW_CHARS).collect();
+        out = kept;
+    }
+    if hidden_lines == 0 && char_overflow == 0 {
+        return out;
+    }
+    let mut marker = String::new();
+    if char_overflow > 0 {
+        marker.push('…');
+    }
+    if hidden_lines > 0 {
+        if !marker.is_empty() {
+            marker.push(' ');
+        }
+        let noun = if hidden_lines == 1 { "line" } else { "lines" };
+        marker.push_str(&format!("+{hidden_lines} more {noun}"));
+    }
+    format!("{}\n⋮ {marker}", out)
 }
 
 fn format_display_label(call: &ToolCall, display: &ToolDisplayConfig) -> Option<String> {

@@ -84,14 +84,96 @@ fn shell_tool_rows_retain_content_and_flag_shell() {
 }
 
 #[test]
-fn non_shell_tool_rows_still_hide_content_by_default() {
-    let call = call("read_file", json!({ "path": "src/main.rs" }));
-    let result = result("read_file", "contents");
+fn plain_tool_rows_preview_content_by_default() {
+    let call = call("custom_tool", json!({}));
+    let result = result("custom_tool", "line one\nline two");
 
     let row = build_tool_row(&call, &result, None);
     let tool = row.tool.unwrap();
-    assert_eq!(row.content, "");
+    assert_eq!(row.content, "line one\nline two");
     assert!(!tool.is_shell);
+}
+
+#[test]
+fn file_tool_rows_still_hide_content() {
+    // The built-in file-tool family keeps the previous behavior: no content
+    // preview.
+    for name in ["read_file", "create_file", "edit_file"] {
+        let call = call(name, json!({ "path": "src/main.rs" }));
+        let result = result(name, "line one\nline two");
+
+        assert_eq!(build_tool_row(&call, &result, None).content, "", "{name}");
+    }
+}
+
+#[test]
+fn custom_display_rows_still_hide_content_without_show_result() {
+    let call = call("computer", json!({ "action": "status" }));
+    let result = result("computer", "line one\nline two");
+    let display = ToolDisplayConfig {
+        args: vec!["action".to_string()],
+        ..Default::default()
+    };
+
+    assert_eq!(build_tool_row(&call, &result, Some(&display)).content, "");
+}
+
+#[test]
+fn non_shell_tool_rows_truncate_preview_to_first_lines() {
+    let call = call("mcp_call", json!({ "tool": "git_status" }));
+    let result = result("mcp_call", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight");
+
+    let row = build_tool_row(&call, &result, None);
+    assert_eq!(row.content, "one\ntwo\nthree\nfour\nfive\n⋮ +3 more lines");
+}
+
+#[test]
+fn non_shell_tool_rows_cap_single_line_preview_by_chars() {
+    let long = "a".repeat(3000);
+    let call = call("mcp_call", json!({ "tool": "blob" }));
+    let result = result("mcp_call", &long);
+
+    let row = build_tool_row(&call, &result, None);
+    assert_eq!(row.content, format!("{}\n⋮ …", "a".repeat(1000)));
+}
+
+#[test]
+fn non_shell_tool_rows_cap_preview_chars_and_line_count_together() {
+    let line = "a".repeat(300);
+    let call = call("mcp_call", json!({ "tool": "blob" }));
+    // 5 lines of 300 chars each → 1504 chars including newlines; the char
+    // cap (1000) bites before the 5th line ends.
+    let result = result("mcp_call", &[line.as_str(); 6].join("\n"));
+
+    let row = build_tool_row(&call, &result, None);
+    let mut lines = row.content.lines();
+    let marker = lines.next_back().unwrap().to_string();
+    let body: String = lines.collect::<Vec<_>>().join("\n");
+    assert_eq!(body.chars().count(), 1000);
+    assert_eq!(marker, "⋮ … +1 more line");
+}
+
+#[test]
+fn non_shell_tool_rows_skip_blank_only_preview() {
+    let call = call("custom_tool", json!({}));
+    let result = result("custom_tool", "   \n");
+
+    assert_eq!(build_tool_row(&call, &result, None).content, "");
+}
+
+#[test]
+fn explicit_show_result_true_keeps_full_content() {
+    let call = call("custom_tool", json!({}));
+    let result = result("custom_tool", "a\nb\nc\nd\ne\nf\ng");
+    let display = ToolDisplayConfig {
+        show_result: Some(true),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_tool_row(&call, &result, Some(&display)).content,
+        "a\nb\nc\nd\ne\nf\ng"
+    );
 }
 
 #[test]
