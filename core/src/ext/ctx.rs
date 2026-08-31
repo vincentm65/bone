@@ -1153,6 +1153,9 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         let t = lua.create_table()?;
         t.set("id", p.id)?;
         t.set("running", p.running)?;
+        t.set("state", p.state.label())?;
+        t.set("started_at", p.started_at)?;
+        t.set("finished_at", p.finished_at)?;
         t.set("stdout", p.stdout)?;
         t.set("stderr", p.stderr)?;
         t.set("exit_code", p.exit_code.map(i64::from))?;
@@ -1184,6 +1187,12 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             t.set("id", p.id)?;
             t.set("command", p.command)?;
             t.set("running", p.running)?;
+            t.set("state", p.state.label())?;
+            t.set("started_at", p.started_at)?;
+            t.set("finished_at", p.finished_at)?;
+            t.set("exit_code", p.exit_code.map(i64::from))?;
+            t.set("signal", p.signal.map(i64::from))?;
+            t.set("error", p.error)?;
             result.set(i + 1, t)?;
         }
         Ok(Value::Table(result))

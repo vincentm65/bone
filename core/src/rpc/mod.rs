@@ -1333,6 +1333,18 @@ impl DaemonCtx {
                 command: process.command,
                 owner: process.owner,
                 running: process.running,
+                state: match process.state {
+                    crate::processes::ProcessState::Running => bone_protocol::ProcessState::Running,
+                    crate::processes::ProcessState::Exited => bone_protocol::ProcessState::Exited,
+                    crate::processes::ProcessState::TimedOut => {
+                        bone_protocol::ProcessState::TimedOut
+                    }
+                    crate::processes::ProcessState::Cancelled => {
+                        bone_protocol::ProcessState::Cancelled
+                    }
+                },
+                started_at: process.started_at,
+                finished_at: process.finished_at,
                 stdout: process.stdout,
                 stderr: process.stderr,
                 exit_code: process.exit_code,
@@ -2288,6 +2300,13 @@ impl DaemonCtx {
                 text,
                 images,
             } => {
+                // Finished background processes stay visible for the turn in
+                // which they finished; the next user turn clears this
+                // conversation's finished entries.
+                let scope = crate::processes::conversation_scope(Some(
+                    self.session.lock().unwrap().background_scope(),
+                ));
+                let _ = crate::processes::registry().clear_completed_scoped(&scope);
                 // Push the user message to the transcript + DB before building
                 // the driver. The Driver detects the duplicate (last message is
                 // already the user prompt) and skips its own push; images are
@@ -2791,6 +2810,12 @@ impl DaemonCtx {
                             .push(ChatMessage::new(crate::llm::ChatRole::User, &ret.output));
                         s.append_user_to_db(&ret.output, None);
                     }
+                    // Same finished-process cleanup as a typed prompt: the
+                    // command-submitted prompt is a full user turn too.
+                    let scope = crate::processes::conversation_scope(Some(
+                        self.session.lock().unwrap().background_scope(),
+                    ));
+                    let _ = crate::processes::registry().clear_completed_scoped(&scope);
                     Flow::StartTurn {
                         request_id,
                         text: ret.output,

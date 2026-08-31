@@ -85,6 +85,8 @@ pub struct ScriptOutput {
     pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub timed_out: bool,
+    pub cancelled: bool,
 }
 
 struct ProcessRequest {
@@ -400,6 +402,31 @@ pub async fn run_direct_exec(
 /// owns timeout, cancellation, process-tree cleanup, reaping, and final output.
 pub(crate) async fn run_script_stream<F>(
     request: ScriptRequest,
+    emit: F,
+) -> Result<ScriptOutput, String>
+where
+    F: FnMut(bool, &[u8]) -> Result<(), String>,
+{
+    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
+    let output = run_script_stream_with_metadata(request, emit).await?;
+    if output.cancelled || output.timed_out {
+        let why = if output.cancelled {
+            "cancelled by user".to_string()
+        } else {
+            format!("timed out after {timeout_ms}ms")
+        };
+        let mut message = format!("[{why}; partial output]\nstdout:\n{}", output.stdout);
+        if !output.stderr.is_empty() {
+            message.push_str(&format!("\nstderr:\n{}", output.stderr));
+        }
+        return Err(message);
+    }
+    Ok(output)
+}
+
+/// Like [`run_script_stream`], but retains lifecycle metadata for managed callers.
+pub(crate) async fn run_script_stream_with_metadata<F>(
+    request: ScriptRequest,
     mut emit: F,
 ) -> Result<ScriptOutput, String>
 where
@@ -445,23 +472,13 @@ where
     .map_err(|error| error.message)?;
     let stdout = out.render(500);
     let stderr = err.render(100);
-    if output.cancelled || output.timed_out {
-        let why = if output.cancelled {
-            "cancelled by user".to_string()
-        } else {
-            format!("timed out after {timeout_ms}ms")
-        };
-        let mut message = format!("[{why}; partial output]\nstdout:\n{stdout}");
-        if !stderr.is_empty() {
-            message.push_str(&format!("\nstderr:\n{stderr}"));
-        }
-        return Err(message);
-    }
     Ok(ScriptOutput {
         exit_code: output.exit_code,
         signal: output.signal,
         stdout,
         stderr,
+        timed_out: output.timed_out,
+        cancelled: output.cancelled,
     })
 }
 

@@ -19,7 +19,7 @@ pub use config::{
 };
 pub use event::{
     CommandAction, ConfigAction, ConversationLoad, JobEventSnapshot, JobSnapshot, JobStatus,
-    KeymapDispatchKind, ProcessSnapshot, RuntimeCommand, RuntimeEvent,
+    KeymapDispatchKind, ProcessSnapshot, ProcessState, RuntimeCommand, RuntimeEvent,
 };
 pub use host::{
     CatalogAction, CatalogActionKind, CatalogApplyResult, CatalogItem, CatalogItemOutcome,

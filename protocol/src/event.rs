@@ -236,18 +236,78 @@ pub enum RuntimeEvent {
     },
 }
 
+/// Lifecycle state of a daemon-owned background process.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
+    Running,
+    Exited,
+    TimedOut,
+    Cancelled,
+}
+
 /// Serializable daemon-owned background process state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProcessSnapshot {
     pub id: String,
     pub command: String,
     pub owner: String,
+    /// Retained for compatibility; use `state` for lifecycle details.
     pub running: bool,
+    pub state: ProcessState,
+    pub started_at: u64,
+    pub finished_at: Option<u64>,
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub error: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ProcessSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            id: String,
+            command: String,
+            owner: String,
+            running: bool,
+            #[serde(default)]
+            state: Option<ProcessState>,
+            #[serde(default)]
+            started_at: u64,
+            #[serde(default)]
+            finished_at: Option<u64>,
+            stdout: String,
+            stderr: String,
+            exit_code: Option<i32>,
+            signal: Option<i32>,
+            error: Option<String>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Ok(Self {
+            id: fields.id,
+            command: fields.command,
+            owner: fields.owner,
+            state: fields.state.unwrap_or(if fields.running {
+                ProcessState::Running
+            } else {
+                ProcessState::Exited
+            }),
+            started_at: fields.started_at,
+            finished_at: fields.finished_at,
+            running: fields.running,
+            stdout: fields.stdout,
+            stderr: fields.stderr,
+            exit_code: fields.exit_code,
+            signal: fields.signal,
+            error: fields.error,
+        })
+    }
 }
 
 /// State of an active daemon-owned background job.

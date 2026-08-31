@@ -87,6 +87,9 @@ fn every_runtime_event_variant_round_trips() {
                 command: "cargo test".into(),
                 owner: "conversation:7".into(),
                 running: true,
+                state: ProcessState::Running,
+                started_at: 0,
+                finished_at: None,
                 stdout: "running".into(),
                 stderr: String::new(),
                 exit_code: None,
@@ -485,4 +488,24 @@ fn request_ids_are_optional_for_legacy_wire_messages() {
         serde_json::to_value(legacy_submit).unwrap(),
         json!({ "submit_prompt": { "text": "hi", "images": [] } })
     );
+}
+
+#[test]
+fn old_process_snapshots_derive_state_from_running_flag() {
+    let snapshot: ProcessSnapshot = serde_json::from_value(json!({
+        "id": "process-1",
+        "command": "build",
+        "owner": "conversation:1",
+        "running": false,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": 1,
+        "signal": null,
+        "error": null
+    }))
+    .expect("deserialize legacy snapshot");
+
+    assert_eq!(snapshot.state, ProcessState::Exited);
+    assert_eq!(snapshot.started_at, 0);
+    assert_eq!(snapshot.finished_at, None);
 }

@@ -7,7 +7,34 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::tools::shell::{ScriptRequest, run_script_stream};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::tools::shell::{ScriptRequest, run_script_stream_with_metadata};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    Running,
+    Exited,
+    TimedOut,
+    Cancelled,
+}
+
+impl ProcessState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Exited => "exited",
+            Self::TimedOut => "timed out",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
 
 #[derive(Clone, Debug)]
 pub struct ProcessSnapshot {
@@ -15,6 +42,9 @@ pub struct ProcessSnapshot {
     pub command: String,
     pub owner: String,
     pub running: bool,
+    pub state: ProcessState,
+    pub started_at: u64,
+    pub finished_at: Option<u64>,
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
@@ -65,6 +95,7 @@ impl ProcessRegistry {
         let order = self.next.fetch_add(1, Ordering::Relaxed);
         let id = format!("process-{order}");
         let cancel = Arc::new(AtomicBool::new(false));
+        let started_at = now_millis();
         self.processes.lock().unwrap().insert(
             id.clone(),
             Process {
@@ -73,6 +104,9 @@ impl ProcessRegistry {
                     command: command.clone(),
                     owner,
                     running: true,
+                    state: ProcessState::Running,
+                    started_at,
+                    finished_at: None,
                     stdout: String::new(),
                     stderr: String::new(),
                     exit_code: None,
@@ -88,7 +122,7 @@ impl ProcessRegistry {
         let job_id = id.clone();
         tokio::spawn(async move {
             let output_id = job_id.clone();
-            let result = run_script_stream(
+            let result = run_script_stream_with_metadata(
                 ScriptRequest {
                     command,
                     env: Vec::new(),
@@ -105,8 +139,16 @@ impl ProcessRegistry {
             let mut processes = registry.processes.lock().unwrap();
             if let Some(process) = processes.get_mut(&job_id) {
                 process.snapshot.running = false;
+                process.snapshot.finished_at = Some(now_millis());
                 match result {
                     Ok(out) => {
+                        process.snapshot.state = if out.cancelled {
+                            ProcessState::Cancelled
+                        } else if out.timed_out {
+                            ProcessState::TimedOut
+                        } else {
+                            ProcessState::Exited
+                        };
                         process.snapshot.stdout.clear();
                         append_bounded(&mut process.snapshot.stdout, out.stdout.as_bytes());
                         process.snapshot.stderr.clear();
@@ -114,7 +156,10 @@ impl ProcessRegistry {
                         process.snapshot.exit_code = out.exit_code;
                         process.snapshot.signal = out.signal;
                     }
-                    Err(err) => process.snapshot.error = Some(err),
+                    Err(err) => {
+                        process.snapshot.state = ProcessState::Exited;
+                        process.snapshot.error = Some(err);
+                    }
                 }
             }
             Self::prune_completed(&mut processes);
@@ -221,6 +266,26 @@ impl ProcessRegistry {
         killed
     }
 
+    /// Remove every finished process owned by `scope`, returning the number
+    /// removed. Called when a new user turn starts: a finished process stays
+    /// visible for the turn in which it finished, then the next turn clears it.
+    pub fn clear_completed_scoped(&self, scope: &str) -> usize {
+        let mut removed = 0;
+        let mut processes = self.processes.lock().unwrap();
+        processes.retain(|_, process| {
+            let finished = process.snapshot.owner == scope && !process.snapshot.running;
+            if finished {
+                removed += 1;
+            }
+            !finished
+        });
+        drop(processes);
+        if removed > 0 {
+            self.bump_version();
+        }
+        removed
+    }
+
     pub fn kill(&self, id: &str) -> bool {
         let processes = self.processes.lock().unwrap();
         let Some(p) = processes.get(id) else {
@@ -251,6 +316,22 @@ pub fn registry() -> &'static ProcessRegistry {
     })
 }
 
+fn elapsed_ms(process: &ProcessSnapshot) -> u64 {
+    process
+        .finished_at
+        .unwrap_or_else(now_millis)
+        .saturating_sub(process.started_at)
+}
+
+fn format_elapsed(process: &ProcessSnapshot) -> String {
+    let seconds = elapsed_ms(process) / 1000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m{}s", seconds / 60, seconds % 60)
+    }
+}
+
 pub(crate) fn execute_action(
     action: &str,
     id: Option<&str>,
@@ -262,13 +343,10 @@ pub(crate) fn execute_action(
             .into_iter()
             .map(|process| {
                 format!(
-                    "{} {} {}",
+                    "{} {} {} ({})",
                     process.id,
-                    if process.running {
-                        "running"
-                    } else {
-                        "finished"
-                    },
+                    process.state.label(),
+                    format_elapsed(&process),
                     process.command
                 )
             })
@@ -282,8 +360,10 @@ pub(crate) fn execute_action(
             }
             .ok_or("unknown process")?;
             Ok(format!(
-                "{}\nrunning: {}\nexit code: {}\nsignal: {}\nstdout:\n{}\nstderr:\n{}\n{}",
+                "{}\nstate: {}\nelapsed: {}\nrunning: {}\nexit code: {}\nsignal: {}\nstdout:\n{}\nstderr:\n{}\n{}",
                 process.id,
+                process.state.label(),
+                format_elapsed(&process),
                 process.running,
                 process
                     .exit_code

@@ -56,12 +56,14 @@ pub(crate) fn active_job_ids(jobs: &[bone_protocol::JobSnapshot]) -> Vec<String>
     jobs.iter().map(|job| job.id.clone()).collect()
 }
 
-pub(crate) fn active_process_ids(processes: &[bone_protocol::ProcessSnapshot]) -> Vec<String> {
+pub(crate) fn process_ids(processes: &[bone_protocol::ProcessSnapshot]) -> Vec<String> {
+    processes.iter().map(|process| process.id.clone()).collect()
+}
+
+fn process_is_running(processes: &[bone_protocol::ProcessSnapshot], id: &str) -> bool {
     processes
         .iter()
-        .filter(|process| process.running)
-        .map(|process| process.id.clone())
-        .collect()
+        .any(|process| process.id == id && process.running)
 }
 
 fn background_pane_needs_refresh(processes_changed: bool, agent_jobs_tick_due: bool) -> bool {
@@ -2537,16 +2539,18 @@ impl App {
         self.request_full_synchronization()
     }
 
-    /// Refresh background panes after snapshot changes or, while agent jobs are
-    /// active, at least once per second so elapsed time stays live.
+    /// Refresh background panes after snapshot changes or, while agent jobs
+    /// or background processes are running, at least once per second so
+    /// elapsed time stays live.
     pub(crate) fn maybe_refresh_jobs_pane(&mut self) -> bool {
         let jobs_changed = self.jobs_version != self.jobs_seen_version;
         let processes_changed = self.processes_version != self.processes_seen_version;
-        let agent_jobs_tick_due = self.jobs_last_refresh.elapsed()
+        let background_tick_due = self.jobs_last_refresh.elapsed()
             >= std::time::Duration::from_secs(1)
-            && !self.jobs.is_empty();
+            && (!self.jobs.is_empty()
+                || self.processes.iter().any(|p| p.running));
         let refresh =
-            jobs_changed || background_pane_needs_refresh(processes_changed, agent_jobs_tick_due);
+            jobs_changed || background_pane_needs_refresh(processes_changed, background_tick_due);
         if !refresh {
             return false;
         }
@@ -2693,13 +2697,12 @@ impl App {
                 self.active_page,
             );
         }
-        let active_ids: Vec<_> = self
+        let all_ids: Vec<_> = self
             .processes
             .iter()
-            .filter(|process| process.running)
             .map(|process| process.id.clone())
             .collect();
-        crate::ui::selectable_pane::reconcile_selection(&mut self.selected_process_id, &active_ids);
+        crate::ui::selectable_pane::reconcile_selection(&mut self.selected_process_id, &all_ids);
         if let Some(page) = crate::ui::processes_pane::render(
             &self.renderer.theme,
             &self.processes,
@@ -3122,7 +3125,7 @@ impl App {
         }
 
         if self.processes_pane_active() {
-            let active_ids = active_process_ids(&self.processes);
+            let active_ids = process_ids(&self.processes);
             match apply_nav_key(
                 code,
                 modifiers,
@@ -3136,9 +3139,11 @@ impl App {
                     return self.redraw(term);
                 }
                 SelectablePaneAction::Cancel(id) => {
-                    let _ = self
-                        .command_tx
-                        .send(crate::runtime::RuntimeCommand::CancelProcess { id });
+                    if process_is_running(&self.processes, &id) {
+                        let _ = self
+                            .command_tx
+                            .send(crate::runtime::RuntimeCommand::CancelProcess { id });
+                    }
                     return self.redraw(term);
                 }
                 SelectablePaneAction::Open(id) => return self.open_process(&id, term),

@@ -1,7 +1,7 @@
 //! Fullscreen live-output viewer for host-managed background processes.
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -11,6 +11,43 @@ use ratatui::widgets::Paragraph;
 
 use crate::ui::fullscreen::{self, FullscreenTerminal};
 use crate::ui::render::wrap::wrap_text;
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+fn process_state_label(state: bone_protocol::ProcessState) -> &'static str {
+    match state {
+        bone_protocol::ProcessState::Running => "running",
+        bone_protocol::ProcessState::Exited => "exited",
+        bone_protocol::ProcessState::TimedOut => "timed out",
+        bone_protocol::ProcessState::Cancelled => "cancelled",
+    }
+}
+
+fn format_elapsed_ms(elapsed_ms: u64) -> String {
+    if elapsed_ms < 60_000 {
+        format!("{}s", elapsed_ms / 1000)
+    } else {
+        format!("{}m{}s", elapsed_ms / 60_000, (elapsed_ms / 1000) % 60)
+    }
+}
+
+fn elapsed_ms(process: &bone_protocol::ProcessSnapshot) -> u64 {
+    if process.started_at == 0 {
+        return 0;
+    }
+    process
+        .finished_at
+        .unwrap_or_else(now_millis)
+        .saturating_sub(process.started_at)
+}
+
+fn format_elapsed(process: &bone_protocol::ProcessSnapshot) -> String {
+    format_elapsed_ms(elapsed_ms(process))
+}
 
 pub fn run(
     process: bone_protocol::ProcessSnapshot,
@@ -32,6 +69,7 @@ fn run_loop(
     let mut scroll = 0;
     let mut follow = true;
     let (mut height, mut max_scroll) = redraw(term, &process, &mut scroll, follow, theme)?;
+    let mut last_redraw = Instant::now();
     let mut dirty = false;
 
     loop {
@@ -59,7 +97,11 @@ fn run_loop(
         }
         if dirty {
             (height, max_scroll) = redraw(term, &process, &mut scroll, follow, theme)?;
+            last_redraw = Instant::now();
             dirty = false;
+        } else if process.running && last_redraw.elapsed() >= Duration::from_secs(1) {
+            (height, max_scroll) = redraw(term, &process, &mut scroll, follow, theme)?;
+            last_redraw = Instant::now();
         }
 
         if !event::poll(Duration::from_millis(100))? {
@@ -68,9 +110,11 @@ fn run_loop(
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let _ = command_tx.send(bone_protocol::RuntimeCommand::CancelProcess {
-                        id: process.id.clone(),
-                    });
+                    if process.running {
+                        let _ = command_tx.send(bone_protocol::RuntimeCommand::CancelProcess {
+                            id: process.id.clone(),
+                        });
+                    }
                 }
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -129,7 +173,15 @@ fn redraw(
     } else {
         *scroll = (*scroll).min(max_scroll);
     }
-    draw(term, &lines, *scroll, process.running, follow, theme)?;
+    draw(
+        term,
+        &lines,
+        *scroll,
+        process.state,
+        elapsed_ms(process),
+        follow,
+        theme,
+    )?;
     Ok((height, max_scroll))
 }
 
@@ -169,6 +221,18 @@ fn process_lines(
                 theme.palette.muted,
             );
         }
+        append_output(
+            &mut lines,
+            &format!("state: {}", process_state_label(process.state)),
+            width,
+            theme.palette.muted,
+        );
+        append_output(
+            &mut lines,
+            &format!("elapsed: {}", format_elapsed(process)),
+            width,
+            theme.palette.muted,
+        );
         if process.exit_code.is_none() && process.signal.is_none() && process.error.is_none() {
             append_output(&mut lines, "finished", width, theme.palette.muted);
         }
@@ -193,7 +257,8 @@ fn draw(
     term: &mut FullscreenTerminal,
     lines: &[Line<'static>],
     scroll: usize,
-    running: bool,
+    state: bone_protocol::ProcessState,
+    elapsed_ms: u64,
     follow: bool,
     theme: &crate::ui::theme::Theme,
 ) -> io::Result<()> {
@@ -217,12 +282,21 @@ fn draw(
             .cloned()
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(visible), chunks[0]);
-        let state = if running { "running" } else { "finished" };
+        let cancel = matches!(state, bone_protocol::ProcessState::Running)
+            .then_some(" · Ctrl+C cancel")
+            .unwrap_or("");
+        let state = match state {
+            bone_protocol::ProcessState::Running => "running",
+            bone_protocol::ProcessState::Exited => "exited",
+            bone_protocol::ProcessState::TimedOut => "timed out",
+            bone_protocol::ProcessState::Cancelled => "cancelled",
+        };
+        let elapsed = format_elapsed_ms(elapsed_ms);
         let follow = if follow { " · following" } else { "" };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(
-                    "{state}{follow} · ↑/↓ PgUp/PgDn Home/End scroll · Ctrl+C cancel · q/Esc/Ctrl+O close"
+                    "{state} · {elapsed}{follow}{cancel} · ↑/↓ PgUp/PgDn Home/End scroll · q/Esc/Ctrl+O close"
                 ),
                 Style::default().fg(theme.palette.muted),
             ))),

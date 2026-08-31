@@ -17,8 +17,8 @@ use std::time::Instant;
 use tokio::time::Duration;
 
 use super::{
-    App, active_job_ids, active_process_ids, apply_input_key_with_paste_burst, apply_pane_nav_key,
-    apply_queue_nav_key, config_rejection_message, finish_queue_edit, orphaned_tool_result_row,
+    App, active_job_ids, apply_input_key_with_paste_burst, apply_pane_nav_key, apply_queue_nav_key,
+    config_rejection_message, finish_queue_edit, orphaned_tool_result_row, process_ids,
     should_open_agent_log,
 };
 
@@ -1781,7 +1781,7 @@ impl App {
                             .get(*active_page)
                             .is_some_and(|p| p.source == crate::ui::processes_pane::PANE_SOURCE);
                     if processes_active {
-                        let active_ids = active_process_ids(processes);
+                        let active_ids = process_ids(processes);
                         match apply_nav_key(
                             key.code,
                             key.modifiers,
@@ -1796,8 +1796,10 @@ impl App {
                                 continue;
                             }
                             SelectablePaneAction::Cancel(id) => {
-                                let _ = command_tx.send(RuntimeCommand::CancelProcess { id });
-                                result.processes_changed = true;
+                                if super::process_is_running(processes, &id) {
+                                    let _ = command_tx.send(RuntimeCommand::CancelProcess { id });
+                                    result.processes_changed = true;
+                                }
                                 continue;
                             }
                             SelectablePaneAction::Open(id) => {

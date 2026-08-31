@@ -81,6 +81,11 @@ not try to recreate it with a pane of the same source. Cancellation is
 conversation-scoped and cooperative: the wait can be cancelled without killing
 the child, while an explicit job cancel requests termination of that job.
 
+Managed shell processes share the conversation scoping. A finished process
+stays queryable (state, output) for the rest of the turn in which it finished,
+and its conversation's finished entries are cleared when the next user turn
+starts; running processes are never cleared by a turn.
+
 ## Extension-facing metadata
 
 `bone.agent_depth`, `bone.headless`, `ctx.runtime.info()`, and `ctx.agent.jobs()`
