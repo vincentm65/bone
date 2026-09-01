@@ -1309,7 +1309,12 @@ fn startup_contention_error_is_bounded_and_structured() {
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     assert_eq!(error.operation, StartupDbOperation::CreateConversation);
     assert_eq!(error.path, path);
-    assert!(error.is_transient_contention());
+    assert!(error.sqlite_codes().is_some_and(|(code, _)| {
+        matches!(
+            code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        )
+    }));
     assert!(error.elapsed >= std::time::Duration::from_millis(80));
     let rendered = error.to_string();
     assert!(rendered.contains("create conversation"));
@@ -1335,5 +1340,10 @@ fn startup_retry_does_not_retry_non_contention_errors() {
     .unwrap_err();
 
     assert_eq!(attempts, 1);
-    assert!(!error.is_transient_contention());
+    assert!(!error.sqlite_codes().is_some_and(|(code, _)| {
+        matches!(
+            code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        )
+    }));
 }

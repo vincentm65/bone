@@ -512,14 +512,6 @@ impl StartupDbError {
         }
     }
 
-    pub fn is_transient_contention(&self) -> bool {
-        self.sqlite_codes().is_some_and(|(code, _)| {
-            matches!(
-                code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-        })
-    }
 }
 
 impl std::fmt::Display for StartupDbError {
