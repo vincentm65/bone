@@ -184,6 +184,23 @@ struct DriverHookState<'a> {
     usage_records: &'a mut Vec<UsageRecord>,
 }
 
+#[derive(Default)]
+struct BeforeTurnExtras {
+    replacement: Option<Vec<ChatMessage>>,
+    system_prompt_appends: Vec<String>,
+    turn_messages: Vec<String>,
+    tool_filter: Option<Vec<String>>,
+    deferred_operations: Vec<crate::ext::ctx::ConversationOperation>,
+}
+
+enum DriverHookMode<'a> {
+    Generic,
+    BeforeTurn {
+        report_usage: &'a (dyn Fn(&TokenStats) + Send + Sync),
+        extras: &'a mut BeforeTurnExtras,
+    },
+}
+
 fn context_system_prompt(history: &[ChatMessage], configured: &Option<String>) -> Option<String> {
     history
         .first()
@@ -197,6 +214,42 @@ impl DriverHookRuntime<'_> {
         &self,
         state: DriverHookState<'_>,
     ) -> (crate::ext::types::ManagedHookResult, bool) {
+        self.run_mode(state, DriverHookMode::Generic).await
+    }
+
+    async fn run_mode(
+        &self,
+        state: DriverHookState<'_>,
+        mode: DriverHookMode<'_>,
+    ) -> (crate::ext::types::ManagedHookResult, bool) {
+        let (
+            system_prompt,
+            per_record_usage,
+            set_handler_cancel,
+            forward_keys,
+            before_extras,
+        ) = match mode {
+            DriverHookMode::Generic => (
+                context_system_prompt(state.history, self.system_prompt_override),
+                None,
+                true,
+                true,
+                None,
+            ),
+            // before_turn historically receives the raw override, even when the
+            // current history already has a system message. Its tool handler also
+            // intentionally does not receive the generic run cancel token.
+            DriverHookMode::BeforeTurn {
+                report_usage,
+                extras,
+            } => (
+                self.system_prompt_override.clone(),
+                Some(report_usage),
+                false,
+                false,
+                Some(extras),
+            ),
+        };
         let mut app_state = crate::ext::ctx::AppCtxState::new(
             state.tools,
             state.token_stats,
@@ -205,7 +258,7 @@ impl DriverHookRuntime<'_> {
             self.llm.id(),
             self.llm.model(),
             self.llm.context_window_tokens(),
-            context_system_prompt(state.history, self.system_prompt_override),
+            system_prompt,
             Vec::new(),
             state.transcript.clone(),
             self.config_store.clone(),
@@ -219,7 +272,9 @@ impl DriverHookRuntime<'_> {
         ctx_cfg.agent_depth = self.agent_depth;
         if let Some(handler) = ctx_cfg.tool_handler.as_mut() {
             handler.approval_gate = ctx_cfg.approval_gate.clone();
-            handler.cancel_token = self.cancel.clone();
+            if set_handler_cancel {
+                handler.cancel_token = self.cancel.clone();
+            }
         }
         let private_usage = Arc::new(Mutex::new(Vec::new()));
         ctx_cfg.private_llm = Some(crate::ext::ctx::PrivateLlmContext {
@@ -232,28 +287,32 @@ impl DriverHookRuntime<'_> {
             },
             usage_records: Arc::clone(&private_usage),
         });
-        let forwarder = if let (Some(events_out), Some(key_registry)) =
-            (self.runtime_events.clone(), self.key_reply_registry.clone())
-        {
-            let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
-            ctx_cfg.key_sender = Some(live_tx);
-            let handle = tokio::spawn(async move {
-                loop {
-                    let request = tokio::select! {
-                        request = live_rx.recv() => request,
-                        _ = &mut stop_rx => {
-                            while let Ok(request) = live_rx.try_recv() {
-                                forward_key_request(request, &key_registry, &events_out);
+        let forwarder = if forward_keys {
+            if let (Some(events_out), Some(key_registry)) =
+                (self.runtime_events.clone(), self.key_reply_registry.clone())
+            {
+                let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+                ctx_cfg.key_sender = Some(live_tx);
+                let handle = tokio::spawn(async move {
+                    loop {
+                        let request = tokio::select! {
+                            request = live_rx.recv() => request,
+                            _ = &mut stop_rx => {
+                                while let Ok(request) = live_rx.try_recv() {
+                                    forward_key_request(request, &key_registry, &events_out);
+                                }
+                                break;
                             }
-                            break;
-                        }
-                    };
-                    let Some(request) = request else { break };
-                    forward_key_request(request, &key_registry, &events_out);
-                }
-            });
-            Some((stop_tx, handle))
+                        };
+                        let Some(request) = request else { break };
+                        forward_key_request(request, &key_registry, &events_out);
+                    }
+                });
+                Some((stop_tx, handle))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -290,17 +349,48 @@ impl DriverHookRuntime<'_> {
             state.usage_records,
             self.llm.id(),
             self.llm.model(),
-            None,
+            per_record_usage,
         );
-        apply_hook_operations(
-            std::mem::take(&mut result.operations),
-            state.transcript,
-            state.history,
-            state.request_history,
-            state.persist_messages,
-            state.session,
-            state.session_seq,
-        );
+        if let Some(extras) = before_extras {
+            for action in std::mem::take(&mut result.actions) {
+                if let Some(messages) = action.conversation_replace {
+                    extras.replacement = Some(messages);
+                }
+                if let Some(message) = action.system_prompt_append {
+                    extras.system_prompt_appends.push(message);
+                }
+                if let Some(message) = action.turn_message {
+                    extras.turn_messages.push(message);
+                }
+                if let Some(filter) = action.tool_filter {
+                    extras.tool_filter = Some(filter);
+                }
+            }
+            for operation in std::mem::take(&mut result.operations) {
+                match operation {
+                    crate::ext::ctx::ConversationOperation::Append(messages) => {
+                        extras.deferred_operations.push(
+                            crate::ext::ctx::ConversationOperation::Append(messages),
+                        );
+                    }
+                    crate::ext::ctx::ConversationOperation::Load(_) => {
+                        crate::ext::ctx::runtime_warn(
+                            "bone-lua warn: conversation.load is unavailable during a turn",
+                        );
+                    }
+                }
+            }
+        } else {
+            apply_hook_operations(
+                std::mem::take(&mut result.operations),
+                state.transcript,
+                state.history,
+                state.request_history,
+                state.persist_messages,
+                state.session,
+                state.session_seq,
+            );
+        }
         (result, cancelled)
     }
 }
@@ -799,126 +889,39 @@ impl Driver {
                 token_stats.context_length = token_stats.anchored_context_estimate(
                     estimate_context_chars(&history, tool_defs_json_chars),
                 );
-                let mut state = crate::ext::ctx::AppCtxState::new(
-                    &tools,
-                    &token_stats,
-                    &approval_mode.get(),
-                    conversation_id,
-                    llm.id(),
-                    llm.model(),
-                    llm.context_window_tokens(),
-                    system_prompt_override.clone(),
-                    Vec::new(),
-                    transcript.clone(),
-                    config_store.clone(),
-                    config_schema.clone(),
-                );
-                state.background_scope = background_scope;
-                let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
-                // Give before_turn handlers a live status channel so they can
-                // surface progress to the attached frontend.
-                ctx_cfg.runtime_status = runtime_events.clone();
-                // Thread the turn cancel flag through blocking hooks and private
-                // LLM requests.
-                ctx_cfg.cancelled = cancel.clone();
-                ctx_cfg.approval_gate = Some(crate::tools::SharedGate(gate.clone()));
-                if let Some(handler) = ctx_cfg.tool_handler.as_mut() {
-                    handler.approval_gate = ctx_cfg.approval_gate.clone();
-                }
-                // Subagents (depth > 0) run with no runtime_status channel, so
-                // `ctx.ui.status`/`notify` would otherwise fall back to stderr
-                // — corrupting the parent TUI, which owns the terminal in raw
-                // mode. Mark the depth so those calls drop silently instead.
-                ctx_cfg.agent_depth = agent_depth;
-                let private_usage_records = Arc::new(Mutex::new(Vec::new()));
-                ctx_cfg.private_llm = Some(crate::ext::ctx::PrivateLlmContext {
-                    provider: Arc::clone(&llm),
-                    request_context: ProviderRequestContext {
-                        conversation_id,
-                        cache_scope: Some(cache_scope.clone()),
-                        turn_state: Some(Arc::clone(&turn_state)),
-                        max_tokens: None,
-                    },
-                    usage_records: Arc::clone(&private_usage_records),
-                });
-
-                let mut sys_appends: Vec<String> = Vec::new();
-                let mut tool_filter: Option<Vec<String>> = None;
-                let mut replacement: Option<Vec<ChatMessage>> = None;
-                let mut pending_appends = Vec::new();
-                // Run Lua on a blocking thread so arbitrary handlers cannot
-                // freeze the frontend poll loop. Cloning the manager (shared
-                // `Arc<Mutex<Lua>>`) and awaiting the join keeps this future
-                // yielding while a handler runs.
-                let ext_for_hook = extensions.clone();
-                let mut hook = tokio::task::spawn_blocking(move || {
-                    ext_for_hook.dispatch_managed(
-                        "before_turn",
-                        serde_json::json!({}),
-                        ctx_cfg,
-                        false,
+                let mut extras = BeforeTurnExtras::default();
+                let hook_mode = approval_mode.get();
+                let (_hook_result, hook_cancelled) = hook_runtime
+                    .run_mode(
+                        DriverHookState {
+                            name: "before_turn",
+                            payload: serde_json::json!({}),
+                            blockable: false,
+                            tools: &tools,
+                            token_stats: &mut token_stats,
+                            approval_mode: &hook_mode,
+                            transcript: &mut transcript,
+                            history: &mut history,
+                            request_history: &mut request_history,
+                            persist_messages: &mut persist_messages,
+                            session: session.as_ref(),
+                            session_seq: &mut session_seq,
+                            usage_records: &mut usage_records,
+                        },
+                        DriverHookMode::BeforeTurn {
+                            report_usage: &report_usage,
+                            extras: &mut extras,
+                        },
                     )
-                });
-                // Private LLM calls cooperatively observe cancellation. Give the
-                // hook a bounded grace period to publish any provider usage it
-                // already received, without letting arbitrary Lua delay cancel.
-                let (hook_result, hook_cancelled) = tokio::select! {
-                    biased;
-                    _ = await_cancel() => {
-                        let result = tokio::time::timeout(
-                            std::time::Duration::from_millis(100),
-                            &mut hook,
-                        )
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or_default();
-                        (result, true)
-                    }
-                    res = &mut hook => (res.unwrap_or_default(), false),
-                };
-                record_hook_usage(
-                    std::mem::take(
-                        &mut *private_usage_records
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                    ),
-                    &mut token_stats,
-                    session.as_ref(),
-                    &mut usage_records,
-                    llm.id(),
-                    llm.model(),
-                    Some(&report_usage),
-                );
+                    .await;
                 if hook_cancelled {
                     break 'turn Ok(String::new());
                 }
-                for operation in hook_result.operations {
-                    match operation {
-                        crate::ext::ctx::ConversationOperation::Append(messages) => {
-                            pending_appends.extend(messages);
-                        }
-                        crate::ext::ctx::ConversationOperation::Load(_) => {
-                            crate::ext::ctx::runtime_warn(
-                                "bone-lua warn: conversation.load is unavailable during a turn",
-                            );
-                        }
-                    }
-                }
-                for action in hook_result.actions {
-                    if let Some(new_messages) = action.conversation_replace {
-                        replacement = Some(new_messages);
-                    }
-                    if let Some(s) = action.system_prompt_append {
-                        sys_appends.push(s);
-                    }
-                    if let Some(s) = action.turn_message {
-                        turn_messages.push(s);
-                    }
-                    if let Some(t) = action.tool_filter {
-                        tool_filter = Some(t);
-                    }
-                }
+                let replacement = extras.replacement;
+                let sys_appends = extras.system_prompt_appends;
+                turn_messages.extend(extras.turn_messages);
+                let tool_filter = extras.tool_filter;
+                let pending_operations = extras.deferred_operations;
 
                 // Finalize the active system prompt only after every hook has
                 // run. A replacement uses the same history rebuild path.
@@ -944,11 +947,9 @@ impl Driver {
                     last_turn_messages.clear();
                     token_stats.clear_context_anchor();
                 } else {
-                    if !pending_appends.is_empty() {
+                    if !pending_operations.is_empty() {
                         apply_hook_operations(
-                            vec![crate::ext::ctx::ConversationOperation::Append(
-                                pending_appends,
-                            )],
+                            pending_operations,
                             &mut transcript,
                             &mut history,
                             &mut request_history,
