@@ -1536,7 +1536,6 @@ impl DaemonCtx {
             s.transcript.clone(),
             self.config.clone(),
             config_schema,
-            s.turn_nudge.lock().unwrap().clone(),
         );
         state.background_scope = Some(s.background_scope());
         state

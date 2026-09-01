@@ -178,7 +178,6 @@ struct DriverHookState<'a> {
     session: &'a dyn SessionSink,
     session_seq: &'a mut i64,
     usage_records: &'a mut Vec<UsageRecord>,
-    turn_nudge: Option<String>,
 }
 
 fn context_system_prompt(history: &[ChatMessage], configured: &Option<String>) -> Option<String> {
@@ -207,7 +206,6 @@ impl DriverHookRuntime<'_> {
             state.transcript.clone(),
             self.config_store.clone(),
             self.config_schema.clone(),
-            state.turn_nudge,
         );
         app_state.background_scope = self.background_scope;
         let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&app_state);
@@ -646,7 +644,6 @@ impl Driver {
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
-                turn_nudge: None,
             })
             .await;
         if message_hook_cancelled {
@@ -678,7 +675,6 @@ impl Driver {
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
-                turn_nudge: None,
             })
             .await;
         if hook_cancelled {
@@ -714,7 +710,6 @@ impl Driver {
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
-                turn_nudge: None,
             })
             .await;
         if hook_cancelled {
@@ -812,7 +807,6 @@ impl Driver {
                     transcript.clone(),
                     config_store.clone(),
                     config_schema.clone(),
-                    nudge.clone(),
                 );
                 state.background_scope = background_scope;
                 let mut ctx_cfg = crate::ext::ctx::build_before_turn_config(&state);
@@ -1258,7 +1252,6 @@ impl Driver {
                         session: session.as_ref(),
                         session_seq: &mut session_seq,
                         usage_records: &mut usage_records,
-                        turn_nudge: None,
                     })
                     .await;
             }
@@ -1362,7 +1355,6 @@ impl Driver {
                 transcript.clone(),
                 config_store.clone(),
                 config_schema.clone(),
-                nudge.clone(),
             );
             app_state.background_scope = background_scope;
             tools.app_state = Some(app_state);
@@ -1398,7 +1390,6 @@ impl Driver {
                         session: session.as_ref(),
                         session_seq: &mut session_seq,
                         usage_records: &mut usage_records,
-                        turn_nudge: nudge.clone(),
                     })
                     .await;
                 hook_blocks.push(hook.blocked);
@@ -1441,7 +1432,6 @@ impl Driver {
                         session: session.as_ref(),
                         session_seq: &mut session_seq,
                         usage_records: &mut usage_records,
-                        turn_nudge: nudge.clone(),
                     })
                     .await;
             }
@@ -1601,7 +1591,6 @@ impl Driver {
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
-                turn_nudge: None,
             })
             .await;
         session.end();
@@ -1620,7 +1609,6 @@ impl Driver {
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
-                turn_nudge: None,
             })
             .await;
 

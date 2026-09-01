@@ -182,9 +182,6 @@ pub struct CtxConfig {
     /// (the TUI) via `ctx.ui.status`/`ctx.ui.notify`. `None` headless, where
     /// those calls fall back to stderr.
     pub runtime_status: Option<tokio::sync::mpsc::UnboundedSender<crate::runtime::RuntimeEvent>>,
-    /// Steering text injected mid-turn via Ctrl+Enter. Passed to the
-    /// `before_turn` hook so Lua can shape the next provider request.
-    pub turn_nudge: Option<String>,
 }
 
 impl CtxConfig {
@@ -221,7 +218,6 @@ impl CtxConfig {
             config_schema: None,
             conversation_operations: None,
             runtime_status: None,
-            turn_nudge: None,
         }
     }
 }
@@ -248,8 +244,6 @@ pub struct AppCtxState {
     pub conversation_history: Vec<crate::llm::ChatMessage>,
     pub config_store: crate::config::store::ConfigStore,
     pub config_schema: bone_protocol::ConfigSchema,
-    /// Steering text injected mid-turn via Ctrl+Enter.
-    pub turn_nudge: Option<String>,
 }
 
 impl AppCtxState {
@@ -270,7 +264,6 @@ impl AppCtxState {
         history: Vec<crate::llm::ChatMessage>,
         config_store: crate::config::store::ConfigStore,
         config_schema: bone_protocol::ConfigSchema,
-        turn_nudge: Option<String>,
     ) -> Self {
         let est = estimate_prompt_tokens(tools, system_prompt_override.as_deref());
         Self {
@@ -286,7 +279,6 @@ impl AppCtxState {
             conversation_history: history,
             config_store,
             config_schema,
-            turn_nudge,
         }
     }
 
@@ -308,7 +300,6 @@ impl AppCtxState {
         cfg.conversation_history = Some(self.conversation_history.clone());
         cfg.config_store = Some(self.config_store.clone());
         cfg.config_schema = Some(self.config_schema.clone());
-        cfg.turn_nudge = self.turn_nudge.clone();
     }
 }
 

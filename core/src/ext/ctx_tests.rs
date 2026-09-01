@@ -615,7 +615,6 @@ fn sample_app_state(system_prompt_override: Option<String>) -> AppCtxState {
         history,
         config_store,
         config_schema,
-        None,
     )
 }
 
