@@ -373,17 +373,6 @@ fn complete_message_roundtrip_preserves_codex_provider_order() {
     assert_eq!(history[0].content, "text between calls");
     assert!(history[0].tool_calls.as_deref().unwrap().contains("call-a"));
     assert!(!history[0].is_error);
-    let searchable: String = db
-        .conn
-        .query_row(
-            "SELECT content FROM messages_fts
-             WHERE rowid = (SELECT id FROM messages WHERE conversation_id = ?1)",
-            rusqlite::params![conv],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(searchable.contains("text between calls"));
-    assert!(searchable.contains("call-b"));
 
     let loaded = db.load_effective_transcript(conv).unwrap();
     assert_eq!(loaded, vec![message]);
@@ -672,50 +661,6 @@ fn all_checkpoints_malformed_falls_back_to_raw_messages() {
     assert_eq!(effective[1].content, "second");
     assert_eq!(effective[2].content, "error result");
     assert!(effective[2].is_error, "is_error must survive raw fallback");
-}
-
-#[test]
-fn v6_migration_rebuilds_drifted_fts_index_without_changing_messages() {
-    let conn = Connection::open_in_memory().unwrap();
-    let db = SessionDb { conn };
-    db.setup_schema().unwrap();
-    let conv = db.create_conversation("openai", "gpt-4").unwrap();
-    db.append_message(conv, "user", "searchable", None, None, None, None, false, 1)
-        .unwrap();
-    db.conn.execute("DELETE FROM messages_fts", []).unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO messages_fts(rowid, content, role, conversation_id)
-             VALUES (999, 'stale', 'user', 999)",
-            [],
-        )
-        .unwrap();
-    db.conn.pragma_update(None, "user_version", 6u32).unwrap();
-
-    db.setup_schema().unwrap();
-
-    let messages: i64 = db
-        .conn
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-        .unwrap();
-    let indexed: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM messages m JOIN messages_fts f ON f.rowid = m.id
-             WHERE f.content = m.content AND f.role = m.role",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let stale: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM messages_fts WHERE rowid = 999",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!((messages, indexed, stale), (1, 1, 0));
 }
 
 #[test]

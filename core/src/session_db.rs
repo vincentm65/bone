@@ -89,7 +89,6 @@ fn migrate_legacy_db_if_needed(
     Ok(())
 }
 
-/// A search hit from FTS5 query.
 /// Summary of a conversation for listing.
 #[derive(Clone, Debug)]
 pub(crate) struct ConversationSummary {
@@ -355,13 +354,6 @@ const FULL_SCHEMA: &str = "
         through_seq     INTEGER NOT NULL,
         messages_json   TEXT NOT NULL,
         created_at      TEXT NOT NULL
-    );
-
-    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-        content,
-        role UNINDEXED,
-        conversation_id UNINDEXED,
-        tokenize='unicode61'
     );
 
     CREATE INDEX IF NOT EXISTS idx_usage_events_conversation
@@ -778,19 +770,9 @@ impl SessionDb {
         }
 
         if version == 6 {
-            // Rebuild only the derived search index. Older writers could leave
-            // missing/stale FTS rowids; authoritative conversation data is not
-            // deleted or rewritten by this migration.
-            tx.execute_batch(
-                "DELETE FROM messages_fts;
-                 INSERT INTO messages_fts (rowid, content, role, conversation_id)
-                 SELECT id,
-                        CASE WHEN tool_calls IS NOT NULL
-                             THEN content || ' TOOL_CALL ' || tool_calls
-                             ELSE content END,
-                        role, conversation_id
-                 FROM messages;",
-            )?;
+            // v6 -> v7: the messages_fts rebuild that lived here was removed
+            // along with the table; the bump remains so v6 databases reach
+            // the later migration steps.
             version = 7;
         }
 
@@ -846,7 +828,7 @@ impl SessionDb {
 
         if version == 9 {
             // Preserve a complete, versioned model-facing message alongside
-            // the normalized columns used by history and FTS. Existing rows
+            // the normalized columns used by history. Existing rows
             // remain NULL and continue through the legacy column mapper.
             if !column_exists(&tx, "messages", "payload_json")? {
                 tx.execute_batch("ALTER TABLE messages ADD COLUMN payload_json TEXT;")?;
@@ -968,7 +950,7 @@ impl SessionDb {
         }
     }
 
-    /// Insert one normalized message row plus its FTS projection.
+    /// Insert one normalized message row.
     fn insert_message_row(
         conn: &Connection,
         conversation_id: i64,
@@ -996,16 +978,6 @@ impl SessionDb {
             ],
         )?;
         let msg_id = conn.last_insert_rowid();
-        // Include tool-call info in the FTS index so it stays searchable.
-        let searchable = if let Some(tool_calls) = row.tool_calls {
-            format!("{} TOOL_CALL {tool_calls}", row.content)
-        } else {
-            row.content.to_string()
-        };
-        conn.execute(
-            "INSERT INTO messages_fts (rowid, content, role, conversation_id) VALUES (?1, ?2, ?3, ?4)",
-            params![msg_id, searchable, row.role, conversation_id],
-        )?;
         Ok(msg_id)
     }
 
@@ -1074,7 +1046,7 @@ impl SessionDb {
         Ok(allocated_seq)
     }
 
-    /// Append a message to a conversation (inserts into both messages and messages_fts).
+    /// Append a message to a conversation.
     ///
     /// This normalized-column adapter remains for compatibility. Runtime
     /// persistence should use [`Self::append_chat_message`] so no message
@@ -1139,8 +1111,8 @@ impl SessionDb {
     /// Append every new message and usage record from a completed turn in a
     /// single transaction — one commit (one WAL sync) instead of one per row,
     /// and the whole turn is atomic: a mid-loop failure rolls everything back,
-    /// so the DB can never hold a partial turn or desync `messages` from
-    /// `messages_fts`. `seq` is advanced per written message and returned.
+    /// so the DB can never hold a partial turn. `seq` is advanced per written
+    /// message and returned.
     pub fn append_turn(
         &self,
         conversation_id: i64,
@@ -1704,7 +1676,6 @@ impl SessionDb {
         rows.collect()
     }
 
-    /// Full-text search across all conversations.
     /// List recent conversations, most recent first.
     pub(crate) fn list_conversations(
         &self,
