@@ -129,12 +129,6 @@ pub struct WaitOutcome {
     pub timed_out: bool,
 }
 
-impl Default for JobRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl JobRegistry {
     pub fn new() -> Self {
         Self {
