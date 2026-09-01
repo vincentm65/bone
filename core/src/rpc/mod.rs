@@ -874,7 +874,6 @@ fn is_config_command(command: &RuntimeCommand) -> bool {
             | RuntimeCommand::SetToolEnabled { .. }
             | RuntimeCommand::SetCommandEnabled { .. }
             | RuntimeCommand::ReloadSettings
-            | RuntimeCommand::SetSetting { .. }
             | RuntimeCommand::UpsertSubagent { .. }
             | RuntimeCommand::DeleteSubagent { .. }
             | RuntimeCommand::SetSubagentEnabled { .. }
@@ -1458,18 +1457,6 @@ impl DaemonCtx {
         request_id: Option<String>,
     ) {
         self.finish_config_mutation(vec![path], result, false, request_id);
-    }
-
-    fn set_extension_setting(
-        &self,
-        path: &str,
-        value: serde_json::Value,
-        expected_revision: u64,
-        request_id: Option<String>,
-    ) {
-        let full_path = format!("extensions.{path}");
-        let result = self.config.set_value(&full_path, value, expected_revision);
-        self.finish_config_mutation(vec![full_path], result, false, request_id);
     }
 
     fn persist_mode(&self, mode_str: &str) {
@@ -2653,15 +2640,6 @@ impl DaemonCtx {
                 self.reload_settings();
                 Flow::Continue
             }
-            RuntimeCommand::SetSetting {
-                path,
-                value,
-                expected_revision,
-                request_id,
-            } => {
-                self.set_extension_setting(&path, value, expected_revision, request_id);
-                Flow::Continue
-            }
             RuntimeCommand::UpsertSubagent {
                 agent,
                 expected_revision,
@@ -3021,14 +2999,6 @@ impl DaemonCtx {
                     // (the gate reads the shared atomic per call).
                     Some(RuntimeCommand::SetApprovalMode { mode: mode_str }) => self.persist_mode(&mode_str),
                     Some(RuntimeCommand::ReloadSettings) => self.reload_settings(),
-                    Some(RuntimeCommand::SetSetting {
-                        path,
-                        value,
-                        expected_revision,
-                        request_id,
-                    }) => {
-                        self.set_extension_setting(&path, value, expected_revision, request_id)
-                    }
                     // Preserve prompts received while a turn is active. They are
                     // handled through the normal idle path after this turn, so
                     // transcript insertion, persistence, hooks, and turn ordering

@@ -548,14 +548,6 @@ pub enum RuntimeCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
-    /// Validate and atomically persist one registered extension setting.
-    SetSetting {
-        path: String,
-        value: serde_json::Value,
-        expected_revision: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-    },
     /// Create or replace one canonical config-backed sub-agent.
     UpsertSubagent {
         agent: crate::session::SubagentDefinition,

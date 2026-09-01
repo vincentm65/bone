@@ -292,12 +292,6 @@ fn every_runtime_command_variant_round_trips() {
         },
         RuntimeCommand::ReloadExtensions,
         RuntimeCommand::ReloadSettings,
-        RuntimeCommand::SetSetting {
-            path: "compact.auto".into(),
-            value: json!(true),
-            expected_revision: 7,
-            request_id: Some("setting-1".into()),
-        },
         RuntimeCommand::UpsertSubagent {
             agent: crate::SubagentDefinition {
                 name: "researcher".into(),
