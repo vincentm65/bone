@@ -559,10 +559,6 @@ impl LlmProvider for OpenAiCompatProvider {
         self.context_window_tokens
     }
 
-    async fn validate(&self) -> Result<(), LlmError> {
-        Ok(())
-    }
-
     async fn chat_stream(
         &self,
         messages: Vec<ChatMessage>,
