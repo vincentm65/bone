@@ -123,11 +123,6 @@ impl UsageOnlySessionSink {
         Self::from_parts(db, conversation_id)
     }
 
-    /// Construct with an already-open DB (tests / injected paths).
-    pub fn with_db(db: SessionDb, conversation_id: i64) -> Self {
-        Self::from_parts(Some(db), conversation_id)
-    }
-
     fn from_parts(db: Option<SessionDb>, conversation_id: i64) -> Self {
         Self {
             db: Mutex::new(db),

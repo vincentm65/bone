@@ -14,7 +14,6 @@
 //! 4. `UsageOnlySessionSink` attributes usage to a parent conversation without
 //!    writing messages or ending that conversation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bone_core::llm::{ChatMessage, ChatRole};
@@ -145,31 +144,24 @@ fn injected_sink_is_shareable_via_arc() {
     assert_eq!(Arc::strong_count(&sink), 1);
 }
 
-static USAGE_SINK_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn temp_session_db() -> (SessionDb, std::path::PathBuf) {
-    let id = USAGE_SINK_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "bone_usage_only_sink_{}_{}",
-        std::process::id(),
-        id
-    ));
-    let db = SessionDb::open(&path).unwrap();
-    (db, path)
-}
-
 #[test]
 fn usage_only_sink_records_usage_against_parent_without_messages() {
-    let (db, path) = temp_session_db();
-    let parent_id = db
+    let temp = tempfile::tempdir().unwrap();
+    let old_bone = std::env::var_os("BONE_DIR");
+    unsafe { std::env::set_var("BONE_DIR", temp.path()) };
+
+    // The sink opens the default conversations.db path (mirrors production:
+    // nested agent opens the shared conversations.db path).
+    let path = bone_core::session_db::db_path();
+    let parent_id = SessionDb::open(&path)
+        .unwrap()
         .create_conversation("parent-provider", "parent-model")
         .unwrap();
-
-    // Re-open via a second connection so the sink owns its own handle (mirrors
-    // production: nested agent opens the shared conversations.db path).
-    drop(db);
-    let sink_db = SessionDb::open(&path).unwrap();
-    let sink = UsageOnlySessionSink::with_db(sink_db, parent_id);
+    let sink = UsageOnlySessionSink::open_for(parent_id);
+    match old_bone {
+        Some(v) => unsafe { std::env::set_var("BONE_DIR", v) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
 
     assert_eq!(sink.conv_id(), Some(parent_id));
 
@@ -224,8 +216,6 @@ fn usage_only_sink_records_usage_against_parent_without_messages() {
 
     // Parent conversation must still exist after end().
     assert!(verify.conversation_exists(parent_id).unwrap());
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

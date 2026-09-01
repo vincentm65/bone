@@ -415,20 +415,22 @@ async fn driver_outcome_carries_usage_records() {
 /// lands in the parent conversation's `usage_events` (what `/stats` reads).
 #[tokio::test]
 async fn driver_usage_only_sink_persists_to_parent_conversation() {
-    let path = std::env::temp_dir().join(format!(
-        "bone_driver_usage_only_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let parent_id = {
-        let db = SessionDb::open(&path).unwrap();
-        db.create_conversation("parent", "parent-model").unwrap()
-    };
-    let sink_db = SessionDb::open(&path).unwrap();
-    let sink: Arc<dyn SessionSink> = Arc::new(UsageOnlySessionSink::with_db(sink_db, parent_id));
+    let temp = tempfile::tempdir().unwrap();
+    let old_bone = std::env::var_os("BONE_DIR");
+    unsafe { std::env::set_var("BONE_DIR", temp.path()) };
+
+    // The sink opens the default conversations.db path (mirrors production:
+    // nested agent opens the shared conversations.db path).
+    let path = bone_core::session_db::db_path();
+    let parent_id = SessionDb::open(&path)
+        .unwrap()
+        .create_conversation("parent", "parent-model")
+        .unwrap();
+    let sink: Arc<dyn SessionSink> = Arc::new(UsageOnlySessionSink::open_for(parent_id));
+    match old_bone {
+        Some(v) => unsafe { std::env::set_var("BONE_DIR", v) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
 
     let prompt = "hi";
     let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
@@ -485,8 +487,6 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
     assert_eq!(usage.cached_tokens, 5);
     assert_eq!(usage.request_count, 1);
     assert!((usage.cost - 0.001).abs() < 1e-9);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]
