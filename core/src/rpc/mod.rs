@@ -1128,6 +1128,11 @@ impl BlockingCtxSetup {
     }
 }
 
+enum BlockingPumpResult<T> {
+    Finished(Option<T>),
+    Shutdown(Option<T>),
+}
+
 impl DaemonCtx {
     fn publish_runtime_event(&mut self, event: RuntimeEvent) {
         self.pending_interactions.track(&event);
@@ -1535,24 +1540,17 @@ impl DaemonCtx {
         state
     }
 
-    /// Run a lifecycle hook as daemon-owned work. The callback receives the same
-    /// bounded context as an interactive Lua command, while the actor continues
-    /// pumping approvals, key replies, UI diffs, jobs, processes, and cancellation.
-    async fn run_managed_hook(
+    /// Pump daemon-owned blocking work while preserving the runtime control plane
+    /// shared by managed hooks and interactive commands.
+    async fn pump_blocking<T>(
         &mut self,
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
-        name: String,
-        payload: serde_json::Value,
-        blockable: bool,
-    ) -> crate::ext::types::ManagedHookResult {
+        mut handle: tokio::task::JoinHandle<T>,
+        setup: BlockingCtxSetup,
+        cancel_background_on_disconnect: bool,
+    ) -> BlockingPumpResult<T> {
         use std::sync::atomic::Ordering;
 
-        let mut setup = BlockingCtxSetup::new(self);
-        let ctx_cfg = setup.ctx_config(None);
-        let extensions = self.extensions.clone();
-        let mut handle = tokio::task::spawn_blocking(move || {
-            extensions.dispatch_managed(&name, payload, ctx_cfg, blockable)
-        });
         let BlockingCtxSetup {
             cancel,
             usage_records: private_usage_records,
@@ -1562,7 +1560,6 @@ impl DaemonCtx {
             mut status_rx,
             ..
         } = setup;
-
         let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
         loop {
             tokio::select! {
@@ -1577,7 +1574,7 @@ impl DaemonCtx {
                         &private_provider_model,
                     );
                     self.pending_interactions.clear();
-                    return result.unwrap_or_default();
+                    return BlockingPumpResult::Finished(result.ok());
                 }
                 Some(event) = status_rx.recv() => self.publish_runtime_event(event),
                 Some(request) = live_rx.recv() => {
@@ -1601,10 +1598,13 @@ impl DaemonCtx {
                     Some(RuntimeCommand::Synchronize { request_id, include_messages }) => {
                         self.publish_synchronized_state(request_id, include_messages, true)
                     }
+                    Some(command) if is_config_command(&command) => {
+                        let _ = Box::pin(self.handle_idle_command(command, commands)).await;
+                    }
                     Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
                     Some(RuntimeCommand::GetJobs) => self.publish_jobs(true),
                     Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
-                    Some(RuntimeCommand::Cancel) | None => {
+                    Some(RuntimeCommand::Cancel) => {
                         self.cancel_background_work();
                         cancel.store(true, Ordering::Relaxed);
                         self.approval_registry.cancel_all();
@@ -1612,7 +1612,7 @@ impl DaemonCtx {
                         let result = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
                             &mut handle,
-                        ).await.ok().and_then(Result::ok).unwrap_or_default();
+                        ).await.ok().and_then(Result::ok);
                         self.record_private_llm_usage(
                             &private_usage_records,
                             &private_provider_id,
@@ -1620,13 +1620,53 @@ impl DaemonCtx {
                         );
                         self.pending_interactions.clear();
                         self.drain_diffs();
-                        return result;
+                        return BlockingPumpResult::Shutdown(result);
                     }
-                    Some(command) if is_config_command(&command) => {
-                        let _ = Box::pin(self.handle_idle_command(command, commands)).await;
+                    None => {
+                        if cancel_background_on_disconnect {
+                            self.cancel_background_work();
+                        }
+                        cancel.store(true, Ordering::Relaxed);
+                        self.approval_registry.cancel_all();
+                        self.key_registry.cancel_all();
+                        let result = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            &mut handle,
+                        ).await.ok().and_then(Result::ok);
+                        self.record_private_llm_usage(
+                            &private_usage_records,
+                            &private_provider_id,
+                            &private_provider_model,
+                        );
+                        self.pending_interactions.clear();
+                        self.drain_diffs();
+                        return BlockingPumpResult::Shutdown(result);
                     }
                     Some(command) => self.pending_commands.push_back(command),
                 }
+            }
+        }
+    }
+
+    /// Run a lifecycle hook as daemon-owned work. The callback receives the same
+    /// bounded context as an interactive Lua command, while the actor continues
+    /// pumping approvals, key replies, UI diffs, jobs, processes, and cancellation.
+    async fn run_managed_hook(
+        &mut self,
+        commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
+        name: String,
+        payload: serde_json::Value,
+        blockable: bool,
+    ) -> crate::ext::types::ManagedHookResult {
+        let mut setup = BlockingCtxSetup::new(self);
+        let ctx_cfg = setup.ctx_config(None);
+        let extensions = self.extensions.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            extensions.dispatch_managed(&name, payload, ctx_cfg, blockable)
+        });
+        match self.pump_blocking(commands, handle, setup, true).await {
+            BlockingPumpResult::Finished(result) | BlockingPumpResult::Shutdown(result) => {
+                result.unwrap_or_default()
             }
         }
     }
@@ -1717,7 +1757,6 @@ impl DaemonCtx {
         if !self.extensions.command_enabled(&name) {
             return None;
         }
-        use std::sync::atomic::Ordering;
 
         let mut setup = BlockingCtxSetup::new(self);
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
@@ -1728,7 +1767,7 @@ impl DaemonCtx {
         // async runtime (spawn_blocking — the handler may nest tool calls).
         // Outer `Option` = "was the command found?"; inner `Option` = the parsed
         // result (a found handler may legitimately return a no-op `None`).
-        let mut handle = tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             let lua_guard = lua.lock().unwrap_or_else(|e| e.into_inner());
             // Not found: the only case that should surface as "unknown command".
             let handler = crate::ext::ops_commands::find_handler(&lua_guard, &name)?;
@@ -1752,109 +1791,9 @@ impl DaemonCtx {
             };
             Some((ret, conversation_rx.try_iter().collect()))
         });
-        let BlockingCtxSetup {
-            cancel,
-            usage_records: private_usage_records,
-            provider_id: private_provider_id,
-            provider_model: private_provider_model,
-            key_rx: mut live_rx,
-            mut status_rx,
-            ..
-        } = setup;
-
-        let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
-        loop {
-            tokio::select! {
-                res = &mut handle => {
-                    // Flush any trailing pane diffs and UI messages the handler emitted.
-                    self.drain_diffs();
-                    while let Ok(event) = status_rx.try_recv() {
-                        self.publish_runtime_event(event);
-                    }
-                    self.record_private_llm_usage(
-                        &private_usage_records,
-                        &private_provider_id,
-                        &private_provider_model,
-                    );
-                    self.pending_interactions.clear();
-                    return res.ok().flatten();
-                }
-                Some(event) = status_rx.recv() => self.publish_runtime_event(event),
-                Some(req) = live_rx.recv() => {
-                    let id = self.key_registry.register(req);
-                    self.publish_runtime_event(RuntimeEvent::KeyRequest { id });
-                }
-                _ = diff_timer.tick() => {
-                    self.publish_processes(false);
-                    self.publish_jobs(false);
-                    self.drain_diffs();
-                }
-                cmd = commands.recv() => match cmd {
-                    Some(RuntimeCommand::ApprovalReply { id, outcome }) => {
-                        self.approval_registry.resolve(id, outcome);
-                        self.pending_interactions
-                            .remove(InteractionId::Approval(id));
-                    }
-                    Some(RuntimeCommand::KeyReply { id, key }) => {
-                        self.key_registry.resolve(id, key);
-                        self.pending_interactions.remove(InteractionId::Key(id));
-                    }
-                    Some(RuntimeCommand::Synchronize {
-                        request_id,
-                        include_messages,
-                    }) => self.publish_synchronized_state(request_id, include_messages, true),
-                    Some(cmd) if is_config_command(&cmd) => {
-                        let _ = Box::pin(self.handle_idle_command(cmd, commands)).await;
-                    }
-                    Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
-                    Some(RuntimeCommand::GetJobs) => self.publish_jobs(true),
-                    Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
-                    Some(RuntimeCommand::Cancel) => {
-                        // Ctrl+C cancels all work owned by this conversation,
-                        // including background sub-agents and shell processes.
-                        self.cancel_background_work();
-                        cancel.store(true, Ordering::Relaxed);
-                        self.approval_registry.cancel_all();
-                        self.key_registry.cancel_all();
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_millis(100),
-                            &mut handle,
-                        )
-                        .await;
-                        self.record_private_llm_usage(
-                            &private_usage_records,
-                            &private_provider_id,
-                            &private_provider_model,
-                        );
-                        self.pending_interactions.clear();
-                        self.drain_diffs();
-                        return Some((None, Vec::new()));
-                    }
-                    None => {
-                        // Signal the blocking handler, then stop waiting for
-                        // it. Cooperative handlers/tools poll this flag. Give a
-                        // private provider request a bounded grace period to
-                        // publish usage without wedging on arbitrary Lua.
-                        cancel.store(true, Ordering::Relaxed);
-                        self.approval_registry.cancel_all();
-                        self.key_registry.cancel_all();
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_millis(100),
-                            &mut handle,
-                        )
-                        .await;
-                        self.record_private_llm_usage(
-                            &private_usage_records,
-                            &private_provider_id,
-                            &private_provider_model,
-                        );
-                        self.pending_interactions.clear();
-                        self.drain_diffs();
-                        return Some((None, Vec::new()));
-                    }
-                    Some(command) => self.pending_commands.push_back(command),
-                },
-            }
+        match self.pump_blocking(commands, handle, setup, false).await {
+            BlockingPumpResult::Finished(result) => result.flatten(),
+            BlockingPumpResult::Shutdown(_) => Some((None, Vec::new())),
         }
     }
 
