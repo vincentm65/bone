@@ -1838,26 +1838,11 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     Ok(tools_table)
 }
 
-/// Cheap prefix check for `ctx.db.query`. Accepts `SELECT` and CTE form
-/// `WITH ... SELECT`. Actual write protection is enforced after prepare via
-/// `Statement::readonly()` — `WITH` can also introduce mutating statements.
-fn is_allowed_db_query_prefix(sql: &str) -> bool {
-    let head = sql.trim_start().to_ascii_lowercase();
-    head.starts_with("select") || head.starts_with("with")
-}
-
-/// Build the `ctx.db` table: `query(sql, params?)` runs a read-only (SELECT)
-/// statement against the session db and returns an array of row tables.
+/// Build the `ctx.db` table: `query(sql, params?)` runs a read-only statement
+/// against the session db and returns an array of row tables.
 fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
     let db_query_fn = lua.create_function(|lua, (sql, params): (String, Option<Vec<Value>>)| {
         let db = open_session_db()?;
-
-        // Read-only: only allow SELECT / CTE SELECT statements.
-        if !is_allowed_db_query_prefix(&sql) {
-            return Err(mlua::Error::external(
-                "ctx.db.query only allows SELECT statements",
-            ));
-        }
 
         // Build bound parameters.
         let params: Vec<rusqlite::types::Value> = match &params {
