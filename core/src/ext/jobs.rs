@@ -2,7 +2,7 @@
 //!
 //! Jobs are created by `ctx.agent.spawn`, run as detached tokio tasks, and
 //! their results are queryable via `ctx.agent.jobs` or delivered via the
-//! `peek_finished_unconsumed` / `mark_consumed` auto-injection flow.
+//! `peek_finished_unconsumed_scoped` / `mark_consumed` auto-injection flow.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -76,7 +76,7 @@ pub struct Job {
     /// `None` is reserved for standalone callers that have no runtime owner.
     #[serde(skip)]
     pub scope: Option<i64>,
-    /// Per-job cancellation flag, settable by [`JobRegistry::cancel`].
+    /// Per-job cancellation flag, settable by [`JobRegistry::cancel_scoped`].
     #[serde(skip)]
     pub cancel_flag: Arc<AtomicBool>,
 }
@@ -110,13 +110,13 @@ pub struct NewJob {
 
 pub struct JobRegistry {
     jobs: Mutex<Vec<Job>>,
-    /// Notified whenever a job completes, so `wait_for` can wake up.
+    /// Notified whenever a job completes, so `wait_for_scoped` can wake up.
     completed: Condvar,
     version: AtomicU64,
     next_id: AtomicU64,
 }
 
-/// Outcome of a blocking [`JobRegistry::wait_for`] call.
+/// Outcome of a blocking [`JobRegistry::wait_for_scoped`] call.
 #[derive(Debug)]
 pub struct WaitOutcome {
     /// Jobs (among the requested ids) that finished. Marked consumed.
@@ -289,7 +289,7 @@ impl JobRegistry {
         let jobs = self.lock_jobs();
         let job = jobs
             .iter()
-            .find(|j| j.id == id && scope_matches(j.scope, Some(scope)))?;
+            .find(|j| j.id == id && scope_matches(j.scope, scope))?;
         job.transcript.clone()
     }
 
@@ -346,30 +346,12 @@ impl JobRegistry {
         self.version.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// IDs of all active (running or queued) jobs.
-    pub fn running_ids(&self) -> Vec<String> {
-        let jobs = self.lock_jobs();
-        jobs.iter()
-            .filter(|j| !j.is_finished() && scope_matches(j.scope, None))
-            .map(|j| j.id.clone())
-            .collect()
-    }
-
     /// IDs of active jobs owned by exactly `scope`.
     pub fn running_ids_scoped(&self, scope: Option<i64>) -> Vec<String> {
         let jobs = self.lock_jobs();
         jobs.iter()
-            .filter(|j| !j.is_finished() && scope_matches(j.scope, Some(scope)))
+            .filter(|j| !j.is_finished() && scope_matches(j.scope, scope))
             .map(|j| j.id.clone())
-            .collect()
-    }
-
-    /// Clones of all active (running or queued) jobs.
-    pub fn running_jobs(&self) -> Vec<Job> {
-        let jobs = self.lock_jobs();
-        jobs.iter()
-            .filter(|j| !j.is_finished() && scope_matches(j.scope, None))
-            .cloned()
             .collect()
     }
 
@@ -377,29 +359,19 @@ impl JobRegistry {
     pub fn running_jobs_scoped(&self, scope: Option<i64>) -> Vec<Job> {
         let jobs = self.lock_jobs();
         jobs.iter()
-            .filter(|j| !j.is_finished() && scope_matches(j.scope, Some(scope)))
+            .filter(|j| !j.is_finished() && scope_matches(j.scope, scope))
             .cloned()
             .collect()
     }
 
-    /// Block until all of the given jobs finish, the timeout elapses, or the
-    /// cancellation flag is set. Finished jobs (among `ids`) are returned and
-    /// marked consumed so they are not auto-injected again later. IDs unknown
-    /// to the registry are ignored. Jobs still running when the wait ends are
-    /// reported as `pending`. Ordinary pending jobs remain unconsumed and
-    /// auto-inject on completion; jobs explicitly cancelled through the
-    /// registry remain consumed.
-    pub fn wait_for(
-        &self,
-        ids: &[String],
-        timeout: Duration,
-        cancelled: Option<&AtomicBool>,
-    ) -> WaitOutcome {
-        self.wait_for_matching(ids, timeout, cancelled, None)
-    }
-
-    /// Scoped form of [`wait_for`](Self::wait_for). Unknown or foreign job ids
-    /// are ignored and can never be consumed by another actor.
+    /// Block until all of the given jobs in `scope` finish, the timeout
+    /// elapses, or the cancellation flag is set. Finished jobs (among `ids`)
+    /// are returned and marked consumed so they are not auto-injected again
+    /// later. Unknown or foreign job ids, or ids outside `scope`, are ignored
+    /// and can never be consumed by another actor. Jobs still running when the
+    /// wait ends are reported as `pending`. Ordinary pending jobs remain
+    /// unconsumed and auto-inject on completion; jobs explicitly cancelled
+    /// through the registry remain consumed.
     pub fn wait_for_scoped(
         &self,
         ids: &[String],
@@ -407,25 +379,13 @@ impl JobRegistry {
         cancelled: Option<&AtomicBool>,
         scope: Option<i64>,
     ) -> WaitOutcome {
-        self.wait_for_matching(ids, timeout, cancelled, Some(scope))
-    }
-
-    fn wait_for_matching(
-        &self,
-        ids: &[String],
-        timeout: Duration,
-        cancelled: Option<&AtomicBool>,
-        required_scope: Option<Option<i64>>,
-    ) -> WaitOutcome {
         let deadline = Instant::now() + timeout;
         let mut jobs = self.lock_jobs();
         loop {
             let pending: Vec<String> = jobs
                 .iter()
                 .filter(|j| {
-                    !j.is_finished()
-                        && ids.contains(&j.id)
-                        && scope_matches(j.scope, required_scope)
+                    !j.is_finished() && ids.contains(&j.id) && scope_matches(j.scope, scope)
                 })
                 .map(|j| j.id.clone())
                 .collect();
@@ -439,9 +399,7 @@ impl JobRegistry {
                 let mut finished: Vec<Job> = jobs
                     .iter_mut()
                     .filter(|j| {
-                        j.is_finished()
-                            && ids.contains(&j.id)
-                            && scope_matches(j.scope, required_scope)
+                        j.is_finished() && ids.contains(&j.id) && scope_matches(j.scope, scope)
                     })
                     .map(|j| {
                         if !j.consumed {
@@ -474,60 +432,28 @@ impl JobRegistry {
         }
     }
 
-    /// Snapshot of all jobs as a JSON array.
-    pub fn snapshot(&self) -> serde_json::Value {
-        let jobs = self.lock_jobs();
-        let array: Vec<_> = jobs
-            .iter()
-            .filter(|job| scope_matches(job.scope, None))
-            .cloned()
-            .collect();
-        serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
-    }
-
-    /// Snapshot of jobs owned by exactly `scope`.
+    /// Snapshot of jobs owned by exactly `scope` as a JSON array.
     pub fn snapshot_scoped(&self, scope: Option<i64>) -> serde_json::Value {
         let jobs = self.lock_jobs();
         let array: Vec<_> = jobs
             .iter()
-            .filter(|job| scope_matches(job.scope, Some(scope)))
+            .filter(|job| scope_matches(job.scope, scope))
             .cloned()
             .collect();
         serde_json::to_value(array).unwrap_or_else(|_| serde_json::json!([]))
     }
 
-    /// Clones of all jobs (e.g. for the Rust-side pane renderer).
-    pub fn all_jobs(&self) -> Vec<Job> {
-        self.lock_jobs().clone()
-    }
-
-    /// Peek at all unconsumed finished jobs without marking them consumed.
-    /// Call [`JobRegistry::mark_consumed`] after the results have actually
-    /// been delivered (e.g. injected into the conversation).
-    pub fn peek_finished_unconsumed(&self) -> Vec<Job> {
-        let jobs = self.lock_jobs();
-        let mut finished: Vec<Job> = jobs
-            .iter()
-            .filter(|j| {
-                (j.status == JobStatus::Done || j.status == JobStatus::Error)
-                    && !j.consumed
-                    && scope_matches(j.scope, None)
-            })
-            .cloned()
-            .collect();
-        finished.sort_by_key(|j| j.started_at);
-        finished
-    }
-
-    /// Like [`peek_finished_unconsumed`](Self::peek_finished_unconsumed) but
-    /// limited to jobs in `scope` (see [`Job::scope`]), so a daemon only injects
-    /// results from its own conversation.
+    /// Peek at the unconsumed finished jobs in `scope` (see [`Job::scope`])
+    /// without marking them consumed, so a daemon only injects results from
+    /// its own conversation. Call [`JobRegistry::mark_consumed`] after the
+    /// results have actually been delivered (e.g. injected into the
+    /// conversation).
     pub fn peek_finished_unconsumed_scoped(&self, scope: Option<i64>) -> Vec<Job> {
         let jobs = self.lock_jobs();
         let mut finished: Vec<Job> = jobs
             .iter()
             .filter(|j| {
-                scope_matches(j.scope, Some(scope))
+                scope_matches(j.scope, scope)
                     && (j.status == JobStatus::Done || j.status == JobStatus::Error)
                     && !j.consumed
             })
@@ -537,28 +463,19 @@ impl JobRegistry {
         finished
     }
 
-    /// Cancel an unfinished job by setting its cancel flag. Explicitly
+    /// Cancel an unfinished job only when it belongs to `scope`. Explicitly
     /// cancelled jobs are also marked consumed so their eventual cancellation
     /// result is not auto-injected into a later turn. Returns `true` when the
     /// job was found and signalled.
-    pub fn cancel(&self, id: &str) -> bool {
-        self.cancel_matching(id, None)
-    }
-
-    /// Cancel an unfinished job only when it belongs to `scope`.
     ///
     /// This is the entry point for conversation-owned APIs. The id and scope
     /// check happen under the same registry lock so another conversation can
     /// never cancel or consume the job between a snapshot and the mutation.
     pub fn cancel_scoped(&self, id: &str, scope: Option<i64>) -> bool {
-        self.cancel_matching(id, Some(scope))
-    }
-
-    fn cancel_matching(&self, id: &str, required_scope: Option<Option<i64>>) -> bool {
         let mut jobs = self.lock_jobs();
         let Some(job) = jobs
             .iter_mut()
-            .find(|job| job.id == id && scope_matches(job.scope, required_scope))
+            .find(|job| job.id == id && scope_matches(job.scope, scope))
         else {
             return false;
         };
@@ -582,7 +499,7 @@ impl JobRegistry {
         let mut jobs = self.lock_jobs();
         let mut cancelled = 0;
         for job in jobs.iter_mut() {
-            if !job.is_finished() && scope_matches(job.scope, Some(scope)) {
+            if !job.is_finished() && scope_matches(job.scope, scope) {
                 job.cancel_flag.store(true, Ordering::Relaxed);
                 job.activity = Some("cancelling…".to_string());
                 job.consumed = true;
@@ -621,11 +538,9 @@ pub fn registry() -> &'static JobRegistry {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Return whether a job's scope matches an optional scope restriction.
-/// `None` means unscoped callers may see every job; `Some(scope)` requires an
-/// exact match, including `Some(None)` for jobs with no scope.
-fn scope_matches(job_scope: Option<i64>, required_scope: Option<Option<i64>>) -> bool {
-    required_scope.is_none_or(|scope| job_scope == scope)
+/// Return whether a job belongs to the required scope.
+fn scope_matches(job_scope: Option<i64>, required_scope: Option<i64>) -> bool {
+    job_scope == required_scope
 }
 
 /// Apply finished-job state under the lock: update status/result/tokens.

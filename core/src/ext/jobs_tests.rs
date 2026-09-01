@@ -25,7 +25,7 @@ fn create_and_snapshot() {
     let reg = fresh_registry();
     let id = create_default(&reg, "researcher", "search the web");
     assert_eq!(id, "job-1");
-    let snap = reg.snapshot();
+    let snap = reg.snapshot_scoped(None);
     let arr = snap.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     let job = &arr[0];
@@ -42,7 +42,7 @@ fn start_marks_a_queued_job_running() {
     let id = create_default(&reg, "coder", "task one");
     assert!(reg.start(&id));
     assert_eq!(
-        reg.all_jobs()
+        reg.running_jobs_scoped(None)
             .into_iter()
             .find(|job| job.id == id)
             .unwrap()
@@ -62,16 +62,16 @@ fn cancel_sets_flag_and_completes() {
     });
 
     // Cancel the job.
-    assert!(reg.cancel(&id));
+    assert!(reg.cancel_scoped(&id, None));
     assert!(cancel_flag.load(Ordering::Relaxed));
     reg.complete(&id, Err("cancelled".into()));
     assert!(
-        reg.peek_finished_unconsumed().is_empty(),
+        reg.peek_finished_unconsumed_scoped(None).is_empty(),
         "an explicitly cancelled result must not auto-inject"
     );
 
     // Cancelling a non-existent job returns false.
-    assert!(!reg.cancel("nonexistent"));
+    assert!(!reg.cancel_scoped("nonexistent", None));
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn complete_sets_done() {
     let reg = fresh_registry();
     create_default(&reg, "coder", "write code");
     reg.complete("job-1", Ok("finished".into()));
-    let snap = reg.snapshot();
+    let snap = reg.snapshot_scoped(None);
     assert_eq!(snap[0]["status"], "done");
     assert_eq!(snap[0]["result"], "finished");
     assert!(snap[0]["finished_at"].is_number());
@@ -91,7 +91,7 @@ fn complete_sets_error() {
     let reg = fresh_registry();
     create_default(&reg, "coder", "write code");
     reg.complete("job-1", Err("boom".into()));
-    let snap = reg.snapshot();
+    let snap = reg.snapshot_scoped(None);
     assert_eq!(snap[0]["status"], "error");
     assert_eq!(snap[0]["result"], "boom");
 }
@@ -230,7 +230,7 @@ fn complete_spills_long_result_to_file() {
     let id = create_default(&reg, "coder", "long output");
     let long = "x".repeat(MAX_INJECT_CHARS + 100);
     reg.complete(&id, Ok(long.clone()));
-    let snap = reg.snapshot();
+    let snap = reg.snapshot_scoped(None);
     let path = snap[0]["result_file"].as_str().expect("spill file path");
     let on_disk = std::fs::read_to_string(path).unwrap();
     assert_eq!(on_disk, long);
@@ -264,14 +264,14 @@ fn cancel_bumps_version() {
     let reg = fresh_registry();
     let id = reg.create(new_job("a", "t"));
     let v = reg.version();
-    assert!(reg.cancel(&id));
+    assert!(reg.cancel_scoped(&id, None));
     assert_eq!(reg.version(), v + 1);
     // Cancelling again while still running returns true, bumps version.
-    assert!(reg.cancel(&id));
+    assert!(reg.cancel_scoped(&id, None));
     assert_eq!(reg.version(), v + 2);
     // After completion, cancelling returns false and does not bump version.
     reg.complete(&id, Ok("done".into()));
-    assert!(!reg.cancel(&id));
+    assert!(!reg.cancel_scoped(&id, None));
     assert_eq!(reg.version(), v + 3);
 }
 
@@ -282,16 +282,16 @@ fn peek_then_mark_consumed() {
     reg.complete("job-1", Ok("result".into()));
 
     // Peek does not consume.
-    let peeked = reg.peek_finished_unconsumed();
+    let peeked = reg.peek_finished_unconsumed_scoped(None);
     assert_eq!(peeked.len(), 1);
     assert_eq!(peeked[0].id, "job-1");
-    assert_eq!(reg.peek_finished_unconsumed().len(), 1);
+    assert_eq!(reg.peek_finished_unconsumed_scoped(None).len(), 1);
 
     // Marking consumes and bumps version.
     let v = reg.version();
     reg.mark_consumed(&["job-1".into()]);
     assert_eq!(reg.version(), v + 1);
-    assert!(reg.peek_finished_unconsumed().is_empty());
+    assert!(reg.peek_finished_unconsumed_scoped(None).is_empty());
 
     // Marking again is a no-op.
     reg.mark_consumed(&["job-1".into()]);
@@ -303,7 +303,7 @@ fn peek_skips_running() {
     let reg = fresh_registry();
     create_default(&reg, "a", "t");
     // Job is still running.
-    assert!(reg.peek_finished_unconsumed().is_empty());
+    assert!(reg.peek_finished_unconsumed_scoped(None).is_empty());
     assert_eq!(reg.version(), 1);
 }
 
@@ -315,7 +315,7 @@ fn pruning_caps_registry_size() {
         reg.complete(&id, Ok("r".into()));
         reg.mark_consumed(std::slice::from_ref(&id));
     }
-    let len = reg.snapshot().as_array().unwrap().len();
+    let len = reg.snapshot_scoped(None).as_array().unwrap().len();
     assert!(len <= MAX_RETAINED_JOBS, "registry not pruned: {len}");
 }
 
@@ -330,7 +330,7 @@ fn pruning_keeps_unconsumed_jobs() {
         reg.complete(&id, Ok("r".into()));
         reg.mark_consumed(std::slice::from_ref(&id));
     }
-    let peeked = reg.peek_finished_unconsumed();
+    let peeked = reg.peek_finished_unconsumed_scoped(None);
     assert!(peeked.iter().any(|j| j.id == keep));
 }
 
@@ -345,7 +345,7 @@ fn note_event_bumps_version_only_for_known_job() {
         None,
     );
     assert_eq!(reg.version(), version + 1);
-    assert_eq!(reg.all_jobs()[0].events.len(), 1);
+    assert_eq!(reg.running_jobs_scoped(None)[0].events.len(), 1);
 
     let version = reg.version();
     reg.note_event(
@@ -404,7 +404,12 @@ fn wait_for_returns_immediately_when_finished() {
     let id = create_default(&reg, "a", "t");
     reg.complete(&id, Ok("result".into()));
 
-    let outcome = reg.wait_for(std::slice::from_ref(&id), Duration::from_secs(5), None);
+    let outcome = reg.wait_for_scoped(
+        std::slice::from_ref(&id),
+        Duration::from_secs(5),
+        None,
+        None,
+    );
     assert_eq!(outcome.finished.len(), 1);
     assert_eq!(outcome.finished[0].id, id);
     assert!(outcome.pending.is_empty());
@@ -412,7 +417,7 @@ fn wait_for_returns_immediately_when_finished() {
     assert!(!outcome.cancelled);
 
     // Waited jobs are consumed: not re-delivered via auto-injection.
-    assert!(reg.peek_finished_unconsumed().is_empty());
+    assert!(reg.peek_finished_unconsumed_scoped(None).is_empty());
 }
 
 #[test]
@@ -420,14 +425,19 @@ fn wait_for_times_out_on_running_job() {
     let reg = fresh_registry();
     let id = create_default(&reg, "a", "t");
 
-    let outcome = reg.wait_for(std::slice::from_ref(&id), Duration::from_millis(50), None);
+    let outcome = reg.wait_for_scoped(
+        std::slice::from_ref(&id),
+        Duration::from_millis(50),
+        None,
+        None,
+    );
     assert!(outcome.finished.is_empty());
     assert_eq!(outcome.pending, vec![id.clone()]);
     assert!(outcome.timed_out);
 
     // Job stays unconsumed for later auto-injection.
     reg.complete(&id, Ok("late".into()));
-    assert_eq!(reg.peek_finished_unconsumed().len(), 1);
+    assert_eq!(reg.peek_finished_unconsumed_scoped(None).len(), 1);
 }
 
 #[test]
@@ -442,7 +452,7 @@ fn wait_for_wakes_on_completion() {
         reg2.complete(&id2, Ok("done".into()));
     });
 
-    let outcome = reg.wait_for(&[id], Duration::from_secs(5), None);
+    let outcome = reg.wait_for_scoped(&[id], Duration::from_secs(5), None, None);
     handle.join().unwrap();
     assert_eq!(outcome.finished.len(), 1);
     assert_eq!(outcome.finished[0].result.as_deref(), Some("done"));
@@ -455,10 +465,11 @@ fn wait_for_respects_cancellation() {
     let id = create_default(&reg, "a", "t");
     let cancelled = AtomicBool::new(true);
 
-    let outcome = reg.wait_for(
+    let outcome = reg.wait_for_scoped(
         std::slice::from_ref(&id),
         Duration::from_secs(5),
         Some(&cancelled),
+        None,
     );
     assert!(outcome.cancelled);
     assert!(!outcome.timed_out);
@@ -468,7 +479,7 @@ fn wait_for_respects_cancellation() {
 #[test]
 fn wait_for_ignores_unknown_ids() {
     let reg = fresh_registry();
-    let outcome = reg.wait_for(&["job-999".into()], Duration::from_secs(5), None);
+    let outcome = reg.wait_for_scoped(&["job-999".into()], Duration::from_secs(5), None, None);
     assert!(outcome.finished.is_empty());
     assert!(outcome.pending.is_empty());
     assert!(!outcome.timed_out);
@@ -481,7 +492,7 @@ fn wait_for_returns_already_consumed_jobs() {
     reg.complete(&id, Ok("r".into()));
     reg.mark_consumed(std::slice::from_ref(&id));
 
-    let outcome = reg.wait_for(&[id], Duration::from_secs(5), None);
+    let outcome = reg.wait_for_scoped(&[id], Duration::from_secs(5), None, None);
     assert_eq!(outcome.finished.len(), 1);
 }
 
@@ -491,8 +502,8 @@ fn running_ids_lists_only_running() {
     let id1 = create_default(&reg, "a", "t1");
     let id2 = create_default(&reg, "b", "t2");
     reg.complete(&id1, Ok("done".into()));
-    assert_eq!(reg.running_ids(), vec![id2.clone()]);
-    let running = reg.running_jobs();
+    assert_eq!(reg.running_ids_scoped(None), vec![id2.clone()]);
+    let running = reg.running_jobs_scoped(None);
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].id, id2);
     assert_eq!(running[0].agent, "b");
@@ -503,7 +514,7 @@ fn multiple_jobs_ordered_in_snapshot() {
     let reg = fresh_registry();
     create_default(&reg, "a", "t1");
     create_default(&reg, "b", "t2");
-    let snap = reg.snapshot();
+    let snap = reg.snapshot_scoped(None);
     assert_eq!(snap[0]["agent"], "a");
     assert_eq!(snap[1]["agent"], "b");
 }

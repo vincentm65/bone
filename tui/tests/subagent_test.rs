@@ -330,7 +330,7 @@ fn spawn_lifecycle_no_provider() {
 
     let mut job_id: Option<String> = None;
     loop {
-        let snap = registry.snapshot();
+        let snap = registry.snapshot_scoped(None);
         if let Some(arr) = snap.as_array() {
             for job in arr {
                 if job["task"].as_str() == Some(task_marker)
@@ -356,11 +356,11 @@ fn spawn_lifecycle_no_provider() {
     // Finished jobs are first peeked, then explicitly marked consumed after
     // delivery.
     // (Registry is process-global, so other unconsumed jobs may exist from prior tests.)
-    let taken = registry.peek_finished_unconsumed();
+    let taken = registry.peek_finished_unconsumed_scoped(None);
     let my_job = taken.iter().find(|j| j.id == id);
     assert!(
         my_job.is_some(),
-        "peek_finished_unconsumed should include {}; got jobs: {:?}",
+        "peek_finished_unconsumed_scoped should include {}; got jobs: {:?}",
         id,
         taken,
     );
@@ -369,7 +369,7 @@ fn spawn_lifecycle_no_provider() {
     registry.mark_consumed(std::slice::from_ref(&id));
 
     // Second peek: this job is no longer unconsumed.
-    let taken2 = registry.peek_finished_unconsumed();
+    let taken2 = registry.peek_finished_unconsumed_scoped(None);
     assert!(!taken2.iter().any(|j| j.id == id));
 
     rt.shutdown_timeout(Duration::from_secs(1));
@@ -528,7 +528,7 @@ fn wait_action_collects_dispatched_job() {
     );
 
     // Consumed: not delivered again via auto-injection.
-    let taken = registry.peek_finished_unconsumed();
+    let taken = registry.peek_finished_unconsumed_scoped(None);
     assert!(
         !taken.iter().any(|j| j.id == job_id),
         "waited job must be consumed and not auto-injected",
@@ -781,7 +781,7 @@ fn cancel_running_job_via_lua_tool() {
     registry.complete(&job_id, Err("cancelled".into()));
     assert!(
         !registry
-            .peek_finished_unconsumed()
+            .peek_finished_unconsumed_scoped(None)
             .iter()
             .any(|job| job.id == job_id),
         "an explicitly cancelled job must not auto-inject later",
