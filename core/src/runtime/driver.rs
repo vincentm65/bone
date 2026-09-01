@@ -74,6 +74,7 @@ fn record_hook_usage(
     usage_records: &mut Vec<UsageRecord>,
     provider: &str,
     model: &str,
+    per_record: Option<&(dyn Fn(&TokenStats) + Send + Sync)>,
 ) {
     for usage in usage {
         token_stats.record_request(
@@ -100,6 +101,9 @@ fn record_hook_usage(
             cost: usage.cost,
             is_estimated: usage.is_estimated,
         });
+        if let Some(callback) = per_record {
+            callback(token_stats);
+        }
     }
 }
 
@@ -286,6 +290,7 @@ impl DriverHookRuntime<'_> {
             state.usage_records,
             self.llm.id(),
             self.llm.model(),
+            None,
         );
         apply_hook_operations(
             std::mem::take(&mut result.operations),
@@ -872,38 +877,19 @@ impl Driver {
                     }
                     res = &mut hook => (res.unwrap_or_default(), false),
                 };
-                let private_usage = std::mem::take(
-                    &mut *private_usage_records
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                record_hook_usage(
+                    std::mem::take(
+                        &mut *private_usage_records
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                    ),
+                    &mut token_stats,
+                    session.as_ref(),
+                    &mut usage_records,
+                    llm.id(),
+                    llm.model(),
+                    Some(&report_usage),
                 );
-                for usage in private_usage {
-                    token_stats.record_request(
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        usage.cached_tokens,
-                        usage.cost,
-                    );
-                    session.record_usage(
-                        llm.id(),
-                        llm.model(),
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        usage.cached_tokens,
-                        usage.cost,
-                        usage.is_estimated,
-                    );
-                    usage_records.push(UsageRecord {
-                        provider: llm.id().to_string(),
-                        model: llm.model().to_string(),
-                        prompt_tokens: usage.prompt_tokens,
-                        completion_tokens: usage.completion_tokens,
-                        cached_tokens: usage.cached_tokens,
-                        cost: usage.cost,
-                        is_estimated: usage.is_estimated,
-                    });
-                    report_usage(&token_stats);
-                }
                 if hook_cancelled {
                     break 'turn Ok(String::new());
                 }
